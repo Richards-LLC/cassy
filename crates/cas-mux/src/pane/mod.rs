@@ -293,6 +293,7 @@ impl Pane {
             args: vec![],
             cwd: Some(cwd),
             env: vec![],
+            env_remove: vec![],
             rows,
             cols,
         };
@@ -322,6 +323,7 @@ impl Pane {
         effort: Option<&str>,
         config_dir: Option<&str>,
         config_dir_source: Option<&str>,
+        secure_storage_dir: Option<Option<&str>>,
         teams: Option<&TeamsSpawnConfig>,
         // `active_workers`: workers already running plus the one being
         // spawned, used to derate this worker's `CARGO_BUILD_JOBS`
@@ -339,6 +341,7 @@ impl Pane {
             effort,
             config_dir,
             config_dir_source,
+            secure_storage_dir,
             teams,
             active_workers,
         })
@@ -356,6 +359,7 @@ impl Pane {
         effort: Option<&str>,
         config_dir: Option<&str>,
         config_dir_source: Option<&str>,
+        secure_storage_dir: Option<Option<&str>>,
         rows: u16,
         cols: u16,
         teams: Option<&TeamsSpawnConfig>,
@@ -374,6 +378,7 @@ impl Pane {
             effort,
             config_dir,
             config_dir_source,
+            secure_storage_dir,
             teams,
             active_workers,
         );

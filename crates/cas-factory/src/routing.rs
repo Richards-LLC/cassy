@@ -736,6 +736,7 @@ fn routing_decision(
         effort: Some(recipe.default_effort),
         config_dir: None,
         requester_config_dir: None,
+        requester_secure_storage_dir: None,
     };
     RoutingDecision {
         lane: lane.to_string(),
@@ -1204,6 +1205,7 @@ candidates = ["codex_luna"]
             effort: Some(Effort::XHigh),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         };
         validate_explicit(&valid, &CapabilitySnapshot::default())
             .expect("receipted recipe accepts every registry-declared effort");
@@ -1348,6 +1350,7 @@ candidates = ["first"]
                 effort: Some(Effort::High),
                 config_dir: None,
                 requester_config_dir: None,
+                requester_secure_storage_dir: None,
             };
             let error = validate_explicit(&invalid, &CapabilitySnapshot::default())
                 .expect_err("Claude Code rejects the old lane slug")
@@ -1379,6 +1382,7 @@ candidates = ["first"]
                 effort: None,
                 config_dir: None,
                 requester_config_dir: None,
+                requester_secure_storage_dir: None,
             };
             validate_explicit(&valid, &CapabilitySnapshot::default()).unwrap_or_else(|error| {
                 panic!("recognized Claude model {model} rejected: {error}")
@@ -1401,6 +1405,7 @@ candidates = ["first"]
                 effort: None,
                 config_dir: None,
                 requester_config_dir: None,
+                requester_secure_storage_dir: None,
             };
             let error = validate_explicit(&invalid, &CapabilitySnapshot::default())
                 .expect_err("unrecognized Claude model shape must be rejected")
@@ -1587,6 +1592,7 @@ no_fallback = true
             effort: Some(Effort::High),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         };
         assert!(validate_explicit(&spec, &CapabilitySnapshot::default()).is_err());
     }
@@ -1600,6 +1606,7 @@ no_fallback = true
             effort: Some(Effort::XHigh),
             config_dir: Some("/accounts/codex".to_string()),
             requester_config_dir: Some("/accounts/requester".to_string()),
+            requester_secure_storage_dir: None,
         };
         let before = terra.clone();
         let error = validate_explicit(&terra, &CapabilitySnapshot::default())
@@ -1625,6 +1632,7 @@ no_fallback = true
             effort: Some(Effort::High),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         };
         let error = validate_explicit(&luna, &CapabilitySnapshot::default())
             .expect_err("Luna below xhigh must fail closed")

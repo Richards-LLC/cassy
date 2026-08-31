@@ -2146,10 +2146,9 @@ pub(crate) fn queue_supervisor_intro_prompt(
             // compact to its retrieval command rather than being truncated.
             use crate::hooks::handlers::session_budget::SessionContextAssembler;
 
-            let mut assembler = SessionContextAssembler::new(format!(
-                "{prompt}\n\n<cas-queued-session-start>"
-            ))
-            .with_budget(crate::builtins::SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES);
+            let mut assembler =
+                SessionContextAssembler::new(format!("{prompt}\n\n<cas-queued-session-start>"))
+                    .with_budget(crate::builtins::SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES);
             if let Some(context) = bundle.context {
                 let tool_prefix = supervisor_cli.backend().capabilities().tool_prefix;
                 assembler.append_degradable(
@@ -3750,6 +3749,7 @@ mod tests {
             args: vec![],
             cwd: None,
             env: vec![],
+            env_remove: vec![],
             rows: 24,
             cols: 80,
         };

@@ -273,6 +273,7 @@ impl Mux {
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<Option<String>>,
     ) {
         config
             .resolved_worker_specs
@@ -282,13 +283,19 @@ impl Mux {
                 let effort_str = spec
                     .effort
                     .map(|e| spec.cli.backend().effort_arg(e).to_string());
-                let (config_dir, config_dir_source) = match (
+                let (config_dir, config_dir_source, secure_storage_dir) = match (
                     spec.config_dir.clone(),
                     spec.requester_config_dir.clone(),
+                    spec.requester_secure_storage_dir.clone(),
                 ) {
-                    (Some(dir), _) => (Some(dir), Some("explicit".to_string())),
-                    (None, Some(dir)) => (Some(dir), Some("supervisor".to_string())),
-                    (None, None) => (None, None),
+                    (Some(dir), _, _) => (Some(dir), Some("explicit".to_string()), None),
+                    (None, Some(dir), secure) => {
+                        (Some(dir), Some("supervisor".to_string()), Some(secure))
+                    }
+                    (None, None, Some(secure)) => {
+                        (None, Some("supervisor".to_string()), Some(Some(secure)))
+                    }
+                    (None, None, None) => (None, None, None),
                 };
                 (
                     spec.cli,
@@ -296,6 +303,7 @@ impl Mux {
                     effort_str,
                     config_dir,
                     config_dir_source,
+                    secure_storage_dir,
                 )
             })
             .unwrap_or_else(|| {
@@ -303,6 +311,7 @@ impl Mux {
                     config.worker_cli,
                     config.worker_model.clone(),
                     config.worker_effort.clone(),
+                    None,
                     None,
                     None,
                 )
@@ -332,7 +341,7 @@ impl Mux {
             let teams = config.teams_configs.get(name);
 
             // Resolve per-worker spec via the shared helper.
-            let (cli, model_opt, effort_opt, config_dir, config_dir_source) =
+            let (cli, model_opt, effort_opt, config_dir, config_dir_source, secure_storage_dir) =
                 Self::resolve_worker_spec_from_config(name, config);
 
             let pty_config = Pane::build_worker_config(
@@ -346,6 +355,7 @@ impl Mux {
                 effort_opt.as_deref(),
                 config_dir.as_deref(),
                 config_dir_source.as_deref(),
+                secure_storage_dir.as_ref().map(|value| value.as_deref()),
                 teams,
                 // The whole initial fleet is known here, so every worker in it
                 // is derated against the real total rather than the assumed
@@ -399,6 +409,7 @@ impl Mux {
             effort: default_effort,
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         });
         mux.supervisor_cli = config.supervisor_cli;
 
@@ -447,7 +458,7 @@ impl Mux {
             let teams = config.teams_configs.get(name);
 
             // Resolve per-worker spec via the shared helper.
-            let (cli, model_opt, effort_opt, config_dir, config_dir_source) =
+            let (cli, model_opt, effort_opt, config_dir, config_dir_source, secure_storage_dir) =
                 Self::resolve_worker_spec_from_config(name, &config);
 
             let pane = Pane::worker(
@@ -461,6 +472,7 @@ impl Mux {
                 effort_opt.as_deref(),
                 config_dir.as_deref(),
                 config_dir_source.as_deref(),
+                secure_storage_dir.as_ref().map(|value| value.as_deref()),
                 pane_rows,
                 pane_cols,
                 teams,
@@ -712,13 +724,15 @@ impl Mux {
         let effort_str = effective
             .effort
             .map(|e| effective.cli.backend().effort_arg(e).to_string());
-        let (config_dir, config_dir_source) = match (
+        let (config_dir, config_dir_source, secure_storage_dir) = match (
             effective.config_dir.as_deref(),
             effective.requester_config_dir.as_deref(),
+            effective.requester_secure_storage_dir.as_deref(),
         ) {
-            (Some(dir), _) => (Some(dir), Some("explicit")),
-            (None, Some(dir)) => (Some(dir), Some("supervisor")),
-            (None, None) => (None, None),
+            (Some(dir), _, _) => (Some(dir), Some("explicit"), None),
+            (None, Some(dir), secure) => (Some(dir), Some("supervisor"), Some(secure)),
+            (None, None, Some(secure)) => (None, Some("supervisor"), Some(Some(secure))),
+            (None, None, None) => (None, None, None),
         };
         let mut config = Pane::build_worker_config(
             name,
@@ -731,6 +745,7 @@ impl Mux {
             effort_str.as_deref(),
             config_dir,
             config_dir_source,
+            secure_storage_dir,
             teams,
             // Mirrors `add_worker`: this helper previews the config that
             // spawn would produce, so it must derate identically or the
@@ -785,13 +800,15 @@ impl Mux {
         let effort_str = effective
             .effort
             .map(|e| effective.cli.backend().effort_arg(e).to_string());
-        let (config_dir, config_dir_source) = match (
+        let (config_dir, config_dir_source, secure_storage_dir) = match (
             effective.config_dir.as_deref(),
             effective.requester_config_dir.as_deref(),
+            effective.requester_secure_storage_dir.as_deref(),
         ) {
-            (Some(dir), _) => (Some(dir), Some("explicit")),
-            (None, Some(dir)) => (Some(dir), Some("supervisor")),
-            (None, None) => (None, None),
+            (Some(dir), _, _) => (Some(dir), Some("explicit"), None),
+            (None, Some(dir), secure) => (Some(dir), Some("supervisor"), Some(secure)),
+            (None, None, Some(secure)) => (None, Some("supervisor"), Some(Some(secure))),
+            (None, None, None) => (None, None, None),
         };
         // cas-4614 (GH #107): derate this worker's CARGO_BUILD_JOBS against
         // the fleet it is joining. `worker_count()` is the live pane count
@@ -812,6 +829,7 @@ impl Mux {
             effort_str.as_deref(),
             config_dir,
             config_dir_source,
+            secure_storage_dir,
             self.rows,
             self.cols,
             teams,

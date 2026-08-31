@@ -27,6 +27,10 @@ pub struct WorkerLaunchConfig<'a> {
     pub effort: Option<&'a str>,
     pub config_dir: Option<&'a str>,
     pub config_dir_source: Option<&'a str>,
+    /// Independent requester secure-storage selector. The outer `Option`
+    /// distinguishes legacy derivation from a captured selector; the inner
+    /// `Option` preserves unset versus an explicitly empty value.
+    pub secure_storage_dir: Option<Option<&'a str>>,
     pub teams: Option<&'a TeamsSpawnConfig>,
     pub active_workers: Option<usize>,
 }

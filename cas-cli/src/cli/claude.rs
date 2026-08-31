@@ -24,7 +24,8 @@
 use std::ffi::OsString;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Args, FromArgMatches, Subcommand};
@@ -43,6 +44,9 @@ const LAYOUT: ProfileLayout = ProfileLayout {
     named_prefix: ".claude-",
     main_name: "main",
 };
+
+/// A broken or unavailable Claude binary must not hang profile discovery.
+const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Arguments for `cas claude [profile] [factory-args...]`.
 #[derive(Args, Clone, Debug)]
@@ -129,8 +133,37 @@ fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState {
     let mut command = Command::new("claude");
     configure_profile_command(&mut command, profile, profile_dir);
     command.args(["auth", "status", "--json"]);
+    command.stdout(Stdio::piped());
 
-    let Ok(output) = command.output() else {
+    probe_login_state_command(command, AUTH_PROBE_TIMEOUT)
+}
+
+/// Run an auth probe with a hard upper bound, killing and reaping a wedged
+/// provider process before returning `Unknown`.
+fn probe_login_state_command(mut command: Command, timeout: Duration) -> LoginState {
+    let Ok(mut child) = command.spawn() else {
+        return LoginState::Unknown;
+    };
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return LoginState::Unknown;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return LoginState::Unknown;
+            }
+        }
+    }
+
+    let Ok(output): Result<Output, _> = child.wait_with_output() else {
         return LoginState::Unknown;
     };
     let Ok(status) = serde_json::from_slice::<ClaudeAuthStatus>(&output.stdout) else {
@@ -177,8 +210,13 @@ fn configure_profile_command(command: &mut Command, profile: &str, profile_dir: 
             .env("CLAUDE_CONFIG_DIR", profile_dir)
             .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", profile_dir);
     }
+    scrub_claude_credentials(command);
+}
+
+/// Explicit and inherited-account launches must not accidentally authenticate
+/// through API/OAuth overrides left in the parent environment.
+fn scrub_claude_credentials(command: &mut Command) {
     command
-        // Explicit account selection must win over inherited credentials.
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
@@ -222,7 +260,10 @@ fn create_and_log_in_new_profile(home: &Path, profile: &str) -> Result<String> {
     )?;
     report_seeding(&seeding, "~/.claude");
 
-    eprintln!("Logging in Claude account config: {}", profile_dir.display());
+    eprintln!(
+        "Logging in Claude account config: {}",
+        profile_dir.display()
+    );
     let mut command = build_claude_command(
         &profile,
         &profile_dir,
@@ -287,6 +328,17 @@ pub(crate) fn build_claude_command(
 ) -> Command {
     let mut command = Command::new("claude");
     configure_profile_command(&mut command, profile, profile_dir);
+    command.args(args);
+    command
+}
+
+/// Build a plain Claude launch while preserving the caller's account
+/// selectors. This is used when profile probing cannot safely establish an
+/// account and the request is non-interactive; defaulting to `main` would be a
+/// silent credential switch.
+pub(crate) fn build_inherited_claude_command(args: &[OsString]) -> Command {
+    let mut command = Command::new("claude");
+    scrub_claude_credentials(&mut command);
     command.args(args);
     command
 }
@@ -423,26 +475,25 @@ fn parse_factory_args(args: &[OsString]) -> FactoryArgs {
 
 /// Plain Claude Code launch. On Unix this replaces the Cassy process with Claude.
 fn execute_bare(args: &ClaudeArgs) -> Result<()> {
-    let home = dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
     // `apply_profile_env` already ran the picker for this process; reuse its
     // answer rather than asking a second time on the way to the same launch.
     // `apply_profile_env` already resolved and announced the account for both
     // the explicit and the picked case. Only the silent fallback below — no
     // explicit profile and no prompt (non-TTY, or a single account) — still
     // needs its own announcement, which is what it printed before this change.
-    let (profile, already_announced) = match args.profile() {
-        Some(profile) => (profile.to_string(), true),
-        None => match SELECTED_PROFILE.get() {
-            Some(picked) => (picked.clone(), true),
-            None => ("main".to_string(), false),
-        },
+    let profile = args
+        .profile()
+        .map(str::to_string)
+        .or_else(|| SELECTED_PROFILE.get().cloned());
+    let Some(profile) = profile else {
+        eprintln!(
+            "No Claude account override applied; preserving the current environment's account selectors."
+        );
+        let mut command = build_inherited_claude_command(args.passthrough_args());
+        return exec_claude(&mut command);
     };
+    let home = dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
     let profile_dir = resolve_profile_dir(&home, &profile);
-
-    if !already_announced {
-        warn_about_profile_state(&profile, &profile_dir);
-        eprintln!("Using Claude account config: {}", profile_dir.display());
-    }
 
     let mut command = build_claude_command(&profile, &profile_dir, args.passthrough_args());
     exec_claude(&mut command)
@@ -529,6 +580,37 @@ mod tests {
         assert!(envs.contains(&(OsStr::new("CLAUDE_CODE_OAUTH_TOKEN"), None)));
         assert!(envs.contains(&(OsStr::new("CLAUDE_CODE_OAUTH_REFRESH_TOKEN"), None)));
         assert!(envs.contains(&(OsStr::new("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"), None)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_probe_timeout_returns_unknown_for_a_hung_provider() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 5"]);
+        let started = Instant::now();
+
+        assert_eq!(
+            probe_login_state_command(command, Duration::from_millis(40)),
+            LoginState::Unknown
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "probe exceeded its bounded timeout"
+        );
+    }
+
+    #[test]
+    fn inherited_launch_preserves_account_selectors_and_scrubs_credentials() {
+        let args = vec![OsString::from("--continue")];
+        let command = build_inherited_claude_command(&args);
+        let envs = command.get_envs().collect::<Vec<_>>();
+
+        assert!(!envs.iter().any(|(key, _)| {
+            *key == OsStr::new("CLAUDE_CONFIG_DIR")
+                || *key == OsStr::new("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        }));
+        assert!(envs.contains(&(OsStr::new("ANTHROPIC_API_KEY"), None)));
+        assert!(envs.contains(&(OsStr::new("CLAUDE_CODE_OAUTH_TOKEN"), None)));
     }
 
     #[test]

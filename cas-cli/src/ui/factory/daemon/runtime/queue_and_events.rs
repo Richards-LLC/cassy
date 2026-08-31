@@ -70,10 +70,7 @@ fn timeout_pane_tail(buffer: Option<&super::relay::PaneBuffer>) -> Option<String
 /// during boot. Claude Code emits these messages before a rejected worker
 /// necessarily exits, so polling this signal closes the gap between pane
 /// output and `PaneExited` delivery.
-fn boot_model_error_detail(
-    cli: cas_mux::SupervisorCli,
-    pane_tail: Option<&str>,
-) -> Option<String> {
+fn boot_model_error_detail(cli: cas_mux::SupervisorCli, pane_tail: Option<&str>) -> Option<String> {
     let tail = pane_tail.filter(|tail| !tail.trim().is_empty())?;
     let lower = tail.to_ascii_lowercase();
     let marker = match cli {
@@ -1850,7 +1847,8 @@ impl FactoryDaemon {
         worker_name: &str,
         exit_code: Option<i32>,
     ) -> anyhow::Result<()> {
-        let verification = take_unverified_spawn_on_exit(&mut self.spawn_verifications, worker_name);
+        let verification =
+            take_unverified_spawn_on_exit(&mut self.spawn_verifications, worker_name);
         let registered_during_boot = verification
             .as_ref()
             .and_then(|verification| verification.registered_at)
@@ -4718,6 +4716,10 @@ impl FactoryDaemon {
                         if spec.requester_config_dir.is_none() {
                             spec.requester_config_dir = request.requester_config_dir.clone();
                         }
+                        if spec.requester_secure_storage_dir.is_none() {
+                            spec.requester_secure_storage_dir =
+                                request.requester_secure_storage_dir.clone();
+                        }
                     }
                     // MCP and cloud producers validate before enqueueing, but
                     // this daemon also consumes legacy/direct queue rows. Keep
@@ -5664,9 +5666,10 @@ impl FactoryDaemon {
         // External conditions are deliberately polled less often than the
         // normal two-second refresh. The reminder row remains pending until
         // this probe observes true, so a daemon restart cannot lose the edge.
-        let external_ready = if self.last_external_wake_scan.is_none_or(|last| {
-            last.elapsed() >= super::ci_watch::EXTERNAL_WAKE_INTERVAL
-        }) {
+        let external_ready = if self
+            .last_external_wake_scan
+            .is_none_or(|last| last.elapsed() >= super::ci_watch::EXTERNAL_WAKE_INTERVAL)
+        {
             self.last_external_wake_scan = Some(std::time::Instant::now());
             let mut ready = Vec::new();
             for event_type in [
@@ -5700,20 +5703,19 @@ impl FactoryDaemon {
                         );
                         continue;
                     };
-                    let condition = match super::ci_watch::parse_external_wake_condition(
-                        event_type, filter,
-                    ) {
-                        Ok(condition) => condition,
-                        Err(error) => {
-                            tracing::warn!(
-                                reminder_id = reminder.id,
-                                event_type,
-                                %error,
-                                "external reminder has invalid condition filter"
-                            );
-                            continue;
-                        }
-                    };
+                    let condition =
+                        match super::ci_watch::parse_external_wake_condition(event_type, filter) {
+                            Ok(condition) => condition,
+                            Err(error) => {
+                                tracing::warn!(
+                                    reminder_id = reminder.id,
+                                    event_type,
+                                    %error,
+                                    "external reminder has invalid condition filter"
+                                );
+                                continue;
+                            }
+                        };
                     match super::ci_watch::external_wake_condition_satisfied(
                         self.app.project_path(),
                         &condition,
@@ -5736,24 +5738,20 @@ impl FactoryDaemon {
             Vec::new()
         };
 
-        let supervisor_queue = if !due_reminders.is_empty()
-            || !events.is_empty()
-            || !external_ready.is_empty()
-        {
-            open_supervisor_queue_store(self.app.cas_dir()).ok()
-        } else {
-            None
-        };
+        let supervisor_queue =
+            if !due_reminders.is_empty() || !events.is_empty() || !external_ready.is_empty() {
+                open_supervisor_queue_store(self.app.cas_dir()).ok()
+            } else {
+                None
+            };
 
         // Open prompt queue for PTY injection of fired reminders
-        let prompt_queue = if !due_reminders.is_empty()
-            || !events.is_empty()
-            || !external_ready.is_empty()
-        {
-            open_prompt_queue_store(self.app.cas_dir()).ok()
-        } else {
-            None
-        };
+        let prompt_queue =
+            if !due_reminders.is_empty() || !events.is_empty() || !external_ready.is_empty() {
+                open_prompt_queue_store(self.app.cas_dir()).ok()
+            } else {
+                None
+            };
 
         let agent_id_to_name = &self.app.director_data().agent_id_to_name;
 
@@ -6127,7 +6125,7 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 mod tests {
     use super::{
         LIFECYCLE_MAX_RENUDGE_ATTEMPTS, append_spawn_audit, append_spawn_audit_line,
-        cancel_targeted_in_flight_spawn, deliver_worker_task_brief,
+        boot_model_error_detail, cancel_targeted_in_flight_spawn, deliver_worker_task_brief,
         enqueue_preassign_failure_lifecycle_relay, enqueue_spawn_cancelled_notice,
         enqueue_spawn_outcome_notice, ensure_worker_preassignment, is_exact_agent_name_match,
         matches_event_filter, preassign_failure_reason, prompt_poison_sweep_due,
@@ -6135,7 +6133,7 @@ mod tests {
         reminder_matches_factory_session, report_stale_reminder_expiry, shutdown_targets,
         spawn_predates_shutdown, spawn_provisioning_timed_out, stalled_spawn_requests,
         take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
-        timeout_pane_tail, boot_model_error_detail,
+        timeout_pane_tail,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
@@ -6150,17 +6148,14 @@ mod tests {
     #[test]
     fn external_wake_delivery_is_durable_and_not_repeated_after_restart() {
         let temp = tempfile::TempDir::new().unwrap();
-        let reminder_store: Arc<dyn cas_store::ReminderStore> = Arc::new(
-            cas_store::SqliteReminderStore::open(temp.path()).unwrap(),
-        );
+        let reminder_store: Arc<dyn cas_store::ReminderStore> =
+            Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
         reminder_store.init().unwrap();
-        let supervisor_store: Arc<dyn cas_store::SupervisorQueueStore> = Arc::new(
-            cas_store::SqliteSupervisorQueueStore::open(temp.path()).unwrap(),
-        );
+        let supervisor_store: Arc<dyn cas_store::SupervisorQueueStore> =
+            Arc::new(cas_store::SqliteSupervisorQueueStore::open(temp.path()).unwrap());
         supervisor_store.init().unwrap();
-        let prompt_store: Arc<dyn cas_store::PromptQueueStore> = Arc::new(
-            cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap(),
-        );
+        let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
+            Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
         prompt_store.init().unwrap();
 
         let id = reminder_store
@@ -6179,7 +6174,11 @@ mod tests {
                 None,
             )
             .unwrap();
-        let reminder = reminder_store.list_pending("supervisor-1").unwrap().pop().unwrap();
+        let reminder = reminder_store
+            .list_pending("supervisor-1")
+            .unwrap()
+            .pop()
+            .unwrap();
         let condition = super::super::ci_watch::ExternalWakeCondition::TagExists {
             tag: "v3.6.0".to_string(),
         };
@@ -6206,7 +6205,10 @@ mod tests {
         let fired = reminder_store.list_recently_fired(60).unwrap();
         assert_eq!(fired.len(), 1);
         assert_eq!(fired[0].id, id);
-        assert_eq!(fired[0].fired_event.as_ref().unwrap()["event_type"], "tag_exists");
+        assert_eq!(
+            fired[0].fired_event.as_ref().unwrap()["event_type"],
+            "tag_exists"
+        );
         let notifications = supervisor_store.peek("supervisor-1", 10).unwrap();
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].event_type, "reminder_fired");
@@ -8830,6 +8832,7 @@ mod tests {
             factory_session: session.map(str::to_string),
             task_id: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
             created_at: now - chrono::Duration::seconds(age_secs),
             processed_at: None,
         };

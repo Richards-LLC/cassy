@@ -594,6 +594,7 @@ mod tests {
             effort: Some(cas_mux::Effort::Medium),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         };
         let msg = ClientMessage::SpawnWorkers {
             count: 1,

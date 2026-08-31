@@ -336,6 +336,8 @@ pub struct PtyConfig {
     pub cwd: Option<PathBuf>,
     /// Environment variables to set
     pub env: Vec<(String, String)>,
+    /// Environment variables to remove from the inherited child environment.
+    pub env_remove: Vec<String>,
     /// Initial terminal size
     pub rows: u16,
     pub cols: u16,
@@ -426,40 +428,78 @@ fn opencode_hosted_provider_config(model: &str) -> Option<serde_json::Value> {
 ///
 /// This deliberately does nothing for omitted values so ordinary process
 /// inheritance remains untouched for existing spawns.
-fn push_claude_config_dir_env(
-    env: &mut Vec<(String, String)>,
-    role: &str,
-    config_dir: Option<&str>,
-) {
-    if role != "worker" {
-        return;
-    }
-    let Some(config_dir) = config_dir else {
-        return;
-    };
-
-    let expanded = config_dir.strip_prefix('~').map_or_else(
+fn expand_claude_selector(config_dir: &str) -> String {
+    let config_dir = config_dir.trim();
+    let config_dir = config_dir
+        .strip_suffix('/')
+        .filter(|value| !value.is_empty())
+        .unwrap_or(config_dir);
+    config_dir.strip_prefix('~').map_or_else(
         || config_dir.to_string(),
         |suffix| {
             dirs::home_dir()
                 .map(|home| format!("{}{}", home.display(), suffix))
                 .unwrap_or_else(|| config_dir.to_string())
         },
-    );
-    let main_dir = dirs::home_dir().map(|home| home.join(".claude"));
-    let secure_storage_dir = if main_dir.as_deref() == Some(std::path::Path::new(&expanded)) {
-        // The default Claude profile historically owns the un-suffixed macOS
-        // Keychain item. Keep that identity stable while named profiles use
-        // their path-hashed secure-storage items.
-        String::new()
-    } else {
-        expanded.clone()
-    };
-    env.push(("CLAUDE_CONFIG_DIR".to_string(), expanded));
-    env.push((
-        "CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(),
-        secure_storage_dir,
-    ));
+    )
+}
+
+/// Add Claude account selectors to a worker env.
+///
+/// The outer `Option` on `secure_storage_dir` distinguishes the legacy
+/// config-derived behavior (`None`) from an independently captured requester
+/// selector (`Some(...)`). The inner `Option` then preserves unset versus an
+/// explicitly empty value.
+#[cfg(test)]
+fn push_claude_config_dir_env(
+    env: &mut Vec<(String, String)>,
+    role: &str,
+    config_dir: Option<&str>,
+) -> bool {
+    push_claude_account_env(env, role, config_dir, None)
+}
+
+fn push_claude_account_env(
+    env: &mut Vec<(String, String)>,
+    role: &str,
+    config_dir: Option<&str>,
+    secure_storage_dir: Option<Option<&str>>,
+) -> bool {
+    if role != "worker" {
+        return false;
+    }
+
+    let expanded_config_dir = config_dir.map(expand_claude_selector);
+    if let Some(expanded) = expanded_config_dir.as_deref() {
+        env.push(("CLAUDE_CONFIG_DIR".to_string(), expanded.to_string()));
+    }
+
+    let derived_main = expanded_config_dir.as_deref().is_some_and(|expanded| {
+        dirs::home_dir()
+            .map(|home| home.join(".claude").to_string_lossy() == expanded)
+            .unwrap_or(false)
+    });
+    match secure_storage_dir {
+        Some(Some(value)) => env.push((
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(),
+            expand_claude_selector(value),
+        )),
+        Some(None) => {}
+        None if !derived_main => {
+            if let Some(expanded) = expanded_config_dir.as_deref() {
+                env.push((
+                    "CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(),
+                    expanded.to_string(),
+                ));
+            }
+        }
+        None => {}
+    }
+
+    // `true` tells the caller to remove the inherited selector. Main must use
+    // the legacy unscoped credential item, not a defined-but-empty override.
+    secure_storage_dir.is_some_and(|value| value.is_none())
+        || (secure_storage_dir.is_none() && derived_main)
 }
 
 #[cfg(test)]
@@ -558,12 +598,46 @@ mod claude_config_dir_contract_tests {
     #[test]
     fn default_claude_config_dir_keeps_legacy_main_credential_store() {
         let mut env = Vec::new();
-        push_claude_config_dir_env(&mut env, "worker", Some("~/.claude"));
+        let removes_secure_storage =
+            push_claude_account_env(&mut env, "worker", Some("~/.claude"), None);
 
-        assert_eq!(
-            env_value(&env, "CLAUDE_SECURESTORAGE_CONFIG_DIR").as_deref(),
-            Some("")
-        );
+        assert!(removes_secure_storage);
+        assert_eq!(env_value(&env, "CLAUDE_SECURESTORAGE_CONFIG_DIR"), None);
+    }
+
+    #[test]
+    fn requester_secure_storage_preserves_unset_empty_and_set_values() {
+        let cases = [
+            (Some(None), None),
+            (Some(Some("")), Some("")),
+            (Some(Some("~/.claude-keychain")), Some("~/.claude-keychain")),
+        ];
+        let home = dirs::home_dir().expect("test host has a home directory");
+        for (selector, expected) in cases {
+            let mut config = PtyConfig::default();
+            config.apply_claude_account(Some("~/.claude-work"), selector, Some("supervisor"));
+            assert_eq!(
+                env_value(&config.env, "CLAUDE_SECURESTORAGE_CONFIG_DIR").as_deref(),
+                expected
+                    .map(|value| {
+                        if value.is_empty() {
+                            value.to_string()
+                        } else {
+                            home.join(value.trim_start_matches("~/"))
+                                .to_string_lossy()
+                                .into_owned()
+                        }
+                    })
+                    .as_deref()
+            );
+            assert_eq!(
+                config
+                    .env_remove
+                    .iter()
+                    .any(|key| key == "CLAUDE_SECURESTORAGE_CONFIG_DIR"),
+                expected.is_none()
+            );
+        }
     }
 
     #[test]
@@ -624,6 +698,7 @@ impl Default for PtyConfig {
             args: vec![],
             cwd: None,
             env: vec![],
+            env_remove: vec![],
             rows: 24,
             cols: 80,
         }
@@ -674,12 +749,40 @@ impl PtyConfig {
 
     /// Apply the Claude-only account directory override to this worker config.
     ///
-    /// `Pty::spawn` detects the resulting environment entry and removes
-    /// inherited API-key and OAuth-token overrides from the child command,
-    /// allowing the selected Claude subscription account to take effect.
+    /// `Pty::spawn` detects the resulting source marker and removes inherited
+    /// API-key and OAuth-token overrides from the child command, allowing the
+    /// selected Claude subscription account to take effect. An explicit main
+    /// selector also removes an inherited secure-storage override so Claude
+    /// sees the legacy unset form.
     pub fn apply_claude_config_dir(&mut self, config_dir: Option<&str>, source: Option<&str>) {
-        push_claude_config_dir_env(&mut self.env, "worker", config_dir);
-        if config_dir.is_some() {
+        self.apply_claude_account(config_dir, None, source);
+    }
+
+    /// Apply a Claude config directory plus an independently captured secure
+    /// storage selector to this worker config.
+    ///
+    /// `secure_storage_dir == None` derives the selector from `config_dir` for
+    /// an explicit worker override. `Some(None)` removes the inherited
+    /// selector, while `Some(Some(value))` preserves a requester value,
+    /// including `Some("")`.
+    pub fn apply_claude_account(
+        &mut self,
+        config_dir: Option<&str>,
+        secure_storage_dir: Option<Option<&str>>,
+        source: Option<&str>,
+    ) {
+        let remove_secure_storage =
+            push_claude_account_env(&mut self.env, "worker", config_dir, secure_storage_dir);
+        if remove_secure_storage
+            && !self
+                .env_remove
+                .iter()
+                .any(|key| key == "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        {
+            self.env_remove
+                .push("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string());
+        }
+        if config_dir.is_some() || secure_storage_dir.is_some() {
             if let Some(source) = source {
                 self.env.push((
                     "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE".to_string(),
@@ -898,6 +1001,7 @@ impl PtyConfig {
             args,
             cwd: Some(cwd),
             env,
+            env_remove: vec![],
             rows: 24,
             cols: 80,
         }
@@ -1038,6 +1142,7 @@ impl PtyConfig {
             args,
             cwd: Some(cwd),
             env,
+            env_remove: vec![],
             rows: 24,
             cols: 80,
         }
@@ -1163,6 +1268,7 @@ impl PtyConfig {
             args,
             cwd: Some(cwd),
             env,
+            env_remove: vec![],
             rows: 24,
             cols: 80,
         }
@@ -1325,6 +1431,7 @@ impl PtyConfig {
             args,
             cwd: Some(cwd),
             env,
+            env_remove: vec![],
             rows: 24,
             cols: 80,
         }
@@ -1816,6 +1923,9 @@ impl Pty {
 
         for (key, value) in &config.env {
             cmd.env(key, value);
+        }
+        for key in &config.env_remove {
+            cmd.env_remove(key);
         }
 
         // Strip CLAUDECODE to prevent nested-session detection in spawned Claude CLI
@@ -2326,8 +2436,11 @@ mod tests {
         let worker = sandbox.join("worker");
         std::fs::create_dir_all(main.join(".claude/skills/cas-history-probe"))
             .expect("create tracked skill fixture");
-        std::fs::write(main.join(".claude/skills/cas-history-probe/SKILL.md"), "tracked skill\n")
-            .expect("write tracked skill fixture");
+        std::fs::write(
+            main.join(".claude/skills/cas-history-probe/SKILL.md"),
+            "tracked skill\n",
+        )
+        .expect("write tracked skill fixture");
 
         fn git(dir: &std::path::Path, args: &[&str]) {
             let output = Command::new("git")
@@ -4324,6 +4437,7 @@ mod tests {
             args: vec![],
             cwd: None,
             env: vec![],
+            env_remove: vec![],
             rows: 24,
             cols: 80,
         };
@@ -4385,6 +4499,7 @@ mod tests {
             args: vec![],
             cwd: None,
             env: vec![],
+            env_remove: vec![],
             rows: 24,
             cols: 80,
         };
@@ -4424,11 +4539,25 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn kill_tree_force_reaps_the_direct_child_without_a_zombie() {
-        let config = PtyConfig { command: "sleep".to_string(), args: vec!["120".to_string()], cwd: None, env: vec![], rows: 24, cols: 80 };
-        let mut pty = match Pty::spawn("zombie-reap-probe", config) { Ok(pty) => pty, Err(_) => return };
+        let config = PtyConfig {
+            command: "sleep".to_string(),
+            args: vec!["120".to_string()],
+            cwd: None,
+            env: vec![],
+            env_remove: vec![],
+            rows: 24,
+            cols: 80,
+        };
+        let mut pty = match Pty::spawn("zombie-reap-probe", config) {
+            Ok(pty) => pty,
+            Err(_) => return,
+        };
         let pid = pty.process_group_id().expect("PTY child pid");
         pty.kill_tree(true).await;
-        assert!(std::fs::read_to_string(format!("/proc/{pid}/stat")).is_err(), "force teardown must wait the direct child");
+        assert!(
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_err(),
+            "force teardown must wait the direct child"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -4547,7 +4676,10 @@ mod tests {
                 token_plan.then_some(true)
             );
             let encoded = serde_json::to_string(&inline).unwrap();
-            assert!(!encoded.contains("sk-"), "inline config must contain no key value");
+            assert!(
+                !encoded.contains("sk-"),
+                "inline config must contain no key value"
+            );
         }
     }
 

@@ -104,10 +104,8 @@ fn multiline_urgent_interrupt_recovers_codex_and_stays_reachable() {
         return;
     }
 
-    let scratch = std::env::temp_dir().join(format!(
-        "cas-4208-codex-runtime-{}",
-        std::process::id()
-    ));
+    let scratch =
+        std::env::temp_dir().join(format!("cas-4208-codex-runtime-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch).expect("create scratch dir");
     // `codex` refuses to run in a dir it doesn't trust unless it's a git
@@ -124,12 +122,20 @@ fn multiline_urgent_interrupt_recovers_codex_and_stays_reachable() {
         args: vec!["--yolo".to_string(), "--no-alt-screen".to_string()],
         cwd: Some(scratch.clone()),
         env: vec![],
+        env_remove: vec![],
         rows: 24,
         cols: 80,
     };
     let pty = Pty::spawn("cas4208-codex-rt", config).expect("spawn codex pty");
-    let pane = Pane::with_pty("cas4208-codex-rt", PaneKind::Worker, pty, 24, 80, SupervisorCli::Codex)
-        .expect("wrap pty in pane");
+    let pane = Pane::with_pty(
+        "cas4208-codex-rt",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Codex,
+    )
+    .expect("wrap pty in pane");
     let mut mux = Mux::new(24, 80);
     mux.add_pane(pane);
 
@@ -196,13 +202,23 @@ fn multiline_urgent_interrupt_recovers_codex_and_stays_reachable() {
         saw_full_redirect,
         "the full multi-line redirect must land as a real user_message after \
          the fix — rollout tail:\n{}",
-        contents.lines().rev().take(20).collect::<Vec<_>>().join("\n")
+        contents
+            .lines()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     assert!(
         saw_reply,
         "Codex must actually act on the redirect and reply, not go silent — \
          rollout tail:\n{}",
-        contents.lines().rev().take(20).collect::<Vec<_>>().join("\n")
+        contents
+            .lines()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     // AC3: the worker must remain reachable afterward — a subsequent
@@ -232,7 +248,12 @@ fn multiline_urgent_interrupt_recovers_codex_and_stays_reachable() {
         "worker must still be reachable after the urgent interrupt — a \
          normal follow-up message never landed (this is the 'deaf to all \
          later messages' symptom from the cas-4208 report). Rollout tail:\n{}",
-        contents.lines().rev().take(30).collect::<Vec<_>>().join("\n")
+        contents
+            .lines()
+            .rev()
+            .take(30)
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     let _ = std::fs::remove_dir_all(&scratch);
@@ -269,10 +290,8 @@ fn already_idle_urgent_interrupt_starts_new_turn() {
         return;
     }
 
-    let scratch = std::env::temp_dir().join(format!(
-        "cas-1317-codex-runtime-{}",
-        std::process::id()
-    ));
+    let scratch =
+        std::env::temp_dir().join(format!("cas-1317-codex-runtime-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch).expect("create scratch dir");
     let _ = std::process::Command::new("git")
@@ -286,12 +305,20 @@ fn already_idle_urgent_interrupt_starts_new_turn() {
         args: vec!["--yolo".to_string(), "--no-alt-screen".to_string()],
         cwd: Some(scratch.clone()),
         env: vec![],
+        env_remove: vec![],
         rows: 24,
         cols: 80,
     };
     let pty = Pty::spawn("cas1317-codex-rt", config).expect("spawn codex pty");
-    let pane = Pane::with_pty("cas1317-codex-rt", PaneKind::Worker, pty, 24, 80, SupervisorCli::Codex)
-        .expect("wrap pty in pane");
+    let pane = Pane::with_pty(
+        "cas1317-codex-rt",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Codex,
+    )
+    .expect("wrap pty in pane");
     let mut mux = Mux::new(24, 80);
     mux.add_pane(pane);
 
@@ -339,8 +366,7 @@ fn already_idle_urgent_interrupt_starts_new_turn() {
         if let Ok(mut f) = std::fs::File::open(&rollout) {
             let _ = f.read_to_string(&mut contents);
         }
-        if contents.contains("FIRST-TURN-DONE") && contents.contains("\"type\":\"task_complete\"")
-        {
+        if contents.contains("FIRST-TURN-DONE") && contents.contains("\"type\":\"task_complete\"") {
             first_turn_done = true;
             break;
         }
@@ -350,7 +376,12 @@ fn already_idle_urgent_interrupt_starts_new_turn() {
         first_turn_done,
         "first turn must complete normally (task_complete) before we can test the \
          idle case — rollout tail:\n{}",
-        contents.lines().rev().take(20).collect::<Vec<_>>().join("\n")
+        contents
+            .lines()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     // Let the pane go genuinely idle: no more PTY output, well past the
@@ -396,7 +427,12 @@ fn already_idle_urgent_interrupt_starts_new_turn() {
         nonurgent_observed,
         "cas-a5a7: a normal coordination message to an ALREADY-IDLE Codex worker \
          must create a new user_message and complete a new turn. Rollout tail:\n{}",
-        contents.lines().rev().take(30).collect::<Vec<_>>().join("\n")
+        contents
+            .lines()
+            .rev()
+            .take(30)
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     // Return to a genuinely idle prompt before testing urgent delivery.
@@ -446,7 +482,12 @@ fn already_idle_urgent_interrupt_starts_new_turn() {
         urgent_observed,
         "cas-a5a7: an urgent coordination message to an ALREADY-IDLE Codex \
          worker must create a new user_message and complete a new turn. Rollout tail:\n{}",
-        contents.lines().rev().take(30).collect::<Vec<_>>().join("\n")
+        contents
+            .lines()
+            .rev()
+            .take(30)
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     let _ = std::fs::remove_dir_all(&scratch);

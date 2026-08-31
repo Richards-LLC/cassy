@@ -829,9 +829,7 @@ fn checkout_ref_for_spawn_base(
             // the local object in the other two cases: an unpublished
             // fast-forward leaves local ahead while origin is necessarily
             // stale (GH #450).
-            if local_sha == remote_sha
-                || base_ref.as_deref() == Some(remote_sha.as_str())
-            {
+            if local_sha == remote_sha || base_ref.as_deref() == Some(remote_sha.as_str()) {
                 base_ref = Some(remote_sha);
                 checkout_ref = remote;
             } else {
@@ -1128,9 +1126,9 @@ fn flag_agent_dirty_on_shutdown(
 fn worker_has_open_tasks(cas_dir: &std::path::Path, agent_id: &str) -> bool {
     match open_task_store(cas_dir) {
         Ok(store) => match store.list(None) {
-            Ok(tasks) => tasks.iter().any(|t| {
-                t.assignee.as_deref() == Some(agent_id) && !t.is_terminal()
-            }),
+            Ok(tasks) => tasks
+                .iter()
+                .any(|t| t.assignee.as_deref() == Some(agent_id) && !t.is_terminal()),
             Err(e) => {
                 tracing::warn!(
                     "worker_has_open_tasks: task list failed for agent '{agent_id}': {e} — assuming busy"
@@ -1587,6 +1585,7 @@ impl FactoryApp {
             effort: worker_effort,
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         });
     }
 
@@ -2760,10 +2759,9 @@ mod spawn_base_tests {
 
         let task_base = task_epic_base(&cas_dir, &repo, &child.id);
         assert!(
-            task_base.work_target().is_some_and(|target| matches!(
-                target.owner,
-                WorkTargetOwner::Epic { .. }
-            )),
+            task_base
+                .work_target()
+                .is_some_and(|target| matches!(target.owner, WorkTargetOwner::Epic { .. })),
             "the duplicate default target must not remain task authority"
         );
         let (base, source) = resolve_spawn_base(&task_base, Some("epic/unrelated"), "main");
@@ -2785,7 +2783,8 @@ mod spawn_base_tests {
         branch_at(&repo, "release/operator-selected", "main");
 
         let store = crate::store::open_task_store(&cas_dir).unwrap();
-        let mut epic = cas_types::Task::new("cas-d22d-explicit-epic".into(), "delivery epic".into());
+        let mut epic =
+            cas_types::Task::new("cas-d22d-explicit-epic".into(), "delivery epic".into());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/live-delivery".into());
         epic.deliverables.work_target = Some(cas_types::WorkTarget {
@@ -4037,10 +4036,7 @@ mod spawn_base_tests {
             base_ref, parent_tip,
             "the fresh unpublished local tip must win"
         );
-        assert_eq!(
-            checkout_ref, "epic/behind",
-            "origin/epic/behind is stale"
-        );
+        assert_eq!(checkout_ref, "epic/behind", "origin/epic/behind is stale");
         assert!(
             freshness_notice.is_none(),
             "the preceding unpublished-refresh notice is the applicable disclosure: {freshness_notice:?}"
@@ -4204,10 +4200,7 @@ mod spawn_base_tests {
             .expect_err("divergent epic/parent history cannot be fast-forwarded");
         assert!(error.contains("have diverged"), "{error}");
         let refusal = epic_base_refresh_refusal(&error);
-        assert!(
-            refusal.contains("EPIC BASE REFRESH REFUSED"),
-            "{refusal}"
-        );
+        assert!(refusal.contains("EPIC BASE REFRESH REFUSED"), "{refusal}");
         assert!(refusal.contains("epic/diverged"), "{refusal}");
         assert!(refusal.contains("main"), "{refusal}");
         assert!(
@@ -4634,11 +4627,7 @@ mod tests {
 
         let store = crate::store::open_task_store(&cas_dir).unwrap();
         store
-            .add(&task_with(
-                "cas-abc1",
-                Some(holder),
-                TaskStatus::Open,
-            ))
+            .add(&task_with("cas-abc1", Some(holder), TaskStatus::Open))
             .unwrap();
 
         assert!(

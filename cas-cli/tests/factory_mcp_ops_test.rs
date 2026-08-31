@@ -643,7 +643,10 @@ async fn remind_external_condition_defaults_to_non_expiring_cross_session_row() 
     assert_eq!(pending[0].trigger_event.as_deref(), Some("tag_exists"));
     assert_eq!(pending[0].ttl_secs, 0);
     assert!(pending[0].cross_session);
-    assert_eq!(pending[0].trigger_filter, Some(serde_json::json!({"tag": "v3.6.0"})));
+    assert_eq!(
+        pending[0].trigger_filter,
+        Some(serde_json::json!({"tag": "v3.6.0"}))
+    );
 }
 
 fn get_text(result: &rmcp::model::CallToolResult) -> String {
@@ -4210,6 +4213,7 @@ fn clear_context_command_really_resets_a_live_claude() {
             args: vec![],
             cwd: Some(cwd.clone()),
             env: vec![("TERM".to_string(), "xterm-256color".to_string())],
+            env_remove: vec![],
             rows: 24,
             cols: 80,
         },

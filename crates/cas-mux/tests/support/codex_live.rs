@@ -121,6 +121,7 @@ impl CodexLive {
             args: vec!["--yolo".to_string(), "--no-alt-screen".to_string()],
             cwd: Some(scratch.clone()),
             env: vec![],
+            env_remove: vec![],
             rows: 24,
             cols: 80,
         };

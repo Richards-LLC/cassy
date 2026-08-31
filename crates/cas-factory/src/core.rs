@@ -146,6 +146,7 @@ impl FactoryCore {
             effort: default_effort,
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         });
         for spec in &config.resolved_worker_specs {
             if let Some(ref name) = spec.name {

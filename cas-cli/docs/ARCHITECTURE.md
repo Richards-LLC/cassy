@@ -34,7 +34,7 @@ The root `Cargo.toml` defines a workspace. `cas-cli/` is the main binary crate; 
 | `cas-types` | Shared data types (Entry, Task, Rule, Skill, Agent, etc.) |
 | `cas-store` | SQLite storage layer — trait definitions (`Store`, `TaskStore`, `RuleStore`, `KnowledgeStore`, etc.) and their SQLite implementations. `knowledge_store.rs` is the odd one out: it keeps page *index rows* in SQLite and page *bodies* as markdown on disk. |
 | `cas-search` | Search infrastructure: `Bm25Index` (Tantivy), `LmdbVectorStore` (heed) and score-combination helpers. Local search is **BM25-only** — the vector store and `HybridSearch` are wired but have no local embedder, so semantic ranking is cloud-gated. |
-| `cas-core` | Core business logic, hooks framework, search index abstraction, skill/rule syncing |
+| `cas-core` | Core business logic, hooks framework, temporal/artifact search types, skill/rule syncing |
 | `cas-mcp` | MCP protocol types and request/response models |
 | `cas-factory` | Factory session lifecycle: `FactoryCore`, config, director, recording, notifications |
 | `cas-factory-protocol` | WebSocket message protocol between supervisor and worker agents |
@@ -67,7 +67,7 @@ Two properties of the knowledge surface are load-bearing and easy to get wrong:
 
 `.claude/CODEMAP.md` and `docs/PRODUCT_OVERVIEW.md` are **views over this surface, not a parallel one**: both are ordinary distillable sources, so the `codemap` and `project-overview` skills query `cas knowledge search` before regenerating and run `cas knowledge build` after writing, which turns each doc into a page plus a source-ledger entry.
 
-**Search reality check:** every "search" above except the knowledge surface goes through the Tantivy BM25 index (`cas-core/src/search/`, doc types `entry`/`task`/`rule`/`skill`/`spec`/`code_symbol`/`code_file`). The knowledge surface has its own SQLite FTS5 index instead. **Neither is semantic on its own.** There is no local embedder; the semantic channel exists only when the cloud does — see below.
+**Search reality check:** every "search" above except the knowledge surface goes through the live Tantivy BM25/hybrid implementation in `cas-cli/src/hybrid_search/` (doc types `entry`/`task`/`rule`/`skill`/`spec`/`code_symbol`/`code_file`). `cas-core/src/search/` supplies only shared temporal/artifact types. The knowledge surface has its own SQLite FTS5 index instead. **Neither is semantic on its own.** There is no local embedder; the semantic channel exists only when the cloud does — see below.
 
 ### The local/cloud boundary for project knowledge
 

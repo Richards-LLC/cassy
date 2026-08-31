@@ -100,8 +100,6 @@ CREATE TABLE IF NOT EXISTS rules (
     status TEXT NOT NULL DEFAULT 'draft',
     last_accessed TEXT,
     review_after TEXT,
-    -- Rule automation
-    hook_command TEXT,
     -- CodeRabbit-inspired categorization
     category TEXT NOT NULL DEFAULT 'general',
     priority INTEGER NOT NULL DEFAULT 2,
@@ -796,7 +794,7 @@ impl SqliteRuleStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
-             tags, paths, content, status, last_accessed, review_after, hook_command,
+             tags, paths, content, status, last_accessed, review_after,
              category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share
              FROM rules WHERE status = 'proven' ORDER BY priority ASC, created DESC",
         )?;
@@ -805,7 +803,7 @@ impl SqliteRuleStore {
             .query_map([], |row| {
                 Ok(Rule {
                     id: row.get(0)?,
-                    scope: Self::parse_scope(row.get(15)?),
+                    scope: Self::parse_scope(row.get(14)?),
                     created: Self::parse_datetime(&row.get::<_, String>(1)?)
                         .unwrap_or_else(Utc::now),
                     source_ids: Self::parse_source_ids(row.get(2)?),
@@ -824,18 +822,17 @@ impl SqliteRuleStore {
                     review_after: row
                         .get::<_, Option<String>>(10)?
                         .and_then(|s| Self::parse_datetime(&s)),
-                    hook_command: row.get(11)?,
                     category: row
-                        .get::<_, Option<String>>(12)?
+                        .get::<_, Option<String>>(11)?
                         .and_then(|s| s.parse().ok())
                         .unwrap_or_default(),
-                    priority: row.get::<_, Option<u8>>(13)?.unwrap_or(2),
-                    surface_count: row.get::<_, Option<i32>>(14)?.unwrap_or(0),
-                    auto_approve_tools: row.get(16)?,
-                    auto_approve_paths: row.get(17)?,
-                    team_id: row.get(18)?,
+                    priority: row.get::<_, Option<u8>>(12)?.unwrap_or(2),
+                    surface_count: row.get::<_, Option<i32>>(13)?.unwrap_or(0),
+                    auto_approve_tools: row.get(15)?,
+                    auto_approve_paths: row.get(16)?,
+                    team_id: row.get(17)?,
                     share: row
-                        .get::<_, Option<String>>(19)?
+                        .get::<_, Option<String>>(18)?
                         .as_deref()
                         .and_then(|s| s.parse().ok()),
                 })
@@ -850,7 +847,7 @@ impl SqliteRuleStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
-             tags, paths, content, status, last_accessed, review_after, hook_command,
+             tags, paths, content, status, last_accessed, review_after,
              category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share
              FROM rules WHERE priority = 0 AND status IN ('proven', 'draft') ORDER BY created DESC",
         )?;
@@ -859,7 +856,7 @@ impl SqliteRuleStore {
             .query_map([], |row| {
                 Ok(Rule {
                     id: row.get(0)?,
-                    scope: Self::parse_scope(row.get(15)?),
+                    scope: Self::parse_scope(row.get(14)?),
                     created: Self::parse_datetime(&row.get::<_, String>(1)?)
                         .unwrap_or_else(Utc::now),
                     source_ids: Self::parse_source_ids(row.get(2)?),
@@ -878,18 +875,17 @@ impl SqliteRuleStore {
                     review_after: row
                         .get::<_, Option<String>>(10)?
                         .and_then(|s| Self::parse_datetime(&s)),
-                    hook_command: row.get(11)?,
                     category: row
-                        .get::<_, Option<String>>(12)?
+                        .get::<_, Option<String>>(11)?
                         .and_then(|s| s.parse().ok())
                         .unwrap_or_default(),
-                    priority: row.get::<_, Option<u8>>(13)?.unwrap_or(2),
-                    surface_count: row.get::<_, Option<i32>>(14)?.unwrap_or(0),
-                    auto_approve_tools: row.get(16)?,
-                    auto_approve_paths: row.get(17)?,
-                    team_id: row.get(18)?,
+                    priority: row.get::<_, Option<u8>>(12)?.unwrap_or(2),
+                    surface_count: row.get::<_, Option<i32>>(13)?.unwrap_or(0),
+                    auto_approve_tools: row.get(15)?,
+                    auto_approve_paths: row.get(16)?,
+                    team_id: row.get(17)?,
                     share: row
-                        .get::<_, Option<String>>(19)?
+                        .get::<_, Option<String>>(18)?
                         .as_deref()
                         .and_then(|s| s.parse().ok()),
                 })

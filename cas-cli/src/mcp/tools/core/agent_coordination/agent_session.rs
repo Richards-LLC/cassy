@@ -224,8 +224,12 @@ impl CasCore {
         }
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| {
-            build_context(&input, req.limit.unwrap_or(5), &self.cas_root)
-                .unwrap_or_else(|_| String::new())
+            let limit = req.limit.unwrap_or_else(|| {
+                crate::config::Config::load(&self.cas_root)
+                    .unwrap_or_default()
+                    .context_limit()
+            });
+            build_context(&input, limit, &self.cas_root).unwrap_or_else(|_| String::new())
         });
 
         // Write current_session for CLI parity (best effort)

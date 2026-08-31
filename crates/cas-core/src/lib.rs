@@ -46,7 +46,6 @@ pub mod error;
 pub mod extraction;
 pub mod hooks;
 pub mod memory;
-pub mod migration;
 pub mod search;
 pub mod sync;
 
@@ -66,48 +65,14 @@ pub use sync::{
     transform_agents_md,
 };
 
-// Re-export search types for convenience
+// Re-export the temporal search and durable artifact types that are shared by
+// the live cas-cli search implementation. The old Tantivy index/scoring and
+// metrics implementation was removed from cas-core; cas-cli owns that surface.
 pub use search::{
-    DocType,
-    EntityHistory,
-    EntitySnapshot,
-    HistoryEventType,
-    LatencyTimer,
-    MethodComparison,
-    MethodMetrics,
-    MetricsStore,
-    QueryFeatures,
-    QueryType,
-    RelationshipEvent,
-    ResultFeedback,
-    SearchEvent,
-    SearchIndex,
-    SearchMethod,
-    SearchOptions,
-    SearchResult,
-    SearchWeights,
-    TemporalEntryResult,
-    TemporalParseError,
-    TemporalQuery,
-    TemporalRelation,
-    TemporalRetriever,
-    TimePeriod,
-    // Scorer types
-    calibrate_scores,
-    combine_multi_channel,
-    combine_scores,
-    extract_id_patterns,
-    // Temporal types
-    filter_entities_by_time,
-    filter_entries_by_time,
-    filter_relationships_by_time,
-    // Metrics types
-    generate_event_id,
-    normalize_scores,
-    parse_date_flexible,
-    percentile_normalize,
-    reciprocal_rank_fusion,
-    rrf_with_magnitude,
+    ArtifactDocument, EntityHistory, EntitySnapshot, HistoryEventType, RelationshipEvent,
+    TemporalEntryResult, TemporalParseError, TemporalQuery, TemporalRelation, TemporalRetriever,
+    TimePeriod, artifact_document_id, filter_entities_by_time, filter_entries_by_time,
+    filter_relationships_by_time, parse_artifact_document_id, parse_date_flexible,
 };
 
 // Re-export extraction types for convenience

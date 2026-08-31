@@ -266,6 +266,9 @@ pub const MIGRATIONS: &[Migration] = &[
     m043_sessions_add_friction_score::MIGRATION,
     m044_sessions_add_delight_count::MIGRATION,
     // Rules
+    // Historical compatibility migration: the rule model no longer exposes
+    // or writes this legacy column, but the ID remains in the forward-only
+    // ledger for databases that already applied it.
     m051_rules_add_hook_command::MIGRATION,
     m052_rules_add_category::MIGRATION,
     m053_rules_add_priority::MIGRATION,

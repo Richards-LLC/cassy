@@ -16,7 +16,7 @@ use crate::store::{
 use crate::types::RuleStatus;
 use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
-use cas_core::SearchIndex;
+use crate::hybrid_search::SearchIndex;
 
 use crate::cli::Cli;
 

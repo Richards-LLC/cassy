@@ -224,6 +224,36 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     WorkerAttentionRelayOutcome::Persisted { notification_id }
 }
 
+/// Surface a failed required PR-lane check through the same durable
+/// supervisor-facing worker-attention channel as merge-queue ejections.
+/// `PrLaneFailure::dedupe_key` binds retries to the PR head, so a plain CI
+/// rerun stays quiet while a corrective push starts a new episode.
+pub(super) fn enqueue_pr_lane_failure_relay(
+    cas_dir: &std::path::Path,
+    failure: &super::ci_watch::PrLaneFailure,
+) -> WorkerAttentionRelayOutcome {
+    let detail = format!(
+        "Delivery PR #{} for {} failed required check {} in run {} at {} (head {}).",
+        failure.pr_number,
+        failure.task_id,
+        failure.check_name,
+        failure.run_id,
+        failure.run_url,
+        failure.head_sha,
+    );
+    let key = failure.dedupe_key();
+    enqueue_worker_attention_relay_detail_with_key(
+        cas_dir,
+        "pr_lane_failed",
+        &failure.worker,
+        Some(&failure.task_id),
+        None,
+        &detail,
+        &key,
+        Some(&key),
+    )
+}
+
 /// A relay is consumed by an in-memory detector only after both durable lanes
 /// are confirmed. `Pending` deliberately leaves that detector eligible for a
 /// retry; the occurrence key makes the replay idempotent after a partial write.
@@ -242,6 +272,28 @@ fn enqueue_worker_attention_relay_detail(
     elapsed_secs: Option<u64>,
     detail: &str,
     occurrence: &str,
+) -> WorkerAttentionRelayOutcome {
+    enqueue_worker_attention_relay_detail_with_key(
+        cas_dir,
+        kind,
+        worker,
+        task_id,
+        elapsed_secs,
+        detail,
+        occurrence,
+        None,
+    )
+}
+
+fn enqueue_worker_attention_relay_detail_with_key(
+    cas_dir: &std::path::Path,
+    kind: &str,
+    worker: &str,
+    task_id: Option<&str>,
+    elapsed_secs: Option<u64>,
+    detail: &str,
+    occurrence: &str,
+    stable_key: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
         LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
@@ -264,11 +316,19 @@ fn enqueue_worker_attention_relay_detail(
     };
     // `occurrence` identifies the detected episode, not this delivery attempt.
     // A retry after a durable-only write must reuse it across daemon restarts.
-    let key = format!(
-        "worker-attention:{}:{kind}:{worker}:{}:{occurrence}",
-        factory_session.as_deref().unwrap_or(""),
-        occurrence
-    );
+    let key = stable_key
+        .map(|key| {
+            format!(
+                "worker-attention:{}:{kind}:{key}",
+                factory_session.as_deref().unwrap_or("")
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "worker-attention:{}:{kind}:{worker}:{occurrence}",
+                factory_session.as_deref().unwrap_or("")
+            )
+        });
     let payload = serde_json::json!({
         "kind": kind,
         "worker": worker,
@@ -482,6 +542,46 @@ mod worker_attention_tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn pr_lane_failure_relay_names_pr_check_and_run_and_replays_once() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "pr-lane-failure-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "pr-lane-failure-test");
+        let failure = crate::ui::factory::daemon::runtime::ci_watch::PrLaneFailure {
+            task_id: "cas-pr-lane".to_string(),
+            worker: "bright-otter".to_string(),
+            pr_number: 659,
+            head_sha: "current-head".to_string(),
+            run_id: 33436155392,
+            run_url: "https://github.test/runs/33436155392".to_string(),
+            check_name: crate::ui::factory::daemon::runtime::ci_watch::REQUIRED_PR_LANE_CHECK
+                .to_string(),
+        };
+
+        let first = enqueue_pr_lane_failure_relay(&cas_dir, &failure);
+        let replay = enqueue_pr_lane_failure_relay(&cas_dir, &failure);
+        assert!(matches!(
+            first,
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        assert!(matches!(
+            replay,
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "replayed PR/head failure stays idempotent");
+        assert!(rows[0].prompt.contains("kind=\"pr_lane_failed\""));
+        assert!(rows[0].prompt.contains("PR #659"));
+        assert!(rows[0].prompt.contains("cas-pr-lane"));
+        assert!(rows[0].prompt.contains("Scoped Validation (factory/PR)"));
+        assert!(rows[0].prompt.contains("33436155392"));
     }
 }
 
@@ -790,6 +890,10 @@ impl FactoryDaemon {
         // key is the recovery boundary. A failed merge_group run also lets the
         // first poll after a daemon restart recover a real ejection.
         let mut last_merge_queue_membership = std::collections::BTreeSet::new();
+        // Track the arm independently from queue membership. A clean PR can
+        // lose both its auto-merge arm and queue entry without a merge-group
+        // run, which still needs one supervisor wake.
+        let mut last_auto_merge_membership = std::collections::BTreeSet::new();
         let refresh_interval = Duration::from_secs(2);
         let poll_interval = Duration::from_millis(100);
 
@@ -935,6 +1039,7 @@ impl FactoryDaemon {
                         })
                         .collect::<Vec<_>>();
                     let previously_queued = last_merge_queue_membership.clone();
+                    let previously_armed = last_auto_merge_membership.clone();
                     let mut watched_branches =
                         std::collections::BTreeSet::from(["main".to_string()]);
                     if let Some(manager) = self.app.worktree_manager() {
@@ -959,10 +1064,11 @@ impl FactoryDaemon {
                         let transport = super::ci_watch::GhCiTransport::from_project(&project)?;
                         let failures =
                             super::ci_watch::collect_failures(&transport, &watched_branches)?;
-                        let queue_poll = super::ci_watch::collect_merge_queue_ejections(
+                        let queue_poll = super::ci_watch::collect_merge_queue_ejections_with_arm_state(
                             &transport,
                             &deliveries,
                             &previously_queued,
+                            &previously_armed,
                         )?;
                         Ok((failures, queue_poll))
                     }));
@@ -975,6 +1081,7 @@ impl FactoryDaemon {
                         Ok(Ok((failures, queue_poll))) => {
                             ci_watch_unavailable_reported = false;
                             last_merge_queue_membership = queue_poll.queued_prs;
+                            last_auto_merge_membership = queue_poll.auto_merge_prs;
                             for ejection in queue_poll.ejections {
                                 match enqueue_merge_queue_ejection_relay(
                                     self.app.cas_dir(),
@@ -997,6 +1104,31 @@ impl FactoryDaemon {
                                         task_id = %ejection.task_id,
                                         pr_number = ejection.pr_number,
                                         "merge-queue ejection relay remains pending"
+                                    ),
+                                    WorkerAttentionRelayOutcome::NotApplicable => {}
+                                }
+                            }
+                            for failure in queue_poll.pr_lane_failures {
+                                match enqueue_pr_lane_failure_relay(
+                                    self.app.cas_dir(),
+                                    &failure,
+                                ) {
+                                    WorkerAttentionRelayOutcome::Persisted { notification_id } => {
+                                        tracing::warn!(
+                                            task_id = %failure.task_id,
+                                            worker = %failure.worker,
+                                            pr_number = failure.pr_number,
+                                            head_sha = %failure.head_sha,
+                                            run_id = failure.run_id,
+                                            notification_id,
+                                            "queued durable PR-lane failure relay for supervisor"
+                                        )
+                                    }
+                                    WorkerAttentionRelayOutcome::Pending => tracing::warn!(
+                                        task_id = %failure.task_id,
+                                        pr_number = failure.pr_number,
+                                        head_sha = %failure.head_sha,
+                                        "PR-lane failure relay remains pending"
                                     ),
                                     WorkerAttentionRelayOutcome::NotApplicable => {}
                                 }

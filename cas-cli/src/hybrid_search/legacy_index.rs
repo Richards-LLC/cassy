@@ -28,10 +28,8 @@
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use tantivy::collector::DocSetCollector;
 use tantivy::directory::error::LockError;
 use tantivy::directory::{Directory, DirectoryLock, INDEX_WRITER_LOCK, Lock, META_LOCK};
-use tantivy::query::AllQuery;
 use tantivy::schema::Value;
 
 use crate::error::{CasError, Result};
@@ -51,7 +49,9 @@ const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyIndexState {
     pub documents: usize,
-    pub entry_ids: Vec<String>,
+    /// Number of live memory-entry documents, counted from the `doc_type`
+    /// term dictionary without fetching stored fields.
+    pub entry_documents: usize,
     /// Doc types present in the legacy root that are NOT memory entries
     /// (`task`, `rule`, `skill`, `spec`, ...), with their document counts.
     ///
@@ -225,16 +225,72 @@ pub fn inspect_legacy_index(cas_dir: &Path) -> Result<Option<LegacyIndexState>> 
     }
 
     let index = tantivy::Index::open_in_dir(&legacy_dir)?;
-    read_index_state(&index).map(Some)
+    read_index_summary(&index).map(Some)
 }
 
-/// Read ids out of an already-open legacy index.
+/// Summarize an already-open legacy index without touching its stored fields.
 ///
-/// Split out of [`inspect_legacy_index`] so the repair path can take this
-/// snapshot *while holding the writer lock* (cas-25a9 P2-A); the public
-/// inspect entry point stays lock-free because doctor's read-only check must
-/// never contend with a running daemon.
-fn read_index_state(index: &tantivy::Index) -> Result<LegacyIndexState> {
+/// `Searcher::num_docs` reads the live document count from segment metadata,
+/// while the `doc_type` term dictionaries provide the diagnostic breakdown.
+/// This is intentionally separate from [`read_index_state`]: inspection runs
+/// on every doctor/daemon cycle, but only repair needs to fetch stored ids.
+fn read_index_summary(index: &tantivy::Index) -> Result<LegacyIndexState> {
+    let schema = index.schema();
+    let doc_type_field = schema
+        .get_field("doc_type")
+        .map_err(|_| CasError::Other("legacy Tantivy index has no `doc_type` field".to_string()))?;
+    let reader = index.reader()?;
+    let searcher = reader.searcher();
+    let documents = searcher.num_docs() as usize;
+    let mut doc_type_counts = std::collections::BTreeMap::new();
+
+    for segment_reader in searcher.segment_readers() {
+        let inverted_index = segment_reader.inverted_index(doc_type_field)?;
+        let mut terms = inverted_index.terms().stream()?;
+        while let Some((term, term_info)) = terms.next() {
+            let doc_type = String::from_utf8_lossy(term).into_owned();
+            let live_count = if let Some(alive_bitset) = segment_reader.alive_bitset() {
+                let term = tantivy::Term::from_field_bytes(doc_type_field, term);
+                inverted_index
+                    .read_postings(&term, tantivy::schema::IndexRecordOption::Basic)?
+                    .map(|postings| postings.doc_freq_given_deletes(alive_bitset) as usize)
+                    .unwrap_or_default()
+            } else {
+                term_info.doc_freq as usize
+            };
+            *doc_type_counts.entry(doc_type).or_default() += live_count;
+        }
+    }
+
+    // `doc_type` is a single-valued STRING field in the index schema. Keep
+    // documents from older/corrupt roots that lack the field visible as
+    // `unknown`, matching the old stored-document inspection behavior.
+    let known_documents: usize = doc_type_counts.values().sum();
+    let unknown_documents = documents.saturating_sub(known_documents);
+    if unknown_documents > 0 {
+        doc_type_counts.insert("unknown".to_string(), unknown_documents);
+    }
+    let entry_documents = doc_type_counts.remove("entry").unwrap_or_default();
+    let non_entry_documents = doc_type_counts.into_iter().collect();
+
+    Ok(LegacyIndexState {
+        documents,
+        entry_documents,
+        non_entry_documents,
+    })
+}
+
+/// Read ids out of an already-open legacy index and durably re-queue them.
+///
+/// This is repair-only because it fetches stored fields. IDs are streamed one
+/// segment at a time and marked pending in bounded batches, avoiding a
+/// whole-index address vector/set while preserving the repair invariant that
+/// every entry is re-queued before retirement.
+fn read_index_state(
+    index: &tantivy::Index,
+    store: &dyn Store,
+    batch_size: usize,
+) -> Result<LegacyRepairState> {
     let schema = index.schema();
     let id_field = schema
         .get_field("id")
@@ -244,37 +300,68 @@ fn read_index_state(index: &tantivy::Index) -> Result<LegacyIndexState> {
         .map_err(|_| CasError::Other("legacy Tantivy index has no `doc_type` field".to_string()))?;
     let reader = index.reader()?;
     let searcher = reader.searcher();
-    let addresses = searcher.search(&AllQuery, &DocSetCollector)?;
-    let documents = addresses.len();
-    let mut entry_ids = Vec::new();
+    let documents = searcher.num_docs() as usize;
+    let batch_size = batch_size.max(1);
+    let mut entry_ids = Vec::with_capacity(batch_size);
+    let mut requeued_entries = 0;
     let mut non_entry: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
-    for address in addresses {
-        let document: tantivy::TantivyDocument = searcher.doc(address)?;
-        let doc_type = document
-            .get_first(doc_type_field)
-            .and_then(|value| value.as_str());
-        if doc_type != Some("entry") {
-            *non_entry
-                .entry(doc_type.unwrap_or("unknown").to_string())
-                .or_default() += 1;
-            continue;
-        }
-        if let Some(id) = document
-            .get_first(id_field)
-            .and_then(|value| value.as_str())
-        {
-            entry_ids.push(id.to_string());
+
+    for (segment_ord, segment_reader) in searcher.segment_readers().iter().enumerate() {
+        for doc_id in segment_reader.doc_ids_alive() {
+            let address = tantivy::DocAddress {
+                segment_ord: segment_ord as u32,
+                doc_id,
+            };
+            let document: tantivy::TantivyDocument = searcher.doc(address)?;
+            let doc_type = document
+                .get_first(doc_type_field)
+                .and_then(|value| value.as_str());
+            if doc_type != Some("entry") {
+                *non_entry
+                    .entry(doc_type.unwrap_or("unknown").to_string())
+                    .or_default() += 1;
+                continue;
+            }
+            if let Some(id) = document
+                .get_first(id_field)
+                .and_then(|value| value.as_str())
+            {
+                entry_ids.push(id.to_string());
+                if entry_ids.len() >= batch_size {
+                    requeued_entries += requeue_entry_batch(store, &mut entry_ids)?;
+                }
+            }
         }
     }
-    entry_ids.sort();
-    entry_ids.dedup();
+    requeued_entries += requeue_entry_batch(store, &mut entry_ids)?;
 
-    Ok(LegacyIndexState {
+    Ok(LegacyRepairState {
         documents,
-        entry_ids,
+        requeued_entries,
         non_entry_documents: non_entry.into_iter().collect(),
     })
+}
+
+/// Re-queue one bounded batch from the repair scan.
+fn requeue_entry_batch(store: &dyn Store, ids: &mut Vec<String>) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    let ids_ref: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let count = ids_ref.len();
+    store.mark_index_pending_batch(&ids_ref)?;
+    ids.clear();
+    Ok(count)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyRepairState {
+    documents: usize,
+    requeued_entries: usize,
+    non_entry_documents: Vec<(String, usize)>,
 }
 
 /// Re-queue every legacy entry, retire only Tantivy-managed root files, and
@@ -349,12 +436,11 @@ pub fn repair_legacy_index(
     // meta lock itself (that is what it is for — keeping segments from being
     // GC'd while a reader opens them), and META_LOCK is declared blocking, so
     // holding it across this call deadlocks the process against itself.
-    let state = read_index_state(&index)?;
-    let ids: Vec<&str> = state.entry_ids.iter().map(String::as_str).collect();
-
     // Durable re-queue happens before ANY deletion, so every later step is
-    // safe to fail: the worst residue is stray bytes, never a lost id.
-    store.mark_index_pending_batch(&ids)?;
+    // safe to fail: the worst residue is stray bytes, never a lost id. The
+    // scan fetches stored ids only on this repair path and re-queues them in
+    // bounded batches rather than materialising the whole root first.
+    let state = read_index_state(&index, store, limits.batch_size)?;
 
     // Now — with no reader of ours open — take the meta lock for the deletion
     // phase, so a reader in another process cannot be mid-open on the segments
@@ -384,7 +470,7 @@ pub fn repair_legacy_index(
 
     Ok(LegacyRepairOutcome::Repaired(LegacyRepairResult {
         legacy_documents: state.documents,
-        requeued_entries: state.entry_ids.len(),
+        requeued_entries: state.requeued_entries,
         indexed_entries: indexed.indexed,
         retired_non_entry_documents: state.non_entry_documents,
         errors: indexed.errors,
@@ -681,6 +767,10 @@ mod tests {
             .expect("inspect")
             .expect("legacy state");
         assert_eq!(
+            state.entry_documents, 1,
+            "inspection must count entries without fetching their stored ids"
+        );
+        assert_eq!(
             state.non_entry_documents,
             vec![("task".to_string(), 1)],
             "the non-entry document must be visible to inspection"
@@ -707,6 +797,25 @@ mod tests {
             "requeued_entries counts entry IDS, not documents"
         );
         assert_eq!(repair.legacy_documents, 2, "both documents were in the root");
+    }
+
+    #[test]
+    fn inspection_counts_only_live_documents_when_the_root_has_deletes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (cas_root, entry) = legacy_root_with_one_stranded_entry(temp.path());
+
+        // Re-indexing the same id leaves a deleted document in the segment
+        // metadata until Tantivy merges it. Summary term frequencies include
+        // that deleted document, but doctor must report the live count.
+        let legacy = SearchIndex::open(&cas_root.join("index")).expect("legacy index");
+        legacy.index_entry(&entry).expect("re-index legacy entry");
+
+        let state = inspect_legacy_index(&cas_root)
+            .expect("inspect")
+            .expect("legacy state");
+        assert_eq!(state.documents, 1);
+        assert_eq!(state.entry_documents, 1);
+        assert!(state.non_entry_documents.is_empty());
     }
 
     // ----------------------------------------------------------------------
@@ -887,7 +996,7 @@ mod tests {
             .expect("inspect")
             .expect("legacy state");
         assert_eq!(state.documents, 1);
-        assert_eq!(state.entry_ids, vec![entry.id.clone()]);
+        assert_eq!(state.entry_documents, 1);
 
         let repair = match repair_legacy_index(
             &cas_root,

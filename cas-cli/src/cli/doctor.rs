@@ -902,7 +902,7 @@ fn legacy_search_index_check(cas_root: &Path) -> Check {
             message: format!(
                 "{} document(s), including {} memory entry id(s), are stranded in `.cas/index/` and invisible to search; run `cas doctor --fix`",
                 state.documents,
-                state.entry_ids.len()
+                state.entry_documents
             ),
         },
         Ok(None) => Check {

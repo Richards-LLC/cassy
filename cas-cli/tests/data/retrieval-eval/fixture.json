@@ -2606,8 +2606,8 @@
    "helpful_count": 0,
    "harmful_count": 0,
    "age_days": 15,
-   "title": "Commander has two co-primary surfaces: desktop for Daniel, mobile for Ben",
-   "body": "Operator (Daniel), 2026-08-15, correcting his own earlier framing twice in one session — this is the settled version. Commander (hub-web/) serves TWO CO-PRIMARY SURFACES with different users: - Daniel: desktop primary, mobile secondary. - Ben: MOBILE PRIMARY. Exact words: \"it will be bens primary surface so it must be equally badass.\" So mobile is \"secondary\" only in Daniel's personal usage. As a product surface it is somebody's main way of working, and it must be held to the same quality bar as desktop — not a triage subset, not a reduced viewer, not \"fine for checking in.\" Anything needed mid-session must be reachable on the phone. Equal quality does NOT mean identical layout. Each surface"
+   "title": "Commander has two co-primary surfaces: desktop for the operator, mobile for a second user",
+   "body": "Commander (hub-web/) serves two co-primary surfaces with different roles: desktop is the operator's primary surface and mobile is a second user's primary surface. Mobile must meet the same quality bar as desktop while allowing a distinct layout. Anything needed mid-session must be reachable on the phone."
   },
   {
    "id": "2026-08-18-9",
@@ -4480,9 +4480,9 @@
     "cli",
     "reliability",
     "hang",
-    "ben-incident"
+    "collaborator-incident"
    ],
-   "user_prompt": "`cas init` can enter an infinite 100%-CPU loop that writes nothing to its log file and never exits. Observed on ben's starscream machine 2026-04-16: a `cas init` process started Apr 15 18:09 was still running ~15 hours later, burning 99.9% of one core in state `R` (actively running, not blocked on I/O — wchan=0), with ",
+   "user_prompt": "`cas init` can enter an infinite 100%-CPU loop that writes nothing to its log file and never exits. Observed on a collaborator's starscream machine 2026-04-16: a `cas init` process started Apr 15 18:09 was still running ~15 hours later, burning 99.9% of one core in state `R` (actively running, not blocked on I/O — wchan=0), with ",
    "cwd": "/workspace/cas-src",
    "files": [],
    "relevant": [

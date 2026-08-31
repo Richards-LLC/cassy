@@ -3,13 +3,13 @@
 
 mod common;
 
-use common::TEST_TEAM;
 use cas::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig};
 use cas::store::{
     open_rule_store_local, open_skill_store_local, open_store_local, open_task_store_local,
 };
 use cas::types::{Entry, EntryType, Scope};
 use chrono::{DateTime, Utc};
+use common::TEST_TEAM;
 use std::sync::Arc;
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
@@ -34,42 +34,60 @@ fn with_project_id(entry: Entry, project_id: &str) -> serde_json::Value {
     value
 }
 
+fn with_updated_at(mut entry: serde_json::Value, updated_at: DateTime<Utc>) -> serde_json::Value {
+    entry["updated_at"] = serde_json::json!(updated_at.to_rfc3339());
+    entry
+}
+
 #[tokio::test]
 async fn team_pull_reconciles_same_id_entries_with_lww_and_skips_foreign_rows() {
     let server = MockServer::start().await;
     let project_id = "cas-633-project";
+    let now = Utc::now();
 
-    let remote_personal_newer = with_project_id(
-        entry(
-            "same-id-personal-newer",
-            "stale team copy",
-            "2026-08-10T00:00:00Z",
+    let remote_personal_newer = with_updated_at(
+        with_project_id(
+            entry(
+                "same-id-personal-newer",
+                "stale team copy",
+                &(now - chrono::Duration::hours(2)).to_rfc3339(),
+            ),
+            project_id,
         ),
-        project_id,
+        now - chrono::Duration::minutes(30),
     );
-    let remote_team_newer = with_project_id(
-        entry(
-            "same-id-team-newer",
-            "new team copy",
-            "2026-08-12T00:00:00Z",
+    let remote_team_newer = with_updated_at(
+        with_project_id(
+            entry(
+                "same-id-team-newer",
+                "new team copy",
+                &(now + chrono::Duration::hours(1)).to_rfc3339(),
+            ),
+            project_id,
         ),
-        project_id,
+        now + chrono::Duration::hours(1),
     );
-    let remote_unchanged = with_project_id(
-        entry(
-            "same-id-unchanged",
-            "unchanged copy",
-            "2026-08-11T00:00:00Z",
+    let remote_unchanged = with_updated_at(
+        with_project_id(
+            entry(
+                "same-id-unchanged",
+                "unchanged copy",
+                &(now - chrono::Duration::hours(1)).to_rfc3339(),
+            ),
+            project_id,
         ),
-        project_id,
+        now - chrono::Duration::hours(1),
     );
-    let foreign_same_id = with_project_id(
-        entry(
-            "same-id-cross-project",
-            "foreign project copy",
-            "2026-08-13T00:00:00Z",
+    let foreign_same_id = with_updated_at(
+        with_project_id(
+            entry(
+                "same-id-cross-project",
+                "foreign project copy",
+                &(now + chrono::Duration::hours(2)).to_rfc3339(),
+            ),
+            "other-project",
         ),
-        "other-project",
+        now + chrono::Duration::hours(2),
     );
 
     Mock::given(method("GET"))
@@ -104,21 +122,21 @@ async fn team_pull_reconciles_same_id_entries_with_lww_and_skips_foreign_rows() 
         .add(&entry(
             "same-id-personal-newer",
             "new personal copy",
-            "2026-08-13T00:00:00Z",
+            &(now - chrono::Duration::hours(1)).to_rfc3339(),
         ))
         .unwrap();
     store
         .add(&entry(
             "same-id-team-newer",
             "old personal copy",
-            "2026-08-11T00:00:00Z",
+            &(now - chrono::Duration::hours(3)).to_rfc3339(),
         ))
         .unwrap();
     store
         .add(&entry(
             "same-id-unchanged",
             "unchanged copy",
-            "2026-08-11T00:00:00Z",
+            &(now - chrono::Duration::hours(1)).to_rfc3339(),
         ))
         .unwrap();
 
@@ -142,9 +160,16 @@ async fn team_pull_reconciles_same_id_entries_with_lww_and_skips_foreign_rows() 
     .unwrap()
     .unwrap();
 
-    assert!(result.errors.is_empty(), "unexpected pull errors: {:?}", result.errors);
+    assert!(
+        result.errors.is_empty(),
+        "unexpected pull errors: {:?}",
+        result.errors
+    );
     assert_eq!(result.pulled_entries, 1, "only the newer team copy applies");
-    assert_eq!(result.conflicts_resolved, 2, "older and equal rows are no-ops");
+    assert_eq!(
+        result.conflicts_resolved, 2,
+        "older and equal rows are no-ops"
+    );
 
     let store = open_store_local(tmp.path()).unwrap();
     assert_eq!(

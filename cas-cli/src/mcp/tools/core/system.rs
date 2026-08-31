@@ -110,7 +110,11 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<LimitRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let limit = req.limit.unwrap_or(5);
+        let limit = req.limit.unwrap_or_else(|| {
+            crate::config::Config::load(&self.cas_root)
+                .unwrap_or_default()
+                .context_limit()
+        });
 
         // Create a minimal HookInput for context building
         let hook_input = HookInput {

@@ -1,3 +1,4 @@
+use super::Config;
 use serde::{Deserialize, Serialize};
 
 /// Per-hook configuration for SessionStart
@@ -658,6 +659,17 @@ impl Default for HookConfig {
     }
 }
 
+impl Config {
+    /// Effective maximum number of context entries for callers that do not
+    /// provide an explicit per-request limit.
+    pub fn context_limit(&self) -> usize {
+        self.hooks
+            .as_ref()
+            .map(|hooks| hooks.context_limit)
+            .unwrap_or_else(default_context_limit)
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -665,6 +677,12 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_limit_defaults_to_five() {
+        assert_eq!(Config::default().context_limit(), 5);
+        assert_eq!(HookConfig::default().context_limit, 5);
+    }
 
     #[test]
     fn default_pre_tool_use_matcher_covers_factory_intercepts() {

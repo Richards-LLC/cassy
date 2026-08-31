@@ -19,7 +19,7 @@ use crate::types::{
     Agent, AgentRole, ChangeType, CommitLink, DependencyType, Entry, EntryType, FileChange,
     ObservationType, Prompt, Rule, Session, Task, TaskStatus, TaskType,
 };
-use cas_core::SearchIndex;
+use crate::hybrid_search::SearchIndex;
 
 use crate::hooks::transcript::check_promise_in_transcript;
 

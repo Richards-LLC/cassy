@@ -207,7 +207,6 @@ fn handle_user_prompt_submit_capture(
                     source_ids: vec![],
                     last_accessed: None,
                     review_after: None,
-                    hook_command: None,
                     category: crate::types::RuleCategory::General,
                     priority: 2, // Normal priority
                     surface_count: 0,

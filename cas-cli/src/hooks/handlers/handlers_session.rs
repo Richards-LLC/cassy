@@ -153,6 +153,7 @@ pub fn handle_session_start(
         Some(root) => root,
         None => return Ok(HookOutput::empty()),
     };
+    let context_limit = config.context_limit();
 
     // Build appropriate context based on mode
     let context = if is_plan_mode {
@@ -161,14 +162,14 @@ pub fn handle_session_start(
     } else if config.hooks.as_ref().map(|h| h.ai_context).unwrap_or(false) {
         // Try AI-powered context selection
         eprintln!("cas: Using AI-assisted context prioritization");
-        match build_context_ai(input, 5, cas_root) {
+        match build_context_ai(input, context_limit, cas_root) {
             Ok(ctx) => ctx,
             Err(e) => {
                 // Check if fallback is enabled
                 let ai_fallback = config.hooks.as_ref().map(|h| h.ai_fallback).unwrap_or(true);
                 if ai_fallback {
                     eprintln!("cas: AI context failed ({e}), falling back to standard");
-                    build_context(input, 5, cas_root)?
+                    build_context(input, context_limit, cas_root)?
                 } else {
                     eprintln!("cas: AI context failed: {e}");
                     return Err(e);
@@ -176,7 +177,7 @@ pub fn handle_session_start(
             }
         }
     } else {
-        build_context(input, 5, cas_root)?
+        build_context(input, context_limit, cas_root)?
     };
 
     // Inject codemap + project-overview freshness warnings.
@@ -600,11 +601,17 @@ mod large_artifact_staging_tests {
         let context = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
 
         assert!(
-            context.contains("## Helpful Memories (3/5 shown, +2 more"),
+            context.contains("## Helpful Memories (3 memories"),
             "configured context_limit must cap Helpful Memories at three: {context}"
         );
-        assert!(!context.contains("context limit candidate 3"));
-        assert!(!context.contains("context limit candidate 4"));
+        assert_eq!(
+            context
+                .lines()
+                .filter(|line| line.contains("context limit candidate"))
+                .count(),
+            3,
+            "configured context_limit must inject exactly three memories: {context}"
+        );
     }
 
     #[test]

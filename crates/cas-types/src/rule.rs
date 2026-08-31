@@ -148,11 +148,6 @@ pub struct Rule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_after: Option<DateTime<Utc>>,
 
-    /// Hook command to execute (e.g., linter) when files matching paths are edited
-    /// If set, this rule becomes a "linter rule" that triggers the command
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hook_command: Option<String>,
-
     /// Rule category for filtering and prioritization
     #[serde(default)]
     pub category: RuleCategory,
@@ -217,7 +212,6 @@ impl Rule {
             paths: String::new(),
             last_accessed: None,
             review_after: Some(Utc::now() + chrono::Duration::days(30)),
-            hook_command: None,
             category: RuleCategory::default(),
             priority: 2,
             surface_count: 0,
@@ -236,11 +230,6 @@ impl Rule {
     /// Check if this is a security rule
     pub fn is_security(&self) -> bool {
         self.category == RuleCategory::Security
-    }
-
-    /// Check if this rule has a hook command (is a linter rule)
-    pub fn is_linter_rule(&self) -> bool {
-        self.hook_command.is_some()
     }
 
     /// Tools that are considered safe for auto-approval
@@ -383,7 +372,6 @@ impl Default for Rule {
             paths: String::new(),
             last_accessed: None,
             review_after: None,
-            hook_command: None,
             category: RuleCategory::default(),
             priority: 2,
             surface_count: 0,
@@ -421,20 +409,21 @@ mod tests {
     }
 
     #[test]
+    fn rule_model_omits_retired_hook_command_surface() {
+        let value =
+            serde_json::to_value(Rule::new("rule-001".to_string(), "test".to_string())).unwrap();
+        assert!(
+            value.get("hook_command").is_none(),
+            "retired hook_command must not be serialized by the rule model"
+        );
+    }
+
+    #[test]
     fn test_feedback_score() {
         let mut rule = Rule::new("rule-001".to_string(), "test".to_string());
         rule.helpful_count = 10;
         rule.harmful_count = 3;
         assert_eq!(rule.feedback_score(), 7);
-    }
-
-    #[test]
-    fn test_is_linter_rule() {
-        let mut rule = Rule::new("rule-001".to_string(), "test".to_string());
-        assert!(!rule.is_linter_rule());
-
-        rule.hook_command = Some("cargo fmt".to_string());
-        assert!(rule.is_linter_rule());
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub fn truncate_str(s: &str, max_len: usize) -> String {
 ///
 /// Returns true if a rule with high similarity score exists
 pub fn find_similar_rule(cas_root: &std::path::Path, content: &str) -> bool {
-    use cas_core::{DocType, SearchIndex, SearchOptions};
+    use crate::hybrid_search::{DocType, SearchIndex, SearchOptions};
 
     let index_dir = cas_root.join("index/tantivy");
     let search = match SearchIndex::open(&index_dir) {
@@ -56,7 +56,7 @@ pub fn find_similar_rule(cas_root: &std::path::Path, content: &str) -> bool {
 /// the caller should skip writing a new near-duplicate entry.  Mirrors the
 /// `find_similar_rule` guard used by the `extract_learnings_sync` path.
 pub fn find_similar_entry(cas_root: &std::path::Path, content: &str) -> bool {
-    use cas_core::{DocType, SearchIndex, SearchOptions};
+    use crate::hybrid_search::{DocType, SearchIndex, SearchOptions};
 
     let index_dir = cas_root.join("index/tantivy");
     let search = match SearchIndex::open(&index_dir) {

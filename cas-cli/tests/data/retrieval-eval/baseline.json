@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "fixture_id": "cas-e0ed-retrieval-eval-v1",
+  "captured_at": "2026-08-31",
+  "note": "Captured by CAS_RETRIEVAL_EVAL_REBASELINE=1. See the test module header for the re-baseline procedure and what each metric means.",
+  "selectors": [
+    {
+      "selector": "helpful_memories",
+      "tier_mode": "live_tiers",
+      "cases": 56,
+      "precision_at_5": 0.007143,
+      "recall_at_5": 0.005102,
+      "lenient_precision_at_5": 0.032143,
+      "lenient_recall_at_5": 0.018602,
+      "mean_returned": 5.0,
+      "cases_with_a_hit": 1,
+      "silent_cases": 0
+    },
+    {
+      "selector": "ambient_packet",
+      "tier_mode": "live_tiers",
+      "cases": 56,
+      "precision_at_5": 0.071429,
+      "recall_at_5": 0.033801,
+      "lenient_precision_at_5": 0.08631,
+      "lenient_recall_at_5": 0.027537,
+      "mean_returned": 1.428571,
+      "cases_with_a_hit": 8,
+      "silent_cases": 24
+    },
+    {
+      "selector": "ambient_candidates",
+      "tier_mode": "live_tiers",
+      "cases": 56,
+      "precision_at_5": 0.046429,
+      "recall_at_5": 0.054337,
+      "lenient_precision_at_5": 0.057143,
+      "lenient_recall_at_5": 0.044544,
+      "mean_returned": 5.0,
+      "cases_with_a_hit": 11,
+      "silent_cases": 0
+    },
+    {
+      "selector": "helpful_memories",
+      "tier_mode": "all_working",
+      "cases": 56,
+      "precision_at_5": 0.007143,
+      "recall_at_5": 0.005102,
+      "lenient_precision_at_5": 0.032143,
+      "lenient_recall_at_5": 0.018602,
+      "mean_returned": 5.0,
+      "cases_with_a_hit": 1,
+      "silent_cases": 0
+    },
+    {
+      "selector": "ambient_packet",
+      "tier_mode": "all_working",
+      "cases": 56,
+      "precision_at_5": 0.071429,
+      "recall_at_5": 0.033801,
+      "lenient_precision_at_5": 0.08631,
+      "lenient_recall_at_5": 0.027537,
+      "mean_returned": 1.428571,
+      "cases_with_a_hit": 8,
+      "silent_cases": 24
+    },
+    {
+      "selector": "ambient_candidates",
+      "tier_mode": "all_working",
+      "cases": 56,
+      "precision_at_5": 0.046429,
+      "recall_at_5": 0.054337,
+      "lenient_precision_at_5": 0.057143,
+      "lenient_recall_at_5": 0.044544,
+      "mean_returned": 5.0,
+      "cases_with_a_hit": 11,
+      "silent_cases": 0
+    }
+  ]
+}

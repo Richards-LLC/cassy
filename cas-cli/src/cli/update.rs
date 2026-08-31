@@ -24,8 +24,9 @@ use crate::cli::hook::{
 use crate::cli::init::{generate_cas_skill, update_claude_md};
 use crate::cli::update::preview::{build_update_transaction, show_enhanced_dry_run};
 use crate::cloud::{CloudConfig, FetchTeamsOutcome, fetch_and_cache_teams, maybe_adopt_team_scope};
+use crate::hybrid_search::{LegacyRepairLimits, LegacyRepairOutcome, repair_legacy_index_bounded};
 use crate::migration::{check_migrations, run_migrations};
-use crate::store::{open_rule_store, open_skill_store};
+use crate::store::{open_rule_store, open_skill_store, open_store};
 use crate::sync::{SkillSyncer, Syncer};
 use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
@@ -135,6 +136,11 @@ const REPO_NAME: &str = "cas";
 /// Binary name in release assets
 const BIN_NAME: &str = "cas";
 
+/// An automatic update must not hang indefinitely behind a pre-update daemon.
+/// The repair primitive itself also bounds lock acquisition, but this outer
+/// deadline closes the reader-acquisition race described in legacy_index.rs.
+const UPDATE_REPAIR_BUDGET: Duration = Duration::from_secs(20);
+
 #[derive(Args)]
 pub struct UpdateArgs {
     /// Only check for updates without installing
@@ -174,7 +180,8 @@ pub struct UpdateArgs {
     /// Refresh every discovered local Cassy project after updating.
     ///
     /// Performs schema migration, generated-file/builtin sync, cloud team
-    /// membership refresh, and cloud sync for every cloud-linked project.
+    /// membership refresh, legacy search-index repair, and cloud sync for
+    /// every cloud-linked project.
     #[arg(long)]
     pub all_projects: bool,
 }
@@ -255,6 +262,7 @@ enum ProjectPhase {
     Ok(String),
     Skipped(String),
     Planned(String),
+    Warning(String),
     Failed(String),
 }
 
@@ -264,6 +272,7 @@ impl ProjectPhase {
             Self::Ok(detail) => format!("ok: {detail}"),
             Self::Skipped(detail) => format!("skipped: {detail}"),
             Self::Planned(detail) => format!("dry-run: {detail}"),
+            Self::Warning(detail) => format!("warning: {detail}"),
             Self::Failed(detail) => format!("FAILED: {detail}"),
         }
     }
@@ -276,6 +285,7 @@ impl ProjectPhase {
 struct ProjectRefreshReceipt {
     project: PathBuf,
     migration: ProjectPhase,
+    search_index: ProjectPhase,
     skills: ProjectPhase,
     membership: ProjectPhase,
     cloud: ProjectPhase,
@@ -320,6 +330,7 @@ fn refresh_all_projects(
         let migration = run_project_phase("migration", args.dry_run, || {
             run_schema_migrations(args, cli, Some(&cas_root))
         });
+        let search_index = repair_project_search_index(&cas_root, args.dry_run, cli);
         let skills = run_project_phase("skills", args.dry_run, || {
             sync_claude_files(cli, Some(&cas_root))
         });
@@ -329,6 +340,7 @@ fn refresh_all_projects(
         receipts.push(ProjectRefreshReceipt {
             project,
             migration,
+            search_index,
             skills,
             membership,
             cloud,
@@ -351,6 +363,95 @@ fn refresh_all_projects(
         );
     }
     Ok(())
+}
+
+/// Repair the pre-cas-bc42 Tantivy root as part of the native update walk.
+///
+/// Search repair is deliberately advisory: a held lock, malformed legacy
+/// index, or unavailable project store must be visible to the operator but
+/// must not prevent the remaining update phases or other projects from being
+/// refreshed. The cheap metadata check avoids opening a project store on the
+/// common no-stray-root path.
+fn repair_project_search_index(cas_root: &Path, dry_run: bool, cli: &Cli) -> ProjectPhase {
+    let legacy_dir = cas_root.join("index");
+    let has_legacy_root = legacy_dir.join("meta.json").is_file();
+    let has_resumable_sweep = legacy_dir.join(".managed.json").is_file();
+
+    let phase = if dry_run {
+        ProjectPhase::Planned("legacy-root repair".to_string())
+    } else if !has_legacy_root && !has_resumable_sweep {
+        ProjectPhase::Ok("no stray root".to_string())
+    } else {
+        match open_store(cas_root) {
+            Err(error) => {
+                ProjectPhase::Warning(format!("could not open project store for repair: {error}"))
+            }
+            Ok(store) => match repair_legacy_index_bounded(
+                cas_root,
+                store,
+                LegacyRepairLimits::default(),
+                UPDATE_REPAIR_BUDGET,
+            ) {
+                Ok(LegacyRepairOutcome::NoLegacyRoot) => {
+                    ProjectPhase::Ok("no stray root".to_string())
+                }
+                Ok(LegacyRepairOutcome::Busy { reason }) => ProjectPhase::Warning(format!(
+                    "busy, will retry in the daemon cycle ({reason})"
+                )),
+                Ok(LegacyRepairOutcome::Repaired(repair)) => {
+                    let mut detail = format!(
+                        "repaired {} stranded memories ({} re-queued)",
+                        repair.legacy_documents, repair.requeued_entries
+                    );
+                    if !repair.errors.is_empty() {
+                        detail.push_str(&format!(
+                            "; {} memory(s) remain queued for retry",
+                            repair.errors.len()
+                        ));
+                    }
+                    if !repair.unswept_files.is_empty() {
+                        detail.push_str(&format!(
+                            "; {} legacy file(s) remain for the next sweep",
+                            repair.unswept_files.len()
+                        ));
+                    }
+                    if !repair.retired_non_entry_documents.is_empty() {
+                        detail.push_str(&format!(
+                            "; retired non-memory documents: {}",
+                            repair
+                                .retired_non_entry_documents
+                                .iter()
+                                .map(|(kind, count)| format!("{count} {kind}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    if repair.errors.is_empty()
+                        && repair.unswept_files.is_empty()
+                        && repair.retired_non_entry_documents.is_empty()
+                    {
+                        ProjectPhase::Ok(detail)
+                    } else {
+                        ProjectPhase::Warning(detail)
+                    }
+                }
+                Err(error) => ProjectPhase::Warning(format!("repair failed: {error}")),
+            },
+        }
+    };
+
+    if !cli.json {
+        let (status, detail) = match &phase {
+            ProjectPhase::Ok(detail) => ("OK", detail),
+            ProjectPhase::Planned(detail) => ("DRY RUN", detail),
+            ProjectPhase::Warning(detail) => ("WARN", detail),
+            ProjectPhase::Skipped(detail) => ("SKIP", detail),
+            ProjectPhase::Failed(detail) => ("FAIL", detail),
+        };
+        println!("    [{status}] search index: {detail}");
+    }
+
+    phase
 }
 
 fn run_project_phase(
@@ -456,6 +557,7 @@ fn print_project_refresh_summary(
                 serde_json::json!({
                     "project": receipt.project,
                     "migration": receipt.migration.summary(),
+                    "search_index": receipt.search_index.summary(),
                     "skills": receipt.skills.summary(),
                     "membership": receipt.membership.summary(),
                     "cloud_sync": receipt.cloud.summary(),
@@ -473,6 +575,7 @@ fn print_project_refresh_summary(
     for receipt in receipts {
         println!("  {}", receipt.project.display());
         println!("    migration:  {}", receipt.migration.summary());
+        println!("    search index: {}", receipt.search_index.summary());
         println!("    skills:     {}", receipt.skills.summary());
         println!("    membership: {}", receipt.membership.summary());
         println!("    cloud sync: {}", receipt.cloud.summary());

@@ -2,7 +2,6 @@
 
 use assert_cmd::Command;
 use cas::hybrid_search::{SearchIndex, SearchOptions};
-use cas::store::Store;
 use cas::types::Entry;
 use std::path::{Path, PathBuf};
 use tantivy::directory::{Directory, META_LOCK};

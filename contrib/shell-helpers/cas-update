@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# cas-update — build CAS from source, install it, delegate the native
-# all-project refresh, then safely turn over processes still executing the
-# previous binary.
+# cas-update — build CAS from source, install it, safely turn over processes
+# still executing the previous binary, then delegate the native all-project
+# refresh.
 #
 # Canonical source: contrib/shell-helpers/cas-update
 # Install with:     contrib/shell-helpers/install.sh
@@ -484,6 +484,18 @@ verify_runtime_epoch() {
   RUNTIME_STATUS="verified: no process executes the previous installed hash"
 }
 
+report_stale_turnover_processes() {
+  [ -s "$TURNOVER_RESULTS_FILE" ] || return 0
+  local pid action kind session owner cmd restart
+  while IFS='|' read -r pid action kind session owner cmd restart; do
+    case "$action" in
+      *STALE*|not\ stopped*)
+        warn "PID $pid [$kind] is still running after runtime turnover; search-index repair will continue and may report busy"
+        ;;
+    esac
+  done <"$TURNOVER_RESULTS_FILE"
+}
+
 run_cmd() {
   if [ "$DRY_RUN" = "1" ]; then dim "  [dry-run] $*"; else "$@"; fi
 }
@@ -606,7 +618,7 @@ sync_projects() {
   step "Refresh every CAS project natively"
   local args=(update --all-projects)
   [ "$DRY_RUN" = "1" ] && args+=(--dry-run)
-  info "delegating migration, skills, team membership, and cloud sync to cas (${SCAN_ROOTS})"
+  info "delegating migration, skills, legacy search-index repair, team membership, and cloud sync to cas (${SCAN_ROOTS})"
   CAS_PROJECT_ROOTS="$SCAN_ROOTS" "$CAS_INSTALL" "${args[@]}"
 }
 
@@ -744,7 +756,7 @@ finish() {
 }
 
 main() {
-  local parse_rc=0
+  local parse_rc=0 runtime_turnover_failed=0
   parse_args "$@" || parse_rc=$?
   if [ "$parse_rc" -ne 0 ]; then
     if [ "$parse_rc" -eq 2 ]; then SUMMARY_PRINTED=1; return 0; fi
@@ -764,6 +776,13 @@ main() {
     NEW_INSTALLED_HASH="$(sha256_file "$CAS_INSTALL")"
   fi
 
+  # The native `cas update --all-projects` phase repairs legacy Tantivy roots.
+  # Turn over the old runtime epoch first so an old daemon cannot recreate the
+  # stray root while that repair is running. A stale survivor is retained as a
+  # failure for final verification, but it must not prevent the repair walk.
+  if ! turnover_old_processes; then runtime_turnover_failed=1; fi
+  report_stale_turnover_processes
+
   if [ "$DO_SYNC" = "1" ]; then
     migrate_host_db; MIGRATION_STATUS="$([ "$DRY_RUN" = 1 ] && printf planned || printf complete)"
     sync_projects; sync_user_builtins
@@ -772,13 +791,11 @@ main() {
     MIGRATION_STATUS="skipped (--build-only)"; SYNC_STATUS="skipped (--build-only)"
   fi
 
-  if [ "$DO_TURNOVER" = "1" ]; then
-    turnover_old_processes
-    verify_runtime_epoch
-  else
-    turnover_old_processes
+  if [ "$DO_TURNOVER" = "1" ] && ! verify_runtime_epoch; then
+    runtime_turnover_failed=1
   fi
   print_summary
+  return "$runtime_turnover_failed"
 }
 
 if [ "${CAS_UPDATE_SOURCE_ONLY:-0}" != "1" ]; then

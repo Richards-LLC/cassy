@@ -389,7 +389,7 @@ test_native_project_refresh_delegation() {
     sync_projects
   ) >"$out" 2>&1 \
     && [ "$(cat "$args")" = 'update --all-projects' ] \
-    && assert_contains "$out" 'delegating migration, skills, team membership, and cloud sync'; then
+    && assert_contains "$out" 'delegating migration, skills, legacy search-index repair, team membership, and cloud sync'; then
     pass 'sync-only phase delegates the complete project refresh to native cas'
   else fail 'sync-only phase delegates the complete project refresh to native cas'; fi
   rm -rf "$tmp"
@@ -437,6 +437,7 @@ test_stale_turnover_is_reported_before_project_refresh() {
       record_turnover 401 'STALE SURVIVOR after SIGKILL' mcp-client-managed none none 'cas serve' restart
       return 1
     }
+    if ! turnover_old_processes; then :; fi
     report_stale_turnover_processes
     sync_projects() { printf 'project-refresh\n' >>"$CAS_UPDATE_EVENT_LOG"; }
     sync_projects

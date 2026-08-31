@@ -184,6 +184,15 @@ pub(crate) enum ExternalWakeCondition {
     TagExists { tag: String },
 }
 
+/// The ref and commit that an external condition actually compared. Keeping
+/// this separate from the user-supplied filter makes the fired reminder
+/// explain which remote state caused the wake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalWakeObservation {
+    pub(crate) compared_ref: String,
+    pub(crate) compared_sha: String,
+}
+
 impl ExternalWakeCondition {
     pub(crate) fn event_type(&self) -> &'static str {
         match self {
@@ -216,6 +225,22 @@ impl ExternalWakeCondition {
             Self::TagExists { tag } => {
                 format!("external condition satisfied: tag {tag} exists")
             }
+        }
+    }
+
+    pub(crate) fn description_with_observation(
+        &self,
+        observation: &ExternalWakeObservation,
+    ) -> String {
+        match self {
+            Self::BranchContained { commit, .. } => format!(
+                "external condition satisfied: commit {commit} is contained in {}@{}",
+                observation.compared_ref, observation.compared_sha
+            ),
+            Self::TagExists { tag } => format!(
+                "external condition satisfied: tag {tag} exists at {}@{}",
+                observation.compared_ref, observation.compared_sha
+            ),
         }
     }
 }
@@ -282,34 +307,123 @@ pub(crate) fn parse_external_wake_condition(
     }
 }
 
-/// Evaluate one external condition using bounded, local git reads. A normal
-/// non-zero git status means the condition is false (for example the target
-/// branch or tag is not present yet); process failures/timeouts are surfaced so
-/// the daemon can retain the pending row and retry on a later cadence.
+/// Evaluate one external condition using bounded git reads. Branch containment
+/// refreshes the named origin branch before resolving it, so a local branch or
+/// stale remote-tracking ref can never satisfy a reminder for another target.
+/// A normal non-zero git status means the condition is false (for example the
+/// target branch or tag is not present yet); process failures/timeouts are
+/// surfaced so the daemon can retain the pending row and retry on a later
+/// cadence.
 pub(crate) fn external_wake_condition_satisfied(
     project: &Path,
     condition: &ExternalWakeCondition,
 ) -> Result<bool, CiWatchError> {
-    let args = match condition {
+    Ok(external_wake_condition_observation(project, condition)?.is_some())
+}
+
+/// Evaluate an external condition and return the exact ref/SHA that was
+/// compared when it is satisfied. For branch conditions, the fetch is forced
+/// into `refs/remotes/origin/<target>` and failures return false without
+/// consulting any stale copy of that ref.
+pub(crate) fn external_wake_condition_observation(
+    project: &Path,
+    condition: &ExternalWakeCondition,
+) -> Result<Option<ExternalWakeObservation>, CiWatchError> {
+    match condition {
         ExternalWakeCondition::BranchContained {
             commit,
             target_branch,
-        } => vec![
-            "merge-base".to_string(),
-            "--is-ancestor".to_string(),
-            commit.clone(),
-            target_branch.clone(),
-        ],
-        ExternalWakeCondition::TagExists { tag } => vec![
-            "rev-parse".to_string(),
-            "--verify".to_string(),
-            "--quiet".to_string(),
-            format!("refs/tags/{tag}^{{commit}}"),
-        ],
-    };
+        } => {
+            let check_args = vec![
+                "check-ref-format".to_string(),
+                "--branch".to_string(),
+                target_branch.clone(),
+            ];
+            if !run_external_git_command(project, &check_args)?
+                .status
+                .success()
+            {
+                return Ok(None);
+            }
+
+            let target_ref = format!("refs/remotes/origin/{target_branch}");
+            let fetch_args = vec![
+                "fetch".to_string(),
+                "--no-tags".to_string(),
+                "origin".to_string(),
+                format!("+refs/heads/{target_branch}:{target_ref}"),
+            ];
+            // Never fall back to an existing remote-tracking ref if the
+            // refresh fails: that ref may be exactly the stale state that
+            // caused a false positive such as reminder #1179.
+            if !run_external_git_command(project, &fetch_args)?
+                .status
+                .success()
+            {
+                return Ok(None);
+            }
+
+            let Some(target_sha) = resolve_external_git_commit(project, &target_ref)? else {
+                return Ok(None);
+            };
+            let Some(commit_sha) = resolve_external_git_commit(project, commit)? else {
+                return Ok(None);
+            };
+            let merge_args = vec![
+                "merge-base".to_string(),
+                "--is-ancestor".to_string(),
+                commit_sha,
+                target_sha.clone(),
+            ];
+            if !run_external_git_command(project, &merge_args)?
+                .status
+                .success()
+            {
+                return Ok(None);
+            }
+            Ok(Some(ExternalWakeObservation {
+                compared_ref: target_ref,
+                compared_sha: target_sha,
+            }))
+        }
+        ExternalWakeCondition::TagExists { tag } => {
+            let tag_ref = format!("refs/tags/{tag}");
+            let Some(tag_sha) = resolve_external_git_commit(project, &tag_ref)? else {
+                return Ok(None);
+            };
+            Ok(Some(ExternalWakeObservation {
+                compared_ref: tag_ref,
+                compared_sha: tag_sha,
+            }))
+        }
+    }
+}
+
+fn resolve_external_git_commit(
+    project: &Path,
+    revision: &str,
+) -> Result<Option<String>, CiWatchError> {
+    let args = vec![
+        "rev-parse".to_string(),
+        "--verify".to_string(),
+        "--quiet".to_string(),
+        format!("{revision}^{{commit}}"),
+    ];
+    let output = run_external_git_command(project, &args)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!sha.is_empty()).then_some(sha))
+}
+
+fn run_external_git_command(
+    project: &Path,
+    args: &[String],
+) -> Result<std::process::Output, CiWatchError> {
     let mut command = Command::new("git");
-    command.args(&args).current_dir(project);
-    let output = run_command(
+    command.args(args).current_dir(project);
+    run_command(
         &mut command,
         Deadline::after(EXTERNAL_GIT_TIMEOUT),
         EXTERNAL_GIT_TIMEOUT,
@@ -323,8 +437,7 @@ pub(crate) fn external_wake_condition_satisfied(
                 "git is unavailable for external reminder probe".to_string()
             }
         })
-    })?;
-    Ok(output.status.success())
+    })
 }
 
 #[derive(Deserialize)]
@@ -1341,37 +1454,96 @@ mod tests {
     }
 
     #[test]
-    fn external_wake_git_probe_flips_for_ancestor_and_tag() {
+    fn external_wake_git_probe_uses_fresh_origin_and_reports_observation() {
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = temp.path();
-        git(repo, &["init", "-q"]);
-        git(repo, &["config", "user.email", "test@example.com"]);
-        git(repo, &["config", "user.name", "Test"]);
+        git(temp.path(), &["init", "--bare", "-q", "origin.git"]);
+        let origin = temp.path().join("origin.git");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
         std::fs::write(repo.join("file"), "first\n").unwrap();
-        git(repo, &["add", "file"]);
-        git(repo, &["commit", "-qm", "first"]);
-        let first = git_output(repo, &["rev-parse", "HEAD"]);
-        git(repo, &["tag", "v1"]);
-        std::fs::write(repo.join("file"), "second\n").unwrap();
-        git(repo, &["commit", "-qam", "second"]);
+        git(&repo, &["add", "file"]);
+        git(&repo, &["commit", "-qm", "first"]);
+        let first = git_output(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["tag", "v1"]);
+        git(&repo, &["branch", "-M", "factory/crisp-crane-67"]);
+        git(&repo, &["checkout", "--orphan", "main"]);
+        git(&repo, &["rm", "-rf", "."]);
+        std::fs::write(repo.join("unrelated"), "main\n").unwrap();
+        git(&repo, &["add", "unrelated"]);
+        git(&repo, &["commit", "-qm", "unrelated main"]);
+        git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&repo, &["push", "-q", "origin", "main"]);
+        git(&repo, &["checkout", "-q", "factory/crisp-crane-67"]);
+        // Keep the local main ref pointed at the delivered commit while the
+        // remote main remains unrelated. The pre-fix probe incorrectly fired
+        // by resolving the unqualified target_branch against this local ref.
+        git(&repo, &["branch", "-f", "main", first.as_str()]);
+        // Also pin a stale remote-tracking ref and make the remote
+        // unavailable: a failed refresh must not fall back to this stale
+        // value.
+        git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/main", first.as_str()],
+        );
+        let missing_origin = temp.path().join("missing-origin.git");
+        git(
+            &repo,
+            &["remote", "set-url", "origin", missing_origin.to_str().unwrap()],
+        );
+
+        let condition = ExternalWakeCondition::BranchContained {
+            commit: first.clone(),
+            target_branch: "main".to_string(),
+        };
+        assert!(!external_wake_condition_satisfied(&repo, &condition).unwrap());
+        assert!(external_wake_condition_observation(&repo, &condition)
+            .unwrap()
+            .is_none());
+
+        // Move the remote target forward to contain the source commit. The
+        // next fresh fetch flips the condition exactly once for the pending
+        // reminder edge, and records the ref/SHA used for that decision.
+        git(
+            &repo,
+            &["remote", "set-url", "origin", origin.to_str().unwrap()],
+        );
+        git(
+            &repo,
+            &[
+                "push",
+                "-q",
+                "--force",
+                "origin",
+                "factory/crisp-crane-67:main",
+            ],
+        );
+        let observation = external_wake_condition_observation(&repo, &condition)
+            .unwrap()
+            .unwrap();
+        assert_eq!(observation.compared_ref, "refs/remotes/origin/main");
+        assert_eq!(observation.compared_sha, first);
+        assert!(external_wake_condition_satisfied(&repo, &condition).unwrap());
 
         assert!(external_wake_condition_satisfied(
-            repo,
+            &repo,
             &ExternalWakeCondition::BranchContained {
-                commit: first,
-                target_branch: "HEAD".to_string(),
+                commit: observation.compared_sha.clone(),
+                target_branch: "main".to_string(),
             }
         )
         .unwrap());
         assert!(external_wake_condition_satisfied(
-            repo,
+            &repo,
             &ExternalWakeCondition::TagExists {
                 tag: "v1".to_string(),
             }
         )
         .unwrap());
         assert!(!external_wake_condition_satisfied(
-            repo,
+            &repo,
             &ExternalWakeCondition::TagExists {
                 tag: "not-created".to_string(),
             }

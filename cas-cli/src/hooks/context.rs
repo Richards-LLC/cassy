@@ -22,8 +22,9 @@ use cas_core::hooks::{
     token_display, truncate,
 };
 use cas_store::{
-    AgentStore, KnowledgeStore, RuleStore, SkillStore, SqliteKnowledgeStore,
-    SqliteSurfacedArtifactStore, Store, SurfacedArtifact, TaskStore,
+    AgentStore, KnowledgeStore, RetrievalHitIdentity, RetrievalStore, RuleStore, SkillStore,
+    SqliteKnowledgeStore, SqliteRetrievalStore, SqliteSurfacedArtifactStore, Store,
+    SurfacedArtifact, TaskStore,
 };
 use cas_types::{Entry, Rule, RuleStatus, Skill, Task, TaskStatus};
 
@@ -41,6 +42,47 @@ use crate::store::{
 
 const HOST_CONSTRAINT_SECTION_BUDGET_BYTES: usize = 1200;
 const HOST_CONSTRAINT_LINE_BUDGET_BYTES: usize = 220;
+const CONTEXT_SESSION_START_RETRIEVAL_FAMILY: &str = "context_session_start";
+const CONTEXT_SESSION_START_RETRIEVAL_POLICY: &str = "context-session-start-v1";
+
+/// Record the Helpful Memories section as one retrieval query and one result
+/// per injected entry. This is deliberately best-effort: SessionStart is on
+/// the harness critical path, so a telemetry database error must never hide a
+/// successfully built context prompt.
+fn record_context_session_start_query(cas_root: &Path, input: &HookInput, memory_ids: &[String]) {
+    let query_id = format!(
+        "qry-context-session-start-{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let hits = memory_ids
+        .iter()
+        .enumerate()
+        .map(|(rank, result_id)| RetrievalHitIdentity {
+            result_id: result_id.clone(),
+            document_type: "entry".to_string(),
+            rank,
+        })
+        .collect::<Vec<_>>();
+    let session_id = (!input.session_id.trim().is_empty()).then_some(input.session_id.as_str());
+
+    let store = match SqliteRetrievalStore::open(cas_root) {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("cas: Warning: failed to open SessionStart retrieval telemetry: {error}");
+            return;
+        }
+    };
+    if let Err(error) = store.record_query(
+        &query_id,
+        "SessionStart Helpful Memories",
+        CONTEXT_SESSION_START_RETRIEVAL_FAMILY,
+        CONTEXT_SESSION_START_RETRIEVAL_POLICY,
+        session_id,
+        &hits,
+    ) {
+        eprintln!("cas: Warning: failed to record SessionStart retrieval telemetry: {error}");
+    }
+}
 
 /// Build context string for session start injection
 ///
@@ -129,10 +171,17 @@ pub fn build_context_with_token_budget(
     // The existing DevTracer receives every surfaced item, including memory.
     let surfaced_artifacts = Arc::new(Mutex::new(Vec::<SurfacedArtifact>::new()));
     let surfaced_artifacts_for_callback = Arc::clone(&surfaced_artifacts);
+    let injected_memory_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+    let injected_memory_ids_for_callback = Arc::clone(&injected_memory_ids);
     let surfaced_callback: Option<SurfacedItemCallback> = Some(Box::new(
         move |id: &str, item_type: &str, preview: Option<&str>| {
             if let Some(tracer) = crate::tracing::DevTracer::get() {
                 let _ = tracer.record_surfaced_item(id, item_type, preview);
+            }
+            if item_type.eq_ignore_ascii_case("memory")
+                && let Ok(mut memory_ids) = injected_memory_ids_for_callback.lock()
+            {
+                memory_ids.push(id.to_string());
             }
             if matches!(item_type, "rule" | "skill")
                 && let Ok(mut artifacts) = surfaced_artifacts_for_callback.lock()
@@ -168,6 +217,11 @@ pub fn build_context_with_token_budget(
         // context hook fail after successfully building the prompt.
         let _ = store.record_batch(&input.session_id, &surfaced_artifacts);
     }
+
+    let injected_memory_ids = injected_memory_ids
+        .lock()
+        .map(|mut memory_ids| std::mem::take(&mut *memory_ids))
+        .unwrap_or_default();
 
     let context = {
         let mut ctx = context;
@@ -222,8 +276,13 @@ pub fn build_context_with_token_budget(
             total_tokens: stats.total_tokens,
             token_budget: config.token_budget(),
             items_omitted: stats.items_omitted,
+            memory_ids: injected_memory_ids.clone(),
         };
         let _ = tracer.record_context_injection(&trace, start_time.elapsed().as_millis() as u64);
+    }
+
+    if input.hook_event_name == "SessionStart" {
+        record_context_session_start_query(cas_root, input, &injected_memory_ids);
     }
 
     Ok(context)

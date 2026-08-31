@@ -1,6 +1,9 @@
 use crate::support::*;
+use cas::hooks::HookInput;
 use cas::mcp::tools::service::SearchContextRequest;
 use cas::mcp::tools::*;
+use cas_store::{SqliteStore, Store};
+use cas_types::Entry;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ErrorCode;
 
@@ -501,6 +504,25 @@ async fn provenance_v1_projects_every_unified_document_type() {
 async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
     let (temp, core) = setup_cas();
 
+    let cas_dir = temp.path().join(".cas");
+    let entry_store = SqliteStore::open(&cas_dir).unwrap();
+    for id in ["metrics-session-memory-a", "metrics-session-memory-b"] {
+        entry_store
+            .add(&Entry::new(
+                id.to_string(),
+                format!("Helpful SessionStart metric memory {id}"),
+            ))
+            .unwrap();
+    }
+    let session_input = HookInput {
+        session_id: "metrics-context-session".to_string(),
+        cwd: temp.path().to_string_lossy().to_string(),
+        hook_event_name: "SessionStart".to_string(),
+        ..Default::default()
+    };
+    cas::hooks::build_context_with_token_budget(&session_input, 2, &cas_dir, None)
+        .expect("SessionStart context should build");
+
     let task_req = TaskCreateRequest {
         depth: None,
         title: "Retrieval provenance integration marker".to_string(),
@@ -639,16 +661,31 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
         .expect("offline metrics should succeed");
     let metrics_json: serde_json::Value =
         serde_json::from_str(&extract_text(metrics)).expect("metrics response should be JSON");
-    assert_eq!(metrics_json["groups"][0]["document_type"], "task");
-    assert_eq!(
-        metrics_json["groups"][0]["ranking_policy"],
-        "current-default-v1"
-    );
-    assert_eq!(metrics_json["groups"][0]["total"], 2);
-    assert_eq!(metrics_json["groups"][0]["helpful"], 1);
-    assert_eq!(metrics_json["groups"][0]["resolved"], 1);
-    assert_eq!(metrics_json["groups"][0]["unresolved"], 1);
-    assert_eq!(metrics_json["groups"][0]["usefulness_rate"], 1.0);
+    let groups = metrics_json["groups"]
+        .as_array()
+        .expect("metrics groups should be an array");
+    let task_group = groups
+        .iter()
+        .find(|group| group["document_type"] == "task")
+        .expect("task provenance group should be present");
+    assert_eq!(task_group["ranking_policy"], "current-default-v1");
+    assert_eq!(task_group["total"], 2);
+    assert_eq!(task_group["helpful"], 1);
+    assert_eq!(task_group["resolved"], 1);
+    assert_eq!(task_group["unresolved"], 1);
+    assert_eq!(task_group["results"], 1);
+    assert_eq!(task_group["denominator"], "resolved");
+    assert_eq!(task_group["coverage_rate"], 1.0);
+    assert_eq!(task_group["usefulness_rate"], 1.0);
+
+    let context_group = groups
+        .iter()
+        .find(|group| group["query_family"] == "context_session_start")
+        .expect("SessionStart memory telemetry group should be present");
+    assert_eq!(context_group["document_type"], "entry");
+    assert_eq!(context_group["results"], 2);
+    assert_eq!(context_group["denominator"], "resolved");
+    assert_eq!(context_group["coverage_rate"], 0.0);
 
     let db = std::fs::read(temp.path().join(".cas/cas.db")).unwrap();
     let raw = String::from_utf8_lossy(&db);

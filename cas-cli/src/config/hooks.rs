@@ -292,8 +292,9 @@ pub struct StopHookConfig {
     #[serde(default = "default_learning_review_threshold")]
     pub learning_review_threshold: usize,
 
-    /// Enable rule review at session end (blocks stop if draft rules exceed threshold)
-    #[serde(default)]
+    /// Enable rule review at session end (default: true; factory workers are
+    /// exempt, and the draft threshold still gates the Stop blocker).
+    #[serde(default = "default_true")]
     pub rule_review_enabled: bool,
 
     /// Number of draft rules required to trigger review (default: 5)
@@ -346,7 +347,7 @@ impl Default for StopHookConfig {
             generate_summary: false,
             learning_review_enabled: false,
             learning_review_threshold: default_learning_review_threshold(),
-            rule_review_enabled: false,
+            rule_review_enabled: true,
             rule_review_threshold: default_rule_review_threshold(),
             duplicate_detection_enabled: false,
             duplicate_detection_threshold: default_duplicate_detection_threshold(),
@@ -687,5 +688,16 @@ mod tests {
                 "PreToolUse matcher must include factory intercept tool {tool}: {matcher:?}"
             );
         }
+    }
+
+    #[test]
+    fn rule_review_defaults_enabled_even_when_nested_config_is_omitted() {
+        assert!(StopHookConfig::default().rule_review_enabled);
+        let config: crate::config::Config = toml::from_str(
+            "[hooks.stop]\nrule_review_threshold = 7\n",
+        )
+        .expect("partial hook config should deserialize");
+        assert!(config.hooks().stop.rule_review_enabled);
+        assert_eq!(config.hooks().stop.rule_review_threshold, 7);
     }
 }

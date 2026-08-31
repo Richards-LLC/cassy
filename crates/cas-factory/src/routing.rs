@@ -1058,10 +1058,10 @@ candidates = ["codex_luna"]
         );
 
         let haiku = &registry.recipes["claude_haiku"];
-        assert_eq!(haiku.model, "haiku-4.5");
+        assert_eq!(haiku.model, "claude-haiku-4-5-20251001");
         assert_eq!(haiku.allowed_efforts, [Effort::Low, Effort::Medium]);
         assert_eq!(haiku.default_effort, Effort::Low);
-        assert_eq!(registry.recipes["claude_opus"].model, "opus-5");
+        assert_eq!(registry.recipes["claude_opus"].model, "claude-opus-5");
         assert_eq!(
             registry.recipes["codex_terra"].status,
             RecipeStatus::Suspended
@@ -1201,9 +1201,48 @@ candidates = ["first"]
         let decision = resolve_lane("light", &CapabilitySnapshot::default()).unwrap();
         assert_eq!(decision.recipe_id, "claude_haiku");
         assert_eq!(decision.spec.cli, SupervisorCli::Claude);
-        assert_eq!(decision.spec.model.as_deref(), Some("haiku-4.5"));
+        assert_eq!(
+            decision.spec.model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
         assert_eq!(decision.spec.effort, Some(Effort::Low));
         assert!(decision.warnings.is_empty());
+    }
+
+    #[test]
+    fn explicit_claude_model_validation_rejects_noncanonical_lane_slugs() {
+        let invalid = WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Claude,
+            model: Some("opus-5".to_string()),
+            effort: Some(Effort::High),
+            config_dir: None,
+            requester_config_dir: None,
+        };
+        let error = validate_explicit(&invalid, &CapabilitySnapshot::default())
+            .expect_err("Claude Code rejects the old opus-5 lane slug")
+            .to_string();
+        assert!(error.contains("claude-opus-5"), "{error}");
+
+        for model in [
+            "claude-opus-5",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-5",
+            "opus",
+            "haiku",
+            "sonnet",
+        ] {
+            let valid = WorkerSpec {
+                name: None,
+                cli: SupervisorCli::Claude,
+                model: Some(model.to_string()),
+                effort: Some(Effort::High),
+                config_dir: None,
+                requester_config_dir: None,
+            };
+            validate_explicit(&valid, &CapabilitySnapshot::default())
+                .unwrap_or_else(|error| panic!("recognized Claude model {model} rejected: {error}"));
+        }
     }
 
     #[test]

@@ -772,19 +772,43 @@ pub fn helpful_memories_production_ranking(
 pub struct ProductionRunner<'a> {
     corpus: &'a EvalCorpus,
     store: SqliteStore,
-    scorer: crate::hooks::scorer::HybridContextScorer,
+    scorer: Box<dyn cas_core::hooks::context::ContextScorer>,
     config: crate::config::Config,
     limit: usize,
 }
 
 impl<'a> ProductionRunner<'a> {
+    /// The production scorer, exactly as `context.rs` opens it.
     pub fn open(corpus: &'a EvalCorpus) -> Result<Self, EvalError> {
+        let scorer =
+            crate::hooks::scorer::HybridContextScorer::open_with_graph(corpus.cas_dir())
+                .map_err(|e| EvalError::Store(format!("open scorer: {e}")))?;
+        Self::with_scorer(corpus, Box::new(scorer))
+    }
+
+    /// The same wiring with one scorer configuration swapped in.
+    ///
+    /// This is the A/B seam: everything except the scorer stays production, so
+    /// a ranking question (cas-3b80, the cas-e7ae fusion decision) can be
+    /// answered by measurement. Guarded by the equivalence pin — under
+    /// [`ScorerConfig::PRODUCTION`] this must rank identically to [`Self::open`].
+    pub fn open_with_config(
+        corpus: &'a EvalCorpus,
+        config: ScorerConfig,
+    ) -> Result<Self, EvalError> {
+        let scorer = ConfigurableHybridScorer::open(corpus.cas_dir(), config)?;
+        Self::with_scorer(corpus, Box::new(scorer))
+    }
+
+    fn with_scorer(
+        corpus: &'a EvalCorpus,
+        scorer: Box<dyn cas_core::hooks::context::ContextScorer>,
+    ) -> Result<Self, EvalError> {
         let cas_dir = corpus.cas_dir();
         Ok(Self {
             store: SqliteStore::open(cas_dir)
                 .map_err(|e| EvalError::Store(format!("open store: {e}")))?,
-            scorer: crate::hooks::scorer::HybridContextScorer::open_with_graph(cas_dir)
-                .map_err(|e| EvalError::Store(format!("open scorer: {e}")))?,
+            scorer,
             config: crate::config::Config::load(cas_dir).unwrap_or_default(),
             limit: production_context_limit(cas_dir),
             corpus,
@@ -793,7 +817,7 @@ impl<'a> ProductionRunner<'a> {
 
     /// Rank one case exactly as `context.rs` would, reusing the open handles.
     pub fn rank(&self, case: &EvalCase, query_mode: QueryMode) -> Result<Vec<String>, EvalError> {
-        use cas_core::hooks::context::{ContextScorer, ContextStores, SurfacedItemCallback};
+        use cas_core::hooks::context::{ContextStores, SurfacedItemCallback};
         use std::sync::{Arc, Mutex};
 
         let _env = NeutralHookEnv::acquire();
@@ -815,7 +839,7 @@ impl<'a> ProductionRunner<'a> {
         let mut stores = ContextStores::empty();
         stores.project_store = Some(&self.store as &dyn Store);
         stores.task_store = Some(task_store.as_ref());
-        stores.entry_scorer = Some(&self.scorer as &dyn ContextScorer);
+        stores.entry_scorer = Some(self.scorer.as_ref());
         stores.recent_files = crate::hooks::handlers::get_session_files(self.corpus.cas_dir());
 
         cas_core::hooks::context::build_context_with_stores(
@@ -830,6 +854,218 @@ impl<'a> ProductionRunner<'a> {
 
         Ok(surfaced.lock().map(|ids| ids.clone()).unwrap_or_default())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Scorer-swap A/B rig
+// ---------------------------------------------------------------------------
+
+/// Knobs the production Helpful-Memories scorer hardcodes, exposed so a ranking
+/// question can be answered with a measurement instead of an argument.
+///
+/// This started life in cas-e979 carrying the three `apply_boosts` flags as
+/// well. Those flags — and `apply_boosts` itself — were deleted in that task
+/// once the harness proved their output was never read
+/// (`HybridSearch::search` took `r.bm25_score`, the raw field, and discarded
+/// the boosted one). The struct is deliberately NOT carrying a config for code
+/// that no longer exists; `temporal` remains because the temporal channel is
+/// real, is hardcoded on at `hooks/scorer.rs:55`, and measurably changes
+/// retrieval.
+///
+/// See `docs/analysis/2026-08-31-cas-e979-ranking-boosts.md`, and cas-e7ae for
+/// the still-open discarded-field-read defect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScorerConfig {
+    /// `HybridSearchOptions::enable_temporal`. Production hardcodes `true`.
+    pub temporal: bool,
+}
+
+impl ScorerConfig {
+    /// Exactly what production runs today.
+    pub const PRODUCTION: Self = Self { temporal: true };
+
+    pub fn label(&self) -> String {
+        format!("temporal:{}", if self.temporal { "on" } else { "off" })
+    }
+}
+
+/// `HybridContextScorer` with its hardcoded channel options exposed.
+///
+/// A deliberate replica of `HybridContextScorer::score_entries`
+/// (cas-cli/src/hooks/scorer.rs:118-183). Only the scorer body is replicated:
+/// it is passed as `entry_scorer` to the real `build_context_with_stores`, so
+/// build_start's filtering, high-importance-preference sort, budget logic and
+/// render path all stay production. `contextual_overlap_bonus` calls the real
+/// function rather than a copy.
+///
+/// [`ProductionRunner::open_with_config`] drives it, and the equivalence pin
+/// `the_scorer_replica_matches_production_under_the_production_config` holds it
+/// to the real scorer on every fixture case. No number from an unpinned replica
+/// should be reported.
+pub struct ConfigurableHybridScorer {
+    search: crate::hybrid_search::HybridSearch,
+    config: ScorerConfig,
+}
+
+impl ConfigurableHybridScorer {
+    pub fn open(cas_dir: &Path, config: ScorerConfig) -> Result<Self, EvalError> {
+        Ok(Self {
+            search: crate::hybrid_search::HybridSearch::open_with_graph(cas_dir)
+                .map_err(|e| EvalError::Store(format!("open hybrid search: {e}")))?,
+            config,
+        })
+    }
+
+    /// Mirrors `HybridContextScorer::score_with_hybrid` (scorer.rs:43-70) with
+    /// `enable_temporal` taken from the config instead of hardcoded.
+    fn score_with_hybrid(
+        &self,
+        entries: &[cas_types::Entry],
+        query: &str,
+    ) -> Result<Vec<(String, f32)>, ()> {
+        if query.trim().is_empty() || entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let opts = crate::hybrid_search::HybridSearchOptions {
+            base: crate::hybrid_search::SearchOptions {
+                query: query.to_string(),
+                limit: entries.len() * 2,
+                ..Default::default()
+            },
+            enable_semantic: false,
+            enable_temporal: self.config.temporal,
+            enable_graph: self.search.has_graph_retriever(),
+            enable_code: false,
+            enable_rerank: false,
+            use_adaptive_weights: true,
+            calibrate_scores: true,
+            ..Default::default()
+        };
+        let results = self.search.search(&opts, entries).map_err(|_| ())?;
+        Ok(results
+            .into_iter()
+            .map(|r| (r.id, r.score as f32))
+            .collect())
+    }
+}
+
+impl cas_core::hooks::context::ContextScorer for ConfigurableHybridScorer {
+    fn score_entries(
+        &self,
+        entries: &[cas_types::Entry],
+        context: &cas_core::hooks::context::ContextQuery,
+    ) -> Vec<(cas_types::Entry, f32)> {
+        use cas_core::hooks::context::BasicContextScorer;
+
+        let query = context.to_query_string();
+        if !context.has_content() || query.trim().is_empty() {
+            return BasicContextScorer.score_entries(entries, context);
+        }
+
+        let mut scored = match self.score_with_hybrid(entries, &query) {
+            Ok(hybrid_scores) if !hybrid_scores.is_empty() => {
+                let hybrid_map: std::collections::HashMap<&str, f32> = hybrid_scores
+                    .iter()
+                    .map(|(id, score)| (id.as_str(), *score))
+                    .collect();
+                entries
+                    .iter()
+                    .map(|e| {
+                        let hybrid_score = hybrid_map.get(e.id.as_str()).copied();
+                        let basic_score = BasicContextScorer::calculate_score(e);
+                        let final_score = match hybrid_score {
+                            Some(hs) => {
+                                let basic_normalized = (basic_score / 3.0).min(1.0);
+                                hs * 0.7 + basic_normalized * 0.3
+                            }
+                            None => (basic_score / 3.0).min(1.0) * 0.3,
+                        };
+                        (e.clone(), final_score)
+                    })
+                    .collect()
+            }
+            Ok(_) | Err(_) => BasicContextScorer.score_entries(entries, context),
+        };
+
+        for (entry, score) in &mut scored {
+            *score += crate::hooks::scorer::contextual_overlap_bonus(entry, &query);
+        }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored
+    }
+
+    /// Must stay `"hybrid"`: `build_start.rs:841` gates the "Related to Current
+    /// Work" section on this exact string, so returning anything else would
+    /// change the rendered context and make an A/B incomparable.
+    fn name(&self) -> &'static str {
+        "hybrid"
+    }
+}
+
+/// One measured row of a scorer-config experiment.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScorerArm {
+    pub config: String,
+    pub tier_mode: String,
+    pub query_mode: String,
+    pub precision_at_5: f64,
+    pub recall_at_5: f64,
+    pub lenient_precision_at_5: f64,
+    pub distinct_rankings: usize,
+    pub cases_with_a_hit: usize,
+}
+
+/// Measure one scorer configuration over the whole fixture.
+pub fn measure_scorer_arm(
+    fixture: &EvalFixture,
+    corpus: &EvalCorpus,
+    tier_mode: TierMode,
+    query_mode: QueryMode,
+    config: ScorerConfig,
+) -> Result<ScorerArm, EvalError> {
+    let runner = ProductionRunner::open_with_config(corpus, config)?;
+    let (metrics, _details) = score_in_query_mode(
+        SELECTOR_HELPFUL_MEMORIES_PRODUCTION,
+        tier_mode,
+        Some(query_mode),
+        &fixture.cases,
+        |case| runner.rank(case, query_mode).unwrap_or_default(),
+    );
+    Ok(ScorerArm {
+        config: config.label(),
+        tier_mode: tier_mode.as_str().to_string(),
+        query_mode: query_mode.as_str().to_string(),
+        precision_at_5: metrics.precision_at_5,
+        recall_at_5: metrics.recall_at_5,
+        lenient_precision_at_5: metrics.lenient_precision_at_5,
+        distinct_rankings: metrics.distinct_rankings,
+        cases_with_a_hit: metrics.cases_with_a_hit,
+    })
+}
+
+/// Render an experiment table for a task note or docs addendum.
+pub fn render_scorer_table(arms: &[ScorerArm]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "config          tier          query          P@5     R@5     lenP@5  hit  distinct\n",
+    );
+    out.push_str(
+        "--------------- ------------- -------------  ------  ------  ------  ---  --------\n",
+    );
+    for arm in arms {
+        out.push_str(&format!(
+            "{:<15} {:<13} {:<13}  {:.4}  {:.4}  {:.4}  {:>3}  {:>8}\n",
+            arm.config,
+            arm.tier_mode,
+            arm.query_mode,
+            arm.precision_at_5,
+            arm.recall_at_5,
+            arm.lenient_precision_at_5,
+            arm.cases_with_a_hit,
+            arm.distinct_rankings,
+        ));
+    }
+    out
 }
 
 /// The Basic-path ranking read back out of the rendered block rather than the

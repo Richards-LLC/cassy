@@ -130,11 +130,12 @@ The audit asked for these to be distinguished, because they have different remed
 
 ## Open follow-up questions (deliberately not decided here)
 
-1. **Should the discarded field read be fixed?** `HybridSearch::search` reading
-   `bm25_score` rather than `score` is the reason this whole knob was dead. Fixing it
-   is a fusion-behaviour change (raw ~30-scale → calibrated 0–1) and needs its own
-   task, its own review, and a re-run of this matrix. The counterfactual table above
-   is the input to that decision.
+1. **Should the discarded field read be fixed?** Filed as **cas-e7ae** (P3,
+   main-targeted), framed as *defect, not dead feature*. `HybridSearch::search`
+   reading `bm25_score` rather than `score` is the reason this whole knob was dead.
+   Fixing it is a fusion-behaviour change (raw ~30-scale → calibrated 0–1) and needs
+   its own review and a re-run of this matrix. The counterfactual table above is the
+   input to that decision.
 2. **Should equivalent boosts apply in `search_unified`?** An "enable" decision would
    only ever have moved the SessionStart Helpful-Memories path — `search_unified`,
    which backs the `mcp__cas__search` tool, never called `apply_boosts`. Whether
@@ -143,6 +144,24 @@ The audit asked for these to be distinguished, because they have different remed
 3. **Does any of this matter before tier starvation is fixed?** On `live_tiers` no arm
    moved a single metric, because the tier filter leaves 14 of 189 entries eligible
    (cas-b06c, cas-763b). Ranking work on the shipped path is capped until that changes.
+
+## A footnote on the surviving knob
+
+`enable_temporal` was kept — it is a real channel, hardcoded on at
+`hooks/scorer.rs:55`, and flipping it changes `HybridSearch::search`'s result set
+(189 hits → 185) and its whole head. But that difference does **not** reach the @5
+metric on this fixture: build_start filters to active-tier entries,
+`contextual_overlap_bonus` and the high-importance-preference sort dominate the
+survivors, and the top-5 truncates before the temporal reordering matters. Both arms
+score identically.
+
+That is a different failure mode from the boosts and worth keeping straight. The
+boosts were **discarded at the field read** — the value was never consumed. Temporal
+is **consumed but washed out downstream**. The first is a defect; the second is a
+consequence of the tier filter and the @5 window, and is one more reason tier
+starvation (cas-763b) gates ranking work on the shipped path.
+`the_temporal_arms_agree_at_5_today_and_the_harness_says_why` pins the current
+equality so a future divergence arrives explained.
 
 ## What changed in the tree
 
@@ -154,6 +173,13 @@ The audit asked for these to be distinguished, because they have different remed
 - `SearchResult::{score, boosted_score}` are retained and now both carry the
   calibrated BM25 score; `boosted_score` still has readers in
   `mcp/tools/core/search.rs`, so the field was left in place rather than renamed.
+- The harness keeps a **scorer-swap A/B rig** (`ScorerConfig`,
+  `ConfigurableHybridScorer`, `ProductionRunner::open_with_config`) with the three
+  boost fields removed and `temporal` retained — the harness must not carry a config
+  for code that no longer exists. The rig is reusable for cas-3b80 and for the
+  cas-e7ae fusion decision, and is guarded by an equivalence pin: under
+  `ScorerConfig::PRODUCTION` the replica must rank identically to the real
+  `HybridContextScorer` on all 56 cases in both query modes.
 
 The committed harness baseline (`cas-cli/tests/data/retrieval-eval/baseline.json`) is
 **unchanged** by this deletion, and the gate is green on the final configuration.

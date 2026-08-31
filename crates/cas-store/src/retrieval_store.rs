@@ -474,6 +474,44 @@ impl SqliteRetrievalStore {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StoreError::Database)
     }
+
+    /// Aggregate retrieval rows belonging to one session. Session IDs are
+    /// hashed with the same domain-separated identity function used by query
+    /// writers; raw session identifiers never enter the SQL query.
+    pub fn aggregate_for_session(&self, session_id: &str) -> Result<Vec<RetrievalAggregate>> {
+        let session_hash = Self::identity_hash("session", session_id)?;
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT r.document_type, q.query_family, q.ranking_policy,
+                    COUNT(o.id) AS total,
+                    COUNT(DISTINCT CASE WHEN o.outcome != 'unresolved' THEN o.session_hash END)
+                        AS distinct_sessions,
+                    COALESCE(SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'ignored' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'corrected' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome != 'unresolved' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'unresolved' THEN 1 ELSE 0 END), 0),
+                    COUNT(DISTINCT CASE WHEN o.outcome != 'unresolved'
+                        THEN r.query_id || char(0) || r.result_id END) AS resolved_results,
+                    COUNT(DISTINCT CASE WHEN o.outcome = 'used'
+                        THEN r.query_id || char(0) || r.result_id END) AS used_results,
+                    COUNT(DISTINCT CASE WHEN o.outcome = 'helpful'
+                        THEN r.query_id || char(0) || r.result_id END) AS helpful_results,
+                    COUNT(DISTINCT r.query_id || char(0) || r.result_id) AS results
+             FROM retrieval_query_results r
+             JOIN retrieval_queries q ON q.id = r.query_id
+             LEFT JOIN retrieval_outcomes o
+               ON o.query_id = r.query_id AND o.result_id = r.result_id
+             WHERE q.session_hash = ?1
+             GROUP BY r.document_type, q.query_family, q.ranking_policy
+             ORDER BY r.document_type, q.query_family, q.ranking_policy",
+        )?;
+        let rows = stmt.query_map([session_hash], Self::parse_aggregate)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
+    }
 }
 
 impl RetrievalStore for SqliteRetrievalStore {

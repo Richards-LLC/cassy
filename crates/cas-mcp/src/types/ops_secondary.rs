@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub struct SearchContextRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'search', 'retrieval_feedback', 'retrieval_metrics' (funnel stages use distinct retrieved result rows; quality rates use resolved outcomes; includes rolling judge-labelled injected precision), 'skill_impact' (impact_report alias), 'context', 'context_for_subagent', 'observe', 'entity_list', 'entity_show', 'entity_extract', 'code_search', 'code_show', 'grep', 'blame', 'history'"
+        description = "Action: 'search', 'retrieval_feedback', 'retrieval_metrics' (optional session_id filter; funnel stages use distinct retrieved result rows; quality rates use resolved outcomes; includes rolling judge-labelled injected precision), 'skill_impact' (impact_report alias), 'context', 'context_for_subagent', 'observe', 'entity_list', 'entity_show', 'entity_extract', 'code_search', 'code_show', 'grep', 'blame', 'history'"
     )]
     pub action: String,
 
@@ -195,8 +195,10 @@ pub struct SearchContextRequest {
     #[serde(default)]
     pub include_prompts: Option<bool>,
 
-    /// Filter by session ID (for blame)
-    #[schemars(description = "Filter blame by session ID")]
+    /// Session ID filter for retrieval_metrics; hashed before comparison.
+    #[schemars(
+        description = "Filter retrieval_metrics rows by session ID (hashed before comparison)"
+    )]
     #[serde(default)]
     pub session_id: Option<String>,
 

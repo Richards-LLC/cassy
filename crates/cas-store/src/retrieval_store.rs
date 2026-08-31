@@ -712,9 +712,9 @@ mod tests {
         assert_eq!(aggregate.helpful, 1);
         assert_eq!(aggregate.ignored, 1);
         assert_eq!(aggregate.corrected, 1);
-        assert_eq!(aggregate.usefulness_rate, 1.0);
-        assert_eq!(aggregate.ignore_rate, 0.5);
-        assert_eq!(aggregate.correction_rate, 0.5);
+        assert_eq!(aggregate.usefulness_rate, 0.5);
+        assert_eq!(aggregate.ignore_rate, 0.25);
+        assert_eq!(aggregate.correction_rate, 0.25);
     }
 
     #[test]

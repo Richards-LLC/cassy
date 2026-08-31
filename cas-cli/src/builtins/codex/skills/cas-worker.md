@@ -128,7 +128,7 @@ Before setting `status=blocked`, re-read with `action=show`. If it already shows
 
 ## Running Tests in a Worker
 
-**Batch fixes, then verify.** Inner loop: `cargo check -p <crate> --lib --tests`. Before handoff/awaiting_merge, if diff spans >1 crate or changes a `pub fn` signature, run `cargo check --workspace --tests` (compile-only; no suite change) and record exit 0. Otherwise run targets through `cargo nextest run` at most twice.
+**Batch the fixes.** Inner loop: `cargo check -p <crate> --lib --tests`; before handoff/awaiting_merge, multi-crate/pub fn signature diffs require `cargo check --workspace --tests` (compile-only; exit-0 receipt). Final proof: cargo nextest run --lib <module>/--test <name>, at most twice; no foreground sleep; never full suite.
 
 For env-reading code, check the clean-CI shape with `make -C cas-cli test-clean-env`.
 

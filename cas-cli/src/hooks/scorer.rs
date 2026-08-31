@@ -74,7 +74,11 @@ impl HybridContextScorer {
 /// context query. Hybrid search already blends lexical relevance with recency
 /// and importance, but a recently-created generic entry can otherwise crowd a
 /// task-specific memory out of the compact ambient-memory window.
-fn contextual_overlap_bonus(entry: &Entry, query: &str) -> f32 {
+///
+/// `pub(crate)` for the retrieval-eval harness, whose scorer-swap replica calls
+/// this exact function rather than copying it, so an experiment cannot silently
+/// diverge from production on the bonus term.
+pub(crate) fn contextual_overlap_bonus(entry: &Entry, query: &str) -> f32 {
     const COMMON_CONTEXT_TERMS: &[&str] = &[
         "about", "after", "against", "and", "are", "for", "from", "into", "must", "not", "the",
         "that", "this", "with",

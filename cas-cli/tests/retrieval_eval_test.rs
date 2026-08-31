@@ -52,7 +52,7 @@ use std::collections::HashSet;
 
 use cas::retrieval_eval::{
     self, Baseline, EvalCorpus, EvalFixture, ProductionScorerState, QueryMode, REBASELINE_ENV,
-    REGRESSION_TOLERANCE, SELECTOR_AMBIENT_CANDIDATES, SELECTOR_AMBIENT_PACKET,
+    REGRESSION_TOLERANCE, ScorerConfig, SELECTOR_AMBIENT_CANDIDATES, SELECTOR_AMBIENT_PACKET,
     SELECTOR_HELPFUL_MEMORIES, SELECTOR_HELPFUL_MEMORIES_PRODUCTION, TierMode,
 };
 
@@ -426,6 +426,89 @@ fn the_fast_production_runner_matches_the_real_build_context_path() {
             );
         }
     }
+}
+
+#[test]
+fn the_scorer_replica_matches_production_under_the_production_config() {
+    // The A/B seam's licence to exist. `ConfigurableHybridScorer` replicates
+    // `HybridContextScorer::score_entries` so the channel options production
+    // hardcodes can be varied and a ranking question answered by measurement
+    // (cas-3b80, and the cas-e7ae fusion decision).
+    //
+    // Under ScorerConfig::PRODUCTION it must rank identically to the real
+    // scorer on every case, in both query modes. If this fails, no number the
+    // replica produces means anything.
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = EvalCorpus::materialize_with_index(&fixture, dir.path(), TierMode::AllWorking)
+        .expect("seed + index");
+
+    let production = retrieval_eval::ProductionRunner::open(&corpus).expect("production runner");
+    let replica =
+        retrieval_eval::ProductionRunner::open_with_config(&corpus, ScorerConfig::PRODUCTION)
+            .expect("replica runner");
+
+    for query_mode in [QueryMode::SeededTask, QueryMode::FreshSession] {
+        for case in &fixture.cases {
+            assert_eq!(
+                production.rank(case, query_mode).expect("production"),
+                replica.rank(case, query_mode).expect("replica"),
+                "{} / {}: scorer replica diverged from the real HybridContextScorer",
+                case.case_id,
+                query_mode.as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_temporal_arms_agree_at_5_today_and_the_harness_says_why() {
+    // Exercises the surviving knob, and records an honest asymmetry rather than
+    // asserting a flattering one.
+    //
+    // `enable_temporal` is NOT dead the way the deleted `apply_boosts` flags
+    // were. Measured in cas-e979 at the search boundary, flipping it changes
+    // `HybridSearch::search`'s result set (189 hits -> 185) and its entire head.
+    // That is a real retrieval difference, and it is why the knob was kept.
+    //
+    // But that difference does NOT survive to the @5 window on this fixture:
+    // build_start filters to active-tier entries, `contextual_overlap_bonus`
+    // and the high-importance-preference sort dominate the surviving handful,
+    // and the top-5 truncates before the temporal reordering matters. So both
+    // arms score identically here.
+    //
+    // Asserting the equality (rather than a difference) is the honest pin: it
+    // is what is true today, and a future divergence then arrives explained
+    // instead of mysterious. If this starts failing, the temporal channel has
+    // begun reaching the metric — re-baseline and record which change did it.
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = EvalCorpus::materialize_with_index(&fixture, dir.path(), TierMode::AllWorking)
+        .expect("seed + index");
+
+    let arm = |temporal: bool| {
+        retrieval_eval::measure_scorer_arm(
+            &fixture,
+            &corpus,
+            TierMode::AllWorking,
+            QueryMode::SeededTask,
+            ScorerConfig { temporal },
+        )
+        .expect("measure")
+    };
+    let on = arm(true);
+    let off = arm(false);
+    println!(
+        "\n{}",
+        retrieval_eval::render_scorer_table(&[on.clone(), off.clone()])
+    );
+
+    assert_eq!(
+        (on.precision_at_5, on.recall_at_5, on.distinct_rankings),
+        (off.precision_at_5, off.recall_at_5, off.distinct_rankings),
+        "the temporal channel now reaches the @5 metric. That is a real change, \
+         not a broken test — re-baseline and record what caused it."
+    );
 }
 
 #[test]

@@ -237,6 +237,20 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: scripts/run-scoped-tests.sh -p cas --lib --no-fail-fast
 
+      # cas-ad65: the library-only invocation above cannot exercise integration
+      # snapshots. Route only their committed CLI-output input surfaces here;
+      # PRs #649/#650 and PR #657 run 33435790948 reached the queue before
+      # stale doctor_snapshot output was exercised. This remains one small
+      # target within Scoped Validation, never a new CI lane.
+      - name: Test snapshot-pinned CLI output surfaces
+        if: >-
+          steps.pr-dedupe.outputs.covered != 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+        run: scripts/check-scoped-snapshot-tests.sh --base-sha "$BASE_SHA" --zero-base-ref "$ZERO_BASE_REF"
+
       - name: Report why no Rust work ran
         if: >-
           steps.pr-dedupe.outputs.covered == 'true'

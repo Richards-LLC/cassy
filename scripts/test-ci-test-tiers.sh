@@ -13,6 +13,8 @@ makefile="$repo_root/cas-cli/Makefile"
 verified="$repo_root/scripts/run-verified-tests.sh"
 real_store_guard="$repo_root/scripts/check-real-store-untouched.sh"
 migration_guard="$repo_root/scripts/check-release-migration-snapshots.sh"
+snapshot_router="$repo_root/scripts/check-scoped-snapshot-tests.sh"
+snapshot_router_test="$repo_root/scripts/test-check-scoped-snapshot-tests.sh"
 watchdog="$repo_root/.github/workflows/merge-queue-watchdog.yml"
 watchdog_script="$repo_root/scripts/cancel-stale-merge-group-runs.sh"
 runner_unit="$repo_root/ops/systemd/cassy-actions-runner.service"
@@ -334,6 +336,10 @@ require_text "$scoped" "github.event_name == 'pull_request'" 'pull requests use 
 require_text "$scoped" 'github.base_ref != github.event.repository.default_branch' 'scoped tier skips protected-default PRs'
 require_text "$scoped" 'cargo check -p cas --lib --tests' 'scoped tier checks target surface'
 require_text "$scoped" 'scripts/run-scoped-tests.sh -p cas --lib' 'scoped tier runs one guarded test binary'
+require_text "$scoped" 'Test snapshot-pinned CLI output surfaces' 'scoped tier names the snapshot surface target'
+require_text "$scoped" 'scripts/check-scoped-snapshot-tests.sh --base-sha' 'scoped tier routes mapped snapshot surfaces'
+require_text "$scoped" 'github.event.merge_group.base_sha' 'snapshot router receives merge-group base'
+require_text "$scoped" 'origin/${{ github.event.repository.default_branch }}' 'snapshot router has a trusted zero-base fallback'
 
 # Merge-latency contract for the scoped lane (cas-3e14). This lane is not a
 # required check, but it reports last on a factory PR, so a merge that waits for
@@ -371,7 +377,8 @@ for expensive in \
     './.github/actions/setup-rust-linux' \
     'taiki-e/install-action@nextest' \
     'cargo check -p cas --lib --tests' \
-    'scripts/run-scoped-tests.sh -p cas --lib'; do
+    'scripts/run-scoped-tests.sh -p cas --lib' \
+    'scripts/check-scoped-snapshot-tests.sh --base-sha'; do
     step_block="$(awk -v needle="$expensive" '
         /^      - / {
             if (block != "" && index(block, needle)) { printf "%s", block; found = 1; exit }
@@ -383,6 +390,33 @@ for expensive in \
     require_text "$step_block" "steps.pr-dedupe.outputs.covered != 'true'" "scoped lane step is dedupe-gated: $expensive"
     require_text "$step_block" "steps.classify-diff.outputs.rust-unaffected != 'true'" "scoped lane step is classification-gated: $expensive"
 done
+
+# The snapshot router is deliberately a separate, conditional target inside
+# Scoped Validation: it catches doctor_snapshot staleness before the merge
+# queue (PRs #649/#650; PR #657 run 33435790948) without creating a required
+# lane or widening ordinary library coverage.
+require_text "$(<"$snapshot_router")" 'component_output_test__doctor_snapshot.snap|cas-cli/src/cli/doctor.rs|component_output_test' \
+    'doctor.rs maps to component_output_test'
+require_text "$(<"$snapshot_router")" 'component_output_test__status_empty_snapshot.snap|cas-cli/src/cli/status.rs|component_output_test' \
+    'status.rs maps to component_output_test'
+require_text "$(<"$snapshot_router")" 'no Scoped Validation mapping' \
+    'unmapped committed snapshots fail loudly'
+if [[ -x "$snapshot_router" ]]; then
+    printf 'ok   snapshot router is executable\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL snapshot router must be executable\n'
+    fail=$((fail + 1))
+fi
+if [[ -x "$snapshot_router_test" ]]; then
+    printf 'ok   snapshot router has an executable self-test\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL snapshot router has no executable self-test\n'
+    fail=$((fail + 1))
+fi
+require_text "$(<"$makefile")" 'test-check-scoped-snapshot-tests.sh' \
+    'test-ci-tiers runs the snapshot router self-test'
 
 # Removing the factory push trigger in the name of dedupe would leave the
 # supervisor's `git merge --no-ff` integration path — which never opens a pull

@@ -51,3 +51,14 @@ and `AGENTS.md` loading, `--yolo`, model/effort config, and resume/approval
 continuity. No Cassy code change is required from the notes alone. **Source
 gaps:** none for 0.148.0 and 0.149.0; 0.149.1 has no release-note body, so no
 item-level change is inferred.
+
+## POSTED
+
+Channel: `#cas-internal` (`C0B44GUKDK2`) · Posted 2026-08-31 via the approved Claude profile route (embargo lifted by the operator on 2026-08-31).
+
+| Message | Slack ts | Permalink |
+| --- | --- | --- |
+| Parent | 1788180395.467059 | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1788180395467059 |
+| Grok reply | 1788180401.859449 | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1788180401859449?thread_ts=1788180395.467059&cid=C0B44GUKDK2 |
+| Claude reply | 1788180408.002849 | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1788180408002849?thread_ts=1788180395.467059&cid=C0B44GUKDK2 |
+| Codex reply | 1788180413.884179 | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1788180413884179?thread_ts=1788180395.467059&cid=C0B44GUKDK2 |

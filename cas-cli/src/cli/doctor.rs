@@ -226,18 +226,51 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 }),
             }
 
+            // `doctor --fix` is interactive, so it drains the whole legacy root
+            // rather than the daemon's bounded slice.
             match open_store(path).and_then(|store| {
-                crate::hybrid_search::repair_legacy_index(path, store.as_ref())
+                crate::hybrid_search::repair_legacy_index(
+                    path,
+                    store.as_ref(),
+                    crate::hybrid_search::LegacyRepairLimits::unbounded(),
+                )
             }) {
-                Ok(Some(repair)) => checks.push(Check {
-                    name: "auto-fix".to_string(),
-                    status: CheckStatus::Ok,
-                    message: format!(
+                Ok(crate::hybrid_search::LegacyRepairOutcome::Repaired(repair)) => {
+                    let mut message = format!(
                         "Repaired legacy Tantivy root: {} document(s), {} entry row(s) re-queued, {} pending entry row(s) indexed",
                         repair.legacy_documents, repair.requeued_entries, repair.indexed_entries
-                    ),
-                }),
-                Ok(None) => {}
+                    );
+                    let mut status = CheckStatus::Ok;
+                    if !repair.unswept_files.is_empty() {
+                        status = CheckStatus::Warning;
+                        message.push_str(&format!(
+                            "; {} file(s) could not be removed — re-run `cas doctor --fix` to finish the sweep",
+                            repair.unswept_files.len()
+                        ));
+                    }
+                    if !repair.errors.is_empty() {
+                        status = CheckStatus::Warning;
+                        message.push_str(&format!(
+                            "; {} entry row(s) failed to index and stay queued for retry",
+                            repair.errors.len()
+                        ));
+                    }
+                    checks.push(Check {
+                        name: "auto-fix".to_string(),
+                        status,
+                        message,
+                    });
+                }
+                Ok(crate::hybrid_search::LegacyRepairOutcome::NoLegacyRoot) => {}
+                Ok(crate::hybrid_search::LegacyRepairOutcome::Busy { reason }) => {
+                    checks.push(Check {
+                        name: "auto-fix".to_string(),
+                        status: CheckStatus::Warning,
+                        message: format!(
+                            "Legacy Tantivy root is busy ({reason}); stop any running `cas serve`/daemon and re-run `cas doctor --fix`"
+                        ),
+                    })
+                }
                 Err(error) => checks.push(Check {
                     name: "auto-fix".to_string(),
                     status: CheckStatus::Warning,
@@ -1877,9 +1910,15 @@ mod tests {
             before.message
         );
 
-        crate::hybrid_search::repair_legacy_index(&cas_root, store.as_ref())
-            .expect("repair")
-            .expect("legacy repair result");
+        assert!(matches!(
+            crate::hybrid_search::repair_legacy_index(
+                &cas_root,
+                store.as_ref(),
+                crate::hybrid_search::LegacyRepairLimits::unbounded(),
+            )
+            .expect("repair"),
+            crate::hybrid_search::LegacyRepairOutcome::Repaired(_)
+        ));
         let after = legacy_search_index_check(&cas_root);
         assert!(matches!(after.status, CheckStatus::Ok));
         assert!(

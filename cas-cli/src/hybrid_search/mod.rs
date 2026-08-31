@@ -99,7 +99,8 @@ use tantivy::{Index, IndexReader};
 
 pub use id_utils::extract_id_patterns;
 pub use legacy_index::{
-    LegacyIndexState, LegacyRepairResult, inspect_legacy_index, repair_legacy_index,
+    LegacyIndexState, LegacyRepairLimits, LegacyRepairOutcome, LegacyRepairResult,
+    inspect_legacy_index, repair_legacy_index,
 };
 
 /// Document type for unified search

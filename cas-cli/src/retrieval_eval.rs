@@ -14,8 +14,9 @@
 //!   `HybridContextScorer::open_with_graph` and passes it as `entry_scorer`, so
 //!   ranking is `hs * 0.7 + basic * 0.3` plus `contextual_overlap_bonus`. This
 //!   is the row that describes what a session actually receives. It is measured
-//!   in both [`QueryMode`]s, because a SessionStart's `ContextQuery` is only
-//!   non-empty when an in-progress task exists.
+//!   in all three [`QueryMode`]s, because what a SessionStart can say about
+//!   itself depends entirely on what the project has recorded: an in-progress
+//!   task, a previously captured prompt, or nothing but its own directory.
 //! * **`helpful_memories`** — the Basic FALLBACK control. Built by
 //!   [`cas_core::hooks::context::build_context_with_stores`] with no
 //!   `entry_scorer`, which is `build_start.rs`'s fallback. Retained from
@@ -277,20 +278,40 @@ impl TierMode {
 
 /// Which SessionStart shape the production selector is measured under.
 ///
-/// `ContextQuery::has_content()` (cas-core/src/hooks/context/mod.rs:113) is
-/// `!task_titles.is_empty() || user_prompt.is_some() || !recent_files.is_empty()`
-/// — **cwd is deliberately not counted**, even though `to_query_string()`
-/// includes it. At SessionStart `user_prompt` is always `None` (that field
-/// belongs to UserPromptSubmit), and `recent_files` comes from
-/// `<cas_root>/session_files.json`, which does not exist on the live cas-src
-/// store. So in practice the only thing that can make a real SessionStart
-/// query-aware is an in-progress task.
+/// At SessionStart `input.user_prompt` is always `None` (that field belongs to
+/// UserPromptSubmit), so what a session can say about itself comes from what
+/// the project has recorded: an in-progress task, session files, the last
+/// captured prompt, cwd and branch. The three modes below separate those
+/// sources deliberately, because collapsing them is how a measured gain gets
+/// attributed to the wrong mechanism.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QueryMode {
     /// The factory regime: one in-progress task, as a worker session sees.
     SeededTask,
-    /// A fresh session in a project: no in-progress task, no session files.
+    /// A true cold start: no in-progress task, no session files, no captured
+    /// prompt in the store. The only query content is what cas-3b80 added to
+    /// `has_content()` — project identity from cwd, plus the git branch when
+    /// the checkout has one.
+    ///
+    /// Every fixture case shares one cwd and the corpus lives in a temp dir
+    /// with no repository, so this mode's query is *identical* for all 56
+    /// cases by construction and one distinct ranking is the correct result,
+    /// not a defect. What it measures is the other half: whether ranking a
+    /// constant query through the hybrid path beats the Basic fallback it used
+    /// to take. Across projects or branches — where cwd and branch actually
+    /// differ — this content does discriminate; this fixture cannot show that.
     FreshSession,
+    /// A cold start in a project with history: no in-progress task, but the
+    /// last UserPromptSubmit is still in the prompt store and production
+    /// carries it forward.
+    ///
+    /// The seeded prompt is the case's own, i.e. **perfect topic continuity**
+    /// between the previous session and this one. Read this row's precision as
+    /// the ceiling of what carry-forward can buy, never as an expectation: a
+    /// real previous prompt is only as useful as it is related to what the new
+    /// session turns out to be about. The result that does not rest on that
+    /// assumption is `distinct_rankings`.
+    FreshSessionCarriedPrompt,
 }
 
 impl QueryMode {
@@ -298,7 +319,25 @@ impl QueryMode {
         match self {
             Self::SeededTask => "seeded_task",
             Self::FreshSession => "fresh_session",
+            Self::FreshSessionCarriedPrompt => "fresh_session_carried_prompt",
         }
+    }
+
+    /// Every mode the production selector is measured in.
+    pub const ALL: [Self; 3] = [
+        Self::SeededTask,
+        Self::FreshSession,
+        Self::FreshSessionCarriedPrompt,
+    ];
+
+    /// Whether this mode installs an in-progress task.
+    fn seeds_task(self) -> bool {
+        matches!(self, Self::SeededTask)
+    }
+
+    /// Whether this mode leaves a previous session's prompt in the store.
+    fn seeds_prompt(self) -> bool {
+        matches!(self, Self::FreshSessionCarriedPrompt)
     }
 }
 
@@ -717,7 +756,7 @@ impl<'a> SeededTask<'a> {
         case: &EvalCase,
         mode: QueryMode,
     ) -> Result<Self, EvalError> {
-        if mode == QueryMode::FreshSession {
+        if !mode.seeds_task() {
             return Ok(Self {
                 cas_dir,
                 task_id: None,
@@ -759,34 +798,67 @@ impl Drop for SeededTask<'_> {
 /// without one would measure a state the field does not have.
 ///
 /// The seeded prompt is the case's **own** prompt, i.e. perfect topic
-/// continuity between the previous session and this one. Read the resulting
-/// precision as the upper bound of what carry-forward can buy; the real gain is
-/// bounded by how related consecutive sessions actually are. The measurement
-/// that does *not* rest on that assumption is `distinct_rankings`, which only
-/// asks whether the ranking responds to the session at all.
+/// continuity between the previous session and this one — see
+/// [`QueryMode::FreshSessionCarriedPrompt`] for how to read the resulting
+/// number.
 ///
-/// No `Drop`: `PromptStore` has no delete, and none is needed. Each install
-/// writes a uniquely-identified row stamped `Utc::now()`, and production reads
-/// `list_recent(1)`, so the row installed for the case being ranked is always
-/// the one read.
-struct SeededPrompt;
+/// Installed only in that one mode, and removed on drop. The removal is what
+/// keeps [`QueryMode::FreshSession`] a *true* cold start: production reads
+/// `list_recent(1)` with no notion of eval modes, so a prompt row left behind
+/// by one mode would silently seed the next one, and the two rows would stop
+/// measuring different things. `PromptStore` exposes no delete, so the guard
+/// removes its own row through the same `cas.db` the store writes.
+struct SeededPrompt<'a> {
+    cas_dir: &'a Path,
+    prompt_id: Option<String>,
+}
 
-impl SeededPrompt {
-    fn install(cas_dir: &Path, case: &EvalCase) -> Self {
-        if let Ok(store) = crate::store::open_prompt_store(cas_dir) {
-            let unique = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default();
-            let prompt = cas_types::Prompt::new(
-                format!("prompt-eval-{}-{unique}", case.case_id),
-                format!("retrieval-eval-{}", case.case_id),
-                "retrieval-eval-agent".to_string(),
-                case.user_prompt.clone(),
-            );
-            let _ = store.add(&prompt);
+impl<'a> SeededPrompt<'a> {
+    fn install(cas_dir: &'a Path, case: &EvalCase, mode: QueryMode) -> Self {
+        if !mode.seeds_prompt() {
+            return Self {
+                cas_dir,
+                prompt_id: None,
+            };
         }
-        Self
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let id = format!("prompt-eval-{}-{unique}", case.case_id);
+        let Ok(store) = crate::store::open_prompt_store(cas_dir) else {
+            return Self {
+                cas_dir,
+                prompt_id: None,
+            };
+        };
+        let prompt = cas_types::Prompt::new(
+            id.clone(),
+            format!("retrieval-eval-{}", case.case_id),
+            "retrieval-eval-agent".to_string(),
+            case.user_prompt.clone(),
+        );
+        match store.add(&prompt) {
+            Ok(()) => Self {
+                cas_dir,
+                prompt_id: Some(id),
+            },
+            Err(_) => Self {
+                cas_dir,
+                prompt_id: None,
+            },
+        }
+    }
+}
+
+impl Drop for SeededPrompt<'_> {
+    fn drop(&mut self) {
+        let Some(id) = self.prompt_id.take() else {
+            return;
+        };
+        if let Ok(conn) = rusqlite::Connection::open(self.cas_dir.join("cas.db")) {
+            let _ = conn.execute("DELETE FROM prompts WHERE id = ?1", [id]);
+        }
     }
 }
 
@@ -863,7 +935,7 @@ pub fn helpful_memories_production_ranking(
 ) -> Result<Vec<String>, EvalError> {
     let _env = NeutralHookEnv::acquire(corpus.cas_dir());
     let _task = SeededTask::install(corpus.cas_dir(), case, query_mode)?;
-    let _prompt = SeededPrompt::install(corpus.cas_dir(), case);
+    let _prompt = SeededPrompt::install(corpus.cas_dir(), case, query_mode);
 
     let rendered = crate::hooks::build_context(
         &production_hook_input(case),
@@ -941,7 +1013,7 @@ impl<'a> ProductionRunner<'a> {
 
         let _env = NeutralHookEnv::acquire(self.corpus.cas_dir());
         let _task = SeededTask::install(self.corpus.cas_dir(), case, query_mode)?;
-        let _prompt = SeededPrompt::install(self.corpus.cas_dir(), case);
+        let _prompt = SeededPrompt::install(self.corpus.cas_dir(), case, query_mode);
 
         let task_store = crate::store::open_task_store_local(self.corpus.cas_dir())
             .map_err(|e| EvalError::Store(format!("open task store: {e}")))?;
@@ -1247,7 +1319,7 @@ pub fn probe_production_scorer_state(
     let Ok(_task) = SeededTask::install(corpus.cas_dir(), case, query_mode) else {
         return ProductionScorerState::ScorerUnavailable;
     };
-    let _prompt = SeededPrompt::install(corpus.cas_dir(), case);
+    let _prompt = SeededPrompt::install(corpus.cas_dir(), case, query_mode);
 
     if crate::hooks::scorer::HybridContextScorer::open_with_graph(corpus.cas_dir()).is_err() {
         return ProductionScorerState::ScorerUnavailable;
@@ -1549,7 +1621,7 @@ pub fn run_all(
         // The production path, in both SessionStart shapes. This is the row
         // that describes what a real session receives.
         let runner = ProductionRunner::open(&corpus)?;
-        for query_mode in [QueryMode::SeededTask, QueryMode::FreshSession] {
+        for query_mode in QueryMode::ALL {
             let (m, d) = score_in_query_mode(
                 SELECTOR_HELPFUL_MEMORIES_PRODUCTION,
                 mode,

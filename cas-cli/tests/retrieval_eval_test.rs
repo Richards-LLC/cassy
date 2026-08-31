@@ -300,7 +300,7 @@ fn the_production_selector_is_measured_and_gated_in_every_mode() {
     let (metrics, _) = run(&fixture);
 
     for tier in [TierMode::Live, TierMode::AllWorking] {
-        for query_mode in [QueryMode::SeededTask, QueryMode::FreshSession] {
+        for query_mode in QueryMode::ALL {
             let row = metrics
                 .iter()
                 .find(|m| {
@@ -374,30 +374,64 @@ fn a_fresh_session_is_query_aware_and_the_number_says_so() {
     // This test was born asserting the defect: a fresh session had no
     // in-progress task and no session_files.json, `has_content()` excluded cwd,
     // and production collapsed to ONE ranking for all 56 cases (cas-b06c).
-    // cas-3b80 fixed that — a fresh session now ranks on the carried-forward
-    // prompt, the archived previous-session files, project identity and branch
-    // — so the assertion is inverted rather than deleted: the number that used
-    // to prove the defect now guards the fix.
+    // cas-3b80 fixed that, so the assertion is re-aimed rather than deleted —
+    // but at the RIGHT mode. Each of the three modes pins a different claim:
+    //
+    // * fresh_session (true cold start) — cwd and branch are the only content,
+    //   and this fixture's 56 cases share one cwd in a non-repository temp dir.
+    //   Its query is therefore identical for every case and ONE distinct
+    //   ranking is the correct answer. What must be true is that it is no
+    //   longer the *Basic* list: the hybrid path now runs on a constant query
+    //   instead of early-returning.
+    // * fresh_session_carried_prompt — the previous session's prompt is in the
+    //   store, so ranking must vary case by case. This is where the cas-3b80
+    //   "off 1" result lives.
+    // * seeded_task — unchanged behaviour, still query-dependent.
     let fixture = fixture();
     let dir = tempfile::tempdir().expect("tempdir");
     let corpus = EvalCorpus::materialize_with_index(&fixture, dir.path(), TierMode::AllWorking)
         .expect("seed + index");
 
     let fresh = distinct_rankings(&fixture, &corpus, QueryMode::FreshSession);
+    let carried = distinct_rankings(&fixture, &corpus, QueryMode::FreshSessionCarriedPrompt);
     let seeded = distinct_rankings(&fixture, &corpus, QueryMode::SeededTask);
-    println!("distinct top-5 rankings — fresh_session: {fresh}, seeded_task: {seeded}");
+    println!(
+        "distinct top-5 rankings — fresh_session: {fresh}, \
+         fresh_session_carried_prompt: {carried}, seeded_task: {seeded}"
+    );
 
+    assert_eq!(
+        fresh, 1,
+        "every case shares one cwd and there is no branch, so a true cold start \
+         necessarily issues one query; {fresh} distinct rankings means the mode \
+         is picking up state it is supposed to be measured without"
+    );
     assert!(
-        fresh > 1,
-        "a fresh session must rank on what the session is about; {fresh} \
-         distinct rankings across {} cases means it collapsed back to the \
-         query-blind Basic list. Re-baseline only after finding out why.",
+        carried > 1,
+        "with the previous session's prompt carried forward, production must \
+         vary with what the session is about; {carried} distinct rankings \
+         across {} cases means it collapsed back to the query-blind Basic list. \
+         Re-baseline only after finding out why.",
         fixture.cases.len()
     );
     assert!(
         seeded > 1,
         "with an in-progress task seeded, production must vary with the query; \
          got {seeded} distinct rankings"
+    );
+
+    // The cold start's one ranking must be the HYBRID one, not the Basic
+    // fallback it used to take: that is the half of cas-3b80 the constant-query
+    // mode exists to measure.
+    let case = &fixture.cases[0];
+    let runner = retrieval_eval::ProductionRunner::open(&corpus).expect("runner");
+    let cold = runner.rank(case, QueryMode::FreshSession).expect("cold");
+    let basic = retrieval_eval::helpful_memories_ranking(&corpus, case).expect("basic");
+    println!("cold-start top-5: {cold:?}\nbasic top-5:      {basic:?}");
+    assert_ne!(
+        cold, basic,
+        "a cold start still produced the Basic fallback ranking — cwd/branch \
+         content is not reaching the hybrid scorer"
     );
 }
 
@@ -419,9 +453,18 @@ fn the_production_scorer_state_is_reported_not_guessed() {
     assert_eq!(
         retrieval_eval::probe_production_scorer_state(&with_index, case, QueryMode::FreshSession),
         ProductionScorerState::QueryAwareWithLexicalIndex,
-        "since cas-3b80 a fresh session carries the last prompt, the previous \
-         session's files, project identity and branch, so has_content() holds \
-         and scorer.rs:123 no longer early-returns onto query-blind Basic"
+        "since cas-3b80 project identity alone satisfies has_content(), so even \
+         a true cold start stops early-returning onto query-blind Basic at \
+         scorer.rs:123"
+    );
+    assert_eq!(
+        retrieval_eval::probe_production_scorer_state(
+            &with_index,
+            case,
+            QueryMode::FreshSessionCarriedPrompt
+        ),
+        ProductionScorerState::QueryAwareWithLexicalIndex,
+        "a cold start in a project with history carries the last prompt forward"
     );
 
     // A MISSING index is not a hard failure, and this is the part the task
@@ -485,7 +528,7 @@ fn the_fast_production_runner_matches_the_real_build_context_path() {
         .expect("seed + index");
     let runner = retrieval_eval::ProductionRunner::open(&corpus).expect("runner");
 
-    for query_mode in [QueryMode::SeededTask, QueryMode::FreshSession] {
+    for query_mode in QueryMode::ALL {
         for case in &fixture.cases {
             let fast = runner.rank(case, query_mode).expect("fast");
             let real =
@@ -671,7 +714,7 @@ fn the_scorer_replica_matches_production_under_the_production_config() {
         retrieval_eval::ProductionRunner::open_with_config(&corpus, ScorerConfig::PRODUCTION)
             .expect("replica runner");
 
-    for query_mode in [QueryMode::SeededTask, QueryMode::FreshSession] {
+    for query_mode in QueryMode::ALL {
         for case in &fixture.cases {
             assert_eq!(
                 production.rank(case, query_mode).expect("production"),
@@ -1033,7 +1076,7 @@ fn the_gate_fires_on_a_deliberate_corpus_regression() {
         // cover it — otherwise `compare` reports missing coverage instead of a
         // regression and the proof is vacuous.
         let runner = retrieval_eval::ProductionRunner::open(&corpus).expect("runner");
-        for query_mode in [QueryMode::SeededTask, QueryMode::FreshSession] {
+        for query_mode in QueryMode::ALL {
             let (m, _) = retrieval_eval::score_in_query_mode(
                 SELECTOR_HELPFUL_MEMORIES_PRODUCTION,
                 mode,

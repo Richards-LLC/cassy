@@ -300,7 +300,7 @@ pub enum QueryMode {
     /// constant query through the hybrid path beats the Basic fallback it used
     /// to take. Across projects or branches — where cwd and branch actually
     /// differ — this content does discriminate; this fixture cannot show that.
-    FreshSession,
+    FreshSessionColdStart,
     /// A cold start in a project with history: no in-progress task, but the
     /// last UserPromptSubmit is still in the prompt store and production
     /// carries it forward.
@@ -318,7 +318,7 @@ impl QueryMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SeededTask => "seeded_task",
-            Self::FreshSession => "fresh_session",
+            Self::FreshSessionColdStart => "fresh_session_cold_start",
             Self::FreshSessionCarriedPrompt => "fresh_session_carried_prompt",
         }
     }
@@ -326,7 +326,7 @@ impl QueryMode {
     /// Every mode the production selector is measured in.
     pub const ALL: [Self; 3] = [
         Self::SeededTask,
-        Self::FreshSession,
+        Self::FreshSessionColdStart,
         Self::FreshSessionCarriedPrompt,
     ];
 
@@ -803,7 +803,7 @@ impl Drop for SeededTask<'_> {
 /// number.
 ///
 /// Installed only in that one mode, and removed on drop. The removal is what
-/// keeps [`QueryMode::FreshSession`] a *true* cold start: production reads
+/// keeps [`QueryMode::FreshSessionColdStart`] a *true* cold start: production reads
 /// `list_recent(1)` with no notion of eval modes, so a prompt row left behind
 /// by one mode would silently seed the next one, and the two rows would stop
 /// measuring different things. `PromptStore` exposes no delete, so the guard

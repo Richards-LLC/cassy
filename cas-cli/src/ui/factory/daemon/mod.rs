@@ -139,11 +139,17 @@ enum PendingSpawn {
     KillShell { name: String },
 }
 
-/// A launched worker that has not yet proved liveness by registering in Cassy.
+/// A launched worker whose registration and initial boot window are tracked by
+/// the daemon. Registration is not the end of verification: a harness can
+/// register its MCP child and then immediately die while rejecting its model.
 #[derive(Debug, Clone)]
 struct SpawnVerification {
     request_id: Option<i64>,
     launched_at: Instant,
+    /// When registration was first observed. Retaining this record for the
+    /// short post-registration window lets PaneExited and pane-error polling
+    /// downgrade an optimistic `registered` result to a durable failure.
+    registered_at: Option<Instant>,
     /// cas-28a4 (GH #84): task this spawn promised to pre-assign. Carried to
     /// registration so the binding is re-confirmed (and the worker briefed)
     /// at the only moment the worker is provably alive.

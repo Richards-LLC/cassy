@@ -1703,12 +1703,12 @@ harness = "codex"
     #[test]
     fn worker_top_level_model_wins_over_stock_default() {
         let llm = LlmConfig {
-            model: Some("claude-opus-4-7".to_string()),
+            model: Some("claude-opus-5".to_string()),
             ..LlmConfig::default()
         };
         assert_eq!(
             llm.model_for_role("worker"),
-            Some("claude-opus-4-7"),
+            Some("claude-opus-5"),
             "top-level llm.model must still flow through to workers — \
              stock fallback only fires when both role and top-level are None"
         );

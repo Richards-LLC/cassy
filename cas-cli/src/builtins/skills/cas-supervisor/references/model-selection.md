@@ -28,9 +28,9 @@ The route table below is generated from the embedded `cas-factory` registry. Kee
 <!-- BEGIN GENERATED ROUTE TABLE: cas-factory lane registry -->
 | Lane | Recipe | Provider | CLI | Model | Effort | Status | Fallback | Notes |
 |---|---|---|---|---|---|---|---|---|
-| `light` | `claude_haiku` | `anthropic` | `claude` | `haiku-4.5` | `low` | `active` | `ordered candidates` |  |
+| `light` | `claude_haiku` | `anthropic` | `claude` | `claude-haiku-4-5-20251001` | `low` | `active` | `ordered candidates` |  |
 | `standard` | `codex_luna` | `openai` | `codex` | `gpt-5.6-luna` | `xhigh` | `active` | `ordered candidates` |  |
-| `taste` | `claude_opus` | `anthropic` | `claude` | `opus-5` | `high` | `active` | `disabled` |  |
+| `taste` | `claude_opus` | `anthropic` | `claude` | `claude-opus-5` | `high` | `active` | `disabled` |  |
 | `heavy` | `codex_sol` | `openai` | `codex` | `gpt-5.6-sol` | `high` | `active` | `ordered candidates` |  |
 | `— (explicit only)` | `codex_terra` | `openai` | `codex` | `gpt-5.6-terra` | `xhigh` | `suspended` | `not lane-routed` | Standing operator suspension (2026-08-27) |
 | `— (explicit only)` | `qwencloud_qwen` | `qwencloud` | `opencode` | `qwen3.8-max` | `medium` | `active` | `not lane-routed` | Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27; explicit recipe/model only |
@@ -102,9 +102,20 @@ carry the operator-declared tier as metadata when supplied.
 | `cli=` | Accepted `model=` slugs | Notes |
 |---|---|---|
 | `codex` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Sol/high is the heavy route; Luna/xhigh is the standard route; **Terra is standing-suspended and has no active lane**. Luna is the gpt-5.4-mini successor. |
-| `claude` | `haiku-4.5`, `opus-5` (full Anthropic ids also ok) | Haiku/low is the light lane; Opus/high is the taste lane and also serves exceptional architecture/safety/rescue/challenge. Sonnet is not a normal worker lane. |
-| `grok` | `grok-4.5`, `grok-composer-2.5-fast` | Provider capacity is not an active registry lane in this matrix; never invent `cli=cursor` or a fallback recipe. |
+| `claude` | any canonical `claude-*` id (e.g. `claude-opus-5`, `claude-haiku-4-5-20251001`, `claude-sonnet-5`) or the `opus`/`sonnet`/`haiku` aliases | Canonical IDs accept future numeric family/version releases and the CLI's optional `[1m]` context suffix; Haiku/low is the light lane; Opus/high is the taste lane and also serves exceptional architecture/safety/rescue/challenge. Sonnet is available for explicit non-lane work. |
+| `grok` | `grok-4.5`, `grok-4.6` | Provider capacity is not an active registry lane in this matrix; never invent `cli=cursor` or a fallback recipe. |
 | `opencode` | `local/<model>`, `qwencloud/qwen3.8-max`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Explicit local, Token Plan, or DashScope pay-as-you-go lane; per-lane conformance receipt required. Hosted auth/model availability are operator preflight inputs. |
+
+### Stock fallback routes
+
+When no factory configuration supplies a route, omitted controls resolve through
+the harness stock fallback. Claude intentionally keeps the verified `opus`
+alias as its stock model; this is a fallback route, not a registry lane.
+
+```text
+# Claude stock fallback
+mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
+```
 
 ### Effort vocabulary (Cassy-wide)
 
@@ -130,13 +141,13 @@ Copy-paste commands generated from the registry; every recipe pins `cli`, `model
 
 ```text
 # light — recipe claude_haiku
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=haiku-4.5 effort=low
+mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-haiku-4-5-20251001 effort=low
 
 # standard — recipe codex_luna
 mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
 
 # taste — recipe claude_opus
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=opus-5 effort=high
+mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5 effort=high
 
 # heavy — recipe codex_sol
 mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high

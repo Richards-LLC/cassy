@@ -86,6 +86,17 @@
 //!   move between `1` and `n` is exactly the event this harness exists to
 //!   catch.
 //!
+//! # Deliberate production boundary
+//!
+//! ProductionRunner reproduces the ranking-producing build_context path only.
+//! It does not reproduce the rule/skill/knowledge/agent stores or the
+//! host-constraints/cloud/mcp-tools sections appended by the CLI wrapper. The
+//! fixture seeds only project memory entries and, for SeededTask, one
+//! in-progress task; an integration test asserts that those omitted stores and
+//! sections are empty. The measured branch is explicitly hooks.ai_context = false;
+//! build_context_ai is unmeasured because invoking an external model
+//! would make this harness neither deterministic nor hermetic.
+//!
 //! # Re-baselining
 //!
 //! **One-line procedure:** run
@@ -96,6 +107,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration as StdDuration;
 
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -120,6 +132,13 @@ pub const REGRESSION_TOLERANCE: f64 = 0.10;
 
 /// Environment switch that rewrites the committed baseline instead of gating.
 pub const REBASELINE_ENV: &str = "CAS_RETRIEVAL_EVAL_REBASELINE";
+
+/// The fixture's fixed labeled-case count. A change requires an explicit
+/// fixture review rather than silently weakening all-case equivalence.
+pub const EXPECTED_CASE_COUNT: usize = 56;
+
+/// Maximum wall-clock time for one complete fixture harness run.
+pub const HARNESS_RUNTIME_BUDGET: StdDuration = StdDuration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // Fixture
@@ -561,7 +580,7 @@ pub fn helpful_memories_ranking(
         // "related" item_type is the separate "Related to Current Work"
         // section, which only exists for the hybrid scorer and is scored
         // separately if it is ever wired into this harness.
-        if item_type == "Memory"
+        if item_type.eq_ignore_ascii_case("memory")
             && let Ok(mut ids) = sink.lock()
         {
             ids.push(id.to_string());
@@ -593,33 +612,91 @@ pub fn helpful_memories_ranking(
 // The production Helpful-Memories path (cas-b06c)
 // ---------------------------------------------------------------------------
 
-/// Clears the factory environment for the duration of a production measurement.
+/// Isolates process-global inputs for the duration of a production measurement.
 ///
 /// `build_context_with_stores` renders an Agent Coordination section whenever
 /// `CAS_AGENT_ROLE` is set, which consumes token budget and can change which
 /// memories still fit inside it. The committed baseline must describe a plain
 /// operator session, not whichever pane happened to run the harness.
 ///
+/// The wrapper also opens host constraints through HOME/.cas and loads cloud
+/// credentials through both CAS_ROOT and the user-level cloud path. Every
+/// CAS_* variable is scrubbed, CAS_ROOT points at the disposable corpus,
+/// HOME/XDG_CONFIG_HOME point at a disposable home, and a logged-out cloud
+/// config is installed there. This keeps the ranking independent of the
+/// worker's real ~/.cas, login state, and live cloud.
+///
 /// Safe under the repo's standard runner: nextest gives every test its own
 /// process, so this cannot race a sibling test.
 struct NeutralHookEnv {
-    restore: Option<String>,
+    restore: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
+    _home: tempfile::TempDir,
 }
 
 impl NeutralHookEnv {
-    fn acquire() -> Self {
-        let restore = std::env::var("CAS_AGENT_ROLE").ok();
-        if restore.is_some() {
-            unsafe { std::env::remove_var("CAS_AGENT_ROLE") };
+    fn acquire(cas_dir: &Path) -> Self {
+        let home = tempfile::tempdir().expect("temporary production-eval HOME");
+        let home_path = home.path().to_path_buf();
+        let home_cas = home_path.join(".cas");
+        let xdg_config = home_path.join(".config");
+        std::fs::create_dir_all(&home_cas).expect("create production-eval user cas root");
+        std::fs::create_dir_all(&xdg_config).expect("create production-eval config root");
+        // An explicitly token-less user cloud config is the production
+        // equivalent of a logged-out state. The endpoint is also loopback-only
+        // so an accidental call cannot reach the network.
+        std::fs::write(home_cas.join("cloud.json"), r#"{"token":null}"#)
+            .expect("write logged-out production-eval cloud config");
+
+        let mut env = Self {
+            restore: Vec::new(),
+            _home: home,
+        };
+        let keys = std::env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| {
+                key.to_str().is_some_and(|value| {
+                    value.starts_with("CAS_") || matches!(value, "HOME" | "XDG_CONFIG_HOME")
+                })
+            })
+            .collect::<Vec<_>>();
+        for key in keys {
+            env.capture(&key);
+            // SAFETY: nextest isolates each integration test process, and this
+            // guard restores every captured value before the temp home drops.
+            unsafe { std::env::remove_var(&key) };
         }
-        Self { restore }
+        env.set("HOME", &home_path);
+        env.set("XDG_CONFIG_HOME", &xdg_config);
+        env.set("CAS_ROOT", cas_dir);
+        env.set("CAS_USER_CLOUD_JSON", home_cas.join("cloud.json"));
+        env.set("CAS_CLOUD_ENDPOINT", "http://127.0.0.1:9");
+        env
+    }
+
+    fn capture(&mut self, key: &std::ffi::OsStr) {
+        if !self.restore.iter().any(|(saved, _)| saved == key) {
+            self.restore
+                .push((key.to_os_string(), std::env::var_os(key)));
+        }
+    }
+
+    fn set(&mut self, key: impl AsRef<std::ffi::OsStr>, value: impl AsRef<std::ffi::OsStr>) {
+        let key = key.as_ref();
+        self.capture(key);
+        // SAFETY: see the guard's acquire comment.
+        unsafe { std::env::set_var(key, value) };
     }
 }
 
 impl Drop for NeutralHookEnv {
     fn drop(&mut self) {
-        if let Some(value) = self.restore.take() {
-            unsafe { std::env::set_var("CAS_AGENT_ROLE", value) };
+        for (key, value) in self.restore.iter().rev() {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
         }
     }
 }
@@ -743,7 +820,7 @@ pub fn helpful_memories_production_ranking(
     case: &EvalCase,
     query_mode: QueryMode,
 ) -> Result<Vec<String>, EvalError> {
-    let _env = NeutralHookEnv::acquire();
+    let _env = NeutralHookEnv::acquire(corpus.cas_dir());
     let _task = SeededTask::install(corpus.cas_dir(), case, query_mode)?;
 
     let rendered = crate::hooks::build_context(
@@ -820,7 +897,7 @@ impl<'a> ProductionRunner<'a> {
         use cas_core::hooks::context::{ContextStores, SurfacedItemCallback};
         use std::sync::{Arc, Mutex};
 
-        let _env = NeutralHookEnv::acquire();
+        let _env = NeutralHookEnv::acquire(self.corpus.cas_dir());
         let _task = SeededTask::install(self.corpus.cas_dir(), case, query_mode)?;
 
         let task_store = crate::store::open_task_store_local(self.corpus.cas_dir())
@@ -829,7 +906,7 @@ impl<'a> ProductionRunner<'a> {
         let surfaced: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&surfaced);
         let callback: SurfacedItemCallback = Box::new(move |id: &str, item_type: &str, _preview| {
-            if item_type == "Memory"
+            if item_type.eq_ignore_ascii_case("memory")
                 && let Ok(mut ids) = sink.lock()
             {
                 ids.push(id.to_string());
@@ -1111,7 +1188,7 @@ pub fn probe_production_scorer_state(
     use cas_core::hooks::context::ContextQuery;
     use cas_types::TaskStatus;
 
-    let _env = NeutralHookEnv::acquire();
+    let _env = NeutralHookEnv::acquire(corpus.cas_dir());
     let Ok(_task) = SeededTask::install(corpus.cas_dir(), case, query_mode) else {
         return ProductionScorerState::ScorerUnavailable;
     };

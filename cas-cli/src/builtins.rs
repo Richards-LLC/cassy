@@ -5589,6 +5589,23 @@ This is the body content."#;
                 content.contains(&generated_recipes),
                 "{label} model-selection.md is missing the registry-generated spawn recipes"
             );
+
+            // Use the same acceptance-set seam as the runtime validator with
+            // a deterministic stub CLI. A generated recipe is copyable
+            // operator input, so a documented model outside the harness's
+            // accepted set must fail this golden test before it can ship.
+            for line in content.lines().filter(|line| line.contains("cli=claude model=")) {
+                let model = line
+                    .split_once("model=")
+                    .and_then(|(_, value)| value.split_whitespace().next())
+                    .expect("generated Claude recipe must contain model=");
+                cas_factory::validate_model_slug_with(
+                    cas_mux::SupervisorCli::Claude,
+                    model,
+                    cas_factory::is_claude_model_slug,
+                )
+                .unwrap_or_else(|error| panic!("{label} documents an unaccepted Claude model: {error}"));
+            }
         }
         for lane_name in registry.lanes.keys() {
             let decision = cas_factory::resolve_lane(
@@ -5682,7 +5699,7 @@ This is the body content."#;
         }
         // cas-b342/cas-96ea: the hard rule requires explicit cli/model/effort on EVERY
         // spawn, so every `spawn_workers` recipe line in the rubric — including
-        // the light Grok Composer lane — must carry an explicit `effort=`, and
+        // the light Grok lane — must carry an explicit `effort=`, and
         // Sonnet must not remain as a copyable spawn recipe.
         for line in claude.content.lines() {
             if line.contains("action=spawn_workers") {

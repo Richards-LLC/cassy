@@ -523,6 +523,8 @@ pub fn build_context_ai(
     // Build context from selected items
     let mut context_parts = Vec::new();
     let mut total_tokens: usize = 0;
+    let mut injected_memory_ids: Vec<String> =
+        pinned_entries.iter().map(|e| e.id.clone()).collect();
 
     // Always include pinned first
     if !pinned_entries.is_empty() {
@@ -544,6 +546,9 @@ pub fn build_context_ai(
         for candidate in candidates.iter().filter(|c| selected_ids.contains(&c.id)) {
             if pinned_ids.contains(&candidate.id) {
                 continue; // Skip if already shown as pinned
+            }
+            if candidate.item_type == "memory" {
+                injected_memory_ids.push(candidate.id.clone());
             }
             context_parts.push(format!(
                 "- {} [{}] {}",
@@ -567,6 +572,10 @@ pub fn build_context_ai(
             token_display(total_tokens),
             hints
         ));
+    }
+
+    if input.hook_event_name == "SessionStart" {
+        record_context_session_start_query(cas_root, input, &injected_memory_ids);
     }
 
     Ok(context_parts.join("\n"))
@@ -1136,6 +1145,64 @@ mod tests {
     use crate::test_support::TestEnvGuard;
     use cas_core::hooks::HookInput;
     use cas_types::{Entry, Scope};
+
+    #[test]
+    fn ai_session_start_telemeters_selected_memory_ids() {
+        use cas_store::{RuleStore, SqliteRetrievalStore, SqliteRuleStore, Store};
+        use rusqlite::Connection;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::store::SqliteStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let mut entry = Entry::new(
+            "ai-session-memory".to_string(),
+            "Memory selected by the AI session context path".to_string(),
+        );
+        entry.helpful_count = 1;
+        store.add(&entry).unwrap();
+
+        let rules = SqliteRuleStore::open(temp.path()).unwrap();
+        rules.init().unwrap();
+        SqliteRetrievalStore::open(temp.path()).unwrap();
+
+        let fake_bin = tempfile::tempdir().unwrap();
+        let claude = fake_bin.path().join("claude");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nprintf '%s' '{\"selected\": [\"ai-session-memory\"]}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = format!(
+            "{}:{}",
+            fake_bin.path().display(),
+            original_path.to_string_lossy()
+        );
+        let env = TestEnvGuard::with_optional_vars(&[("PATH", Some(path.as_str()))]);
+
+        let input = HookInput {
+            session_id: "ai-session-telemetry".to_string(),
+            cwd: temp.path().to_string_lossy().to_string(),
+            hook_event_name: "SessionStart".to_string(),
+            ..HookInput::default()
+        };
+        let context = build_context_ai(&input, 5, temp.path()).unwrap();
+        assert!(context.contains("ai-session-memory"), "{context}");
+
+        drop(env);
+        let db = Connection::open(temp.path().join("cas.db")).unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM retrieval_query_results
+                 WHERE result_id = 'ai-session-memory'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "AI-selected memory must be telemetered");
+    }
 
     /// cas-c220 (GH #89): pin the user-config namespace for a whole test body.
     ///

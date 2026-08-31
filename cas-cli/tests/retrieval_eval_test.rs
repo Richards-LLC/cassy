@@ -49,12 +49,23 @@
 //! incident, not a broken test.
 
 use std::collections::HashSet;
+use std::io::Write;
+use std::net::TcpListener;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use cas::retrieval_eval::{
-    self, Baseline, EvalCorpus, EvalFixture, ProductionScorerState, QueryMode, REBASELINE_ENV,
-    REGRESSION_TOLERANCE, ScorerConfig, SELECTOR_AMBIENT_CANDIDATES, SELECTOR_AMBIENT_PACKET,
-    SELECTOR_HELPFUL_MEMORIES, SELECTOR_HELPFUL_MEMORIES_PRODUCTION, TierMode,
+    self, Baseline, EXPECTED_CASE_COUNT, EvalCorpus, EvalFixture, HARNESS_RUNTIME_BUDGET,
+    ProductionScorerState, QueryMode, REBASELINE_ENV, REGRESSION_TOLERANCE,
+    SELECTOR_AMBIENT_CANDIDATES, SELECTOR_AMBIENT_PACKET, SELECTOR_HELPFUL_MEMORIES,
+    SELECTOR_HELPFUL_MEMORIES_PRODUCTION, ScorerConfig, TierMode,
 };
+use sha2::{Digest, Sha256};
+
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+use test_env_guard::TestEnvGuard;
 
 fn fixture() -> EvalFixture {
     EvalFixture::load(&EvalFixture::committed_path()).expect("committed fixture must load")
@@ -76,6 +87,11 @@ fn run(
 #[test]
 fn the_committed_fixture_is_well_formed_and_self_contained() {
     let fixture = fixture();
+    assert_eq!(
+        fixture.cases.len(),
+        EXPECTED_CASE_COUNT,
+        "the equivalence and budget pins cover a fixed 56-case fixture"
+    );
     assert!(
         fixture.cases.len() >= 50,
         "the brief asks for ~50 labeled pairs, got {}",
@@ -152,6 +168,7 @@ fn the_fixture_carries_no_secret_or_client_confidential_shapes() {
     // redaction pass. This test is the standing guard on that pass — a hit here
     // means confidential material is about to be published, so treat it as a
     // disclosure incident rather than a formatting nit.
+    let fixture = fixture();
     let raw = std::fs::read_to_string(EvalFixture::committed_path()).expect("read fixture");
 
     let forbidden: &[(&str, &str)] = &[
@@ -186,6 +203,60 @@ fn the_fixture_carries_no_secret_or_client_confidential_shapes() {
             );
         }
     }
+
+    // The public fixture was mined from a store containing operator
+    // collaborators' personal memories. Keep the collaborator denylist as
+    // SHA-256 digests so the guard does not publish the names it protects.
+    // These digests are for known third-party first names in the pre-fix
+    // public fixture. Normalize case before hashing so a lower-case mention
+    // cannot bypass the guard; enumerate additional names from the source
+    // store only when the redaction audit finds them.
+    const PERSONAL_NAME_SHA256: &[&str] = &[
+        "6700869c8ff7480e34a70a708b028700dbaa3a033b5652b903afe89f49a31456",
+        "030d756286e59f22a464c36e1fbff606a795dfc70aaf0108bd86f2aa193d05f4",
+    ];
+    let name = regex::Regex::new(r"(?i)\b[a-z]{2,24}\b").expect("name pattern compiles");
+    for entry in &fixture.entries {
+        for token in name.find_iter(&format!("{} {}", entry.title, entry.body)) {
+            let normalized = token.as_str().to_ascii_lowercase();
+            let digest = format!("{:x}", Sha256::digest(normalized.as_bytes()));
+            assert!(
+                !PERSONAL_NAME_SHA256.contains(&digest.as_str()),
+                "fixture contains a denylisted personal name in {} — redact it",
+                entry.id
+            );
+        }
+    }
+    for case in &fixture.cases {
+        let public_fields = std::iter::once(case.task_title.as_str())
+            .chain(case.task_labels.iter().map(String::as_str))
+            .chain(std::iter::once(case.user_prompt.as_str()));
+        for field in public_fields {
+            for token in name.find_iter(field) {
+                let normalized = token.as_str().to_ascii_lowercase();
+                let digest = format!("{:x}", Sha256::digest(normalized.as_bytes()));
+                assert!(
+                    !PERSONAL_NAME_SHA256.contains(&digest.as_str()),
+                    "fixture contains a denylisted personal name in case {} — redact it",
+                    case.case_id
+                );
+            }
+        }
+    }
+
+    // A quoted sentence introduced as "exact words" is a named-person
+    // attribution shape in the pre-fix third-party entry. Keep this explicit
+    // shape guard alongside the hashed-name guard so redacting only the name
+    // cannot leave the person's words in the public fixture.
+    let attributed_quote = regex::Regex::new(r#"(?i)exact words\s*:\s*"[^"]+""#)
+        .expect("attributed quote pattern compiles");
+    assert!(
+        fixture
+            .entries
+            .iter()
+            .all(|entry| !attributed_quote.is_match(&entry.body)),
+        "fixture contains a quoted sentence attributed as exact words; paraphrase it"
+    );
 }
 
 #[test]
@@ -412,7 +483,7 @@ fn the_fast_production_runner_matches_the_real_build_context_path() {
     let runner = retrieval_eval::ProductionRunner::open(&corpus).expect("runner");
 
     for query_mode in [QueryMode::SeededTask, QueryMode::FreshSession] {
-        for case in fixture.cases.iter().take(6) {
+        for case in &fixture.cases {
             let fast = runner.rank(case, query_mode).expect("fast");
             let real =
                 retrieval_eval::helpful_memories_production_ranking(&corpus, case, query_mode)
@@ -426,6 +497,155 @@ fn the_fast_production_runner_matches_the_real_build_context_path() {
             );
         }
     }
+}
+
+#[test]
+fn the_production_selector_is_hermetic_to_home_cas_and_cloud() {
+    // Poison the process environment with a logged-in project cloud config
+    // whose endpoint is a local trap. The production selector must override
+    // both CAS_ROOT and HOME before build_context opens host constraints or
+    // loads CloudConfig; otherwise this test observes a request.
+    let fixture = fixture();
+    let corpus_dir = tempfile::tempdir().expect("corpus tempdir");
+    let corpus = EvalCorpus::materialize_with_index(
+        &fixture,
+        corpus_dir.path(),
+        TierMode::AllWorking,
+    )
+    .expect("seed + index");
+
+    let poison_dir = tempfile::tempdir().expect("poison tempdir");
+    let poison_cas = poison_dir.path().join(".cas");
+    std::fs::create_dir_all(&poison_cas).expect("poison cas root");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("cloud trap");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking cloud trap");
+    let endpoint = format!("http://{}", listener.local_addr().expect("trap address"));
+    std::fs::write(
+        poison_cas.join("cloud.json"),
+        serde_json::json!({"endpoint": endpoint, "token": "trap-token"}).to_string(),
+    )
+    .expect("write poison cloud config");
+
+    let _env = TestEnvGuard::temp_home();
+    let mut env = _env;
+    env.set("HOME", poison_dir.path());
+    env.set("CAS_ROOT", &poison_cas);
+    env.set("CAS_USER_CLOUD_JSON", poison_cas.join("cloud.json"));
+
+    let (attempt_tx, attempt_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+                    );
+                    let _ = attempt_tx.send(true);
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        let _ = attempt_tx.send(false);
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => {
+                    let _ = attempt_tx.send(false);
+                    return;
+                }
+            }
+        }
+    });
+
+    let ranking = retrieval_eval::helpful_memories_production_ranking(
+        &corpus,
+        &fixture.cases[0],
+        QueryMode::SeededTask,
+    )
+    .expect("hermetic production ranking");
+    assert!(!ranking.is_empty(), "the trap must not remove the ranking");
+    assert_eq!(
+        attempt_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("cloud trap result"),
+        false,
+        "production ranking attempted a live cloud call"
+    );
+    server.join().expect("cloud trap thread");
+}
+
+#[test]
+fn the_production_runner_documents_its_unreplicated_surface() {
+    let module = include_str!("../src/retrieval_eval.rs");
+    for behavior in [
+        "rule/skill/knowledge/agent stores",
+        "host-constraints/cloud/mcp-tools sections",
+        "hooks.ai_context = false",
+        "build_context_ai",
+    ] {
+        assert!(
+            module.contains(behavior),
+            "retrieval eval module must disclose unreplicated behavior: {behavior}"
+        );
+    }
+}
+
+#[test]
+fn the_fixture_seeds_none_of_the_unreplicated_production_inputs() {
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let corpus = EvalCorpus::materialize(&fixture, dir.path(), TierMode::AllWorking)
+        .expect("materialize fixture");
+    let connection =
+        rusqlite::Connection::open(corpus.cas_dir().join("cas.db")).expect("open fixture db");
+
+    for table in ["rules", "skills", "agents", "knowledge_pages"] {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("check fixture table");
+        if exists {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .expect("count fixture table");
+            assert_eq!(count, 0, "fixture unexpectedly seeds {table}");
+        }
+    }
+
+    for path in [
+        "cloud.json",
+        "proxy_snapshot.json",
+        "session_files.json",
+        "host_constraints.json",
+    ] {
+        assert!(
+            !corpus.cas_dir().join(path).exists(),
+            "fixture unexpectedly seeds omitted production input {path}"
+        );
+    }
+}
+
+#[test]
+fn the_full_harness_has_a_named_sixty_second_budget() {
+    let module = include_str!("../src/retrieval_eval.rs");
+    assert!(
+        module.contains("HARNESS_RUNTIME_BUDGET"),
+        "the 60s budget must be a named module constant"
+    );
+    let started = Instant::now();
+    let _ = run(&fixture());
+    assert!(
+        started.elapsed() <= HARNESS_RUNTIME_BUDGET,
+        "full retrieval harness exceeded its 60s budget: {:?}",
+        started.elapsed()
+    );
 }
 
 #[test]
@@ -554,17 +774,11 @@ fn the_production_selector_does_not_inherit_the_worker_environment() {
     // The env guard must hold on the real build_context path too, not just the
     // hoisted runner — that is the path a future reader will reach for.
 
-    // SAFETY: nextest runs each test in its own process, so this env mutation
-    // cannot reach a sibling test. The guard restores it regardless.
-    let restore = std::env::var("CAS_AGENT_ROLE").ok();
-    unsafe { std::env::set_var("CAS_AGENT_ROLE", "worker") };
+    let mut env = TestEnvGuard::new();
+    env.set("CAS_AGENT_ROLE", "worker");
     let under_worker_env =
         retrieval_eval::helpful_memories_production_ranking(&corpus, case, QueryMode::SeededTask)
             .expect("rank");
-    match restore {
-        Some(value) => unsafe { std::env::set_var("CAS_AGENT_ROLE", value) },
-        None => unsafe { std::env::remove_var("CAS_AGENT_ROLE") },
-    }
 
     assert_eq!(
         baseline_ranking, under_worker_env,

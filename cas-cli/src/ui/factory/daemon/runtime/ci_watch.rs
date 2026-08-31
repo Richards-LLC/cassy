@@ -26,6 +26,7 @@ pub(crate) const EXTERNAL_BRANCH_CONTAINED_EVENT: &str = "branch_contained_in";
 pub(crate) const EXTERNAL_TAG_EXISTS_EVENT: &str = "tag_exists";
 const EXTERNAL_GIT_TIMEOUT: Duration = Duration::from_secs(2);
 const GH_CALL_TIMEOUT: Duration = Duration::from_secs(8);
+pub(crate) const REQUIRED_PR_LANE_CHECK: &str = "Scoped Validation (factory/PR)";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CiFailure {
@@ -50,6 +51,23 @@ struct SuppressedCiRun {
 impl CiFailure {
     pub(crate) fn dedupe_key(&self) -> String {
         format!("ci-red-run:{}:{}", self.branch, self.head_sha)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrLaneFailure {
+    pub task_id: String,
+    pub worker: String,
+    pub pr_number: u64,
+    pub head_sha: String,
+    pub run_id: u64,
+    pub run_url: String,
+    pub check_name: String,
+}
+
+impl PrLaneFailure {
+    pub(crate) fn dedupe_key(&self) -> String {
+        format!("pr-lane-failed:{}:{}", self.pr_number, self.head_sha)
     }
 }
 
@@ -101,10 +119,39 @@ pub(crate) struct MergeQueuePullRequest {
     pub number: u64,
     #[serde(rename = "headRefName")]
     pub head_branch: String,
+    #[serde(rename = "headRefOid")]
+    pub head_sha: String,
     #[serde(rename = "isInMergeQueue")]
     pub is_in_merge_queue: bool,
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
+    #[serde(rename = "autoMergeRequest")]
+    pub auto_merge_request: Option<AutoMergeRequest>,
+    #[serde(rename = "statusCheckRollup")]
+    pub status_check_rollup: Option<StatusCheckRollup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct AutoMergeRequest {
+    #[serde(rename = "enabledAt")]
+    pub enabled_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct StatusCheckRollup {
+    pub state: String,
+}
+
+impl MergeQueuePullRequest {
+    fn auto_merge_armed(&self) -> bool {
+        self.auto_merge_request.is_some()
+    }
+
+    fn checks_green(&self) -> bool {
+        self.status_check_rollup
+            .as_ref()
+            .is_some_and(|rollup| rollup.state == "SUCCESS")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +167,8 @@ pub(crate) struct MergeQueueEjection {
 pub(crate) struct MergeQueuePoll {
     pub queued_prs: BTreeSet<u64>,
     pub ejections: Vec<MergeQueueEjection>,
+    pub auto_merge_prs: BTreeSet<u64>,
+    pub pr_lane_failures: Vec<PrLaneFailure>,
 }
 
 /// A durable condition encoded in an event reminder's JSON filter. The
@@ -444,7 +493,7 @@ impl CiTransport for GhCiTransport {
                     "invalid GitHub repository for merge-queue watcher".to_string(),
                 )
             })?;
-        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number headRefName isInMergeQueue updatedAt } } } }";
+        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
         let response: MergeQueueGraphqlResponse = self.gh_json(&[
             "api".to_string(),
             "graphql".to_string(),
@@ -473,10 +522,24 @@ pub(crate) fn collect_merge_queue_ejections(
     deliveries: &[AwaitingMergeDelivery],
     previously_queued: &BTreeSet<u64>,
 ) -> Result<MergeQueuePoll, CiWatchError> {
+    collect_merge_queue_ejections_with_arm_state(
+        transport,
+        deliveries,
+        previously_queued,
+        &BTreeSet::new(),
+    )
+}
+
+pub(crate) fn collect_merge_queue_ejections_with_arm_state(
+    transport: &dyn CiTransport,
+    deliveries: &[AwaitingMergeDelivery],
+    previously_queued: &BTreeSet<u64>,
+    previously_armed: &BTreeSet<u64>,
+) -> Result<MergeQueuePoll, CiWatchError> {
     let pulls = transport.merge_queue_pull_requests()?;
     let runs = transport.completed_runs()?;
     let mut failed_runs = BTreeMap::<u64, u64>::new();
-    for run in runs {
+    for run in &runs {
         if run.event == "merge_group"
             && run.conclusion.as_deref() == Some("failure")
             && let Some(pr) = merge_group_pr_number(&run.head_branch)
@@ -494,12 +557,19 @@ pub(crate) fn collect_merge_queue_ejections(
             // A normally merged PR leaves the open-PR listing; it is never an ejection.
             continue;
         };
+        if pr.auto_merge_armed() {
+            poll.auto_merge_prs.insert(pr.number);
+        }
         if pr.is_in_merge_queue {
             poll.queued_prs.insert(pr.number);
             continue;
         }
         let failed_run_id = failed_runs.get(&pr.number).copied();
-        if !previously_queued.contains(&pr.number) && failed_run_id.is_none() {
+        let arm_vanished = pr.head_branch.starts_with("factory/")
+            && previously_armed.contains(&pr.number)
+            && !pr.auto_merge_armed()
+            && pr.checks_green();
+        if !previously_queued.contains(&pr.number) && failed_run_id.is_none() && !arm_vanished {
             continue;
         }
         // A prior observed queue membership starts a fresh episode even when
@@ -514,6 +584,8 @@ pub(crate) fn collect_merge_queue_ejections(
                     .map(|run_id| format!("merge-group-run:{run_id}"))
                     .unwrap_or_else(|| "no-failed-run".to_string())
             )
+        } else if arm_vanished {
+            format!("auto-merge-disarmed:{}:{}", pr.head_sha, pr.updated_at)
         } else {
             failed_run_id
                 .map(|run_id| format!("merge-group-run:{run_id}"))
@@ -527,7 +599,62 @@ pub(crate) fn collect_merge_queue_ejections(
             occurrence,
         });
     }
+    poll.pr_lane_failures = collect_pr_lane_failures(transport, deliveries, &pulls, &runs)?;
     Ok(poll)
+}
+
+/// Find the latest failed required PR-lane run for each current delivery PR.
+/// Factory PRs receive this check from their branch push event, so `event` is
+/// deliberately not used as the discriminator; the required job name is the
+/// stable check identity. Matching the current PR head prevents a stale red
+/// run from waking a worker after a corrective push.
+pub(crate) fn collect_pr_lane_failures(
+    transport: &dyn CiTransport,
+    deliveries: &[AwaitingMergeDelivery],
+    pulls: &[MergeQueuePullRequest],
+    runs: &[CiRun],
+) -> Result<Vec<PrLaneFailure>, CiWatchError> {
+    let mut latest = BTreeMap::<(u64, String), (&AwaitingMergeDelivery, &CiRun)>::new();
+    for delivery in deliveries {
+        let Some(pr) = pulls.iter().find(|pr| pr.head_branch == delivery.branch) else {
+            continue;
+        };
+        if !pr.head_branch.starts_with("factory/") || pr.head_sha.is_empty() {
+            continue;
+        }
+        for run in runs {
+            if run.status != "completed"
+                || run.conclusion.as_deref() != Some("failure")
+                || run.head_branch != delivery.branch
+                || run.head_sha != pr.head_sha
+            {
+                continue;
+            }
+            let key = (pr.number, run.head_sha.clone());
+            let replace = latest.get(&key).is_none_or(|(_, current)| run.id > current.id);
+            if replace {
+                latest.insert(key, (delivery, run));
+            }
+        }
+    }
+
+    let mut failures = Vec::new();
+    for ((pr_number, head_sha), (delivery, run)) in latest {
+        let check_name = transport.failing_job(run.id)?;
+        if check_name != REQUIRED_PR_LANE_CHECK {
+            continue;
+        }
+        failures.push(PrLaneFailure {
+            task_id: delivery.task_id.clone(),
+            worker: delivery.worker.clone(),
+            pr_number,
+            head_sha,
+            run_id: run.id,
+            run_url: run.html_url.clone(),
+            check_name,
+        });
+    }
+    Ok(failures)
 }
 
 /// Keep only the latest completed failure for each watched branch.
@@ -716,8 +843,31 @@ mod tests {
         MergeQueuePullRequest {
             number,
             head_branch: branch.to_string(),
+            head_sha: "deadbeef".to_string(),
             is_in_merge_queue: queued,
             updated_at: updated_at.to_string(),
+            auto_merge_request: None,
+            status_check_rollup: None,
+        }
+    }
+
+    fn armed_pull(
+        number: u64,
+        branch: &str,
+        head_sha: &str,
+        queued: bool,
+        updated_at: &str,
+    ) -> MergeQueuePullRequest {
+        MergeQueuePullRequest {
+            number,
+            head_branch: branch.to_string(),
+            head_sha: head_sha.to_string(),
+            is_in_merge_queue: queued,
+            updated_at: updated_at.to_string(),
+            auto_merge_request: Some(AutoMergeRequest { enabled_at: None }),
+            status_check_rollup: Some(StatusCheckRollup {
+                state: "SUCCESS".to_string(),
+            }),
         }
     }
 
@@ -955,6 +1105,180 @@ mod tests {
             .is_empty(),
             "a normally merged PR must not relay"
         );
+    }
+
+    #[test]
+    fn failed_required_pr_lane_run_matches_current_head_and_delivery() {
+        let delivery = AwaitingMergeDelivery {
+            task_id: "cas-pr-lane".to_string(),
+            worker: "bright-otter".to_string(),
+            branch: "factory/bright-otter".to_string(),
+        };
+        let transport = FakeTransport {
+            runs: vec![run_with(
+                "factory/bright-otter",
+                "current-head",
+                903,
+                Some("failure"),
+            )],
+            pulls: vec![armed_pull(
+                659,
+                &delivery.branch,
+                "current-head",
+                true,
+                "2026-08-31T20:31:00Z",
+            )],
+            job: REQUIRED_PR_LANE_CHECK.to_string(),
+            log: None,
+            calls: Cell::new(0),
+        };
+        let poll = collect_merge_queue_ejections_with_arm_state(
+            &transport,
+            std::slice::from_ref(&delivery),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(poll.queued_prs, BTreeSet::from([659]));
+        assert_eq!(poll.pr_lane_failures.len(), 1);
+        let failure = &poll.pr_lane_failures[0];
+        assert_eq!(failure.task_id, "cas-pr-lane");
+        assert_eq!(failure.worker, "bright-otter");
+        assert_eq!(failure.pr_number, 659);
+        assert_eq!(failure.head_sha, "current-head");
+        assert_eq!(failure.run_id, 903);
+        assert_eq!(failure.check_name, REQUIRED_PR_LANE_CHECK);
+    }
+
+    #[test]
+    fn stale_head_and_other_checks_do_not_create_pr_lane_failure() {
+        let delivery = AwaitingMergeDelivery {
+            task_id: "cas-pr-lane".to_string(),
+            worker: "bright-otter".to_string(),
+            branch: "factory/bright-otter".to_string(),
+        };
+        let transport = FakeTransport {
+            runs: vec![
+                run_with(
+                    &delivery.branch,
+                    "old-head",
+                    904,
+                    Some("failure"),
+                ),
+                run_with(
+                    &delivery.branch,
+                    "current-head",
+                    905,
+                    Some("failure"),
+                ),
+            ],
+            pulls: vec![armed_pull(
+                659,
+                &delivery.branch,
+                "current-head",
+                true,
+                "2026-08-31T20:31:00Z",
+            )],
+            job: "macOS Check".to_string(),
+            log: None,
+            calls: Cell::new(0),
+        };
+        let failures = collect_pr_lane_failures(
+            &transport,
+            std::slice::from_ref(&delivery),
+            &transport.pulls,
+            &transport.runs,
+        )
+        .unwrap();
+        assert!(failures.is_empty());
+        assert_eq!(transport.calls.get(), 1);
+    }
+
+    #[test]
+    fn auto_merge_arm_loss_after_green_checks_is_one_episode() {
+        let delivery = AwaitingMergeDelivery {
+            task_id: "cas-pr-arm".to_string(),
+            worker: "bright-otter".to_string(),
+            branch: "factory/bright-otter".to_string(),
+        };
+        let armed = FakeTransport {
+            runs: Vec::new(),
+            pulls: vec![armed_pull(
+                660,
+                &delivery.branch,
+                "current-head",
+                false,
+                "2026-08-31T20:00:00Z",
+            )],
+            job: String::new(),
+            log: None,
+            calls: Cell::new(0),
+        };
+        let first = collect_merge_queue_ejections_with_arm_state(
+            &armed,
+            std::slice::from_ref(&delivery),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(first.ejections.is_empty());
+        assert_eq!(first.auto_merge_prs, BTreeSet::from([660]));
+
+        let mut disarmed_pull = armed.pulls[0].clone();
+        disarmed_pull.is_in_merge_queue = false;
+        disarmed_pull.updated_at = "2026-08-31T20:04:00Z".to_string();
+        disarmed_pull.auto_merge_request = None;
+        let disarmed = FakeTransport {
+            runs: Vec::new(),
+            pulls: vec![disarmed_pull],
+            job: String::new(),
+            log: None,
+            calls: Cell::new(0),
+        };
+        let second = collect_merge_queue_ejections_with_arm_state(
+            &disarmed,
+            std::slice::from_ref(&delivery),
+            &first.queued_prs,
+            &first.auto_merge_prs,
+        )
+        .unwrap();
+        assert_eq!(second.ejections.len(), 1);
+        assert_eq!(second.ejections[0].failed_run_id, None);
+        assert_eq!(
+            second.ejections[0].occurrence,
+            "auto-merge-disarmed:current-head:2026-08-31T20:04:00Z"
+        );
+
+        let replay = collect_merge_queue_ejections_with_arm_state(
+            &disarmed,
+            std::slice::from_ref(&delivery),
+            &second.queued_prs,
+            &second.auto_merge_prs,
+        )
+        .unwrap();
+        assert!(replay.ejections.is_empty());
+    }
+
+    #[test]
+    fn pr_lane_failure_dedupe_is_pr_head_scoped() {
+        let failure = PrLaneFailure {
+            task_id: "cas-pr-lane".to_string(),
+            worker: "bright-otter".to_string(),
+            pr_number: 659,
+            head_sha: "head-a".to_string(),
+            run_id: 1,
+            run_url: "url".to_string(),
+            check_name: REQUIRED_PR_LANE_CHECK.to_string(),
+        };
+        assert_eq!(failure.dedupe_key(), "pr-lane-failed:659:head-a");
+        let rerun = PrLaneFailure { run_id: 2, ..failure.clone() };
+        assert_eq!(failure.dedupe_key(), rerun.dedupe_key());
+        let corrective = PrLaneFailure {
+            head_sha: "head-b".to_string(),
+            ..failure
+        };
+        assert_ne!(rerun.dedupe_key(), corrective.dedupe_key());
     }
 
     #[test]

@@ -37,6 +37,7 @@ cargo build                          # Dev build
 cargo build --release                # Release build (LTO, strip)
 cargo build --profile release-fast   # Fast release (thin LTO, 16 codegen units)
 cargo check -p cas --lib --tests     # Worker iteration: compile feedback, no test linking/runs
+cargo check --workspace --tests      # Before handoff when the diff spans crates or changes a pub fn signature
 scripts/run-scoped-tests.sh -p cas --lib module_name
 scripts/run-scoped-tests.sh -p cas --test cli_test
 cargo nextest run -p cas             # Full suite: supervisor integration/release gates only
@@ -51,6 +52,15 @@ nextest and rejects a silent zero-test success. Factory workers should iterate
 with `cargo check`, then run only the affected `--lib` or `--test` target; the
 PreToolUse guard rejects an unscoped worker test run. Full suites are owned by
 the supervisor integration merge and release gate.
+
+Before handoff or `awaiting_merge`, inspect the diff against its target branch.
+When it touches more than one crate or changes any `pub fn` signature, run
+`cargo check --workspace --tests` and include its exit-0 in the delivery
+receipt. This is compile-only: it does not execute test suites or change which
+scoped tests run. The gate follows PR #655 (run 33430464567), where a scoped
+proof missed a broken `cloud::syncer` test, and PR #657 (run 33435093275), where
+a new spawn argument left `cas-mux` integration-test call sites uncompilable.
+Single-crate, non-signature diffs keep the cheaper scoped recipe above.
 
 Factory worker spawns use `sccache` automatically when it is installed, while
 keeping a separate target directory per worktree so concurrent Cargo builds do

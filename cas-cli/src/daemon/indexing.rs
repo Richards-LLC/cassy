@@ -17,24 +17,73 @@ pub(crate) fn generate_bm25_index(
 ) -> Result<crate::hybrid_search::IndexingResult, CasError> {
     use crate::hybrid_search::{BackgroundIndexer, IndexingConfig};
 
-    let repaired = match crate::hybrid_search::repair_legacy_index(&config.cas_root, store.as_ref())
-    {
-        Ok(Some(repair)) => repair.indexed_entries,
-        Ok(None) => 0,
-        Err(error) => {
-            return Ok(crate::hybrid_search::IndexingResult {
-                indexed: 0,
-                errors: vec![("legacy-index-repair".to_string(), error.to_string())],
-            });
+    // Legacy-root repair is BEST EFFORT, per cycle. It must never short-circuit
+    // the cycle: a persistently un-retirable root (malformed `.managed.json`,
+    // EPERM, a writer lock held by a pre-fix daemon) used to return early and
+    // so permanently disabled ALL background memory indexing, with no self-heal
+    // short of hand-deleting `.cas/index/meta.json` (cas-25a9 P1-B). Failures
+    // are recorded and the cycle continues into `process_pending`.
+    let mut repair_errors: Vec<(String, String)> = Vec::new();
+    let mut repaired = 0usize;
+    match crate::hybrid_search::repair_legacy_index_bounded(
+        &config.cas_root,
+        // Bounded at the CALL SITE as well as inside: the inner probe cannot
+        // close the window where another process takes META_LOCK between the
+        // probe and `Index::reader()`, and tantivy 0.25 offers no timeout on
+        // the reader's own acquisition. Running repair on its own thread and
+        // abandoning it after a budget means a blocked reader can never wedge
+        // the maintenance select! arm (cas-25a9).
+        Arc::clone(store),
+        // Bounded on the daemon path: the maintenance `select!` arm also runs
+        // agent reaping, lease reclaim and worktree cleanup, so a huge legacy
+        // root must not hold it for a full re-index (cas-25a9 P2-C).
+        crate::hybrid_search::LegacyRepairLimits {
+            batch_size: config.index_batch_size,
+            max_per_run: config.index_max_per_run,
+        },
+        crate::hybrid_search::DAEMON_REPAIR_BUDGET,
+    ) {
+        Ok(crate::hybrid_search::LegacyRepairOutcome::Repaired(repair)) => {
+            repaired = repair.indexed_entries;
+            repair_errors.extend(repair.errors);
+            for (doc_type, count) in &repair.retired_non_entry_documents {
+                repair_errors.push((
+                    "legacy-index-repair".to_string(),
+                    format!(
+                        "retired {count} legacy `{doc_type}` document(s) with no re-queue path;                          reindex that document type to restore it"
+                    ),
+                ));
+            }
+            if !repair.unswept_files.is_empty() {
+                repair_errors.push((
+                    "legacy-index-repair".to_string(),
+                    format!(
+                        "{} legacy file(s) not yet swept; will resume next cycle",
+                        repair.unswept_files.len()
+                    ),
+                ));
+            }
         }
-    };
+        Ok(crate::hybrid_search::LegacyRepairOutcome::NoLegacyRoot) => {}
+        Ok(crate::hybrid_search::LegacyRepairOutcome::Busy { reason }) => {
+            // Normal, retryable: skip this cycle's repair, keep indexing.
+            repair_errors.push((
+                "legacy-index-repair".to_string(),
+                format!("skipped this cycle: {reason}"),
+            ));
+        }
+        Err(error) => {
+            repair_errors.push(("legacy-index-repair".to_string(), error.to_string()));
+        }
+    }
 
     let indexer = match BackgroundIndexer::open(&config.cas_root) {
         Ok(indexer) => indexer,
         Err(error) => {
+            repair_errors.push(("index".to_string(), error.to_string()));
             return Ok(crate::hybrid_search::IndexingResult {
-                indexed: 0,
-                errors: vec![("index".to_string(), error.to_string())],
+                indexed: repaired,
+                errors: repair_errors,
             });
         }
     };
@@ -46,6 +95,9 @@ pub(crate) fn generate_bm25_index(
 
     let mut result = indexer.process_pending(store.as_ref(), &index_config)?;
     result.indexed += repaired;
+    // Repair diagnostics ride alongside the cycle's own errors; they never
+    // replace the cycle.
+    result.errors.splice(0..0, repair_errors);
     Ok(result)
 }
 

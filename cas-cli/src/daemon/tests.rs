@@ -905,3 +905,78 @@ fn full_tree_reconciliation_retires_repository_when_eligible_set_becomes_empty()
     );
     assert_eq!(scan.last_error, None);
 }
+
+/// cas-25a9 P1-B: a legacy-repair failure must not disable background indexing.
+///
+/// Before the fix, `generate_bm25_index` returned as soon as
+/// `repair_legacy_index` errored, so a legacy root that could never be retired
+/// (malformed `.managed.json`, EPERM, a lock held by a pre-fix daemon)
+/// permanently stopped ALL background memory indexing — and `doctor --fix` hit
+/// the same error, leaving no self-heal short of hand-deleting
+/// `.cas/index/meta.json`. Repair is best-effort per cycle; the cycle continues.
+#[test]
+fn a_failing_legacy_repair_still_indexes_pending_entries() {
+    use crate::hybrid_search::SearchIndex;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cas_root = temp.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("create .cas");
+    let store = crate::store::open_store(&cas_root).expect("store");
+
+    // One entry stranded in the legacy root, one ordinary pending entry that
+    // has nothing to do with the legacy problem.
+    let stranded = Entry::new(
+        "legacy-stranded".to_string(),
+        "legacyquasar stranded in the old root".to_string(),
+    );
+    store.add(&stranded).expect("add stranded");
+    {
+        let legacy = SearchIndex::open(&cas_root.join("index")).expect("legacy index");
+        legacy.index_entry(&stranded).expect("index legacy");
+    }
+    store.mark_indexed(&stranded.id).expect("mark indexed");
+
+    let healthy = Entry::new(
+        "ordinary-pending".to_string(),
+        "ordinarypending entry awaiting the canonical index".to_string(),
+    );
+    store.add(&healthy).expect("add healthy");
+
+    // Poison retirement: `.managed.json` no longer parses, so repair fails
+    // every single cycle, forever.
+    std::fs::write(cas_root.join("index/.managed.json"), b"{ not json ]")
+        .expect("poison managed list");
+
+    let config = DaemonConfig {
+        cas_root: cas_root.clone(),
+        index_bm25: true,
+        ..DaemonConfig::default()
+    };
+    let store: Arc<dyn Store> = store;
+    let result =
+        crate::daemon::indexing::generate_bm25_index(&store, &config).expect("cycle must not fail");
+
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|(id, _)| id == "legacy-index-repair"),
+        "the repair failure must be reported, not swallowed: {:?}",
+        result.errors
+    );
+    assert!(
+        result.indexed >= 1,
+        "the cycle must still index pending entries despite the repair failure; \
+         indexed {} errors {:?}",
+        result.indexed,
+        result.errors
+    );
+    assert!(
+        store
+            .list_pending_index(10)
+            .expect("pending")
+            .iter()
+            .all(|entry| entry.id != healthy.id),
+        "the unrelated pending entry must have reached the canonical index"
+    );
+}

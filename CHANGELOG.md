@@ -7,6 +7,38 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.7.2] - 2026-08-31
+
+### Added
+- SessionStart memory injection is now telemetered with honest retrieval
+  outcomes: unresolved cards stay distinct from ignored cards, and reading an
+  injected memory counts as use. Ambient rule and skill surfaces are recorded
+  for the same impact accounting.
+- Added a labeled retrieval-evaluation harness with committed fixtures and
+  precision@5/recall@5 baseline gates so ranking changes are measured before
+  they ship.
+- `cas doctor` now detects memory entries stranded in a legacy daemon index;
+  `cas doctor --fix` recovers them into the active index with bounded,
+  resumable repair.
+
+### Changed
+- Helpful Memories now read from the live, curated, tier-aware corpus while
+  excluding raw context blobs, and `cas stats` reports the live corpus count.
+- `retrieval_metrics` supports session filtering and rejects unsupported
+  filters instead of silently widening the result set.
+- Rule review is enabled by default, and ambiently surfaced rules count toward
+  the promotion flywheel, so useful rules can progress instead of remaining
+  invisible drafts.
+- Team sync upserts auto-promoted entries without turning a successful pull
+  into an error; Claude worker lanes use canonical model identifiers and report
+  workers that die during boot as failed. Project-managed skills are ignored by
+  git so generated files no longer become repository noise.
+
+### Fixed
+- Background and legacy search indexing now share one repair path, making
+  daemon-written memories visible to search and giving busy legacy processes a
+  bounded doctor warning with a retry remedy.
+
 ## [3.7.1] - 2026-08-30
 
 ### Added
@@ -1525,7 +1557,8 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 ### Added
 - Initial stable release with core functionality.
 
-[Unreleased]: https://github.com/Richards-LLC/cassy/compare/v3.7.1...HEAD
+[Unreleased]: https://github.com/Richards-LLC/cassy/compare/v3.7.2...HEAD
+[3.7.2]: https://github.com/Richards-LLC/cassy/compare/v3.7.1...v3.7.2
 [3.7.1]: https://github.com/Richards-LLC/cassy/compare/v3.7.0...v3.7.1
 [3.7.0]: https://github.com/Richards-LLC/cassy/compare/v3.6.0...v3.7.0
 [2.13.0]: https://github.com/pippenz/cas/compare/v2.12.0...v2.13.0

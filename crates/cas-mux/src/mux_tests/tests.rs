@@ -382,6 +382,7 @@ fn factory_pane_configs_uses_per_worker_specs() {
                 effort: None,
                 config_dir: Some("/accounts/codex-research".to_string()),
                 requester_config_dir: None,
+                requester_secure_storage_dir: None,
             },
             WorkerSpec {
                 name: Some("worker-2".to_string()),
@@ -390,6 +391,7 @@ fn factory_pane_configs_uses_per_worker_specs() {
                 effort: None,
                 config_dir: Some("/accounts/claude-review".to_string()),
                 requester_config_dir: None,
+                requester_secure_storage_dir: None,
             },
         ],
         ..MuxConfig::default()
@@ -487,6 +489,7 @@ fn add_worker_uses_explicit_spec() {
         effort: Some(Effort::High),
         config_dir: None,
         requester_config_dir: None,
+        requester_secure_storage_dir: None,
     };
 
     let pty_config = mux.build_add_worker_config(
@@ -537,6 +540,7 @@ fn effective_worker_spec_uses_worker_specs_map() {
         effort: None,
         config_dir: None,
         requester_config_dir: None,
+        requester_secure_storage_dir: None,
     };
     mux.set_worker_spec("worker-map", codex_spec);
 
@@ -610,6 +614,7 @@ fn add_worker_persists_explicit_spec_so_effective_resolves_codex() {
         effort: None,
         config_dir: None,
         requester_config_dir: None,
+        requester_secure_storage_dir: None,
     });
 
     // Pre-condition: with nothing registered, an unknown worker resolves to the
@@ -697,6 +702,7 @@ fn add_worker_effort_propagates_to_pty_args() {
         effort: Some(Effort::Low),
         config_dir: None,
         requester_config_dir: None,
+        requester_secure_storage_dir: None,
     });
 
     let pty = mux.build_add_worker_config(
@@ -747,6 +753,7 @@ fn explicit_config_dir_beats_requester_config_dir() {
             effort: None,
             config_dir: Some("~/.claude-explicit".to_string()),
             requester_config_dir: Some("~/.claude-supervisor".to_string()),
+            requester_secure_storage_dir: None,
         }),
     );
 
@@ -778,6 +785,7 @@ fn requester_config_dir_applies_when_explicit_param_is_omitted() {
             effort: None,
             config_dir: None,
             requester_config_dir: Some("~/.claude-supervisor".to_string()),
+            requester_secure_storage_dir: None,
         }),
     );
 
@@ -791,6 +799,50 @@ fn requester_config_dir_applies_when_explicit_param_is_omitted() {
         spawned_env(&config, "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE"),
         Some("supervisor")
     );
+}
+
+#[test]
+fn requester_secure_storage_selector_preserves_unset_empty_and_set() {
+    for (secure_storage_dir, expected_env, expect_remove) in [
+        (None, None, true),
+        (Some(""), Some(""), false),
+        (
+            Some("~/.claude-keychain"),
+            Some("~/.claude-keychain"),
+            false,
+        ),
+    ] {
+        let mux = Mux::new(24, 80);
+        let config = mux.build_add_worker_config(
+            "claude-secure-selector",
+            PathBuf::from("/tmp/test"),
+            None,
+            "supervisor",
+            None,
+            Some(WorkerSpec {
+                name: None,
+                cli: crate::harness::SupervisorCli::Claude,
+                model: None,
+                effort: None,
+                config_dir: None,
+                requester_config_dir: Some("~/.claude-work".to_string()),
+                requester_secure_storage_dir: secure_storage_dir.map(str::to_string),
+            }),
+        );
+
+        let actual = spawned_env(&config, "CLAUDE_SECURESTORAGE_CONFIG_DIR");
+        assert_eq!(
+            actual.map(|value| value.rsplit('/').next().unwrap_or(value)),
+            expected_env.map(|value| value.rsplit('/').next().unwrap_or(value))
+        );
+        assert_eq!(
+            config
+                .env_remove
+                .iter()
+                .any(|key| key == "CLAUDE_SECURESTORAGE_CONFIG_DIR"),
+            expect_remove
+        );
+    }
 }
 
 #[test]
@@ -809,6 +861,7 @@ fn omitted_config_dirs_leave_claude_environment_untouched() {
             effort: None,
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         }),
     );
 
@@ -835,6 +888,7 @@ fn codex_ignores_resolved_claude_config_dir() {
             effort: None,
             config_dir: Some("~/.claude-explicit".to_string()),
             requester_config_dir: Some("~/.claude-supervisor".to_string()),
+            requester_secure_storage_dir: None,
         }),
     );
 
@@ -938,6 +992,7 @@ fn codex_cat_pane(name: &str) -> Option<Pane> {
             args: vec![],
             cwd: Some(PathBuf::from("/tmp")),
             env: vec![],
+            env_remove: vec![],
             rows: 24,
             cols: 80,
         },
@@ -982,9 +1037,7 @@ async fn settled_pane_snapshot(
 ) -> cas_factory_protocol::TerminalSnapshot {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     mux.poll_batch();
-    mux.get_pane_snapshot(pane_id)
-        .expect("pane snapshot")
-        .0
+    mux.get_pane_snapshot(pane_id).expect("pane snapshot").0
 }
 
 #[cfg(target_os = "linux")]
@@ -1006,6 +1059,7 @@ fn kill_all_terminates_a_synthetic_long_lived_child_group() {
         args: vec!["-c".to_string(), "sleep 300 & wait".to_string()],
         cwd: Some(PathBuf::from("/tmp")),
         env: vec![],
+        env_remove: vec![],
         rows: 24,
         cols: 80,
     };
@@ -1067,6 +1121,7 @@ async fn graceful_kill_worker_waits_before_escalating_a_term_ignoring_group() {
         ],
         cwd: Some(PathBuf::from("/tmp")),
         env: vec![],
+        env_remove: vec![],
         rows: 24,
         cols: 80,
     };
@@ -1116,6 +1171,7 @@ async fn graceful_kill_worker_returns_when_the_group_honors_term() {
         args: vec!["-c".to_string(), "sleep 300 & wait".to_string()],
         cwd: Some(PathBuf::from("/tmp")),
         env: vec![],
+        env_remove: vec![],
         rows: 24,
         cols: 80,
     };
@@ -1537,6 +1593,7 @@ fn ticking_pane(name: &str, harness: SupervisorCli) -> Option<Pane> {
         ],
         cwd: Some(PathBuf::from("/tmp")),
         env: vec![],
+        env_remove: vec![],
         rows: 24,
         cols: 80,
     };

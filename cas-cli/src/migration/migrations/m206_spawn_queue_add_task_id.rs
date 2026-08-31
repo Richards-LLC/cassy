@@ -150,6 +150,10 @@ mod tests {
         {
             upgraded.execute(sql, []).unwrap();
         }
+        for sql in crate::migration::migrations::m246_spawn_queue_add_requester_secure_storage_dir::MIGRATION.up
+        {
+            upgraded.execute(sql, []).unwrap();
+        }
         let upgraded_cols = spawn_queue_columns(&upgraded);
         assert!(
             upgraded_cols.contains(&"task_id".to_string()),
@@ -158,6 +162,10 @@ mod tests {
         assert!(
             upgraded_cols.contains(&"requester_config_dir".to_string()),
             "post-migration schema (existing-DB path) must include requester_config_dir: {upgraded_cols:?}"
+        );
+        assert!(
+            upgraded_cols.contains(&"requester_secure_storage_dir".to_string()),
+            "post-migration schema (existing-DB path) must include requester_secure_storage_dir: {upgraded_cols:?}"
         );
 
         // Column ORDER legitimately differs — ALTER TABLE ADD COLUMN always

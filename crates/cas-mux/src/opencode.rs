@@ -740,6 +740,7 @@ mod tests {
             effort: Some(crate::Effort::High),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         };
         let projection = OpenCodeProjectionSpec::from_worker_spec(
             &worker,

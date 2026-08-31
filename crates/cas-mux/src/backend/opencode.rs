@@ -188,6 +188,7 @@ mod tests {
             effort: Some("xhigh"),
             config_dir: None,
             config_dir_source: None,
+            secure_storage_dir: None,
             teams: None,
             active_workers: None,
         });

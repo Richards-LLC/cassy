@@ -395,6 +395,7 @@ mod tests {
             effort: Some(Effort::Medium),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         };
 
         // Step 1: handler pushes PendingSpawn with the spec (simulates ws_client / gui_client).
@@ -429,6 +430,7 @@ mod tests {
             effort: None,
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         });
         let tmpdir = tempfile::TempDir::new().unwrap();
         let config = mux.build_add_worker_config(
@@ -473,6 +475,7 @@ mod tests {
             effort: Some(Effort::Medium),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         };
         let pending = PendingSpawn::Named {
             request_id: Some(542),
@@ -494,6 +497,7 @@ mod tests {
             effort: Some(Effort::Low),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         });
         let pty = mux.build_add_worker_config(
             "effort-worker",

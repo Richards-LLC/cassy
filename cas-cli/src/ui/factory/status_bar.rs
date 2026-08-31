@@ -619,24 +619,83 @@ impl StatusBar {
         ))
     }
 
-    /// Return the account profile represented by a Claude config directory.
-    ///
-    /// The default config directory is always the main account. Alternate
-    /// profiles follow Claude Code's conventional `~/.claude-<profile>` name.
+    /// Return the account profile represented by Claude's two account
+    /// selectors. Non-conventional paths remain visibly custom instead of
+    /// being mistaken for the main account.
     fn claude_profile_from_config_dir(config_dir: Option<&str>) -> String {
+        Self::claude_profile_from_selectors(config_dir, None)
+    }
+
+    fn expand_claude_selector(raw: &str) -> PathBuf {
+        let raw = raw.trim();
+        if raw == "~" {
+            return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw));
+        }
+        if let Some(suffix) = raw.strip_prefix("~/") {
+            return dirs::home_dir()
+                .map(|home| home.join(suffix))
+                .unwrap_or_else(|| PathBuf::from(raw));
+        }
+        PathBuf::from(raw)
+    }
+
+    fn paths_equal(left: &Path, right: &Path) -> bool {
+        match (left.canonicalize(), right.canonicalize()) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => left == right,
+        }
+    }
+
+    fn is_main_claude_dir(raw: &str) -> bool {
+        let Some(home) = dirs::home_dir() else {
+            return false;
+        };
+        Self::paths_equal(&Self::expand_claude_selector(raw), &home.join(".claude"))
+    }
+
+    fn custom_claude_label(raw: &str) -> String {
+        let path = Self::expand_claude_selector(raw);
+        let label = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        format!("custom:{label}")
+    }
+
+    /// Resolve the badge's effective path. A non-empty secure-storage
+    /// selector is the credential identity even when config remains at the
+    /// default directory; an explicit empty selector is intentionally legacy
+    /// main semantics, not a custom path.
+    fn claude_profile_from_selectors(
+        config_dir: Option<&str>,
+        secure_storage_dir: Option<&str>,
+    ) -> String {
         let config_dir = config_dir.map(str::trim).filter(|dir| !dir.is_empty());
-        let Some(config_dir) = config_dir else {
+        let secure_storage_dir = secure_storage_dir
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty());
+        let Some(effective_dir) = secure_storage_dir.or(config_dir) else {
             return "main".to_string();
         };
 
-        let directory_name = config_dir.trim_end_matches('/').rsplit('/').next();
-        match directory_name {
-            Some(".claude") | None => "main".to_string(),
-            Some(name) => name
-                .strip_prefix(".claude-")
-                .filter(|profile| !profile.is_empty())
-                .unwrap_or("main")
-                .to_string(),
+        // Main is only safe when the config resolves to the user's default
+        // directory and no non-empty secure-store override was supplied.
+        if secure_storage_dir.is_none() && Self::is_main_claude_dir(effective_dir) {
+            return "main".to_string();
+        }
+
+        let directory_name = Self::expand_claude_selector(effective_dir)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        if let Some(profile) = directory_name
+            .as_deref()
+            .and_then(|name| name.strip_prefix(".claude-"))
+            .filter(|profile| !profile.is_empty())
+        {
+            profile.to_string()
+        } else {
+            Self::custom_claude_label(effective_dir)
         }
     }
 
@@ -651,18 +710,35 @@ impl StatusBar {
             return None;
         }
 
-        let config_dir = match pane.kind() {
+        let (config_dir, secure_storage_dir) = match pane.kind() {
             PaneKind::Worker => {
                 let spec = app.mux.effective_worker_spec(pane.id(), None);
-                spec.config_dir
+                let explicit_config = spec.config_dir.is_some();
+                let config_dir = spec
+                    .config_dir
                     .or(spec.requester_config_dir)
-                    .or_else(|| std::env::var("CLAUDE_CONFIG_DIR").ok())
+                    .or_else(|| std::env::var("CLAUDE_CONFIG_DIR").ok());
+                let secure_storage_dir = (!explicit_config)
+                    .then(|| spec.requester_secure_storage_dir)
+                    .flatten()
+                    .or_else(|| {
+                        (!explicit_config)
+                            .then(|| std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR").ok())
+                            .flatten()
+                    });
+                (config_dir, secure_storage_dir)
             }
-            PaneKind::Supervisor => std::env::var("CLAUDE_CONFIG_DIR").ok(),
+            PaneKind::Supervisor => (
+                std::env::var("CLAUDE_CONFIG_DIR").ok(),
+                std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR").ok(),
+            ),
             PaneKind::Director | PaneKind::Shell => return None,
         };
 
-        Some(Self::claude_profile_from_config_dir(config_dir.as_deref()))
+        Some(Self::claude_profile_from_selectors(
+            config_dir.as_deref(),
+            secure_storage_dir.as_deref(),
+        ))
     }
 
     /// Trim leading spans until the rendered width fits.
@@ -905,6 +981,7 @@ mod tests {
                 args: vec![],
                 cwd: None,
                 env: vec![],
+                env_remove: vec![],
                 rows: 24,
                 cols: 80,
             },
@@ -1018,6 +1095,28 @@ mod tests {
     }
 
     #[test]
+    fn claude_profile_badge_keeps_custom_paths_and_secure_store_truthful() {
+        let cases = [
+            (Some("/tmp/.claude"), None, "custom:.claude"),
+            (Some("/srv/claude-cfg"), None, "custom:claude-cfg"),
+            (
+                Some("~/.claude"),
+                Some("/srv/credentials"),
+                "custom:credentials",
+            ),
+            (Some("~/.claude"), Some(""), "main"),
+            (None, Some("/srv/credentials"), "custom:credentials"),
+        ];
+        for (config_dir, secure_storage_dir, expected) in cases {
+            assert_eq!(
+                StatusBar::claude_profile_from_selectors(config_dir, secure_storage_dir),
+                expected,
+                "config={config_dir:?} secure={secure_storage_dir:?}"
+            );
+        }
+    }
+
+    #[test]
     fn render_status_bar_shows_and_emphasizes_focused_worker_alt_profile() {
         let Some(worker_pane) = spawn_claude_worker("alt-worker") else {
             eprintln!("skipping: `cat`/PTY-backed pane unavailable in this environment");
@@ -1034,10 +1133,14 @@ mod tests {
                 effort: None,
                 config_dir: Some("~/.claude-alt".to_string()),
                 requester_config_dir: None,
+                requester_secure_storage_dir: None,
             },
         );
         app.mux.add_pane(worker_pane);
-        assert!(app.mux.focus("alt-worker"), "fixture pane must be focusable");
+        assert!(
+            app.mux.focus("alt-worker"),
+            "fixture pane must be focusable"
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(68, 1)).unwrap();
         terminal

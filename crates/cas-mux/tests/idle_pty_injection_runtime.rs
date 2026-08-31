@@ -100,6 +100,7 @@ fn idle_pane_injection_auto_submits_real_pty() {
         ],
         cwd: Some(std::env::temp_dir()),
         env: vec![("PS1".to_string(), "cas893c$ ".to_string())],
+        env_remove: vec![],
         rows: 24,
         cols: 80,
     };
@@ -199,6 +200,7 @@ fn non_urgent_injection_does_not_break_in_flight_turn() {
         ],
         cwd: Some(std::env::temp_dir()),
         env: vec![("PS1".to_string(), "casa5a7$ ".to_string())],
+        env_remove: vec![],
         rows: 24,
         cols: 80,
     };

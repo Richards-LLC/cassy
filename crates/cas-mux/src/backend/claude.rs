@@ -41,7 +41,11 @@ impl Backend for Claude {
             launch.effort,
             launch.teams,
         );
-        config.apply_claude_config_dir(launch.config_dir, launch.config_dir_source);
+        config.apply_claude_account(
+            launch.config_dir,
+            launch.secure_storage_dir,
+            launch.config_dir_source,
+        );
         finish_worker_config(
             &mut config,
             launch.supervisor_cli,

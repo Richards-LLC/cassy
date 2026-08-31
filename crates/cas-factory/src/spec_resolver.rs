@@ -825,6 +825,7 @@ mod codex_fallback_tests {
             effort: Some(Effort::High),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         }
     }
 
@@ -859,6 +860,7 @@ mod codex_fallback_tests {
             effort: Some(Effort::High),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         }];
 
         let notices =
@@ -921,6 +923,7 @@ mod codex_fallback_tests {
             effort: None,
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         }];
 
         let err =
@@ -976,6 +979,7 @@ mod codex_fallback_tests {
             effort: Some(Effort::Medium),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         }];
         let before = specs[0].clone();
         let notices =
@@ -1039,6 +1043,7 @@ mod codex_fallback_tests {
             effort: None,
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         }];
         let notices = apply_codex_fallback_with(
             &mut specs,
@@ -1219,6 +1224,7 @@ mod codex_fallback_tests {
             effort: Some(Effort::High),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         };
         let notices = apply_codex_fallback_with(
             std::slice::from_mut(&mut spec),
@@ -1255,6 +1261,7 @@ mod codex_fallback_tests {
             effort: None,
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         };
         let err = apply_codex_fallback_with(
             std::slice::from_mut(&mut spec),
@@ -1287,6 +1294,7 @@ mod codex_fallback_tests {
             effort: None,
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         };
         let notices = apply_codex_fallback_for_supervisor(&mut spec, false, None).unwrap();
         assert!(notices.is_empty(), "claude spec must never be touched");

@@ -94,6 +94,14 @@ pub struct WorkerSpec {
     /// Explicit `config_dir` takes precedence.
     #[serde(default)]
     pub requester_config_dir: Option<String>,
+    /// Requesting Claude supervisor's independent secure-storage selector,
+    /// captured when the spawn request was enqueued. `None` means the
+    /// variable was unset, `Some("")` means it was explicitly empty, and
+    /// `Some(path)` preserves the selected credential-store directory.
+    /// Explicit `config_dir` takes precedence over this field for the worker's
+    /// derived secure-storage policy.
+    #[serde(default)]
+    pub requester_secure_storage_dir: Option<String>,
 }
 
 impl WorkerSpec {
@@ -106,6 +114,7 @@ impl WorkerSpec {
             effort: Some(Effort::High),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         }
     }
 
@@ -132,6 +141,7 @@ impl WorkerSpec {
             effort: None,
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         }
     }
 }
@@ -224,6 +234,7 @@ mod tests {
             effort: Some(Effort::Medium),
             config_dir: None,
             requester_config_dir: None,
+            requester_secure_storage_dir: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(

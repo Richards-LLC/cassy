@@ -67,6 +67,17 @@ fn requester_account_dir(cli: cas_mux::SupervisorCli) -> Option<String> {
     }
 }
 
+/// The requesting supervisor's independent Claude secure-storage selector.
+/// This is intentionally captured separately from `CLAUDE_CONFIG_DIR`: an
+/// operator may select a config profile while retaining a credential store
+/// elsewhere, and unset/empty/set must survive the queue boundary distinctly.
+fn requester_secure_storage_dir(cli: cas_mux::SupervisorCli) -> Option<String> {
+    match cli {
+        cas_mux::SupervisorCli::Claude => std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR").ok(),
+        _ => None,
+    }
+}
+
 /// Resolve and validate an explicit Claude config directory before its spawn
 /// request reaches the daemon.  A partial profile otherwise starts a PTY that
 /// cannot load Cassy' worker contract, then fails sixty seconds later with no
@@ -1810,6 +1821,7 @@ impl CasService {
         // worker's CODEX_HOME (or vice versa).
         for spec in &mut specs {
             spec.requester_config_dir = requester_account_dir(spec.cli);
+            spec.requester_secure_storage_dir = requester_secure_storage_dir(spec.cli);
             if spec.cli == cas_mux::SupervisorCli::Codex
                 && let Some(config_dir) = spec.config_dir.as_deref()
             {
@@ -1910,14 +1922,17 @@ impl CasService {
         };
 
         let factory_session = current_factory_session();
-        // Legacy rows carry one requester directory in their own column. New
-        // multi-worker rows persist the provider-correct account on every
+        // Legacy rows carry requester selectors in their own columns. New
+        // multi-worker rows persist the provider-correct selectors on every
         // WorkerSpec, so the daemon never flattens distinct accounts again.
         let requester_config_dir = (specs.len() == 1)
             .then(|| specs[0].requester_config_dir.as_deref())
             .flatten();
+        let requester_secure_storage_dir = (specs.len() == 1)
+            .then(|| specs[0].requester_secure_storage_dir.as_deref())
+            .flatten();
         let request_id = queue
-            .enqueue_spawn_with_requester_config_dir(
+            .enqueue_spawn_with_requester_account_dirs(
                 count,
                 &worker_names,
                 isolate,
@@ -1925,6 +1940,7 @@ impl CasService {
                 factory_session.as_deref(),
                 req.task_id.as_deref(),
                 requester_config_dir,
+                requester_secure_storage_dir,
             )
             .map_err(|e| {
                 Self::error(
@@ -3514,14 +3530,12 @@ impl CasService {
                 format!("Failed to open agent store: {e}"),
             )
         })?;
-        let all_agents = agent_store
-            .list(None)
-            .map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to list agents: {e}"),
-                )
-            })?;
+        let all_agents = agent_store.list(None).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to list agents: {e}"),
+            )
+        })?;
         let mut dead_workers = Vec::new();
         let mut visible_workers = Vec::new();
         for agent in all_agents.into_iter().filter(|agent| {
@@ -10155,12 +10169,8 @@ model = "local/qwen3.8"
     #[test]
     fn lane_recipe_does_not_emit_omitted_model_or_effort_warning() {
         let _home = TestEnvGuard::temp_home();
-        let json = build_spawn_spec_json(
-            Some("claude"),
-            Some("claude-opus-5"),
-            Some("high"),
-        )
-        .unwrap();
+        let json =
+            build_spawn_spec_json(Some("claude"), Some("claude-opus-5"), Some("high")).unwrap();
         let spec = decoded_spawn_spec(&json);
 
         let warning = spawn_warning_for_request(true, false, false, true, &json, &[spec]);

@@ -190,6 +190,10 @@ pub struct SpawnRequest {
     /// Requesting supervisor's Claude account directory, captured at enqueue
     /// time so the daemon does not substitute its own environment.
     pub requester_config_dir: Option<String>,
+    /// Requesting supervisor's independent Claude secure-storage selector.
+    /// `None`, `Some("")`, and `Some(path)` retain the source environment's
+    /// unset, empty, and set states respectively.
+    pub requester_secure_storage_dir: Option<String>,
     /// When the request was queued
     pub created_at: DateTime<Utc>,
     /// When the request was processed (None if pending)
@@ -217,6 +221,7 @@ CREATE TABLE IF NOT EXISTS spawn_queue (
     factory_session TEXT,
     task_id TEXT,
     requester_config_dir TEXT,
+    requester_secure_storage_dir TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     processed_at TEXT,
     spawn_state TEXT,
@@ -276,6 +281,31 @@ pub trait SpawnQueueStore: Send + Sync {
             spec_json,
             factory_session,
             task_id,
+        )
+    }
+
+    /// Queue a spawn while preserving both independent requester Claude
+    /// selectors for daemon-side spawning.
+    fn enqueue_spawn_with_requester_account_dirs(
+        &self,
+        count: i32,
+        worker_names: &[String],
+        isolate: bool,
+        spec_json: Option<&str>,
+        factory_session: Option<&str>,
+        task_id: Option<&str>,
+        requester_config_dir: Option<&str>,
+        requester_secure_storage_dir: Option<&str>,
+    ) -> Result<i64> {
+        let _ = (requester_config_dir, requester_secure_storage_dir);
+        self.enqueue_spawn_with_requester_config_dir(
+            count,
+            worker_names,
+            isolate,
+            spec_json,
+            factory_session,
+            task_id,
+            requester_config_dir,
         )
     }
 
@@ -387,7 +417,8 @@ impl SqliteSpawnQueueStore {
         let factory_session: Option<String> = row.get(7).unwrap_or_default();
         let task_id: Option<String> = row.get(8).unwrap_or_default();
         let requester_config_dir: Option<String> = row.get(9).unwrap_or_default();
-        let processed_at_str: Option<String> = row.get(11)?;
+        let requester_secure_storage_dir: Option<String> = row.get(10).unwrap_or_default();
+        let processed_at_str: Option<String> = row.get(12)?;
 
         Ok(SpawnRequest {
             id: row.get(0)?,
@@ -400,7 +431,8 @@ impl SqliteSpawnQueueStore {
             factory_session,
             task_id,
             requester_config_dir,
-            created_at: Self::parse_datetime(&row.get::<_, String>(10)?).unwrap_or_else(Utc::now),
+            requester_secure_storage_dir,
+            created_at: Self::parse_datetime(&row.get::<_, String>(11)?).unwrap_or_else(Utc::now),
             processed_at: processed_at_str.and_then(|s| Self::parse_datetime(&s)),
         })
     }
@@ -416,6 +448,7 @@ impl SqliteSpawnQueueStore {
         factory_session: Option<&str>,
         task_id: Option<&str>,
         requester_config_dir: Option<&str>,
+        requester_secure_storage_dir: Option<&str>,
     ) -> Result<i64> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -427,7 +460,7 @@ impl SqliteSpawnQueueStore {
             };
 
             conn.execute(
-                "INSERT INTO spawn_queue (action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, requester_config_dir, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO spawn_queue (action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, requester_config_dir, requester_secure_storage_dir, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     action.as_str(),
                     count,
@@ -438,6 +471,7 @@ impl SqliteSpawnQueueStore {
                     factory_session,
                     task_id,
                     requester_config_dir,
+                    requester_secure_storage_dir,
                     now
                 ],
             )?;
@@ -476,6 +510,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             factory_session,
             task_id,
             None,
+            None,
         )
     }
 
@@ -499,6 +534,32 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             factory_session,
             task_id,
             requester_config_dir,
+            None,
+        )
+    }
+
+    fn enqueue_spawn_with_requester_account_dirs(
+        &self,
+        count: i32,
+        worker_names: &[String],
+        isolate: bool,
+        spec_json: Option<&str>,
+        factory_session: Option<&str>,
+        task_id: Option<&str>,
+        requester_config_dir: Option<&str>,
+        requester_secure_storage_dir: Option<&str>,
+    ) -> Result<i64> {
+        self.enqueue(
+            SpawnAction::Spawn,
+            Some(count),
+            worker_names,
+            false,
+            isolate,
+            spec_json,
+            factory_session,
+            task_id,
+            requester_config_dir,
+            requester_secure_storage_dir,
         )
     }
 
@@ -519,6 +580,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             factory_session,
             None,
             None,
+            None,
         )
     }
 
@@ -537,6 +599,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             factory_session,
             None,
             None,
+            None,
         )
     }
 
@@ -545,7 +608,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         let now = Utc::now().to_rfc3339();
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, requester_config_dir, created_at, processed_at
+            "SELECT id, action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, requester_config_dir, requester_secure_storage_dir, created_at, processed_at
              FROM spawn_queue
              WHERE processed_at IS NULL
                AND (factory_session = ? OR factory_session IS NULL)
@@ -587,7 +650,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, requester_config_dir, created_at, processed_at
+            "SELECT id, action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, requester_config_dir, requester_secure_storage_dir, created_at, processed_at
              FROM spawn_queue
              WHERE processed_at IS NULL
              ORDER BY created_at ASC
@@ -959,12 +1022,12 @@ mod tests {
     }
 
     #[test]
-    fn test_enqueue_spawn_preserves_requester_config_dir() {
+    fn test_enqueue_spawn_preserves_requester_account_dirs() {
         let (_temp, store) = create_test_store();
         let spec_json = r#"{"name":null,"cli":"claude","model":null,"effort":"high","config_dir":"~/.claude-explicit"}"#;
 
         store
-            .enqueue_spawn_with_requester_config_dir(
+            .enqueue_spawn_with_requester_account_dirs(
                 1,
                 &[],
                 false,
@@ -972,6 +1035,7 @@ mod tests {
                 Some("session-a"),
                 None,
                 Some("~/.claude-supervisor"),
+                Some(""),
             )
             .unwrap();
 
@@ -980,6 +1044,10 @@ mod tests {
         assert_eq!(
             requests[0].requester_config_dir.as_deref(),
             Some("~/.claude-supervisor")
+        );
+        assert_eq!(
+            requests[0].requester_secure_storage_dir.as_deref(),
+            Some("")
         );
         assert!(
             requests[0]

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SKILL.state vs CAS — evaluation, 2026-08-29</title>
+<style>
+  :root {
+    --ink: #1a2332; --muted: #5a6678; --line: #d8dee8; --bg: #ffffff; --panel: #f5f7fa;
+    --accent: #174ea6; --bad: #b3261e; --mixed: #9a6700; --good: #1a7f37;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.55 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  main { max-width: 58rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  h1 { font-size: 1.6rem; line-height: 1.25; margin: 0 0 .3rem; }
+  h2 { font-size: 1.2rem; margin: 2rem 0 .6rem; border-bottom: 2px solid var(--line); padding-bottom: .25rem; }
+  .meta { color: var(--muted); font-size: .85rem; margin-bottom: 1.4rem; }
+  .verdict { background: var(--panel); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.2rem 0; }
+  .verdict p { margin: .3rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0 1.2rem; font-size: .9rem; }
+  th, td { border: 1px solid var(--line); padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: var(--panel); }
+  .wrap { overflow-x: auto; }
+  code { background: var(--panel); padding: .08rem .3rem; border-radius: 3px; font-size: .85em; }
+  .hit { color: var(--bad); font-weight: 600; }
+  .ok { color: var(--good); font-weight: 600; }
+  .na { color: var(--muted); font-weight: 600; }
+  .callout { background: #eef7f0; border-left: 4px solid var(--good); padding: .8rem 1.1rem; margin: 1rem 0; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 2px solid var(--line); font-size: .82rem; color: var(--muted); }
+  @media print { body { font-size: 11pt; } .wrap { overflow: visible; } }
+</style>
+</head>
+<body>
+<main>
+<h1>SKILL.state vs CAS: no runtime change, but it names our worker-notes problem</h1>
+<p class="meta">2026-08-29 · factory supervisor session · practitioner audience ·
+paper: Badhe, Tiwari, Chung, <em>SKILL.state: Scalable Long-Horizon Agent Skills</em>, Google LLC + Purdue,
+arXiv:2608.26263v1 (2026-08-26) · companion to the same-day WikiSkill evaluation</p>
+
+<div class="verdict">
+<p><strong>Verdict.</strong> SKILL.state is a <em>runtime architecture</em>: it replaces append-only conversational
+history with a structured, mutable execution state the model patches each step. CAS cannot adopt the runtime — our
+workers live inside conversational harnesses (Claude Code / Codex / Grok) whose history loop CAS does not own. But
+three findings land on real CAS surfaces, and the sharpest one names a problem we watch daily:
+<strong>worker task state is append-only prose notes, and workers burn context headroom exactly the way the paper
+predicts</strong> (95%→20% over a single task this session).</p>
+<p><strong>Confidence:</strong> high on the mechanism mapping; benchmarks are synthetic/procedural, so magnitudes
+will not transfer to open-ended coding work.</p>
+</div>
+
+<h2>The paper in one screen</h2>
+<p>Each step the model sees only <code>(P, Σ_t, O_t)</code> — immutable procedural spec, structured JSON execution
+state, latest observation. It emits reasoning (discarded after the step), a validated JSON state patch (dictionary
+merge, null = delete), and one action. Prompt footprint O(1), cumulative tokens O(T) vs O(T²). Schemas are authored
+once per domain, not per task; a malformed patch is rejected by the runtime and never corrupts state.</p>
+<div class="wrap"><table>
+<thead><tr><th>Result</th><th>Number</th></tr></thead>
+<tbody>
+<tr><td>Long horizon, T=200 (warehouse, Gemini-3-Flash)</td><td>0.94 vs 0.74 ReAct / 0.88 LangGraph-style; 122k tokens vs 2.6M–6.2M</td></tr>
+<tr><td>Token cut at T=100</td><td>16.2× vs stateful baseline</td></tr>
+<tr><td>Noise: 50 distractor events per turn</td><td>≥0.97 vs 0.53 ReAct — distractors filtered at patch time never re-enter context</td></tr>
+<tr><td>External state drift recovery</td><td>0 wasted turns vs 5–14 turns of hallucination lag for history runtimes</td></tr>
+<tr><td>Budget-matched controls (~1,800 tokens each)</td><td>truncation 0.18 · summary 0.52 · LLMLingua 0.22 · SKILL.state 0.94 — <strong>structure, not brevity, is the cause</strong></td></tr>
+<tr><td>InterCode CTF / τ-Bench</td><td>best pass rates at 40–65% fewer tokens</td></tr>
+<tr><td>Open-weight failure taxonomy</td><td>68% premature state overwrite · 20% schema confusion · 12% JSON slips → constrained decoding</td></tr>
+</tbody>
+</table></div>
+<p>Stated limitations: the state must be a <em>sufficient statistic</em> (fails when the schema can't be known up
+front, when an observation's relevance is recognized late, or <strong>when the trajectory itself is the deliverable —
+auditing, debugging, provenance</strong>); single-agent only (concurrent writes need deterministic merge semantics).</p>
+
+<h2>What it does and does not touch in CAS</h2>
+<div class="wrap"><table>
+<thead><tr><th>CAS surface</th><th>Impact</th></tr></thead>
+<tbody>
+<tr><td>Harness runtime (append-only chat history)</td>
+<td class="na">Not ours to change — Claude Code/Codex own the loop; CAS is hooks + MCP around it. No adoption path for the runtime itself.</td></tr>
+<tr><td>Factory orchestration state (<code>epic_status</code>, <code>worker_status</code>, task board)</td>
+<td class="ok">Already state-centric — structured current-state surfaces, not history replays. The paper validates the existing design.</td></tr>
+<tr><td>Task store as multi-agent merge operator</td>
+<td class="ok">CAS is ahead — the paper punts on concurrent writes; leases + status transitions are the deterministic merge semantics it says multi-agent needs.</td></tr>
+<tr><td>Worker task notes as the resume/continue surface</td>
+<td class="hit">The real hit — notes are append-only prose; resuming or context-cleared workers replay narrative history, and mid-task headroom drains 95%→20%. The fix maps onto <code>task action=start brief=true</code> growing a real schema (phase, receipts, files touched, next step); zero-recovery-step resume after <code>clear_context</code> is the paper's Table-3 result.</td></tr>
+<tr><td>SessionStart context injection (rules/memories)</td>
+<td class="ok">Supports current design — irrelevant context collapses ReAct 0.68→0.53; endorses budgeted, scored injection and argues against widening it casually.</td></tr>
+<tr><td>Verification / audit trail / provenance</td>
+<td class="na">Explicitly outside state-centric execution — the paper's own limitation: when the trajectory is the deliverable, history is the product. Verification audit rows stay history-shaped.</td></tr>
+</tbody>
+</table></div>
+
+<h2>How it composes with WikiSkill</h2>
+<div class="callout">
+<p>The two papers split the same raw material by consumer. SKILL.state: <strong>discard</strong> reasoning traces
+from the <em>execution</em> context — they poison long horizons. WikiSkill: <strong>retain</strong> traces durably
+for <em>learning</em> — the maintainer mines them. Division of labor, not contradiction:
+bounded structured execution state (SKILL.state) → immutable trace archive for mining (WikiSkill; already tasked
+as cas-62a6) → gated knowledge promotion (the cas-c845 epic in flight).</p>
+</div>
+
+<h2>Candidate follow-up — not tasked, awaiting operator call</h2>
+<p><strong>Structured task execution state:</strong> a schema'd, patchable state blob on tasks (phase / receipts /
+touched files / next action), updated by workers via small patches instead of only prose notes, and made the primary
+payload of <code>start brief=true</code> and post-<code>clear_context</code> re-briefs. Expected wins per the paper's
+mechanism: slower mid-task context burn, lossless resume, less narrative replay. Prose notes stay for humans and
+audit; the state blob becomes the machine resume surface. Moderate effort: task schema + MCP action + worker skill
+guidance.</p>
+
+<footer>
+<p><strong>Provenance.</strong> Paper: <code>~/Downloads/2608.26263v1.pdf</code>, read in full (16pp), 2026-08-29.
+CAS-side claims from the same-day WikiSkill code survey (working tree @ <code>f9692472</code>) and live factory-session
+observations. Source: <code>docs/reports/2026-08-29-skillstate-vs-cas.md</code> (markdown is authoritative).</p>
+</footer>
+</main>
+</body>
+</html>

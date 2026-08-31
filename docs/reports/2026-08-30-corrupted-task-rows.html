@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Corrupted Cloud Task Rows — 2026-08-30</title>
+<style>
+  :root{--ink:#1a2233;--muted:#5b6577;--line:#dde3ec;--bg:#f7f9fc;--card:#ffffff;
+        --bad:#b42318;--bad-bg:#fef3f2;--warn:#b54708;--warn-bg:#fffaeb;--ok:#067647;--ok-bg:#ecfdf3;
+        --accent:#175cd3;--accent-bg:#eff8ff;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  main{max-width:960px;margin:0 auto;padding:32px 24px 64px}
+  h1{font-size:26px;line-height:1.25;margin:0 0 4px}
+  h2{font-size:19px;margin:40px 0 12px;border-bottom:1px solid var(--line);padding-bottom:6px}
+  h3{font-size:16px;margin:24px 0 8px}
+  .meta{color:var(--muted);font-size:13px;margin-bottom:24px}
+  .verdict{background:var(--bad-bg);border:1px solid #f2c1bc;border-left:5px solid var(--bad);border-radius:8px;padding:16px 20px;margin:20px 0}
+  .verdict strong{color:var(--bad)}
+  .cards{display:flex;gap:14px;flex-wrap:wrap;margin:20px 0}
+  .card{flex:1 1 180px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+  .card .n{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums}
+  .card .l{font-size:12.5px;color:var(--muted);margin-top:2px}
+  .card.bad .n{color:var(--bad)} .card.warn .n{color:var(--warn)} .card.ok .n{color:var(--ok)} .card.acc .n{color:var(--accent)}
+  table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:14px}
+  th{background:#eef2f8;text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);font-size:13px}
+  td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  tr.total td{font-weight:700;background:#f2f5fa}
+  code{background:#eef1f6;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  pre{background:#101828;color:#e4e9f1;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:13px;line-height:1.5}
+  pre code{background:none;border:none;color:inherit;padding:0}
+  .idgrid{columns:5 150px;column-gap:18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 18px;margin:8px 0}
+  .idgrid span{display:block;padding:1px 0}
+  .pill{display:inline-block;border-radius:99px;padding:1px 10px;font-size:12px;font-weight:600}
+  .pill.bad{background:var(--bad-bg);color:var(--bad)} .pill.ok{background:var(--ok-bg);color:var(--ok)}
+  .pill.warn{background:var(--warn-bg);color:var(--warn)} .pill.acc{background:var(--accent-bg);color:var(--accent)}
+  .note{background:var(--accent-bg);border:1px solid #b8daff;border-left:5px solid var(--accent);border-radius:8px;padding:12px 18px;margin:16px 0}
+  .flow{display:flex;gap:0;align-items:stretch;flex-wrap:wrap;margin:14px 0}
+  .flow .step{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;flex:1 1 200px;font-size:13.5px}
+  .flow .arr{align-self:center;padding:0 10px;color:var(--muted);font-size:20px}
+  footer{margin-top:48px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12.5px}
+  @media print{ body{background:#fff} pre{white-space:pre-wrap} .idgrid{columns:4} a[href]:after{content:" (" attr(href) ")";font-size:11px} }
+</style>
+</head>
+<body>
+<main>
+<h1>Corrupted cloud task rows: 98 rows fail every team pull</h1>
+<p class="meta">2026-08-30 · factory supervisor session 9bc9520d · source: <code>cas_update_20280830.txt</code> + read-only queries on <code>cas-src/.cas/cas.db</code> · repair: EPIC cas-5697</p>
+
+<div class="verdict">
+<strong>Verdict:</strong> 98 task rows in the team cloud carry <code>deliverables</code> serialized as a JSON <em>string</em> where the sync contract expects the <code>TaskDeliverables</code> struct. Every team pull on every cloud-linked project rejects all 98 and applies partial results (8 projects × 98 = 784 error lines in one <code>cas update</code> run). Until repaired, these rows cannot reach any other machine. Client fix <strong>cas-6980</strong> and one-time cloud repair <strong>cas-9894</strong> are scheduled under EPIC cas-5697 with workers assigned.
+</div>
+
+<div class="cards">
+  <div class="card bad"><div class="n">98</div><div class="l">corrupted cloud rows (unique IDs)</div></div>
+  <div class="card warn"><div class="n">60</div><div class="l">live open cas-src tasks — cloud copy dead</div></div>
+  <div class="card acc"><div class="n">10</div><div class="l">closed cas-src archive rows — cloud copy dead</div></div>
+  <div class="card ok"><div class="n">28</div><div class="l">cloud-only tombstones of deleted contamination</div></div>
+</div>
+
+<h2>Error shape</h2>
+<pre><code>⚠ Team pull encountered 98 error(s); partial results applied
+  - task deserialize error (id=cas-XXXX): invalid type: string
+    "{\"files_changed\":[]}", expected struct TaskDeliverables</code></pre>
+<p>Identical on all 8 cloud-linked projects — log lines 40, 160, 305, 427, 547, 667, 787, 907. ID extraction: <code>grep -oP 'id=\Kcas-[0-9a-f]+' cas_update_20280830.txt | sort -u</code> → 98.</p>
+
+<h2>Breakdown and disposition</h2>
+<table>
+<thead><tr><th>Class</th><th class="num">Count</th><th>Disposition (cas-9894)</th></tr></thead>
+<tbody>
+<tr><td><span class="pill warn">live</span> Local <strong>open</strong> cas-src tasks — real work, cloud copy corrupted</td><td class="num">60</td><td>Re-push clean local canonical</td></tr>
+<tr><td><span class="pill acc">archive</span> Local <strong>closed</strong> cas-src tasks — cloud copy corrupted</td><td class="num">10</td><td>Re-push clean local canonical</td></tr>
+<tr><td><span class="pill ok">tombstone</span> Cloud-only remnants of contamination deleted 2026-08-30</td><td class="num">28</td><td>Delete cloud copy</td></tr>
+<tr class="total"><td>Total</td><td class="num">98</td><td></td></tr>
+</tbody>
+</table>
+
+<div class="note">
+<strong>Highest-impact row: cas-9cf9</strong> (P1 — publish the 2026-08-25 harness diary thread; sole remaining child of live EPIC cas-abfc). It is the only row whose stringified payload holds <em>real</em> data, not the trivial <code>{"files_changed":[]}</code>: a work_target (<code>project:cas-src</code> @ the cas-abfc epic branch), factory anchor <code>fdf43b20</code>, parked branch <code>factory/eager-heron-43</code>. Its cloud copy cannot sync anywhere — the diary publication task exists only on this host until repair. EPIC cas-abfc itself is also among the 60.
+</div>
+
+<h2>Root cause</h2>
+<div class="flow">
+  <div class="step"><strong>cas-02a7 relocation</strong> (2026-08-29) moves ~789 rows between project DBs</div>
+  <div class="arr">→</div>
+  <div class="step">Writer JSON-encodes an already-encoded <code>deliverables</code> value → string, not struct (<strong>cas-6980</strong>)</div>
+  <div class="arr">→</div>
+  <div class="step">That session pushes the stringified rows to the team cloud</div>
+  <div class="arr">→</div>
+  <div class="step">Every client pull rejects the 98 rows; partial results forever</div>
+</div>
+<p>The client's refusal is correct behavior; the gap is that the corruption reached the cloud at write time and pulls only report it as a per-run warning.</p>
+
+<h2>Blast radius — and what it is not</h2>
+<ul>
+<li><strong>No data loss on this host:</strong> all 70 local rows are intact; only their <em>cloud</em> copies are bad.</li>
+<li><strong>Cross-machine loss until repair:</strong> other machines pulling the team project receive none of the 98, including live P1 work (cas-9cf9, cas-abfc).</li>
+<li><strong>Silver lining:</strong> the 28 corrupted tombstones never resurrected the deleted contamination — pulls skip what they cannot decode.</li>
+</ul>
+
+<h2>The 98 IDs</h2>
+<h3>60 live open (P1: cas-7657, cas-9cf9, cas-abfc · P4: cas-0f22 · rest P2/P3)</h3>
+<div class="idgrid">
+<span>cas-7657</span><span>cas-9cf9</span><span>cas-abfc</span><span>cas-0101</span><span>cas-1b12</span><span>cas-2598</span><span>cas-3b29</span><span>cas-467a</span><span>cas-48e4</span><span>cas-4c89</span><span>cas-5bc14</span><span>cas-63b9</span><span>cas-6c28</span><span>cas-7265</span><span>cas-74e3</span><span>cas-844b</span><span>cas-9886</span><span>cas-9d8a</span><span>cas-b8b1</span><span>cas-c2b2</span><span>cas-c2f2</span><span>cas-c8a6</span><span>cas-ce30</span><span>cas-dae6</span><span>cas-dfa3</span><span>cas-046c</span><span>cas-0906</span><span>cas-1a95</span><span>cas-1c31</span><span>cas-236d</span><span>cas-24d0</span><span>cas-269ab</span><span>cas-2929</span><span>cas-326e</span><span>cas-3316</span><span>cas-3843</span><span>cas-4cec</span><span>cas-563a</span><span>cas-5eb9</span><span>cas-5f61</span><span>cas-6419</span><span>cas-7062</span><span>cas-7391</span><span>cas-746a</span><span>cas-74b9</span><span>cas-74c8</span><span>cas-8090</span><span>cas-84b3</span><span>cas-9040</span><span>cas-939a</span><span>cas-96ab</span><span>cas-9fe6</span><span>cas-a5c0</span><span>cas-b352</span><span>cas-d4a0</span><span>cas-d6b9</span><span>cas-de46</span><span>cas-ec70</span><span>cas-f163</span><span>cas-0f22</span>
+</div>
+<h3>10 closed archive</h3>
+<div class="idgrid">
+<span>cas-1833</span><span>cas-1ddf</span><span>cas-42a4</span><span>cas-8172</span><span>cas-9def</span><span>cas-a81f</span><span>cas-c40a</span><span>cas-cdcc</span><span>cas-d132</span><span>cas-eaf6</span>
+</div>
+<h3>28 cloud-only tombstones (delete)</h3>
+<div class="idgrid">
+<span>cas-082b</span><span>cas-0acb</span><span>cas-0b21</span><span>cas-1818</span><span>cas-29a6</span><span>cas-2cbb0</span><span>cas-3ac7</span><span>cas-43a1</span><span>cas-5548</span><span>cas-5f2e</span><span>cas-71b7</span><span>cas-8b21</span><span>cas-8e9d</span><span>cas-9841</span><span>cas-9c3a</span><span>cas-9f5e</span><span>cas-a1e0</span><span>cas-a2e6</span><span>cas-adb8</span><span>cas-b492</span><span>cas-bcfe</span><span>cas-c97a</span><span>cas-dbf9</span><span>cas-dcbc</span><span>cas-e42d</span><span>cas-e446</span><span>cas-ea8d</span><span>cas-f179</span>
+</div>
+
+<h2>Repair plan (scheduled)</h2>
+<table>
+<thead><tr><th>Task</th><th>What</th><th>State</th></tr></thead>
+<tbody>
+<tr><td><code>cas-6980</code></td><td>Client tolerates/repairs string-encoded deliverables on pull (double-decode); fix the writer that stringified</td><td><span class="pill acc">worker assigned</span></td></tr>
+<tr><td><code>cas-9894</code></td><td>Re-push 70 clean local canonicals · delete 28 tombstones · prove 0-error pulls from ≥2 projects with per-ID receipts</td><td><span class="pill warn">blocked by cas-6980</span></td></tr>
+</tbody>
+</table>
+
+<footer>
+Provenance: (a) <code>cas_update_20280830.txt</code>, cas-src repo root, unmodified, run 2026-08-30 10:48; (b) read-only SQLite on <code>/home/pippenz/Petrastella/cas-src/.cas/cas.db</code>, 2026-08-30 — 98-ID <code>IN</code> list, status grouping (open=60, closed=10), set difference (28). Markdown source of truth: <code>docs/reports/2026-08-30-corrupted-task-rows.md</code>.
+</footer>
+</main>
+</body>
+</html>

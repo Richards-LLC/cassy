@@ -146,6 +146,40 @@ impl SyncQueue {
         Ok(items)
     }
 
+    /// Get retained failed personal rows for operator-facing diagnostics.
+    pub fn failed_for_entity_type(
+        &self,
+        entity_type: Option<EntityType>,
+        max_retries: i32,
+        limit: usize,
+    ) -> Result<Vec<QueuedSync>, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, entity_type, entity_id, operation, payload, team_id, created_at, retry_count, last_error
+            FROM sync_queue
+            WHERE retry_count >= ?1 AND (team_id IS NULL OR team_id = '')
+              AND entity_type != 'knowledge_page'
+              AND (?3 IS NULL OR entity_type = ?3)
+            ORDER BY id DESC
+            LIMIT ?2
+            "#,
+        )?;
+
+        let items = stmt
+            .query_map(
+                params![
+                    max_retries,
+                    limit as i64,
+                    entity_type.map(|kind| kind.as_str())
+                ],
+                Self::map_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(items)
+    }
+
     /// Get pending items for a specific team.
     pub fn pending_for_team(
         &self,

@@ -23,6 +23,16 @@ mod team_push;
 #[cfg(test)]
 mod tests;
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct PushBacklog {
+    /// Rows still eligible for a push attempt.
+    pub pending: usize,
+    /// Rows retained after reaching the retry limit (including parked rows).
+    pub failed: usize,
+    /// Operator-facing diagnostics from retained failed rows.
+    pub failed_errors: Vec<String>,
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct SyncResult {
     /// Number of entries pushed
@@ -75,6 +85,10 @@ pub struct SyncResult {
     pub conflicts_resolved: usize,
     /// Errors encountered during sync
     pub errors: Vec<String>,
+    /// Number of personal queue batches fetched and attempted.
+    pub batches_run: usize,
+    /// Personal queue rows that remain after this push invocation.
+    pub remaining_backlog: PushBacklog,
     /// Duration of sync in milliseconds
     pub duration_ms: u64,
     /// Task lifecycle changes actually applied by a pull. These are kept
@@ -149,6 +163,8 @@ pub struct PushPlan {
     pub scope: PushScope,
     pub counts: BTreeMap<String, usize>,
     pub total_in_next_batch: usize,
+    /// Total eligible personal rows in the selected scope.
+    pub total_matching: usize,
     pub batch_limit: usize,
     /// Conservative saturation marker. At exactly the query limit the queue
     /// read cannot prove whether more matching rows exist, so callers must not

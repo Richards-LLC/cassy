@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use crate::cli::Cli;
 use crate::cloud::{
-    BackfillOutcome, CloudConfig, FetchTeamsOutcome, PersonalScopeNotice, SyncQueue, TeamInfo,
-    fetch_and_cache_teams, maybe_apply_team_backfill, maybe_mark_personal_scope_notice,
-    teams_cache_stale, user_level_cloud_json_path,
+    BackfillOutcome, CloudConfig, CloudSyncerConfig, FetchTeamsOutcome, PersonalScopeNotice,
+    SyncQueue, TeamInfo, fetch_and_cache_teams, maybe_apply_team_backfill,
+    maybe_mark_personal_scope_notice, teams_cache_stale, user_level_cloud_json_path,
 };
 use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
@@ -132,6 +132,16 @@ pub struct CloudProjectSetArgs {
     pub canonical_id: String,
 }
 
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("expected a positive integer, got {value:?}"))?;
+    if parsed == 0 {
+        return Err("expected a positive integer, got 0".to_string());
+    }
+    Ok(parsed)
+}
+
 #[derive(Parser)]
 pub struct CloudPushArgs {
     /// Push only entries
@@ -145,6 +155,10 @@ pub struct CloudPushArgs {
     /// Dry run (don't actually push)
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Stop after this many queue batches instead of draining the full backlog.
+    #[arg(long, value_parser = parse_positive_usize)]
+    pub max_batches: Option<usize>,
 
     /// Allow re-homing existing cloud entities to the current project slug.
     ///
@@ -2396,12 +2410,50 @@ fn push_result_counts(
         .collect()
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct SkippedTeamBacklog {
+    team_id: String,
+    pending: usize,
+    failed: usize,
+    command: &'static str,
+}
+
+impl SkippedTeamBacklog {
+    fn total(&self) -> usize {
+        self.pending + self.failed
+    }
+}
+
+/// Personal `cloud push` deliberately does not send the team endpoint. Make
+/// that boundary visible whenever the active team's queue has rows, so a
+/// successful personal push cannot falsely imply that the whole queue moved.
+fn active_team_backlog(
+    queue: &SyncQueue,
+    config: &CloudConfig,
+) -> anyhow::Result<Option<SkippedTeamBacklog>> {
+    let Some(team_id) = config.active_team_id() else {
+        return Ok(None);
+    };
+    let pending =
+        queue.pending_count_for_team(&team_id, CloudSyncerConfig::default().max_retries)?;
+    let failed = queue.failed_count_for_team(&team_id, CloudSyncerConfig::default().max_retries)?;
+    if pending == 0 && failed == 0 {
+        return Ok(None);
+    }
+    Ok(Some(SkippedTeamBacklog {
+        team_id,
+        pending,
+        failed,
+        command: "cas cloud sync",
+    }))
+}
+
 /// Queue-driven personal push, rooted explicitly at `cas_root`.
 #[doc(hidden)]
 pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     use std::sync::Arc;
 
-    use crate::cloud::{CloudSyncer, CloudSyncerConfig, PushScope, resolve_canonical_id};
+    use crate::cloud::{CloudSyncer, PushScope, resolve_canonical_id};
 
     let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
     if config.token.is_none() {
@@ -2421,29 +2473,32 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
     queue.init()?;
     let syncer = CloudSyncer::new_for_project(
         queue.clone(),
-        config,
+        config.clone(),
         CloudSyncerConfig::default(),
         project_id.clone(),
         cas_root,
     );
     let plan = syncer.plan_push(scope)?;
+    let team_backlog = active_team_backlog(&queue, &config)?;
 
     if args.dry_run {
         if cli.json {
-            println!(
-                "{}",
-                serde_json::json!({
+            let mut output = serde_json::json!({
                     "dry_run": true,
                     "root": cas_root,
                     "project_canonical_id": project_id,
                     "plan": plan,
-                })
-            );
+                    "max_batches": args.max_batches,
+            });
+            if let Some(backlog) = &team_backlog {
+                output["team_backlog_skipped"] = serde_json::to_value(backlog)?;
+            }
+            println!("{output}");
         } else {
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
             fmt.write_accent("  \u{2192} ")?;
-            fmt.write_raw("Dry run - next queued push batch:")?;
+            fmt.write_raw("Dry run - would drain all matching queued push batches:")?;
             fmt.newline()?;
             fmt.write_raw(&format!("    root: {}", cas_root.display()))?;
             fmt.newline()?;
@@ -2451,14 +2506,28 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
             fmt.newline()?;
             fmt.write_raw(&format!("    scope: {}", scope.label()))?;
             fmt.newline()?;
-            for (key, count) in &plan.counts {
-                fmt.write_raw(&format!("    {count} {key}"))?;
+            fmt.write_raw(&format!(
+                "    matching backlog: {} row(s)",
+                plan.total_matching
+            ))?;
+            fmt.newline()?;
+            fmt.write_raw(&format!(
+                "    batch limit: {} row(s) per request",
+                plan.batch_limit
+            ))?;
+            fmt.newline()?;
+            if let Some(max_batches) = args.max_batches {
+                fmt.write_raw(&format!("    max batches: {max_batches}"))?;
                 fmt.newline()?;
             }
-            if plan.batch_limit_reached {
+            for (key, count) in &plan.counts {
+                fmt.write_raw(&format!("    next batch: {count} {key}"))?;
+                fmt.newline()?;
+            }
+            if let Some(backlog) = &team_backlog {
                 fmt.write_raw(&format!(
-                    "    batch limit {} reached; the total matching backlog may be larger",
-                    plan.batch_limit
+                    "    team backlog skipped: {} row(s); run `cas cloud sync`",
+                    backlog.total()
                 ))?;
                 fmt.newline()?;
             }
@@ -2480,44 +2549,73 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
         return Ok(());
     }
 
-    let result = syncer.push_scoped(scope)?;
+    let result = match args.max_batches {
+        Some(max_batches) => syncer.push_scoped_with_max_batches(scope, max_batches)?,
+        None => syncer.push_scoped(scope)?,
+    };
     if result.errors.is_empty() {
         if let Err(error) = queue.set_metadata("last_push_canonical_id", &project_id) {
             tracing::warn!(%error, %project_id, "failed to record last push project scope");
         }
     }
     let counts = push_result_counts(&result, scope);
+    let personal_complete = result.errors.is_empty()
+        && result.remaining_backlog.pending == 0
+        && result.remaining_backlog.failed == 0;
+    let push_complete = personal_complete && team_backlog.is_none();
 
     if cli.json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "status": if result.errors.is_empty() { "ok" } else { "partial" },
+        let mut output = serde_json::json!({
+                "status": if push_complete { "ok" } else { "partial" },
                 "source": "sync_queue",
                 "root": cas_root,
                 "project_canonical_id": project_id,
                 "scope": scope,
                 "pushed": counts,
+                "total_pushed": result.total_pushed(),
+                "batches_run": result.batches_run,
+                "remaining_backlog": result.remaining_backlog,
                 "errors": result.concise_errors(),
-            })
-        );
+        });
+        if let Some(backlog) = &team_backlog {
+            output["team_backlog_skipped"] = serde_json::to_value(backlog)?;
+        }
+        println!("{output}");
     } else {
         let mut out = io::stdout();
         let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-        if result.errors.is_empty() {
+        if push_complete {
             fmt.success("Push complete")?;
         } else {
             let warning_color = fmt.theme().palette.status_warning;
             fmt.write_colored("  ! ", warning_color)?;
-            fmt.write_raw("Push incomplete; failed rows remain queued")?;
+            fmt.write_raw("Push incomplete; queued rows remain")?;
             fmt.newline()?;
         }
+        fmt.write_raw(&format!("    batches: {}", result.batches_run))?;
+        fmt.newline()?;
+        fmt.write_raw(&format!(
+            "    remaining: {} pending, {} failed/parked",
+            result.remaining_backlog.pending, result.remaining_backlog.failed
+        ))?;
+        fmt.newline()?;
         for (key, count) in counts {
             fmt.write_raw(&format!("    {key}: {count} pushed"))?;
             fmt.newline()?;
         }
+        for error in &result.remaining_backlog.failed_errors {
+            fmt.write_raw(&format!("    remaining error: {error}"))?;
+            fmt.newline()?;
+        }
         for error in result.concise_errors() {
             fmt.write_raw(&format!("    error: {error}"))?;
+            fmt.newline()?;
+        }
+        if let Some(backlog) = team_backlog {
+            fmt.write_raw(&format!(
+                "    team backlog skipped: {} row(s); run `cas cloud sync`",
+                backlog.total()
+            ))?;
             fmt.newline()?;
         }
     }
@@ -2924,6 +3022,7 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
             entries_only: false,
             tasks_only: false,
             dry_run: args.dry_run,
+            max_batches: None,
             rehome: args.rehome,
         },
         cli,
@@ -4622,6 +4721,43 @@ mod team_cmd_tests {
     use tempfile::TempDir;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn active_team_backlog_is_reported_with_sync_command() {
+        let root = TempDir::new().unwrap();
+        let queue = SyncQueue::open(root.path()).unwrap();
+        queue.init().unwrap();
+        queue
+            .enqueue_for_team(
+                crate::cloud::EntityType::Entry,
+                "team-entry",
+                crate::cloud::SyncOperation::Upsert,
+                Some(r#"{"id":"team-entry"}"#),
+                "team-42",
+            )
+            .unwrap();
+        queue
+            .enqueue_for_team(
+                crate::cloud::EntityType::Task,
+                "team-task",
+                crate::cloud::SyncOperation::Upsert,
+                Some(r#"{"id":"team-task"}"#),
+                "team-42",
+            )
+            .unwrap();
+
+        let config = CloudConfig {
+            team_id: Some("team-42".to_string()),
+            ..Default::default()
+        };
+        let backlog = active_team_backlog(&queue, &config).unwrap().unwrap();
+
+        assert_eq!(backlog.team_id, "team-42");
+        assert_eq!(backlog.pending, 2);
+        assert_eq!(backlog.failed, 0);
+        assert_eq!(backlog.command, "cas cloud sync");
+        assert_eq!(backlog.total(), 2);
+    }
 
     #[test]
     fn local_unlink_removes_only_the_project_cloud_link() {

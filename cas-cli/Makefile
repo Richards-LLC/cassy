@@ -225,6 +225,7 @@ test-ci-tiers:
 	cd .. && ./scripts/test-check-release-host.sh
 	cd .. && ./scripts/test-cas-install.sh
 	cd .. && ./scripts/test-check-release-migration-snapshots.sh
+	cd .. && ./scripts/test-check-scoped-snapshot-tests.sh
 
 # Type check
 check:

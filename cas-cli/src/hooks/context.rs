@@ -523,6 +523,8 @@ pub fn build_context_ai(
     // Build context from selected items
     let mut context_parts = Vec::new();
     let mut total_tokens: usize = 0;
+    let mut injected_memory_ids: Vec<String> =
+        pinned_entries.iter().map(|e| e.id.clone()).collect();
 
     // Always include pinned first
     if !pinned_entries.is_empty() {
@@ -544,6 +546,9 @@ pub fn build_context_ai(
         for candidate in candidates.iter().filter(|c| selected_ids.contains(&c.id)) {
             if pinned_ids.contains(&candidate.id) {
                 continue; // Skip if already shown as pinned
+            }
+            if candidate.item_type == "memory" {
+                injected_memory_ids.push(candidate.id.clone());
             }
             context_parts.push(format!(
                 "- {} [{}] {}",
@@ -567,6 +572,10 @@ pub fn build_context_ai(
             token_display(total_tokens),
             hints
         ));
+    }
+
+    if input.hook_event_name == "SessionStart" {
+        record_context_session_start_query(cas_root, input, &injected_memory_ids);
     }
 
     Ok(context_parts.join("\n"))
@@ -1139,7 +1148,7 @@ mod tests {
 
     #[test]
     fn ai_session_start_telemeters_selected_memory_ids() {
-        use cas_store::{RetrievalStore, RuleStore, SqliteRetrievalStore, SqliteRuleStore, Store};
+        use cas_store::{RuleStore, SqliteRetrievalStore, SqliteRuleStore, Store};
         use rusqlite::Connection;
         use std::os::unix::fs::PermissionsExt;
 

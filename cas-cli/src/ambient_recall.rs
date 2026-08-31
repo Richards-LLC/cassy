@@ -2407,16 +2407,15 @@ fn record_pending_outcomes(
     changed
 }
 
-fn collect_exact_id_fields(value: &serde_json::Value, ids: &mut Vec<String>) {
+fn collect_exact_id_fields(value: &serde_json::Value, ids: &mut Vec<String>) -> bool {
     if ids.len() == LEDGER_ENTRY_CAP {
-        return;
+        return true;
     }
     match value {
         serde_json::Value::Array(values) => {
             for value in values {
-                collect_exact_id_fields(value, ids);
-                if ids.len() == LEDGER_ENTRY_CAP {
-                    break;
+                if collect_exact_id_fields(value, ids) {
+                    return true;
                 }
             }
         }
@@ -2429,27 +2428,28 @@ fn collect_exact_id_fields(value: &serde_json::Value, ids: &mut Vec<String>) {
                             ids.push(id);
                         }
                     }
-                } else {
-                    collect_exact_id_fields(value, ids);
+                } else if collect_exact_id_fields(value, ids) {
+                    return true;
                 }
                 if ids.len() == LEDGER_ENTRY_CAP {
-                    break;
+                    return true;
                 }
             }
         }
         _ => {}
     }
+    false
 }
 
 /// Exact IDs observed through Cassy's body-pull surface. This semantic signal
 /// does not need the four-character substring heuristic used for arbitrary
 /// tool traffic: memory IDs are compared to the injected ledger directly.
 fn exact_memory_retrieval_ids(input: &cas_core::hooks::types::HookInput) -> Vec<String> {
-    let is_memory_tool = input
-        .tool_name
-        .as_deref()
-        .and_then(|name| name.rsplit("__").next())
-        .is_some_and(|name| name.eq_ignore_ascii_case("memory"));
+    let is_memory_tool = input.tool_name.as_deref().is_some_and(|name| {
+        name.eq_ignore_ascii_case("mcp__cas__memory")
+            || name.eq_ignore_ascii_case("mcp__cs__memory")
+            || name.eq_ignore_ascii_case("cas_memory")
+    });
     if !is_memory_tool {
         return Vec::new();
     }
@@ -2477,7 +2477,12 @@ fn exact_memory_retrieval_ids(input: &cas_core::hooks::types::HookInput) -> Vec<
         "list" | "show" | "recent"
     ) {
         if let Some(response) = input.tool_response.as_ref() {
-            collect_exact_id_fields(response, &mut ids);
+            if collect_exact_id_fields(response, &mut ids) {
+                tracing::debug!(
+                    cap = LEDGER_ENTRY_CAP,
+                    "memory tool response ID collection reached its cap; additional IDs were omitted"
+                );
+            }
         }
     }
     ids
@@ -3538,7 +3543,7 @@ mod tests {
 
     #[test]
     fn automatic_hook_feedback_populates_metrics_with_plausible_attribution() {
-        use cas_store::{RetrievalStore, SqliteRetrievalStore};
+        use cas_store::SqliteRetrievalStore;
 
         let project = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
@@ -3600,7 +3605,7 @@ mod tests {
 
     #[test]
     fn memory_get_marks_a_short_injected_id_used() {
-        use cas_store::{RetrievalStore, SqliteRetrievalStore};
+        use cas_store::SqliteRetrievalStore;
 
         let project = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
@@ -3686,7 +3691,7 @@ mod tests {
             .unwrap()
             .aggregate()
             .unwrap();
-        assert_eq!((groups[0].total, groups[0].used), (1, 0));
+        assert_eq!((groups[0].total, groups[0].used), (0, 0));
     }
 
     #[test]
@@ -3751,6 +3756,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(exact_memory_retrieval_ids(&input), vec!["m1", "m2"]);
+    }
+
+    #[test]
+    fn exact_memory_id_collection_reports_when_the_response_reaches_its_cap() {
+        let response = serde_json::json!({
+            "entries": (0..=LEDGER_ENTRY_CAP)
+                .map(|index| serde_json::json!({"id": format!("memory-{index}")}))
+                .collect::<Vec<_>>()
+        });
+        let mut ids = Vec::new();
+        assert!(collect_exact_id_fields(&response, &mut ids));
+        assert_eq!(ids.len(), LEDGER_ENTRY_CAP);
     }
 
     #[test]

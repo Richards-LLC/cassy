@@ -248,8 +248,13 @@ async fn task_focused_context_defaults_to_configured_context_limit() {
     .unwrap();
     let text = extract_text(service.search(Parameters(request)).await.unwrap());
     assert!(text.contains("## Helpful Memories (3 memories"), "{text}");
+    let helpful_section = text
+        .split_once("## Helpful Memories")
+        .and_then(|(_, section)| section.split_once("\n## ").map(|(section, _)| section))
+        .unwrap_or_default();
     assert_eq!(
-        text.lines()
+        helpful_section
+            .lines()
             .filter(|line| line.contains("Configured context limit candidate"))
             .count(),
         3,

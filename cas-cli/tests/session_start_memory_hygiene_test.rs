@@ -1,9 +1,7 @@
 use assert_cmd::Command;
 use cas::hooks::build_context_with_token_budget;
 use cas::types::{Entry, EntryType};
-use cas_core::hooks::context::{
-    ContextStores, SurfacedItemCallback, build_context_with_stores,
-};
+use cas_core::hooks::context::{ContextStores, SurfacedItemCallback, build_context_with_stores};
 use cas_core::hooks::{DefaultHooksConfig, HookInput};
 use cas_core::memory::{contamination_patterns, find_contaminated_entries};
 use cas_store::{
@@ -196,10 +194,7 @@ fn helpful_memory_surface_callback_uses_literal_lowercase_memory_tag() {
 
     assert_eq!(
         surfaced.lock().unwrap().as_slice(),
-        &[(
-            "lowercase-memory-tag".to_string(),
-            "memory".to_string()
-        )]
+        &[("lowercase-memory-tag".to_string(), "memory".to_string())]
     );
 }
 

@@ -803,11 +803,7 @@ pub fn build_context_with_stores(
                 stats.memories_included += 1;
 
                 if let Some(callback) = on_surfaced {
-                    callback(
-                        &item.id,
-                        &format!("{:?}", item.item_type),
-                        Some(&item.summary),
-                    );
+                    callback(&item.id, "memory", Some(&item.summary));
                 }
             }
             stats.items_omitted += omitted;

@@ -175,11 +175,10 @@ fn test_search_context_request_search() {
 #[test]
 fn search_descriptions_document_time_bound_history_filtering() {
     let service_source = include_str!("../src/mcp/tools/service/mod.rs");
-    let shared_request_source =
-        include_str!("../../crates/cas-mcp/src/types/ops_secondary.rs");
+    let shared_request_source = include_str!("../../crates/cas-mcp/src/types/ops_secondary.rs");
     for source in [service_source, shared_request_source] {
         assert!(
-            source.contains("history (search indexed git commits by text/path/time;"),
+            source.contains("'history' (search indexed git commits by text/path/time"),
             "history description must document time filtering"
         );
     }

@@ -13,8 +13,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Claude worker launches preserve the requester's config and secure-storage
   selectors independently, auth checks stop waiting after a bounded timeout,
   and failed checks no longer silently choose the main account.
-- Worker proof guidance is now compact and mirrored across the Claude, Codex,
-  and Grok builtins while retaining the required compile and scoped-test gates.
 
 ### Fixed
 - Custom Claude profile directories now keep truthful names in account badges

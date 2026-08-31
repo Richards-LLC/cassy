@@ -106,6 +106,17 @@ carry the operator-declared tier as metadata when supplied.
 | `grok` | `grok-4.5`, `grok-4.6` | Provider capacity is not an active registry lane in this matrix; never invent `cli=cursor` or a fallback recipe. |
 | `opencode` | `local/<model>`, `qwencloud/qwen3.8-max`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Explicit local, Token Plan, or DashScope pay-as-you-go lane; per-lane conformance receipt required. Hosted auth/model availability are operator preflight inputs. |
 
+### Stock fallback routes
+
+When no factory configuration supplies a route, omitted controls resolve through
+the harness stock fallback. Claude intentionally keeps the verified `opus`
+alias as its stock model; this is a fallback route, not a registry lane.
+
+```text
+# Claude stock fallback
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
+```
+
 ### Effort vocabulary (Cassy-wide)
 
 Accepted values: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` (alias `x-high`).

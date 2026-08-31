@@ -1374,7 +1374,7 @@ status = "active"
 [recipes.fallback]
 harness = "claude"
 provider = "anthropic"
-model = "fallback"
+model = "claude-opus-5"
 effort = "high"
 allowed_efforts = ["high"]
 status = "active"
@@ -1421,7 +1421,7 @@ status = "active"
 [recipes.fallback]
 harness = "claude"
 provider = "anthropic"
-model = "fallback"
+model = "claude-opus-5"
 effort = "high"
 allowed_efforts = ["high"]
 status = "active"
@@ -1454,7 +1454,7 @@ schema_version = 1
 [recipes.primary]
 harness = "claude"
 provider = "anthropic"
-model = "primary"
+model = "claude-opus-5"
 effort = "high"
 allowed_efforts = ["high"]
 status = "active"

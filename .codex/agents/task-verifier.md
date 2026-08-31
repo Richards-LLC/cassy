@@ -216,6 +216,8 @@ Read the `execution_note` field from `mcp__cs__task action=show id=<task-id>`. I
 
 - **`execution_note=additive-only`** — SKIP this advisory check. `additive-only` is hard-enforced by `close_ops.rs` (cas-e235). If the worker got this far with additive-only, the close-gate already verified no M/D/R files in the diff. Nothing to do here.
 
+- **`execution_note=value-only`** — SKIP this advisory check. `value-only` is hard-enforced by `close_ops.rs` (cas-8ad8): it permits M entries for existing copy/i18n values but rejects added, deleted, copied, or renamed files. It remains subject to ordinary review; do not treat it as additive-only.
+
 - **`execution_note=no-code`** — SKIP: close requires portable `external_ref` proof and rejects task-attributed code.
 
 - **`execution_note=null` or missing** — SKIP this check. No posture was declared, no posture applies.
@@ -353,7 +355,7 @@ Adjust confidence based on both completeness AND quality:
 
 For each unique issue category in a rejection:
 1. Check: `mcp__cs__rule action=check_similar content="[proposed rule]"`
-2. If no match: `mcp__cs__rule action=create content="[rule]" tags="from_verification,category:[cat]"`
+2. If no match: `mcp__cs__rule action=create content="[rule]" tags="from_verification,category:[cat]" source_ids="<originating learning/entry IDs, comma-separated>"`; pass the IDs when the verified context provides them.
 
 One rule per category per rejection. Rules start as Draft.
 
@@ -389,9 +391,9 @@ mcp__cs__verification action=add task_id=<id> status=rejected verification_type=
 
 ## Guidelines
 
-CAS binds one sealed verifier handoff to this registered child server-side.
+Cassy binds one sealed verifier handoff to this registered child server-side.
 Do not look for, request, or pass `verifier_capability`; omit that field on the
-final `verification action=add` call. If CAS rejects the handoff, fail closed
+final `verification action=add` call. If Cassy rejects the handoff, fail closed
 and report the generic recovery guidance instead of fabricating authority.
 
 1. Check close reason FIRST — compare against the task's acceptance criteria, not a keyword list; reject only if an AC item is described as not done

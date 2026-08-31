@@ -28,9 +28,9 @@ For each learning ID from context:
    - **Strengthen existing** — if a similar rule exists but the learning adds nuance, update the existing rule rather than creating a new one
    - **Keep as learning** — project-specific, one-time fix, already covered, too vague
 5. **Create or update**:
-   - New rule: `mcp__cas__rule action=create content="..." tags="from_learning"`
+   - New rule: `mcp__cas__rule action=create content="..." tags="from_learning" source_ids="<learning ID(s)>"` — always pass the originating learning ID(s), comma-separated.
    - Update existing: `mcp__cas__rule action=update id=<existing> content="<improved>"`
-   - New skill: `mcp__cas__skill action=create name="..." summary="..." description="..." tags="from_learning"`
+   - New skill: `mcp__cas__skill action=create name="..." summary="..." description="..." tags="from_learning" source_ids="<learning ID(s)>"` — always pass the originating learning ID(s), comma-separated.
 6. **Mark reviewed**: `mcp__cas__memory action=mark_reviewed id=<id>`
 
 ## Decision Guide

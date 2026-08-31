@@ -46,11 +46,14 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use cas::builtins::{
     agent_catalog_for_harness, skill_catalog_for_harness, BUILTIN_AGENTS, BUILTIN_SKILLS,
 };
 use cas_mux::SupervisorCli;
+use serde_json::Value;
+use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
 // Flavors
@@ -702,6 +705,175 @@ fn builtin_flavors_stay_content_identical_after_normalization() {
         failures.len(),
         compared,
         failures.join("\n\n")
+    );
+}
+
+/// The files checked into the cas-src root are the committed projections that
+/// keep the authoring checkout clean after `cas update`. Skills are deliberately
+/// different: the operator directive makes every project skill a generated,
+/// ignored projection, including database-backed `cas-*` skills with no
+/// embedded source such as `cas-seo-expert`.
+#[test]
+fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
+    let root = repo_root();
+
+    for builtin in BUILTIN_AGENTS {
+        let path = root.join(".claude").join(builtin.path);
+        let actual = fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!("missing root Claude projection {}: {error}", path.display())
+        });
+        assert_eq!(
+            actual,
+            builtin.content,
+            "root Claude projection {} diverged from its embedded template",
+            path.display()
+        );
+    }
+    for builtin in cas::builtins::CODEX_BUILTIN_AGENTS {
+        let path = root.join(".codex").join(builtin.path);
+        let actual = fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!("missing root Codex projection {}: {error}", path.display())
+        });
+        assert_eq!(
+            actual,
+            builtin.content,
+            "root Codex projection {} diverged from its embedded template",
+            path.display()
+        );
+    }
+
+    // Generate the current project-level settings and CLAUDE.md block in an
+    // isolated project. Keeping this behavioral avoids duplicating the large
+    // hook JSON and the managed block's prose in the drift test itself.
+    let fixture = TempDir::new().expect("temporary projection fixture");
+    let project = fixture.path().join("project");
+    let home = fixture.path().join("home");
+    let xdg = fixture.path().join("xdg");
+    fs::create_dir_all(project.join(".claude")).expect("create fixture Claude dir");
+    fs::create_dir_all(&home).expect("create fixture home");
+    fs::create_dir_all(&xdg).expect("create fixture XDG dir");
+    let init = Command::new(cas::test_paths::cas_binary())
+        .current_dir(&project)
+        .args(["--json", "init", "--yes", "--no-integrations"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+        .env("CAS_SKIP_FACTORY_TOOLING", "1")
+        .env_remove("CAS_ROOT")
+        .env_remove("CAS_CLOUD_TOKEN")
+        .env_remove("CAS_FACTORY_MODE")
+        .env_remove("CAS_FACTORY_SESSION")
+        .output()
+        .expect("run source-built cas initializer");
+    assert!(
+        init.status.success(),
+        "source-built cas init failed (status {:?}): {}",
+        init.status,
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let generated_settings: Value = serde_json::from_str(
+        &fs::read_to_string(project.join(".claude/settings.json"))
+            .expect("generated settings.json"),
+    )
+    .expect("generated settings JSON");
+    let root_settings: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".claude/settings.json")).expect("root settings.json"),
+    )
+    .expect("root settings JSON");
+
+    for key in ["hooks", "statusLine"] {
+        assert_eq!(
+            root_settings.get(key),
+            generated_settings.get(key),
+            "root .claude/settings.json managed key {key:?} diverged"
+        );
+    }
+    let generated_permissions = generated_settings
+        .pointer("/permissions/allow")
+        .and_then(Value::as_array)
+        .expect("generated Cassy permission list");
+    let root_permissions = root_settings
+        .pointer("/permissions/allow")
+        .and_then(Value::as_array)
+        .expect("root Cassy permission list");
+    for permission in generated_permissions {
+        assert!(
+            root_permissions.contains(permission),
+            "root .claude/settings.json is missing managed permission {permission}"
+        );
+    }
+    assert_eq!(
+        root_settings.get("enableArtifact"),
+        Some(&Value::Bool(false)),
+        "root .claude/settings.json must retain the managed enableArtifact=false key"
+    );
+
+    let root_claude = fs::read_to_string(root.join("CLAUDE.md")).expect("root CLAUDE.md");
+    let generated_claude =
+        fs::read_to_string(project.join("CLAUDE.md")).expect("generated CLAUDE.md");
+    fn managed_block(content: &str) -> &str {
+        let begin = content
+            .find("<!-- CAS:BEGIN")
+            .expect("CLAUDE.md managed block begin marker");
+        let end_marker = "<!-- CAS:END -->";
+        let end = content[begin..]
+            .find(end_marker)
+            .map(|offset| begin + offset + end_marker.len())
+            .expect("CLAUDE.md managed block end marker");
+        &content[begin..end]
+    }
+    assert_eq!(
+        managed_block(&root_claude),
+        managed_block(&generated_claude),
+        "root CLAUDE.md managed block diverged from the generated template"
+    );
+
+    let gitignore = fs::read_to_string(root.join(".gitignore")).expect("root .gitignore");
+    assert!(
+        gitignore
+            .lines()
+            .any(|line| line.trim() == "/.claude/skills/*"),
+        ".gitignore must ignore the complete project Claude skills tree"
+    );
+    assert!(
+        !gitignore
+            .lines()
+            .any(|line| line.trim_start().starts_with("!") && line.contains(".claude/skills/")),
+        ".gitignore must not re-include a project Claude skill"
+    );
+    for path in [
+        ".claude/skills/cas/SKILL.md",
+        ".claude/skills/cas-servers/SKILL.md",
+        ".claude/skills/cas-seo-expert/SKILL.md",
+    ] {
+        let check = Command::new("git")
+            .current_dir(&root)
+            .args(["check-ignore", "--no-index", "--", path])
+            .output()
+            .expect("run git check-ignore");
+        assert!(
+            check.status.success(),
+            "project skill path {path} is not covered by .gitignore: {}",
+            String::from_utf8_lossy(&check.stdout)
+        );
+    }
+    let tracked_skills = Command::new("git")
+        .current_dir(&root)
+        .args(["ls-files", "--", ".claude/skills"])
+        .output()
+        .expect("list tracked project skills");
+    assert!(
+        tracked_skills.status.success(),
+        "git ls-files failed: {}",
+        String::from_utf8_lossy(&tracked_skills.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&tracked_skills.stdout)
+            .trim()
+            .is_empty(),
+        "Cassy project skills must not remain tracked: {}",
+        String::from_utf8_lossy(&tracked_skills.stdout)
     );
 }
 

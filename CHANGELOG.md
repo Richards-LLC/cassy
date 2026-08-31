@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.7.4] - 2026-08-31
+
+### Changed
+- Curated memories with importance at least 0.9 or positive helpful feedback
+  stay in the working tier during decay, and reading a cold or archived memory
+  brings it back to working; `[memory.decay]` settings and doctor counters make
+  the policy visible.
+- Legacy search-index inspection counts metadata without loading every stored
+  document, so doctor and daemon checks are fast even with stranded entries.
+- Tantivy indexes now use versioned paths; schema mismatches preserve the old
+  directory and explicit reindexing migrates or quarantines it safely.
+
 ## [3.7.3] - 2026-08-31
 
 ### Fixed
@@ -1566,7 +1578,8 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 ### Added
 - Initial stable release with core functionality.
 
-[Unreleased]: https://github.com/Richards-LLC/cassy/compare/v3.7.3...HEAD
+[Unreleased]: https://github.com/Richards-LLC/cassy/compare/v3.7.4...HEAD
+[3.7.4]: https://github.com/Richards-LLC/cassy/compare/v3.7.3...v3.7.4
 [3.7.3]: https://github.com/Richards-LLC/cassy/compare/v3.7.2...v3.7.3
 [3.7.2]: https://github.com/Richards-LLC/cassy/compare/v3.7.1...v3.7.2
 [3.7.1]: https://github.com/Richards-LLC/cassy/compare/v3.7.0...v3.7.1

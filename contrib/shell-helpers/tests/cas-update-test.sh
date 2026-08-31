@@ -395,6 +395,62 @@ test_native_project_refresh_delegation() {
   rm -rf "$tmp"
 }
 
+test_turnover_precedes_native_project_refresh() {
+  local tmp out events
+  tmp="$(new_fixture)"; out="$tmp/out"; events="$tmp/events"
+  if (
+    export HOME="$tmp/home" CAS_INSTALL="$tmp/bin/cas" CAS_PROJECT_ROOTS="$tmp/home"
+    export CAS_UPDATE_PROC_ROOT="$tmp/proc" CAS_UPDATE_SOURCE_ONLY=1
+    export CAS_UPDATE_SESSIONS_DIR="$tmp/home/.cas/sessions"
+    export CAS_UPDATE_SERVER_REGISTRY_ROOTS="$tmp/registry"
+    export CAS_UPDATE_EVENT_LOG="$events"
+    source "$helper"
+    turnover_old_processes() { printf 'turnover\n' >>"$CAS_UPDATE_EVENT_LOG"; }
+    migrate_host_db() { printf 'host-migration\n' >>"$CAS_UPDATE_EVENT_LOG"; }
+    sync_projects() { printf 'project-refresh\n' >>"$CAS_UPDATE_EVENT_LOG"; }
+    sync_user_builtins() { printf 'user-refresh\n' >>"$CAS_UPDATE_EVENT_LOG"; }
+    print_summary() { :; }
+    cleanup() { :; }
+    main --sync-only --projects "$tmp/home"
+  ) >"$out" 2>&1 \
+    && [ "$(cat "$events")" = $'turnover\nhost-migration\nproject-refresh\nuser-refresh' ]; then
+    pass 'runtime turnover completes before the native project refresh begins'
+  else
+    fail 'runtime turnover completes before the native project refresh begins'
+  fi
+  rm -rf "$tmp"
+}
+
+test_stale_turnover_is_reported_before_project_refresh() {
+  local tmp out events
+  tmp="$(new_fixture)"; out="$tmp/out"; events="$tmp/events"
+  if (
+    export HOME="$tmp/home" CAS_INSTALL="$tmp/bin/cas" CAS_PROJECT_ROOTS="$tmp/home"
+    export CAS_UPDATE_PROC_ROOT="$tmp/proc" CAS_UPDATE_SOURCE_ONLY=1
+    export CAS_UPDATE_SESSIONS_DIR="$tmp/home/.cas/sessions"
+    export CAS_UPDATE_SERVER_REGISTRY_ROOTS="$tmp/registry"
+    export CAS_UPDATE_EVENT_LOG="$events"
+    source "$helper"
+    ensure_state_files; capture_installed_identity
+    printf '401|start|hash|cas serve|none|none|mcp-client-managed|restart\n' >"$OLD_PROCESS_FILE"
+    turnover_old_processes() {
+      record_turnover 401 'STALE SURVIVOR after SIGKILL' mcp-client-managed none none 'cas serve' restart
+      return 1
+    }
+    report_stale_turnover_processes
+    sync_projects() { printf 'project-refresh\n' >>"$CAS_UPDATE_EVENT_LOG"; }
+    sync_projects
+  ) >"$out" 2>&1 \
+    && assert_contains "$out" 'PID 401' \
+    && assert_contains "$out" 'search-index repair will continue' \
+    && assert_contains "$events" 'project-refresh'; then
+    pass 'a stale runtime is named while project search repair remains scheduled'
+  else
+    fail 'a stale runtime is named while project search repair remains scheduled'
+  fi
+  rm -rf "$tmp"
+}
+
 test_installer() {
   local tmp
   tmp="$(mktemp -d -t cas-update-install.XXXXXX)"
@@ -448,6 +504,8 @@ test_dry_run_and_opt_out
 test_stale_survivor_is_nonzero
 test_no_process_and_flag_semantics
 test_native_project_refresh_delegation
+test_turnover_precedes_native_project_refresh
+test_stale_turnover_is_reported_before_project_refresh
 test_installer
 test_updater_ancestry_is_protected
 test_main_exit_and_help

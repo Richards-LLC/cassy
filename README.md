@@ -173,10 +173,10 @@ Knowledge stays local-first: the SQLite metadata and markdown bodies are the sou
 # Install (Linux x86_64 or macOS Apple Silicon)
 curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 
-# Initialize in your project — writes .mcp.json, .claude/settings.json hooks,
-# .codex config, and syncs the builtin skills/agents
+# Complete the machine setup and initialize this project — login, pairing,
+# hub service, optional Viktor, hooks, builtins, and cloud sync are guided here
 cd your-project
-cas init
+cas setup --project "$PWD"
 
 # Check the install
 cas doctor
@@ -248,6 +248,7 @@ cas claude|codex|grok # choose the supervisor harness (all factory flags pass th
 cas claude login alt  # isolate login to ~/.claude-alt (main stays untouched)
 cas codex login alt   # isolate login to ~/.codex-alt (main stays untouched)
 cas open              # interactive project picker
+cas setup             # guided machine setup; optionally pass --project DIR
 cas init              # initialize Cassy in the current project
 cas serve             # run the MCP server
 cas doctor            # diagnostics (see below)

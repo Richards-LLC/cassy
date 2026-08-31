@@ -52,13 +52,16 @@ Then open a new terminal (or `source ~/.zshenv`) and confirm:
 cas --version
 ```
 
-Initialize a project and verify it before configuring any integrations:
+Complete the guided machine setup, initialize a project, and verify it:
 
 ```bash
-cd /path/to/your/repo
-cas init
+cas setup --project /path/to/your/repo
 cas doctor
 ```
+
+`cas setup` is idempotent: rerunning it reports the environment, login, pairing,
+hub service, optional Viktor key, and project status without repeating completed
+work. Use `cas setup --dry-run` to inspect the fresh-machine plan first.
 
 After a binary update, one `cas update` refreshes every discovered local Cassy
 project: schema, generated files and builtins, team membership, then cloud sync
@@ -97,7 +100,7 @@ administrator needs to confirm that the account email and team are correct.
 
 - `cas` binary built from your fork at `~/.local/bin/cas`
 - Claude Code installed and configured to talk to `cas` over MCP
-- A project initialized with `cas init`
+- A project initialized with `cas setup --project /path/to/your/repo`
 - The Cassy factory TUI launching successfully
 - A one-liner upgrade workflow (`git pull && cargo build && install …`)
 
@@ -306,12 +309,16 @@ Then in Claude Code, run `/mcp` — `cas` should appear and connect within ~1 se
 
 ---
 
-## Step 9 — Initialize Cassy in a project
+## Step 9 — Complete Cassy setup in a project
 
 ```bash
-cd /path/to/your/repo
-cas init
+cas setup --project /path/to/your/repo
 ```
+
+The setup command guides the machine-level login, pairing, hub service, and
+optional integrations before initializing and syncing the first project. It is
+safe to rerun after an interrupted setup. Use `cas init` directly only when you
+want the lower-level project initialization step by itself.
 
 This creates a `.cas/` directory with `cas.db` (SQLite for memories/tasks/rules/skills) and a `config.toml`. It also writes a starter `.claude/` directory with built-in skills, agents, and settings.
 

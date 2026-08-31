@@ -201,6 +201,68 @@ async fn task_focused_context_surfaces_preferences_and_task_content_matches() {
 }
 
 #[tokio::test]
+async fn task_focused_context_defaults_to_configured_context_limit() {
+    let (temp, core) = setup_cas();
+    let service = CasService::new(core.clone(), None);
+    let cas_root = temp.path().join(".cas");
+    std::fs::write(cas_root.join("config.toml"), "[hooks]\ncontext_limit = 3\n").unwrap();
+
+    let task_id = extract_task_id(&extract_text(
+        core.cas_task_create(Parameters(TaskCreateRequest {
+            depth: None,
+            title: "Configured context limit task".to_string(),
+            description: Some("Exercise the configured context limit".to_string()),
+            priority: 1,
+            task_type: "task".to_string(),
+            labels: None,
+            notes: None,
+            blocked_by: None,
+            design: None,
+            acceptance_criteria: None,
+            external_ref: None,
+            assignee: None,
+            demo_statement: None,
+            execution_note: None,
+            epic: None,
+        }))
+        .await
+        .unwrap(),
+    ))
+    .unwrap()
+    .to_string();
+
+    let store = open_store(&cas_root).unwrap();
+    for index in 0..5 {
+        store
+            .add(&Entry::new(
+                format!("configured-limit-{index}"),
+                format!("Configured context limit candidate {index}"),
+            ))
+            .unwrap();
+    }
+
+    let request: SearchContextRequest = serde_json::from_value(json!({
+        "action": "context",
+        "task_id": task_id
+    }))
+    .unwrap();
+    let text = extract_text(service.search(Parameters(request)).await.unwrap());
+    assert!(text.contains("## Helpful Memories (3 memories"), "{text}");
+    let helpful_section = text
+        .split_once("## Helpful Memories")
+        .and_then(|(_, section)| section.split_once("\n## ").map(|(section, _)| section))
+        .unwrap_or_default();
+    assert_eq!(
+        helpful_section
+            .lines()
+            .filter(|line| line.contains("Configured context limit candidate"))
+            .count(),
+        3,
+        "task-focused context must use hooks.context_limit: {text}"
+    );
+}
+
+#[tokio::test]
 async fn test_stats() {
     let (_temp, service) = setup_cas();
 
@@ -320,6 +382,29 @@ async fn stats_reports_retrieval_funnel_with_results_denominator() {
         ),
         "{text}"
     );
+}
+
+#[tokio::test]
+async fn stats_reports_retrieval_store_errors_as_unavailable_errors() {
+    let (temp, service) = setup_cas();
+    SqliteRetrievalStore::open(&temp.path().join(".cas")).unwrap();
+    let db_path = temp.path().join(".cas/cas.db");
+    let db = rusqlite::Connection::open(db_path).unwrap();
+    db.execute(
+        "ALTER TABLE retrieval_query_results RENAME TO retrieval_query_results_broken",
+        [],
+    )
+    .unwrap();
+    db.execute("CREATE TABLE retrieval_query_results (wrong TEXT)", [])
+        .unwrap();
+
+    let result = service.cas_stats().await.unwrap();
+    let text = extract_text(result);
+    assert!(
+        text.contains("Retrieval telemetry unavailable:"),
+        "store errors must be visible: {text}"
+    );
+    assert!(!text.contains("No retrieval results recorded"), "{text}");
 }
 
 #[tokio::test]

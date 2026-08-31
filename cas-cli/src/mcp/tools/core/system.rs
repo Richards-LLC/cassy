@@ -260,47 +260,52 @@ impl CasCore {
             .filter(|s| s.status == SkillStatus::Enabled)
             .count();
 
-        let (retrieval_groups, rolling_precision) = SqliteRetrievalStore::open(&self.cas_root)
-            .ok()
-            .map(|retrieval_store| {
-                (
-                    retrieval_store.aggregate().unwrap_or_default(),
-                    retrieval_store.rolling_injected_precision(30).ok(),
-                )
-            })
-            .unwrap_or_default();
-        let precision_display = rolling_precision
-            .as_ref()
-            .and_then(|precision| {
-                precision.precision.map(|value| {
-                    format!(
-                        "{:.1}% ({}/{} judge labels)",
-                        value * 100.0,
-                        precision.helpful,
-                        precision.judged
-                    )
-                })
-            })
-            .unwrap_or_else(|| "unavailable (0 judge labels)".to_string());
-        let mut retrieval_funnel = format!(
-            "Retrieval funnel (denominator: results; rolling injected precision, 30d: {precision_display})"
-        );
-        if retrieval_groups.is_empty() {
-            retrieval_funnel.push_str("\n  No retrieval results recorded");
-        } else {
-            for group in &retrieval_groups {
-                retrieval_funnel.push_str(&format!(
-                    "\n  {}/{} / {}: results={} -> resolved={} -> used/body-pulled={} -> helpful={}",
-                    group.document_type,
-                    group.query_family,
-                    group.ranking_policy,
-                    group.results,
-                    group.resolved_results,
-                    group.used_results,
-                    group.helpful_results,
-                ));
+        let retrieval_funnel = match SqliteRetrievalStore::open(&self.cas_root) {
+            Err(error) => format!("Retrieval telemetry unavailable: {error}"),
+            Ok(retrieval_store) => {
+                match (
+                    retrieval_store.aggregate(),
+                    retrieval_store.rolling_injected_precision(30),
+                ) {
+                    (Err(error), _) | (_, Err(error)) => {
+                        format!("Retrieval telemetry unavailable: {error}")
+                    }
+                    (Ok(retrieval_groups), Ok(rolling_precision)) => {
+                        let precision_display = rolling_precision
+                            .precision
+                            .map(|value| {
+                                format!(
+                                    "{:.1}% ({}/{} judge labels)",
+                                    value * 100.0,
+                                    rolling_precision.helpful,
+                                    rolling_precision.judged
+                                )
+                            })
+                            .unwrap_or_else(|| "unavailable (0 judge labels)".to_string());
+                        let mut funnel = format!(
+                            "Retrieval funnel (denominator: results; rolling injected precision, 30d: {precision_display})"
+                        );
+                        if retrieval_groups.is_empty() {
+                            funnel.push_str("\n  No retrieval results recorded");
+                        } else {
+                            for group in &retrieval_groups {
+                                funnel.push_str(&format!(
+                                    "\n  {}/{} / {}: results={} -> resolved={} -> used/body-pulled={} -> helpful={}",
+                                    group.document_type,
+                                    group.query_family,
+                                    group.ranking_policy,
+                                    group.results,
+                                    group.resolved_results,
+                                    group.used_results,
+                                    group.helpful_results,
+                                ));
+                            }
+                        }
+                        funnel
+                    }
+                }
             }
-        }
+        };
 
         let output = format!(
             "Cassy Statistics\n\

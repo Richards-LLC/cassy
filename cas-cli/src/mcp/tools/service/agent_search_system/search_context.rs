@@ -166,10 +166,15 @@ impl CasService {
         &self,
         req: SearchContextRequest,
     ) -> Result<CallToolResult, McpError> {
+        let limit = req.limit.unwrap_or_else(|| {
+            crate::config::Config::load(&self.inner.cas_root)
+                .unwrap_or_default()
+                .context_limit()
+        });
         if let Some(task_id) = req.task_id.as_deref() {
             return self
                 .inner
-                .cas_context_for_task(task_id, req.limit.unwrap_or(5), req.max_tokens)
+                .cas_context_for_task(task_id, limit, req.max_tokens)
                 .await;
         }
 

@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use cas::hooks::build_context_with_token_budget;
 use cas::types::{Entry, EntryType};
-use cas_core::hooks::context::{ContextStores, build_context_with_stores};
+use cas_core::hooks::context::{ContextStores, SurfacedItemCallback, build_context_with_stores};
 use cas_core::hooks::{DefaultHooksConfig, HookInput};
 use cas_core::memory::{contamination_patterns, find_contaminated_entries};
 use cas_store::{
@@ -11,6 +11,7 @@ use cas_store::{
 use cas_types::{MemoryTier, Rule, RuleStatus, Session, SessionOutcome, Skill, SkillStatus};
 use rusqlite::Connection;
 use std::fs;
+use std::sync::{Arc, Mutex};
 
 fn session_start_input() -> HookInput {
     HookInput {
@@ -153,6 +154,47 @@ fn cli_session_start_telemeters_helpful_memories_with_trace_parity() {
             .enumerate()
             .map(|(rank, id)| (id.to_string(), "entry".to_string(), rank))
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn helpful_memory_surface_callback_uses_literal_lowercase_memory_tag() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+    store
+        .add(&Entry::new(
+            "lowercase-memory-tag".to_string(),
+            "Memory tag contract test".to_string(),
+        ))
+        .unwrap();
+
+    let surfaced = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let surfaced_for_callback = Arc::clone(&surfaced);
+    let callback: SurfacedItemCallback = Box::new(move |id: &str, item_type: &str, _preview| {
+        surfaced_for_callback
+            .lock()
+            .unwrap()
+            .push((id.to_string(), item_type.to_string()));
+    });
+    let stores = ContextStores {
+        project_store: Some(&store),
+        ..ContextStores::empty()
+    };
+
+    build_context_with_stores(
+        &session_start_input(),
+        &stores,
+        &DefaultHooksConfig::new(),
+        5,
+        Some(&callback),
+        "mcp__cas__",
+    )
+    .unwrap();
+
+    assert_eq!(
+        surfaced.lock().unwrap().as_slice(),
+        &[("lowercase-memory-tag".to_string(), "memory".to_string())]
     );
 }
 

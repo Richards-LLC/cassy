@@ -580,7 +580,7 @@ pub fn helpful_memories_ranking(
         // "related" item_type is the separate "Related to Current Work"
         // section, which only exists for the hybrid scorer and is scored
         // separately if it is ever wired into this harness.
-        if item_type == "Memory"
+        if item_type.eq_ignore_ascii_case("memory")
             && let Ok(mut ids) = sink.lock()
         {
             ids.push(id.to_string());
@@ -906,7 +906,7 @@ impl<'a> ProductionRunner<'a> {
         let surfaced: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&surfaced);
         let callback: SurfacedItemCallback = Box::new(move |id: &str, item_type: &str, _preview| {
-            if item_type == "Memory"
+            if item_type.eq_ignore_ascii_case("memory")
                 && let Ok(mut ids) = sink.lock()
             {
                 ids.push(id.to_string());

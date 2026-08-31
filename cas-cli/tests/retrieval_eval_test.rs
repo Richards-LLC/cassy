@@ -370,12 +370,14 @@ fn the_production_path_ranks_differently_from_the_basic_fallback() {
 }
 
 #[test]
-fn a_fresh_session_is_query_blind_and_the_number_says_so() {
-    // The supervisor's addition: a fresh session in a project has no
-    // in-progress task and no session_files.json, and `has_content()` excludes
-    // cwd (cas-core/src/hooks/context/mod.rs:113). If that collapses production
-    // to a single ranking across all cases, THAT is the concrete cas-3b80
-    // defect and it must be stated as a number, not inferred.
+fn a_fresh_session_is_query_aware_and_the_number_says_so() {
+    // This test was born asserting the defect: a fresh session had no
+    // in-progress task and no session_files.json, `has_content()` excluded cwd,
+    // and production collapsed to ONE ranking for all 56 cases (cas-b06c).
+    // cas-3b80 fixed that — a fresh session now ranks on the carried-forward
+    // prompt, the archived previous-session files, project identity and branch
+    // — so the assertion is inverted rather than deleted: the number that used
+    // to prove the defect now guards the fix.
     let fixture = fixture();
     let dir = tempfile::tempdir().expect("tempdir");
     let corpus = EvalCorpus::materialize_with_index(&fixture, dir.path(), TierMode::AllWorking)
@@ -385,11 +387,11 @@ fn a_fresh_session_is_query_blind_and_the_number_says_so() {
     let seeded = distinct_rankings(&fixture, &corpus, QueryMode::SeededTask);
     println!("distinct top-5 rankings — fresh_session: {fresh}, seeded_task: {seeded}");
 
-    assert_eq!(
-        fresh, 1,
-        "a fresh session was expected to be query-blind (one ranking for all \
-         {} cases). It produced {fresh}. If a fix landed, update this test and \
-         re-baseline — do not delete it.",
+    assert!(
+        fresh > 1,
+        "a fresh session must rank on what the session is about; {fresh} \
+         distinct rankings across {} cases means it collapsed back to the \
+         query-blind Basic list. Re-baseline only after finding out why.",
         fixture.cases.len()
     );
     assert!(
@@ -416,9 +418,10 @@ fn the_production_scorer_state_is_reported_not_guessed() {
     );
     assert_eq!(
         retrieval_eval::probe_production_scorer_state(&with_index, case, QueryMode::FreshSession),
-        ProductionScorerState::QueryBlindEarlyReturn,
-        "scorer.rs:123 early-returns pure Basic when has_content() is false — \
-         no contextual_overlap_bonus is applied on that path"
+        ProductionScorerState::QueryAwareWithLexicalIndex,
+        "since cas-3b80 a fresh session carries the last prompt, the previous \
+         session's files, project identity and branch, so has_content() holds \
+         and scorer.rs:123 no longer early-returns onto query-blind Basic"
     );
 
     // A MISSING index is not a hard failure, and this is the part the task

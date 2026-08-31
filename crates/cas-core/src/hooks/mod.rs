@@ -46,7 +46,8 @@ pub use config::{DefaultHooksConfig, HooksConfig, PlanModeConfig};
 pub use context::{
     BasicContextScorer, ContextItem, ContextItemType, ContextQuery, ContextScorer, ContextStats,
     ContextStores, RuleMatchCache, SurfacedItemCallback, build_context_with_stores,
-    build_plan_context_with_stores, estimate_tokens, rule_matches_path, token_display, truncate,
+    build_plan_context_with_stores, estimate_tokens, rule_matches_path, select_task_titles,
+    token_display, truncate,
 };
 pub use transcript::{
     ContentBlock, TranscriptEntry, TranscriptMessage, TranscriptMetadata,

@@ -110,8 +110,14 @@ pub(crate) fn current_agent_id(input: &HookInput) -> String {
     }
 }
 
-/// Clear session files (called on session end)
+/// Clear session files (called on Stop and session end)
+///
+/// The list is archived first. Stop fires after every assistant turn, so
+/// without the archive `get_session_files` was empty at essentially every
+/// SessionStart, and the file signal in the context query never existed
+/// (cas-3b80).
 pub(crate) fn clear_session_files(cas_root: &std::path::Path) {
+    super::session_query::archive_session_files(cas_root);
     let session_files_path = cas_root.join("session_files.json");
     let _ = std::fs::remove_file(&session_files_path);
 }

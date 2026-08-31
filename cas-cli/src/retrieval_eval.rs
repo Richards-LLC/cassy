@@ -749,6 +749,47 @@ impl Drop for SeededTask<'_> {
     }
 }
 
+/// Installs the case's prompt as the project's most recently captured prompt.
+///
+/// Production carries the last UserPromptSubmit forward into the SessionStart
+/// `ContextQuery` (cas-3b80): SessionStart's own `user_prompt` is always
+/// `None`, so the previous session's prompt is the only stated intent a
+/// starting session has. Every real prompt is already written to the prompt
+/// store for blame attribution, so any project with history has one — a corpus
+/// without one would measure a state the field does not have.
+///
+/// The seeded prompt is the case's **own** prompt, i.e. perfect topic
+/// continuity between the previous session and this one. Read the resulting
+/// precision as the upper bound of what carry-forward can buy; the real gain is
+/// bounded by how related consecutive sessions actually are. The measurement
+/// that does *not* rest on that assumption is `distinct_rankings`, which only
+/// asks whether the ranking responds to the session at all.
+///
+/// No `Drop`: `PromptStore` has no delete, and none is needed. Each install
+/// writes a uniquely-identified row stamped `Utc::now()`, and production reads
+/// `list_recent(1)`, so the row installed for the case being ranked is always
+/// the one read.
+struct SeededPrompt;
+
+impl SeededPrompt {
+    fn install(cas_dir: &Path, case: &EvalCase) -> Self {
+        if let Ok(store) = crate::store::open_prompt_store(cas_dir) {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            let prompt = cas_types::Prompt::new(
+                format!("prompt-eval-{}-{unique}", case.case_id),
+                format!("retrieval-eval-{}", case.case_id),
+                "retrieval-eval-agent".to_string(),
+                case.user_prompt.clone(),
+            );
+            let _ = store.add(&prompt);
+        }
+        Self
+    }
+}
+
 /// The hook input a real SessionStart carries.
 ///
 /// Note `user_prompt: None` — `handle_session_start` never populates it; that
@@ -822,6 +863,7 @@ pub fn helpful_memories_production_ranking(
 ) -> Result<Vec<String>, EvalError> {
     let _env = NeutralHookEnv::acquire(corpus.cas_dir());
     let _task = SeededTask::install(corpus.cas_dir(), case, query_mode)?;
+    let _prompt = SeededPrompt::install(corpus.cas_dir(), case);
 
     let rendered = crate::hooks::build_context(
         &production_hook_input(case),
@@ -899,6 +941,7 @@ impl<'a> ProductionRunner<'a> {
 
         let _env = NeutralHookEnv::acquire(self.corpus.cas_dir());
         let _task = SeededTask::install(self.corpus.cas_dir(), case, query_mode)?;
+        let _prompt = SeededPrompt::install(self.corpus.cas_dir(), case);
 
         let task_store = crate::store::open_task_store_local(self.corpus.cas_dir())
             .map_err(|e| EvalError::Store(format!("open task store: {e}")))?;
@@ -913,14 +956,26 @@ impl<'a> ProductionRunner<'a> {
             }
         });
 
+        let input = production_hook_input(case);
+        // The same session facts `hooks/context.rs` assembles — carried prompt,
+        // recent files, branch, reading agent. Read through the production
+        // helper rather than replicated, so the equivalence pin cannot drift.
+        let session = crate::hooks::handlers::session_query::session_query_context(
+            self.corpus.cas_dir(),
+            &input,
+        );
+
         let mut stores = ContextStores::empty();
         stores.project_store = Some(&self.store as &dyn Store);
         stores.task_store = Some(task_store.as_ref());
         stores.entry_scorer = Some(self.scorer.as_ref());
-        stores.recent_files = crate::hooks::handlers::get_session_files(self.corpus.cas_dir());
+        stores.recent_files = session.recent_files;
+        stores.carried_prompt = session.carried_prompt;
+        stores.git_branch = session.git_branch;
+        stores.agent_id = session.agent_id;
 
         cas_core::hooks::context::build_context_with_stores(
-            &production_hook_input(case),
+            &input,
             &stores,
             &self.config,
             self.limit,
@@ -1192,21 +1247,35 @@ pub fn probe_production_scorer_state(
     let Ok(_task) = SeededTask::install(corpus.cas_dir(), case, query_mode) else {
         return ProductionScorerState::ScorerUnavailable;
     };
+    let _prompt = SeededPrompt::install(corpus.cas_dir(), case);
 
     if crate::hooks::scorer::HybridContextScorer::open_with_graph(corpus.cas_dir()).is_err() {
         return ProductionScorerState::ScorerUnavailable;
     }
 
+    let input = production_hook_input(case);
+    let session =
+        crate::hooks::handlers::session_query::session_query_context(corpus.cas_dir(), &input);
     let task_titles: Vec<String> = crate::store::open_task_store_local(corpus.cas_dir())
         .ok()
         .and_then(|ts| ts.list(Some(TaskStatus::InProgress)).ok())
-        .map(|tasks| tasks.iter().map(|t| t.title.clone()).collect())
+        .map(|tasks| {
+            cas_core::hooks::context::select_task_titles(&tasks, session.agent_id.as_deref())
+        })
         .unwrap_or_default();
+    let task_titles_present = !task_titles.is_empty();
     let query = ContextQuery {
         task_titles,
         cwd: case.cwd.clone(),
-        user_prompt: None,
-        recent_files: crate::hooks::handlers::get_session_files(corpus.cas_dir()),
+        // Production's fallback rule: the carried prompt is used only when no
+        // in-progress task states the topic (build_start.rs).
+        user_prompt: if task_titles_present {
+            None
+        } else {
+            session.carried_prompt.clone()
+        },
+        recent_files: session.recent_files.clone(),
+        git_branch: session.git_branch.clone(),
     };
     if !query.has_content() || query.to_query_string().trim().is_empty() {
         return ProductionScorerState::QueryBlindEarlyReturn;

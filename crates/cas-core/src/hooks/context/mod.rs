@@ -47,9 +47,64 @@ pub struct ContextQuery {
     pub user_prompt: Option<String>,
     /// Recent file paths being worked on
     pub recent_files: Vec<String>,
+    /// Checked-out git branch, if the session is in a repository.
+    ///
+    /// A fresh session usually has no in-progress task, no prompt and no
+    /// session files, but it nearly always has a branch — and in a factory or
+    /// epic workflow the branch name is the cheapest honest statement of what
+    /// the session is about.
+    pub git_branch: Option<String>,
+}
+
+/// Branch-name segments that say nothing about the work.
+///
+/// A branch contributes its topical segments to the query; `epic`, `factory`
+/// and `main` are workflow vocabulary shared by every branch in the repo, so
+/// they would only add noise that the BM25 channel has to rank around.
+const GENERIC_BRANCH_TERMS: &[&str] = &[
+    "main", "master", "trunk", "develop", "dev", "epic", "factory", "feature", "feat", "fix",
+    "bugfix", "hotfix", "chore", "wip", "release", "staging", "prod", "test", "temp", "tmp",
+    "branch", "head", "detached",
+];
+
+/// Pick the task titles that should seed a session's context query.
+///
+/// When the reader's identity is known, only that agent's own in-progress
+/// tasks are used. cas-b06c measured the alternative on a live factory: with
+/// four concurrent lanes, every worker's SessionStart query was a soup of four
+/// unrelated task titles, so each lane's memory ranking was partly driven by
+/// work it was not doing. Project-wide titles remain the fallback when the
+/// reader owns nothing in progress — a supervisor or an operator session
+/// should still get task-shaped context rather than none.
+pub fn select_task_titles(tasks: &[Task], agent_id: Option<&str>) -> Vec<String> {
+    if let Some(agent_id) = agent_id.filter(|id| !id.is_empty()) {
+        let own: Vec<String> = tasks
+            .iter()
+            .filter(|task| task.assignee.as_deref() == Some(agent_id))
+            .map(|task| task.title.clone())
+            .collect();
+        if !own.is_empty() {
+            return own;
+        }
+    }
+    tasks.iter().map(|task| task.title.clone()).collect()
 }
 
 impl ContextQuery {
+    /// Topical terms contributed by the checked-out branch.
+    fn branch_terms(&self) -> Vec<String> {
+        let Some(branch) = self.git_branch.as_deref() else {
+            return Vec::new();
+        };
+        branch
+            .split(|character: char| !character.is_alphanumeric())
+            .filter(|segment| segment.chars().count() >= 3)
+            .filter(|segment| !segment.chars().all(|c| c.is_ascii_digit()))
+            .map(str::to_lowercase)
+            .filter(|segment| !GENERIC_BRANCH_TERMS.contains(&segment.as_str()))
+            .collect()
+    }
+
     /// Build a search query string from the context
     pub fn to_query_string(&self) -> String {
         let mut parts = Vec::new();
@@ -106,11 +161,37 @@ impl ContextQuery {
             }
         }
 
+        // The branch the session is on, minus workflow vocabulary.
+        parts.extend(self.branch_terms());
+
         parts.join(" ")
     }
 
-    /// Check if the query has meaningful content for semantic search
+    /// Check if the query has meaningful content for relevance scoring.
+    ///
+    /// This is the gate `HybridContextScorer::score_entries` uses to decide
+    /// between query-aware ranking and the query-blind `BasicContextScorer`
+    /// fallback, so it must answer exactly one question: does the assembled
+    /// query carry any term at all? The older form asked a narrower question
+    /// (is there a task, prompt or session file?) and therefore answered "no"
+    /// for a plain operator session, which is how the shipped SessionStart
+    /// ranking came to be identical for all 56 labeled eval contexts (cas-b06c
+    /// measured distinct top-5 = 1). Project identity and branch are weak
+    /// signals, but they are signals, and ranking on them beats ranking on
+    /// nothing.
     pub fn has_content(&self) -> bool {
+        !self.to_query_string().trim().is_empty()
+    }
+
+    /// Whether the query states what the session is *working on*, as opposed to
+    /// merely where it is.
+    ///
+    /// Ranking the memories a session was going to receive anyway is worth
+    /// doing on a weak signal; *adding* a second memory section on one is not.
+    /// This is the older, narrower `has_content()` rule, kept for the
+    /// "Related to Current Work" section so that project identity alone does
+    /// not start injecting up to five extra memories into every session.
+    pub fn has_focused_content(&self) -> bool {
         !self.task_titles.is_empty() || self.user_prompt.is_some() || !self.recent_files.is_empty()
     }
 }
@@ -489,6 +570,16 @@ pub struct ContextStores<'a> {
     pub rule_match_cache: Option<&'a RuleMatchCache>,
     /// Recent files from session (for context query boosting)
     pub recent_files: Vec<String>,
+    /// The last prompt this project saw, carried forward from a previous
+    /// session (SessionStart's own `user_prompt` is always `None` — that field
+    /// belongs to UserPromptSubmit). Used only when the hook input carries no
+    /// prompt of its own.
+    pub carried_prompt: Option<String>,
+    /// Checked-out git branch for the session's cwd, if any.
+    pub git_branch: Option<String>,
+    /// The reading agent's identity, used to scope in-progress task titles to
+    /// the reader's own work instead of every lane in the project.
+    pub agent_id: Option<String>,
 }
 
 impl<'a> ContextStores<'a> {
@@ -507,6 +598,9 @@ impl<'a> ContextStores<'a> {
             entry_scorer: None,
             rule_match_cache: None,
             recent_files: Vec::new(),
+            carried_prompt: None,
+            git_branch: None,
+            agent_id: None,
         }
     }
 

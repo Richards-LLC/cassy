@@ -28,7 +28,6 @@ use cas_store::{
 };
 use cas_types::{Entry, Rule, RuleStatus, Skill, Task, TaskStatus};
 
-use crate::hooks::get_session_files;
 use crate::hooks::scorer::HybridContextScorer;
 
 use std::path::Path;
@@ -145,8 +144,12 @@ pub fn build_context_with_token_budget(
     };
     let rule_cache = RuleMatchCache::build(&all_rules, &input.cwd);
 
-    // Get recent session files for context query boosting
-    let recent_files = get_session_files(cas_root);
+    // What this session knows about itself: recent files (this session's, else
+    // the previous one's), the last prompt the project saw, the checked-out
+    // branch and the reading agent. Without these a SessionStart's
+    // ContextQuery is empty and the Helpful-Memories ranking is the same list
+    // for every session (cas-3b80).
+    let session = crate::hooks::handlers::session_query::session_query_context(cas_root, input);
 
     // Create ContextStores with references to Arc contents
     let stores = ContextStores {
@@ -161,7 +164,10 @@ pub fn build_context_with_token_budget(
         knowledge_store: knowledge_store.as_ref().map(|s| s.as_ref()),
         entry_scorer: scorer_ref,
         rule_match_cache: Some(&rule_cache),
-        recent_files,
+        recent_files: session.recent_files,
+        carried_prompt: session.carried_prompt,
+        git_branch: session.git_branch,
+        agent_id: session.agent_id,
     };
 
     let start_time = std::time::Instant::now();
@@ -618,8 +624,8 @@ pub fn build_plan_context(
     };
     let rule_cache = RuleMatchCache::build(&all_rules, &input.cwd);
 
-    // Get recent session files for context query boosting
-    let recent_files = get_session_files(cas_root);
+    // Same session facts the SessionStart path uses (cas-3b80).
+    let session = crate::hooks::handlers::session_query::session_query_context(cas_root, input);
 
     let stores = ContextStores {
         global_store: None, // Global store removed
@@ -633,7 +639,10 @@ pub fn build_plan_context(
         knowledge_store: knowledge_store.as_ref().map(|s| s.as_ref()),
         entry_scorer: scorer_ref,
         rule_match_cache: Some(&rule_cache),
-        recent_files,
+        recent_files: session.recent_files,
+        carried_prompt: session.carried_prompt,
+        git_branch: session.git_branch,
+        agent_id: session.agent_id,
     };
 
     let (context, _stats) = build_plan_context_with_stores(

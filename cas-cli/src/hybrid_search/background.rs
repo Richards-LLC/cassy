@@ -46,7 +46,7 @@ pub struct BackgroundIndexer {
 impl BackgroundIndexer {
     /// Open a background indexer for the given Cassy directory
     pub fn open(cas_dir: &Path) -> Result<Self> {
-        let index_dir = cas_dir.join("index");
+        let index_dir = crate::hybrid_search::tantivy_index_dir(cas_dir);
         let index = SearchIndex::open(&index_dir)?;
         Ok(Self { index })
     }
@@ -112,7 +112,7 @@ impl BackgroundIndexer {
         }
 
         // Index all entries with single commit
-        let count = self.index.index_entries_batch(entries)?;
+        let count = self.index.index_entries_batch_and_merge(entries)?;
 
         // Mark all entries as indexed
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
@@ -123,8 +123,9 @@ impl BackgroundIndexer {
 
     /// Process a single entry (fallback when batch fails)
     fn process_single(&self, entry: &Entry, store: &dyn Store) -> Result<()> {
-        // Index the entry
-        self.index.index_entry(entry)?;
+        // Keep the fallback on the same merge-completing commit path. A batch
+        // error must not reintroduce one permanent segment per entry.
+        self.index.index_entries_batch_and_merge(std::slice::from_ref(entry))?;
 
         // Mark as indexed
         store.mark_indexed(&entry.id)?;
@@ -146,8 +147,13 @@ impl BackgroundIndexer {
 
 #[cfg(test)]
 mod tests {
+    use crate::hooks::HybridContextScorer;
     use crate::hybrid_search::background::*;
+    use crate::hybrid_search::{DocType, HybridSearch, HybridSearchOptions, SearchOptions};
     use crate::store::mock::MockStore;
+    use crate::store::open_store;
+    use crate::types::MemoryTier;
+    use cas_core::hooks::{ContextQuery, ContextScorer};
     use std::time::Instant;
 
     #[test]
@@ -199,6 +205,118 @@ mod tests {
         // MockStore returns all entries as pending (no updated_at tracking)
         assert_eq!(result.indexed, 2);
         assert!(result.errors.is_empty());
+    }
+
+    /// Regression for cas-bc42: the daemon's pending-entry writer and every
+    /// query reader must resolve the same on-disk Tantivy index.
+    #[test]
+    fn background_only_entry_is_visible_to_hybrid_search() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("create .cas");
+        let store = open_store(&cas_root).expect("store");
+        let entry = Entry {
+            memory_tier: MemoryTier::Working,
+            ..Entry::new(
+                "daemon-only-entry".to_string(),
+                "quasarplum daemon-only indexing regression".to_string(),
+            )
+        };
+        store.add(&entry).expect("add entry");
+
+        let indexer = BackgroundIndexer::open(&cas_root).expect("background indexer");
+        let result = indexer
+            .process_pending(store.as_ref(), &IndexingConfig::default())
+            .expect("process pending");
+        assert_eq!(result.indexed, 1);
+
+        let search = HybridSearch::open(&cas_root).expect("hybrid search");
+        let entries = store.list().expect("entries");
+        let results = search
+            .search(
+                &HybridSearchOptions {
+                    base: SearchOptions {
+                        query: "quasarplum".to_string(),
+                        doc_types: vec![DocType::Entry],
+                        ..Default::default()
+                    },
+                    enable_temporal: false,
+                    enable_graph: false,
+                    ..Default::default()
+                },
+                &entries,
+            )
+            .expect("search");
+
+        assert!(
+            results.iter().any(|result| result.id == entry.id),
+            "daemon-indexed entry must be visible to the reader: {results:?}"
+        );
+        assert!(
+            !cas_root.join("index/meta.json").exists(),
+            "background indexing must not create a second Tantivy root"
+        );
+
+        let scorer = HybridContextScorer::open(&cas_root).expect("helpful-memory scorer");
+        let scored = scorer.score_entries(
+            &entries,
+            &ContextQuery {
+                user_prompt: Some("quasarplum daemon-only".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            scored.first().map(|(entry, _)| entry.id.as_str()),
+            Some(entry.id.as_str()),
+            "Helpful Memories scorer must see the daemon-only document"
+        );
+    }
+
+    #[test]
+    fn constructors_share_the_canonical_tantivy_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cas_root = temp.path().join(".cas");
+        let canonical = crate::hybrid_search::tantivy_index_dir(&cas_root);
+
+        let _background = BackgroundIndexer::open(&cas_root).expect("background indexer");
+        let _reader = HybridSearch::open(&cas_root).expect("hybrid reader");
+
+        assert!(canonical.join("meta.json").exists());
+        assert!(!cas_root.join("index/meta.json").exists());
+    }
+
+    #[test]
+    fn background_batches_wait_for_segment_merges() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("create .cas");
+        let store = open_store(&cas_root).expect("store");
+        let indexer = BackgroundIndexer::open(&cas_root).expect("background indexer");
+        let config = IndexingConfig {
+            batch_size: 1,
+            max_per_run: 1,
+        };
+
+        for ordinal in 0..64 {
+            let entry = Entry::new(
+                format!("segment-{ordinal:03}"),
+                format!("segment merge regression document {ordinal}"),
+            );
+            store.add(&entry).expect("add entry");
+            assert_eq!(
+                indexer
+                    .process_pending(store.as_ref(), &config)
+                    .expect("process one batch")
+                    .indexed,
+                1
+            );
+        }
+
+        let segments = indexer.index().segment_count().expect("segment count");
+        assert!(
+            segments <= 15,
+            "64 one-document daemon batches left {segments} searchable segments"
+        );
     }
 
     /// Test that batch indexing of 100 documents stays within a reasonable bound.

@@ -374,6 +374,11 @@ impl Store for MarkdownStore {
         Ok(())
     }
 
+    fn mark_index_pending_batch(&self, _ids: &[&str]) -> Result<()> {
+        // MarkdownStore doesn't persist indexed_at
+        Ok(())
+    }
+
     fn cas_dir(&self) -> &Path {
         &self.cas_dir
     }

@@ -313,7 +313,7 @@ impl CasCore {
         if let Some(idx) = self.cached_search_index.get() {
             return Ok(idx.clone());
         }
-        let index_dir = self.cas_root.join("index/tantivy");
+        let index_dir = crate::hybrid_search::tantivy_index_dir(&self.cas_root);
         let idx = SearchIndex::open(&index_dir).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to open search index: {e}")),

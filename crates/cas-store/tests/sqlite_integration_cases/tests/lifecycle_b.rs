@@ -326,5 +326,19 @@ fn test_sqlite_store_batch_mark_indexed() {
         );
     }
 
+    store
+        .mark_index_pending_batch(&["batch-001", "batch-003"])
+        .expect("Failed to batch re-queue indexed entries");
+    let pending = store
+        .list_pending_index(100)
+        .expect("Failed to list re-queued entries");
+    assert_eq!(
+        pending.len(),
+        7,
+        "Two indexed entries should be pending again"
+    );
+    assert!(pending.iter().any(|entry| entry.id == "batch-001"));
+    assert!(pending.iter().any(|entry| entry.id == "batch-003"));
+
     store.close().expect("Failed to close store");
 }

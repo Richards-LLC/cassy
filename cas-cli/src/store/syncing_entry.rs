@@ -228,6 +228,11 @@ impl Store for SyncingEntryStore {
         // Note: We don't queue for sync on mark_indexed as it's a local-only flag
     }
 
+    fn mark_index_pending_batch(&self, ids: &[&str]) -> Result<()> {
+        self.inner.mark_index_pending_batch(ids)
+        // Index state is local-only and must not enter the cloud sync queue.
+    }
+
     fn cas_dir(&self) -> &Path {
         self.inner.cas_dir()
     }

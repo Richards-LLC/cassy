@@ -363,6 +363,56 @@ fn test_maintenance_cycle_runs_pruning_and_checkpoint() {
 }
 
 #[test]
+fn daemon_index_cycle_repairs_the_legacy_tantivy_root_before_draining_pending_entries() {
+    use crate::daemon::indexing::run_indexing_cycle;
+    use crate::hybrid_search::{DocType, SearchIndex, SearchOptions};
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().expect("tempdir");
+    let cas_root = temp.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("create .cas");
+    let store = crate::store::open_store(&cas_root).expect("store");
+    let entry = Entry::new(
+        "daemon-repair-entry".to_string(),
+        "daemonrepairquasar legacy root".to_string(),
+    );
+    store.add(&entry).expect("add entry");
+    {
+        let legacy = SearchIndex::open(&cas_root.join("index")).expect("legacy index");
+        legacy.index_entry(&entry).expect("legacy write");
+    }
+    store
+        .mark_indexed(&entry.id)
+        .expect("incorrect indexed flag");
+
+    let result = run_indexing_cycle(&DaemonConfig {
+        cas_root: cas_root.clone(),
+        ..DaemonConfig::default()
+    })
+    .expect("daemon index cycle");
+    assert_eq!(result.indexed, 1);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert!(!cas_root.join("index/meta.json").exists());
+
+    let canonical = SearchIndex::open(&crate::hybrid_search::tantivy_index_dir(&cas_root))
+        .expect("canonical index");
+    let hits = canonical
+        .search(
+            &SearchOptions {
+                query: "daemonrepairquasar".to_string(),
+                doc_types: vec![DocType::Entry],
+                ..Default::default()
+            },
+            &store.list().expect("entries"),
+        )
+        .expect("canonical search");
+    assert_eq!(
+        hits.first().map(|hit| hit.id.as_str()),
+        Some(entry.id.as_str())
+    );
+}
+
+#[test]
 fn test_maintenance_archives_old_events_and_recordings() {
     use crate::store::{init_cas_dir, open_event_store, open_recording_store};
     use cas_types::{

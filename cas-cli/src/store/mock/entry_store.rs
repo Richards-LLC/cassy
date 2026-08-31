@@ -331,6 +331,10 @@ impl Store for MockStore {
         Ok(())
     }
 
+    fn mark_index_pending_batch(&self, ids: &[&str]) -> Result<()> {
+        self.mark_indexed_batch(ids)
+    }
+
     fn cas_dir(&self) -> &Path {
         &self.cas_dir
     }

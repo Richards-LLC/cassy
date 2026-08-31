@@ -551,12 +551,16 @@ impl CasCore {
                 match count_result {
                     Ok(())
                         if indexed.total() != expected_index.total()
-                            || index_last_modified(&self.cas_root.join("index/tantivy"))
-                                .zip(expected_index.latest_store_update.as_ref())
-                                .is_some_and(|(indexed_at, store_update)| {
+                            || index_last_modified(&crate::hybrid_search::tantivy_index_dir(
+                                &self.cas_root,
+                            ))
+                            .zip(expected_index.latest_store_update.as_ref())
+                            .is_some_and(
+                                |(indexed_at, store_update)| {
                                     store_update.signed_duration_since(indexed_at).num_seconds()
                                         > INDEX_FRESHNESS_TOLERANCE_SECS
-                                }) =>
+                                },
+                            ) =>
                     {
                         issues.push(format!(
                             "Search Index: STALE — run reindex bm25=true ({})",
@@ -734,7 +738,7 @@ impl CasCore {
             let skill_store = self.open_skill_store()?;
             let skills = skill_store.list(None).unwrap_or_default();
 
-            let index_dir = self.cas_root.join("index/tantivy");
+            let index_dir = crate::hybrid_search::tantivy_index_dir(&self.cas_root);
             // Clear existing index first
             let _ = std::fs::remove_dir_all(&index_dir);
             match SearchIndex::open(&index_dir) {

@@ -86,9 +86,11 @@ pub use semantic::{SemanticChannel, open_semantic_channel};
 pub mod filter_grammar;
 pub mod frontmatter;
 mod id_utils;
+mod legacy_index;
 mod search_index_impl;
 mod search_index_query;
 
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use tantivy::query::QueryParser;
@@ -96,6 +98,9 @@ use tantivy::schema::*;
 use tantivy::{Index, IndexReader};
 
 pub use id_utils::extract_id_patterns;
+pub use legacy_index::{
+    LegacyIndexState, LegacyRepairResult, inspect_legacy_index, repair_legacy_index,
+};
 
 /// Document type for unified search
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +166,14 @@ impl DocType {
 
 /// Default memory budget for BM25 index writer (50MB)
 pub const DEFAULT_WRITER_MEMORY: usize = 50_000_000;
+
+/// Canonical location of the unified Tantivy index below a Cassy root.
+///
+/// Every reader and writer must use this resolver. Keeping the path derivation
+/// here prevents the background daemon from silently creating a sibling index.
+pub fn tantivy_index_dir(cas_dir: &Path) -> PathBuf {
+    cas_dir.join("index").join("tantivy")
+}
 
 /// Search index backed by Tantivy
 pub struct SearchIndex {

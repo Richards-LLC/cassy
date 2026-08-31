@@ -434,6 +434,9 @@ pub trait Store: Send + Sync {
     /// Mark multiple entries as indexed in a single transaction
     fn mark_indexed_batch(&self, ids: &[&str]) -> Result<()>;
 
+    /// Re-queue multiple entries for indexing by clearing their indexed time.
+    fn mark_index_pending_batch(&self, ids: &[&str]) -> Result<()>;
+
     /// Get the .cas directory path
     fn cas_dir(&self) -> &std::path::Path;
 

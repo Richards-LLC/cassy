@@ -367,7 +367,7 @@ impl HybridSearch {
     /// Note: Local semantic search has been removed and is now cloud-only.
     /// This opens BM25 search only.
     pub fn open(cas_dir: &Path) -> Result<Self> {
-        let index_dir = cas_dir.join("index").join("tantivy");
+        let index_dir = crate::hybrid_search::tantivy_index_dir(cas_dir);
 
         // Open BM25 index
         let bm25_index = SearchIndex::open(&index_dir)?;

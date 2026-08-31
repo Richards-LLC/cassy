@@ -77,9 +77,12 @@ fn test_build_rule_review_context_disabled() {
     use crate::store::mock::MockRuleStore;
 
     let rule_store = MockRuleStore::new();
-    let config = Config::default();
+    let mut config = Config::default();
+    let mut hook_config = crate::config::HookConfig::default();
+    hook_config.stop.rule_review_enabled = false;
+    config.hooks = Some(hook_config);
 
-    // Default config has rule_review_enabled = false
+    // An explicit false override still disables the default-on review.
     let result = build_rule_review_context(&rule_store, &config);
     assert!(result.is_none());
 }

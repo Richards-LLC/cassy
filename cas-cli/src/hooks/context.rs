@@ -22,12 +22,12 @@ use cas_core::hooks::{
     token_display, truncate,
 };
 use cas_store::{
-    AgentStore, KnowledgeStore, RuleStore, SkillStore, SqliteKnowledgeStore,
-    SqliteSurfacedArtifactStore, Store, SurfacedArtifact, TaskStore,
+    AgentStore, KnowledgeStore, RetrievalHitIdentity, RetrievalStore, RuleStore, SkillStore,
+    SqliteKnowledgeStore, SqliteRetrievalStore, SqliteSurfacedArtifactStore, Store,
+    SurfacedArtifact, TaskStore,
 };
 use cas_types::{Entry, Rule, RuleStatus, Skill, Task, TaskStatus};
 
-use crate::hooks::get_session_files;
 use crate::hooks::scorer::HybridContextScorer;
 
 use std::path::Path;
@@ -41,6 +41,47 @@ use crate::store::{
 
 const HOST_CONSTRAINT_SECTION_BUDGET_BYTES: usize = 1200;
 const HOST_CONSTRAINT_LINE_BUDGET_BYTES: usize = 220;
+const CONTEXT_SESSION_START_RETRIEVAL_FAMILY: &str = "context_session_start";
+const CONTEXT_SESSION_START_RETRIEVAL_POLICY: &str = "context-session-start-v1";
+
+/// Record the Helpful Memories section as one retrieval query and one result
+/// per injected entry. This is deliberately best-effort: SessionStart is on
+/// the harness critical path, so a telemetry database error must never hide a
+/// successfully built context prompt.
+fn record_context_session_start_query(cas_root: &Path, input: &HookInput, memory_ids: &[String]) {
+    let query_id = format!(
+        "qry-context-session-start-{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let hits = memory_ids
+        .iter()
+        .enumerate()
+        .map(|(rank, result_id)| RetrievalHitIdentity {
+            result_id: result_id.clone(),
+            document_type: "entry".to_string(),
+            rank,
+        })
+        .collect::<Vec<_>>();
+    let session_id = (!input.session_id.trim().is_empty()).then_some(input.session_id.as_str());
+
+    let store = match SqliteRetrievalStore::open(cas_root) {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("cas: Warning: failed to open SessionStart retrieval telemetry: {error}");
+            return;
+        }
+    };
+    if let Err(error) = store.record_query(
+        &query_id,
+        "SessionStart Helpful Memories",
+        CONTEXT_SESSION_START_RETRIEVAL_FAMILY,
+        CONTEXT_SESSION_START_RETRIEVAL_POLICY,
+        session_id,
+        &hits,
+    ) {
+        eprintln!("cas: Warning: failed to record SessionStart retrieval telemetry: {error}");
+    }
+}
 
 /// Build context string for session start injection
 ///
@@ -103,8 +144,12 @@ pub fn build_context_with_token_budget(
     };
     let rule_cache = RuleMatchCache::build(&all_rules, &input.cwd);
 
-    // Get recent session files for context query boosting
-    let recent_files = get_session_files(cas_root);
+    // What this session knows about itself: recent files (this session's, else
+    // the previous one's), the last prompt the project saw, the checked-out
+    // branch and the reading agent. Without these a SessionStart's
+    // ContextQuery is empty and the Helpful-Memories ranking is the same list
+    // for every session (cas-3b80).
+    let session = crate::hooks::handlers::session_query::session_query_context(cas_root, input);
 
     // Create ContextStores with references to Arc contents
     let stores = ContextStores {
@@ -119,7 +164,10 @@ pub fn build_context_with_token_budget(
         knowledge_store: knowledge_store.as_ref().map(|s| s.as_ref()),
         entry_scorer: scorer_ref,
         rule_match_cache: Some(&rule_cache),
-        recent_files,
+        recent_files: session.recent_files,
+        carried_prompt: session.carried_prompt,
+        git_branch: session.git_branch,
+        agent_id: session.agent_id,
     };
 
     let start_time = std::time::Instant::now();
@@ -129,10 +177,17 @@ pub fn build_context_with_token_budget(
     // The existing DevTracer receives every surfaced item, including memory.
     let surfaced_artifacts = Arc::new(Mutex::new(Vec::<SurfacedArtifact>::new()));
     let surfaced_artifacts_for_callback = Arc::clone(&surfaced_artifacts);
+    let injected_memory_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+    let injected_memory_ids_for_callback = Arc::clone(&injected_memory_ids);
     let surfaced_callback: Option<SurfacedItemCallback> = Some(Box::new(
         move |id: &str, item_type: &str, preview: Option<&str>| {
             if let Some(tracer) = crate::tracing::DevTracer::get() {
                 let _ = tracer.record_surfaced_item(id, item_type, preview);
+            }
+            if item_type.eq_ignore_ascii_case("memory")
+                && let Ok(mut memory_ids) = injected_memory_ids_for_callback.lock()
+            {
+                memory_ids.push(id.to_string());
             }
             if matches!(item_type, "rule" | "skill")
                 && let Ok(mut artifacts) = surfaced_artifacts_for_callback.lock()
@@ -168,6 +223,11 @@ pub fn build_context_with_token_budget(
         // context hook fail after successfully building the prompt.
         let _ = store.record_batch(&input.session_id, &surfaced_artifacts);
     }
+
+    let injected_memory_ids = injected_memory_ids
+        .lock()
+        .map(|mut memory_ids| std::mem::take(&mut *memory_ids))
+        .unwrap_or_default();
 
     let context = {
         let mut ctx = context;
@@ -222,8 +282,13 @@ pub fn build_context_with_token_budget(
             total_tokens: stats.total_tokens,
             token_budget: config.token_budget(),
             items_omitted: stats.items_omitted,
+            memory_ids: injected_memory_ids.clone(),
         };
         let _ = tracer.record_context_injection(&trace, start_time.elapsed().as_millis() as u64);
+    }
+
+    if input.hook_event_name == "SessionStart" {
+        record_context_session_start_query(cas_root, input, &injected_memory_ids);
     }
 
     Ok(context)
@@ -464,6 +529,8 @@ pub fn build_context_ai(
     // Build context from selected items
     let mut context_parts = Vec::new();
     let mut total_tokens: usize = 0;
+    let mut injected_memory_ids: Vec<String> =
+        pinned_entries.iter().map(|e| e.id.clone()).collect();
 
     // Always include pinned first
     if !pinned_entries.is_empty() {
@@ -485,6 +552,9 @@ pub fn build_context_ai(
         for candidate in candidates.iter().filter(|c| selected_ids.contains(&c.id)) {
             if pinned_ids.contains(&candidate.id) {
                 continue; // Skip if already shown as pinned
+            }
+            if candidate.item_type == "memory" {
+                injected_memory_ids.push(candidate.id.clone());
             }
             context_parts.push(format!(
                 "- {} [{}] {}",
@@ -508,6 +578,10 @@ pub fn build_context_ai(
             token_display(total_tokens),
             hints
         ));
+    }
+
+    if input.hook_event_name == "SessionStart" {
+        record_context_session_start_query(cas_root, input, &injected_memory_ids);
     }
 
     Ok(context_parts.join("\n"))
@@ -550,8 +624,8 @@ pub fn build_plan_context(
     };
     let rule_cache = RuleMatchCache::build(&all_rules, &input.cwd);
 
-    // Get recent session files for context query boosting
-    let recent_files = get_session_files(cas_root);
+    // Same session facts the SessionStart path uses (cas-3b80).
+    let session = crate::hooks::handlers::session_query::session_query_context(cas_root, input);
 
     let stores = ContextStores {
         global_store: None, // Global store removed
@@ -565,7 +639,10 @@ pub fn build_plan_context(
         knowledge_store: knowledge_store.as_ref().map(|s| s.as_ref()),
         entry_scorer: scorer_ref,
         rule_match_cache: Some(&rule_cache),
-        recent_files,
+        recent_files: session.recent_files,
+        carried_prompt: session.carried_prompt,
+        git_branch: session.git_branch,
+        agent_id: session.agent_id,
     };
 
     let (context, _stats) = build_plan_context_with_stores(
@@ -1077,6 +1154,64 @@ mod tests {
     use crate::test_support::TestEnvGuard;
     use cas_core::hooks::HookInput;
     use cas_types::{Entry, Scope};
+
+    #[test]
+    fn ai_session_start_telemeters_selected_memory_ids() {
+        use cas_store::{RuleStore, SqliteRetrievalStore, SqliteRuleStore, Store};
+        use rusqlite::Connection;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::store::SqliteStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let mut entry = Entry::new(
+            "ai-session-memory".to_string(),
+            "Memory selected by the AI session context path".to_string(),
+        );
+        entry.helpful_count = 1;
+        store.add(&entry).unwrap();
+
+        let rules = SqliteRuleStore::open(temp.path()).unwrap();
+        rules.init().unwrap();
+        SqliteRetrievalStore::open(temp.path()).unwrap();
+
+        let fake_bin = tempfile::tempdir().unwrap();
+        let claude = fake_bin.path().join("claude");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nprintf '%s' '{\"selected\": [\"ai-session-memory\"]}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = format!(
+            "{}:{}",
+            fake_bin.path().display(),
+            original_path.to_string_lossy()
+        );
+        let env = TestEnvGuard::with_optional_vars(&[("PATH", Some(path.as_str()))]);
+
+        let input = HookInput {
+            session_id: "ai-session-telemetry".to_string(),
+            cwd: temp.path().to_string_lossy().to_string(),
+            hook_event_name: "SessionStart".to_string(),
+            ..HookInput::default()
+        };
+        let context = build_context_ai(&input, 5, temp.path()).unwrap();
+        assert!(context.contains("ai-session-memory"), "{context}");
+
+        drop(env);
+        let db = Connection::open(temp.path().join("cas.db")).unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM retrieval_query_results
+                 WHERE result_id = 'ai-session-memory'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "AI-selected memory must be telemetered");
+    }
 
     /// cas-c220 (GH #89): pin the user-config namespace for a whole test body.
     ///

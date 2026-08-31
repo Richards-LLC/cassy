@@ -363,6 +363,56 @@ fn test_maintenance_cycle_runs_pruning_and_checkpoint() {
 }
 
 #[test]
+fn daemon_index_cycle_repairs_the_legacy_tantivy_root_before_draining_pending_entries() {
+    use crate::daemon::indexing::run_indexing_cycle;
+    use crate::hybrid_search::{DocType, SearchIndex, SearchOptions};
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().expect("tempdir");
+    let cas_root = temp.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("create .cas");
+    let store = crate::store::open_store(&cas_root).expect("store");
+    let entry = Entry::new(
+        "daemon-repair-entry".to_string(),
+        "daemonrepairquasar legacy root".to_string(),
+    );
+    store.add(&entry).expect("add entry");
+    {
+        let legacy = SearchIndex::open(&cas_root.join("index")).expect("legacy index");
+        legacy.index_entry(&entry).expect("legacy write");
+    }
+    store
+        .mark_indexed(&entry.id)
+        .expect("incorrect indexed flag");
+
+    let result = run_indexing_cycle(&DaemonConfig {
+        cas_root: cas_root.clone(),
+        ..DaemonConfig::default()
+    })
+    .expect("daemon index cycle");
+    assert_eq!(result.indexed, 1);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert!(!cas_root.join("index/meta.json").exists());
+
+    let canonical = SearchIndex::open(&crate::hybrid_search::tantivy_index_dir(&cas_root))
+        .expect("canonical index");
+    let hits = canonical
+        .search(
+            &SearchOptions {
+                query: "daemonrepairquasar".to_string(),
+                doc_types: vec![DocType::Entry],
+                ..Default::default()
+            },
+            &store.list().expect("entries"),
+        )
+        .expect("canonical search");
+    assert_eq!(
+        hits.first().map(|hit| hit.id.as_str()),
+        Some(entry.id.as_str())
+    );
+}
+
+#[test]
 fn test_maintenance_archives_old_events_and_recordings() {
     use crate::store::{init_cas_dir, open_event_store, open_recording_store};
     use cas_types::{
@@ -854,4 +904,169 @@ fn full_tree_reconciliation_retires_repository_when_eligible_set_becomes_empty()
         (0, 0, 0)
     );
     assert_eq!(scan.last_error, None);
+}
+
+/// cas-25a9 P1-B: a legacy-repair failure must not disable background indexing.
+///
+/// Before the fix, `generate_bm25_index` returned as soon as
+/// `repair_legacy_index` errored, so a legacy root that could never be retired
+/// (malformed `.managed.json`, EPERM, a lock held by a pre-fix daemon)
+/// permanently stopped ALL background memory indexing — and `doctor --fix` hit
+/// the same error, leaving no self-heal short of hand-deleting
+/// `.cas/index/meta.json`. Repair is best-effort per cycle; the cycle continues.
+#[test]
+fn a_failing_legacy_repair_still_indexes_pending_entries() {
+    use crate::hybrid_search::SearchIndex;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cas_root = temp.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("create .cas");
+    let store = crate::store::open_store(&cas_root).expect("store");
+
+    // One entry stranded in the legacy root, one ordinary pending entry that
+    // has nothing to do with the legacy problem.
+    let stranded = Entry::new(
+        "legacy-stranded".to_string(),
+        "legacyquasar stranded in the old root".to_string(),
+    );
+    store.add(&stranded).expect("add stranded");
+    {
+        let legacy = SearchIndex::open(&cas_root.join("index")).expect("legacy index");
+        legacy.index_entry(&stranded).expect("index legacy");
+    }
+    store.mark_indexed(&stranded.id).expect("mark indexed");
+
+    let healthy = Entry::new(
+        "ordinary-pending".to_string(),
+        "ordinarypending entry awaiting the canonical index".to_string(),
+    );
+    store.add(&healthy).expect("add healthy");
+
+    // Poison retirement: `.managed.json` no longer parses, so repair fails
+    // every single cycle, forever.
+    std::fs::write(cas_root.join("index/.managed.json"), b"{ not json ]")
+        .expect("poison managed list");
+
+    let config = DaemonConfig {
+        cas_root: cas_root.clone(),
+        index_bm25: true,
+        ..DaemonConfig::default()
+    };
+    let store: Arc<dyn Store> = store;
+    let result =
+        crate::daemon::indexing::generate_bm25_index(&store, &config).expect("cycle must not fail");
+
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|(id, _)| id == "legacy-index-repair"),
+        "the repair failure must be reported, not swallowed: {:?}",
+        result.errors
+    );
+    assert!(
+        result.indexed >= 1,
+        "the cycle must still index pending entries despite the repair failure; \
+         indexed {} errors {:?}",
+        result.indexed,
+        result.errors
+    );
+    assert!(
+        store
+            .list_pending_index(10)
+            .expect("pending")
+            .iter()
+            .all(|entry| entry.id != healthy.id),
+        "the unrelated pending entry must have reached the canonical index"
+    );
+}
+
+/// cas-25a9 AC1 at the DAEMON call site: a held legacy lock must not wedge the
+/// maintenance cycle.
+///
+/// This is the site that matters most — `run_maintenance` awaits the indexing
+/// cycle inside the daemon's `select!`, so a block here stalls agent reaping,
+/// lease reclaim and worktree cleanup for every session on the box. The
+/// companion `doctor_fix_against_a_held_legacy_lock_warns_within_a_bounded_time`
+/// covers the other call site.
+#[test]
+fn a_held_legacy_lock_does_not_wedge_the_daemon_cycle() {
+    use crate::hybrid_search::SearchIndex;
+    use std::time::{Duration, Instant};
+    use tantivy::directory::Directory;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cas_root = temp.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("create .cas");
+    let store = crate::store::open_store(&cas_root).expect("store");
+
+    let stranded = Entry::new(
+        "daemon-locked-stranded".to_string(),
+        "daemonlocked stranded in the legacy root".to_string(),
+    );
+    store.add(&stranded).expect("add stranded");
+    {
+        let legacy = SearchIndex::open(&cas_root.join("index")).expect("legacy index");
+        legacy.index_entry(&stranded).expect("index legacy");
+    }
+    store.mark_indexed(&stranded.id).expect("mark indexed");
+
+    // An unrelated entry that the cycle must still index while the legacy root
+    // is unavailable.
+    let healthy = Entry::new(
+        "daemon-locked-healthy".to_string(),
+        "daemonhealthy entry awaiting the canonical index".to_string(),
+    );
+    store.add(&healthy).expect("add healthy");
+
+    // A pre-fix `cas serve` is holding the legacy root.
+    let holder = tantivy::Index::open_in_dir(cas_root.join("index")).expect("open legacy root");
+    let held = holder
+        .directory()
+        .acquire_lock(&tantivy::directory::META_LOCK)
+        .expect("hold the meta lock");
+
+    let config = DaemonConfig {
+        cas_root: cas_root.clone(),
+        index_bm25: true,
+        ..DaemonConfig::default()
+    };
+    let store_arc: Arc<dyn Store> = store.clone();
+
+    let started = Instant::now();
+    let result = crate::daemon::indexing::generate_bm25_index(&store_arc, &config)
+        .expect("the cycle must not fail");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "a held legacy lock must not wedge the maintenance cycle; took {elapsed:?}"
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|(id, message)| id == "legacy-index-repair" && message.contains("skipped")),
+        "the skipped repair must be recorded: {:?}",
+        result.errors
+    );
+    assert!(
+        result.indexed >= 1,
+        "the cycle must keep indexing while the legacy root is busy; indexed {} errors {:?}",
+        result.indexed,
+        result.errors
+    );
+    assert!(
+        store
+            .list_pending_index(10)
+            .expect("pending")
+            .iter()
+            .all(|entry| entry.id != healthy.id),
+        "the unrelated entry must have reached the canonical index"
+    );
+
+    // Release before anything opens a tantivy reader: `IndexReader` acquires
+    // META_LOCK itself, so touching the root while still holding it would
+    // deadlock this test against itself.
+    drop(held);
 }

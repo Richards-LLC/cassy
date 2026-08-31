@@ -1,4 +1,8 @@
-//! Migration: rules_add_hook_command
+//! Historical migration: rules_add_hook_command.
+//!
+//! The live Rule model intentionally no longer exposes this column. Keep this
+//! migration immutable so existing migration ledgers remain stable; the
+//! column is ignored by current SQLite/Markdown stores.
 
 use crate::migration::{Migration, Subsystem};
 

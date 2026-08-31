@@ -19,7 +19,7 @@ use crate::types::{
     Agent, AgentRole, ChangeType, CommitLink, DependencyType, Entry, EntryType, FileChange,
     ObservationType, Prompt, Rule, Session, Task, TaskStatus, TaskType,
 };
-use cas_core::SearchIndex;
+use crate::hybrid_search::SearchIndex;
 
 use crate::hooks::transcript::check_promise_in_transcript;
 
@@ -260,6 +260,7 @@ pub(crate) fn truncate_display(s: &str, max_len: usize) -> String {
 
 mod handlers_session;
 mod handlers_state;
+pub mod session_query;
 pub(crate) mod issue_triage;
 pub(crate) mod session_budget;
 pub(crate) mod session_hygiene;

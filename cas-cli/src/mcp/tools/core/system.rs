@@ -1,4 +1,50 @@
 use crate::mcp::tools::core::imports::*;
+use cas_types::{Entry, MemoryTier};
+
+#[derive(Debug, Default)]
+struct EntryCorpusStats {
+    /// Counts indexed by tier, then archived flag (`archived = 0`, `archived = 1`).
+    by_tier: [(usize, usize); 4],
+    total: usize,
+    archived: usize,
+    /// Entries in working/in-context tiers with `archived = 0`.
+    live: usize,
+}
+
+impl EntryCorpusStats {
+    fn record(&mut self, entry: &Entry) {
+        let tier_index = match entry.memory_tier {
+            MemoryTier::InContext => 0,
+            MemoryTier::Working => 1,
+            MemoryTier::Cold => 2,
+            MemoryTier::Archive => 3,
+        };
+        let counts = &mut self.by_tier[tier_index];
+        if entry.archived {
+            counts.1 += 1;
+            self.archived += 1;
+        } else {
+            counts.0 += 1;
+            if entry.memory_tier.is_active() {
+                self.live += 1;
+            }
+        }
+        self.total += 1;
+    }
+
+    fn from_store_lists(entries: &[Entry], archived_entries: &[Entry]) -> Self {
+        let mut stats = Self::default();
+        for entry in entries.iter().chain(archived_entries) {
+            stats.record(entry);
+        }
+        stats
+    }
+
+    fn tier_line(&self, tier: MemoryTier, tier_index: usize) -> String {
+        let (unarchived, archived) = self.by_tier[tier_index];
+        format!("  {tier}: {unarchived} archived=0, {archived} archived=1")
+    }
+}
 
 #[derive(Debug, Default)]
 struct StoreBackedIndexCounts {
@@ -64,7 +110,11 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<LimitRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let limit = req.limit.unwrap_or(5);
+        let limit = req.limit.unwrap_or_else(|| {
+            crate::config::Config::load(&self.cas_root)
+                .unwrap_or_default()
+                .context_limit()
+        });
 
         // Create a minimal HookInput for context building
         let hook_input = HookInput {
@@ -179,6 +229,8 @@ impl CasCore {
 
     /// Get memory statistics
     pub async fn cas_stats(&self) -> Result<CallToolResult, McpError> {
+        use cas_store::SqliteRetrievalStore;
+
         let store = self.open_store()?;
         let rule_store = self.open_rule_store()?;
         let task_store = self.open_task_store()?;
@@ -190,7 +242,7 @@ impl CasCore {
         let tasks = task_store.list(None).unwrap_or_default();
         let skills = skill_store.list(None).unwrap_or_default();
 
-        let total_entries = entries.len() + archived.len();
+        let corpus = EntryCorpusStats::from_store_lists(&entries, &archived);
         let proven_rules = rules
             .iter()
             .filter(|r| r.status == RuleStatus::Proven)
@@ -208,23 +260,81 @@ impl CasCore {
             .filter(|s| s.status == SkillStatus::Enabled)
             .count();
 
+        let retrieval_funnel = match SqliteRetrievalStore::open(&self.cas_root) {
+            Err(error) => format!("Retrieval telemetry unavailable: {error}"),
+            Ok(retrieval_store) => {
+                match (
+                    retrieval_store.aggregate(),
+                    retrieval_store.rolling_injected_precision(30),
+                ) {
+                    (Err(error), _) | (_, Err(error)) => {
+                        format!("Retrieval telemetry unavailable: {error}")
+                    }
+                    (Ok(retrieval_groups), Ok(rolling_precision)) => {
+                        let precision_display = rolling_precision
+                            .precision
+                            .map(|value| {
+                                format!(
+                                    "{:.1}% ({}/{} judge labels)",
+                                    value * 100.0,
+                                    rolling_precision.helpful,
+                                    rolling_precision.judged
+                                )
+                            })
+                            .unwrap_or_else(|| "unavailable (0 judge labels)".to_string());
+                        let mut funnel = format!(
+                            "Retrieval funnel (denominator: results; rolling injected precision, 30d: {precision_display})"
+                        );
+                        if retrieval_groups.is_empty() {
+                            funnel.push_str("\n  No retrieval results recorded");
+                        } else {
+                            for group in &retrieval_groups {
+                                funnel.push_str(&format!(
+                                    "\n  {}/{} / {}: results={} -> resolved={} -> used/body-pulled={} -> helpful={}",
+                                    group.document_type,
+                                    group.query_family,
+                                    group.ranking_policy,
+                                    group.results,
+                                    group.resolved_results,
+                                    group.used_results,
+                                    group.helpful_results,
+                                ));
+                            }
+                        }
+                        funnel
+                    }
+                }
+            }
+        };
+
         let output = format!(
             "Cassy Statistics\n\
              ==============\n\n\
-             Entries: {} ({} active, {} archived)\n\
+             Entries: {} ({} live, {} archived)\n\
+             Tier breakdown (archived flag):\n\
+             {}\n\
+             {}\n\
+             {}\n\
+             {}\n\
              Rules: {} ({} proven)\n\
              Tasks: {} ({} open, {} in progress)\n\
-             Skills: {} ({} enabled)",
-            total_entries,
-            entries.len(),
-            archived.len(),
+             Skills: {} ({} enabled)\n\
+             {}",
+            corpus.total,
+            corpus.live,
+            corpus.archived,
+            corpus.tier_line(MemoryTier::InContext, 0),
+            corpus.tier_line(MemoryTier::Working, 1),
+            corpus.tier_line(MemoryTier::Cold, 2),
+            corpus.tier_line(MemoryTier::Archive, 3),
             rules.len(),
             proven_rules,
             tasks.len(),
             open_tasks,
             in_progress,
             skills.len(),
-            enabled_skills
+            enabled_skills,
+            retrieval_funnel
         );
 
         Ok(Self::success(output))
@@ -446,12 +556,16 @@ impl CasCore {
                 match count_result {
                     Ok(())
                         if indexed.total() != expected_index.total()
-                            || index_last_modified(&self.cas_root.join("index/tantivy"))
-                                .zip(expected_index.latest_store_update.as_ref())
-                                .is_some_and(|(indexed_at, store_update)| {
+                            || index_last_modified(&crate::hybrid_search::tantivy_index_dir(
+                                &self.cas_root,
+                            ))
+                            .zip(expected_index.latest_store_update.as_ref())
+                            .is_some_and(
+                                |(indexed_at, store_update)| {
                                     store_update.signed_duration_since(indexed_at).num_seconds()
                                         > INDEX_FRESHNESS_TOLERANCE_SECS
-                                }) =>
+                                },
+                            ) =>
                     {
                         issues.push(format!(
                             "Search Index: STALE — run reindex bm25=true ({})",
@@ -629,7 +743,7 @@ impl CasCore {
             let skill_store = self.open_skill_store()?;
             let skills = skill_store.list(None).unwrap_or_default();
 
-            let index_dir = self.cas_root.join("index/tantivy");
+            let index_dir = crate::hybrid_search::tantivy_index_dir(&self.cas_root);
             // Clear existing index first
             let _ = std::fs::remove_dir_all(&index_dir);
             match SearchIndex::open(&index_dir) {

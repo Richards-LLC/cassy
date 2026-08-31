@@ -153,6 +153,10 @@ impl Store for NotifyingEntryStore {
         self.inner.mark_indexed_batch(ids)
     }
 
+    fn mark_index_pending_batch(&self, ids: &[&str]) -> Result<()> {
+        self.inner.mark_index_pending_batch(ids)
+    }
+
     fn cas_dir(&self) -> &Path {
         self.inner.cas_dir()
     }

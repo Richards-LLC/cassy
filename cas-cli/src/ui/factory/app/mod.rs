@@ -2198,7 +2198,10 @@ fn claude_custom_config_context_fallback(
         agent_role: Some("supervisor".to_string()),
         ..Default::default()
     };
-    crate::hooks::build_context(&input, 5, cas_dir)
+    let limit = crate::config::Config::load(cas_dir)
+        .unwrap_or_default()
+        .context_limit();
+    crate::hooks::build_context(&input, limit, cas_dir)
         .ok()
         .filter(|context| !context.trim().is_empty())
 }
@@ -2222,7 +2225,10 @@ fn queued_supervisor_session_start_bundle(
         agent_role: Some("supervisor".to_string()),
         ..Default::default()
     };
-    let context = crate::hooks::build_context(&input, 5, cas_dir)
+    let limit = crate::config::Config::load(cas_dir)
+        .unwrap_or_default()
+        .context_limit();
+    let context = crate::hooks::build_context(&input, limit, cas_dir)
         .ok()
         .filter(|context| !context.trim().is_empty());
     let ambient_recall = crate::ambient_recall::build_ambient_recall_context_for_factory_launch(

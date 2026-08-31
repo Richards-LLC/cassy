@@ -246,7 +246,9 @@ pub fn build_rule_review_context(rule_store: &dyn RuleStore, config: &Config) ->
     // Check if rule review is enabled
     let stop_config = config.hooks.as_ref().map(|h| &h.stop);
 
-    let enabled = stop_config.map(|s| s.rule_review_enabled).unwrap_or(false);
+    // An omitted [hooks] section means default configuration, so preserve the
+    // enabled-by-default behavior even before callers materialize HookConfig.
+    let enabled = stop_config.map(|s| s.rule_review_enabled).unwrap_or(true);
 
     if !enabled {
         return None;

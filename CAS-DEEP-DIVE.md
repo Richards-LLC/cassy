@@ -62,7 +62,7 @@ cas-src/
 │   ├── cas-types/              # Entry, Task, Rule, Skill, Agent, Verification, etc.
 │   ├── cas-store/              # SQLite storage (trait defs + implementations)
 │   ├── cas-search/             # Tantivy BM25 full-text search
-│   ├── cas-core/               # Business logic, hooks framework, search abstraction
+│   ├── cas-core/               # Business logic, hooks framework, shared search types
 │   ├── cas-mcp/                # MCP protocol types
 │   ├── cas-factory/            # FactoryCore: PTY lifecycle, config, recording
 │   ├── cas-factory-protocol/   # WebSocket protocol (MessagePack) for TUI/Desktop/Web

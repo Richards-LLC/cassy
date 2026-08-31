@@ -756,11 +756,8 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "serde_yaml",
- "tantivy",
  "tempfile",
  "thiserror 2.0.18",
- "toml",
 ]
 
 [[package]]

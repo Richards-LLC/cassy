@@ -18,7 +18,10 @@ impl CasCore {
                 Some(vec![PromptArgument {
                     name: "limit".to_string(),
                     title: Some("Limit".to_string()),
-                    description: Some("Maximum items per section".to_string()),
+                    description: Some(
+                        "Maximum items per section (defaults to hooks.context_limit, 5)"
+                            .to_string(),
+                    ),
                     required: Some(false),
                 }]),
             ),
@@ -102,7 +105,14 @@ impl CasCore {
     ) -> Result<GetPromptResult, McpError> {
         match name {
             "session_start" => {
-                let limit = args.get("limit").and_then(|s| s.parse().ok()).unwrap_or(5);
+                let limit = args
+                    .get("limit")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| {
+                        crate::config::Config::load(&self.cas_root)
+                            .unwrap_or_default()
+                            .context_limit()
+                    });
                 let context = crate::hooks::build_context(
                     &crate::hooks::HookInput {
                         session_id: "mcp".to_string(),

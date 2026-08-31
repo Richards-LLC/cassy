@@ -1,3 +1,4 @@
+use super::Config;
 use serde::{Deserialize, Serialize};
 
 /// Per-hook configuration for SessionStart
@@ -292,8 +293,9 @@ pub struct StopHookConfig {
     #[serde(default = "default_learning_review_threshold")]
     pub learning_review_threshold: usize,
 
-    /// Enable rule review at session end (blocks stop if draft rules exceed threshold)
-    #[serde(default)]
+    /// Enable rule review at session end (default: true; factory workers are
+    /// exempt, and the draft threshold still gates the Stop blocker).
+    #[serde(default = "default_true")]
     pub rule_review_enabled: bool,
 
     /// Number of draft rules required to trigger review (default: 5)
@@ -346,7 +348,7 @@ impl Default for StopHookConfig {
             generate_summary: false,
             learning_review_enabled: false,
             learning_review_threshold: default_learning_review_threshold(),
-            rule_review_enabled: false,
+            rule_review_enabled: true,
             rule_review_threshold: default_rule_review_threshold(),
             duplicate_detection_enabled: false,
             duplicate_detection_threshold: default_duplicate_detection_threshold(),
@@ -658,6 +660,17 @@ impl Default for HookConfig {
     }
 }
 
+impl Config {
+    /// Effective maximum number of context entries for callers that do not
+    /// provide an explicit per-request limit.
+    pub fn context_limit(&self) -> usize {
+        self.hooks
+            .as_ref()
+            .map(|hooks| hooks.context_limit)
+            .unwrap_or_else(default_context_limit)
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -665,6 +678,12 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_limit_defaults_to_five() {
+        assert_eq!(Config::default().context_limit(), 5);
+        assert_eq!(HookConfig::default().context_limit, 5);
+    }
 
     #[test]
     fn default_pre_tool_use_matcher_covers_factory_intercepts() {
@@ -687,5 +706,16 @@ mod tests {
                 "PreToolUse matcher must include factory intercept tool {tool}: {matcher:?}"
             );
         }
+    }
+
+    #[test]
+    fn rule_review_defaults_enabled_even_when_nested_config_is_omitted() {
+        assert!(StopHookConfig::default().rule_review_enabled);
+        let config: crate::config::Config = toml::from_str(
+            "[hooks.stop]\nrule_review_threshold = 7\n",
+        )
+        .expect("partial hook config should deserialize");
+        assert!(config.hooks().stop.rule_review_enabled);
+        assert_eq!(config.hooks().stop.rule_review_threshold, 7);
     }
 }

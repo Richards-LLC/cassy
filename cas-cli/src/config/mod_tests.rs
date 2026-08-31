@@ -27,6 +27,12 @@ fn test_config_defaults() {
             .get("skill_validation.require_sandbox")
             .is_some()
     );
+    assert!(config.hooks().stop.rule_review_enabled);
+    let rule_review = meta::registry()
+        .get("hooks.stop.rule_review_enabled")
+        .expect("rule review config metadata");
+    assert_eq!(rule_review.default, "true");
+    assert!(rule_review.description.contains("Factory workers are exempt"));
 }
 
 #[test]
@@ -77,6 +83,36 @@ fn daemon_archive_size_cap_is_configurable_and_rejects_zero() {
     config.save(temp.path()).unwrap();
     let loaded = Config::load(temp.path()).unwrap();
     assert_eq!(loaded.daemon().archive_max_bytes, 4096);
+}
+
+#[test]
+fn daemon_relevance_sampling_is_configurable_and_has_weekly_defaults() {
+    let mut config = Config::default();
+    assert!(config.daemon().relevance_sampling_enabled);
+    assert_eq!(config.daemon().relevance_sampling_interval_secs, 604_800);
+    assert_eq!(config.daemon().relevance_sampling_sample_size, 20);
+    assert!(meta::registry()
+        .get("daemon.relevance_sampling_enabled")
+        .is_some());
+
+    config
+        .set("daemon.relevance_sampling_enabled", "false")
+        .unwrap();
+    config
+        .set("daemon.relevance_sampling_interval_secs", "3600")
+        .unwrap();
+    config
+        .set("daemon.relevance_sampling_sample_size", "7")
+        .unwrap();
+    assert!(!config.daemon().relevance_sampling_enabled);
+    assert_eq!(config.daemon().relevance_sampling_interval_secs, 3600);
+    assert_eq!(config.daemon().relevance_sampling_sample_size, 7);
+    assert!(config
+        .set("daemon.relevance_sampling_interval_secs", "0")
+        .is_err());
+    assert!(config
+        .set("daemon.relevance_sampling_sample_size", "0")
+        .is_err());
 }
 
 #[test]

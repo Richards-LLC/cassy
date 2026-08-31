@@ -312,7 +312,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
 
                 if store.add(&entry).is_ok() {
                     // Index the summary
-                    let index_dir = cas_root.join("index/tantivy");
+                    let index_dir = crate::hybrid_search::tantivy_index_dir(cas_root);
                     if let Ok(search) = SearchIndex::open(&index_dir) {
                         let _ = search.index_entry(&entry);
                     }
@@ -468,7 +468,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                             };
 
                             if store.add(&entry).is_ok() {
-                                let index_dir = cas_root.join("index/tantivy");
+                                let index_dir = crate::hybrid_search::tantivy_index_dir(cas_root);
                                 if let Ok(search) = SearchIndex::open(&index_dir) {
                                     let _ = search.index_entry(&entry);
                                 }
@@ -518,7 +518,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
             };
 
             if store.add(&entry).is_ok() {
-                let index_dir = cas_root.join("index/tantivy");
+                let index_dir = crate::hybrid_search::tantivy_index_dir(cas_root);
                 if let Ok(search) = SearchIndex::open(&index_dir) {
                     let _ = search.index_entry(&entry);
                 }

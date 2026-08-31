@@ -34,4 +34,46 @@ pub(super) fn register_daemon(registry: &mut ConfigRegistry) {
             "Retain this key while migrating older config files",
         ],
     });
+
+    registry.register(ConfigMeta {
+        key: "daemon.relevance_sampling_enabled",
+        section: "daemon",
+        name: "Injected Relevance Sampling",
+        description: "Enable the weekly bounded judge pass over recent injected retrieval results. Disable when no receiving-agent or scheduled judge is available.",
+        value_type: ConfigType::Bool,
+        default: "true",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["daemon", "evaluation", "retrieval", "relevance", "judge", "sampling"],
+        use_cases: &["Collect rolling relevance labels for injected memory packets"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "daemon.relevance_sampling_interval_secs",
+        section: "daemon",
+        name: "Relevance Sampling Cadence",
+        description: "Minimum interval between injected-relevance sampling passes, in seconds. The default is one week.",
+        value_type: ConfigType::Int,
+        default: "604800",
+        constraint: Constraint::Min(1),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["daemon", "evaluation", "retrieval", "relevance", "cadence"],
+        use_cases: &["Run the judge more often in a high-volume evaluation environment"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "daemon.relevance_sampling_sample_size",
+        section: "daemon",
+        name: "Relevance Sampling Size",
+        description: "Maximum injected result rows offered to the judge per pass. The default is 20.",
+        value_type: ConfigType::Int,
+        default: "20",
+        constraint: Constraint::Min(1),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["daemon", "evaluation", "retrieval", "relevance", "sample", "size"],
+        use_cases: &["Bound judge work while still measuring a representative rolling sample"],
+    });
 }

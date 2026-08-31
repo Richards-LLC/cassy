@@ -796,7 +796,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Search and context operations. Actions: search (BM25 full-text), retrieval_feedback (explicit retrieval outcome), retrieval_metrics (offline outcome aggregation), skill_impact (surface and session-outcome impact report; impact_report alias), context (session context), context_for_subagent, observe (record observation), entity_list, entity_show, entity_extract, code_search (search code symbols), code_show (show symbol details), grep, blame, history (search indexed git commits by text/path/time; every response carries an index_status block stating freshness and what is not yet supported)."
+        description = "Search and context operations. Actions: search (BM25 full-text), retrieval_feedback (explicit retrieval outcome), retrieval_metrics (offline aggregation; funnel stages use distinct retrieved result rows, quality rates use resolved outcomes, and rolling judge-labelled injected precision is included), skill_impact (surface and session-outcome impact report; impact_report alias), context (session context), context_for_subagent, observe (record observation), entity_list, entity_show, entity_extract, code_search (search code symbols), code_show (show symbol details), grep, blame, 'history' (search indexed git commits by text/path/time; every response carries an index_status block stating freshness and what is not yet supported)."
     )]
     pub async fn search(
         &self,
@@ -808,7 +808,7 @@ impl CasService {
             let result = match req.action.as_str() {
                 "search" => this.search_impl(req).await,
                 "retrieval_feedback" => this.retrieval_feedback_impl(req).await,
-                "retrieval_metrics" => this.retrieval_metrics_impl().await,
+                "retrieval_metrics" => this.retrieval_metrics_impl(req).await,
                 "skill_impact" | "impact_report" => this.skill_impact_impl(req).await,
                 "context" => this.context_impl(req).await,
                 "context_for_subagent" => this.context_for_subagent_impl(req).await,

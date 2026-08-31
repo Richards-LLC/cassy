@@ -249,9 +249,11 @@ pub use reminder_store::{
 
 // Retrieval provenance and explicit outcome feedback
 pub use retrieval_store::{
-    DEFAULT_RETRIEVAL_POLICY, RETRIEVAL_SCHEMA, RETRIEVAL_SCHEMA_STATEMENTS, RetrievalAggregate,
-    RetrievalHitIdentity, RetrievalOutcome, RetrievalOutcomeEvent, RetrievalQuery, RetrievalStore,
-    SqliteRetrievalStore,
+    DEFAULT_RETRIEVAL_POLICY, RETRIEVAL_ATTRIBUTION_AUTOMATIC,
+    RETRIEVAL_ATTRIBUTION_EXPLICIT, RETRIEVAL_ATTRIBUTION_JUDGE, RETRIEVAL_SCHEMA,
+    RETRIEVAL_SCHEMA_STATEMENTS, RelevanceSamplingReport, RetrievalAggregate, RetrievalHitIdentity,
+    RetrievalOutcome, RetrievalOutcomeEvent, RetrievalQuery, RetrievalSample, RetrievalStore,
+    RollingInjectedPrecision, SqliteRetrievalStore,
 };
 
 // Spawn queue store for worker lifecycle commands
@@ -431,6 +433,9 @@ pub trait Store: Send + Sync {
 
     /// Mark multiple entries as indexed in a single transaction
     fn mark_indexed_batch(&self, ids: &[&str]) -> Result<()>;
+
+    /// Re-queue multiple entries for indexing by clearing their indexed time.
+    fn mark_index_pending_batch(&self, ids: &[&str]) -> Result<()>;
 
     /// Get the .cas directory path
     fn cas_dir(&self) -> &std::path::Path;

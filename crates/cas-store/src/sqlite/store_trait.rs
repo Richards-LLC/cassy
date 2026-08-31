@@ -121,6 +121,10 @@ impl Store for SqliteStore {
         self.store_mark_indexed_batch(ids)
     }
 
+    fn mark_index_pending_batch(&self, ids: &[&str]) -> Result<()> {
+        self.store_mark_index_pending_batch(ids)
+    }
+
     fn cas_dir(&self) -> &Path {
         self.store_cas_dir()
     }

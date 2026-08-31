@@ -399,7 +399,6 @@ impl CasCore {
                 })
                 .unwrap_or_default(),
             review_after: None,
-            hook_command: None,
             category: crate::types::RuleCategory::default(),
             priority: 2,
             surface_count: 0,

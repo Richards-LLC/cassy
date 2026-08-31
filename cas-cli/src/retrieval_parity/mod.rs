@@ -160,7 +160,7 @@ impl ParityContext {
     pub fn new(cas_dir: &Path) -> Self {
         Self {
             cas_dir: cas_dir.to_path_buf(),
-            index_dir: cas_dir.join("index").join("tantivy"),
+            index_dir: crate::hybrid_search::tantivy_index_dir(cas_dir),
             global_cas_dir: None,
             global_unavailable: None,
         }

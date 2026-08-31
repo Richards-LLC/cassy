@@ -1,9 +1,13 @@
 use crate::support::*;
 use cas::mcp::CasService;
 use cas::mcp::tools::*;
-use cas::store::open_task_store;
-use cas::types::Task;
+use cas::store::{open_store, open_task_store};
+use cas::types::{Entry, MemoryTier, Task};
 use cas_mcp::{SearchContextRequest, SystemRequest};
+use cas_store::{
+    DEFAULT_RETRIEVAL_POLICY, RetrievalHitIdentity, RetrievalOutcome, RetrievalStore,
+    SqliteRetrievalStore,
+};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ErrorCode;
 use serde_json::json;
@@ -197,6 +201,68 @@ async fn task_focused_context_surfaces_preferences_and_task_content_matches() {
 }
 
 #[tokio::test]
+async fn task_focused_context_defaults_to_configured_context_limit() {
+    let (temp, core) = setup_cas();
+    let service = CasService::new(core.clone(), None);
+    let cas_root = temp.path().join(".cas");
+    std::fs::write(cas_root.join("config.toml"), "[hooks]\ncontext_limit = 3\n").unwrap();
+
+    let task_id = extract_task_id(&extract_text(
+        core.cas_task_create(Parameters(TaskCreateRequest {
+            depth: None,
+            title: "Configured context limit task".to_string(),
+            description: Some("Exercise the configured context limit".to_string()),
+            priority: 1,
+            task_type: "task".to_string(),
+            labels: None,
+            notes: None,
+            blocked_by: None,
+            design: None,
+            acceptance_criteria: None,
+            external_ref: None,
+            assignee: None,
+            demo_statement: None,
+            execution_note: None,
+            epic: None,
+        }))
+        .await
+        .unwrap(),
+    ))
+    .unwrap()
+    .to_string();
+
+    let store = open_store(&cas_root).unwrap();
+    for index in 0..5 {
+        store
+            .add(&Entry::new(
+                format!("configured-limit-{index}"),
+                format!("Configured context limit candidate {index}"),
+            ))
+            .unwrap();
+    }
+
+    let request: SearchContextRequest = serde_json::from_value(json!({
+        "action": "context",
+        "task_id": task_id
+    }))
+    .unwrap();
+    let text = extract_text(service.search(Parameters(request)).await.unwrap());
+    assert!(text.contains("## Helpful Memories (3 memories"), "{text}");
+    let helpful_section = text
+        .split_once("## Helpful Memories")
+        .and_then(|(_, section)| section.split_once("\n## ").map(|(section, _)| section))
+        .unwrap_or_default();
+    assert_eq!(
+        helpful_section
+            .lines()
+            .filter(|line| line.contains("Configured context limit candidate"))
+            .count(),
+        3,
+        "task-focused context must use hooks.context_limit: {text}"
+    );
+}
+
+#[tokio::test]
 async fn test_stats() {
     let (_temp, service) = setup_cas();
 
@@ -204,6 +270,141 @@ async fn test_stats() {
 
     let text = extract_text(result);
     assert!(text.contains("CAS Statistics") || text.contains("entries") || text.contains("0"));
+}
+
+#[tokio::test]
+async fn stats_reports_live_entries_by_tier_and_archived_flag() {
+    let (temp, service) = setup_cas();
+    let cas_root = temp.path().join(".cas");
+    let store = open_store(&cas_root).expect("entry store should open");
+
+    for entry in [
+        Entry {
+            id: "stats-working-live".to_string(),
+            memory_tier: MemoryTier::Working,
+            ..Entry::new("unused-working-live".to_string(), "working live".to_string())
+        },
+        Entry {
+            id: "stats-pinned-live".to_string(),
+            memory_tier: MemoryTier::InContext,
+            ..Entry::new("unused-pinned-live".to_string(), "pinned live".to_string())
+        },
+        Entry {
+            id: "stats-cold-live".to_string(),
+            memory_tier: MemoryTier::Cold,
+            ..Entry::new("unused-cold-live".to_string(), "cold live".to_string())
+        },
+        Entry {
+            id: "stats-archive-live".to_string(),
+            memory_tier: MemoryTier::Archive,
+            ..Entry::new("unused-archive-live".to_string(), "archive live".to_string())
+        },
+        Entry {
+            id: "stats-working-archived".to_string(),
+            memory_tier: MemoryTier::Working,
+            ..Entry::new(
+                "unused-working-archived".to_string(),
+                "working archived".to_string(),
+            )
+        },
+    ] {
+        store.add(&entry).unwrap();
+    }
+    store.archive("stats-working-archived").unwrap();
+
+    let result = service.cas_stats().await.expect("stats should succeed");
+    let text = extract_text(result);
+    assert!(text.contains("Entries: 5 (2 live, 1 archived)"), "{text}");
+    assert!(text.contains("in-context: 1 archived=0, 0 archived=1"), "{text}");
+    assert!(text.contains("working: 1 archived=0, 1 archived=1"), "{text}");
+    assert!(text.contains("cold: 1 archived=0, 0 archived=1"), "{text}");
+    assert!(text.contains("archive: 1 archived=0, 0 archived=1"), "{text}");
+}
+
+#[tokio::test]
+async fn stats_reports_retrieval_funnel_with_results_denominator() {
+    let (temp, service) = setup_cas();
+    let retrieval =
+        SqliteRetrievalStore::open(&temp.path().join(".cas")).expect("retrieval store should open");
+    retrieval
+        .record_query(
+            "stats-funnel-query",
+            "funnel query",
+            "context_session_start",
+            DEFAULT_RETRIEVAL_POLICY,
+            Some("stats-funnel-session"),
+            &[
+                RetrievalHitIdentity {
+                    result_id: "stats-funnel-helpful".to_string(),
+                    document_type: "entry".to_string(),
+                    rank: 0,
+                },
+                RetrievalHitIdentity {
+                    result_id: "stats-funnel-unresolved".to_string(),
+                    document_type: "entry".to_string(),
+                    rank: 1,
+                },
+            ],
+        )
+        .expect("funnel query should persist");
+    retrieval
+        .record_outcome(
+            "stats-funnel-used",
+            "stats-funnel-query",
+            "stats-funnel-helpful",
+            RetrievalOutcome::Used,
+            "stats-funnel-actor",
+            "stats-funnel-session",
+            None,
+        )
+        .expect("used outcome should persist");
+    retrieval
+        .record_outcome(
+            "stats-funnel-helpful-event",
+            "stats-funnel-query",
+            "stats-funnel-helpful",
+            RetrievalOutcome::Helpful,
+            "stats-funnel-actor",
+            "stats-funnel-session",
+            None,
+        )
+        .expect("helpful outcome should persist");
+
+    let result = service.cas_stats().await.expect("stats should succeed");
+    let text = extract_text(result);
+    assert!(
+        text.contains("Retrieval funnel (denominator: results;"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "entry/context_session_start / current-default-v1: results=2 -> resolved=1 -> used/body-pulled=1 -> helpful=1"
+        ),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn stats_reports_retrieval_store_errors_as_unavailable_errors() {
+    let (temp, service) = setup_cas();
+    SqliteRetrievalStore::open(&temp.path().join(".cas")).unwrap();
+    let db_path = temp.path().join(".cas/cas.db");
+    let db = rusqlite::Connection::open(db_path).unwrap();
+    db.execute(
+        "ALTER TABLE retrieval_query_results RENAME TO retrieval_query_results_broken",
+        [],
+    )
+    .unwrap();
+    db.execute("CREATE TABLE retrieval_query_results (wrong TEXT)", [])
+        .unwrap();
+
+    let result = service.cas_stats().await.unwrap();
+    let text = extract_text(result);
+    assert!(
+        text.contains("Retrieval telemetry unavailable:"),
+        "store errors must be visible: {text}"
+    );
+    assert!(!text.contains("No retrieval results recorded"), "{text}");
 }
 
 #[tokio::test]

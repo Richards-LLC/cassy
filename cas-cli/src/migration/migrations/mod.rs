@@ -219,6 +219,8 @@ mod m240_rule_skill_versions;
 mod m241_tasks_add_origin_project;
 mod m242_rule_skill_versions_operations;
 mod m243_surfaced_artifacts_create_table;
+mod m244_retrieval_outcomes_add_unresolved;
+mod m245_retrieval_outcomes_add_attribution;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -265,6 +267,9 @@ pub const MIGRATIONS: &[Migration] = &[
     m043_sessions_add_friction_score::MIGRATION,
     m044_sessions_add_delight_count::MIGRATION,
     // Rules
+    // Historical compatibility migration: the rule model no longer exposes
+    // or writes this legacy column, but the ID remains in the forward-only
+    // ledger for databases that already applied it.
     m051_rules_add_hook_command::MIGRATION,
     m052_rules_add_category::MIGRATION,
     m053_rules_add_priority::MIGRATION,
@@ -471,6 +476,8 @@ pub const MIGRATIONS: &[Migration] = &[
     m241_tasks_add_origin_project::MIGRATION,
     m242_rule_skill_versions_operations::MIGRATION,
     m243_surfaced_artifacts_create_table::MIGRATION,
+    m244_retrieval_outcomes_add_unresolved::MIGRATION,
+    m245_retrieval_outcomes_add_attribution::MIGRATION,
 ];
 
 #[cfg(test)]

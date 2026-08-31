@@ -1,6 +1,12 @@
 use crate::support::*;
+use cas::hooks::HookInput;
 use cas::mcp::tools::service::SearchContextRequest;
 use cas::mcp::tools::*;
+use cas_store::{
+    DEFAULT_RETRIEVAL_POLICY, RetrievalHitIdentity, RetrievalStore, SqliteRetrievalStore,
+    SqliteStore, Store,
+};
+use cas_types::Entry;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ErrorCode;
 
@@ -501,6 +507,25 @@ async fn provenance_v1_projects_every_unified_document_type() {
 async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
     let (temp, core) = setup_cas();
 
+    let cas_dir = temp.path().join(".cas");
+    let entry_store = SqliteStore::open(&cas_dir).unwrap();
+    for id in ["metrics-session-memory-a", "metrics-session-memory-b"] {
+        entry_store
+            .add(&Entry::new(
+                id.to_string(),
+                format!("Helpful SessionStart metric memory {id}"),
+            ))
+            .unwrap();
+    }
+    let session_input = HookInput {
+        session_id: "metrics-context-session".to_string(),
+        cwd: temp.path().to_string_lossy().to_string(),
+        hook_event_name: "SessionStart".to_string(),
+        ..Default::default()
+    };
+    cas::hooks::build_context_with_token_budget(&session_input, 2, &cas_dir, None)
+        .expect("SessionStart context should build");
+
     let task_req = TaskCreateRequest {
         depth: None,
         title: "Retrieval provenance integration marker".to_string(),
@@ -616,6 +641,21 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
     let feedback_json: serde_json::Value =
         serde_json::from_str(&extract_text(feedback)).expect("feedback response should be JSON");
     assert_eq!(feedback_json["outcome"], "helpful");
+    assert_eq!(feedback_json["attribution"], "explicit");
+
+    let unresolved_req: SearchContextRequest = serde_json::from_value(serde_json::json!({
+        "action": "retrieval_feedback",
+        "query_id": feedback_json["query_id"],
+        "result_id": feedback_json["result_id"],
+        "outcome": "unresolved",
+        "actor_id": "private-integration-actor",
+        "session_id": "private-integration-session"
+    }))
+    .unwrap();
+    service
+        .search(Parameters(unresolved_req))
+        .await
+        .expect("unresolved telemetry should persist independently of resolved feedback");
 
     let metrics_req: SearchContextRequest =
         serde_json::from_value(serde_json::json!({"action": "retrieval_metrics"})).unwrap();
@@ -625,17 +665,120 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
         .expect("offline metrics should succeed");
     let metrics_json: serde_json::Value =
         serde_json::from_str(&extract_text(metrics)).expect("metrics response should be JSON");
-    assert_eq!(metrics_json["groups"][0]["document_type"], "task");
-    assert_eq!(
-        metrics_json["groups"][0]["ranking_policy"],
-        "current-default-v1"
-    );
-    assert_eq!(metrics_json["groups"][0]["helpful"], 1);
-    assert_eq!(metrics_json["groups"][0]["usefulness_rate"], 1.0);
+    assert!(metrics_json["rolling_injected_precision"].is_null());
+    assert_eq!(metrics_json["injected_precision_numerator"], 0);
+    assert_eq!(metrics_json["injected_precision_denominator"], 0);
+    assert_eq!(metrics_json["injected_precision_window_days"], 30);
+    let groups = metrics_json["groups"]
+        .as_array()
+        .expect("metrics groups should be an array");
+    let task_group = groups
+        .iter()
+        .find(|group| group["document_type"] == "task")
+        .expect("task provenance group should be present");
+    assert_eq!(task_group["ranking_policy"], "current-default-v1");
+    assert_eq!(task_group["total"], 2);
+    assert_eq!(task_group["helpful"], 1);
+    assert_eq!(task_group["resolved"], 1);
+    assert_eq!(task_group["unresolved"], 1);
+    assert_eq!(task_group["results"], 1);
+    assert_eq!(task_group["denominator"], "resolved");
+    assert_eq!(task_group["coverage_rate"], 1.0);
+    assert_eq!(task_group["usefulness_rate"], 1.0);
+
+    let context_group = groups
+        .iter()
+        .find(|group| group["query_family"] == "context_session_start")
+        .expect("SessionStart memory telemetry group should be present");
+    assert_eq!(context_group["document_type"], "entry");
+    assert_eq!(context_group["results"], 2);
+    assert_eq!(context_group["denominator"], "resolved");
+    assert_eq!(context_group["coverage_rate"], 0.0);
 
     let db = std::fs::read(temp.path().join(".cas/cas.db")).unwrap();
     let raw = String::from_utf8_lossy(&db);
     assert!(!raw.contains("  Retrieval   PROVENANCE integration  "));
     assert!(!raw.contains("private-integration-actor"));
     assert!(!raw.contains("private-integration-session"));
+}
+
+#[tokio::test]
+async fn retrieval_metrics_filters_by_session_and_rejects_unsupported_filters() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let store = SqliteRetrievalStore::open(&cas_dir).expect("retrieval store should open");
+    let hits = [RetrievalHitIdentity {
+        result_id: "entry-session-filter".to_string(),
+        document_type: "entry".to_string(),
+        rank: 0,
+    }];
+    for (query_id, session_id) in [
+        ("query-session-a", "session-a"),
+        ("query-session-b", "session-b"),
+    ] {
+        store
+            .record_query(
+                query_id,
+                "session-filter query",
+                "session-filter",
+                DEFAULT_RETRIEVAL_POLICY,
+                Some(session_id),
+                &hits,
+            )
+            .expect("retrieval query should persist");
+    }
+
+    let service = CasService::new(core, None);
+    let metrics = |session_id: Option<&str>| {
+        serde_json::json!({
+            "action": "retrieval_metrics",
+            "session_id": session_id,
+        })
+    };
+    let response = service
+        .search(Parameters(
+            serde_json::from_value(metrics(None)).expect("unfiltered request should deserialize"),
+        ))
+        .await
+        .expect("unfiltered metrics should succeed");
+    let all: serde_json::Value =
+        serde_json::from_str(&extract_text(response)).expect("metrics should be JSON");
+    assert_eq!(all["groups"][0]["results"], 2);
+
+    let response = service
+        .search(Parameters(
+            serde_json::from_value(metrics(Some("session-a")))
+                .expect("session-filtered request should deserialize"),
+        ))
+        .await
+        .expect("session-filtered metrics should succeed");
+    let filtered: serde_json::Value =
+        serde_json::from_str(&extract_text(response)).expect("filtered metrics should be JSON");
+    assert_eq!(filtered["groups"][0]["results"], 1);
+
+    let response = service
+        .search(Parameters(
+            serde_json::from_value(metrics(Some("session-missing")))
+                .expect("different session request should deserialize"),
+        ))
+        .await
+        .expect("different session metrics should succeed");
+    let missing: serde_json::Value =
+        serde_json::from_str(&extract_text(response)).expect("missing metrics should be JSON");
+    assert_eq!(missing["groups"], serde_json::json!([]));
+
+    let unsupported: SearchContextRequest = serde_json::from_value(serde_json::json!({
+        "action": "retrieval_metrics",
+        "doc_type": "entry",
+    }))
+    .expect("unsupported filter request should deserialize");
+    let error = service
+        .search(Parameters(unsupported))
+        .await
+        .expect_err("unsupported metrics filters must fail explicitly");
+    assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+    assert!(
+        error.message.contains("doc_type"),
+        "unexpected error: {error:?}"
+    );
 }

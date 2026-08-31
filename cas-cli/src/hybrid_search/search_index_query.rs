@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use chrono::Utc;
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
@@ -218,19 +217,25 @@ impl SearchIndex {
                 }
             }
 
-            // Apply boosts
-            let boosted = self.apply_boosts(bm25_score as f64, entry, opts);
+            // cas-e979: the feedback/recency/importance boosts that used to be
+            // applied here were deleted. `apply_boosts` wrote its result into
+            // `score`/`boosted_score`, but the only production consumer
+            // (`HybridSearch::search`, hybrid.rs) reads `bm25_score` — so the
+            // boosted value was computed and discarded, and no configuration of
+            // the three flags could move any measured metric. See
+            // docs/analysis/2026-08-31-cas-e979-ranking-boosts.md.
+            let score = bm25_score as f64;
 
             results.push(SearchResult {
                 id,
                 doc_type: DocType::Entry,
-                score: boosted,
-                bm25_score: bm25_score as f64,
-                boosted_score: boosted,
+                score,
+                bm25_score: score,
+                boosted_score: score,
             });
         }
 
-        // Re-sort by boosted score
+        // Re-sort by score
         results.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -462,41 +467,6 @@ impl SearchIndex {
         results.truncate(opts.limit);
 
         Ok(results)
-    }
-
-    /// Apply feedback, recency, and importance boosts to a score
-    fn apply_boosts(&self, score: f64, entry: &Entry, opts: &SearchOptions) -> f64 {
-        let mut boosted = score;
-
-        // Feedback boost: score * (1 + 0.1*helpful) * max(0.1, 1 - 0.1*harmful)
-        if opts.boost_feedback {
-            let helpful_mult = 1.0 + 0.1 * entry.helpful_count as f64;
-            let harmful_mult = (1.0 - 0.1 * entry.harmful_count as f64).max(0.1);
-            boosted *= helpful_mult * harmful_mult;
-        }
-
-        // Recency boost: exponential decay
-        if opts.boost_recency {
-            let last_time = entry.last_accessed.unwrap_or(entry.created);
-            let days_ago = (Utc::now() - last_time).num_days() as f64;
-            let half_life = opts.recency_half_life.num_days() as f64;
-
-            if half_life > 0.0 {
-                let decay = 0.5_f64.powf(days_ago / half_life);
-                // Scale between 0.5 and 1.0
-                boosted *= 0.5 + 0.5 * decay;
-            }
-        }
-
-        // Importance boost: importance score is 0.0-1.0, we scale it to 0.5-1.5
-        // So importance=0.5 (default) gives 1.0 multiplier (no change)
-        // importance=1.0 gives 1.5x boost, importance=0.0 gives 0.5x penalty
-        if opts.boost_importance {
-            let importance_mult = 0.5 + entry.importance as f64;
-            boosted *= importance_mult;
-        }
-
-        boosted
     }
 
     /// Search for a single entry (first result)

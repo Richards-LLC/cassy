@@ -37,8 +37,10 @@ pub struct SessionStartRequest {
     #[serde(default)]
     pub cwd: Option<String>,
 
-    /// Context entry limit
-    #[schemars(description = "Maximum context entries to include (default: 5)")]
+    /// Context entry limit (falls back to hooks.context_limit, default 5)
+    #[schemars(
+        description = "Maximum context entries to include (default: hooks.context_limit, 5)"
+    )]
     #[serde(default)]
     pub limit: Option<usize>,
 }

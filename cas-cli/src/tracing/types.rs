@@ -107,6 +107,11 @@ pub struct ContextInjectionTrace {
     pub token_budget: usize,
     /// Items that were omitted due to budget
     pub items_omitted: usize,
+    /// IDs of entries rendered in the Helpful Memories SessionStart section.
+    /// These are opaque identifiers used to reconcile the injection trace with
+    /// retrieval query result rows.
+    #[serde(default)]
+    pub memory_ids: Vec<String>,
 }
 
 /// Rule application trace details

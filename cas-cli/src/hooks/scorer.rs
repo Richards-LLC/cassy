@@ -74,7 +74,11 @@ impl HybridContextScorer {
 /// context query. Hybrid search already blends lexical relevance with recency
 /// and importance, but a recently-created generic entry can otherwise crowd a
 /// task-specific memory out of the compact ambient-memory window.
-fn contextual_overlap_bonus(entry: &Entry, query: &str) -> f32 {
+///
+/// `pub(crate)` for the retrieval-eval harness, whose scorer-swap replica calls
+/// this exact function rather than copying it, so an experiment cannot silently
+/// diverge from production on the bonus term.
+pub(crate) fn contextual_overlap_bonus(entry: &Entry, query: &str) -> f32 {
     const COMMON_CONTEXT_TERMS: &[&str] = &[
         "about", "after", "against", "and", "are", "for", "from", "into", "must", "not", "the",
         "that", "this", "with",
@@ -203,6 +207,7 @@ mod tests {
             cwd: "/project".to_string(),
             user_prompt: None,
             recent_files: vec![],
+            git_branch: None,
         };
         assert!(context.has_content());
         assert!(context.to_query_string().contains("Implement feature X"));
@@ -250,5 +255,117 @@ mod tests {
             "a multi-term task match ({task_score}) must outrank a high-importance generic memory ({generic_score}) when hybrid search falls back"
         );
         assert_eq!(contextual_overlap_bonus(&generic_memory, query), 0.0);
+    }
+
+    /// cas-3b80 acceptance criterion 1, on the production wiring.
+    ///
+    /// `hooks/context.rs` builds `ContextStores` and hands it to
+    /// `build_context_with_stores` with `HybridContextScorer` as the
+    /// `entry_scorer`; this drives exactly that call. Before this task the
+    /// assertion below was impossible to satisfy for a fresh session: with no
+    /// in-progress task and no prompt of its own, `ContextQuery::has_content()`
+    /// was false, the scorer early-returned onto `BasicContextScorer`, and
+    /// every session in a project received byte-identical Helpful Memories.
+    #[test]
+    fn two_different_sessions_get_different_helpful_memories() {
+        use cas_core::hooks::context::{ContextStores, SurfacedItemCallback};
+        use cas_store::{SqliteStore, Store};
+        use cas_types::Entry;
+        use std::sync::{Arc, Mutex};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cas_dir = temp.path();
+        let store = SqliteStore::open(cas_dir).expect("open store");
+        store.init().expect("init store");
+
+        let corpus = [
+            (
+                "mem-retrieval",
+                "Retrieval ranking regressions are caught by the labeled retrieval eval harness precision baseline",
+            ),
+            (
+                "mem-release",
+                "Release tag pushes must announce the digest before the release workflow promotes it",
+            ),
+            (
+                "mem-hooks",
+                "SessionStart hooks open every store once and must never block the harness critical path",
+            ),
+            (
+                "mem-sqlite",
+                "SQLite writers serialize under one lock, so a busy timeout beats a retry loop",
+            ),
+            (
+                "mem-slack",
+                "Slack release notes need a user thread and a dev thread with Was and Now framing",
+            ),
+            (
+                "mem-worktree",
+                "Worktree cleanup deletes the branch only when the lane is finished",
+            ),
+        ];
+        for (id, content) in corpus {
+            let entry = Entry {
+                id: id.to_string(),
+                content: content.to_string(),
+                entry_type: cas_types::EntryType::Learning,
+                created: chrono::Utc::now(),
+                ..Default::default()
+            };
+            store.add(&entry).expect("add entry");
+        }
+
+        let scorer = HybridContextScorer::open_with_graph(cas_dir).expect("open scorer");
+        let config = crate::config::Config::default();
+
+        let rank = |carried_prompt: &str| -> Vec<String> {
+            let surfaced: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&surfaced);
+            let callback: SurfacedItemCallback =
+                Box::new(move |id: &str, item_type: &str, _preview| {
+                    if item_type.eq_ignore_ascii_case("memory")
+                        && let Ok(mut ids) = sink.lock()
+                    {
+                        ids.push(id.to_string());
+                    }
+                });
+
+            let mut stores = ContextStores::empty();
+            stores.project_store = Some(&store as &dyn Store);
+            stores.entry_scorer = Some(&scorer as &dyn ContextScorer);
+            stores.carried_prompt = Some(carried_prompt.to_string());
+
+            let input = cas_core::hooks::types::HookInput {
+                session_id: "scorer-test".to_string(),
+                cwd: cas_dir.display().to_string(),
+                hook_event_name: "SessionStart".to_string(),
+                ..Default::default()
+            };
+            cas_core::hooks::context::build_context_with_stores(
+                &input,
+                &stores,
+                &config,
+                5,
+                Some(&callback),
+                "mcp__cas__",
+            )
+            .expect("build context");
+            let ids = surfaced.lock().expect("lock").clone();
+            ids
+        };
+
+        let retrieval_session =
+            rank("Fix the retrieval eval harness so the ranking baseline reflects precision");
+        let release_session =
+            rank("Announce the release digest in Slack before the tag workflow promotes it");
+
+        assert!(
+            !retrieval_session.is_empty() && !release_session.is_empty(),
+            "the Helpful Memories section must not be silent"
+        );
+        assert_ne!(
+            retrieval_session, release_session,
+            "two sessions about different work must not receive the same memory ranking"
+        );
     }
 }

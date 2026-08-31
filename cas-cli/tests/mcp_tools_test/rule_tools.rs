@@ -325,6 +325,38 @@ async fn test_rule_helpful_requires_evidence_threshold() {
 }
 
 #[tokio::test]
+async fn test_rule_helpful_promotes_draft_to_proven_at_default_threshold() {
+    let (_temp, service) = setup_cas();
+
+    let result = service
+        .cas_rule_create(Parameters(RuleCreateRequest {
+            scope: "project".to_string(),
+            content: "End-to-end helpful promotion rule".to_string(),
+            paths: None,
+            tags: None,
+            source_ids: None,
+            auto_approve_tools: None,
+            auto_approve_paths: None,
+        }))
+        .await
+        .unwrap();
+    let id = extract_rule_id(&extract_text(result)).expect("rule ID");
+
+    for expected_status in [RuleStatus::Draft, RuleStatus::Proven] {
+        let feedback = service
+            .cas_rule_helpful(Parameters(IdRequest { id: id.clone() }))
+            .await
+            .unwrap();
+        assert!(extract_text(feedback).contains("helpful"));
+        let rule = open_rule_store(&_temp.path().join(".cas"))
+            .unwrap()
+            .get(&id)
+            .unwrap();
+        assert_eq!(rule.status, expected_status);
+    }
+}
+
+#[tokio::test]
 async fn test_rule_helpful_promotes_at_configured_threshold() {
     let (_temp, service) = setup_cas();
     std::fs::write(
@@ -491,6 +523,32 @@ async fn test_rule_retrieval_evidence_requires_distinct_sessions() {
             .unwrap();
     }
 
+    retrieval
+        .record_query(
+            "query-unresolved-session",
+            "unresolved evidence",
+            "rule_validation",
+            "test-policy",
+            Some("session-unresolved-only"),
+            &[RetrievalHitIdentity {
+                result_id: id.clone(),
+                document_type: "rule".to_string(),
+                rank: 0,
+            }],
+        )
+        .unwrap();
+    retrieval
+        .record_outcome(
+            "outcome-unresolved-session",
+            "query-unresolved-session",
+            &id,
+            RetrievalOutcome::Unresolved,
+            "actor-unresolved",
+            "session-unresolved-only",
+            None,
+        )
+        .unwrap();
+
     service
         .cas_rule_helpful(Parameters(IdRequest { id: id.clone() }))
         .await
@@ -649,7 +707,10 @@ async fn test_corrected_retrieval_evidence_demotes_on_sync() {
         .get(&id)
         .unwrap();
     assert_eq!(rule.status, RuleStatus::Proven);
-    assert!(injected.is_file(), "one correction must not remove the rule");
+    assert!(
+        injected.is_file(),
+        "one correction must not remove the rule"
+    );
 
     retrieval
         .record_query(
@@ -683,7 +744,10 @@ async fn test_corrected_retrieval_evidence_demotes_on_sync() {
         .get(&id)
         .unwrap();
     assert_eq!(rule.status, RuleStatus::Stale);
-    assert!(!injected.exists(), "corrected rule must stop being injected");
+    assert!(
+        !injected.exists(),
+        "corrected rule must stop being injected"
+    );
 
     let history = service
         .cas_rule_history(Parameters(VersionRequest {

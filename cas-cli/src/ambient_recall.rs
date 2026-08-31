@@ -1665,6 +1665,41 @@ pub(crate) fn build_ambient_recall_context_for_factory_launch(
     )
 }
 
+/// Record rule and skill cards selected by ambient recall in the same durable
+/// surface ledger used by the normal SessionStart context builder. Other
+/// ambient evidence remains in retrieval telemetry; surfaced_artifacts is
+/// intentionally limited to artifacts with impact counters.
+fn record_ambient_artifact_surfaces(
+    cas_root: &Path,
+    session_id: &str,
+    injected: &[EvidenceCandidate],
+) {
+    use cas_store::{SqliteSurfacedArtifactStore, SurfacedArtifact};
+
+    let artifacts: Vec<SurfacedArtifact> = injected
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.surface,
+                EvidenceSurface::Rule | EvidenceSurface::Skill
+            )
+        })
+        .map(|candidate| SurfacedArtifact {
+            artifact_id: candidate.evidence_id.clone(),
+            artifact_type: candidate.surface.as_str().to_string(),
+            preview: Some(candidate.snippet.clone()),
+        })
+        .collect();
+    if artifacts.is_empty() {
+        return;
+    }
+    if let Ok(store) = SqliteSurfacedArtifactStore::open(cas_root) {
+        // Impact bookkeeping is observational and must never make ambient
+        // recall fail after the packet has already been rendered.
+        let _ = store.record_batch(session_id, &artifacts);
+    }
+}
+
 fn build_ambient_recall_context_with_factory_identity(
     input: &cas_core::hooks::types::HookInput,
     cas_root: &Path,
@@ -1813,6 +1848,7 @@ fn build_ambient_recall_context_with_factory_identity(
             );
             let query_id =
                 record_ambient_query(cas_root, &identity, &query, &injected, session_start);
+            record_ambient_artifact_surfaces(cas_root, &identity.session_id, &injected);
             ledger.record(packet.query_hash.clone(), query_id, &injected);
             ledger.save(&ledger_file);
             eprintln!(
@@ -2171,12 +2207,14 @@ fn sort_candidates(candidates: &mut [EvidenceCandidate]) {
     });
 }
 
-/// A conservative, shrunk outcome adjustment. Automatic `used` is weakly
-/// positive, automatic `ignored` is weakly negative, and explicit
-/// helpful/corrected/harmful outcomes carry more weight. Four virtual neutral
-/// observations prevent a single event from overpowering retrieval evidence.
+/// A conservative, shrunk outcome adjustment over resolved evidence only.
+/// Automatic `used` is weakly positive; `ignored` is reserved for explicit
+/// non-use evidence and is weakly negative. Explicit helpful/corrected/harmful
+/// outcomes carry more weight. Four virtual neutral observations prevent a
+/// single event from overpowering retrieval evidence. `unresolved` never
+/// reaches either the numerator or denominator.
 fn outcome_adjustment(
-    total: u64,
+    resolved: u64,
     used: u64,
     helpful: u64,
     ignored: u64,
@@ -2187,7 +2225,7 @@ fn outcome_adjustment(
         - ignored as f64 * 0.25
         - corrected as f64 * 0.75
         - harmful as f64 * 1.25;
-    (weighted / (total as f64 + 4.0) * 0.20).clamp(-0.20, 0.15)
+    (weighted / (resolved as f64 + 4.0) * 0.20).clamp(-0.20, 0.15)
 }
 
 /// Apply bounded per-result history to the already scope-gated candidate
@@ -2218,7 +2256,8 @@ fn apply_outcome_feedback(cas_root: &Path, candidates: &mut [EvidenceCandidate])
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT result_id, COUNT(*),
+        "SELECT result_id,
+                SUM(CASE WHEN outcome != 'unresolved' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN outcome = 'used' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN outcome = 'helpful' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN outcome = 'ignored' THEN 1 ELSE 0 END),
@@ -2312,8 +2351,9 @@ fn record_pending_outcomes(
     ledger: &mut RecallLedger,
     outcome: cas_store::RetrievalOutcome,
     activity: Option<&str>,
+    exact_evidence_ids: &[String],
 ) -> bool {
-    use cas_store::{RetrievalStore, SqliteRetrievalStore};
+    use cas_store::{RETRIEVAL_ATTRIBUTION_AUTOMATIC, SqliteRetrievalStore};
 
     if session_id.trim().is_empty() {
         return false;
@@ -2339,7 +2379,8 @@ fn record_pending_outcomes(
         if let Some(activity) = activity {
             let id = seen.evidence_id.to_ascii_lowercase();
             let locator = seen.locator.to_ascii_lowercase();
-            let matched = (id.len() >= 4 && activity.contains(&id))
+            let matched = exact_evidence_ids.iter().any(|exact| exact == &id)
+                || (id.len() >= 4 && activity.contains(&id))
                 || (locator.len() >= 4 && activity.contains(&locator));
             if !matched {
                 continue;
@@ -2347,7 +2388,7 @@ fn record_pending_outcomes(
         }
         let query_id = seen.query_id.as_deref().expect("filtered above");
         if store
-            .record_outcome(
+            .record_outcome_with_attribution(
                 &automatic_outcome_id(query_id, &seen.evidence_id),
                 query_id,
                 &seen.evidence_id,
@@ -2355,6 +2396,7 @@ fn record_pending_outcomes(
                 &actor,
                 session_id,
                 None,
+                RETRIEVAL_ATTRIBUTION_AUTOMATIC,
             )
             .is_ok()
         {
@@ -2363,6 +2405,87 @@ fn record_pending_outcomes(
         }
     }
     changed
+}
+
+fn collect_exact_id_fields(value: &serde_json::Value, ids: &mut Vec<String>) -> bool {
+    if ids.len() == LEDGER_ENTRY_CAP {
+        return true;
+    }
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                if collect_exact_id_fields(value, ids) {
+                    return true;
+                }
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                if key.eq_ignore_ascii_case("id") {
+                    if let Some(id) = value.as_str() {
+                        let id = id.to_ascii_lowercase();
+                        if !id.is_empty() && id.len() <= 256 && !ids.contains(&id) {
+                            ids.push(id);
+                        }
+                    }
+                } else if collect_exact_id_fields(value, ids) {
+                    return true;
+                }
+                if ids.len() == LEDGER_ENTRY_CAP {
+                    return true;
+                }
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+/// Exact IDs observed through Cassy's body-pull surface. This semantic signal
+/// does not need the four-character substring heuristic used for arbitrary
+/// tool traffic: memory IDs are compared to the injected ledger directly.
+fn exact_memory_retrieval_ids(input: &cas_core::hooks::types::HookInput) -> Vec<String> {
+    let is_memory_tool = input.tool_name.as_deref().is_some_and(|name| {
+        name.eq_ignore_ascii_case("mcp__cas__memory")
+            || name.eq_ignore_ascii_case("mcp__cs__memory")
+            || name.eq_ignore_ascii_case("cas_memory")
+    });
+    if !is_memory_tool {
+        return Vec::new();
+    }
+
+    let action = input
+        .tool_input
+        .as_ref()
+        .and_then(|value| value.get("action"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let mut ids = Vec::new();
+    if action.eq_ignore_ascii_case("get") {
+        if let Some(id) = input
+            .tool_input
+            .as_ref()
+            .and_then(|value| value.get("id"))
+            .and_then(serde_json::Value::as_str)
+        {
+            if id.len() <= 256 {
+                ids.push(id.to_ascii_lowercase());
+            }
+        }
+    } else if matches!(
+        action.to_ascii_lowercase().as_str(),
+        "list" | "show" | "recent"
+    ) {
+        if let Some(response) = input.tool_response.as_ref() {
+            if collect_exact_id_fields(response, &mut ids) {
+                tracing::debug!(
+                    cap = LEDGER_ENTRY_CAP,
+                    "memory tool response ID collection reached its cap; additional IDs were omitted"
+                );
+            }
+        }
+    }
+    ids
 }
 
 /// Bounded, redacted trigger facts accumulated from PostToolUse traffic.
@@ -2565,18 +2688,20 @@ pub(crate) fn record_ambient_tool_usage(
     )
     .to_ascii_lowercase();
     activity = truncate_utf8(&activity, TOOL_ACTIVITY_BYTE_CAP);
+    let exact_evidence_ids = exact_memory_retrieval_ids(input);
     if record_pending_outcomes(
         cas_root,
         &input.session_id,
         &mut ledger,
         cas_store::RetrievalOutcome::Used,
         Some(&activity),
+        &exact_evidence_ids,
     ) {
         ledger.save(&path);
     }
 }
 
-/// Finalize unresolved injections as ignored on the normal Stop path. This is
+/// Finalize inactive injections as unresolved on the normal Stop path. This is
 /// intentionally called only after all stop blockers, because a blocked Stop
 /// means the session still has future tool activity that may use a card.
 pub(crate) fn finalize_ambient_recall_feedback(
@@ -2589,8 +2714,9 @@ pub(crate) fn finalize_ambient_recall_feedback(
         cas_root,
         &input.session_id,
         &mut ledger,
-        cas_store::RetrievalOutcome::Ignored,
+        cas_store::RetrievalOutcome::Unresolved,
         None,
+        &[],
     ) {
         ledger.save(&path);
     }
@@ -3033,12 +3159,12 @@ mod tests {
 
     use super::*;
     use crate::test_support::TestEnvGuard;
-    use crate::types::{Entry, Task, TaskStatus};
+    use crate::types::{Entry, Rule, Task, TaskStatus};
     use cas_code::{CodeFile, CodeSymbol, Language, SymbolKind};
     use cas_store::{
         CodeStore, HistoryCommit, HistoryStore, IngestBatch, KnowledgePage, KnowledgeStore,
         PageWrite, SOURCE_EMBEDDINGS, SqliteCodeStore, SqliteCodeVectorStore, SqliteHistoryStore,
-        SqliteKnowledgeStore,
+        SqliteKnowledgeStore, SqliteSurfacedArtifactStore,
     };
 
     fn identity(role: RecallRole) -> RecallIdentity {
@@ -3464,11 +3590,226 @@ mod tests {
         assert_eq!(groups[0].query_family, "ambient_transition");
         assert_eq!(groups[0].ranking_policy, AMBIENT_RETRIEVAL_POLICY);
         assert_eq!(
-            (groups[0].total, groups[0].used, groups[0].ignored),
-            (2, 1, 1)
+            (
+                groups[0].total,
+                groups[0].resolved,
+                groups[0].unresolved,
+                groups[0].used,
+                groups[0].ignored,
+            ),
+            (2, 1, 1, 1, 0)
         );
         let ledger = RecallLedger::load(&ledger_path(&cas_root, &identity.session_id));
         assert!(ledger.seen.iter().all(|seen| seen.outcome_recorded));
+    }
+
+    #[test]
+    fn memory_get_marks_a_short_injected_id_used() {
+        use cas_store::{RetrievalStore, SqliteRetrievalStore};
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let identity = identity(RecallRole::Worker);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "repair parser cache".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let candidates = RecallCandidates {
+            candidates: vec![candidate("m1", EvidenceScope::Global)],
+            rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
+        };
+        let mut ledger = RecallLedger::default();
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
+        let query_id = record_ambient_query(&cas_root, &identity, &query, &injected, false);
+        ledger.record(packet.query_hash, query_id, &injected);
+        ledger.save(&ledger_path(&cas_root, &identity.session_id));
+
+        let tool = cas_core::hooks::types::HookInput {
+            session_id: identity.session_id.clone(),
+            tool_name: Some("mcp__cs__memory".into()),
+            tool_input: Some(serde_json::json!({"action": "get", "id": "m1"})),
+            tool_response: Some(serde_json::json!({"id": "m1", "content": "body"})),
+            ..Default::default()
+        };
+        record_ambient_tool_usage(&tool, &cas_root);
+        finalize_ambient_recall_feedback(&tool, &cas_root);
+
+        let groups = SqliteRetrievalStore::open(&cas_root)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!((groups[0].total, groups[0].used), (1, 1));
+    }
+
+    #[test]
+    fn foreign_memory_tool_does_not_mark_an_injected_id_used() {
+        use cas_store::SqliteRetrievalStore;
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let identity = identity(RecallRole::Worker);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "repair parser cache".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let candidates = RecallCandidates {
+            candidates: vec![candidate("m1", EvidenceScope::Global)],
+            rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
+        };
+        let mut ledger = RecallLedger::default();
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
+        let query_id = record_ambient_query(&cas_root, &identity, &query, &injected, false);
+        ledger.record(packet.query_hash, query_id, &injected);
+        ledger.save(&ledger_path(&cas_root, &identity.session_id));
+
+        record_ambient_tool_usage(
+            &cas_core::hooks::types::HookInput {
+                session_id: identity.session_id.clone(),
+                tool_name: Some("mcp__foreign__memory".into()),
+                tool_input: Some(serde_json::json!({"action": "get", "id": "m1"})),
+                tool_response: Some(serde_json::json!({"id": "m1"})),
+                ..Default::default()
+            },
+            &cas_root,
+        );
+
+        let groups = SqliteRetrievalStore::open(&cas_root)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!((groups[0].total, groups[0].used), (0, 0));
+    }
+
+    #[test]
+    fn opencode_memory_shape_marks_an_injected_id_used() {
+        use cas_store::SqliteRetrievalStore;
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let identity = identity(RecallRole::Worker);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "repair parser cache".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let candidates = RecallCandidates {
+            candidates: vec![candidate("m1", EvidenceScope::Global)],
+            rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
+        };
+        let mut ledger = RecallLedger::default();
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
+        let query_id = record_ambient_query(&cas_root, &identity, &query, &injected, false);
+        ledger.record(packet.query_hash, query_id, &injected);
+        ledger.save(&ledger_path(&cas_root, &identity.session_id));
+
+        record_ambient_tool_usage(
+            &cas_core::hooks::types::HookInput {
+                session_id: identity.session_id.clone(),
+                tool_name: Some("cas_memory".into()),
+                tool_input: Some(serde_json::json!({"action": "get", "id": "m1"})),
+                tool_response: Some(serde_json::json!({"id": "m1"})),
+                ..Default::default()
+            },
+            &cas_root,
+        );
+
+        let groups = SqliteRetrievalStore::open(&cas_root)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!((groups[0].total, groups[0].used), (1, 1));
+    }
+
+    #[test]
+    fn unresolved_outcomes_do_not_adjust_or_dilute_ranking() {
+        assert_eq!(outcome_adjustment(0, 0, 0, 0, 0, 0), 0.0);
+    }
+
+    #[test]
+    fn memory_list_response_returns_exact_injected_ids_without_substring_matching() {
+        let input = cas_core::hooks::types::HookInput {
+            tool_name: Some("mcp__cs__memory".into()),
+            tool_input: Some(serde_json::json!({"action": "list"})),
+            tool_response: Some(serde_json::json!({
+                "entries": [{"id": "m1"}, {"id": "m2"}]
+            })),
+            ..Default::default()
+        };
+        assert_eq!(exact_memory_retrieval_ids(&input), vec!["m1", "m2"]);
+    }
+
+    #[test]
+    fn exact_memory_id_collection_reports_when_the_response_reaches_its_cap() {
+        let response = serde_json::json!({
+            "entries": (0..=LEDGER_ENTRY_CAP)
+                .map(|index| serde_json::json!({"id": format!("memory-{index}")}))
+                .collect::<Vec<_>>()
+        });
+        let mut ids = Vec::new();
+        assert!(collect_exact_id_fields(&response, &mut ids));
+        assert_eq!(ids.len(), LEDGER_ENTRY_CAP);
+    }
+
+    #[test]
+    fn ambient_rule_surface_is_recorded_in_the_shared_ledger() {
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let rule_store = crate::store::open_rule_store_local(&cas_root).unwrap();
+        rule_store
+            .add(&Rule::new(
+                "ambient-rule".into(),
+                "Always surface the rule flywheel".into(),
+            ))
+            .unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some("worker-one")),
+            ("CAS_FACTORY_SESSION", Some("factory-one")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        let input = cas_core::hooks::types::HookInput {
+            session_id: "ambient-rule-session".into(),
+            cwd: project.path().to_string_lossy().into_owned(),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        };
+
+        let packet = build_ambient_recall_context(
+            &input,
+            &cas_root,
+            Some("Please surface the rule flywheel"),
+            true,
+        )
+        .expect("the matching draft rule should be surfaced");
+        assert!(packet.full.contains("ambient-rule"));
+
+        let surfaced = SqliteSurfacedArtifactStore::open(&cas_root).unwrap();
+        assert_eq!(surfaced.count_for_session(&input.session_id).unwrap(), 1);
+        assert_eq!(rule_store.get("ambient-rule").unwrap().surface_count, 1);
+        let impact = surfaced.aggregate(10).unwrap();
+        assert_eq!(impact.len(), 1);
+        assert_eq!(impact[0].artifact_id, "ambient-rule");
+        assert_eq!(impact[0].surfaced_count, 1);
     }
 
     #[test]
@@ -3498,6 +3839,11 @@ mod tests {
                         document_type: "entry".into(),
                         rank: 1,
                     },
+                    RetrievalHitIdentity {
+                        result_id: "unresolved-source".into(),
+                        document_type: "entry".into(),
+                        rank: 2,
+                    },
                 ],
             )
             .unwrap();
@@ -3523,15 +3869,34 @@ mod tests {
                 None,
             )
             .unwrap();
+        store
+            .record_outcome(
+                "out-unresolved",
+                "qry-ranking",
+                "unresolved-source",
+                RetrievalOutcome::Unresolved,
+                "actor",
+                "session",
+                None,
+            )
+            .unwrap();
 
         let mut candidates = vec![
             candidate("harmful-source", EvidenceScope::Global),
             candidate("helpful-source", EvidenceScope::Global),
+            candidate("unresolved-source", EvidenceScope::Global),
         ];
-        assert_eq!(candidates[0].relevance, candidates[1].relevance);
+        let baseline = candidates[0].relevance;
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.relevance == baseline)
+        );
         apply_outcome_feedback(&cas_root, &mut candidates);
         assert_eq!(candidates[0].evidence_id, "helpful-source");
-        assert!(candidates[0].relevance > candidates[1].relevance);
+        assert_eq!(candidates[1].evidence_id, "unresolved-source");
+        assert_eq!(candidates[1].relevance, baseline);
+        assert!(candidates[0].relevance > candidates[2].relevance);
         assert!(
             candidates
                 .iter()

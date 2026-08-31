@@ -24,7 +24,6 @@
 //! let opts = SearchOptions {
 //!     query: "rust testing".to_string(),
 //!     limit: 10,
-//!     boost_feedback: true,
 //!     ..Default::default()
 //! };
 //! let results = index.search(&opts, &entries)?;
@@ -87,17 +86,23 @@ pub use semantic::{SemanticChannel, open_semantic_channel};
 pub mod filter_grammar;
 pub mod frontmatter;
 mod id_utils;
+mod legacy_index;
 mod search_index_impl;
 mod search_index_query;
 
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use chrono::Duration;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
 use tantivy::{Index, IndexReader};
 
 pub use id_utils::extract_id_patterns;
+pub use legacy_index::{
+    DAEMON_REPAIR_BUDGET, DOCTOR_REPAIR_BUDGET, LegacyIndexState, LegacyRepairLimits,
+    LegacyRepairOutcome, LegacyRepairResult, inspect_legacy_index, repair_legacy_index,
+    repair_legacy_index_bounded,
+};
 
 /// Document type for unified search
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +169,14 @@ impl DocType {
 /// Default memory budget for BM25 index writer (50MB)
 pub const DEFAULT_WRITER_MEMORY: usize = 50_000_000;
 
+/// Canonical location of the unified Tantivy index below a Cassy root.
+///
+/// Every reader and writer must use this resolver. Keeping the path derivation
+/// here prevents the background daemon from silently creating a sibling index.
+pub fn tantivy_index_dir(cas_dir: &Path) -> PathBuf {
+    cas_dir.join("index").join("tantivy")
+}
+
 /// Search index backed by Tantivy
 pub struct SearchIndex {
     index: Index,
@@ -229,14 +242,6 @@ pub struct SearchOptions {
     pub query: String,
     /// Maximum number of results
     pub limit: usize,
-    /// Boost results by feedback score
-    pub boost_feedback: bool,
-    /// Boost results by recency
-    pub boost_recency: bool,
-    /// Boost results by importance/priority score
-    pub boost_importance: bool,
-    /// Half-life for recency decay
-    pub recency_half_life: Duration,
     /// Filter by tags (OR logic)
     pub tags: Vec<String>,
     /// Filter by entry types
@@ -259,10 +264,6 @@ impl Default for SearchOptions {
         Self {
             query: String::new(),
             limit: 10,
-            boost_feedback: false,
-            boost_recency: false,
-            boost_importance: false,
-            recency_half_life: Duration::days(30),
             tags: Vec::new(),
             types: Vec::new(),
             doc_types: Vec::new(), // Empty = all types
@@ -384,53 +385,6 @@ mod tests {
                 })
                 .is_err(),
             "registered fields must retain Tantivy's strict syntax validation"
-        );
-    }
-
-    #[test]
-    fn test_feedback_boost() {
-        let index = SearchIndex::in_memory().unwrap();
-
-        // Entry with low BM25 score but high feedback
-        let mut entry1 = create_test_entry("001", "Rust programming");
-        entry1.helpful_count = 10;
-
-        // Entry with higher BM25 score (more matching terms) but no feedback
-        let entry2 = create_test_entry("002", "Rust programming language tutorial guide");
-
-        let entries = vec![entry1, entry2];
-
-        for entry in &entries {
-            index.index_entry(entry).unwrap();
-        }
-
-        // Without boost: entry2 should rank higher due to more content
-        let opts = SearchOptions {
-            query: "programming".to_string(),
-            limit: 10,
-            boost_feedback: false,
-            ..Default::default()
-        };
-        let results_without = index.search(&opts, &entries).unwrap();
-
-        // With boost: entry1's feedback should help it compete or rank higher
-        let opts = SearchOptions {
-            query: "programming".to_string(),
-            limit: 10,
-            boost_feedback: true,
-            ..Default::default()
-        };
-        let results_with = index.search(&opts, &entries).unwrap();
-
-        // Find positions
-        let pos_without = results_without.iter().position(|r| r.id == "001").unwrap();
-        let pos_with = results_with.iter().position(|r| r.id == "001").unwrap();
-
-        // With feedback boost, entry1 should rank better (lower position = better)
-        // or at least maintain position
-        assert!(
-            pos_with <= pos_without,
-            "Feedback boost should improve ranking: pos_with={pos_with}, pos_without={pos_without}"
         );
     }
 

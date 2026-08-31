@@ -374,6 +374,11 @@ impl Store for MarkdownStore {
         Ok(())
     }
 
+    fn mark_index_pending_batch(&self, _ids: &[&str]) -> Result<()> {
+        // MarkdownStore doesn't persist indexed_at
+        Ok(())
+    }
+
     fn cas_dir(&self) -> &Path {
         &self.cas_dir
     }
@@ -431,8 +436,6 @@ impl MarkdownRuleStore {
             #[serde(default)]
             review_after: Option<DateTime<Utc>>,
             #[serde(default)]
-            hook_command: Option<String>,
-            #[serde(default)]
             category: Option<String>,
             #[serde(default)]
             priority: Option<u8>,
@@ -462,7 +465,6 @@ impl MarkdownRuleStore {
             paths: fm.paths,
             last_accessed: fm.last_accessed,
             review_after: fm.review_after,
-            hook_command: fm.hook_command,
             category: fm.category.and_then(|s| s.parse().ok()).unwrap_or_default(),
             priority: fm.priority.unwrap_or(2),
             surface_count: fm.surface_count.unwrap_or(0),
@@ -489,7 +491,7 @@ impl MarkdownRuleStore {
              surface_count: {}\n\
              tags: [{}]\n\
              paths: \"{}\"\n\
-             {}{}{}{}{}\
+             {}{}{}{}\
              ---\n\n\
              {}",
             rule.id,
@@ -508,10 +510,6 @@ impl MarkdownRuleStore {
                 .unwrap_or_default(),
             rule.review_after
                 .map(|t| format!("review_after: {}\n", t.to_rfc3339()))
-                .unwrap_or_default(),
-            rule.hook_command
-                .as_ref()
-                .map(|c| format!("hook_command: \"{c}\"\n"))
                 .unwrap_or_default(),
             rule.auto_approve_tools
                 .as_ref()

@@ -1,15 +1,17 @@
 use assert_cmd::Command;
 use cas::hooks::build_context_with_token_budget;
 use cas::types::{Entry, EntryType};
-use cas_core::hooks::context::{ContextStores, build_context_with_stores};
+use cas_core::hooks::context::{ContextStores, SurfacedItemCallback, build_context_with_stores};
 use cas_core::hooks::{DefaultHooksConfig, HookInput};
 use cas_core::memory::{contamination_patterns, find_contaminated_entries};
 use cas_store::{
     RuleStore, SkillStore, SqliteRuleStore, SqliteSkillStore, SqliteStore,
     SqliteSurfacedArtifactStore, Store,
 };
-use cas_types::{Rule, RuleStatus, Session, SessionOutcome, Skill, SkillStatus};
+use cas_types::{MemoryTier, Rule, RuleStatus, Session, SessionOutcome, Skill, SkillStatus};
+use rusqlite::Connection;
 use std::fs;
+use std::sync::{Arc, Mutex};
 
 fn session_start_input() -> HookInput {
     HookInput {
@@ -76,6 +78,147 @@ fn cli_session_start_persists_surface_ledger_for_injected_rules_and_skills() {
 }
 
 #[test]
+fn cli_session_start_telemeters_helpful_memories_with_trace_parity() {
+    let temp = tempfile::tempdir().unwrap();
+    let cas_root = temp.path().join(".cas");
+    fs::create_dir_all(&cas_root).unwrap();
+
+    let entry_store = SqliteStore::open(&cas_root).unwrap();
+    entry_store.init().unwrap();
+    let ids = ["session-memory-a", "session-memory-b", "session-memory-c"];
+    for id in ids {
+        entry_store
+            .add(&Entry::new(
+                id.to_string(),
+                format!("Helpful SessionStart memory {id}"),
+            ))
+            .unwrap();
+    }
+
+    let input = HookInput {
+        session_id: "context-session-start-test".to_string(),
+        cwd: "/project".to_string(),
+        hook_event_name: "SessionStart".to_string(),
+        ..Default::default()
+    };
+    let context = build_context_with_token_budget(&input, ids.len(), &cas_root, None).unwrap();
+    assert!(
+        context.contains("## Helpful Memories (3 memories"),
+        "{context}"
+    );
+    let mut expected_order: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            (
+                context
+                    .find(&format!("- {id} ["))
+                    .expect("injected memory should be rendered"),
+                id.to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    expected_order.sort_by_key(|(position, _)| *position);
+    let expected_order: Vec<String> = expected_order.into_iter().map(|(_, id)| id).collect();
+
+    let db = Connection::open(cas_root.join("cas.db")).unwrap();
+    let (query_id, family, policy): (String, String, String) = db
+        .query_row(
+            "SELECT id, query_family, ranking_policy
+             FROM retrieval_queries",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(family, "context_session_start");
+    assert_eq!(policy, "context-session-start-v1");
+
+    let mut statement = db
+        .prepare(
+            "SELECT result_id, document_type, rank
+             FROM retrieval_query_results
+             WHERE query_id = ?1
+             ORDER BY rank",
+        )
+        .unwrap();
+    let rows: Vec<(String, String, usize)> = statement
+        .query_map([&query_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? as usize))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(
+        rows,
+        expected_order
+            .into_iter()
+            .enumerate()
+            .map(|(rank, id)| (id.to_string(), "entry".to_string(), rank))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn helpful_memory_surface_callback_uses_literal_lowercase_memory_tag() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+    store
+        .add(&Entry::new(
+            "lowercase-memory-tag".to_string(),
+            "Memory tag contract test".to_string(),
+        ))
+        .unwrap();
+
+    let surfaced = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let surfaced_for_callback = Arc::clone(&surfaced);
+    let callback: SurfacedItemCallback = Box::new(move |id: &str, item_type: &str, _preview| {
+        surfaced_for_callback
+            .lock()
+            .unwrap()
+            .push((id.to_string(), item_type.to_string()));
+    });
+    let stores = ContextStores {
+        project_store: Some(&store),
+        ..ContextStores::empty()
+    };
+
+    build_context_with_stores(
+        &session_start_input(),
+        &stores,
+        &DefaultHooksConfig::new(),
+        5,
+        Some(&callback),
+        "mcp__cas__",
+    )
+    .unwrap();
+
+    assert_eq!(
+        surfaced.lock().unwrap().as_slice(),
+        &[("lowercase-memory-tag".to_string(), "memory".to_string())]
+    );
+}
+
+#[test]
+fn cli_session_start_telemetry_failure_does_not_fail_context_build() {
+    let temp = tempfile::tempdir().unwrap();
+    let cas_root = temp.path().join(".cas");
+    fs::create_dir_all(cas_root.join("cas.db")).unwrap();
+
+    let input = HookInput {
+        session_id: "context-session-start-telemetry-failure".to_string(),
+        cwd: "/project".to_string(),
+        hook_event_name: "SessionStart".to_string(),
+        ..Default::default()
+    };
+    let result = build_context_with_token_budget(&input, 5, &cas_root, None);
+
+    assert!(
+        result.is_ok(),
+        "telemetry failure leaked into hook: {result:?}"
+    );
+}
+
+#[test]
 fn high_importance_preference_injects_its_full_first_line() {
     let first_line = "Slack embargo: do not post internal release details until the operator explicitly clears the embargo; this standing instruction must remain visible in every session";
     let entry = Entry {
@@ -113,6 +256,62 @@ fn high_importance_preference_injects_its_full_first_line() {
         context.contains(first_line),
         "high-importance preference was truncated in SessionStart:\n{context}"
     );
+}
+
+#[test]
+fn helpful_memories_only_surface_active_feedback_eligible_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+
+    let working = Entry::new(
+        "helpful-working".to_string(),
+        "working memory eligible for helpful memories".to_string(),
+    );
+    let archived_tier = Entry {
+        id: "helpful-archive-tier".to_string(),
+        memory_tier: MemoryTier::Archive,
+        content: "archive tier must stay out of helpful memories".to_string(),
+        ..Entry::new("unused-archive-tier".to_string(), String::new())
+    };
+    let raw_context = Entry {
+        id: "raw-context".to_string(),
+        entry_type: EntryType::Context,
+        content: "raw context blob without feedback must stay out".to_string(),
+        ..Entry::new("unused-raw-context".to_string(), String::new())
+    };
+    let feedback_context = Entry {
+        id: "feedback-context".to_string(),
+        entry_type: EntryType::Context,
+        helpful_count: 1,
+        content: "context with helpful feedback remains eligible".to_string(),
+        ..Entry::new("unused-feedback-context".to_string(), String::new())
+    };
+
+    for entry in [working, archived_tier, raw_context, feedback_context] {
+        store.add(&entry).unwrap();
+    }
+
+    let config = DefaultHooksConfig::new().with_token_budget(2_000);
+    let stores = ContextStores {
+        project_store: Some(&store),
+        ..ContextStores::empty()
+    };
+    let (context, stats) = build_context_with_stores(
+        &session_start_input(),
+        &stores,
+        &config,
+        10,
+        None,
+        "mcp__cas__",
+    )
+    .unwrap();
+
+    assert_eq!(stats.memories_included, 2);
+    assert!(context.contains("helpful-working"));
+    assert!(context.contains("feedback-context"));
+    assert!(!context.contains("helpful-archive-tier"));
+    assert!(!context.contains("raw-context"));
 }
 
 #[test]

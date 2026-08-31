@@ -270,7 +270,8 @@ pub struct Lane {
 pub type LaneDefinition = Lane;
 
 /// Per-harness policy defaults. These retain the existing spawn defaults,
-/// which are intentionally distinct from the taste recipe's `opus-5` model.
+/// which are intentionally distinct from the taste recipe's canonical
+/// `claude-opus-5` model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerDefaults {
@@ -414,6 +415,13 @@ pub fn validate_registry(registry: &LaneRegistry) -> Result<(), RoutingError> {
         if recipe.model.trim().is_empty() {
             return Err(RoutingError::Registry(format!(
                 "recipe {name:?} has an empty model"
+            )));
+        }
+        if recipe.harness == SupervisorCli::Claude
+            && let Err(reason) = validate_model_slug(SupervisorCli::Claude, &recipe.model)
+        {
+            return Err(RoutingError::Registry(format!(
+                "recipe {name:?} has an unrecognized Claude model: {reason}"
             )));
         }
         if recipe.allowed_efforts.is_empty() {
@@ -746,15 +754,24 @@ pub fn resolve_lane(
     resolve_lane_from_registry(lane, snapshot, registry)
 }
 
-/// Validate a resolved explicit worker recipe against static suspension and
-/// effort policy. Unknown models remain accepted, preserving the existing
-/// spawn behavior while the registry is being introduced.
+/// Validate a resolved explicit worker recipe against static model, suspension,
+/// and effort policy. Claude's CLI rejects family/version slugs such as
+/// `opus-5`; reject those labels so a lane cannot look healthy in the registry
+/// while dying during harness boot.
 pub fn validate_explicit(
     spec: &WorkerSpec,
     _snapshot: &CapabilitySnapshot,
 ) -> Result<(), RoutingError> {
     let registry = registry()?;
     if let Some(model) = spec.model.as_deref() {
+        if let Err(reason) = validate_model_slug(spec.cli, model) {
+            return Err(RoutingError::Policy(policy_violation_with_alternatives(
+                registry,
+                reason,
+                "harness model slug",
+                Some(model),
+            )));
+        }
         if let Err(reason) = validate_model_is_active(model) {
             return Err(RoutingError::Policy(policy_violation_with_alternatives(
                 registry,
@@ -808,6 +825,94 @@ pub fn validate_explicit(
         }
     }
     Ok(())
+}
+
+/// Return whether a model uses a Claude Code-recognized model shape.
+///
+/// Claude Code accepts the short family aliases and canonical IDs whose
+/// family is followed by one or more numeric version components, optionally
+/// followed by its `[1m]` context suffix. Keep this shape-based check open to
+/// new releases instead of enumerating today's IDs in a list that will go
+/// stale on the next Claude Code release.
+pub fn is_claude_model_slug(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "opus" | "sonnet" | "haiku") {
+        return true;
+    }
+
+    let canonical = normalized.strip_suffix("[1m]").unwrap_or(&normalized);
+    let Some(versioned) = canonical.strip_prefix("claude-") else {
+        return false;
+    };
+    let mut components = versioned.split('-');
+    let Some(family) = components.next() else {
+        return false;
+    };
+    if !matches!(family, "opus" | "sonnet" | "haiku" | "fable" | "mythos") {
+        return false;
+    }
+
+    let version_components: Vec<_> = components.collect();
+    !version_components.is_empty()
+        && version_components.iter().all(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+/// Validate a model slug for its selected harness.
+pub fn validate_model_slug(cli: SupervisorCli, model: &str) -> Result<(), String> {
+    validate_model_slug_with(cli, model, is_claude_model_slug)
+}
+
+/// Validate a model slug against a harness-provided acceptance probe.
+///
+/// Production uses [`is_claude_model_slug`] as the forward-compatible Claude
+/// Code acceptance rule. Tests and future capability checks can supply a stub
+/// or refreshed acceptance set without changing the error/remediation
+/// contract.
+pub fn validate_model_slug_with(
+    cli: SupervisorCli,
+    model: &str,
+    accepted: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    if cli != SupervisorCli::Claude {
+        return Ok(());
+    }
+    if accepted(model.trim()) {
+        return Ok(());
+    }
+
+    let canonical_hint = canonical_hint_for_rejected_claude_slug(model);
+    Err(format!(
+        "invalid Claude model slug {model:?}: Claude Code does not recognize this value; use {canonical_hint}"
+    ))
+}
+
+fn canonical_hint_for_rejected_claude_slug(model: &str) -> String {
+    let normalized = model.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "opus-5" => "claude-opus-5".to_string(),
+        "sonnet-5" => "claude-sonnet-5".to_string(),
+        "haiku-4.5" => "claude-haiku-4-5-20251001".to_string(),
+        _ if is_bare_claude_family_version(&normalized) => format!("claude-{normalized}"),
+        _ => "a canonical claude-* model ID or the opus/sonnet/haiku alias".to_string(),
+    }
+}
+
+fn is_bare_claude_family_version(model: &str) -> bool {
+    let mut components = model.split('-');
+    let Some(family) = components.next() else {
+        return false;
+    };
+    if !matches!(family, "opus" | "sonnet" | "haiku" | "fable" | "mythos") {
+        return false;
+    }
+
+    let version_components: Vec<_> = components.collect();
+    !version_components.is_empty()
+        && version_components.iter().all(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 /// Add the violated registry rule and copyable active recipe alternatives to a
@@ -1058,10 +1163,10 @@ candidates = ["codex_luna"]
         );
 
         let haiku = &registry.recipes["claude_haiku"];
-        assert_eq!(haiku.model, "haiku-4.5");
+        assert_eq!(haiku.model, "claude-haiku-4-5-20251001");
         assert_eq!(haiku.allowed_efforts, [Effort::Low, Effort::Medium]);
         assert_eq!(haiku.default_effort, Effort::Low);
-        assert_eq!(registry.recipes["claude_opus"].model, "opus-5");
+        assert_eq!(registry.recipes["claude_opus"].model, "claude-opus-5");
         assert_eq!(
             registry.recipes["codex_terra"].status,
             RecipeStatus::Suspended
@@ -1171,6 +1276,26 @@ candidates = ["codex_luna"]
     }
 
     #[test]
+    fn parse_registry_rejects_unrecognized_claude_model() {
+        let source = r#"
+schema_version = 1
+
+[recipes.claude_bad]
+harness = "claude"
+provider = "anthropic"
+model = "opus-5"
+default_effort = "high"
+allowed_efforts = ["high"]
+status = "active"
+
+[lanes.taste]
+candidates = ["claude_bad"]
+"#;
+        let error = parse_registry(source).expect_err("invalid Claude IDs must fail registry load");
+        assert!(error.to_string().contains("claude-opus-5"), "{error}");
+    }
+
+    #[test]
     fn parse_registry_rejects_fallback_cycles() {
         let source = r#"
 schema_version = 1
@@ -1201,9 +1326,90 @@ candidates = ["first"]
         let decision = resolve_lane("light", &CapabilitySnapshot::default()).unwrap();
         assert_eq!(decision.recipe_id, "claude_haiku");
         assert_eq!(decision.spec.cli, SupervisorCli::Claude);
-        assert_eq!(decision.spec.model.as_deref(), Some("haiku-4.5"));
+        assert_eq!(
+            decision.spec.model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
         assert_eq!(decision.spec.effort, Some(Effort::Low));
         assert!(decision.warnings.is_empty());
+    }
+
+    #[test]
+    fn explicit_claude_model_validation_rejects_noncanonical_lane_slugs() {
+        for (model, canonical) in [
+            ("opus-5", "claude-opus-5"),
+            ("haiku-4.5", "claude-haiku-4-5-20251001"),
+            ("sonnet-5", "claude-sonnet-5"),
+        ] {
+            let invalid = WorkerSpec {
+                name: None,
+                cli: SupervisorCli::Claude,
+                model: Some(model.to_string()),
+                effort: Some(Effort::High),
+                config_dir: None,
+                requester_config_dir: None,
+            };
+            let error = validate_explicit(&invalid, &CapabilitySnapshot::default())
+                .expect_err("Claude Code rejects the old lane slug")
+                .to_string();
+            assert!(
+                error.contains(canonical),
+                "{model} remediation must name {canonical}: {error}"
+            );
+        }
+
+        for model in [
+            "claude-opus-5",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-5",
+            "claude-opus-4-5",
+            "claude-opus-4-5-20251101",
+            "claude-sonnet-4-6",
+            "claude-opus-4-8",
+            "claude-fable-5",
+            "claude-opus-5[1m]",
+            "opus",
+            "haiku",
+            "sonnet",
+        ] {
+            let valid = WorkerSpec {
+                name: None,
+                cli: SupervisorCli::Claude,
+                model: Some(model.to_string()),
+                effort: None,
+                config_dir: None,
+                requester_config_dir: None,
+            };
+            validate_explicit(&valid, &CapabilitySnapshot::default()).unwrap_or_else(|error| {
+                panic!("recognized Claude model {model} rejected: {error}")
+            });
+        }
+
+        for (model, hint) in [
+            ("opus-4-5", "claude-opus-4-5"),
+            ("fable-5", "claude-fable-5"),
+            ("mythos-5", "claude-mythos-5"),
+            ("claude-opus", "a canonical claude-* model ID"),
+            ("claude-unknown-5", "a canonical claude-* model ID"),
+            ("claude-opus-4.5", "a canonical claude-* model ID"),
+            ("claude-opus-5[2m]", "a canonical claude-* model ID"),
+        ] {
+            let invalid = WorkerSpec {
+                name: None,
+                cli: SupervisorCli::Claude,
+                model: Some(model.to_string()),
+                effort: None,
+                config_dir: None,
+                requester_config_dir: None,
+            };
+            let error = validate_explicit(&invalid, &CapabilitySnapshot::default())
+                .expect_err("unrecognized Claude model shape must be rejected")
+                .to_string();
+            assert!(
+                error.contains(hint),
+                "{model} hint must name {hint}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1236,7 +1442,7 @@ status = "active"
 [recipes.fallback]
 harness = "claude"
 provider = "anthropic"
-model = "fallback"
+model = "claude-opus-5"
 effort = "high"
 allowed_efforts = ["high"]
 status = "active"
@@ -1283,7 +1489,7 @@ status = "active"
 [recipes.fallback]
 harness = "claude"
 provider = "anthropic"
-model = "fallback"
+model = "claude-opus-5"
 effort = "high"
 allowed_efforts = ["high"]
 status = "active"
@@ -1316,7 +1522,7 @@ schema_version = 1
 [recipes.primary]
 harness = "claude"
 provider = "anthropic"
-model = "primary"
+model = "claude-opus-5"
 effort = "high"
 allowed_efforts = ["high"]
 status = "active"

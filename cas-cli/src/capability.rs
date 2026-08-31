@@ -444,14 +444,14 @@ mod tests {
             Harness::ClaudeCode,
             "anthropic",
             CLAUDE_ENDPOINT,
-            "opus-5",
+            "claude-opus-5",
             "main",
         );
         let second = route_identity(
             Harness::ClaudeCode,
             "anthropic",
             "https://proxy.example",
-            "opus-5",
+            "claude-opus-5",
             "main",
         );
         assert_ne!(first, second);

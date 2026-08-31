@@ -76,13 +76,13 @@ Copy-paste commands generated from the registry; every recipe pins `cli`, `model
 
 ```text
 # light — recipe claude_haiku
-cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=haiku-4.5 effort=low
+cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-haiku-4-5-20251001 effort=low
 
 # standard — recipe codex_luna
 cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
 
 # taste — recipe claude_opus
-cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=opus-5 effort=high
+cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5 effort=high
 
 # heavy — recipe codex_sol
 cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high

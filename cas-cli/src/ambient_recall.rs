@@ -3543,7 +3543,7 @@ mod tests {
 
     #[test]
     fn automatic_hook_feedback_populates_metrics_with_plausible_attribution() {
-        use cas_store::SqliteRetrievalStore;
+        use cas_store::{RetrievalStore, SqliteRetrievalStore};
 
         let project = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
@@ -3605,7 +3605,7 @@ mod tests {
 
     #[test]
     fn memory_get_marks_a_short_injected_id_used() {
-        use cas_store::SqliteRetrievalStore;
+        use cas_store::{RetrievalStore, SqliteRetrievalStore};
 
         let project = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
@@ -3650,7 +3650,7 @@ mod tests {
 
     #[test]
     fn foreign_memory_tool_does_not_mark_an_injected_id_used() {
-        use cas_store::{RetrievalStore, SqliteRetrievalStore};
+        use cas_store::SqliteRetrievalStore;
 
         let project = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
@@ -3696,7 +3696,7 @@ mod tests {
 
     #[test]
     fn opencode_memory_shape_marks_an_injected_id_used() {
-        use cas_store::{RetrievalStore, SqliteRetrievalStore};
+        use cas_store::SqliteRetrievalStore;
 
         let project = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(project.path()).unwrap();

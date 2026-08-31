@@ -53,8 +53,7 @@ pub use routing::{
     embedded_registry, parse_registry, recipe_route_identity, registered_harnesses, registry,
     render_route_table, render_spawn_recipes, resolve_lane, resolve_lane_from_registry,
     resolve_lane_specs, validate_explicit, validate_lane_request, validate_model_effort_policy,
-    validate_model_is_active, validate_model_slug,
-    validate_model_slug_with, CLAUDE_MODEL_SLUGS,
+    is_claude_model_slug, validate_model_is_active, validate_model_slug, validate_model_slug_with,
 };
 pub use session::lifecycle::SessionManager;
 pub use session::resume::{

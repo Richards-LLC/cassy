@@ -5602,11 +5602,7 @@ This is the body content."#;
                 cas_factory::validate_model_slug_with(
                     cas_mux::SupervisorCli::Claude,
                     model,
-                    |candidate| {
-                        cas_factory::CLAUDE_MODEL_SLUGS
-                            .iter()
-                            .any(|accepted| accepted.eq_ignore_ascii_case(candidate))
-                    },
+                    cas_factory::is_claude_model_slug,
                 )
                 .unwrap_or_else(|error| panic!("{label} documents an unaccepted Claude model: {error}"));
             }

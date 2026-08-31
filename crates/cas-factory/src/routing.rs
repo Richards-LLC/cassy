@@ -756,8 +756,8 @@ pub fn resolve_lane(
 
 /// Validate a resolved explicit worker recipe against static model, suspension,
 /// and effort policy. Claude's CLI rejects family/version slugs such as
-/// `opus-5`; keep its accepted IDs and aliases explicit so a lane cannot look
-/// healthy in the registry while dying during harness boot.
+/// `opus-5`; reject those labels so a lane cannot look healthy in the registry
+/// while dying during harness boot.
 pub fn validate_explicit(
     spec: &WorkerSpec,
     _snapshot: &CapabilitySnapshot,
@@ -827,35 +827,49 @@ pub fn validate_explicit(
     Ok(())
 }
 
-/// Model IDs and aliases accepted by the Claude Code worker launcher.
+/// Return whether a model uses a Claude Code-recognized model shape.
 ///
-/// The short aliases and canonical IDs below are the values accepted by the
-/// Claude Code probe recorded for the current shipped CLI. Family/version
-/// labels such as `opus-5` and `haiku-4.5` are deliberately absent: they are
-/// human-facing labels, not values the CLI accepts as `--model`.
-pub const CLAUDE_MODEL_SLUGS: &[&str] = &[
-    "opus",
-    "sonnet",
-    "haiku",
-    "claude-opus-5",
-    "claude-sonnet-5",
-    "claude-haiku-4-5-20251001",
-];
+/// Claude Code accepts the short family aliases and canonical IDs whose
+/// family is followed by one or more numeric version components, optionally
+/// followed by its `[1m]` context suffix. Keep this shape-based check open to
+/// new releases instead of enumerating today's IDs in a list that will go
+/// stale on the next Claude Code release.
+pub fn is_claude_model_slug(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "opus" | "sonnet" | "haiku") {
+        return true;
+    }
+
+    let canonical = normalized.strip_suffix("[1m]").unwrap_or(&normalized);
+    let Some(versioned) = canonical.strip_prefix("claude-") else {
+        return false;
+    };
+    let mut components = versioned.split('-');
+    let Some(family) = components.next() else {
+        return false;
+    };
+    if !matches!(family, "opus" | "sonnet" | "haiku" | "fable" | "mythos") {
+        return false;
+    }
+
+    let version_components: Vec<_> = components.collect();
+    !version_components.is_empty()
+        && version_components.iter().all(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
 
 /// Validate a model slug for its selected harness.
 pub fn validate_model_slug(cli: SupervisorCli, model: &str) -> Result<(), String> {
-    validate_model_slug_with(cli, model, |candidate| {
-        CLAUDE_MODEL_SLUGS
-            .iter()
-            .any(|accepted| accepted.eq_ignore_ascii_case(candidate))
-    })
+    validate_model_slug_with(cli, model, is_claude_model_slug)
 }
 
 /// Validate a model slug against a harness-provided acceptance probe.
 ///
-/// Production uses [`CLAUDE_MODEL_SLUGS`] as the recorded Claude Code probe
-/// result. Tests and future capability checks can supply a stub or refreshed
-/// acceptance set without changing the error/remediation contract.
+/// Production uses [`is_claude_model_slug`] as the forward-compatible Claude
+/// Code acceptance rule. Tests and future capability checks can supply a stub
+/// or refreshed acceptance set without changing the error/remediation
+/// contract.
 pub fn validate_model_slug_with(
     cli: SupervisorCli,
     model: &str,
@@ -868,15 +882,37 @@ pub fn validate_model_slug_with(
         return Ok(());
     }
 
-    let canonical_hint = match model.trim().to_ascii_lowercase().as_str() {
-        "opus-5" => "claude-opus-5",
-        "sonnet-5" => "claude-sonnet-5",
-        "haiku-4.5" => "claude-haiku-4-5-20251001",
-        _ => "a canonical claude-* model ID or the opus/sonnet/haiku alias",
-    };
+    let canonical_hint = canonical_hint_for_rejected_claude_slug(model);
     Err(format!(
         "invalid Claude model slug {model:?}: Claude Code does not recognize this value; use {canonical_hint}"
     ))
+}
+
+fn canonical_hint_for_rejected_claude_slug(model: &str) -> String {
+    let normalized = model.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "opus-5" => "claude-opus-5".to_string(),
+        "sonnet-5" => "claude-sonnet-5".to_string(),
+        "haiku-4.5" => "claude-haiku-4-5-20251001".to_string(),
+        _ if is_bare_claude_family_version(&normalized) => format!("claude-{normalized}"),
+        _ => "a canonical claude-* model ID or the opus/sonnet/haiku alias".to_string(),
+    }
+}
+
+fn is_bare_claude_family_version(model: &str) -> bool {
+    let mut components = model.split('-');
+    let Some(family) = components.next() else {
+        return false;
+    };
+    if !matches!(family, "opus" | "sonnet" | "haiku" | "fable" | "mythos") {
+        return false;
+    }
+
+    let version_components: Vec<_> = components.collect();
+    !version_components.is_empty()
+        && version_components.iter().all(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 /// Add the violated registry rule and copyable active recipe alternatives to a
@@ -1326,6 +1362,12 @@ candidates = ["first"]
             "claude-opus-5",
             "claude-haiku-4-5-20251001",
             "claude-sonnet-5",
+            "claude-opus-4-5",
+            "claude-opus-4-5-20251101",
+            "claude-sonnet-4-6",
+            "claude-opus-4-8",
+            "claude-fable-5",
+            "claude-opus-5[1m]",
             "opus",
             "haiku",
             "sonnet",
@@ -1341,6 +1383,32 @@ candidates = ["first"]
             validate_explicit(&valid, &CapabilitySnapshot::default()).unwrap_or_else(|error| {
                 panic!("recognized Claude model {model} rejected: {error}")
             });
+        }
+
+        for (model, hint) in [
+            ("opus-4-5", "claude-opus-4-5"),
+            ("fable-5", "claude-fable-5"),
+            ("mythos-5", "claude-mythos-5"),
+            ("claude-opus", "a canonical claude-* model ID"),
+            ("claude-unknown-5", "a canonical claude-* model ID"),
+            ("claude-opus-4.5", "a canonical claude-* model ID"),
+            ("claude-opus-5[2m]", "a canonical claude-* model ID"),
+        ] {
+            let invalid = WorkerSpec {
+                name: None,
+                cli: SupervisorCli::Claude,
+                model: Some(model.to_string()),
+                effort: None,
+                config_dir: None,
+                requester_config_dir: None,
+            };
+            let error = validate_explicit(&invalid, &CapabilitySnapshot::default())
+                .expect_err("unrecognized Claude model shape must be rejected")
+                .to_string();
+            assert!(
+                error.contains(hint),
+                "{model} hint must name {hint}: {error}"
+            );
         }
     }
 

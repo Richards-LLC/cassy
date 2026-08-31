@@ -102,7 +102,7 @@ carry the operator-declared tier as metadata when supplied.
 | `cli=` | Accepted `model=` slugs | Notes |
 |---|---|---|
 | `codex` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Sol/high is the heavy route; Luna/xhigh is the standard route; **Terra is standing-suspended and has no active lane**. Luna is the gpt-5.4-mini successor. |
-| `claude` | `claude-haiku-4-5-20251001`, `claude-opus-5`, `claude-sonnet-5` (or the `haiku`, `opus`, `sonnet` aliases) | Haiku/low is the light lane; Opus/high is the taste lane and also serves exceptional architecture/safety/rescue/challenge. Sonnet is available for explicit non-lane work. |
+| `claude` | any canonical `claude-*` id (e.g. `claude-opus-5`, `claude-haiku-4-5-20251001`, `claude-sonnet-5`) or the `opus`/`sonnet`/`haiku` aliases | Canonical IDs accept future numeric family/version releases and the CLI's optional `[1m]` context suffix; Haiku/low is the light lane; Opus/high is the taste lane and also serves exceptional architecture/safety/rescue/challenge. Sonnet is available for explicit non-lane work. |
 | `grok` | `grok-4.5`, `grok-4.6` | Provider capacity is not an active registry lane in this matrix; never invent `cli=cursor` or a fallback recipe. |
 | `opencode` | `local/<model>`, `qwencloud/qwen3.8-max`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Explicit local, Token Plan, or DashScope pay-as-you-go lane; per-lane conformance receipt required. Hosted auth/model availability are operator preflight inputs. |
 

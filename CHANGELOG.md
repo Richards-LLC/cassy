@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.7.6] - 2026-08-31
+
+### Changed
+- Claude worker launches preserve the requester's config and secure-storage
+  selectors independently, auth checks stop waiting after a bounded timeout,
+  and failed checks no longer silently choose the main account.
+
+### Fixed
+- Custom Claude profile directories now keep truthful names in account badges
+  instead of being mislabeled as the main profile.
+
 ## [3.7.5] - 2026-08-31
 
 ### Added

@@ -179,6 +179,74 @@ fn test_low_stability_demotes_to_cold() {
 }
 
 #[test]
+fn test_curated_high_importance_survives_stability_decay() {
+    let mut curated = make_entry("curated-importance", EntryType::Learning, MemoryTier::Working);
+    curated.importance = 0.95;
+    curated.stability = 0.2;
+
+    let store = make_store(vec![curated]);
+
+    apply_memory_decay(&store).unwrap();
+
+    assert_eq!(
+        store.get("curated-importance").unwrap().memory_tier,
+        MemoryTier::Working,
+        "curated entries must not fall below working through stability decay"
+    );
+}
+
+#[test]
+fn test_curated_helpful_entry_survives_stability_decay() {
+    let mut curated = make_entry("curated-helpful", EntryType::Learning, MemoryTier::Working);
+    curated.helpful_count = 1;
+    curated.stability = 0.1;
+
+    let store = make_store(vec![curated]);
+
+    apply_memory_decay(&store).unwrap();
+
+    assert_eq!(
+        store.get("curated-helpful").unwrap().memory_tier,
+        MemoryTier::Working,
+        "helpful entries must not fall below working through stability decay"
+    );
+}
+
+#[test]
+fn test_expired_curated_entry_still_archives() {
+    let mut curated = make_entry("expired-curated", EntryType::Learning, MemoryTier::Working);
+    curated.importance = 0.95;
+    curated.valid_until = Some(Utc::now() - Duration::seconds(1));
+
+    let store = make_store(vec![curated]);
+
+    apply_memory_decay(&store).unwrap();
+
+    assert_eq!(
+        store.get("expired-curated").unwrap().memory_tier,
+        MemoryTier::Archive,
+        "expiry must override curated stability protection"
+    );
+}
+
+#[test]
+fn test_negative_curated_entry_still_archives() {
+    let mut curated = make_entry("negative-curated", EntryType::Learning, MemoryTier::Working);
+    curated.importance = 0.95;
+    curated.harmful_count = 1;
+
+    let store = make_store(vec![curated]);
+
+    apply_memory_decay(&store).unwrap();
+
+    assert_eq!(
+        store.get("negative-curated").unwrap().memory_tier,
+        MemoryTier::Archive,
+        "negative feedback must override curated stability protection"
+    );
+}
+
+#[test]
 fn test_very_low_stability_demotes_cold_to_archive() {
     let mut very_low_stab = make_entry("stab-001", EntryType::Learning, MemoryTier::Cold);
     very_low_stab.stability = 0.1;
@@ -190,6 +258,15 @@ fn test_very_low_stability_demotes_cold_to_archive() {
 
     let updated = store.get("stab-001").unwrap();
     assert_eq!(updated.memory_tier, MemoryTier::Archive);
+}
+
+#[test]
+fn test_access_promotes_archive_directly_to_working() {
+    let mut archived = make_entry("accessed-archive", EntryType::Learning, MemoryTier::Archive);
+
+    archived.promote_tier();
+
+    assert_eq!(archived.memory_tier, MemoryTier::Working);
 }
 
 #[test]

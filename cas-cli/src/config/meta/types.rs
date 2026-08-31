@@ -5,6 +5,8 @@ pub enum ConfigType {
     Bool,
     /// Integer number
     Int,
+    /// Floating-point number
+    Float,
     /// String value
     String,
     /// Comma-separated list of strings
@@ -17,6 +19,7 @@ impl ConfigType {
         match self {
             ConfigType::Bool => "boolean",
             ConfigType::Int => "integer",
+            ConfigType::Float => "number",
             ConfigType::String => "string",
             ConfigType::StringList => "string list",
         }
@@ -27,6 +30,7 @@ impl ConfigType {
         match self {
             ConfigType::Bool => vec!["true", "false"],
             ConfigType::Int => vec!["10", "100", "1000"],
+            ConfigType::Float => vec!["0.5", "0.9", "1.0"],
             ConfigType::String => vec!["value", "path/to/file"],
             ConfigType::StringList => vec!["item1,item2,item3"],
         }
@@ -118,6 +122,12 @@ impl ConfigMeta {
                         }
                     }
                     _ => {}
+                }
+            }
+            ConfigType::Float => {
+                let parsed: Result<f64, _> = value.parse();
+                if parsed.is_err() {
+                    return Err(format!("Expected number, got: {value}"));
                 }
             }
             ConfigType::String | ConfigType::StringList => match &self.constraint {

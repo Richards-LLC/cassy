@@ -1128,6 +1128,40 @@ pub struct MemoryConfig {
     /// rate is measured against real session traffic.
     #[serde(default)]
     pub session_learn_auto: bool,
+
+    /// Curated-memory decay and access-promotion policy.
+    #[serde(default)]
+    pub decay: MemoryDecayConfig,
+}
+
+/// Memory lifecycle policy used by background decay and access paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryDecayConfig {
+    /// Importance at or above which stability decay cannot demote an entry
+    /// below the working tier. Defaults to the measured retrieval knee, 0.9.
+    #[serde(default = "default_curated_importance_floor")]
+    pub curated_importance_floor: f32,
+
+    /// Promote cold/archive tier entries to working when accessed.
+    #[serde(default = "default_promote_on_access")]
+    pub promote_on_access: bool,
+}
+
+fn default_curated_importance_floor() -> f32 {
+    0.9
+}
+
+fn default_promote_on_access() -> bool {
+    true
+}
+
+impl Default for MemoryDecayConfig {
+    fn default() -> Self {
+        Self {
+            curated_importance_floor: default_curated_importance_floor(),
+            promote_on_access: default_promote_on_access(),
+        }
+    }
 }
 
 /// `[integrations]` — gates Phase-3 doctor-and-banner behavior for the

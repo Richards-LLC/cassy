@@ -808,7 +808,7 @@ impl CasService {
             let result = match req.action.as_str() {
                 "search" => this.search_impl(req).await,
                 "retrieval_feedback" => this.retrieval_feedback_impl(req).await,
-                "retrieval_metrics" => this.retrieval_metrics_impl().await,
+                "retrieval_metrics" => this.retrieval_metrics_impl(req).await,
                 "skill_impact" | "impact_report" => this.skill_impact_impl(req).await,
                 "context" => this.context_impl(req).await,
                 "context_for_subagent" => this.context_for_subagent_impl(req).await,

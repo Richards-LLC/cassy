@@ -77,14 +77,34 @@ impl CasService {
 
     pub(in crate::mcp::tools::service) async fn retrieval_metrics_impl(
         &self,
+        req: SearchContextRequest,
     ) -> Result<CallToolResult, McpError> {
         use cas_store::SqliteRetrievalStore;
 
+        if let Some(parameter) = Self::retrieval_metrics_unsupported_parameter(&req) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("retrieval_metrics does not support parameter '{parameter}'"),
+            ));
+        }
+        if req
+            .session_id
+            .as_deref()
+            .is_some_and(|session_id| session_id.trim().is_empty())
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "session_id cannot be empty",
+            ));
+        }
+
         let store = SqliteRetrievalStore::open(&self.inner.cas_root)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        let aggregates = store
-            .aggregate()
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let aggregates = match req.session_id.as_deref() {
+            Some(session_id) => store.aggregate_for_session(session_id),
+            None => store.aggregate(),
+        }
+        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         let precision = store
             .rolling_injected_precision(30)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
@@ -104,6 +124,22 @@ impl CasService {
             })
             .to_string(),
         ))
+    }
+
+    /// Return the first explicitly supplied field that retrieval_metrics does
+    /// not support. Serialization keeps this fail-closed when a new field is
+    /// added to the unified request: it must be explicitly allow-listed here.
+    fn retrieval_metrics_unsupported_parameter(req: &SearchContextRequest) -> Option<String> {
+        let serde_json::Value::Object(fields) = serde_json::to_value(req).ok()? else {
+            return Some("<request serialization failed>".to_string());
+        };
+        fields
+            .into_iter()
+            .filter(|(name, value)| {
+                !value.is_null() && !matches!(name.as_str(), "action" | "session_id")
+            })
+            .map(|(name, _)| name)
+            .min()
     }
 
     pub(in crate::mcp::tools::service) async fn skill_impact_impl(

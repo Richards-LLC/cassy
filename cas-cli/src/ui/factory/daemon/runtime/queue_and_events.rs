@@ -5716,14 +5716,17 @@ impl FactoryDaemon {
                                 continue;
                             }
                         };
-                    match super::ci_watch::external_wake_condition_satisfied(
+                    match super::ci_watch::external_wake_condition_observation(
                         self.app.project_path(),
                         &condition,
                     ) {
-                        Ok(true) => {
-                            ready.push((reminder, ReminderTriggerContext::external(&condition)))
+                        Ok(Some(observation)) => {
+                            ready.push((
+                                reminder,
+                                ReminderTriggerContext::external(&condition, &observation),
+                            ))
                         }
-                        Ok(false) => {}
+                        Ok(None) => {}
                         Err(error) => tracing::warn!(
                             reminder_id = reminder.id,
                             event_type,
@@ -5953,11 +5956,14 @@ impl ReminderTriggerContext {
         }
     }
 
-    fn external(condition: &super::ci_watch::ExternalWakeCondition) -> Self {
+    fn external(
+        condition: &super::ci_watch::ExternalWakeCondition,
+        observation: &super::ci_watch::ExternalWakeObservation,
+    ) -> Self {
         Self {
             event_type: condition.event_type().to_string(),
             data: condition.to_json(),
-            description: condition.description(),
+            description: condition.description_with_observation(observation),
         }
     }
 }
@@ -6182,7 +6188,13 @@ mod tests {
         let condition = super::super::ci_watch::ExternalWakeCondition::TagExists {
             tag: "v3.6.0".to_string(),
         };
-        let context = super::ReminderTriggerContext::external(&condition);
+        let context = super::ReminderTriggerContext::external(
+            &condition,
+            &super::super::ci_watch::ExternalWakeObservation {
+                compared_ref: "refs/tags/v3.6.0".to_string(),
+                compared_sha: "0123456789012345678901234567890123456789".to_string(),
+            },
+        );
         let supervisor = Some(Arc::clone(&supervisor_store));
         let prompt = Some(Arc::clone(&prompt_store));
 
@@ -6208,6 +6220,10 @@ mod tests {
         assert_eq!(
             fired[0].fired_event.as_ref().unwrap()["event_type"],
             "tag_exists"
+        );
+        assert_eq!(
+            fired[0].fired_event.as_ref().unwrap()["description"],
+            "external condition satisfied: tag v3.6.0 exists at refs/tags/v3.6.0@0123456789012345678901234567890123456789"
         );
         let notifications = supervisor_store.peek("supervisor-1", 10).unwrap();
         assert_eq!(notifications.len(), 1);

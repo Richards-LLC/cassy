@@ -138,13 +138,13 @@ impl CloudSyncer {
             let after = self
                 .queue
                 .pending_count_for_entity_type(scope.entity_type(), self.config.max_retries)?;
-            if round_had_errors {
-                break;
-            }
             if after >= before {
                 result.errors.push(format!(
                     "Push stopped after making no progress; {after} matching row(s) remain pending"
                 ));
+                break;
+            }
+            if round_had_errors {
                 break;
             }
         }

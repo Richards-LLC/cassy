@@ -128,16 +128,7 @@ Before setting `status=blocked`, re-read with `action=show`. If it already shows
 
 ## Running Tests in a Worker
 
-**Batch the fixes, then verify once.** **Inner loop:** `cargo check -p <crate> --lib --tests`. **Final proof:** run the affected `--lib <module>` / `--test <name>` target through `cargo nextest run`, at most twice (post-batch + pre-push). Never run the full suite from a worker. Background long runs; never foreground-`sleep`.
-
-Before handoff or `awaiting_merge`, inspect the diff against its target branch.
-When it touches more than one crate or changes any `pub fn` signature, run
-`cargo check --workspace --tests` and include its exit-0 in the delivery
-receipt. This is compile-only: it does not execute test suites or change which
-scoped tests run. The gate follows PR #655 (run 33430464567), where a scoped
-proof missed a broken `cloud::syncer` test, and PR #657 (run 33435093275), where
-a new spawn argument left `cas-mux` integration-test call sites uncompilable.
-Single-crate, non-signature diffs keep the cheaper scoped recipe above.
+**Batch fixes, then verify.** Inner loop: `cargo check -p <crate> --lib --tests`. Before handoff/awaiting_merge, if diff spans >1 crate or changes a `pub fn` signature, run `cargo check --workspace --tests` (compile-only; no suite change) and record exit 0. Otherwise run targets through `cargo nextest run` at most twice.
 
 For env-reading code, check the clean-CI shape with `make -C cas-cli test-clean-env`.
 

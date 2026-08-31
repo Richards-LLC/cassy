@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WikiSkill vs CAS — evaluation, 2026-08-29</title>
+<style>
+  :root {
+    --ink: #1a2332; --muted: #5a6678; --line: #d8dee8; --bg: #ffffff; --panel: #f5f7fa;
+    --accent: #174ea6; --bad: #b3261e; --mixed: #9a6700; --good: #1a7f37;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.55 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  main { max-width: 60rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  h1 { font-size: 1.7rem; line-height: 1.25; margin: 0 0 .3rem; }
+  h2 { font-size: 1.25rem; margin: 2.2rem 0 .6rem; border-bottom: 2px solid var(--line); padding-bottom: .25rem; }
+  h3 { font-size: 1.05rem; margin: 1.4rem 0 .4rem; }
+  .meta { color: var(--muted); font-size: .85rem; margin-bottom: 1.4rem; }
+  .verdict { background: var(--panel); border-left: 4px solid var(--accent); padding: 1rem 1.2rem; margin: 1.2rem 0; }
+  .verdict p { margin: .3rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0 1.2rem; font-size: .9rem; }
+  th, td { border: 1px solid var(--line); padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: var(--panel); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .wrap { overflow-x: auto; }
+  code { background: var(--panel); padding: .08rem .3rem; border-radius: 3px; font-size: .85em; }
+  .s-no { color: var(--bad); font-weight: 600; }
+  .s-mix { color: var(--mixed); font-weight: 600; }
+  .s-yes { color: var(--good); font-weight: 600; }
+  .findings li { margin-bottom: .8rem; }
+  .caveat { background: #fff8e6; border-left: 4px solid var(--mixed); padding: .8rem 1.1rem; margin: 1rem 0; }
+  figure.flow { max-width: 56rem; border: 1px solid var(--line); padding: .75rem; margin: 1rem 0; }
+  figure.flow svg { width: 100%; height: auto; }
+  .flow .node { fill: #eef4ff; stroke: var(--accent); stroke-width: 2; }
+  .flow .missing { fill: #fdecea; stroke: var(--bad); stroke-dasharray: 6 4; }
+  .flow text { font: 13px "Segoe UI", system-ui, sans-serif; fill: var(--ink); }
+  .flow .lbl { font-size: 11px; fill: var(--muted); }
+  figcaption { font-size: .85rem; color: var(--muted); margin-top: .5rem; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 2px solid var(--line);
+    font-size: .82rem; color: var(--muted); }
+  @media print {
+    body { font-size: 11pt; } .wrap { overflow: visible; }
+    figure.flow { break-inside: avoid; }
+    a[href^="http"]::after { content: " (" attr(href) ")"; font-size: .8em; }
+  }
+</style>
+</head>
+<body>
+<main>
+<h1>WikiSkill vs CAS: what the paper validates, and the three mechanisms it says we're missing</h1>
+<p class="meta">2026-08-29 · factory supervisor session · audience: practitioner ·
+paper: Tang et al., <em>WikiSkill: Compiling Agent Experience into Persistent Knowledge for Skill Evolution</em>,
+Google Research, arXiv:2608.27454v1 (2026-08-27) · CAS surveyed at <code>cas-src</code> working tree @ <code>f9692472</code></p>
+
+<div class="verdict">
+<p><strong>Verdict.</strong> WikiSkill independently validates the architecture CAS already has — raw experience → compounding
+knowledge → executable skills — and CAS is <em>ahead</em> of the paper on pruning and knowledge-page provenance.
+But the paper's measured results indict exactly the three mechanisms CAS lacks:</p>
+<p>① <strong>measured validation gating</strong> on skill/rule changes (CAS promotes Draft→Proven on a single self-reported tool call) —
+② <strong>immutable trace retention</strong> (CAS hard-deletes raw experience at 30 days) —
+③ <strong>experience→skill provenance</strong> (CAS's link is a free-text tag no code reads).</p>
+<p><strong>Confidence:</strong> high on the CAS side (code survey, file:line verified). The paper's numbers are benchmark
+results; transfer to open-world dev work is argued, not proven — see caveats.</p>
+</div>
+
+<h2>The paper in one screen</h2>
+<p>WikiSkill structures an agent workspace as three layers — an immutable <strong>raw layer</strong> of execution traces,
+a compounding <strong>wiki layer</strong> (pattern pages, an evolution log, a programmatically-maintained per-skill impact
+tracker) that is <em>never reset</em>, and an active <strong>skill layer</strong> where each skill carries a
+<code>PURPOSE.md</code> pointing at the wiki patterns that motivated it. Four components loop:
+Inference Agent (runs tasks, sees skills, <em>denied</em> wiki access), Wiki Maintainer (root-cause analysis over a
+stratified sample of ≤8 traces: ≤5 failing, ≤3 passing, 15k chars each), Skill Proposer (ReAct agent reading wiki
+index + impact history + outcomes; one atomic proposal per iteration), and Gating &amp; Rollback (accept only if the
+measured validation score improves; skills roll back, the wiki never does).</p>
+
+<div class="wrap"><table>
+<caption>Headline results (source: paper Tables 1–3, 5; Appendix D)</caption>
+<thead><tr><th>Result</th><th>Number</th><th>Where</th></tr></thead>
+<tbody>
+<tr><td>WikiSkill vs best competing skill-evolution method (avg, 5 benchmarks)</td><td class="num">+3.3 to +12.0 pts per model</td><td>Table 1</td></tr>
+<tr><td>Ablation: Skill Proposer given persistent-wiki access</td><td class="num">48.7% → 63.7% (<strong>+15.0</strong>)</td><td>Table 3</td></tr>
+<tr><td>Ablation: Inference Agent given wiki access during rollouts</td><td class="num">63.7% → 60.9% (<strong>−2.8</strong>, hurts)</td><td>Table 3</td></tr>
+<tr><td>Cross-model transfer (e.g. Qwen-27B skills on Gemma-31B LiveMath)</td><td class="num">33.9 → 73.7</td><td>Table 2</td></tr>
+<tr><td>Optimizer cost per iteration, full-batch</td><td class="num">O(1): 1 + T<sub>ReAct</sub> calls</td><td>App. D</td></tr>
+<tr><td>Accepted skill updates still landing in iterations 5–7</td><td class="num">4–28%</td><td>Table 5</td></tr>
+</tbody>
+</table></div>
+<p>Stated limitations: skill retrieval/triggering not evaluated (full injection), strict gating discards neutral
+proposals, <strong>no wiki pruning mechanism</strong>, no very-long-horizon tasks.</p>
+
+<h2>The loop, mapped onto CAS</h2>
+<figure class="flow" aria-describedby="flow-summary">
+<svg viewBox="0 0 760 260" role="img" aria-labelledby="flow-title flow-desc">
+<title id="flow-title">WikiSkill evolution loop with CAS equivalents</title>
+<desc id="flow-desc">Four boxes in a loop: Inference Agent, Wiki Maintainer, Skill Proposer, and Gating and Rollback.
+CAS has partial equivalents for the first three; the gating box is missing entirely in CAS.</desc>
+<defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z" fill="#174ea6"/></marker></defs>
+<rect class="node" x="15" y="30" width="165" height="62" rx="6"/>
+<text x="97" y="52" text-anchor="middle" font-weight="600">Inference Agent</text>
+<text x="97" y="70" text-anchor="middle" class="lbl">CAS: sessions + hooks ◐</text>
+<text x="97" y="84" text-anchor="middle" class="lbl">traces not retained ✗</text>
+<rect class="node" x="205" y="30" width="165" height="62" rx="6"/>
+<text x="287" y="52" text-anchor="middle" font-weight="600">Wiki Maintainer</text>
+<text x="287" y="70" text-anchor="middle" class="lbl">CAS: learning-reviewer ◐</text>
+<text x="287" y="84" text-anchor="middle" class="lbl">judges text, not traces</text>
+<rect class="node" x="395" y="30" width="165" height="62" rx="6"/>
+<text x="477" y="52" text-anchor="middle" font-weight="600">Skill Proposer</text>
+<text x="477" y="70" text-anchor="middle" class="lbl">CAS: prompt-table promotion ◐</text>
+<text x="477" y="84" text-anchor="middle" class="lbl">no impact history to read</text>
+<rect class="missing" x="585" y="30" width="160" height="62" rx="6"/>
+<text x="665" y="52" text-anchor="middle" font-weight="600">Gating &amp; Rollback</text>
+<text x="665" y="70" text-anchor="middle" class="lbl">CAS: absent ✗</text>
+<text x="665" y="84" text-anchor="middle" class="lbl">schema exists, never run</text>
+<path d="M180,61 H200 M370,61 H390 M560,61 H580" stroke="#174ea6" stroke-width="2" marker-end="url(#arr)"/>
+<path d="M665,92 V150 H97 V97" stroke="#174ea6" stroke-width="2" fill="none" marker-end="url(#arr)"/>
+<text x="380" y="167" text-anchor="middle" class="lbl">next iteration: accepted skills injected; wiki retained either way</text>
+<rect class="node" x="205" y="190" width="355" height="48" rx="6"/>
+<text x="382" y="210" text-anchor="middle" font-weight="600">Persistent wiki — never reset</text>
+<text x="382" y="227" text-anchor="middle" class="lbl">CAS: memories decay/consolidate (provenance destroyed); knowledge pages read files, not experience</text>
+</svg>
+<figcaption id="flow-summary">The WikiSkill loop with CAS's nearest equivalent under each box. ◐ = partial analogue,
+✗ = absent. The gating stage — the paper's +15pt ingredient together with the persistent wiki — has no CAS
+counterpart: skill and rule changes land unconditionally.</figcaption>
+</figure>
+
+<h2>Layer-by-layer status</h2>
+<div class="wrap"><table>
+<thead><tr><th>WikiSkill mechanism</th><th>CAS analogue</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Raw layer: immutable write-once traces</td>
+<td><code>entries</code>/<code>events</code>/<code>recordings</code>; Claude Code transcripts parsed, never retained</td>
+<td class="s-no">✗ absent — mutable; hard-deleted at 30 days (<code>daemon/maintenance.rs:219-247</code>)</td></tr>
+<tr><td>Wiki pattern pages compounding from experience</td>
+<td>Memories/learnings + knowledge pages</td>
+<td class="s-mix">◐ partial — knowledge pages compound with real provenance but read <em>only the filesystem</em> (<code>knowledge/sources.rs:143-157</code>)</td></tr>
+<tr><td>Evolution log (<code>logs.md</code>)</td>
+<td>None — no history/versions tables; all rule/skill/memory updates are destructive in-place</td>
+<td class="s-no">✗ absent</td></tr>
+<tr><td>Per-skill impact tracker, programmatically maintained</td>
+<td><code>rules.surface_count</code> schema-only, never incremented; <code>helpful_count</code>/<code>usage_count</code> self-reported</td>
+<td class="s-no">✗ absent</td></tr>
+<tr><td>Skill→knowledge provenance (<code>PURPOSE.md</code>)</td>
+<td>Free-text tag <code>from_learning</code>; <code>Rule.source_ids</code> only populated by dead code; <code>Entry</code>/<code>Skill</code> have no provenance field</td>
+<td class="s-no">✗ absent</td></tr>
+<tr><td>Gating: accept only on measured validation improvement; rollback</td>
+<td><code>validation_script</code>/<code>preconditions</code>/<code>postconditions</code> shipped in schema (m073/m074), never executed</td>
+<td class="s-no">✗ absent</td></tr>
+<tr><td>Wiki Maintainer (root-cause over sampled traces)</td>
+<td><code>learning-reviewer</code>/<code>duplicate-detector</code>: prompt-only, threshold-triggered, judge learning <em>text</em></td>
+<td class="s-mix">◐ partial</td></tr>
+<tr><td>Skill Proposer reads impact history to avoid repeating rejects</td>
+<td>Prompt table maps phrasing → outcome; no impact history exists to consult</td>
+<td class="s-mix">◐ partial</td></tr>
+<tr><td>Wiki pruning</td>
+<td>Decay curves, tier demotion, consolidation, dedup (<code>daemon/decay.rs</code>)</td>
+<td class="s-yes">✓ CAS ahead — paper lists pruning as an open limitation</td></tr>
+</tbody>
+</table></div>
+
+<h2>The five sharpest findings</h2>
+<ol class="findings">
+<li><strong>One self-reported call promotes a rule to Proven.</strong> <code>cas_rule_helpful</code>
+(<code>cas-cli/src/mcp/tools/core/rules.rs:39-75</code>): a single <code>rule action=helpful</code> flips Draft→Proven and
+immediately syncs the rule to <code>.claude/rules/</code> for every future session. No threshold, no second party, no
+measurement. <code>harmful</code> increments a counter and <em>never demotes</em> (<code>rules.rs:191-216</code>). The paper's
+equivalent decision requires a measured validation improvement — worth +15pts in its ablation.</li>
+<li><strong>The skill validation schema is inert.</strong> <code>Skill.validation_script</code>, <code>preconditions</code>,
+<code>postconditions</code> (<code>crates/cas-types/src/skill.rs:204-218</code>) survive migration and round-tripping and are
+never executed or evaluated anywhere in the tree. WikiSkill's essential gate exists in CAS as three dormant columns.</li>
+<li><strong>The only true measurement loop is firewalled from every decision that matters.</strong>
+<code>retrieval_outcomes</code> (used/helpful/ignored/corrected/harmful; append-only; privacy-hashed) is well-engineered —
+and by explicit design (<code>crates/cas-store/src/retrieval_store.rs:1-6</code>) "never mutates entry/rule counters or global
+search weights." Its entire effect is a ±0.20-clamped nudge to ambient-recall ranking
+(<code>ambient_recall.rs:2178-2191</code>). Promotion, demotion, injection order, and learning review consume none of it.</li>
+<li><strong>No rollback exists for any knowledge artifact.</strong> Rules, skills, memories all update via destructive
+in-place <code>UPDATE</code>; the reviewer prompt says "archive" where the code does hard <code>DELETE</code>
+(<code>rules.rs:219-232</code> vs <code>.claude/agents/rule-reviewer.md:28</code>). WikiSkill's loop is safe to run autonomously
+<em>because</em> every skill change is reversible and every proposal outcome is logged.</li>
+<li><strong>Provenance is destroyed at every merge point.</strong> Consolidation (<code>daemon/decay.rs:129-166</code>)
+archives sources and writes a fresh merged entry with no link back; learnings derived from observations carry no source
+ids (<code>daemon/observation.rs:52-59</code>). The paper's case study shows the cost: its proposer avoided re-trying a
+rejected skill idea only because the audit trail recorded the rejection.</li>
+</ol>
+
+<h2>Where CAS is ahead</h2>
+<ul>
+<li><strong>Pruning and lifecycle</strong> — decay, tiering, consolidation, dedup: the paper's named open problem, solved in CAS.</li>
+<li><strong>Knowledge-page provenance engineering</strong> — per-fragment source markers with a forgery threat model
+(<code>knowledge/merge.rs:232-268</code>), cascade deletes, tombstones, locked pages. Stronger than anything in the paper —
+it just points at files, never at experience.</li>
+<li><strong>A real immutable gate exists — for task closure.</strong> The verification subsystem
+(<code>verification_store.rs</code>, external gates, audit rows) is precisely WikiSkill's gating discipline, aimed at
+delivery instead of knowledge artifacts.</li>
+<li><strong>Cross-harness skill distribution.</strong> Table 2's transfer results empirically support shipping identical
+skills to Claude/Codex/Grok — with the paper's caveat that model-specific workarounds can transfer negatively.</li>
+</ul>
+
+<h2>Caveats</h2>
+<div class="caveat">
+<p>WikiSkill runs on benchmarks with ground-truth scoring and train/val/test splits. CAS works open-world with no oracle:
+"measured validation" must be proxied (verification verdicts, test outcomes, <code>friction_score</code>, retrieval
+outcomes) and proxies inherit the self-report problem. Full skill injection is the paper's confound-avoidance choice, so
+its acceptance numbers don't transfer directly to CAS's budgeted injection. And the −2.8pt Inference-Agent result concerns
+skill-<em>development</em> trajectory quality — it is not an argument against ambient recall for immediate task success.</p>
+</div>
+
+<h2>Recommended changes, prioritized</h2>
+<div class="wrap"><table>
+<thead><tr><th>#</th><th>Change</th><th>Paper evidence</th><th>Anchor</th></tr></thead>
+<tbody>
+<tr><td class="num">1</td><td>Replace one-call Draft→Proven with an outcome-threshold fed by <code>retrieval_outcomes</code> + verification verdicts; add a demotion path from harmful/corrected</td><td>+15pt gating ablation</td><td><code>rules.rs:39-75</code>, <code>retrieval_store.rs:1-6</code></td></tr>
+<tr><td class="num">2</td><td>Version history for rules/skills + tombstone deletes (<code>RuleStatus::Retired</code> already exists, unused)</td><td>Rollback makes autonomous evolution safe</td><td><code>rules.rs:219-232</code></td></tr>
+<tr><td class="num">3</td><td>Execute <code>validation_script</code> as a create/update gate on skills</td><td>Gating &amp; Rollback §3.2.4</td><td><code>skill.rs:204-218</code></td></tr>
+<tr><td class="num">4</td><td>Populate provenance: <code>Entry.source_ids</code>, revive dead <code>Rule.source_ids</code> path, preserve links through consolidation</td><td>Case study: audit trail prevented repeated failures</td><td><code>decay.rs:129-166</code></td></tr>
+<tr><td class="num">5</td><td>Make <code>surface_count</code> real (increment at injection); correlate with session outcome — a skill-impact analogue</td><td>Proposer reads impact history</td><td><code>build_start.rs:436-505</code></td></tr>
+<tr><td class="num">6</td><td>Append-only archive for traces past 30 days instead of hard delete</td><td>Raw layer is write-once</td><td><code>maintenance.rs:219-247</code></td></tr>
+</tbody>
+</table></div>
+<p>Each row is a candidate factory task; none has been created — awaiting operator sign-off.</p>
+
+<footer>
+<p><strong>Provenance.</strong> Paper: <code>~/Downloads/2608.27454v1.pdf</code>, read in full (28pp), 2026-08-29.
+CAS evidence: read-only code survey of the <code>cas-src</code> working tree @ <code>f9692472</code>, 2026-08-29, ~90 tool
+calls; all file:line references verified at survey time. Source of this page:
+<code>docs/reports/2026-08-29-wikiskill-vs-cas.md</code> (markdown is authoritative).</p>
+</footer>
+</main>
+</body>
+</html>

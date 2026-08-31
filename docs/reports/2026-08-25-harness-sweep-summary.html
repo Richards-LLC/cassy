@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness Sweep 2026-08-25</title>
+<style>
+  :root {
+    --ink: #1a2333; --muted: #5b6577; --line: #d7dce5; --bg: #ffffff; --panel: #f4f6fa;
+    --ok: #1a7f37; --hold: #9a6700; --queue: #0969da; --accent: #174ea6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 2rem 1.25rem 4rem; background: var(--bg); color: var(--ink);
+         font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 62rem; margin: 0 auto; }
+  h1 { font-size: 1.55rem; margin: 0 0 .4rem; }
+  h2 { font-size: 1.2rem; margin: 2.4rem 0 .7rem; border-bottom: 2px solid var(--line); padding-bottom: .3rem; }
+  h3 { font-size: 1.02rem; margin: 1.6rem 0 .5rem; }
+  .hero { background: var(--panel); border-left: 5px solid var(--accent); padding: 1rem 1.25rem;
+          margin: 1.2rem 0 1.6rem; font-size: 1.06rem; }
+  .hero strong { color: var(--accent); }
+  .meta { color: var(--muted); font-size: .85rem; margin-bottom: .2rem; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0 1.4rem; font-size: .92rem; }
+  th, td { border: 1px solid var(--line); padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: var(--panel); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; border: 1.5px solid; border-radius: 999px; padding: 0 .55rem;
+          font-size: .8rem; font-weight: 600; white-space: nowrap; }
+  .pill.ok    { color: var(--ok);    border-color: var(--ok); }
+  .pill.hold  { color: var(--hold);  border-color: var(--hold); border-style: dashed; }
+  .pill.queue { color: var(--queue); border-color: var(--queue); border-style: dotted; }
+  .wasnow b { color: var(--accent); }
+  ul { margin: .4rem 0 1rem; padding-left: 1.3rem; }
+  li { margin: .28rem 0; }
+  code { background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+         padding: 0 .3rem; font-size: .87em; }
+  .decision { border: 2px solid var(--accent); border-radius: 8px; padding: 1rem 1.25rem; margin: 1.2rem 0; }
+  .decision h3 { margin-top: 0; }
+  .prov { color: var(--muted); font-size: .84rem; border-top: 2px solid var(--line);
+          margin-top: 2.5rem; padding-top: 1rem; }
+  .prov code { font-size: .95em; }
+  a { color: var(--queue); }
+  @media print {
+    body { padding: 0; } .hero { border-color: #000; }
+    .pill { border-color: #000 !important; color: #000 !important; }
+    a[href^="http"]::after { content: " (" attr(href) ")"; font-size: .8em; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <p class="meta">Operator status report · 2026-08-25 · epic cas-abfc · prepared by the factory supervisor session</p>
+  <h1>Harness sweep: what changed, what Cassy changed, what's left</h1>
+
+  <div class="hero">
+    All three harness diaries are current; both movable validated pins advanced — <strong>Grok
+    0.2.114 → 1.0.5</strong> and <strong>Codex 0.146.0 → 0.149.1</strong> — on full live matrices
+    with typed receipts. The <strong>Luna-default model rubric</strong> shipped in the distributed
+    skill, and the <strong>OpenCode / Qwen3.8-Max assessment returned conditional GO</strong>.
+    Epic PR <a href="https://github.com/Richards-LLC/cassy/pull/585">#585</a> is in the merge
+    queue to main. Slack announcement embargoed until <strong>2026-08-31</strong>.
+  </div>
+
+  <h2>Overview</h2>
+  <table>
+    <thead><tr><th>Workstream</th><th>Status</th><th class="wasnow">Was → Now</th></tr></thead>
+    <tbody>
+      <tr><td>Claude Code diary</td><td><span class="pill ok">✔ merged</span></td>
+          <td class="wasnow">current through 2.1.231 → current through <b>2.1.245</b> (installed 2.1.245)</td></tr>
+      <tr><td>Codex diary + pin</td><td><span class="pill ok">✔ merged</span></td>
+          <td class="wasnow">diary 0.147.0 / pin 0.146.0 → diary <b>0.149.1</b> / pin <b>0.149.1</b> (live matrix + typed receipt)</td></tr>
+      <tr><td>Grok diary + pin</td><td><span class="pill ok">✔ merged</span></td>
+          <td class="wasnow">diary 1.0.3 / pin 0.2.114 → diary <b>1.0.5</b> / pin <b>1.0.5</b> (live matrix + typed receipt)</td></tr>
+      <tr><td>Model rubric</td><td><span class="pill ok">✔ merged</span></td>
+          <td class="wasnow">Terra default → <b>Luna xhigh-only default</b>; Terra suspended (operator-gated); light tier → Grok Composer/low</td></tr>
+      <tr><td>OpenCode assessment</td><td><span class="pill ok">✔ merged</span></td>
+          <td class="wasnow">no position → <b>conditional GO</b>: 3 blockers, 7 sized tasks (your decision)</td></tr>
+      <tr><td>Slack thread</td><td><span class="pill hold">⏸ embargoed</span></td>
+          <td class="wasnow">draft merged → posting held until <b>2026-08-31</b> (reminder #1088 set)</td></tr>
+      <tr><td>Epic PR #585</td><td><span class="pill ok">✔ merged to main</span></td>
+          <td class="wasnow">landed at <b>39a6c1d5</b> after one merge-queue rejection (six full-suite spawn tests still asserted Terra/high stock defaults — fixed under the rubric task)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>What changed upstream</h2>
+
+  <h3>Claude Code 2.1.232 → 2.1.245 (14 versions)</h3>
+  <ul>
+    <li>MCP reconnect/startup, cross-session delivery, hook matching, worktree and deleted-cwd
+        recovery, skill reload (incl. UTF-8 BOM files), and background/subagent lifecycle hardened.</li>
+    <li><b>No Cassy change required.</b> Standing watches: MCP startup behavior and Cassy-synced
+        skill-mirror precedence on upgrade.</li>
+    <li>Source gaps recorded honestly: 2.1.242 and 2.1.244 have no changelog sections;
+        2.1.240/2.1.241 are detail-free rollups. Nothing invented for them.</li>
+  </ul>
+
+  <h3>Codex CLI 0.148.0 → 0.149.1 (stables)</h3>
+  <ul>
+    <li>0.148.0: async/MCP hooks, MCP recovery and lazy start, skills-loader overhaul, fail-closed
+        sandboxing, resumed sessions restore cwd/approval policy.</li>
+    <li>0.149.0: <code>codex agents</code> dashboard, rmcp 3.1.2 + MCP tool hooks, SDK exact config
+        overrides and <b>new max/ultra reasoning-effort levels</b>, permission-profile restore
+        across resume/fork. 0.149.1: patch, no release-note body.</li>
+    <li><b>Cassy validated the whole range live:</b> full isolated <code>PtyConfig::codex</code>
+        matrix passed on installed 0.149.1 (<code>--yolo</code> fresh + resumed, xhigh accepted,
+        <code>developer_instructions</code> delivered, <code>mcp__cs__*</code> discovered before
+        lifecycle work). Pin 0.146.0 → 0.149.1.</li>
+    <li>Non-gating probe: <code>-c model_reasoning_effort=max</code> <b>is accepted</b> (exit 0).</li>
+  </ul>
+
+  <h3>Grok Build 1.0.4 → 1.0.5</h3>
+  <ul>
+    <li>1.0.4: <code>GROK_SESSION_ID</code> exported to tools/MCP, auto-permission grants honored,
+        headless MCP wait, subagent lifecycle correctness, transcript rebuild from disk.</li>
+    <li>1.0.5: <code>GROK_CONFIG</code>/<code>GROK_CONFIG_PATH</code> overrides, automatic safe
+        worktree reclaim, hook-block vs user-cancel distinction, session recap on /resume.</li>
+    <li><b>Cassy validated live:</b> full isolated <code>PtyConfig::grok</code> matrix on 1.0.5
+        (bypassPermissions; fresh <code>--session-id</code> = <code>CAS_SESSION_ID</code> =
+        transcript identity; <code>cas__*</code> discovery; <code>--rules</code> priming; worktree
+        containment). Pin 0.2.114 → 1.0.5. Local changelog ends at 1.0.3 — 1.0.4/1.0.5 attribution
+        from x.ai's official page.</li>
+  </ul>
+
+  <h2>What Cassy changed this session</h2>
+  <table>
+    <thead><tr><th>Change</th><th>Where</th><th>Receipt</th></tr></thead>
+    <tbody>
+      <tr><td>Three diaries brought current</td><td><code>docs/notes/*-changelog-diary.md</code></td>
+          <td>commits <code>cbe28fb3</code>, <code>fb09cfe1</code>, <code>c5b64e3f</code></td></tr>
+      <tr><td>Grok pin → 1.0.5</td><td><code>crates/cas-pty</code> conformance + pty.rs verification block</td>
+          <td>matrix 1/1 pass (22.2s); receipt <code>grok-build-1.0.5-2026-08-25</code>; branch CI green</td></tr>
+      <tr><td>Codex pin → 0.149.1</td><td><code>crates/cas-pty</code> conformance + diary version status</td>
+          <td>matrix 1/1 pass (61.3s re-run after conflict resolve); conformance 5/5; parity 2/2; branch CI green</td></tr>
+      <tr><td>Model rubric: Luna default</td><td>all three builtin <code>cas-supervisor</code> flavors + reference-history</td>
+          <td><code>cargo check</code> exit 0; builtins nextest 87/87</td></tr>
+      <tr><td>OpenCode assessment</td><td><code>docs/ideation/2026-08-25-opencode-harness-assessment.md</code></td>
+          <td>cited per-touchpoint verdicts + search manifest</td></tr>
+      <tr><td>Slack draft (embargoed)</td><td><code>docs/release-notes/2026-08-25-harness-diary-sweep-slack.md</code></td>
+          <td>rubric-conformant; posting held to 2026-08-31</td></tr>
+    </tbody>
+  </table>
+  <ul>
+    <li><b>Rubric detail (your directives, codified in the distributed skill):</b> default/standard/taste
+        worker is <code>cli=codex model=gpt-5.6-luna effort=xhigh</code>; Luna only ever at its maximum
+        effort (<code>max</code>/<code>ultra</code> documented as future-only); <b>Terra suspended at
+        every tier</b> (dated 2026-08-25, operator decision pending) with light work re-routed to
+        Grok Composer/low.</li>
+  </ul>
+
+  <h2>What Cassy still needs to change</h2>
+  <table>
+    <thead><tr><th>Item</th><th>Why</th><th>Size</th><th>Blocked on</th></tr></thead>
+    <tbody>
+      <tr><td>Extend effort vocabulary with <code>max</code> (poss. <code>ultra</code>)</td>
+          <td>Codex 0.149.1 accepts them (probe verified); you want Luna at literal max; <code>Effort</code> in <code>cas-mux/src/spec.rs</code> tops at xhigh</td>
+          <td class="num">S–M</td><td><b>Your go</b> — pin already validated</td></tr>
+      <tr><td>OpenCode implementation program (7 tasks)</td>
+          <td>Conditional GO; all primitives exist</td>
+          <td class="num">~15–24 worker-days</td><td><b>Your go/no-go</b> + <code>opencode</code> install</td></tr>
+      <tr><td>OpenCode blockers (inside the program)</td>
+          <td>(1) no caller-chosen session ID at spawn; (2) shared SQLite session store needs a liveness/blame adapter; (3) Qwen3.8-Max effort is only low/medium/xhigh — validate, never silently remap</td>
+          <td class="num">—</td><td>—</td></tr>
+      <tr><td>Post the #cas-internal diary thread</td><td>Mandatory publication duty</td>
+          <td class="num">XS</td><td>Embargo lifts 2026-08-31 (reminder #1088)</td></tr>
+      <tr><td>Close epic cas-abfc</td><td>cas-9cf9 stays open until the post lands</td>
+          <td class="num">—</td><td>Same embargo</td></tr>
+    </tbody>
+  </table>
+
+  <div class="decision">
+    <h3>OpenCode × Qwen 3.8 — decision brief</h3>
+    <p><b>Recommendation:</b> fund the 7-task adapter program when ready (~15–24 worker-days); do
+       <b>not</b> advertise <code>cli=opencode</code> before the final live-conformance receipt.</p>
+    <ul>
+      <li>Launch contract is real: <code>opencode &lt;dir&gt; --model alibaba/qwen3.8-max
+          --agent cassy-worker --prompt … --auto</code>; inline agent/MCP config via
+          <code>OPENCODE_CONFIG_CONTENT</code>; env inheritance carries the CAS identity set;
+          MCP tools surface as <code>cas_*</code>.</li>
+      <li>Qwen3.8-Max: provider <code>alibaba</code>, auth <code>DASHSCOPE_API_KEY</code>, 1M
+          context, tool calling; effort variants exactly low/medium/xhigh (xhigh default).</li>
+      <li>Chosen seam: existing <code>cas_mux::Backend</code> + one OpenCode plugin — no new
+          portability framework. Runner-up (minimum surface, no plugin) rejected: cannot satisfy
+          transcript/blame or prove requested effort.</li>
+    </ul>
+  </div>
+
+  <div class="prov">
+    <p><b>Provenance.</b> Epic branch
+       <code>epic/epic-2026-08-25-harness-diary-sweep-claude-codex-g-cas-abfc</code> @
+       <code>4bf0f6af</code> (base main @ <code>17891528</code>) ·
+       PR <a href="https://github.com/Richards-LLC/cassy/pull/585">#585</a> (merge queue) ·
+       tasks cas-e59d / cas-d8ce / cas-d21f (diaries), cas-444a / cas-b9a4 (matrices), cas-3465
+       (assessment), cas-e352 (rubric), cas-9cf9 (Slack, embargoed) under epic cas-abfc ·
+       worker-branch CI runs 32859071876 (Grok lane) and 32859003475 (Codex lane), both green.
+       Diary claims trace to the official Anthropic changelog, openai/codex GitHub releases, and
+       x.ai/build/changelog; OpenCode claims to opencode.ai docs, pinned source
+       <code>a7444bf9</code>, and the Models.dev catalog (full manifest in the assessment doc).
+       Markdown source of truth: <code>docs/reports/2026-08-25-harness-sweep-summary.md</code>.</p>
+  </div>
+</main>
+</body>
+</html>

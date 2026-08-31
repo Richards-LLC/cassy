@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.7.3] - 2026-08-31
+
+### Fixed
+- `cas update` now turns over stale `cas serve` processes before refreshing
+  each project and repairs legacy Tantivy search-index roots; busy locks warn
+  without failing the update.
+- The contributor `cas-update` helper turns over running processes before
+  refreshing project state.
+
 ## [3.7.2] - 2026-08-31
 
 ### Added
@@ -1557,7 +1566,8 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 ### Added
 - Initial stable release with core functionality.
 
-[Unreleased]: https://github.com/Richards-LLC/cassy/compare/v3.7.2...HEAD
+[Unreleased]: https://github.com/Richards-LLC/cassy/compare/v3.7.3...HEAD
+[3.7.3]: https://github.com/Richards-LLC/cassy/compare/v3.7.2...v3.7.3
 [3.7.2]: https://github.com/Richards-LLC/cassy/compare/v3.7.1...v3.7.2
 [3.7.1]: https://github.com/Richards-LLC/cassy/compare/v3.7.0...v3.7.1
 [3.7.0]: https://github.com/Richards-LLC/cassy/compare/v3.6.0...v3.7.0

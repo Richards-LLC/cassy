@@ -52,14 +52,30 @@ const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 pub struct LegacyIndexState {
     pub documents: usize,
     pub entry_ids: Vec<String>,
+    /// Doc types present in the legacy root that are NOT memory entries
+    /// (`task`, `rule`, `skill`, `spec`, ...), with their document counts.
+    ///
+    /// Only entries have a durable re-queue path — `mark_index_pending_batch`
+    /// is entries-only — so these documents are retired without being
+    /// re-indexed. Counting them by type means an operator is TOLD what was
+    /// dropped and can reindex it, instead of the loss being silent
+    /// (cas-25a9 P3 #7).
+    pub non_entry_documents: Vec<(String, usize)>,
 }
 
 /// Outcome of migrating a legacy root into the canonical Tantivy index.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LegacyRepairResult {
     pub legacy_documents: usize,
+    /// Number of distinct memory-entry IDS re-queued — not documents. A legacy
+    /// root can hold several documents per id; this counts the ids that were
+    /// durably marked pending, which is what determines what gets re-indexed.
     pub requeued_entries: usize,
     pub indexed_entries: usize,
+    /// Non-entry documents retired WITHOUT a re-queue, by doc type. Non-empty
+    /// here means those doc types must be reindexed by their own path; the
+    /// legacy root had no way to re-queue them (cas-25a9 P3 #7).
+    pub retired_non_entry_documents: Vec<(String, usize)>,
     /// Per-entry indexing failures. Carried rather than raised: the entries are
     /// already durably re-queued, so a later cycle retries them, and turning
     /// this into an `Err` is what let one bad entry disable all background
@@ -151,6 +167,56 @@ fn acquire_bounded(directory: &dyn Directory, lock: &Lock) -> Result<Option<Dire
     }
 }
 
+/// Wall-clock budget for the daemon's repair attempt.
+///
+/// The maintenance `select!` arm also runs agent reaping, lease reclaim and
+/// worktree cleanup, so a repair that cannot finish promptly must be abandoned
+/// rather than waited on.
+pub const DAEMON_REPAIR_BUDGET: Duration = Duration::from_secs(20);
+
+/// Wall-clock budget for `cas doctor --fix`, which is interactive and may
+/// legitimately drain a large legacy root.
+pub const DOCTOR_REPAIR_BUDGET: Duration = Duration::from_secs(300);
+
+/// Run [`repair_legacy_index`] on its own thread and give up after `budget`.
+///
+/// This is the outer guarantee behind AC1's "never hangs". The inner probe
+/// (see [`repair_legacy_index`]) closes the common case, but it cannot close
+/// the window where another process takes META_LOCK between the probe and
+/// `Index::reader()` — tantivy 0.25 exposes no timeout on the reader's own
+/// acquisition. Bounding the *call site* instead means a blocked reader can
+/// never wedge the daemon's maintenance arm or hang `doctor --fix`, whatever
+/// the inner code does.
+///
+/// On timeout the worker thread is deliberately left detached. It is parked in
+/// `flock`, holds no lock of ours, and will either finish harmlessly later (the
+/// re-queue is idempotent and retirement takes the writer lock, so it cannot
+/// race a subsequent attempt) or die with the process. `doctor --fix` exiting
+/// mid-sweep is safe by construction: ids are durably re-queued before any
+/// deletion and `.managed.json` survives for the resuming run.
+pub fn repair_legacy_index_bounded(
+    cas_dir: &Path,
+    store: std::sync::Arc<dyn Store>,
+    limits: LegacyRepairLimits,
+    budget: Duration,
+) -> Result<LegacyRepairOutcome> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let dir = cas_dir.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = sender.send(repair_legacy_index(&dir, store.as_ref(), limits));
+    });
+
+    match receiver.recv_timeout(budget) {
+        Ok(result) => result,
+        Err(_) => Ok(LegacyRepairOutcome::Busy {
+            reason: format!(
+                "legacy index repair exceeded its {}s budget and was abandoned for this run",
+                budget.as_secs()
+            ),
+        }),
+    }
+}
+
 /// Inspect the legacy root without creating an index when none exists.
 pub fn inspect_legacy_index(cas_dir: &Path) -> Result<Option<LegacyIndexState>> {
     let legacy_dir = cas_dir.join("index");
@@ -181,12 +247,17 @@ fn read_index_state(index: &tantivy::Index) -> Result<LegacyIndexState> {
     let addresses = searcher.search(&AllQuery, &DocSetCollector)?;
     let documents = addresses.len();
     let mut entry_ids = Vec::new();
+    let mut non_entry: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     for address in addresses {
         let document: tantivy::TantivyDocument = searcher.doc(address)?;
         let doc_type = document
             .get_first(doc_type_field)
             .and_then(|value| value.as_str());
         if doc_type != Some("entry") {
+            *non_entry
+                .entry(doc_type.unwrap_or("unknown").to_string())
+                .or_default() += 1;
             continue;
         }
         if let Some(id) = document
@@ -202,6 +273,7 @@ fn read_index_state(index: &tantivy::Index) -> Result<LegacyIndexState> {
     Ok(LegacyIndexState {
         documents,
         entry_ids,
+        non_entry_documents: non_entry.into_iter().collect(),
     })
 }
 
@@ -314,6 +386,7 @@ pub fn repair_legacy_index(
         legacy_documents: state.documents,
         requeued_entries: state.entry_ids.len(),
         indexed_entries: indexed.indexed,
+        retired_non_entry_documents: state.non_entry_documents,
         errors: indexed.errors,
         unswept_files: unswept,
     }))
@@ -521,6 +594,119 @@ mod tests {
             inspect_legacy_index(&cas_root).expect("inspect").is_some(),
             "and it must leave the legacy root intact for the next attempt"
         );
+    }
+
+    #[test]
+    fn the_bounded_wrapper_abandons_a_repair_that_exceeds_its_budget() {
+        // The outer guarantee behind AC1. The inner probe cannot close the
+        // window where another process takes META_LOCK between the probe and
+        // `Index::reader()` (tantivy 0.25 exposes no timeout on the reader's
+        // own acquisition), so the CALL SITE is bounded instead: repair runs on
+        // its own thread and is abandoned after a budget.
+        //
+        // A zero budget is the deterministic way to exercise that path — the
+        // worker cannot possibly deliver before the first `recv_timeout` check,
+        // so this asserts the wrapper's behaviour rather than racing it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (cas_root, _entry) = legacy_root_with_one_stranded_entry(temp.path());
+        let store = open_store(&cas_root).expect("store");
+
+        let started = Instant::now();
+        let outcome = repair_legacy_index_bounded(
+            &cas_root,
+            store,
+            LegacyRepairLimits::unbounded(),
+            Duration::ZERO,
+        )
+        .expect("the wrapper must not error");
+        let elapsed = started.elapsed();
+
+        match outcome {
+            LegacyRepairOutcome::Busy { reason } => {
+                assert!(
+                    reason.contains("budget"),
+                    "a timeout must say so, got: {reason}"
+                );
+            }
+            other => panic!("expected Busy on timeout, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the wrapper must return promptly; took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn the_bounded_wrapper_returns_the_real_outcome_when_it_fits() {
+        // Converse guard: the bound must not turn every repair into a timeout.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (cas_root, _entry) = legacy_root_with_one_stranded_entry(temp.path());
+        let store = open_store(&cas_root).expect("store");
+
+        let outcome = repair_legacy_index_bounded(
+            &cas_root,
+            store,
+            LegacyRepairLimits::unbounded(),
+            Duration::from_secs(60),
+        )
+        .expect("repair");
+        match outcome {
+            LegacyRepairOutcome::Repaired(repair) => {
+                assert_eq!(repair.requeued_entries, 1);
+            }
+            other => panic!("expected Repaired within a generous budget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_entry_documents_are_counted_rather_than_silently_dropped() {
+        // cas-25a9 P3 #7. A legacy root can hold task/rule/skill/spec
+        // documents; only entries have a re-queue path
+        // (`mark_index_pending_batch` is entries-only), so the rest are retired
+        // without being re-indexed. Silently is the problem — they must be
+        // reported by type so an operator knows what to reindex.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (cas_root, _entry) = legacy_root_with_one_stranded_entry(temp.path());
+
+        {
+            let legacy = SearchIndex::open(&cas_root.join("index")).expect("legacy index");
+            let task = crate::types::Task::new(
+                "cas-legacy1".to_string(),
+                "legacy task stranded in the old root".to_string(),
+            );
+            legacy.index_task(&task).expect("index legacy task");
+        }
+
+        let state = inspect_legacy_index(&cas_root)
+            .expect("inspect")
+            .expect("legacy state");
+        assert_eq!(
+            state.non_entry_documents,
+            vec![("task".to_string(), 1)],
+            "the non-entry document must be visible to inspection"
+        );
+
+        let store = open_store(&cas_root).expect("store");
+        let repair = match repair_legacy_index(
+            &cas_root,
+            store.as_ref(),
+            LegacyRepairLimits::unbounded(),
+        )
+        .expect("repair")
+        {
+            LegacyRepairOutcome::Repaired(repair) => repair,
+            other => panic!("expected Repaired, got {other:?}"),
+        };
+        assert_eq!(
+            repair.retired_non_entry_documents,
+            vec![("task".to_string(), 1)],
+            "retiring a non-entry document must be reported, not silent"
+        );
+        assert_eq!(
+            repair.requeued_entries, 1,
+            "requeued_entries counts entry IDS, not documents"
+        );
+        assert_eq!(repair.legacy_documents, 2, "both documents were in the root");
     }
 
     // ----------------------------------------------------------------------

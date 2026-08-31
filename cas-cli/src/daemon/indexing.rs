@@ -25,9 +25,15 @@ pub(crate) fn generate_bm25_index(
     // are recorded and the cycle continues into `process_pending`.
     let mut repair_errors: Vec<(String, String)> = Vec::new();
     let mut repaired = 0usize;
-    match crate::hybrid_search::repair_legacy_index(
+    match crate::hybrid_search::repair_legacy_index_bounded(
         &config.cas_root,
-        store.as_ref(),
+        // Bounded at the CALL SITE as well as inside: the inner probe cannot
+        // close the window where another process takes META_LOCK between the
+        // probe and `Index::reader()`, and tantivy 0.25 offers no timeout on
+        // the reader's own acquisition. Running repair on its own thread and
+        // abandoning it after a budget means a blocked reader can never wedge
+        // the maintenance select! arm (cas-25a9).
+        Arc::clone(store),
         // Bounded on the daemon path: the maintenance `select!` arm also runs
         // agent reaping, lease reclaim and worktree cleanup, so a huge legacy
         // root must not hold it for a full re-index (cas-25a9 P2-C).
@@ -35,10 +41,19 @@ pub(crate) fn generate_bm25_index(
             batch_size: config.index_batch_size,
             max_per_run: config.index_max_per_run,
         },
+        crate::hybrid_search::DAEMON_REPAIR_BUDGET,
     ) {
         Ok(crate::hybrid_search::LegacyRepairOutcome::Repaired(repair)) => {
             repaired = repair.indexed_entries;
             repair_errors.extend(repair.errors);
+            for (doc_type, count) in &repair.retired_non_entry_documents {
+                repair_errors.push((
+                    "legacy-index-repair".to_string(),
+                    format!(
+                        "retired {count} legacy `{doc_type}` document(s) with no re-queue path;                          reindex that document type to restore it"
+                    ),
+                ));
+            }
             if !repair.unswept_files.is_empty() {
                 repair_errors.push((
                     "legacy-index-repair".to_string(),

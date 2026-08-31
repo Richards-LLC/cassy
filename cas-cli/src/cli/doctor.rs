@@ -226,56 +226,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 }),
             }
 
-            // `doctor --fix` is interactive, so it drains the whole legacy root
-            // rather than the daemon's bounded slice.
-            match open_store(path).and_then(|store| {
-                crate::hybrid_search::repair_legacy_index(
-                    path,
-                    store.as_ref(),
-                    crate::hybrid_search::LegacyRepairLimits::unbounded(),
-                )
-            }) {
-                Ok(crate::hybrid_search::LegacyRepairOutcome::Repaired(repair)) => {
-                    let mut message = format!(
-                        "Repaired legacy Tantivy root: {} document(s), {} entry row(s) re-queued, {} pending entry row(s) indexed",
-                        repair.legacy_documents, repair.requeued_entries, repair.indexed_entries
-                    );
-                    let mut status = CheckStatus::Ok;
-                    if !repair.unswept_files.is_empty() {
-                        status = CheckStatus::Warning;
-                        message.push_str(&format!(
-                            "; {} file(s) could not be removed — re-run `cas doctor --fix` to finish the sweep",
-                            repair.unswept_files.len()
-                        ));
-                    }
-                    if !repair.errors.is_empty() {
-                        status = CheckStatus::Warning;
-                        message.push_str(&format!(
-                            "; {} entry row(s) failed to index and stay queued for retry",
-                            repair.errors.len()
-                        ));
-                    }
-                    checks.push(Check {
-                        name: "auto-fix".to_string(),
-                        status,
-                        message,
-                    });
-                }
-                Ok(crate::hybrid_search::LegacyRepairOutcome::NoLegacyRoot) => {}
-                Ok(crate::hybrid_search::LegacyRepairOutcome::Busy { reason }) => {
-                    checks.push(Check {
-                        name: "auto-fix".to_string(),
-                        status: CheckStatus::Warning,
-                        message: format!(
-                            "Legacy Tantivy root is busy ({reason}); stop any running `cas serve`/daemon and re-run `cas doctor --fix`"
-                        ),
-                    })
-                }
-                Err(error) => checks.push(Check {
-                    name: "auto-fix".to_string(),
-                    status: CheckStatus::Warning,
-                    message: format!("Failed to repair legacy Tantivy root: {error}"),
-                }),
+            if let Some(check) = legacy_index_autofix(path) {
+                checks.push(check);
             }
         }
     }
@@ -865,6 +817,81 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     output_checks(&checks, cli)
+}
+
+/// The `cas doctor --fix` legacy-index repair step, as one renderable Check.
+///
+/// Extracted from `execute` so it can be driven by a test: cas-25a9 AC1
+/// requires that a held lock make `--fix` return *bounded* with a Warning
+/// rather than hang, and that is a behaviour, not a code shape.
+///
+/// Returns `None` when there is no stray root — the clean case adds no row.
+fn legacy_index_autofix(path: &Path) -> Option<Check> {
+    // Interactive: drain the whole legacy root rather than the daemon's
+    // bounded slice, but still bound the WALL CLOCK so a blocked reader in
+    // another process cannot hang the command (cas-25a9).
+    let outcome = open_store(path).and_then(|store| {
+        crate::hybrid_search::repair_legacy_index_bounded(
+            path,
+            store,
+            crate::hybrid_search::LegacyRepairLimits::unbounded(),
+            crate::hybrid_search::DOCTOR_REPAIR_BUDGET,
+        )
+    });
+
+    match outcome {
+        Ok(crate::hybrid_search::LegacyRepairOutcome::Repaired(repair)) => {
+            let mut message = format!(
+                "Repaired legacy Tantivy root: {} document(s), {} entry row(s) re-queued, {} pending entry row(s) indexed",
+                repair.legacy_documents, repair.requeued_entries, repair.indexed_entries
+            );
+            let mut status = CheckStatus::Ok;
+            if !repair.retired_non_entry_documents.is_empty() {
+                status = CheckStatus::Warning;
+                let dropped = repair
+                    .retired_non_entry_documents
+                    .iter()
+                    .map(|(doc_type, count)| format!("{count} {doc_type}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                message.push_str(&format!(
+                    "; retired non-entry document(s) with no re-queue path ({dropped}) — reindex those document types to restore them"
+                ));
+            }
+            if !repair.unswept_files.is_empty() {
+                status = CheckStatus::Warning;
+                message.push_str(&format!(
+                    "; {} file(s) could not be removed — re-run `cas doctor --fix` to finish the sweep",
+                    repair.unswept_files.len()
+                ));
+            }
+            if !repair.errors.is_empty() {
+                status = CheckStatus::Warning;
+                message.push_str(&format!(
+                    "; {} entry row(s) failed to index and stay queued for retry",
+                    repair.errors.len()
+                ));
+            }
+            Some(Check {
+                name: "auto-fix".to_string(),
+                status,
+                message,
+            })
+        }
+        Ok(crate::hybrid_search::LegacyRepairOutcome::NoLegacyRoot) => None,
+        Ok(crate::hybrid_search::LegacyRepairOutcome::Busy { reason }) => Some(Check {
+            name: "auto-fix".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "Legacy Tantivy root is busy ({reason}); stop any running `cas serve`/daemon and re-run `cas doctor --fix`"
+            ),
+        }),
+        Err(error) => Some(Check {
+            name: "auto-fix".to_string(),
+            status: CheckStatus::Warning,
+            message: format!("Failed to repair legacy Tantivy root: {error}"),
+        }),
+    }
 }
 
 fn legacy_search_index_check(cas_root: &Path) -> Check {
@@ -1879,6 +1906,75 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// cas-25a9 AC1, behaviourally: `cas doctor --fix` against a held lock must
+    /// return BOUNDED with a Warning, not hang.
+    ///
+    /// Before the fix the repair called `acquire_lock(&META_LOCK)`, an
+    /// unbounded blocking flock, so this scenario hung the command outright.
+    /// The assertion is on wall clock as well as on the rendered Check: a
+    /// regression that reintroduces the block fails here on elapsed time.
+    #[test]
+    fn doctor_fix_against_a_held_legacy_lock_warns_within_a_bounded_time() {
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new().expect("tempdir");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("create .cas");
+        let store = open_store(&cas_root).expect("store");
+        let entry = crate::types::Entry::new(
+            "doctor-locked-entry".to_string(),
+            "doctor legacy index held lock".to_string(),
+        );
+        store.add(&entry).expect("add entry");
+        {
+            let legacy = SearchIndex::open(&cas_root.join("index")).expect("legacy index");
+            legacy.index_entry(&entry).expect("index legacy entry");
+        }
+        store.mark_indexed(&entry.id).expect("mark indexed");
+
+        // Another process (a pre-fix `cas serve`) is holding the legacy root.
+        use tantivy::directory::Directory;
+        let holder =
+            tantivy::Index::open_in_dir(cas_root.join("index")).expect("open legacy root");
+        let _held = holder
+            .directory()
+            .acquire_lock(&tantivy::directory::META_LOCK)
+            .expect("hold the meta lock");
+
+        let started = Instant::now();
+        let check = legacy_index_autofix(&cas_root).expect("a busy root must render a row");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "`doctor --fix` must not block on a held legacy lock; took {elapsed:?}"
+        );
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "a busy legacy root is a Warning, got: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("busy") && check.message.contains("cas doctor --fix"),
+            "the warning must name the condition and the remedy: {}",
+            check.message
+        );
+
+        // Release the lock BEFORE inspecting: `inspect_legacy_index` opens an
+        // `IndexReader`, which acquires META_LOCK itself, so inspecting while
+        // still holding it deadlocks the test against itself — the same trap
+        // documented in `hybrid_search::legacy_index`.
+        drop(_held);
+
+        // And the root is left intact for the retry the warning recommends.
+        assert!(
+            crate::hybrid_search::inspect_legacy_index(&cas_root)
+                .expect("inspect")
+                .is_some(),
+            "a refused repair must not have half-retired the root"
+        );
+    }
 
     #[test]
     fn doctor_reports_legacy_tantivy_root_before_repair_and_clean_after() {

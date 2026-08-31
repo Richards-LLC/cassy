@@ -255,6 +255,9 @@ async fn run_server_impl() -> anyhow::Result<()> {
             code_debounce_ms: code_config.debounce_ms,
             archive_max_bytes: daemon_config.archive_max_bytes,
             archive_retention_days: daemon_config.archive_retention_days,
+            relevance_sampling_enabled: daemon_config.relevance_sampling_enabled,
+            relevance_sampling_interval_secs: daemon_config.relevance_sampling_interval_secs,
+            relevance_sampling_sample_size: daemon_config.relevance_sampling_sample_size,
             ..Default::default()
         };
         let (daemon, handle) = spawn_daemon(config);

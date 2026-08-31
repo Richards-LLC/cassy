@@ -268,6 +268,24 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }
+            "daemon.relevance_sampling_enabled" => {
+                let daemon = self.daemon.get_or_insert_with(DaemonSettings::default);
+                daemon.relevance_sampling_enabled = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
+            "daemon.relevance_sampling_interval_secs" => {
+                let daemon = self.daemon.get_or_insert_with(DaemonSettings::default);
+                daemon.relevance_sampling_interval_secs = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+            }
+            "daemon.relevance_sampling_sample_size" => {
+                let daemon = self.daemon.get_or_insert_with(DaemonSettings::default);
+                daemon.relevance_sampling_sample_size = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+            }
             // Code section
             "code.enabled" => {
                 let code = self.code.get_or_insert_with(CodeConfig::default);

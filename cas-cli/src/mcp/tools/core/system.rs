@@ -229,6 +229,8 @@ impl CasCore {
 
     /// Get memory statistics
     pub async fn cas_stats(&self) -> Result<CallToolResult, McpError> {
+        use cas_store::SqliteRetrievalStore;
+
         let store = self.open_store()?;
         let rule_store = self.open_rule_store()?;
         let task_store = self.open_task_store()?;
@@ -258,6 +260,48 @@ impl CasCore {
             .filter(|s| s.status == SkillStatus::Enabled)
             .count();
 
+        let (retrieval_groups, rolling_precision) = SqliteRetrievalStore::open(&self.cas_root)
+            .ok()
+            .map(|retrieval_store| {
+                (
+                    retrieval_store.aggregate().unwrap_or_default(),
+                    retrieval_store.rolling_injected_precision(30).ok(),
+                )
+            })
+            .unwrap_or_default();
+        let precision_display = rolling_precision
+            .as_ref()
+            .and_then(|precision| {
+                precision.precision.map(|value| {
+                    format!(
+                        "{:.1}% ({}/{} judge labels)",
+                        value * 100.0,
+                        precision.helpful,
+                        precision.judged
+                    )
+                })
+            })
+            .unwrap_or_else(|| "unavailable (0 judge labels)".to_string());
+        let mut retrieval_funnel = format!(
+            "Retrieval funnel (denominator: results; rolling injected precision, 30d: {precision_display})"
+        );
+        if retrieval_groups.is_empty() {
+            retrieval_funnel.push_str("\n  No retrieval results recorded");
+        } else {
+            for group in &retrieval_groups {
+                retrieval_funnel.push_str(&format!(
+                    "\n  {}/{} / {}: results={} -> resolved={} -> used/body-pulled={} -> helpful={}",
+                    group.document_type,
+                    group.query_family,
+                    group.ranking_policy,
+                    group.results,
+                    group.resolved_results,
+                    group.used_results,
+                    group.helpful_results,
+                ));
+            }
+        }
+
         let output = format!(
             "Cassy Statistics\n\
              ==============\n\n\
@@ -269,7 +313,8 @@ impl CasCore {
              {}\n\
              Rules: {} ({} proven)\n\
              Tasks: {} ({} open, {} in progress)\n\
-             Skills: {} ({} enabled)",
+             Skills: {} ({} enabled)\n\
+             {}",
             corpus.total,
             corpus.live,
             corpus.archived,
@@ -283,7 +328,8 @@ impl CasCore {
             open_tasks,
             in_progress,
             skills.len(),
-            enabled_skills
+            enabled_skills,
+            retrieval_funnel
         );
 
         Ok(Self::success(output))

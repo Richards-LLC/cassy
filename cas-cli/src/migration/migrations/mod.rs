@@ -220,6 +220,7 @@ mod m241_tasks_add_origin_project;
 mod m242_rule_skill_versions_operations;
 mod m243_surfaced_artifacts_create_table;
 mod m244_retrieval_outcomes_add_unresolved;
+mod m245_retrieval_outcomes_add_attribution;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -476,6 +477,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m242_rule_skill_versions_operations::MIGRATION,
     m243_surfaced_artifacts_create_table::MIGRATION,
     m244_retrieval_outcomes_add_unresolved::MIGRATION,
+    m245_retrieval_outcomes_add_attribution::MIGRATION,
 ];
 
 #[cfg(test)]

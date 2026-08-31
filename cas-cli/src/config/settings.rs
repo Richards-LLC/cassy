@@ -761,10 +761,34 @@ pub struct DaemonSettings {
     /// forever (legacy compatibility; maintenance now uses archive_max_bytes).
     #[serde(default)]
     pub archive_retention_days: u64,
+
+    /// Enable the bounded injected-relevance sampling pass.
+    #[serde(default = "default_relevance_sampling_enabled")]
+    pub relevance_sampling_enabled: bool,
+
+    /// Minimum cadence between injected-relevance sampling passes, in seconds.
+    #[serde(default = "default_relevance_sampling_interval_secs")]
+    pub relevance_sampling_interval_secs: u64,
+
+    /// Maximum number of injected result rows offered to the judge per pass.
+    #[serde(default = "default_relevance_sampling_sample_size")]
+    pub relevance_sampling_sample_size: usize,
 }
 
 fn default_archive_max_bytes() -> u64 {
     cas_store::DEFAULT_TRACE_ARCHIVE_MAX_BYTES
+}
+
+fn default_relevance_sampling_enabled() -> bool {
+    true
+}
+
+fn default_relevance_sampling_interval_secs() -> u64 {
+    7 * 24 * 60 * 60
+}
+
+fn default_relevance_sampling_sample_size() -> usize {
+    20
 }
 
 impl Default for DaemonSettings {
@@ -772,6 +796,9 @@ impl Default for DaemonSettings {
         Self {
             archive_max_bytes: default_archive_max_bytes(),
             archive_retention_days: 0,
+            relevance_sampling_enabled: default_relevance_sampling_enabled(),
+            relevance_sampling_interval_secs: default_relevance_sampling_interval_secs(),
+            relevance_sampling_sample_size: default_relevance_sampling_sample_size(),
         }
     }
 }

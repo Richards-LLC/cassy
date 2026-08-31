@@ -153,6 +153,18 @@ impl Config {
                 "daemon.archive_retention_days".to_string(),
                 daemon.archive_retention_days.to_string(),
             ),
+            (
+                "daemon.relevance_sampling_enabled".to_string(),
+                daemon.relevance_sampling_enabled.to_string(),
+            ),
+            (
+                "daemon.relevance_sampling_interval_secs".to_string(),
+                daemon.relevance_sampling_interval_secs.to_string(),
+            ),
+            (
+                "daemon.relevance_sampling_sample_size".to_string(),
+                daemon.relevance_sampling_sample_size.to_string(),
+            ),
             // Code section
             (
                 "code.enabled".to_string(),

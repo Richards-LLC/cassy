@@ -69,6 +69,7 @@ impl CasService {
             "query_id": event.query_id,
             "result_id": event.result_id,
             "outcome": event.outcome,
+            "attribution": event.attribution,
             "created_at": event.created_at,
         });
         Ok(Self::success(response.to_string()))
@@ -77,17 +78,29 @@ impl CasService {
     pub(in crate::mcp::tools::service) async fn retrieval_metrics_impl(
         &self,
     ) -> Result<CallToolResult, McpError> {
-        use cas_store::{RetrievalStore, SqliteRetrievalStore};
+        use cas_store::SqliteRetrievalStore;
 
         let store = SqliteRetrievalStore::open(&self.inner.cas_root)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         let aggregates = store
             .aggregate()
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let precision = store
+            .rolling_injected_precision(30)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         Ok(Self::success(
             serde_json::json!({
                 "version": 1,
                 "groups": aggregates,
+                // Keep the scalar easy to consume while publishing the
+                // numerator/denominator beside it. `null` is intentional
+                // until a judge has produced at least one label.
+                "rolling_injected_precision": precision.precision,
+                "injected_precision": precision.precision,
+                "injected_precision_numerator": precision.helpful,
+                "injected_precision_denominator": precision.judged,
+                "injected_precision_window_days": precision.window_days,
+                "injected_precision_stats": precision,
             })
             .to_string(),
         ))

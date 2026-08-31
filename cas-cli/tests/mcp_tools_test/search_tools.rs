@@ -638,6 +638,7 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
     let feedback_json: serde_json::Value =
         serde_json::from_str(&extract_text(feedback)).expect("feedback response should be JSON");
     assert_eq!(feedback_json["outcome"], "helpful");
+    assert_eq!(feedback_json["attribution"], "explicit");
 
     let unresolved_req: SearchContextRequest = serde_json::from_value(serde_json::json!({
         "action": "retrieval_feedback",
@@ -661,6 +662,10 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
         .expect("offline metrics should succeed");
     let metrics_json: serde_json::Value =
         serde_json::from_str(&extract_text(metrics)).expect("metrics response should be JSON");
+    assert!(metrics_json["rolling_injected_precision"].is_null());
+    assert_eq!(metrics_json["injected_precision_numerator"], 0);
+    assert_eq!(metrics_json["injected_precision_denominator"], 0);
+    assert_eq!(metrics_json["injected_precision_window_days"], 30);
     let groups = metrics_json["groups"]
         .as_array()
         .expect("metrics groups should be an array");

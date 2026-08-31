@@ -46,6 +46,12 @@ pub struct DaemonConfig {
     pub index_max_per_run: usize,
     /// BM25 indexing interval (seconds)
     pub index_interval_secs: u64,
+    /// Enable injected-relevance sampling.
+    pub relevance_sampling_enabled: bool,
+    /// Minimum interval between relevance sampling passes (seconds).
+    pub relevance_sampling_interval_secs: u64,
+    /// Maximum result rows offered to the relevance judge per pass.
+    pub relevance_sampling_sample_size: usize,
 }
 
 impl Default for DaemonConfig {
@@ -71,6 +77,9 @@ impl Default for DaemonConfig {
             index_batch_size: 32,
             index_max_per_run: 200,
             index_interval_secs: 30,
+            relevance_sampling_enabled: true,
+            relevance_sampling_interval_secs: 7 * 24 * 60 * 60,
+            relevance_sampling_sample_size: 20,
         }
     }
 }

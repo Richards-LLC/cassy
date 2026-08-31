@@ -286,6 +286,33 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }
+            // Memory section
+            "memory.session_learn_auto" => {
+                let memory = self.memory.get_or_insert_with(MemoryConfig::default);
+                memory.session_learn_auto = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
+            "memory.decay.curated_importance_floor" => {
+                let floor: f32 = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid number value: {value}")))?;
+                if !floor.is_finite() || !(0.0..=1.0).contains(&floor) {
+                    return Err(MemError::Parse(format!(
+                        "Importance floor must be between 0.0 and 1.0, got: {value}"
+                    )));
+                }
+                self.memory
+                    .get_or_insert_with(MemoryConfig::default)
+                    .decay
+                    .curated_importance_floor = floor;
+            }
+            "memory.decay.promote_on_access" => {
+                let memory = self.memory.get_or_insert_with(MemoryConfig::default);
+                memory.decay.promote_on_access = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
             // Code section
             "code.enabled" => {
                 let code = self.code.get_or_insert_with(CodeConfig::default);

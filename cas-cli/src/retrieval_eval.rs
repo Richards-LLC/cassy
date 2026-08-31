@@ -38,10 +38,12 @@
 //! # Tier modes
 //!
 //! The Helpful-Memories selector only considers entries whose
-//! `MemoryTier::is_active()` is true (`in-context` / `working`). In the real
-//! corpus 175 of the 189 fixture entries are `archive`, so the shipped
-//! selector can physically see 14 of them. That is a genuine finding, not a
-//! fixture defect, so the harness reports both:
+//! `MemoryTier::is_active()` is true (`in-context` / `working`). In the
+//! original snapshot 175 of the 189 fixture entries were `archive`. The
+//! fixture now re-tiers the 41 curated rows (importance >= 0.9 or
+//! helpful_count > 0) to `working`, mirroring the decay policy, so the shipped
+//! selector can physically see 47 entries. The remaining 142 archive rows are
+//! intentionally retained, and the harness reports both:
 //!
 //! * `live_tiers` — fixture tiers exactly as mined. Measures the shipped
 //!   end-to-end selector, tier filter included.

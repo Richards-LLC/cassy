@@ -22,6 +22,18 @@ fn test_daemon_status_default() {
     assert!(status.last_run.is_none());
 }
 
+#[test]
+fn memory_decay_status_round_trips_atomically() {
+    let temp = tempfile::tempdir().unwrap();
+
+    super::MemoryDecayStatus::write(temp.path(), 7, 3).unwrap();
+
+    let status = super::MemoryDecayStatus::read(temp.path()).unwrap();
+    assert_eq!(status.curated_entries_protected, 7);
+    assert_eq!(status.promoted_on_access, 3);
+    assert!(status.recorded_at <= Utc::now());
+}
+
 fn make_entry(id: &str, entry_type: EntryType, tier: MemoryTier) -> Entry {
     Entry {
         id: id.to_string(),
@@ -179,6 +191,74 @@ fn test_low_stability_demotes_to_cold() {
 }
 
 #[test]
+fn test_curated_high_importance_survives_stability_decay() {
+    let mut curated = make_entry("curated-importance", EntryType::Learning, MemoryTier::Working);
+    curated.importance = 0.95;
+    curated.stability = 0.2;
+
+    let store = make_store(vec![curated]);
+
+    apply_memory_decay(&store).unwrap();
+
+    assert_eq!(
+        store.get("curated-importance").unwrap().memory_tier,
+        MemoryTier::Working,
+        "curated entries must not fall below working through stability decay"
+    );
+}
+
+#[test]
+fn test_curated_helpful_entry_survives_stability_decay() {
+    let mut curated = make_entry("curated-helpful", EntryType::Learning, MemoryTier::Working);
+    curated.helpful_count = 1;
+    curated.stability = 0.1;
+
+    let store = make_store(vec![curated]);
+
+    apply_memory_decay(&store).unwrap();
+
+    assert_eq!(
+        store.get("curated-helpful").unwrap().memory_tier,
+        MemoryTier::Working,
+        "helpful entries must not fall below working through stability decay"
+    );
+}
+
+#[test]
+fn test_expired_curated_entry_still_archives() {
+    let mut curated = make_entry("expired-curated", EntryType::Learning, MemoryTier::Working);
+    curated.importance = 0.95;
+    curated.valid_until = Some(Utc::now() - Duration::seconds(1));
+
+    let store = make_store(vec![curated]);
+
+    apply_memory_decay(&store).unwrap();
+
+    assert_eq!(
+        store.get("expired-curated").unwrap().memory_tier,
+        MemoryTier::Archive,
+        "expiry must override curated stability protection"
+    );
+}
+
+#[test]
+fn test_negative_curated_entry_still_archives() {
+    let mut curated = make_entry("negative-curated", EntryType::Learning, MemoryTier::Working);
+    curated.importance = 0.95;
+    curated.harmful_count = 1;
+
+    let store = make_store(vec![curated]);
+
+    apply_memory_decay(&store).unwrap();
+
+    assert_eq!(
+        store.get("negative-curated").unwrap().memory_tier,
+        MemoryTier::Archive,
+        "negative feedback must override curated stability protection"
+    );
+}
+
+#[test]
 fn test_very_low_stability_demotes_cold_to_archive() {
     let mut very_low_stab = make_entry("stab-001", EntryType::Learning, MemoryTier::Cold);
     very_low_stab.stability = 0.1;
@@ -190,6 +270,15 @@ fn test_very_low_stability_demotes_cold_to_archive() {
 
     let updated = store.get("stab-001").unwrap();
     assert_eq!(updated.memory_tier, MemoryTier::Archive);
+}
+
+#[test]
+fn test_access_promotes_archive_directly_to_working() {
+    let mut archived = make_entry("accessed-archive", EntryType::Learning, MemoryTier::Archive);
+
+    archived.promote_tier();
+
+    assert_eq!(archived.memory_tier, MemoryTier::Working);
 }
 
 #[test]
@@ -241,6 +330,29 @@ fn test_already_archived_not_double_processed() {
 
     let updated = store.get("arch-001").unwrap();
     assert_eq!(updated.memory_tier, MemoryTier::Archive);
+}
+
+#[test]
+fn test_decay_does_not_promote_archived_entry_from_historical_access() {
+    let mut archived = make_entry(
+        "historically-accessed-archive",
+        EntryType::Learning,
+        MemoryTier::Archive,
+    );
+    archived.last_accessed = Some(Utc::now() - Duration::days(10));
+
+    let store = make_store(vec![archived]);
+    let count = apply_memory_decay(&store).unwrap();
+
+    assert_eq!(count, 0, "decay must not rewrite an already archived entry");
+    assert_eq!(
+        store
+            .get("historically-accessed-archive")
+            .unwrap()
+            .memory_tier,
+        MemoryTier::Archive,
+        "historical access does not prove access after archival"
+    );
 }
 
 #[test]

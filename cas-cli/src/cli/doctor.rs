@@ -104,6 +104,26 @@ fn schema_tables_check(summary: &SchemaSummary) -> Check {
     }
 }
 
+fn memory_decay_check(cas_root: &Path) -> Check {
+    let message = crate::daemon::MemoryDecayStatus::read(cas_root)
+        .map(|status| {
+            format!(
+                "Memory decay (last cycle): protected={} promoted_on_access={} recorded_at={}",
+                status.curated_entries_protected,
+                status.promoted_on_access,
+                status.recorded_at.to_rfc3339()
+            )
+        })
+        .unwrap_or_else(|_| {
+            "Memory decay (last cycle): unavailable (no completed decay cycle recorded)".to_string()
+        });
+    Check {
+        name: "memory decay".to_string(),
+        status: CheckStatus::Ok,
+        message,
+    }
+}
+
 /// Report the routable supervisor population for every factory session that
 /// still has at least one live registered agent. Stale historical supervisor
 /// rows do not make an active session ambiguous.
@@ -642,6 +662,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                     harmful_count
                 ),
             });
+
+            checks.push(memory_decay_check(&cas_root));
         }
     }
 
@@ -2047,6 +2069,25 @@ mod tests {
             after.message.contains("no stray Tantivy root"),
             "{}",
             after.message
+        );
+    }
+
+    #[test]
+    fn doctor_reports_memory_decay_counters_from_the_last_cycle() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        crate::daemon::MemoryDecayStatus::write(&cas_root, 4, 2).unwrap();
+
+        let check = memory_decay_check(&cas_root);
+        assert_eq!(check.name, "memory decay");
+        assert!(matches!(check.status, CheckStatus::Ok));
+        assert!(check.message.contains("protected=4"), "{}", check.message);
+        assert!(
+            check.message.contains("promoted_on_access=2"),
+            "{}",
+            check.message
         );
     }
 

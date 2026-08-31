@@ -11,6 +11,7 @@ impl Config {
         let issues = self.issues.clone().unwrap_or_default();
         let notifications = self.notifications.clone().unwrap_or_default();
         let skill_validation = self.skill_validation.clone().unwrap_or_default();
+        let memory = self.memory.clone().unwrap_or_default();
         match key {
             // Sync section
             "sync.enabled" => Some(self.sync.enabled.to_string()),
@@ -70,6 +71,11 @@ impl Config {
             "daemon.relevance_sampling_sample_size" => {
                 Some(daemon.relevance_sampling_sample_size.to_string())
             }
+            "memory.session_learn_auto" => Some(memory.session_learn_auto.to_string()),
+            "memory.decay.curated_importance_floor" => {
+                Some(memory.decay.curated_importance_floor.to_string())
+            }
+            "memory.decay.promote_on_access" => Some(memory.decay.promote_on_access.to_string()),
             // Code section
             "code.enabled" => Some(self.code.clone().unwrap_or_default().enabled.to_string()),
             "code.watch_paths" => Some(self.code.clone().unwrap_or_default().watch_paths.join(",")),

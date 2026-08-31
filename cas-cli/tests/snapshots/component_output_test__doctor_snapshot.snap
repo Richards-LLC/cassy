@@ -19,6 +19,7 @@ cas doctor
 [OK] configuration: Loaded (sync: enabled)
 [OK] sync target: Will sync to .claude/rules/cas (not yet created)
 [OK] memory stats: [N] total () | tiers:  | compressed: [N] | helpful: [N] | harmful: [N]
+[OK] memory decay: Memory decay (last cycle): unavailable (no completed decay cycle recorded)
 [OK] rules: [N] rules ()
 [OK] tasks: [N] tasks () | 0 open, 0 blocked
 [OK] embeddings: No local vector embeddings (semantic search uses cloud).

@@ -11,6 +11,7 @@ impl Config {
         let issues = self.issues.clone().unwrap_or_default();
         let notifications = self.notifications.clone().unwrap_or_default();
         let skill_validation = self.skill_validation.clone().unwrap_or_default();
+        let memory = self.memory.clone().unwrap_or_default();
         vec![
             // Sync section
             ("sync.enabled".to_string(), self.sync.enabled.to_string()),
@@ -164,6 +165,18 @@ impl Config {
             (
                 "daemon.relevance_sampling_sample_size".to_string(),
                 daemon.relevance_sampling_sample_size.to_string(),
+            ),
+            (
+                "memory.session_learn_auto".to_string(),
+                memory.session_learn_auto.to_string(),
+            ),
+            (
+                "memory.decay.curated_importance_floor".to_string(),
+                memory.decay.curated_importance_floor.to_string(),
+            ),
+            (
+                "memory.decay.promote_on_access".to_string(),
+                memory.decay.promote_on_access.to_string(),
             ),
             // Code section
             (
@@ -685,5 +698,10 @@ impl Config {
     /// Get LLM config with defaults
     pub fn llm(&self) -> LlmConfig {
         self.llm.clone().unwrap_or_default()
+    }
+
+    /// Get memory lifecycle configuration with defaults.
+    pub fn memory(&self) -> MemoryConfig {
+        self.memory.clone().unwrap_or_default()
     }
 }

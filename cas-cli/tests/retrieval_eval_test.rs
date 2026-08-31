@@ -36,8 +36,9 @@
 //! See the module docs on `cas::retrieval_eval` for what each metric means and
 //! why `live_tiers` and `all_working` are both reported. In short: `live_tiers`
 //! is the shipped end-to-end behaviour (the Helpful-Memories tier filter can
-//! only see 14 of the 189 real entries), `all_working` isolates the ranking
-//! function so a ranking change has a metric that can actually move.
+//! see 47 of the 189 fixture entries after curated re-tiering), `all_working`
+//! isolates the ranking function so a ranking change has a metric that can
+//! actually move.
 //!
 //! # This fixture ships in a public repository
 //!
@@ -261,14 +262,15 @@ fn the_fixture_carries_no_secret_or_client_confidential_shapes() {
 
 #[test]
 fn the_fixture_carries_the_real_tier_skew_it_claims_to_measure() {
-    // The whole point of reporting two tier modes is that the live corpus is
-    // almost entirely archive-tier. If a future fixture edit lifted the tiers,
-    // the `live_tiers` numbers would silently stop describing production.
+    // The live corpus remains mostly archive-tier, while curated entries are
+    // deliberately re-tiered to working to mirror the decay policy. If a
+    // future fixture edit lifted the remaining archive rows, the `live_tiers`
+    // numbers would silently stop describing production.
     let fixture = fixture();
     let dir = tempfile::tempdir().expect("tempdir");
     let corpus = EvalCorpus::materialize(&fixture, dir.path(), TierMode::Live).expect("seed");
     assert!(
-        corpus.active_entries() < fixture.entries.len() / 4,
+        corpus.active_entries() <= fixture.entries.len() / 4,
         "fixture no longer reflects the live archive-tier skew: {} of {} entries are active",
         corpus.active_entries(),
         fixture.entries.len()
@@ -893,11 +895,9 @@ fn the_two_tier_modes_agree_today_and_the_harness_says_why() {
     //
     // * The ambient selectors filter on `archived = 0` only — no tier
     //   predicate exists on that path, so the modes agree by construction.
-    // * Helpful Memories sorts high-importance preferences (importance >= 0.9)
-    //   ahead of everything else, and the five that win are recent enough that
-    //   their age decay beats every archive-tier preference of equal
-    //   importance. Lifting the tier filter therefore adds 169 candidates that
-    //   all score below the incumbents.
+    // * The live fixture re-tiers every curated row (importance >= 0.9 or
+    //   helpful_count > 0) to working, so the remaining archive-only rows are
+    //   uncurated and score below the same five candidates as all_working.
     //
     // The mode still earns its place: it is the only way a future ranking
     // change can show up as movement rather than be swallowed by the tier
@@ -927,8 +927,8 @@ fn the_two_tier_modes_agree_today_and_the_harness_says_why() {
         );
     }
 
-    // And the top-5 Helpful Memories really are the high-importance
-    // preferences the comment above blames, not some other coincidence.
+    // And the top-5 Helpful Memories are still the high-importance preferences
+    // the fixture's re-tiering makes eligible, not some other coincidence.
     let fresh = tempfile::tempdir().expect("tempdir");
     let corpus = EvalCorpus::materialize(&fixture, fresh.path(), TierMode::Live).expect("seed");
     let top = retrieval_eval::helpful_memories_ranking(&corpus, &fixture.cases[0]).expect("rank");
@@ -972,8 +972,12 @@ fn harness_reports_precision_and_recall_and_holds_the_committed_baseline() {
             version: retrieval_eval::BASELINE_VERSION,
             fixture_id: fixture.fixture_id.clone(),
             captured_at: chrono::Utc::now().date_naive().to_string(),
-            note: "Captured by CAS_RETRIEVAL_EVAL_REBASELINE=1. See the test module header \
-                   for the re-baseline procedure and what each metric means."
+            note: "Captured by CAS_RETRIEVAL_EVAL_REBASELINE=1 after re-tiering 33 archived \
+                   curated rows (importance >= 0.9 or helpful_count > 0) to working. The \
+                   helpful_memories_production live_tiers seeded_task row moved from P@5 \
+                   0.010714 to 0.050000 and recall@5 from 0.009566 to 0.052126 because \
+                   protected curated memories are now eligible for SessionStart recall. See \
+                   the test module header for the re-baseline procedure and metric definitions."
                 .to_string(),
             selectors: metrics.clone(),
         };

@@ -1,7 +1,7 @@
 use chrono::Utc;
 
 use crate::daemon::decay::{
-    apply_memory_decay, auto_prune, run_consolidation, run_entity_summary_update,
+    auto_prune, run_consolidation, run_entity_summary_update,
 };
 use crate::daemon::indexing::generate_bm25_index;
 use crate::daemon::observation::process_observations;
@@ -41,6 +41,8 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
     let mut consolidations_applied = 0;
     let mut entries_pruned = 0;
     let mut decay_applied = 0;
+    let mut curated_entries_protected = 0;
+    let mut promoted_on_access = 0;
     let mut entries_indexed = 0;
     let mut indexing_errors = Vec::new();
     let mut agents_cleaned = 0;
@@ -74,8 +76,23 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
     }
 
     if config.apply_decay {
-        match apply_memory_decay(&store) {
-            Ok(count) => decay_applied = count,
+        match crate::daemon::decay::apply_memory_decay_with_policy(
+            &store,
+            config.curated_importance_floor,
+            config.promote_on_access,
+        ) {
+            Ok(result) => {
+                decay_applied = result.updated;
+                curated_entries_protected = result.curated_protected;
+                promoted_on_access = result.promoted_on_access;
+                if let Err(error) = crate::daemon::MemoryDecayStatus::write(
+                    &config.cas_root,
+                    curated_entries_protected,
+                    promoted_on_access,
+                ) {
+                    errors.push(format!("Memory decay status write failed: {error}"));
+                }
+            }
             Err(error) => errors.push(format!("Memory decay failed: {error}")),
         }
     }
@@ -292,6 +309,8 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         consolidations_applied,
         entries_pruned,
         decay_applied,
+        curated_entries_protected,
+        promoted_on_access,
         entries_indexed,
         indexing_errors,
         entity_summaries_updated,

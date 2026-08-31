@@ -15,6 +15,21 @@ use chrono::Timelike;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
 use regex::Regex;
 
+/// Record a memory access and optionally restore a cold/archive entry to the
+/// active working tier. Returns whether tier promotion occurred.
+pub(super) fn record_memory_access(entry: &mut Entry, promote_on_access: bool) -> bool {
+    let should_promote = promote_on_access
+        && matches!(
+            entry.memory_tier,
+            cas_types::MemoryTier::Cold | cas_types::MemoryTier::Archive
+        );
+    entry.reinforce();
+    if should_promote {
+        entry.promote_tier();
+    }
+    should_promote
+}
+
 /// Best-effort extraction of an English `until <date>` deadline from memory
 /// prose. Explicit `valid_until` input always wins; this only gives otherwise
 /// prose-only expiry a machine-readable representation.
@@ -776,9 +791,10 @@ impl CasCore {
             data: None,
         })?;
 
-        // Track access for session-aware context boosting
-        // reinforce() updates last_accessed, access_count, and stability
-        entry.reinforce();
+        // Track access for session-aware context boosting and restore entries
+        // that were archived by decay when configured.
+        let promote_on_access = self.load_config().memory().decay.promote_on_access;
+        record_memory_access(&mut entry, promote_on_access);
 
         // Persist access tracking (best-effort, don't fail the get)
         let _ = store.update(&entry);

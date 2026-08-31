@@ -264,6 +264,8 @@ impl EmbeddedDaemonConfigExt for EmbeddedDaemonConfig {
             consolidate_memories: false, // Don't run AI consolidation in background
             auto_prune: false,           // Safe default
             apply_decay: self.apply_decay,
+            curated_importance_floor: self.curated_importance_floor,
+            promote_on_access: self.promote_on_access,
             model: "haiku".to_string(),
             update_entity_summaries: false, // Disable for MCP embedded daemon
             // Code indexing - pass through from config
@@ -1350,6 +1352,8 @@ impl EmbeddedDaemon {
         status.last_maintenance = Some(Utc::now());
         status.observations_processed += result.observations_processed;
         status.decay_applied += result.decay_applied;
+        status.curated_entries_protected = result.curated_entries_protected;
+        status.promoted_on_access = result.promoted_on_access;
 
         if let Some(err) = result.errors.first() {
             status.last_error = Some(err.clone());

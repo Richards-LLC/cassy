@@ -22,6 +22,10 @@ pub struct EmbeddedDaemonStatus {
     pub observations_processed: usize,
     /// Total memory decay applied this session
     pub decay_applied: usize,
+    /// Curated entries protected from demotion in the last maintenance cycle.
+    pub curated_entries_protected: usize,
+    /// Entries promoted from cold/archive in the last maintenance cycle.
+    pub promoted_on_access: usize,
     /// Pending items in cloud sync queue
     pub cloud_sync_pending: usize,
     /// Whether cloud sync is available (user logged in)
@@ -103,6 +107,10 @@ pub struct EmbeddedDaemonConfig {
     pub cloud_sync_idle_secs: u64,
     /// Enable memory decay
     pub apply_decay: bool,
+    /// Importance floor for curated-memory stability protection.
+    pub curated_importance_floor: f32,
+    /// Promote cold/archive memories to working when accessed.
+    pub promote_on_access: bool,
     /// Enable observation processing
     pub process_observations: bool,
     /// Enable cloud sync
@@ -162,6 +170,8 @@ impl Default for EmbeddedDaemonConfig {
             min_idle_secs: 60,                  // 1 minute idle before maintenance
             cloud_sync_idle_secs: 10,           // 10s idle before cloud sync (lightweight)
             apply_decay: true,
+            curated_importance_floor: 0.9,
+            promote_on_access: true,
             process_observations: true,
             cloud_sync_enabled: true, // Auto-sync enabled by default
             batch_size: 20,

@@ -220,7 +220,7 @@ impl CasCore {
             let (preview, matches_filters, metadata) = match result.doc_type {
                 DocType::Entry => {
                     if let Some(ref s) = store {
-                        if let Ok(e) = s.get(&result.id) {
+                        if let Ok(mut e) = s.get(&result.id) {
                             let scope_ok = scope_filter == ScopeFilter::All
                                 || (scope_filter == ScopeFilter::Global
                                     && e.scope == Scope::Global)
@@ -241,6 +241,18 @@ impl CasCore {
                             }
                             if conflict {
                                 signals.push("negative_feedback_conflict".to_string());
+                            }
+                            if scope_ok && tags_ok && !expired {
+                                let promote_on_access = self
+                                    .load_config()
+                                    .memory()
+                                    .decay
+                                    .promote_on_access;
+                                super::memory::record_memory_access(
+                                    &mut e,
+                                    promote_on_access,
+                                );
+                                let _ = s.update(&e);
                             }
                             (
                                 format!("[Entry] {}", e.preview(60)),

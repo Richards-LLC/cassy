@@ -177,6 +177,7 @@ impl Config {
         merge_option!(integrations);
         merge_option!(code_review);
         merge_option!(issues);
+        merge_option!(memory);
         merge_option!(project);
         changed
     }

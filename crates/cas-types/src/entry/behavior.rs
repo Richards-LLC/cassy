@@ -277,11 +277,11 @@ impl Entry {
         };
     }
 
-    /// Promote entry to a higher memory tier (when accessed)
-    /// Note: Use pin() to promote to InContext tier
+    /// Promote an accessed entry to the active working tier.
+    /// Note: Use pin() to promote to InContext tier.
     pub fn promote_tier(&mut self) {
         self.memory_tier = match self.memory_tier {
-            MemoryTier::Archive => MemoryTier::Cold,
+            MemoryTier::Archive => MemoryTier::Working,
             MemoryTier::Cold => MemoryTier::Working,
             MemoryTier::Working => MemoryTier::Working,
             MemoryTier::InContext => MemoryTier::InContext,

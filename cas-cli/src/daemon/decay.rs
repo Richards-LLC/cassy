@@ -20,6 +20,24 @@ fn consolidated_source_ids(source_ids: &[String], entries: &[crate::types::Entry
 
 /// Apply memory decay to entries based on time and access patterns.
 pub(crate) fn apply_memory_decay(store: &Arc<dyn Store>) -> Result<usize, CasError> {
+    let result = apply_memory_decay_with_policy(store, 0.9, true)?;
+    Ok(result.updated)
+}
+
+/// Counters produced by a single memory-decay cycle.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MemoryDecayResult {
+    pub updated: usize,
+    pub curated_protected: usize,
+    pub promoted_on_access: usize,
+}
+
+/// Apply memory decay with the configured curated-memory policy.
+pub(crate) fn apply_memory_decay_with_policy(
+    store: &Arc<dyn Store>,
+    curated_importance_floor: f32,
+    _promote_on_access: bool,
+) -> Result<MemoryDecayResult, CasError> {
     use crate::types::{EntryType, MemoryTier};
 
     // Expiry is an absolute validity boundary, not a soft signal like age or
@@ -27,7 +45,7 @@ pub(crate) fn apply_memory_decay(store: &Arc<dyn Store>) -> Result<usize, CasErr
     // removed from the in-context tier once its valid_until has passed.
     let entries = store.list()?;
     let now = Utc::now();
-    let mut count = 0;
+    let mut result = MemoryDecayResult::default();
 
     for entry in entries {
         let mut updated = entry.clone();
@@ -43,7 +61,7 @@ pub(crate) fn apply_memory_decay(store: &Arc<dyn Store>) -> Result<usize, CasErr
         if updated.memory_tier == MemoryTier::Archive {
             if needs_update {
                 store.update(&updated)?;
-                count += 1;
+                result.updated += 1;
             }
             continue;
         }
@@ -56,9 +74,12 @@ pub(crate) fn apply_memory_decay(store: &Arc<dyn Store>) -> Result<usize, CasErr
             continue;
         }
 
+        let curated = updated.importance >= curated_importance_floor || updated.helpful_count > 0;
+
         if updated.entry_type == EntryType::Observation
             && updated.memory_tier == MemoryTier::Working
             && updated.feedback_score() <= 0
+            && !curated
         {
             updated.memory_tier = MemoryTier::Cold;
             needs_update = true;
@@ -67,6 +88,7 @@ pub(crate) fn apply_memory_decay(store: &Arc<dyn Store>) -> Result<usize, CasErr
         if updated.importance < 0.3
             && updated.memory_tier == MemoryTier::Working
             && updated.feedback_score() <= 0
+            && !curated
         {
             updated.memory_tier = MemoryTier::Cold;
             needs_update = true;
@@ -91,22 +113,30 @@ pub(crate) fn apply_memory_decay(store: &Arc<dyn Store>) -> Result<usize, CasErr
         }
 
         if updated.stability < 0.3 && updated.memory_tier == MemoryTier::Working {
-            updated.memory_tier = MemoryTier::Cold;
-            needs_update = true;
+            if curated {
+                result.curated_protected += 1;
+            } else {
+                updated.memory_tier = MemoryTier::Cold;
+                needs_update = true;
+            }
         }
 
         if updated.stability < 0.15 && updated.memory_tier == MemoryTier::Cold {
-            updated.memory_tier = MemoryTier::Archive;
-            needs_update = true;
+            if curated {
+                result.curated_protected += 1;
+            } else {
+                updated.memory_tier = MemoryTier::Archive;
+                needs_update = true;
+            }
         }
 
         if needs_update {
             store.update(&updated)?;
-            count += 1;
+            result.updated += 1;
         }
     }
 
-    Ok(count)
+    Ok(result)
 }
 
 /// Run AI-powered consolidation.

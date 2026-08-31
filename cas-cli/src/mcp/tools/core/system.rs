@@ -307,6 +307,17 @@ impl CasCore {
             }
         };
 
+        let decay_cycle = self
+            .daemon_status()
+            .await
+            .map(|status| {
+                format!(
+                    "Memory decay (last cycle): protected={} promoted_on_access={}",
+                    status.curated_entries_protected, status.promoted_on_access
+                )
+            })
+            .unwrap_or_else(|| "Memory decay (last cycle): unavailable".to_string());
+
         let output = format!(
             "Cassy Statistics\n\
              ==============\n\n\
@@ -319,6 +330,7 @@ impl CasCore {
              Rules: {} ({} proven)\n\
              Tasks: {} ({} open, {} in progress)\n\
              Skills: {} ({} enabled)\n\
+             {}\n\
              {}",
             corpus.total,
             corpus.live,
@@ -334,6 +346,7 @@ impl CasCore {
             in_progress,
             skills.len(),
             enabled_skills,
+            decay_cycle,
             retrieval_funnel
         );
 
@@ -486,6 +499,15 @@ impl CasCore {
                 Err(e) => issues.push(format!("Store list failed: {e}")),
             },
             Err(e) => issues.push(format!("Store open failed: {e}")),
+        }
+
+        if let Some(status) = self.daemon_status().await {
+            checks.push(format!(
+                "Memory decay: last cycle protected={}, promoted_on_access={}",
+                status.curated_entries_protected, status.promoted_on_access
+            ));
+        } else {
+            checks.push("Memory decay: last cycle unavailable (daemon not running)".to_string());
         }
 
         // Check task store

@@ -2,6 +2,50 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+const MEMORY_DECAY_STATUS_FILE: &str = "memory-decay-status.json";
+
+/// Counters from the most recently completed memory-decay cycle.
+///
+/// Embedded MCP status is process-local, but `cas doctor` runs in a separate
+/// process. Keep the two counters in a small atomically-replaced sidecar so
+/// doctor can report the same cycle rather than guessing from entry state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryDecayStatus {
+    pub recorded_at: DateTime<Utc>,
+    pub curated_entries_protected: usize,
+    pub promoted_on_access: usize,
+}
+
+impl MemoryDecayStatus {
+    pub(crate) fn path(cas_root: &std::path::Path) -> PathBuf {
+        cas_root.join(MEMORY_DECAY_STATUS_FILE)
+    }
+
+    pub(crate) fn read(cas_root: &std::path::Path) -> std::io::Result<Self> {
+        let bytes = std::fs::read(Self::path(cas_root))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+
+    pub(crate) fn write(
+        cas_root: &std::path::Path,
+        curated_entries_protected: usize,
+        promoted_on_access: usize,
+    ) -> std::io::Result<()> {
+        let status = Self {
+            recorded_at: Utc::now(),
+            curated_entries_protected,
+            promoted_on_access,
+        };
+        let path = Self::path(cas_root);
+        let temporary = path.with_extension("json.tmp");
+        let bytes = serde_json::to_vec(&status)
+            .map_err(|error| std::io::Error::other(format!("serialize status: {error}")))?;
+        std::fs::write(&temporary, bytes)?;
+        std::fs::rename(temporary, path)
+    }
+}
+
 /// Configuration for the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -19,6 +63,10 @@ pub struct DaemonConfig {
     pub auto_prune: bool,
     /// Enable memory decay
     pub apply_decay: bool,
+    /// Importance floor for curated-memory stability protection.
+    pub curated_importance_floor: f32,
+    /// Promote cold/archive memories to working when accessed.
+    pub promote_on_access: bool,
     /// Model for AI tasks
     pub model: String,
     /// Path to Cassy root
@@ -64,6 +112,8 @@ impl Default for DaemonConfig {
             consolidate_memories: true,
             auto_prune: true,
             apply_decay: true,
+            curated_importance_floor: 0.9,
+            promote_on_access: true,
             model: "haiku".to_string(),
             cas_root: PathBuf::new(),
             update_entity_summaries: true,
@@ -101,6 +151,10 @@ pub struct DaemonStatus {
     pub entries_pruned: usize,
     /// Number of entries with decay applied
     pub decay_applied: usize,
+    /// Number of curated entries protected from stability demotion.
+    pub curated_entries_protected: usize,
+    /// Number of cold/archive entries promoted to working on access.
+    pub promoted_on_access: usize,
     /// Last error if any
     pub last_error: Option<String>,
 }
@@ -122,6 +176,10 @@ pub struct DaemonRunResult {
     pub entries_pruned: usize,
     /// Entries with decay applied
     pub decay_applied: usize,
+    /// Number of curated entries protected from stability demotion.
+    pub curated_entries_protected: usize,
+    /// Number of cold/archive entries promoted to working on access.
+    pub promoted_on_access: usize,
     /// Entries indexed in BM25
     pub entries_indexed: usize,
     /// Indexing errors

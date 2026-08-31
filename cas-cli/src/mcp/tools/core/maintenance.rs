@@ -68,13 +68,14 @@ impl CasCore {
             Ok(result) => Ok(Self::success(result)),
             Err(e) => {
                 // Fallback: run maintenance directly if daemon not available
-                let archive_max_bytes = crate::config::Config::load(&self.cas_root)
-                    .unwrap_or_default()
-                    .daemon()
-                    .archive_max_bytes;
+                let cas_config = crate::config::Config::load(&self.cas_root).unwrap_or_default();
+                let archive_max_bytes = cas_config.daemon().archive_max_bytes;
+                let memory_decay = cas_config.memory().decay;
                 let daemon_config = crate::daemon::DaemonConfig {
                     cas_root: self.cas_root.clone(),
                     archive_max_bytes,
+                    curated_importance_floor: memory_decay.curated_importance_floor,
+                    promote_on_access: memory_decay.promote_on_access,
                     ..Default::default()
                 };
 

@@ -35,6 +35,13 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
         .insert("daemon", "Background maintenance and trace archives");
     registry
         .section_descriptions
+        .insert("memory", "Memory lifecycle and automatic learning settings");
+    registry.section_descriptions.insert(
+        "memory.decay",
+        "Curated-memory decay floors and access promotion",
+    );
+    registry
+        .section_descriptions
         .insert("code", "Background code indexing for semantic search");
     registry
         .section_descriptions

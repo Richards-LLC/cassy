@@ -44,6 +44,18 @@ const HOST_CONSTRAINT_LINE_BUDGET_BYTES: usize = 220;
 const CONTEXT_SESSION_START_RETRIEVAL_FAMILY: &str = "context_session_start";
 const CONTEXT_SESSION_START_RETRIEVAL_POLICY: &str = "context-session-start-v1";
 
+fn record_memory_access(entry: &mut Entry, promote_on_access: bool) {
+    let should_promote = promote_on_access
+        && matches!(
+            entry.memory_tier,
+            cas_types::MemoryTier::Cold | cas_types::MemoryTier::Archive
+        );
+    entry.reinforce();
+    if should_promote {
+        entry.promote_tier();
+    }
+}
+
 /// Record the Helpful Memories section as one retrieval query and one result
 /// per injected entry. This is deliberately best-effort: SessionStart is on
 /// the harness critical path, so a telemetry database error must never hide a
@@ -179,6 +191,8 @@ pub fn build_context_with_token_budget(
     let surfaced_artifacts_for_callback = Arc::clone(&surfaced_artifacts);
     let injected_memory_ids = Arc::new(Mutex::new(Vec::<String>::new()));
     let injected_memory_ids_for_callback = Arc::clone(&injected_memory_ids);
+    let access_store = project_store.clone();
+    let promote_on_access = config.memory().decay.promote_on_access;
     let surfaced_callback: Option<SurfacedItemCallback> = Some(Box::new(
         move |id: &str, item_type: &str, preview: Option<&str>| {
             if let Some(tracer) = crate::tracing::DevTracer::get() {
@@ -188,6 +202,13 @@ pub fn build_context_with_token_budget(
                 && let Ok(mut memory_ids) = injected_memory_ids_for_callback.lock()
             {
                 memory_ids.push(id.to_string());
+            }
+            if matches!(item_type, "memory" | "related")
+                && let Some(store) = access_store.as_ref()
+                && let Ok(mut entry) = store.get(id)
+            {
+                record_memory_access(&mut entry, promote_on_access);
+                let _ = store.update(&entry);
             }
             if matches!(item_type, "rule" | "skill")
                 && let Ok(mut artifacts) = surfaced_artifacts_for_callback.lock()

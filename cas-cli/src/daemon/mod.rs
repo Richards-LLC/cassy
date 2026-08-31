@@ -36,5 +36,8 @@ pub use queue::{
     MaintenanceTask, TaskQueue, TaskType, global_queue, queue_embedding_task,
     queue_observation_task, queue_scheduled_maintenance,
 };
-pub use types::{CodeIndexResult, DaemonConfig, DaemonRunResult, DaemonStatus, EmbeddingResult};
+pub use types::{
+    CodeIndexResult, DaemonConfig, DaemonRunResult, DaemonStatus, EmbeddingResult,
+    MemoryDecayStatus,
+};
 pub use watcher::{CodeWatcher, WatchEvent, WatcherConfig};

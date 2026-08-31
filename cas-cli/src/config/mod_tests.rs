@@ -14,6 +14,12 @@ fn test_config_defaults() {
         cas_store::DEFAULT_TRACE_ARCHIVE_MAX_BYTES
     );
     assert_eq!(config.daemon().archive_retention_days, 0);
+    assert_eq!(config.memory().decay.curated_importance_floor, 0.9);
+    assert!(config.memory().decay.promote_on_access);
+    assert_eq!(
+        config.get("memory.decay.curated_importance_floor"),
+        Some("0.9".to_string())
+    );
     assert_eq!(config.sync.promotion_threshold, 2);
     assert_eq!(config.sync.demotion_threshold, 2);
     assert_eq!(config.sync.promotion_evidence, vec!["helpful"]);
@@ -33,6 +39,29 @@ fn test_config_defaults() {
         .expect("rule review config metadata");
     assert_eq!(rule_review.default, "true");
     assert!(rule_review.description.contains("Factory workers are exempt"));
+}
+
+#[test]
+fn memory_decay_policy_is_configurable_and_round_trips() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+
+    config
+        .set("memory.decay.curated_importance_floor", "0.95")
+        .unwrap();
+    config
+        .set("memory.decay.promote_on_access", "false")
+        .unwrap();
+
+    assert_eq!(config.memory().decay.curated_importance_floor, 0.95);
+    assert!(!config.memory().decay.promote_on_access);
+    assert!(config.set("memory.decay.curated_importance_floor", "1.1").is_err());
+    assert!(config.set("memory.decay.curated_importance_floor", "nan").is_err());
+
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(loaded.memory().decay.curated_importance_floor, 0.95);
+    assert!(!loaded.memory().decay.promote_on_access);
 }
 
 #[test]

@@ -475,6 +475,9 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // Check 4: Search index
     checks.push(legacy_search_index_check(&cas_root));
+    if let Some(check) = legacy_versioned_search_index_check(&cas_root) {
+        checks.push(check);
+    }
     let index_dir = crate::hybrid_search::tantivy_index_dir(&cas_root);
     if index_dir.exists() {
         match SearchIndex::open(&index_dir) {
@@ -482,7 +485,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 checks.push(Check {
                     name: "search index".to_string(),
                     status: CheckStatus::Ok,
-                    message: "Tantivy index accessible".to_string(),
+                    message: format!("Tantivy index accessible at {}", index_dir.display()),
                 });
             }
             Err(e) => {
@@ -497,7 +500,10 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         checks.push(Check {
             name: "search index".to_string(),
             status: CheckStatus::Warning,
-            message: "Index not found. Will be created on first search.".to_string(),
+            message: format!(
+                "Index not found at {}. Will be created on first search.",
+                index_dir.display()
+            ),
         });
     }
 
@@ -916,6 +922,26 @@ fn legacy_search_index_check(cas_root: &Path) -> Check {
             message: format!("cannot inspect stray Tantivy root: {error}"),
         },
     }
+}
+
+/// Report the pre-versioned canonical path separately from the older stray
+/// root handled by [`legacy_search_index_check`]. This check is read-only: the
+/// next explicit reindex performs the one-time migration or quarantine.
+fn legacy_versioned_search_index_check(cas_root: &Path) -> Option<Check> {
+    let legacy_dir = crate::hybrid_search::legacy_tantivy_index_dir(cas_root);
+    if !legacy_dir.join("meta.json").is_file() {
+        return None;
+    }
+
+    Some(Check {
+        name: "pre-versioned search index".to_string(),
+        status: CheckStatus::Warning,
+        message: format!(
+            "legacy Tantivy index at {}; current versioned path is {}; run the reindex maintenance action (`mcp__cas__system action=reindex bm25=true`) from an agent session to migrate it safely",
+            legacy_dir.display(),
+            crate::hybrid_search::tantivy_index_dir(cas_root).display()
+        ),
+    })
 }
 
 /// Turn a contamination scan into a single `cas doctor` row.

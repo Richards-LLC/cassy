@@ -69,6 +69,7 @@ impl SearchIndex {
 
     /// Open or create a search index
     pub fn open(index_dir: &Path) -> Result<Self, MemError> {
+        prepare_versioned_index_dir(index_dir)?;
         let schema = Self::build_schema();
 
         let index = if index_dir.exists() && index_dir.join("meta.json").exists() {
@@ -77,16 +78,15 @@ impl SearchIndex {
             let existing_field_count = existing_index.schema().fields().count();
 
             if existing_field_count != EXPECTED_FIELD_COUNT {
-                // Schema mismatch - delete old index and recreate
-                tracing::info!(
-                    "Schema mismatch detected: existing index has {} fields, expected {}. Rebuilding index.",
-                    existing_field_count,
-                    EXPECTED_FIELD_COUNT
-                );
-                drop(existing_index); // Release file handles
-                std::fs::remove_dir_all(index_dir)?;
-                std::fs::create_dir_all(index_dir)?;
-                Index::create_in_dir(index_dir, schema.clone())?
+                // Never remove a directory merely because its schema is from
+                // another release. A still-running binary may be using the
+                // same path, and a caller can explicitly rebuild the
+                // versioned path through `rebuild` when it owns that action.
+                drop(existing_index);
+                return Err(MemError::Other(format!(
+                    "schema mismatch at {}: existing index has {existing_field_count} fields, expected {EXPECTED_FIELD_COUNT}; run the reindex maintenance action (`mcp__cas__system action=reindex bm25=true`) from an agent session",
+                    index_dir.display()
+                )));
             } else {
                 existing_index
             }
@@ -149,6 +149,22 @@ impl SearchIndex {
             cached_reader: std::sync::Mutex::new(None),
             cached_query_parser: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Explicitly rebuild a versioned index directory.
+    ///
+    /// Automatic opens are read/create-only with respect to an existing
+    /// index. Rebuilding is reserved for an explicit reindex request, and is
+    /// confined to the caller's already-resolved schema-versioned path.
+    pub fn rebuild(index_dir: &Path) -> Result<Self, MemError> {
+        if index_dir.exists() {
+            std::fs::remove_dir_all(index_dir)?;
+        }
+        let index = Self::open(index_dir)?;
+        let mut writer = index.writer()?;
+        writer.delete_all_documents()?;
+        writer.commit()?;
+        Ok(index)
     }
 
     /// Open or create a search index with custom writer memory budget
@@ -827,4 +843,85 @@ impl SearchIndex {
         writer.commit()?;
         Ok(count)
     }
+}
+
+/// Move the pre-versioned canonical index out of the way once, before opening
+/// the current schema path. Same-schema indexes are retained by an atomic
+/// rename. Mismatched indexes are quarantined instead of deleted and leave a
+/// marker for the background indexer to requeue entry rows for a rebuild.
+fn prepare_versioned_index_dir(index_dir: &Path) -> Result<(), MemError> {
+    let Some(index_name) = index_dir.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    let expected_name = format!("tantivy-v{EXPECTED_FIELD_COUNT}");
+    if index_name != expected_name || index_dir.exists() {
+        return Ok(());
+    }
+
+    let Some(index_parent) = index_dir.parent() else {
+        return Ok(());
+    };
+    let legacy_dir = crate::hybrid_search::legacy_tantivy_index_dir(
+        index_parent.parent().unwrap_or(index_parent),
+    );
+    if !legacy_dir.join("meta.json").is_file() {
+        return Ok(());
+    }
+
+    let existing_index = Index::open_in_dir(&legacy_dir)?;
+    let existing_field_count = existing_index.schema().fields().count();
+    drop(existing_index);
+
+    std::fs::create_dir_all(index_parent)?;
+    if existing_field_count == EXPECTED_FIELD_COUNT {
+        match std::fs::rename(&legacy_dir, index_dir) {
+            Ok(()) => {
+                tracing::info!(
+                    from = %legacy_dir.display(),
+                    to = %index_dir.display(),
+                    "migrated Tantivy index to its schema-versioned path"
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        return Ok(());
+    }
+
+    let marker = crate::hybrid_search::tantivy_rebuild_marker_for_index(index_dir);
+    std::fs::write(
+        &marker,
+        format!(
+            "legacy Tantivy index has {existing_field_count} fields; rebuild required for {EXPECTED_FIELD_COUNT}\n"
+        ),
+    )?;
+
+    // The suffix is deterministic for the normal one-time migration, while
+    // the loop preserves an old process that recreated `index/tantivy` after
+    // an earlier migration.
+    let mut quarantine = index_parent.join(format!(
+        "tantivy-legacy-v{existing_field_count}"
+    ));
+    let mut ordinal = 2;
+    while quarantine.exists() {
+        quarantine = index_parent.join(format!(
+            "tantivy-legacy-v{existing_field_count}-{ordinal}"
+        ));
+        ordinal += 1;
+    }
+    match std::fs::rename(&legacy_dir, &quarantine) {
+        Ok(()) => {
+            tracing::warn!(
+                from = %legacy_dir.display(),
+                to = %quarantine.display(),
+                existing_field_count,
+                expected_field_count = EXPECTED_FIELD_COUNT,
+                "quarantined a mismatched Tantivy index for one-time rebuild"
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }

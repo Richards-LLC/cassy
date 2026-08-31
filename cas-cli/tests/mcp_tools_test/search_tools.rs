@@ -11,7 +11,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ErrorCode;
 
 fn seed_projection_documents(cas_root: &std::path::Path) {
-    let index_dir = cas_root.join("index/tantivy");
+    let index_dir = cas::hybrid_search::tantivy_index_dir(cas_root);
     drop(cas::hybrid_search::SearchIndex::open(&index_dir).unwrap());
 
     let index = tantivy::Index::open_in_dir(index_dir).unwrap();

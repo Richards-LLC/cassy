@@ -136,7 +136,8 @@ pub struct Baseline {
 /// Everything a capture or replay run needs to reach the stores.
 pub struct ParityContext {
     pub cas_dir: PathBuf,
-    /// Tantivy index directory; defaults to `<cas_dir>/index/tantivy`.
+    /// Tantivy index directory; defaults to the schema-versioned resolver
+    /// below `<cas_dir>/index/`.
     pub index_dir: PathBuf,
     /// Global memory store directory (the host's `~/.cas`, see
     /// [`crate::cli::retrieval_parity::resolve_global_cas_dir`]), when it holds

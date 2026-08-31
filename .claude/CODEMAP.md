@@ -74,6 +74,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `ui/factory/` — bare-`cas` TUI, daemon runtime, director events/prompts, session summarization, app state, and rendering.
 - `worktree/` — discovery, Git operations, external-link handling, salvage, sweep, target locking, and cleanup.
 - `ai_enrichment.rs`, `prompt_revalidation.rs`, `retrieval_parity/` — bounded model enrichment, prompt checks, and retrieval fixtures/diffs.
+- `retrieval_eval.rs` — labeled retrieval evaluation: replays the committed prompt-context fixture through the SessionStart and ambient selectors and scores precision@5 / recall@5 against a committed baseline.
 - `agent_id.rs`, `capability.rs`, `factory_{context_reset,isolation,preflight,target_cache}.rs` — identity, capability, factory safety, preflight, and cache boundaries.
 - `ambient_recall.rs`, `consolidation/`, `extraction/`, `notifications/`, `orchestration/`, `telemetry/`, `tracing/` — recall, extraction, coordination, observability, and trace plumbing.
 

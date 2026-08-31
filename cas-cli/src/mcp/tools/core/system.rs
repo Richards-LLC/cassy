@@ -766,9 +766,10 @@ impl CasCore {
             let skills = skill_store.list(None).unwrap_or_default();
 
             let index_dir = crate::hybrid_search::tantivy_index_dir(&self.cas_root);
-            // Clear existing index first
-            let _ = std::fs::remove_dir_all(&index_dir);
-            match SearchIndex::open(&index_dir) {
+            // Rebuild only the current schema-versioned directory. Older
+            // binaries use the pre-versioned path and cannot be affected by
+            // this explicit rebuild.
+            match SearchIndex::rebuild(&index_dir) {
                 Ok(search) => {
                     let mut indexed = 0;
                     for entry in &entries {
@@ -807,6 +808,9 @@ impl CasCore {
                             tracing::warn!(error = %error, "artifact backfill indexing failed")
                         }
                     }
+                    let _ = std::fs::remove_file(
+                        crate::hybrid_search::tantivy_rebuild_marker(&self.cas_root),
+                    );
                     results.push(format!("BM25: Indexed {indexed} documents"));
                 }
                 Err(e) => results.push(format!("BM25: Failed - {e}")),

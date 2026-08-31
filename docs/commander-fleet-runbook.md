@@ -138,6 +138,16 @@ restart the installed service or run `cas hub restart` and repeat the full
 start/health/status sequence. Preserve `~/.cas/hub/`; it contains the stable
 machine identity and paired-device state. Never delete it as an upgrade step.
 
+### Search index schema upgrades
+
+After installing a release that changes the memory search schema, restart every
+running `cas serve` process before checking search health. Cassy stores the
+active Tantivy index under a schema-versioned path (for example,
+`.cas/index/tantivy-v15`), so an older process may continue using the retired
+`.cas/index/tantivy` path without deleting the new index. If `cas doctor` reports
+a pre-versioned index, run the reindex maintenance action (`mcp__cas__system action=reindex bm25=true`) from an agent session once; it migrates a compatible
+index or quarantines an incompatible one and rebuilds the versioned path.
+
 ## H5 proof record (2026-08-09)
 
 Executed in the H5 development environment:

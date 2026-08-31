@@ -158,7 +158,9 @@ async fn task_focused_context_surfaces_preferences_and_task_content_matches() {
     // six-field index while HybridContextScorer expected cas-cli's 15-field
     // schema at the same path. Opening context then destructively rebuilt a
     // live index and could fail with ENOTEMPTY under suite concurrency.
-    let index = tantivy::Index::open_in_dir(temp.path().join(".cas/index/tantivy"))
+    let index = tantivy::Index::open_in_dir(cas::hybrid_search::tantivy_index_dir(
+        &temp.path().join(".cas"),
+    ))
         .expect("the production write path should create a readable search index");
     let field_names: Vec<String> = index
         .schema()
@@ -431,7 +433,9 @@ async fn doctor_flags_stale_search_index_after_store_growth() {
         .add(&indexed_task)
         .expect("indexed task should be stored");
 
-    let search = cas::hybrid_search::SearchIndex::open(&cas_dir.join("index/tantivy"))
+    let search = cas::hybrid_search::SearchIndex::open(
+        &cas::hybrid_search::tantivy_index_dir(&cas_dir),
+    )
         .expect("search index should open");
     search
         .index_task(&indexed_task)
@@ -465,7 +469,9 @@ async fn doctor_accepts_a_fresh_search_index() {
     let task = Task::new("task-fresh".to_string(), "Freshly indexed task".to_string());
     task_store.add(&task).expect("task should be stored");
 
-    let search = cas::hybrid_search::SearchIndex::open(&cas_dir.join("index/tantivy"))
+    let search = cas::hybrid_search::SearchIndex::open(
+        &cas::hybrid_search::tantivy_index_dir(&cas_dir),
+    )
         .expect("search index should open");
     search.index_task(&task).expect("task should be indexed");
 

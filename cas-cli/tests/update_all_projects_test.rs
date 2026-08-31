@@ -139,7 +139,9 @@ fn all_projects_repairs_stray_search_roots_and_reports_clean_projects() {
 
     let store = cas::store::open_store(&stranded.join(".cas")).expect("reopen store");
     let entries = store.list().expect("list entries");
-    let hits = SearchIndex::open(&stranded.join(".cas/index/tantivy"))
+    let hits = SearchIndex::open(&cas::hybrid_search::tantivy_index_dir(
+        &stranded.join(".cas"),
+    ))
         .expect("open canonical index")
         .search(
             &SearchOptions {

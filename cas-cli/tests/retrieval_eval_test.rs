@@ -56,9 +56,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cas::retrieval_eval::{
-    self, Baseline, EvalCorpus, EvalFixture, ProductionScorerState, QueryMode, REBASELINE_ENV,
-    REGRESSION_TOLERANCE, ScorerConfig, SELECTOR_AMBIENT_CANDIDATES, SELECTOR_AMBIENT_PACKET,
-    SELECTOR_HELPFUL_MEMORIES, SELECTOR_HELPFUL_MEMORIES_PRODUCTION, TierMode,
+    self, Baseline, EXPECTED_CASE_COUNT, EvalCorpus, EvalFixture, HARNESS_RUNTIME_BUDGET,
+    ProductionScorerState, QueryMode, REBASELINE_ENV, REGRESSION_TOLERANCE,
+    SELECTOR_AMBIENT_CANDIDATES, SELECTOR_AMBIENT_PACKET, SELECTOR_HELPFUL_MEMORIES,
+    SELECTOR_HELPFUL_MEMORIES_PRODUCTION, ScorerConfig, TierMode,
 };
 use sha2::{Digest, Sha256};
 
@@ -86,6 +87,11 @@ fn run(
 #[test]
 fn the_committed_fixture_is_well_formed_and_self_contained() {
     let fixture = fixture();
+    assert_eq!(
+        fixture.cases.len(),
+        EXPECTED_CASE_COUNT,
+        "the equivalence and budget pins cover a fixed 56-case fixture"
+    );
     assert!(
         fixture.cases.len() >= 50,
         "the brief asks for ~50 labeled pairs, got {}",
@@ -201,20 +207,40 @@ fn the_fixture_carries_no_secret_or_client_confidential_shapes() {
     // The public fixture was mined from a store containing operator
     // collaborators' personal memories. Keep the collaborator denylist as
     // SHA-256 digests so the guard does not publish the names it protects.
-    // This digest is for the known third-party first name in the pre-fix
-    // Commander entry; enumerate additional names from the source store only
-    // when the redaction audit finds them.
-    const PERSONAL_NAME_SHA256: &[&str] =
-        &["030d756286e59f22a464c36e1fbff606a795dfc70aaf0108bd86f2aa193d05f4"];
-    let name = regex::Regex::new(r"\b[A-Z][a-z]{1,24}\b").expect("name pattern compiles");
+    // These digests are for known third-party first names in the pre-fix
+    // public fixture. Normalize case before hashing so a lower-case mention
+    // cannot bypass the guard; enumerate additional names from the source
+    // store only when the redaction audit finds them.
+    const PERSONAL_NAME_SHA256: &[&str] = &[
+        "6700869c8ff7480e34a70a708b028700dbaa3a033b5652b903afe89f49a31456",
+        "030d756286e59f22a464c36e1fbff606a795dfc70aaf0108bd86f2aa193d05f4",
+    ];
+    let name = regex::Regex::new(r"(?i)\b[a-z]{2,24}\b").expect("name pattern compiles");
     for entry in &fixture.entries {
         for token in name.find_iter(&format!("{} {}", entry.title, entry.body)) {
-            let digest = format!("{:x}", Sha256::digest(token.as_str().as_bytes()));
+            let normalized = token.as_str().to_ascii_lowercase();
+            let digest = format!("{:x}", Sha256::digest(normalized.as_bytes()));
             assert!(
                 !PERSONAL_NAME_SHA256.contains(&digest.as_str()),
                 "fixture contains a denylisted personal name in {} — redact it",
                 entry.id
             );
+        }
+    }
+    for case in &fixture.cases {
+        let public_fields = std::iter::once(case.task_title.as_str())
+            .chain(case.task_labels.iter().map(String::as_str))
+            .chain(std::iter::once(case.user_prompt.as_str()));
+        for field in public_fields {
+            for token in name.find_iter(field) {
+                let normalized = token.as_str().to_ascii_lowercase();
+                let digest = format!("{:x}", Sha256::digest(normalized.as_bytes()));
+                assert!(
+                    !PERSONAL_NAME_SHA256.contains(&digest.as_str()),
+                    "fixture contains a denylisted personal name in case {} — redact it",
+                    case.case_id
+                );
+            }
         }
     }
 
@@ -569,6 +595,44 @@ fn the_production_runner_documents_its_unreplicated_surface() {
 }
 
 #[test]
+fn the_fixture_seeds_none_of_the_unreplicated_production_inputs() {
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let corpus = EvalCorpus::materialize(&fixture, dir.path(), TierMode::AllWorking)
+        .expect("materialize fixture");
+    let connection =
+        rusqlite::Connection::open(corpus.cas_dir().join("cas.db")).expect("open fixture db");
+
+    for table in ["rules", "skills", "agents", "knowledge_pages"] {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("check fixture table");
+        if exists {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .expect("count fixture table");
+            assert_eq!(count, 0, "fixture unexpectedly seeds {table}");
+        }
+    }
+
+    for path in [
+        "cloud.json",
+        "proxy_snapshot.json",
+        "session_files.json",
+        "host_constraints.json",
+    ] {
+        assert!(
+            !corpus.cas_dir().join(path).exists(),
+            "fixture unexpectedly seeds omitted production input {path}"
+        );
+    }
+}
+
+#[test]
 fn the_full_harness_has_a_named_sixty_second_budget() {
     let module = include_str!("../src/retrieval_eval.rs");
     assert!(
@@ -578,7 +642,7 @@ fn the_full_harness_has_a_named_sixty_second_budget() {
     let started = Instant::now();
     let _ = run(&fixture());
     assert!(
-        started.elapsed() <= Duration::from_secs(60),
+        started.elapsed() <= HARNESS_RUNTIME_BUDGET,
         "full retrieval harness exceeded its 60s budget: {:?}",
         started.elapsed()
     );
@@ -710,17 +774,11 @@ fn the_production_selector_does_not_inherit_the_worker_environment() {
     // The env guard must hold on the real build_context path too, not just the
     // hoisted runner — that is the path a future reader will reach for.
 
-    // SAFETY: nextest runs each test in its own process, so this env mutation
-    // cannot reach a sibling test. The guard restores it regardless.
-    let restore = std::env::var("CAS_AGENT_ROLE").ok();
-    unsafe { std::env::set_var("CAS_AGENT_ROLE", "worker") };
+    let mut env = TestEnvGuard::new();
+    env.set("CAS_AGENT_ROLE", "worker");
     let under_worker_env =
         retrieval_eval::helpful_memories_production_ranking(&corpus, case, QueryMode::SeededTask)
             .expect("rank");
-    match restore {
-        Some(value) => unsafe { std::env::set_var("CAS_AGENT_ROLE", value) },
-        None => unsafe { std::env::remove_var("CAS_AGENT_ROLE") },
-    }
 
     assert_eq!(
         baseline_ranking, under_worker_env,

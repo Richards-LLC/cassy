@@ -1367,10 +1367,12 @@ impl EmbeddedDaemon {
     async fn run_relevance_sampling(&self) -> Result<cas_store::RelevanceSamplingReport, CasError> {
         let cas_root = self.config.cas_root.clone();
         let sample_size = self.config.relevance_sampling_sample_size;
+        let cooldown_secs = self.config.relevance_sampling_interval_secs;
         tokio::task::spawn_blocking(move || {
             crate::daemon::relevance::run_unconfigured_injected_relevance_sampling(
                 &cas_root,
                 sample_size,
+                cooldown_secs,
             )
         })
         .await

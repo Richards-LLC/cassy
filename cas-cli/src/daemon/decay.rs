@@ -36,7 +36,7 @@ pub(crate) struct MemoryDecayResult {
 pub(crate) fn apply_memory_decay_with_policy(
     store: &Arc<dyn Store>,
     curated_importance_floor: f32,
-    promote_on_access: bool,
+    _promote_on_access: bool,
 ) -> Result<MemoryDecayResult, CasError> {
     use crate::types::{EntryType, MemoryTier};
 
@@ -50,25 +50,9 @@ pub(crate) fn apply_memory_decay_with_policy(
     for entry in entries {
         let mut updated = entry.clone();
         let mut needs_update = false;
-        let mut promoted_on_access = false;
 
         if updated.is_expired() && updated.memory_tier != MemoryTier::Archive {
             updated.memory_tier = MemoryTier::Archive;
-            needs_update = true;
-        }
-
-        // Access tracking is persisted by get/search/injection. This check is
-        // the recovery path for stores whose access and tier writes were not
-        // part of the same transaction.
-        if promote_on_access
-            && !updated.is_expired()
-            && updated.last_accessed.is_some()
-            && updated.feedback_score() >= 0
-            && matches!(updated.memory_tier, MemoryTier::Cold | MemoryTier::Archive)
-        {
-            updated.promote_tier();
-            result.promoted_on_access += 1;
-            promoted_on_access = true;
             needs_update = true;
         }
 
@@ -128,10 +112,7 @@ pub(crate) fn apply_memory_decay_with_policy(
             }
         }
 
-        if !promoted_on_access
-            && updated.stability < 0.3
-            && updated.memory_tier == MemoryTier::Working
-        {
+        if updated.stability < 0.3 && updated.memory_tier == MemoryTier::Working {
             if curated {
                 result.curated_protected += 1;
             } else {
@@ -140,10 +121,7 @@ pub(crate) fn apply_memory_decay_with_policy(
             }
         }
 
-        if !promoted_on_access
-            && updated.stability < 0.15
-            && updated.memory_tier == MemoryTier::Cold
-        {
+        if updated.stability < 0.15 && updated.memory_tier == MemoryTier::Cold {
             if curated {
                 result.curated_protected += 1;
             } else {

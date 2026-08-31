@@ -321,6 +321,29 @@ fn test_already_archived_not_double_processed() {
 }
 
 #[test]
+fn test_decay_does_not_promote_archived_entry_from_historical_access() {
+    let mut archived = make_entry(
+        "historically-accessed-archive",
+        EntryType::Learning,
+        MemoryTier::Archive,
+    );
+    archived.last_accessed = Some(Utc::now() - Duration::days(10));
+
+    let store = make_store(vec![archived]);
+    let count = apply_memory_decay(&store).unwrap();
+
+    assert_eq!(count, 0, "decay must not rewrite an already archived entry");
+    assert_eq!(
+        store
+            .get("historically-accessed-archive")
+            .unwrap()
+            .memory_tier,
+        MemoryTier::Archive,
+        "historical access does not prove access after archival"
+    );
+}
+
+#[test]
 fn test_boundary_importance_value() {
     let mut boundary = make_entry("bound-001", EntryType::Learning, MemoryTier::Working);
     boundary.importance = 0.3;

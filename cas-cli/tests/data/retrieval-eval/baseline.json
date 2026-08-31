@@ -5,8 +5,23 @@
   "note": "Captured by CAS_RETRIEVAL_EVAL_REBASELINE=1. See the test module header for the re-baseline procedure and what each metric means.",
   "selectors": [
     {
-      "selector": "helpful_memories",
+      "selector": "helpful_memories_production",
       "tier_mode": "live_tiers",
+      "query_mode": "seeded_task",
+      "cases": 56,
+      "precision_at_5": 0.010714,
+      "recall_at_5": 0.009566,
+      "lenient_precision_at_5": 0.039286,
+      "lenient_recall_at_5": 0.026042,
+      "mean_returned": 5.0,
+      "cases_with_a_hit": 2,
+      "silent_cases": 0,
+      "distinct_rankings": 43
+    },
+    {
+      "selector": "helpful_memories_production",
+      "tier_mode": "live_tiers",
+      "query_mode": "fresh_session",
       "cases": 56,
       "precision_at_5": 0.007143,
       "recall_at_5": 0.005102,
@@ -14,35 +29,13 @@
       "lenient_recall_at_5": 0.018602,
       "mean_returned": 5.0,
       "cases_with_a_hit": 1,
-      "silent_cases": 0
-    },
-    {
-      "selector": "ambient_packet",
-      "tier_mode": "live_tiers",
-      "cases": 56,
-      "precision_at_5": 0.071429,
-      "recall_at_5": 0.033801,
-      "lenient_precision_at_5": 0.08631,
-      "lenient_recall_at_5": 0.027537,
-      "mean_returned": 1.428571,
-      "cases_with_a_hit": 8,
-      "silent_cases": 24
-    },
-    {
-      "selector": "ambient_candidates",
-      "tier_mode": "live_tiers",
-      "cases": 56,
-      "precision_at_5": 0.046429,
-      "recall_at_5": 0.054337,
-      "lenient_precision_at_5": 0.057143,
-      "lenient_recall_at_5": 0.044544,
-      "mean_returned": 5.0,
-      "cases_with_a_hit": 11,
-      "silent_cases": 0
+      "silent_cases": 0,
+      "distinct_rankings": 1
     },
     {
       "selector": "helpful_memories",
-      "tier_mode": "all_working",
+      "tier_mode": "live_tiers",
+      "query_mode": "n/a",
       "cases": 56,
       "precision_at_5": 0.007143,
       "recall_at_5": 0.005102,
@@ -50,11 +43,13 @@
       "lenient_recall_at_5": 0.018602,
       "mean_returned": 5.0,
       "cases_with_a_hit": 1,
-      "silent_cases": 0
+      "silent_cases": 0,
+      "distinct_rankings": 1
     },
     {
       "selector": "ambient_packet",
-      "tier_mode": "all_working",
+      "tier_mode": "live_tiers",
+      "query_mode": "n/a",
       "cases": 56,
       "precision_at_5": 0.071429,
       "recall_at_5": 0.033801,
@@ -62,11 +57,13 @@
       "lenient_recall_at_5": 0.027537,
       "mean_returned": 1.428571,
       "cases_with_a_hit": 8,
-      "silent_cases": 24
+      "silent_cases": 24,
+      "distinct_rankings": 32
     },
     {
       "selector": "ambient_candidates",
-      "tier_mode": "all_working",
+      "tier_mode": "live_tiers",
+      "query_mode": "n/a",
       "cases": 56,
       "precision_at_5": 0.046429,
       "recall_at_5": 0.054337,
@@ -74,7 +71,78 @@
       "lenient_recall_at_5": 0.044544,
       "mean_returned": 5.0,
       "cases_with_a_hit": 11,
-      "silent_cases": 0
+      "silent_cases": 0,
+      "distinct_rankings": 56
+    },
+    {
+      "selector": "helpful_memories_production",
+      "tier_mode": "all_working",
+      "query_mode": "seeded_task",
+      "cases": 56,
+      "precision_at_5": 0.05,
+      "recall_at_5": 0.052126,
+      "lenient_precision_at_5": 0.085714,
+      "lenient_recall_at_5": 0.061374,
+      "mean_returned": 5.0,
+      "cases_with_a_hit": 10,
+      "silent_cases": 0,
+      "distinct_rankings": 51
+    },
+    {
+      "selector": "helpful_memories_production",
+      "tier_mode": "all_working",
+      "query_mode": "fresh_session",
+      "cases": 56,
+      "precision_at_5": 0.007143,
+      "recall_at_5": 0.005102,
+      "lenient_precision_at_5": 0.032143,
+      "lenient_recall_at_5": 0.018602,
+      "mean_returned": 5.0,
+      "cases_with_a_hit": 1,
+      "silent_cases": 0,
+      "distinct_rankings": 1
+    },
+    {
+      "selector": "helpful_memories",
+      "tier_mode": "all_working",
+      "query_mode": "n/a",
+      "cases": 56,
+      "precision_at_5": 0.007143,
+      "recall_at_5": 0.005102,
+      "lenient_precision_at_5": 0.032143,
+      "lenient_recall_at_5": 0.018602,
+      "mean_returned": 5.0,
+      "cases_with_a_hit": 1,
+      "silent_cases": 0,
+      "distinct_rankings": 1
+    },
+    {
+      "selector": "ambient_packet",
+      "tier_mode": "all_working",
+      "query_mode": "n/a",
+      "cases": 56,
+      "precision_at_5": 0.071429,
+      "recall_at_5": 0.033801,
+      "lenient_precision_at_5": 0.08631,
+      "lenient_recall_at_5": 0.027537,
+      "mean_returned": 1.428571,
+      "cases_with_a_hit": 8,
+      "silent_cases": 24,
+      "distinct_rankings": 32
+    },
+    {
+      "selector": "ambient_candidates",
+      "tier_mode": "all_working",
+      "query_mode": "n/a",
+      "cases": 56,
+      "precision_at_5": 0.046429,
+      "recall_at_5": 0.054337,
+      "lenient_precision_at_5": 0.057143,
+      "lenient_recall_at_5": 0.044544,
+      "mean_returned": 5.0,
+      "cases_with_a_hit": 11,
+      "silent_cases": 0,
+      "distinct_rankings": 56
     }
   ]
 }

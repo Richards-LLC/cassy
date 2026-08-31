@@ -19,6 +19,10 @@ pub struct DaemonConfig {
     pub auto_prune: bool,
     /// Enable memory decay
     pub apply_decay: bool,
+    /// Importance floor for curated-memory stability protection.
+    pub curated_importance_floor: f32,
+    /// Promote cold/archive memories to working when accessed.
+    pub promote_on_access: bool,
     /// Model for AI tasks
     pub model: String,
     /// Path to Cassy root
@@ -64,6 +68,8 @@ impl Default for DaemonConfig {
             consolidate_memories: true,
             auto_prune: true,
             apply_decay: true,
+            curated_importance_floor: 0.9,
+            promote_on_access: true,
             model: "haiku".to_string(),
             cas_root: PathBuf::new(),
             update_entity_summaries: true,
@@ -101,6 +107,10 @@ pub struct DaemonStatus {
     pub entries_pruned: usize,
     /// Number of entries with decay applied
     pub decay_applied: usize,
+    /// Number of curated entries protected from stability demotion.
+    pub curated_entries_protected: usize,
+    /// Number of cold/archive entries promoted to working on access.
+    pub promoted_on_access: usize,
     /// Last error if any
     pub last_error: Option<String>,
 }
@@ -122,6 +132,10 @@ pub struct DaemonRunResult {
     pub entries_pruned: usize,
     /// Entries with decay applied
     pub decay_applied: usize,
+    /// Number of curated entries protected from stability demotion.
+    pub curated_entries_protected: usize,
+    /// Number of cold/archive entries promoted to working on access.
+    pub promoted_on_access: usize,
     /// Entries indexed in BM25
     pub entries_indexed: usize,
     /// Indexing errors

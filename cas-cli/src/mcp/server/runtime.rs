@@ -255,6 +255,8 @@ async fn run_server_impl() -> anyhow::Result<()> {
             code_debounce_ms: code_config.debounce_ms,
             archive_max_bytes: daemon_config.archive_max_bytes,
             archive_retention_days: daemon_config.archive_retention_days,
+            curated_importance_floor: cas_config.memory().decay.curated_importance_floor,
+            promote_on_access: cas_config.memory().decay.promote_on_access,
             relevance_sampling_enabled: daemon_config.relevance_sampling_enabled,
             relevance_sampling_interval_secs: daemon_config.relevance_sampling_interval_secs,
             relevance_sampling_sample_size: daemon_config.relevance_sampling_sample_size,

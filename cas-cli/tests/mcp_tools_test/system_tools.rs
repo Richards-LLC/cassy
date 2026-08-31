@@ -4,6 +4,10 @@ use cas::mcp::tools::*;
 use cas::store::{open_store, open_task_store};
 use cas::types::{Entry, MemoryTier, Task};
 use cas_mcp::{SearchContextRequest, SystemRequest};
+use cas_store::{
+    DEFAULT_RETRIEVAL_POLICY, RetrievalHitIdentity, RetrievalOutcome, RetrievalStore,
+    SqliteRetrievalStore,
+};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ErrorCode;
 use serde_json::json;
@@ -253,6 +257,69 @@ async fn stats_reports_live_entries_by_tier_and_archived_flag() {
     assert!(text.contains("working: 1 archived=0, 1 archived=1"), "{text}");
     assert!(text.contains("cold: 1 archived=0, 0 archived=1"), "{text}");
     assert!(text.contains("archive: 1 archived=0, 0 archived=1"), "{text}");
+}
+
+#[tokio::test]
+async fn stats_reports_retrieval_funnel_with_results_denominator() {
+    let (temp, service) = setup_cas();
+    let retrieval =
+        SqliteRetrievalStore::open(&temp.path().join(".cas")).expect("retrieval store should open");
+    retrieval
+        .record_query(
+            "stats-funnel-query",
+            "funnel query",
+            "context_session_start",
+            DEFAULT_RETRIEVAL_POLICY,
+            Some("stats-funnel-session"),
+            &[
+                RetrievalHitIdentity {
+                    result_id: "stats-funnel-helpful".to_string(),
+                    document_type: "entry".to_string(),
+                    rank: 0,
+                },
+                RetrievalHitIdentity {
+                    result_id: "stats-funnel-unresolved".to_string(),
+                    document_type: "entry".to_string(),
+                    rank: 1,
+                },
+            ],
+        )
+        .expect("funnel query should persist");
+    retrieval
+        .record_outcome(
+            "stats-funnel-used",
+            "stats-funnel-query",
+            "stats-funnel-helpful",
+            RetrievalOutcome::Used,
+            "stats-funnel-actor",
+            "stats-funnel-session",
+            None,
+        )
+        .expect("used outcome should persist");
+    retrieval
+        .record_outcome(
+            "stats-funnel-helpful-event",
+            "stats-funnel-query",
+            "stats-funnel-helpful",
+            RetrievalOutcome::Helpful,
+            "stats-funnel-actor",
+            "stats-funnel-session",
+            None,
+        )
+        .expect("helpful outcome should persist");
+
+    let result = service.cas_stats().await.expect("stats should succeed");
+    let text = extract_text(result);
+    assert!(
+        text.contains("Retrieval funnel (denominator: results;"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "entry/context_session_start / current-default-v1: results=2 -> resolved=1 -> used/body-pulled=1 -> helpful=1"
+        ),
+        "{text}"
+    );
 }
 
 #[tokio::test]

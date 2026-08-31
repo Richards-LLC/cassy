@@ -145,6 +145,12 @@ pub struct EmbeddedDaemonConfig {
     pub embed_drain: bool,
     /// Embedding drain interval (seconds).
     pub embed_drain_interval_secs: u64,
+    /// Enable injected-relevance sampling.
+    pub relevance_sampling_enabled: bool,
+    /// Minimum interval between relevance sampling passes (seconds).
+    pub relevance_sampling_interval_secs: u64,
+    /// Maximum result rows offered to the relevance judge per pass.
+    pub relevance_sampling_sample_size: usize,
 }
 
 impl Default for EmbeddedDaemonConfig {
@@ -189,6 +195,9 @@ impl Default for EmbeddedDaemonConfig {
             // clears in about five ticks rather than one burst.
             embed_drain: true,
             embed_drain_interval_secs: 300,
+            relevance_sampling_enabled: true,
+            relevance_sampling_interval_secs: 7 * 24 * 60 * 60,
+            relevance_sampling_sample_size: 20,
         }
     }
 }

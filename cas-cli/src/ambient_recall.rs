@@ -2353,7 +2353,7 @@ fn record_pending_outcomes(
     activity: Option<&str>,
     exact_evidence_ids: &[String],
 ) -> bool {
-    use cas_store::{RetrievalStore, SqliteRetrievalStore};
+    use cas_store::{RETRIEVAL_ATTRIBUTION_AUTOMATIC, SqliteRetrievalStore};
 
     if session_id.trim().is_empty() {
         return false;
@@ -2388,7 +2388,7 @@ fn record_pending_outcomes(
         }
         let query_id = seen.query_id.as_deref().expect("filtered above");
         if store
-            .record_outcome(
+            .record_outcome_with_attribution(
                 &automatic_outcome_id(query_id, &seen.evidence_id),
                 query_id,
                 &seen.evidence_id,
@@ -2396,6 +2396,7 @@ fn record_pending_outcomes(
                 &actor,
                 session_id,
                 None,
+                RETRIEVAL_ATTRIBUTION_AUTOMATIC,
             )
             .is_ok()
         {

@@ -20,6 +20,16 @@ use crate::{Result, shared_db};
 /// Identifier for the unchanged ranking policy observed by this foundation.
 pub const DEFAULT_RETRIEVAL_POLICY: &str = "current-default-v1";
 
+/// Attribution labels for durable retrieval feedback.
+///
+/// The label is deliberately a small, non-identifying tag rather than an
+/// actor name.  In particular, sampled relevance labels must be distinguishable
+/// from user feedback without putting a model or account identifier in the
+/// database.
+pub const RETRIEVAL_ATTRIBUTION_EXPLICIT: &str = "explicit";
+pub const RETRIEVAL_ATTRIBUTION_AUTOMATIC: &str = "automatic";
+pub const RETRIEVAL_ATTRIBUTION_JUDGE: &str = "judge";
+
 /// Canonical schema for versioned retrieval identities and explicit outcomes.
 pub const RETRIEVAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS retrieval_queries (
@@ -182,7 +192,52 @@ pub struct RetrievalOutcomeEvent {
     pub actor_hash: String,
     pub session_hash: String,
     pub correction_ref: Option<String>,
+    /// Small provenance tag such as `explicit`, `automatic`, or `judge`.
+    pub attribution: String,
     pub created_at: DateTime<Utc>,
+}
+
+/// One injected result offered to an offline relevance judge.
+///
+/// Raw prompt text is intentionally absent: retrieval queries only persist a
+/// salted fingerprint.  A receiving-agent judge can still use the current
+/// session context, while a scheduled judge can resolve the fingerprint from
+/// its own bounded input or return `None` when no label is available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetrievalSample {
+    pub query_id: String,
+    pub query_fingerprint: String,
+    pub query_family: String,
+    pub ranking_policy: String,
+    pub result_id: String,
+    pub document_type: String,
+    pub rank: usize,
+}
+
+/// Result of one bounded injected-relevance sampling pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RelevanceSamplingReport {
+    /// Number of recent unjudged injected result rows offered to the judge.
+    pub sampled: usize,
+    /// Number of `helpful`/`ignored` rows successfully written.
+    pub labels_recorded: usize,
+    /// Number of rows for which the judge returned no label.
+    pub unlabeled: usize,
+    /// Judge failures are retained as bounded diagnostics; one bad item does
+    /// not prevent the remainder of the sample from being evaluated.
+    pub judge_errors: Vec<String>,
+}
+
+/// Rolling precision for judge-labelled injected results.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RollingInjectedPrecision {
+    pub helpful: u64,
+    /// Number of explicit judge labels (`helpful` + `ignored`), i.e. the
+    /// denominator for the precision value.
+    pub judged: u64,
+    pub precision: Option<f64>,
+    pub denominator: String,
+    pub window_days: u64,
 }
 
 /// Offline quality aggregate. Usefulness and negative rates use only resolved
@@ -196,6 +251,12 @@ pub struct RetrievalAggregate {
     pub total: u64,
     /// Number of retrieved result rows represented by this group.
     pub results: u64,
+    /// Distinct retrieved result rows with at least one resolved outcome.
+    pub resolved_results: u64,
+    /// Distinct retrieved result rows with a `used` (body-pull) outcome.
+    pub used_results: u64,
+    /// Distinct retrieved result rows with a `helpful` outcome.
+    pub helpful_results: u64,
     pub resolved: u64,
     pub unresolved: u64,
     /// Number of distinct privacy-preserving sessions contributing resolved
@@ -211,7 +272,7 @@ pub struct RetrievalAggregate {
     pub correction_rate: f64,
     /// Name of the denominator used for all aggregate rates.
     pub denominator: String,
-    /// Resolved outcome rows divided by all retrieved result rows.
+    /// Distinct resolved result rows divided by all retrieved result rows.
     pub coverage_rate: f64,
 }
 
@@ -289,6 +350,25 @@ impl SqliteRetrievalStore {
         Ok(())
     }
 
+    fn ensure_attribution_column(conn: &Connection) -> Result<()> {
+        let has_column: bool = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM pragma_table_info('retrieval_outcomes')
+                 WHERE name = 'attribution'
+             )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !has_column {
+            conn.execute(
+                "ALTER TABLE retrieval_outcomes
+                 ADD COLUMN attribution TEXT NOT NULL DEFAULT 'explicit'",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
     fn parse_aggregate(row: &Row<'_>) -> rusqlite::Result<RetrievalAggregate> {
         let total = row.get::<_, i64>(3)?.max(0) as u64;
         let distinct_sessions = row.get::<_, i64>(4)?.max(0) as u64;
@@ -299,7 +379,10 @@ impl SqliteRetrievalStore {
         let harmful = row.get::<_, i64>(9)?.max(0) as u64;
         let resolved = row.get::<_, i64>(10)?.max(0) as u64;
         let unresolved = row.get::<_, i64>(11)?.max(0) as u64;
-        let results = row.get::<_, i64>(12)?.max(0) as u64;
+        let resolved_results = row.get::<_, i64>(12)?.max(0) as u64;
+        let used_results = row.get::<_, i64>(13)?.max(0) as u64;
+        let helpful_results = row.get::<_, i64>(14)?.max(0) as u64;
+        let results = row.get::<_, i64>(15)?.max(0) as u64;
         let denominator = resolved.max(1) as f64;
         Ok(RetrievalAggregate {
             document_type: row.get(0)?,
@@ -307,6 +390,9 @@ impl SqliteRetrievalStore {
             ranking_policy: row.get(2)?,
             total,
             results,
+            resolved_results,
+            used_results,
+            helpful_results,
             resolved,
             unresolved,
             distinct_sessions,
@@ -322,7 +408,7 @@ impl SqliteRetrievalStore {
             coverage_rate: if results == 0 {
                 0.0
             } else {
-                resolved as f64 / results as f64
+                resolved_results as f64 / results as f64
             },
         })
     }
@@ -362,13 +448,19 @@ impl SqliteRetrievalStore {
                     COUNT(o.id) AS total,
                     COUNT(DISTINCT CASE WHEN o.outcome != 'unresolved' THEN o.session_hash END)
                         AS distinct_sessions,
-                    SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'ignored' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'corrected' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome != 'unresolved' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'unresolved' THEN 1 ELSE 0 END),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'ignored' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'corrected' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome != 'unresolved' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'unresolved' THEN 1 ELSE 0 END), 0),
+                    COUNT(DISTINCT CASE WHEN o.outcome != 'unresolved'
+                        THEN r.query_id || char(0) || r.result_id END) AS resolved_results,
+                    COUNT(DISTINCT CASE WHEN o.outcome = 'used'
+                        THEN r.query_id || char(0) || r.result_id END) AS used_results,
+                    COUNT(DISTINCT CASE WHEN o.outcome = 'helpful'
+                        THEN r.query_id || char(0) || r.result_id END) AS helpful_results,
                     COUNT(DISTINCT r.query_id || char(0) || r.result_id) AS results
              FROM retrieval_query_results r
              JOIN retrieval_queries q ON q.id = r.query_id
@@ -388,6 +480,11 @@ impl RetrievalStore for SqliteRetrievalStore {
     fn init(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         conn.execute_batch(RETRIEVAL_SCHEMA)?;
+        // Direct store users (including older one-shot tools) may open a
+        // database without running the numbered migration runner first.
+        // Keep that path compatible while m245 remains the durable upgrade
+        // for normal startup.
+        Self::ensure_attribution_column(&conn)?;
         Ok(())
     }
 
@@ -453,9 +550,45 @@ impl RetrievalStore for SqliteRetrievalStore {
         session_id: &str,
         correction_ref: Option<&str>,
     ) -> Result<RetrievalOutcomeEvent> {
+        self.record_outcome_with_attribution(
+            id,
+            query_id,
+            result_id,
+            outcome,
+            actor_id,
+            session_id,
+            correction_ref,
+            RETRIEVAL_ATTRIBUTION_EXPLICIT,
+        )
+    }
+
+    fn aggregate(&self) -> Result<Vec<RetrievalAggregate>> {
+        SqliteRetrievalStore::aggregate(self)
+    }
+}
+
+impl SqliteRetrievalStore {
+    /// Record an outcome with an explicit provenance tag.
+    ///
+    /// Existing callers use [`RetrievalStore::record_outcome`] and are marked
+    /// `explicit`. Daemon inference uses `automatic`; the relevance sampler
+    /// uses `judge`. Keeping the extension on the concrete SQLite store avoids
+    /// widening the public trait method and breaking third-party stores.
+    pub fn record_outcome_with_attribution(
+        &self,
+        id: &str,
+        query_id: &str,
+        result_id: &str,
+        outcome: RetrievalOutcome,
+        actor_id: &str,
+        session_id: &str,
+        correction_ref: Option<&str>,
+        attribution: &str,
+    ) -> Result<RetrievalOutcomeEvent> {
         if let Some(reference) = correction_ref {
             Self::validate_opaque_reference(reference)?;
         }
+        Self::validate_opaque_reference(attribution)?;
         if outcome == RetrievalOutcome::Corrected && correction_ref.is_none() {
             return Err(StoreError::Parse(
                 "corrected retrieval outcomes require correction_ref".to_string(),
@@ -470,6 +603,7 @@ impl RetrievalStore for SqliteRetrievalStore {
             actor_hash: Self::identity_hash("actor", actor_id)?,
             session_hash: Self::identity_hash("session", session_id)?,
             correction_ref: correction_ref.map(str::to_string),
+            attribution: attribution.to_string(),
             created_at: Utc::now(),
         };
 
@@ -493,8 +627,8 @@ impl RetrievalStore for SqliteRetrievalStore {
         // idempotent. Explicit MCP events remain unique UUIDs.
         conn.execute(
             "INSERT OR IGNORE INTO retrieval_outcomes
-             (id, query_id, result_id, outcome, actor_hash, session_hash, correction_ref, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (id, query_id, result_id, outcome, actor_hash, session_hash, correction_ref, attribution, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 event.id,
                 event.query_id,
@@ -503,26 +637,164 @@ impl RetrievalStore for SqliteRetrievalStore {
                 event.actor_hash,
                 event.session_hash,
                 event.correction_ref,
+                event.attribution,
                 event.created_at.to_rfc3339(),
             ],
         )?;
         Ok(event)
     }
 
-    fn aggregate(&self) -> Result<Vec<RetrievalAggregate>> {
+    /// Offer the newest unjudged injected result rows to a relevance judge.
+    ///
+    /// The callback returns `Some(true)` for a relevant result,
+    /// `Some(false)` for an irrelevant result, and `None` when the receiving
+    /// agent or scheduled judge cannot label the item. A judge failure is
+    /// isolated to that item; storage failures still fail the pass because a
+    /// partial write cannot be reported as a successful label.
+    pub fn sample_injected_relevance<F>(
+        &self,
+        sample_size: usize,
+        mut judge: F,
+    ) -> Result<RelevanceSamplingReport>
+    where
+        F: FnMut(&RetrievalSample) -> std::result::Result<Option<bool>, String>,
+    {
+        if sample_size == 0 {
+            return Ok(RelevanceSamplingReport::default());
+        }
+
+        let samples = {
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut stmt = conn.prepare(
+                "SELECT r.query_id, q.query_fingerprint, q.query_family,
+                        q.ranking_policy, r.result_id, r.document_type, r.rank
+                 FROM retrieval_query_results r
+                 JOIN retrieval_queries q ON q.id = r.query_id
+                 WHERE (q.query_family = 'context_session_start'
+                        OR q.query_family LIKE 'ambient_%')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM retrieval_outcomes judged
+                       WHERE judged.query_id = r.query_id
+                         AND judged.result_id = r.result_id
+                         AND judged.attribution = 'judge'
+                   )
+                 ORDER BY q.created_at DESC, r.rank ASC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([sample_size as i64], |row| {
+                Ok(RetrievalSample {
+                    query_id: row.get(0)?,
+                    query_fingerprint: row.get(1)?,
+                    query_family: row.get(2)?,
+                    ranking_policy: row.get(3)?,
+                    result_id: row.get(4)?,
+                    document_type: row.get(5)?,
+                    rank: row.get::<_, i64>(6)?.max(0) as usize,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let mut report = RelevanceSamplingReport {
+            sampled: samples.len(),
+            ..Default::default()
+        };
+        for sample in samples {
+            let label = match judge(&sample) {
+                Ok(label) => label,
+                Err(error) => {
+                    report.judge_errors.push(format!(
+                        "{}:{}: {error}",
+                        sample.query_id, sample.result_id
+                    ));
+                    None
+                }
+            };
+            let Some(label) = label else {
+                report.unlabeled += 1;
+                continue;
+            };
+            let outcome = if label {
+                RetrievalOutcome::Helpful
+            } else {
+                RetrievalOutcome::Ignored
+            };
+            let event_id = format!(
+                "out-judge-{}",
+                Self::fingerprint(
+                    "judge-event",
+                    &format!("{}\0{}", sample.query_id, sample.result_id),
+                )
+                .trim_start_matches("sha256:")
+            );
+            let session_id = format!("judge:{}", sample.query_id);
+            self.record_outcome_with_attribution(
+                &event_id,
+                &sample.query_id,
+                &sample.result_id,
+                outcome,
+                "retrieval-relevance-judge",
+                &session_id,
+                None,
+                RETRIEVAL_ATTRIBUTION_JUDGE,
+            )?;
+            report.labels_recorded += 1;
+        }
+        Ok(report)
+    }
+
+    /// Compute precision over judge-labelled injected results in a rolling
+    /// window. A missing denominator is `None`, not a fabricated zero.
+    pub fn rolling_injected_precision(&self, window_days: u64) -> Result<RollingInjectedPrecision> {
+        let cutoff = Utc::now() - chrono::Duration::days(window_days as i64);
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let (helpful, judged): (i64, i64) = conn.query_row(
+            "SELECT
+                 COALESCE(SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN o.outcome IN ('helpful', 'ignored') THEN 1 ELSE 0 END), 0)
+             FROM retrieval_outcomes o
+             JOIN retrieval_queries q ON q.id = o.query_id
+             WHERE o.attribution = 'judge'
+               AND o.created_at >= ?1
+               AND (q.query_family = 'context_session_start'
+                    OR q.query_family LIKE 'ambient_%')",
+            [cutoff.to_rfc3339()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let helpful = helpful.max(0) as u64;
+        let judged = judged.max(0) as u64;
+        Ok(RollingInjectedPrecision {
+            helpful,
+            judged,
+            precision: (judged > 0).then(|| helpful as f64 / judged as f64),
+            denominator: "judge_labels".to_string(),
+            window_days,
+        })
+    }
+
+    /// Aggregate retrieval outcomes by document type, query family, and
+    /// ranking policy. Result-stage counts are distinct rows so repeated
+    /// outcome events cannot inflate the funnel or its coverage denominator.
+    pub fn aggregate(&self) -> Result<Vec<RetrievalAggregate>> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
             "SELECT r.document_type, q.query_family, q.ranking_policy,
                     COUNT(o.id) AS total,
                     COUNT(DISTINCT CASE WHEN o.outcome != 'unresolved' THEN o.session_hash END)
                         AS distinct_sessions,
-                    SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'ignored' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'corrected' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome != 'unresolved' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'unresolved' THEN 1 ELSE 0 END),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'ignored' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'corrected' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome != 'unresolved' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN o.outcome = 'unresolved' THEN 1 ELSE 0 END), 0),
+                    COUNT(DISTINCT CASE WHEN o.outcome != 'unresolved'
+                        THEN r.query_id || char(0) || r.result_id END) AS resolved_results,
+                    COUNT(DISTINCT CASE WHEN o.outcome = 'used'
+                        THEN r.query_id || char(0) || r.result_id END) AS used_results,
+                    COUNT(DISTINCT CASE WHEN o.outcome = 'helpful'
+                        THEN r.query_id || char(0) || r.result_id END) AS helpful_results,
                     COUNT(DISTINCT r.query_id || char(0) || r.result_id) AS results
              FROM retrieval_query_results r
              JOIN retrieval_queries q ON q.id = r.query_id
@@ -602,6 +874,7 @@ mod tests {
             .unwrap();
         assert_ne!(event.actor_hash, "private-actor");
         assert_ne!(event.session_hash, "session-private");
+        assert_eq!(event.attribution, RETRIEVAL_ATTRIBUTION_EXPLICIT);
 
         let db = std::fs::read(temp.path().join("cas.db")).unwrap();
         let raw = String::from_utf8_lossy(&db);
@@ -703,10 +976,13 @@ mod tests {
         assert_eq!(aggregate.ranking_policy, DEFAULT_RETRIEVAL_POLICY);
         assert_eq!(aggregate.total, 5);
         assert_eq!(aggregate.results, 2);
+        assert_eq!(aggregate.resolved_results, 2);
+        assert_eq!(aggregate.used_results, 1);
+        assert_eq!(aggregate.helpful_results, 1);
         assert_eq!(aggregate.resolved, 4);
         assert_eq!(aggregate.unresolved, 1);
         assert_eq!(aggregate.denominator, "resolved");
-        assert_eq!(aggregate.coverage_rate, 2.0);
+        assert_eq!(aggregate.coverage_rate, 1.0);
         assert_eq!(aggregate.distinct_sessions, 1);
         assert_eq!(aggregate.used, 1);
         assert_eq!(aggregate.helpful, 1);
@@ -752,5 +1028,85 @@ mod tests {
         assert_eq!(aggregates.len(), 1);
         assert_eq!(aggregates[0].distinct_sessions, 2);
         assert_eq!(aggregates[0].helpful, 2);
+    }
+
+    #[test]
+    fn aggregates_results_without_outcomes_with_zero_coverage() {
+        let temp = TempDir::new().unwrap();
+        let store = SqliteRetrievalStore::open(temp.path()).unwrap();
+        store
+            .record_query(
+                "qry-unresolved-only",
+                "query with no feedback",
+                "context_session_start",
+                DEFAULT_RETRIEVAL_POLICY,
+                Some("session"),
+                &[hit("entry-unresolved-only", "entry", 0)],
+            )
+            .unwrap();
+
+        let aggregate = &store.aggregate().unwrap()[0];
+        assert_eq!(aggregate.results, 1);
+        assert_eq!(aggregate.resolved_results, 0);
+        assert_eq!(aggregate.used_results, 0);
+        assert_eq!(aggregate.helpful_results, 0);
+        assert_eq!(aggregate.coverage_rate, 0.0);
+    }
+
+    #[test]
+    fn samples_recent_injected_results_once_with_judge_attribution() {
+        let temp = TempDir::new().unwrap();
+        let store = SqliteRetrievalStore::open(temp.path()).unwrap();
+        store
+            .record_query(
+                "ambient-query",
+                "repair parser cache",
+                "ambient_transition",
+                DEFAULT_RETRIEVAL_POLICY,
+                Some("session"),
+                &[hit("entry-helpful", "entry", 0), hit("entry-ignored", "entry", 1)],
+            )
+            .unwrap();
+        store
+            .record_query(
+                "ordinary-query",
+                "not an injected packet",
+                "keyword",
+                DEFAULT_RETRIEVAL_POLICY,
+                Some("session"),
+                &[hit("ordinary", "entry", 0)],
+            )
+            .unwrap();
+
+        let report = store
+            .sample_injected_relevance(10, |sample| {
+                Ok(Some(sample.result_id == "entry-helpful"))
+            })
+            .unwrap();
+        assert_eq!(report.sampled, 2);
+        assert_eq!(report.labels_recorded, 2);
+        assert_eq!(report.unlabeled, 0);
+        assert!(report.judge_errors.is_empty());
+
+        let precision = store.rolling_injected_precision(30).unwrap();
+        assert_eq!(precision.helpful, 1);
+        assert_eq!(precision.judged, 2);
+        assert_eq!(precision.precision, Some(0.5));
+
+        let conn = store.conn.lock().unwrap();
+        let judge_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM retrieval_outcomes WHERE attribution = 'judge'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(judge_rows, 2);
+        drop(conn);
+
+        let second = store
+            .sample_injected_relevance(10, |_| Ok(Some(true)))
+            .unwrap();
+        assert_eq!(second.sampled, 0, "judge rows are idempotently excluded");
     }
 }

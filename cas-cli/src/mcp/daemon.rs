@@ -278,6 +278,9 @@ impl EmbeddedDaemonConfigExt for EmbeddedDaemonConfig {
             index_batch_size: 32,
             index_max_per_run: 200,
             index_interval_secs: 120, // 2 minutes
+            relevance_sampling_enabled: self.relevance_sampling_enabled,
+            relevance_sampling_interval_secs: self.relevance_sampling_interval_secs,
+            relevance_sampling_sample_size: self.relevance_sampling_sample_size,
         }
     }
 }
@@ -635,6 +638,9 @@ impl EmbeddedDaemon {
             tokio::time::interval(Duration::from_secs(self.config.cloud_sync_interval_secs));
         let mut maintenance_interval =
             tokio::time::interval(Duration::from_secs(self.config.maintenance_interval_secs));
+        let mut relevance_sampling_interval = tokio::time::interval(Duration::from_secs(
+            self.config.relevance_sampling_interval_secs.max(1),
+        ));
         let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30)); // Agent heartbeat every 30s
         let mut code_index_interval =
             tokio::time::interval(Duration::from_secs(self.config.code_index_interval_secs));
@@ -665,6 +671,7 @@ impl EmbeddedDaemon {
         // Skip the first immediate tick for maintenance tasks
         cloud_sync_interval.tick().await;
         maintenance_interval.tick().await;
+        relevance_sampling_interval.tick().await;
         heartbeat_interval.tick().await;
         code_index_interval.tick().await;
         history_index_interval.tick().await;
@@ -766,6 +773,33 @@ impl EmbeddedDaemon {
                             Utc::now()
                                 + chrono::Duration::seconds(self.config.maintenance_interval_secs as i64),
                         );
+                    }
+                }
+
+                // Injected-relevance evaluation is a separate, weekly-scale
+                // job. It samples only while idle and leaves unlabeled rows
+                // untouched when no receiving-agent/scheduled judge is
+                // attached, so evaluation never blocks interactive traffic.
+                _ = relevance_sampling_interval.tick(), if self.config.relevance_sampling_enabled => {
+                    if self.activity.is_idle() {
+                        match self.run_relevance_sampling().await {
+                            Ok(report) => {
+                                if report.sampled > 0 {
+                                    tracing::info!(
+                                        sampled = report.sampled,
+                                        labels_recorded = report.labels_recorded,
+                                        unlabeled = report.unlabeled,
+                                        "injected relevance sampling completed"
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                let mut status = self.status.write().await;
+                                status.last_error = Some(format!(
+                                    "Injected relevance sampling failed: {error}"
+                                ));
+                            }
+                        }
                     }
                 }
 
@@ -1324,6 +1358,23 @@ impl EmbeddedDaemon {
         }
 
         Ok(result)
+    }
+
+    /// Run the bounded injected-relevance sampler without holding up the
+    /// async daemon loop. The default scheduled judge is deliberately
+    /// unconfigured; tests and receiving-agent integrations use the public
+    /// callback-based daemon function directly.
+    async fn run_relevance_sampling(&self) -> Result<cas_store::RelevanceSamplingReport, CasError> {
+        let cas_root = self.config.cas_root.clone();
+        let sample_size = self.config.relevance_sampling_sample_size;
+        tokio::task::spawn_blocking(move || {
+            crate::daemon::relevance::run_unconfigured_injected_relevance_sampling(
+                &cas_root,
+                sample_size,
+            )
+        })
+        .await
+        .map_err(|error| CasError::Other(format!("Relevance sampling task join error: {error}")))?
     }
 
     /// Trigger immediate maintenance (ignores idle check)

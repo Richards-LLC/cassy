@@ -61,6 +61,15 @@ impl Config {
             "dev.trace_retention_days" => Some(dev.trace_retention_days.to_string()),
             "daemon.archive_max_bytes" => Some(daemon.archive_max_bytes.to_string()),
             "daemon.archive_retention_days" => Some(daemon.archive_retention_days.to_string()),
+            "daemon.relevance_sampling_enabled" => {
+                Some(daemon.relevance_sampling_enabled.to_string())
+            }
+            "daemon.relevance_sampling_interval_secs" => {
+                Some(daemon.relevance_sampling_interval_secs.to_string())
+            }
+            "daemon.relevance_sampling_sample_size" => {
+                Some(daemon.relevance_sampling_sample_size.to_string())
+            }
             // Code section
             "code.enabled" => Some(self.code.clone().unwrap_or_default().enabled.to_string()),
             "code.watch_paths" => Some(self.code.clone().unwrap_or_default().watch_paths.join(",")),

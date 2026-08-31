@@ -27,6 +27,9 @@ fn test_daemon_config_conversion() {
         cas_root: PathBuf::from("/tmp/cas"),
         maintenance_interval_secs: 1800,
         archive_retention_days: 90,
+        relevance_sampling_enabled: false,
+        relevance_sampling_interval_secs: 3600,
+        relevance_sampling_sample_size: 7,
         ..Default::default()
     };
 
@@ -35,6 +38,9 @@ fn test_daemon_config_conversion() {
     assert_eq!(daemon_config.cas_root, PathBuf::from("/tmp/cas"));
     assert_eq!(daemon_config.archive_max_bytes, config.archive_max_bytes);
     assert_eq!(daemon_config.archive_retention_days, 90);
+    assert!(!daemon_config.relevance_sampling_enabled);
+    assert_eq!(daemon_config.relevance_sampling_interval_secs, 3600);
+    assert_eq!(daemon_config.relevance_sampling_sample_size, 7);
 }
 
 #[test]

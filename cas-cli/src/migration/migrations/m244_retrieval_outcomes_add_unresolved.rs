@@ -14,6 +14,11 @@ pub const MIGRATION: Migration = Migration {
     subsystem: Subsystem::Events,
     description: "Allow unresolved retrieval outcomes without rewriting historical ignored rows (cas-dd4e)",
     up: &[
+        // `apply_migration_statement` guards ADD COLUMN with pragma_table_info,
+        // so this preserves an out-of-band attribution column when present and
+        // supplies its default when the source is the original m209 shape.
+        "ALTER TABLE retrieval_outcomes
+            ADD COLUMN attribution TEXT NOT NULL DEFAULT 'explicit'",
         "CREATE TABLE retrieval_outcomes_new (
             id TEXT PRIMARY KEY,
             query_id TEXT NOT NULL,
@@ -25,12 +30,13 @@ pub const MIGRATION: Migration = Migration {
             session_hash TEXT NOT NULL,
             correction_ref TEXT,
             created_at TEXT NOT NULL,
+            attribution TEXT NOT NULL DEFAULT 'explicit',
             FOREIGN KEY (query_id, result_id)
                 REFERENCES retrieval_query_results(query_id, result_id) ON DELETE CASCADE
         )",
         "INSERT OR IGNORE INTO retrieval_outcomes_new
-            (id, query_id, result_id, outcome, actor_hash, session_hash, correction_ref, created_at)
-            SELECT id, query_id, result_id, outcome, actor_hash, session_hash, correction_ref, created_at
+            (id, query_id, result_id, outcome, actor_hash, session_hash, correction_ref, created_at, attribution)
+            SELECT id, query_id, result_id, outcome, actor_hash, session_hash, correction_ref, created_at, attribution
             FROM retrieval_outcomes",
         "DROP TABLE retrieval_outcomes",
         "ALTER TABLE retrieval_outcomes_new RENAME TO retrieval_outcomes",
@@ -93,7 +99,7 @@ mod tests {
         .unwrap();
 
         for statement in super::MIGRATION.up {
-            conn.execute(statement, []).unwrap();
+            crate::migration::apply_migration_statement(&conn, statement).unwrap();
         }
 
         assert_eq!(
@@ -111,9 +117,24 @@ mod tests {
             .unwrap(),
             "ignored"
         );
+        assert_eq!(
+            conn.query_row(
+                super::super::m245_retrieval_outcomes_add_attribution::MIGRATION
+                    .detect
+                    .unwrap(),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "m244 must leave m245 detected on an original source schema"
+        );
         conn.execute(
-            "INSERT OR IGNORE INTO retrieval_outcomes VALUES
-             (?1, 'q1', 'entry-1', 'unresolved', 'actor', 'session', NULL, 'now')",
+            "INSERT INTO retrieval_outcomes
+             (id, query_id, result_id, outcome, actor_hash, session_hash,
+              correction_ref, created_at, attribution)
+             VALUES (?1, 'q1', 'entry-1', 'unresolved', 'actor', 'session',
+                     NULL, 'now', 'explicit')",
             params!["new-default"],
         )
         .unwrap();
@@ -164,7 +185,7 @@ mod tests {
         .unwrap();
 
         for statement in super::MIGRATION.up {
-            conn.execute(statement, []).unwrap();
+            crate::migration::apply_migration_statement(&conn, statement).unwrap();
         }
 
         let attribution: String = conn
@@ -175,5 +196,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(attribution, "judge");
+        assert_eq!(
+            conn.query_row(
+                super::super::m245_retrieval_outcomes_add_attribution::MIGRATION
+                    .detect
+                    .unwrap(),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "m244 must leave m245 detected when attribution already existed"
+        );
     }
 }

@@ -197,6 +197,16 @@ pub struct RetrievalOutcomeEvent {
     pub created_at: DateTime<Utc>,
 }
 
+type StoredOutcomeIdentity = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+);
+
 /// One injected result offered to an offline relevance judge.
 ///
 /// Raw prompt text is intentionally absent: retrieval queries only persist a
@@ -222,6 +232,8 @@ pub struct RelevanceSamplingReport {
     /// Number of `helpful`/`ignored` rows successfully written.
     pub labels_recorded: usize,
     /// Number of rows for which the judge returned no label.
+    /// These rows receive an unresolved marker so they do not consume another
+    /// sample until the configured cool-down expires.
     pub unlabeled: usize,
     /// Judge failures are retained as bounded diagnostics; one bad item does
     /// not prevent the remainder of the sample from being evaluated.
@@ -366,6 +378,74 @@ impl SqliteRetrievalStore {
                 [],
             )?;
         }
+        Ok(())
+    }
+
+    /// Repair the pre-m244 outcome constraint for direct store users.
+    ///
+    /// Hook subprocesses open this store without running the numbered CLI
+    /// migrations. Rebuild the table in place when its CHECK constraint does
+    /// not yet admit `unresolved`; m244's detect query then recognizes the
+    /// repaired shape and remains the authoritative migration receipt.
+    fn ensure_unresolved_outcome_schema(conn: &Connection) -> Result<()> {
+        let supports_unresolved: bool = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'retrieval_outcomes'
+                   AND sql LIKE '%''unresolved''%'
+             )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if supports_unresolved {
+            return Ok(());
+        }
+
+        let tx = ImmediateTx::new(conn)?;
+        Self::ensure_attribution_column(&tx)?;
+        tx.execute(
+            "CREATE TABLE retrieval_outcomes_new (
+                id TEXT PRIMARY KEY,
+                query_id TEXT NOT NULL,
+                result_id TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK (
+                    outcome IN ('used', 'helpful', 'ignored', 'corrected', 'harmful', 'unresolved')
+                ),
+                actor_hash TEXT NOT NULL,
+                session_hash TEXT NOT NULL,
+                correction_ref TEXT,
+                created_at TEXT NOT NULL,
+                attribution TEXT NOT NULL DEFAULT 'explicit',
+                FOREIGN KEY (query_id, result_id)
+                    REFERENCES retrieval_query_results(query_id, result_id) ON DELETE CASCADE
+             )",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO retrieval_outcomes_new
+                (id, query_id, result_id, outcome, actor_hash, session_hash,
+                 correction_ref, created_at, attribution)
+             SELECT id, query_id, result_id, outcome, actor_hash, session_hash,
+                    correction_ref, created_at, attribution
+             FROM retrieval_outcomes",
+            [],
+        )?;
+        tx.execute("DROP TABLE retrieval_outcomes", [])?;
+        tx.execute(
+            "ALTER TABLE retrieval_outcomes_new RENAME TO retrieval_outcomes",
+            [],
+        )?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_outcomes_query
+             ON retrieval_outcomes(query_id, result_id)",
+            [],
+        )?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_outcomes_created
+             ON retrieval_outcomes(created_at)",
+            [],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -520,8 +600,9 @@ impl RetrievalStore for SqliteRetrievalStore {
         conn.execute_batch(RETRIEVAL_SCHEMA)?;
         // Direct store users (including older one-shot tools) may open a
         // database without running the numbered migration runner first.
-        // Keep that path compatible while m245 remains the durable upgrade
-        // for normal startup.
+        // Keep that path compatible while m244/m245 remain the durable
+        // upgrades for normal startup.
+        Self::ensure_unresolved_outcome_schema(&conn)?;
         Self::ensure_attribution_column(&conn)?;
         Ok(())
     }
@@ -646,6 +727,46 @@ impl SqliteRetrievalStore {
         };
 
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let load_existing = || -> Result<Option<StoredOutcomeIdentity>> {
+            conn.query_row(
+                "SELECT query_id, result_id, outcome, actor_hash, session_hash,
+                        correction_ref, attribution
+                 FROM retrieval_outcomes WHERE id = ?1",
+                [&event.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StoreError::Database)
+        };
+        let is_same_event = |existing: &StoredOutcomeIdentity| {
+            existing.0 == event.query_id
+                && existing.1 == event.result_id
+                && existing.2 == event.outcome.as_str()
+                && existing.3 == event.actor_hash
+                && existing.4 == event.session_hash
+                && existing.5 == event.correction_ref
+                && existing.6 == event.attribution
+        };
+        if let Some(existing) = load_existing()? {
+            return if is_same_event(&existing) {
+                Ok(event)
+            } else {
+                Err(StoreError::Other(format!(
+                    "retrieval outcome id {id} already records a different event"
+                )))
+            };
+        }
+
         let exists: bool = conn
             .query_row(
                 "SELECT 1 FROM retrieval_query_results
@@ -663,10 +784,11 @@ impl SqliteRetrievalStore {
 
         // Automatic hook capture uses a deterministic event ID so a retry is
         // idempotent. Explicit MCP events remain unique UUIDs.
-        conn.execute(
-            "INSERT OR IGNORE INTO retrieval_outcomes
+        let inserted = conn.execute(
+            "INSERT INTO retrieval_outcomes
              (id, query_id, result_id, outcome, actor_hash, session_hash, correction_ref, attribution, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO NOTHING",
             params![
                 event.id,
                 event.query_id,
@@ -679,6 +801,17 @@ impl SqliteRetrievalStore {
                 event.created_at.to_rfc3339(),
             ],
         )?;
+        if inserted == 0 {
+            return match load_existing()? {
+                Some(existing) if is_same_event(&existing) => Ok(event),
+                Some(_) => Err(StoreError::Other(format!(
+                    "retrieval outcome id {id} concurrently recorded a different event"
+                ))),
+                None => Err(StoreError::Other(format!(
+                    "retrieval outcome {id} was not persisted"
+                ))),
+            };
+        }
         Ok(event)
     }
 
@@ -686,12 +819,15 @@ impl SqliteRetrievalStore {
     ///
     /// The callback returns `Some(true)` for a relevant result,
     /// `Some(false)` for an irrelevant result, and `None` when the receiving
-    /// agent or scheduled judge cannot label the item. A judge failure is
-    /// isolated to that item; storage failures still fail the pass because a
-    /// partial write cannot be reported as a successful label.
+    /// agent or scheduled judge cannot label the item. Unlabelled attempts are
+    /// marked unresolved and excluded for `cooldown_secs`; resolved labels are
+    /// excluded permanently. A judge failure is isolated to that item; storage
+    /// failures still fail the pass because a partial write cannot be reported
+    /// as a successful label.
     pub fn sample_injected_relevance<F>(
         &self,
         sample_size: usize,
+        cooldown_secs: u64,
         mut judge: F,
     ) -> Result<RelevanceSamplingReport>
     where
@@ -701,6 +837,12 @@ impl SqliteRetrievalStore {
             return Ok(RelevanceSamplingReport::default());
         }
 
+        let cutoff = i64::try_from(cooldown_secs)
+            .ok()
+            .and_then(chrono::Duration::try_seconds)
+            .and_then(|duration| Utc::now().checked_sub_signed(duration))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC)
+            .to_rfc3339();
         let samples = {
             let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
             let mut stmt = conn.prepare(
@@ -715,11 +857,13 @@ impl SqliteRetrievalStore {
                        WHERE judged.query_id = r.query_id
                          AND judged.result_id = r.result_id
                          AND judged.attribution = 'judge'
+                         AND (judged.outcome != 'unresolved'
+                              OR judged.created_at >= ?2)
                    )
                  ORDER BY q.created_at DESC, r.rank ASC
                  LIMIT ?1",
             )?;
-            let rows = stmt.query_map([sample_size as i64], |row| {
+            let rows = stmt.query_map(params![sample_size as i64, cutoff], |row| {
                 Ok(RetrievalSample {
                     query_id: row.get(0)?,
                     query_fingerprint: row.get(1)?,
@@ -750,6 +894,30 @@ impl SqliteRetrievalStore {
             };
             let Some(label) = label else {
                 report.unlabeled += 1;
+                let event_id = format!(
+                    "out-judge-unresolved-{}",
+                    Self::fingerprint(
+                        "judge-unresolved-event",
+                        &format!(
+                            "{}\0{}\0{}",
+                            sample.query_id,
+                            sample.result_id,
+                            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                        ),
+                    )
+                    .trim_start_matches("sha256:")
+                );
+                let session_id = format!("judge:{}", sample.query_id);
+                self.record_outcome_with_attribution(
+                    &event_id,
+                    &sample.query_id,
+                    &sample.result_id,
+                    RetrievalOutcome::Unresolved,
+                    "retrieval-relevance-judge",
+                    &session_id,
+                    None,
+                    RETRIEVAL_ATTRIBUTION_JUDGE,
+                )?;
                 continue;
             };
             let outcome = if label {
@@ -932,6 +1100,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(persisted, 1, "a successful outcome write must be durable");
+        let attribution: String = conn
+            .query_row(
+                "SELECT attribution FROM retrieval_outcomes WHERE id = 'out-unresolved'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attribution, RETRIEVAL_ATTRIBUTION_AUTOMATIC);
+        let m244_detected: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'retrieval_outcomes'
+                   AND sql LIKE '%''unresolved''%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(m244_detected, 1, "the ordered migration must detect the inline repair");
     }
 
     #[test]
@@ -1070,12 +1256,26 @@ mod tests {
                 "out-1",
                 "qry-1",
                 "entry-1",
-                RetrievalOutcome::Harmful,
+                RetrievalOutcome::Used,
                 "actor",
                 "session",
                 None,
             )
             .unwrap();
+        assert!(
+            store
+                .record_outcome(
+                    "out-1",
+                    "qry-1",
+                    "entry-1",
+                    RetrievalOutcome::Harmful,
+                    "actor",
+                    "session",
+                    None,
+                )
+                .is_err(),
+            "reusing an event ID for different evidence is not an idempotent retry"
+        );
 
         let aggregates = store.aggregate().unwrap();
         assert_eq!(aggregates.len(), 1);
@@ -1186,7 +1386,7 @@ mod tests {
             .unwrap();
 
         let report = store
-            .sample_injected_relevance(10, |sample| {
+            .sample_injected_relevance(10, 604_800, |sample| {
                 Ok(Some(sample.result_id == "entry-helpful"))
             })
             .unwrap();
@@ -1212,7 +1412,7 @@ mod tests {
         drop(conn);
 
         let second = store
-            .sample_injected_relevance(10, |_| Ok(Some(true)))
+            .sample_injected_relevance(10, 604_800, |_| Ok(Some(true)))
             .unwrap();
         assert_eq!(second.sampled, 0, "judge rows are idempotently excluded");
     }
@@ -1232,17 +1432,47 @@ mod tests {
             )
             .unwrap();
 
-        let first = store.sample_injected_relevance(1, |_| Ok(None)).unwrap();
+        let first = store
+            .sample_injected_relevance(1, 3_600, |_| Ok(None))
+            .unwrap();
         assert_eq!(first.sampled, 1);
         assert_eq!(first.labels_recorded, 0);
         assert_eq!(first.unlabeled, 1);
 
         let second = store
-            .sample_injected_relevance(1, |_| Ok(Some(true)))
+            .sample_injected_relevance(1, 3_600, |_| Ok(Some(true)))
             .unwrap();
         assert_eq!(
             second.sampled, 0,
             "the same item must not consume the next judge pass"
         );
+
+        let conn = store.conn.lock().unwrap();
+        let skips: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM retrieval_outcomes
+                 WHERE attribution = 'judge' AND outcome = 'unresolved'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(skips, 1, "the cool-down marker is durable but not a label");
+        conn.execute(
+            "UPDATE retrieval_outcomes SET created_at = '2000-01-01T00:00:00+00:00'
+             WHERE attribution = 'judge' AND outcome = 'unresolved'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let after_cooldown = store
+            .sample_injected_relevance(1, 3_600, |_| Ok(Some(true)))
+            .unwrap();
+        assert_eq!(after_cooldown.sampled, 1);
+        assert_eq!(after_cooldown.labels_recorded, 1);
+        assert_eq!(after_cooldown.unlabeled, 0);
+        let precision = store.rolling_injected_precision(30).unwrap();
+        assert_eq!(precision.helpful, 1);
+        assert_eq!(precision.judged, 1, "unresolved skips are not judge labels");
     }
 }

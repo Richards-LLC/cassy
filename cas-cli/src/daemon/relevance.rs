@@ -8,20 +8,21 @@ use crate::error::CasError;
 
 /// Run one injected-relevance sampling pass with a caller-supplied judge.
 ///
-/// The daemon owns cadence and enablement; this function owns the store
-/// boundary. Keeping the judge as a callback makes the job deterministic in
-/// tests and allows a receiving-agent or scheduled model runner to be plugged
-/// in without coupling the SQLite crate to a model client.
+/// The daemon owns cadence, cool-down, and enablement; this function owns the
+/// store boundary. Keeping the judge as a callback makes the job deterministic
+/// in tests and allows a receiving-agent or scheduled model runner to be
+/// plugged in without coupling the SQLite crate to a model client.
 pub fn run_injected_relevance_sampling<F>(
     cas_root: &Path,
     sample_size: usize,
+    cooldown_secs: u64,
     judge: F,
 ) -> Result<RelevanceSamplingReport, CasError>
 where
     F: FnMut(&RetrievalSample) -> std::result::Result<Option<bool>, String>,
 {
     let store = SqliteRetrievalStore::open(cas_root)?;
-    Ok(store.sample_injected_relevance(sample_size, judge)?)
+    Ok(store.sample_injected_relevance(sample_size, cooldown_secs, judge)?)
 }
 
 /// Scheduled daemon runs have no live receiving-agent callback by default.
@@ -30,8 +31,9 @@ where
 pub fn run_unconfigured_injected_relevance_sampling(
     cas_root: &Path,
     sample_size: usize,
+    cooldown_secs: u64,
 ) -> Result<RelevanceSamplingReport, CasError> {
-    run_injected_relevance_sampling(cas_root, sample_size, |_sample| Ok(None))
+    run_injected_relevance_sampling(cas_root, sample_size, cooldown_secs, |_sample| Ok(None))
 }
 
 #[cfg(test)]
@@ -60,7 +62,7 @@ mod tests {
             )
             .unwrap();
 
-        let report = run_injected_relevance_sampling(&cas_root, 1, |sample| {
+        let report = run_injected_relevance_sampling(&cas_root, 1, 604_800, |sample| {
             assert_eq!(sample.result_id, "entry-1");
             Ok(Some(true))
         })

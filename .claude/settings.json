@@ -1,4 +1,5 @@
 {
+  "enableArtifact": false,
   "hooks": {
     "MessageDisplay": [
       {
@@ -94,7 +95,7 @@
             "type": "command"
           }
         ],
-        "matcher": "Read|Glob|Grep|Write|Edit|Bash|WebFetch|WebSearch|Task|SendMessage"
+        "matcher": "Read|Glob|Grep|Write|Edit|Bash|WebFetch|WebSearch|Task|SendMessage|AskUserQuestion|Skill|Workflow|Agent"
       }
     ],
     "SessionEnd": [

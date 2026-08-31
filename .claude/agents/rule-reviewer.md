@@ -31,6 +31,9 @@ Use `mcp__cas__rule action=history id=<id>` to inspect prior versions and
 `mcp__cas__rule action=restore id=<id> version=<n>` to roll back or un-retire a
 rule. Never describe a tombstoned rule as permanently deleted.
 
+When promoting or rewriting a rule, preserve its existing source entry IDs. When merging,
+carry forward the source entry IDs from every contributing rule into the surviving rule.
+
 ## Quality Bar for Promotion
 
 A rule deserves proven status when it:

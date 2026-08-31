@@ -39,14 +39,10 @@ node_modules/
 # Worktree-specific files (generated per worktree)
 # fallow incremental analysis cache (used by the fallow skill)
 
-# Synced skill copies — rendered from cas-cli/src/builtins/{skills,codex/skills}
-# by `cas update --sync`. The builtins are the source of truth; tracking the
-# rendered output dirties the tree on every upstream skill change. Skills with
-# NO builtin source (local-only) are kept tracked via the negations below.
+# Synced project skills — rendered by `cas update --sync`. The builtins and
+# database projections are the source of truth; tracking any project skill
+# copy dirties the tree on every upstream skill change.
 /.claude/skills/*
-!/.claude/skills/cas/
-!/.claude/skills/cas-seo-expert/
-!/.claude/skills/cas-servers/
 /.codex/skills/
 
 # Codex/agent rollout session logs — debugging artifacts, not source

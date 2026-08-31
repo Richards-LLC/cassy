@@ -147,7 +147,10 @@ impl BackgroundIndexer {
 #[cfg(test)]
 mod tests {
     use crate::hybrid_search::background::*;
+    use crate::hybrid_search::{DocType, HybridSearch, HybridSearchOptions, SearchOptions};
+    use crate::store::open_store;
     use crate::store::mock::MockStore;
+    use crate::types::MemoryTier;
     use std::time::Instant;
 
     #[test]
@@ -199,6 +202,57 @@ mod tests {
         // MockStore returns all entries as pending (no updated_at tracking)
         assert_eq!(result.indexed, 2);
         assert!(result.errors.is_empty());
+    }
+
+    /// Regression for cas-bc42: the daemon's pending-entry writer and every
+    /// query reader must resolve the same on-disk Tantivy index.
+    #[test]
+    fn background_only_entry_is_visible_to_hybrid_search() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("create .cas");
+        let store = open_store(&cas_root).expect("store");
+        let entry = Entry {
+            memory_tier: MemoryTier::Working,
+            ..Entry::new(
+                "daemon-only-entry".to_string(),
+                "quasarplum daemon-only indexing regression".to_string(),
+            )
+        };
+        store.add(&entry).expect("add entry");
+
+        let indexer = BackgroundIndexer::open(&cas_root).expect("background indexer");
+        let result = indexer
+            .process_pending(store.as_ref(), &IndexingConfig::default())
+            .expect("process pending");
+        assert_eq!(result.indexed, 1);
+
+        let search = HybridSearch::open(&cas_root).expect("hybrid search");
+        let entries = store.list().expect("entries");
+        let results = search
+            .search(
+                &HybridSearchOptions {
+                    base: SearchOptions {
+                        query: "quasarplum".to_string(),
+                        doc_types: vec![DocType::Entry],
+                        ..Default::default()
+                    },
+                    enable_temporal: false,
+                    enable_graph: false,
+                    ..Default::default()
+                },
+                &entries,
+            )
+            .expect("search");
+
+        assert!(
+            results.iter().any(|result| result.id == entry.id),
+            "daemon-indexed entry must be visible to the reader: {results:?}"
+        );
+        assert!(
+            !cas_root.join("index/meta.json").exists(),
+            "background indexing must not create a second Tantivy root"
+        );
     }
 
     /// Test that batch indexing of 100 documents stays within a reasonable bound.

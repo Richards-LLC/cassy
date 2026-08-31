@@ -1,16 +1,23 @@
 //! Labeled retrieval evaluation — layer 1 of the EPIC cas-8fac eval harness
-//! (task cas-e0ed).
+//! (tasks cas-e0ed, cas-b06c).
 //!
 //! The sibling `retrieval_parity_test.rs` proves retrieval did not *change*.
 //! This suite proves how *good* it is: 56 hand-judged prompt-contexts replayed
-//! through the two selectors that actually put memories in front of a model,
+//! through the selectors that actually put memories in front of a model,
 //! scored precision@5 / recall@5, gated against a committed baseline.
 //!
-//! The load-bearing test here is
-//! [`the_gate_fires_on_a_deliberate_corpus_regression`]: a gate that has never
-//! been shown to fail is indistinguishable from no gate. Every other test
-//! exists to keep that one honest — that the fixture is self-contained, that
-//! the harness reads the real selectors, and that an unchanged corpus is green.
+//! Two tests are load-bearing:
+//!
+//! * [`the_gate_fires_on_a_deliberate_corpus_regression`] — a gate that has
+//!   never been shown to fail is indistinguishable from no gate.
+//! * [`the_fast_production_runner_matches_the_real_build_context_path`] — the
+//!   baseline is produced by a runner that hoists the store and scorer opens
+//!   out of the per-case loop, and that is only legitimate while it stays
+//!   ranking-identical to the real `crate::hooks::build_context`.
+//!
+//! Every other test exists to keep those honest — that the fixture is
+//! self-contained, that the harness reads the real selectors, and that an
+//! unchanged corpus is green.
 //!
 //! # RE-BASELINE PROCEDURE (one line)
 //!
@@ -44,12 +51,22 @@
 use std::collections::HashSet;
 
 use cas::retrieval_eval::{
-    self, Baseline, EvalCorpus, EvalFixture, REBASELINE_ENV, REGRESSION_TOLERANCE,
-    SELECTOR_AMBIENT_CANDIDATES, SELECTOR_AMBIENT_PACKET, SELECTOR_HELPFUL_MEMORIES, TierMode,
+    self, Baseline, EvalCorpus, EvalFixture, ProductionScorerState, QueryMode, REBASELINE_ENV,
+    REGRESSION_TOLERANCE, SELECTOR_AMBIENT_CANDIDATES, SELECTOR_AMBIENT_PACKET,
+    SELECTOR_HELPFUL_MEMORIES, SELECTOR_HELPFUL_MEMORIES_PRODUCTION, TierMode,
 };
 
 fn fixture() -> EvalFixture {
     EvalFixture::load(&EvalFixture::committed_path()).expect("committed fixture must load")
+}
+
+fn run(
+    fixture: &EvalFixture,
+) -> (
+    Vec<retrieval_eval::SelectorMetrics>,
+    retrieval_eval::CaseBreakdown,
+) {
+    retrieval_eval::run_all(fixture).expect("harness run")
 }
 
 // --------------------------------------------------------------------------
@@ -197,6 +214,299 @@ fn the_fixture_carries_the_real_tier_skew_it_claims_to_measure() {
 }
 
 // --------------------------------------------------------------------------
+// cas-b06c: the PRODUCTION Helpful-Memories path.
+//
+// cas-e0ed's `helpful_memories` selector passes `ContextStores::empty()`, so
+// `build_start.rs` falls back to `BasicContextScorer`. Production does not:
+// `cas-cli/src/hooks/context.rs` opens `HybridContextScorer::open_with_graph`
+// and passes it as `entry_scorer`. Everything below measures that real path
+// and keeps the Basic selector as the labelled fallback control.
+// --------------------------------------------------------------------------
+
+#[test]
+fn the_production_selector_is_measured_and_gated_in_every_mode() {
+    let fixture = fixture();
+    let (metrics, _) = run(&fixture);
+
+    for tier in [TierMode::Live, TierMode::AllWorking] {
+        for query_mode in [QueryMode::SeededTask, QueryMode::FreshSession] {
+            let row = metrics
+                .iter()
+                .find(|m| {
+                    m.selector == SELECTOR_HELPFUL_MEMORIES_PRODUCTION
+                        && m.tier_mode == tier.as_str()
+                        && m.query_mode == query_mode.as_str()
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no production row for {}/{}",
+                        tier.as_str(),
+                        query_mode.as_str()
+                    )
+                });
+            assert_eq!(row.cases, fixture.cases.len());
+        }
+    }
+
+    // Every measured row must be in the committed baseline, or the gate does
+    // not actually cover the new selector.
+    let baseline =
+        Baseline::load(&EvalFixture::committed_baseline_path()).expect("baseline loads");
+    for row in &metrics {
+        assert!(
+            baseline.get(&row.key()).is_some(),
+            "{} is measured but not baselined — it would not be gated",
+            row.key()
+        );
+    }
+}
+
+#[test]
+fn the_production_path_ranks_differently_from_the_basic_fallback() {
+    // AC3. If this ever stops being true, the production selector has silently
+    // degraded to the fallback and the whole point of cas-b06c is gone.
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = EvalCorpus::materialize_with_index(&fixture, dir.path(), TierMode::AllWorking)
+        .expect("seed + index");
+    assert!(
+        corpus.has_search_index(),
+        "precondition: the fixture corpus must carry a real Tantivy index"
+    );
+
+    let runner = retrieval_eval::ProductionRunner::open(&corpus).expect("runner");
+    let mut differing = Vec::new();
+    for case in &fixture.cases {
+        let basic = retrieval_eval::helpful_memories_ranking(&corpus, case).expect("basic");
+        let production = runner.rank(case, QueryMode::SeededTask).expect("production");
+        if basic != production {
+            differing.push((case.case_id.clone(), basic, production));
+        }
+    }
+
+    assert!(
+        !differing.is_empty(),
+        "the production path produced the Basic ranking for all {} cases — \
+         either the index is not being used or the scorer is not wired",
+        fixture.cases.len()
+    );
+    println!(
+        "production differs from Basic on {}/{} cases; first: {:?}",
+        differing.len(),
+        fixture.cases.len(),
+        differing.first()
+    );
+}
+
+#[test]
+fn a_fresh_session_is_query_blind_and_the_number_says_so() {
+    // The supervisor's addition: a fresh session in a project has no
+    // in-progress task and no session_files.json, and `has_content()` excludes
+    // cwd (cas-core/src/hooks/context/mod.rs:113). If that collapses production
+    // to a single ranking across all cases, THAT is the concrete cas-3b80
+    // defect and it must be stated as a number, not inferred.
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = EvalCorpus::materialize_with_index(&fixture, dir.path(), TierMode::AllWorking)
+        .expect("seed + index");
+
+    let fresh = distinct_rankings(&fixture, &corpus, QueryMode::FreshSession);
+    let seeded = distinct_rankings(&fixture, &corpus, QueryMode::SeededTask);
+    println!("distinct top-5 rankings — fresh_session: {fresh}, seeded_task: {seeded}");
+
+    assert_eq!(
+        fresh, 1,
+        "a fresh session was expected to be query-blind (one ranking for all \
+         {} cases). It produced {fresh}. If a fix landed, update this test and \
+         re-baseline — do not delete it.",
+        fixture.cases.len()
+    );
+    assert!(
+        seeded > 1,
+        "with an in-progress task seeded, production must vary with the query; \
+         got {seeded} distinct rankings"
+    );
+}
+
+#[test]
+fn the_production_scorer_state_is_reported_not_guessed() {
+    // The four states a real SessionStart can land in. Conflating them is how
+    // "we have a hybrid scorer" turns into "we ship Basic and never notice".
+    let fixture = fixture();
+    let case = &fixture.cases[0];
+
+    let indexed = tempfile::tempdir().expect("tempdir");
+    let with_index = EvalCorpus::materialize_with_index(&fixture, indexed.path(), TierMode::AllWorking)
+        .expect("seed + index");
+    assert_eq!(
+        retrieval_eval::probe_production_scorer_state(&with_index, case, QueryMode::SeededTask),
+        ProductionScorerState::QueryAwareWithLexicalIndex,
+        "an index plus an in-progress task is the full hybrid path"
+    );
+    assert_eq!(
+        retrieval_eval::probe_production_scorer_state(&with_index, case, QueryMode::FreshSession),
+        ProductionScorerState::QueryBlindEarlyReturn,
+        "scorer.rs:123 early-returns pure Basic when has_content() is false — \
+         no contextual_overlap_bonus is applied on that path"
+    );
+
+    // A MISSING index is not a hard failure, and this is the part the task
+    // brief predicted wrong. `SearchIndex::open` CREATES the directory and an
+    // empty index (hybrid_search/search_index_impl.rs:73-96), and
+    // `open_with_graph` swallows an entity-store error with `if let Ok(..)`.
+    // So the scorer is still constructed, `has_content()` still passes, BM25
+    // just returns nothing, and the session lands on Basic + the
+    // contextual_overlap_bonus — NOT on the scorer-less fallback.
+    let bare = tempfile::tempdir().expect("tempdir");
+    let without_index =
+        EvalCorpus::materialize(&fixture, bare.path(), TierMode::AllWorking).expect("seed");
+    assert!(!without_index.has_search_index());
+    assert_eq!(
+        retrieval_eval::probe_production_scorer_state(&without_index, case, QueryMode::SeededTask),
+        ProductionScorerState::QueryAwareWithoutLexicalIndex,
+        "a missing index leaves the scorer constructed and the query live — it \
+         must not read as ScorerUnavailable"
+    );
+    assert_eq!(retrieval_eval::indexed_document_count(without_index.cas_dir()), 0);
+    assert!(
+        retrieval_eval::indexed_document_count(with_index.cas_dir()) >= fixture.entries.len(),
+        "the fixture index must hold at least one document per entry"
+    );
+}
+
+#[test]
+fn a_missing_index_still_ranks_by_the_query_via_the_overlap_bonus() {
+    // The consequence of the state above, stated as behaviour rather than as
+    // an enum: with NO lexical index at all, production is still
+    // query-dependent. Two mechanisms keep it so, and the audit brief missed
+    // both: the hybrid search's temporal channel needs no index and returns
+    // results anyway (so `score_with_hybrid` is non-empty and the Basic
+    // fallback at scorer.rs:165-168 never fires), and contextual_overlap_bonus
+    // (scorer.rs:77-116) is added on every branch that gets past :123.
+    // "No index => Basic => query-blind" is wrong twice over.
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus =
+        EvalCorpus::materialize(&fixture, dir.path(), TierMode::AllWorking).expect("seed");
+    assert!(!corpus.has_search_index());
+
+    let distinct = distinct_rankings(&fixture, &corpus, QueryMode::SeededTask);
+    assert!(
+        distinct > 1,
+        "with no index the overlap bonus should still vary the ranking; got {distinct}"
+    );
+}
+
+#[test]
+fn the_fast_production_runner_matches_the_real_build_context_path() {
+    // The baseline is produced by ProductionRunner, which hoists the store and
+    // scorer opens out of the per-case loop (~260ms -> ~30ms per case). That is
+    // only legitimate while it stays behaviourally identical to the real
+    // `crate::hooks::build_context` call. This is that proof. If someone
+    // changes the wiring in cas-cli/src/hooks/context.rs and not in
+    // ProductionRunner, this fails — which is the point.
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = EvalCorpus::materialize_with_index(&fixture, dir.path(), TierMode::AllWorking)
+        .expect("seed + index");
+    let runner = retrieval_eval::ProductionRunner::open(&corpus).expect("runner");
+
+    for query_mode in [QueryMode::SeededTask, QueryMode::FreshSession] {
+        for case in fixture.cases.iter().take(6) {
+            let fast = runner.rank(case, query_mode).expect("fast");
+            let real =
+                retrieval_eval::helpful_memories_production_ranking(&corpus, case, query_mode)
+                    .expect("real");
+            assert_eq!(
+                fast,
+                real,
+                "{} / {}: the hoisted runner diverged from build_context",
+                case.case_id,
+                query_mode.as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_rendered_section_parser_agrees_with_the_production_callback() {
+    // The production selector reads its ranking out of the rendered
+    // `## Helpful Memories` block, because that is literally what the model
+    // receives. That only stays honest if the parser matches the callback the
+    // Basic selector uses. Cross-validate the two extraction methods on the
+    // same corpus, so parser drift fails here instead of silently reshaping
+    // the baseline.
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus =
+        EvalCorpus::materialize(&fixture, dir.path(), TierMode::AllWorking).expect("seed");
+
+    for case in fixture.cases.iter().take(8) {
+        let via_callback = retrieval_eval::helpful_memories_ranking(&corpus, case).expect("rank");
+        let via_parser =
+            retrieval_eval::helpful_memories_rendered_ranking(&corpus, case).expect("parse");
+        assert_eq!(
+            via_callback, via_parser,
+            "{}: the rendered-section parser disagrees with the on_surfaced callback",
+            case.case_id
+        );
+    }
+}
+
+#[test]
+fn the_production_selector_does_not_inherit_the_worker_environment() {
+    // `build_context_with_stores` renders an Agent Coordination section when
+    // CAS_AGENT_ROLE is set, which consumes token budget and can change which
+    // memories still fit. The committed baseline must describe a plain
+    // operator session, not whichever pane happened to run the harness.
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = EvalCorpus::materialize_with_index(&fixture, dir.path(), TierMode::AllWorking)
+        .expect("seed + index");
+    let case = &fixture.cases[0];
+
+    let baseline_ranking =
+        retrieval_eval::helpful_memories_production_ranking(&corpus, case, QueryMode::SeededTask)
+            .expect("rank");
+    // The env guard must hold on the real build_context path too, not just the
+    // hoisted runner — that is the path a future reader will reach for.
+
+    // SAFETY: nextest runs each test in its own process, so this env mutation
+    // cannot reach a sibling test. The guard restores it regardless.
+    let restore = std::env::var("CAS_AGENT_ROLE").ok();
+    unsafe { std::env::set_var("CAS_AGENT_ROLE", "worker") };
+    let under_worker_env =
+        retrieval_eval::helpful_memories_production_ranking(&corpus, case, QueryMode::SeededTask)
+            .expect("rank");
+    match restore {
+        Some(value) => unsafe { std::env::set_var("CAS_AGENT_ROLE", value) },
+        None => unsafe { std::env::remove_var("CAS_AGENT_ROLE") },
+    }
+
+    assert_eq!(
+        baseline_ranking, under_worker_env,
+        "the production selector leaked CAS_AGENT_ROLE into its measurement"
+    );
+}
+
+fn distinct_rankings(
+    fixture: &EvalFixture,
+    corpus: &EvalCorpus,
+    query_mode: QueryMode,
+) -> usize {
+    // Uses the hoisted runner, which
+    // `the_fast_production_runner_matches_the_real_build_context_path` proves
+    // is ranking-identical to the real build_context call.
+    let runner = retrieval_eval::ProductionRunner::open(corpus).expect("runner");
+    fixture
+        .cases
+        .iter()
+        .map(|case| runner.rank(case, query_mode).expect("rank"))
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+// --------------------------------------------------------------------------
 // The measured findings, pinned so a future change has to notice them.
 // --------------------------------------------------------------------------
 
@@ -251,9 +561,7 @@ fn the_two_tier_modes_agree_today_and_the_harness_says_why() {
     // filter. This test asserts the *reason*, so if the coincidence ever ends
     // the baseline diff is explained rather than mysterious.
     let fixture = fixture();
-    let live = tempfile::tempdir().expect("tempdir");
-    let working = tempfile::tempdir().expect("tempdir");
-    let (metrics, _) = retrieval_eval::run_all(&fixture, live.path(), working.path()).expect("run");
+    let (metrics, _) = run(&fixture);
 
     for selector in [
         SELECTOR_HELPFUL_MEMORIES,
@@ -304,11 +612,7 @@ fn the_two_tier_modes_agree_today_and_the_harness_says_why() {
 #[test]
 fn harness_reports_precision_and_recall_and_holds_the_committed_baseline() {
     let fixture = fixture();
-    let live = tempfile::tempdir().expect("tempdir");
-    let all_working = tempfile::tempdir().expect("tempdir");
-
-    let (metrics, _details) =
-        retrieval_eval::run_all(&fixture, live.path(), all_working.path()).expect("run");
+    let (metrics, _details) = run(&fixture);
 
     println!(
         "\nretrieval eval — fixture {} ({} cases, {} entries)\n{}",
@@ -375,11 +679,7 @@ fn two_runs_of_the_harness_produce_identical_metrics() {
     // Without this, every gate failure would be indistinguishable from noise.
     let fixture = fixture();
     let run = || {
-        let live = tempfile::tempdir().expect("tempdir");
-        let working = tempfile::tempdir().expect("tempdir");
-        let (metrics, _) =
-            retrieval_eval::run_all(&fixture, live.path(), working.path()).expect("run");
-        metrics
+        run(&fixture).0
     };
     assert_eq!(run(), run(), "the harness must be deterministic");
 }
@@ -394,9 +694,7 @@ fn the_gate_fires_on_a_deliberate_corpus_regression() {
 
     // Baseline: the real corpus, captured in-test so this proof does not depend
     // on the committed numbers staying still.
-    let live = tempfile::tempdir().expect("tempdir");
-    let working = tempfile::tempdir().expect("tempdir");
-    let (clean, _) = retrieval_eval::run_all(&fixture, live.path(), working.path()).expect("run");
+    let (clean, _) = run(&fixture);
     let reference = Baseline {
         version: retrieval_eval::BASELINE_VERSION,
         fixture_id: fixture.fixture_id.clone(),
@@ -428,8 +726,23 @@ fn the_gate_fires_on_a_deliberate_corpus_regression() {
         (TierMode::Live, damaged_live.path()),
         (TierMode::AllWorking, damaged_working.path()),
     ] {
-        let corpus = EvalCorpus::materialize(&fixture, dir, mode).expect("seed");
+        let corpus = EvalCorpus::materialize_with_index(&fixture, dir, mode).expect("seed");
         archive_entries(dir, &victims);
+
+        // The production selector is gated too, so the perturbation has to
+        // cover it — otherwise `compare` reports missing coverage instead of a
+        // regression and the proof is vacuous.
+        let runner = retrieval_eval::ProductionRunner::open(&corpus).expect("runner");
+        for query_mode in [QueryMode::SeededTask, QueryMode::FreshSession] {
+            let (m, _) = retrieval_eval::score_in_query_mode(
+                SELECTOR_HELPFUL_MEMORIES_PRODUCTION,
+                mode,
+                Some(query_mode),
+                &fixture.cases,
+                |c| runner.rank(c, query_mode).unwrap_or_default(),
+            );
+            damaged.push(m);
+        }
 
         let (m, _) = retrieval_eval::score(SELECTOR_HELPFUL_MEMORIES, mode, &fixture.cases, |c| {
             retrieval_eval::helpful_memories_ranking(&corpus, c).unwrap_or_default()
@@ -477,9 +790,7 @@ fn an_unchanged_corpus_does_not_trip_the_gate() {
     // The converse guard: a gate that always fires is as useless as one that
     // never does.
     let fixture = fixture();
-    let live = tempfile::tempdir().expect("tempdir");
-    let working = tempfile::tempdir().expect("tempdir");
-    let (metrics, _) = retrieval_eval::run_all(&fixture, live.path(), working.path()).expect("run");
+    let (metrics, _) = run(&fixture);
     let reference = Baseline {
         version: retrieval_eval::BASELINE_VERSION,
         fixture_id: fixture.fixture_id.clone(),
@@ -566,6 +877,8 @@ fn metrics_stub(precision: f64, recall: f64) -> retrieval_eval::SelectorMetrics 
     retrieval_eval::SelectorMetrics {
         selector: SELECTOR_HELPFUL_MEMORIES.to_string(),
         tier_mode: TierMode::Live.as_str().to_string(),
+        query_mode: "n/a".to_string(),
+        distinct_rankings: 1,
         cases: 55,
         precision_at_5: precision,
         recall_at_5: recall,

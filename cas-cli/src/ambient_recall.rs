@@ -3644,6 +3644,98 @@ mod tests {
     }
 
     #[test]
+    fn foreign_memory_tool_does_not_mark_an_injected_id_used() {
+        use cas_store::{RetrievalStore, SqliteRetrievalStore};
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let identity = identity(RecallRole::Worker);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "repair parser cache".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let candidates = RecallCandidates {
+            candidates: vec![candidate("m1", EvidenceScope::Global)],
+            rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
+        };
+        let mut ledger = RecallLedger::default();
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
+        let query_id = record_ambient_query(&cas_root, &identity, &query, &injected, false);
+        ledger.record(packet.query_hash, query_id, &injected);
+        ledger.save(&ledger_path(&cas_root, &identity.session_id));
+
+        record_ambient_tool_usage(
+            &cas_core::hooks::types::HookInput {
+                session_id: identity.session_id.clone(),
+                tool_name: Some("mcp__foreign__memory".into()),
+                tool_input: Some(serde_json::json!({"action": "get", "id": "m1"})),
+                tool_response: Some(serde_json::json!({"id": "m1"})),
+                ..Default::default()
+            },
+            &cas_root,
+        );
+
+        let groups = SqliteRetrievalStore::open(&cas_root)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!((groups[0].total, groups[0].used), (1, 0));
+    }
+
+    #[test]
+    fn opencode_memory_shape_marks_an_injected_id_used() {
+        use cas_store::{RetrievalStore, SqliteRetrievalStore};
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let identity = identity(RecallRole::Worker);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "repair parser cache".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let candidates = RecallCandidates {
+            candidates: vec![candidate("m1", EvidenceScope::Global)],
+            rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
+        };
+        let mut ledger = RecallLedger::default();
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
+        let query_id = record_ambient_query(&cas_root, &identity, &query, &injected, false);
+        ledger.record(packet.query_hash, query_id, &injected);
+        ledger.save(&ledger_path(&cas_root, &identity.session_id));
+
+        record_ambient_tool_usage(
+            &cas_core::hooks::types::HookInput {
+                session_id: identity.session_id.clone(),
+                tool_name: Some("cas_memory".into()),
+                tool_input: Some(serde_json::json!({"action": "get", "id": "m1"})),
+                tool_response: Some(serde_json::json!({"id": "m1"})),
+                ..Default::default()
+            },
+            &cas_root,
+        );
+
+        let groups = SqliteRetrievalStore::open(&cas_root)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!((groups[0].total, groups[0].used), (1, 1));
+    }
+
+    #[test]
     fn unresolved_outcomes_do_not_adjust_or_dilute_ranking() {
         assert_eq!(outcome_adjustment(0, 0, 0, 0, 0, 0), 0.0);
     }

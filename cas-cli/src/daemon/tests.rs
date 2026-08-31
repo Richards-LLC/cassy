@@ -22,6 +22,18 @@ fn test_daemon_status_default() {
     assert!(status.last_run.is_none());
 }
 
+#[test]
+fn memory_decay_status_round_trips_atomically() {
+    let temp = tempfile::tempdir().unwrap();
+
+    super::MemoryDecayStatus::write(temp.path(), 7, 3).unwrap();
+
+    let status = super::MemoryDecayStatus::read(temp.path()).unwrap();
+    assert_eq!(status.curated_entries_protected, 7);
+    assert_eq!(status.promoted_on_access, 3);
+    assert!(status.recorded_at <= Utc::now());
+}
+
 fn make_entry(id: &str, entry_type: EntryType, tier: MemoryTier) -> Entry {
     Entry {
         id: id.to_string(),

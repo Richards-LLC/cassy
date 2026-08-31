@@ -85,6 +85,13 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
                 decay_applied = result.updated;
                 curated_entries_protected = result.curated_protected;
                 promoted_on_access = result.promoted_on_access;
+                if let Err(error) = crate::daemon::MemoryDecayStatus::write(
+                    &config.cas_root,
+                    curated_entries_protected,
+                    promoted_on_access,
+                ) {
+                    errors.push(format!("Memory decay status write failed: {error}"));
+                }
             }
             Err(error) => errors.push(format!("Memory decay failed: {error}")),
         }

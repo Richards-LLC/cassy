@@ -2,6 +2,50 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+const MEMORY_DECAY_STATUS_FILE: &str = "memory-decay-status.json";
+
+/// Counters from the most recently completed memory-decay cycle.
+///
+/// Embedded MCP status is process-local, but `cas doctor` runs in a separate
+/// process. Keep the two counters in a small atomically-replaced sidecar so
+/// doctor can report the same cycle rather than guessing from entry state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryDecayStatus {
+    pub recorded_at: DateTime<Utc>,
+    pub curated_entries_protected: usize,
+    pub promoted_on_access: usize,
+}
+
+impl MemoryDecayStatus {
+    pub(crate) fn path(cas_root: &std::path::Path) -> PathBuf {
+        cas_root.join(MEMORY_DECAY_STATUS_FILE)
+    }
+
+    pub(crate) fn read(cas_root: &std::path::Path) -> std::io::Result<Self> {
+        let bytes = std::fs::read(Self::path(cas_root))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+
+    pub(crate) fn write(
+        cas_root: &std::path::Path,
+        curated_entries_protected: usize,
+        promoted_on_access: usize,
+    ) -> std::io::Result<()> {
+        let status = Self {
+            recorded_at: Utc::now(),
+            curated_entries_protected,
+            promoted_on_access,
+        };
+        let path = Self::path(cas_root);
+        let temporary = path.with_extension("json.tmp");
+        let bytes = serde_json::to_vec(&status)
+            .map_err(|error| std::io::Error::other(format!("serialize status: {error}")))?;
+        std::fs::write(&temporary, bytes)?;
+        std::fs::rename(temporary, path)
+    }
+}
+
 /// Configuration for the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {

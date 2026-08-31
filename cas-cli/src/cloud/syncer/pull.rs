@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 
 use crate::cloud::syncer::{
@@ -41,6 +42,19 @@ fn deserialize_pulled_entity<T: DeserializeOwned>(
         .to_owned();
     serde_json::from_value(raw)
         .map_err(|error| format!("{entity_type} deserialize error (id={id}): {error}"))
+}
+
+/// Read the cloud mutation timestamp carried by a team-pull entry.
+///
+/// The local `Entry` model predates the wire-level `updated_at` field, so
+/// retain the timestamp as pull metadata instead of changing that public
+/// model. Older responses fall back to `last_accessed`/`created` below.
+fn pulled_entry_updated_at(raw: &serde_json::Value) -> Option<DateTime<Utc>> {
+    raw.get("updated_at")
+        .or_else(|| raw.get("updatedAt"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
 }
 
 const PROPOSAL_PROVENANCE_BEGIN: &str = "--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---";
@@ -1027,41 +1041,84 @@ impl CloudSyncer {
         }
     }
 
-    /// Upsert entry with configurable conflict resolution for team sync
-    fn upsert_entry_with_strategy(
+    /// Upsert a team entry by id using timestamp last-writer-wins.
+    ///
+    /// Team pulls intentionally use LWW for entries even though the other
+    /// team entity kinds retain their configured conflict strategy. An entry
+    /// can legitimately exist in both personal and team scope under the same
+    /// id (GH #633); RemoteWins would overwrite a newer personal copy with an
+    /// older team snapshot and would rewrite equal snapshots on every pull.
+    fn upsert_entry_lww(
         &self,
         store: &dyn Store,
         entry: Entry,
-        strategy: ConflictResolution,
+        remote_updated_at: DateTime<Utc>,
     ) -> Result<UpsertResult, CasError> {
-        match store.get(&entry.id) {
-            Ok(local) => {
-                let local_time = local.last_accessed.unwrap_or(local.created);
-                let remote_time = entry.last_accessed.unwrap_or(entry.created);
+        let local = match store.get(&entry.id) {
+            Ok(local) => Some(local),
+            Err(cas_store::StoreError::EntryNotFound(_)) => match store.get_archived(&entry.id) {
+                Ok(local) => Some(local),
+                Err(cas_store::StoreError::EntryNotFound(_)) => None,
+                Err(error) => return Err(error.into()),
+            },
+            Err(error) => return Err(error.into()),
+        };
 
-                let action =
-                    self.resolve_conflict("entry", &entry.id, local_time, remote_time, strategy);
-
-                match action {
-                    ConflictAction::UseRemote => {
-                        self.journal_local_overwrite(
-                            EntityType::Entry,
-                            &entry.id,
-                            &local,
-                            "remote",
-                            strategy.as_str(),
-                        )?;
-                        store.update(&entry)?;
-                        Ok(UpsertResult::Updated)
-                    }
-                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
+        let Some(local) = local else {
+            return match store.add(&entry) {
+                Ok(()) => Ok(UpsertResult::Created),
+                // A concurrent local write can win the get→add race. Resolve
+                // that row through the same LWW path instead of surfacing a
+                // duplicate-key warning for an otherwise healthy pull.
+                Err(cas_store::StoreError::EntryExists(_)) => {
+                    let local = match store.get(&entry.id) {
+                        Ok(local) => local,
+                        Err(cas_store::StoreError::EntryNotFound(_)) => {
+                            match store.get_archived(&entry.id) {
+                                Ok(local) => local,
+                                Err(error) => return Err(error.into()),
+                            }
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    self.merge_entry_lww(store, local, entry, remote_updated_at)
                 }
+                Err(error) => Err(error.into()),
+            };
+        };
+
+        self.merge_entry_lww(store, local, entry, remote_updated_at)
+    }
+
+    fn merge_entry_lww(
+        &self,
+        store: &dyn Store,
+        local: Entry,
+        remote: Entry,
+        remote_updated_at: DateTime<Utc>,
+    ) -> Result<UpsertResult, CasError> {
+        let local_time = store.recent_timestamp(&local)?;
+        let action = self.resolve_conflict(
+            "entry",
+            &remote.id,
+            local_time,
+            remote_updated_at,
+            ConflictResolution::KeepRecent,
+        );
+
+        match action {
+            ConflictAction::UseRemote => {
+                self.journal_local_overwrite(
+                    EntityType::Entry,
+                    &remote.id,
+                    &local,
+                    "remote",
+                    ConflictResolution::KeepRecent.as_str(),
+                )?;
+                store.update(&remote)?;
+                Ok(UpsertResult::Updated)
             }
-            Err(cas_store::StoreError::EntryNotFound(_)) => {
-                store.add(&entry)?;
-                Ok(UpsertResult::Created)
-            }
-            Err(e) => Err(e.into()),
+            ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
         }
     }
 
@@ -1419,6 +1476,7 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_entry, &current_project_id, "entry") {
                 continue;
             }
+            let remote_updated_at = pulled_entry_updated_at(&raw_entry);
             let remote_entry: Entry = match deserialize_pulled_entity(raw_entry, "entry") {
                 Ok(e) => e,
                 Err(e) => {
@@ -1426,7 +1484,9 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            match self.upsert_entry_with_strategy(store, remote_entry, strategy) {
+            let remote_updated_at = remote_updated_at
+                .unwrap_or_else(|| remote_entry.last_accessed.unwrap_or(remote_entry.created));
+            match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_entries += 1;
                 }

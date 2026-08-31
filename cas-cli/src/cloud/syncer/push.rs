@@ -131,12 +131,16 @@ impl CloudSyncer {
                 .queue
                 .pending_count_for_entity_type(scope.entity_type(), self.config.max_retries)?;
             let round = self.push_pending_batch(&pending, token);
+            let round_had_errors = !round.errors.is_empty();
             result.batches_run += 1;
             Self::merge_push_result(&mut result, round);
 
             let after = self
                 .queue
                 .pending_count_for_entity_type(scope.entity_type(), self.config.max_retries)?;
+            if round_had_errors {
+                break;
+            }
             if after >= before {
                 result.errors.push(format!(
                     "Push stopped after making no progress; {after} matching row(s) remain pending"

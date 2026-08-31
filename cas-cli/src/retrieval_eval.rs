@@ -397,7 +397,7 @@ impl ProductionScorerState {
 
 /// Live documents in the BM25 index `HybridSearch` actually reads.
 ///
-/// Read from the Tantivy `meta.json` at `<cas_dir>/index/tantivy` rather than
+/// Read from the Tantivy `meta.json` at the schema-versioned canonical path rather than
 /// through a search, because a search cannot distinguish "no lexical hits" from
 /// "no lexical index": the temporal channel returns results either way.
 /// Returns 0 when the index does not exist.
@@ -457,7 +457,7 @@ impl EvalCorpus {
     ///
     /// The index is written through `HybridSearch::open` + `index_entry` — the
     /// same production code the inline write sites use — so it lands in
-    /// `<cas_root>/index/tantivy`, exactly where
+    /// the schema-versioned canonical path, exactly where
     /// `HybridContextScorer::open_with_graph` reads from
     /// (hybrid_search/hybrid.rs:370). Deliberately NOT `BackgroundIndexer`,
     /// which writes to `<cas_root>/index` and is read by nothing.

@@ -4,6 +4,7 @@
 //! their last index. Runs as part of the daemon process every 30 seconds.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::Result;
 use crate::store::Store;
@@ -41,6 +42,8 @@ pub struct IndexingResult {
 /// Background indexer for incremental BM25 index updates
 pub struct BackgroundIndexer {
     index: SearchIndex,
+    rebuild_marker: Option<std::path::PathBuf>,
+    rebuild_required: AtomicBool,
 }
 
 impl BackgroundIndexer {
@@ -48,13 +51,23 @@ impl BackgroundIndexer {
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let index_dir = crate::hybrid_search::tantivy_index_dir(cas_dir);
         let index = SearchIndex::open(&index_dir)?;
-        Ok(Self { index })
+        let rebuild_marker = crate::hybrid_search::tantivy_rebuild_marker(cas_dir);
+        let rebuild_required = rebuild_marker.is_file();
+        Ok(Self {
+            index,
+            rebuild_marker: Some(rebuild_marker),
+            rebuild_required: AtomicBool::new(rebuild_required),
+        })
     }
 
     /// Create an in-memory indexer (for testing)
     pub fn in_memory() -> Result<Self> {
         let index = SearchIndex::in_memory()?;
-        Ok(Self { index })
+        Ok(Self {
+            index,
+            rebuild_marker: None,
+            rebuild_required: AtomicBool::new(false),
+        })
     }
 
     /// Get a reference to the search index
@@ -72,6 +85,22 @@ impl BackgroundIndexer {
         config: &IndexingConfig,
     ) -> Result<IndexingResult> {
         let mut result = IndexingResult::default();
+
+        // A mismatched pre-versioned index was quarantined during open. Its
+        // indexed_at timestamps are no longer evidence that the new index is
+        // complete, so requeue all entry rows exactly once before draining the
+        // normal pending queue. The database update is durable even if the
+        // process exits before the marker is removed.
+        if self.rebuild_required.load(Ordering::Acquire) {
+            let entries = store.list()?;
+            let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+            store.mark_index_pending_batch(&ids)?;
+            if self.rebuild_required.swap(false, Ordering::AcqRel) {
+                if let Some(marker) = &self.rebuild_marker {
+                    let _ = std::fs::remove_file(marker);
+                }
+            }
+        }
 
         // Get pending entries
         let pending = store.list_pending_index(config.max_per_run)?;
@@ -155,6 +184,24 @@ mod tests {
     use crate::types::MemoryTier;
     use cas_core::hooks::{ContextQuery, ContextScorer};
     use std::time::Instant;
+
+    fn create_mismatched_legacy_index(path: &std::path::Path) {
+        use tantivy::schema::{Schema, STORED, TEXT};
+
+        std::fs::create_dir_all(path).expect("create legacy index directory");
+        let mut builder = Schema::builder();
+        builder.add_text_field("id", TEXT | STORED);
+        builder.add_text_field("content", TEXT);
+        let index = tantivy::Index::create_in_dir(path, builder.build()).expect("create legacy index");
+        let mut writer = index.writer(15_000_000).expect("legacy writer");
+        writer
+            .add_document(tantivy::doc!(
+                index.schema().get_field("id").expect("id field") => "legacy-entry",
+                index.schema().get_field("content").expect("content field") => "legacy content"
+            ))
+            .expect("write legacy document");
+        writer.commit().expect("commit legacy document");
+    }
 
     #[test]
     fn test_indexing_config_default() {
@@ -283,6 +330,140 @@ mod tests {
 
         assert!(canonical.join("meta.json").exists());
         assert!(!cas_root.join("index/meta.json").exists());
+    }
+
+    #[test]
+    fn compatible_pre_versioned_index_moves_once_and_remains_searchable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("create .cas");
+        let entry = Entry::new(
+            "compatible-legacy".to_string(),
+            "compatible legacy index survives migration".to_string(),
+        );
+        let legacy_dir = crate::hybrid_search::legacy_tantivy_index_dir(&cas_root);
+        let legacy = SearchIndex::open(&legacy_dir).expect("legacy index");
+        legacy.index_entry(&entry).expect("index legacy entry");
+        drop(legacy);
+
+        let current_dir = crate::hybrid_search::tantivy_index_dir(&cas_root);
+        let migrated = SearchIndex::open(&current_dir).expect("migrate index");
+        assert!(current_dir.join("meta.json").is_file());
+        assert!(!legacy_dir.exists(), "migration must retire the old path once");
+        let results = migrated
+            .search(
+                &SearchOptions {
+                    query: "survives migration".to_string(),
+                    ..Default::default()
+                },
+                std::slice::from_ref(&entry),
+            )
+            .expect("search migrated index");
+        assert_eq!(results.first().map(|result| result.id.as_str()), Some(entry.id.as_str()));
+
+        // A second open sees only the versioned path and must not repeat or
+        // recreate the legacy directory.
+        drop(migrated);
+        let _again = SearchIndex::open(&current_dir).expect("reopen migrated index");
+        assert!(!legacy_dir.exists());
+    }
+
+    #[test]
+    fn mismatched_pre_versioned_index_is_quarantined_and_rebuilt_once() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("create .cas");
+        let store = open_store(&cas_root).expect("store");
+        let entry = Entry::new(
+            "mismatched-legacy".to_string(),
+            "mismatched legacy index is rebuilt safely".to_string(),
+        );
+        store.add(&entry).expect("add entry");
+        store.mark_indexed(&entry.id).expect("simulate old index state");
+
+        let legacy_dir = crate::hybrid_search::legacy_tantivy_index_dir(&cas_root);
+        create_mismatched_legacy_index(&legacy_dir);
+        let current_dir = crate::hybrid_search::tantivy_index_dir(&cas_root);
+        let marker = crate::hybrid_search::tantivy_rebuild_marker(&cas_root);
+
+        let indexer = BackgroundIndexer::open(&cas_root).expect("open versioned index");
+        assert!(current_dir.join("meta.json").is_file());
+        assert!(!legacy_dir.exists(), "mismatched path must be quarantined, not deleted");
+        assert!(marker.is_file(), "rebuild marker must survive the open");
+        assert!(cas_root.join("index/tantivy-legacy-v2").is_dir());
+
+        let first = indexer
+            .process_pending(store.as_ref(), &IndexingConfig::default())
+            .expect("rebuild pending entries");
+        assert_eq!(first.indexed, 1);
+        assert!(!marker.exists(), "background indexing consumes the marker once");
+
+        let second = BackgroundIndexer::open(&cas_root)
+            .expect("reopen rebuilt index")
+            .process_pending(store.as_ref(), &IndexingConfig::default())
+            .expect("drain second cycle");
+        assert_eq!(second.indexed, 0, "the migration must not requeue repeatedly");
+        let entries = store.list().expect("list entries");
+        let results = indexer
+            .index()
+            .search(
+                &SearchOptions {
+                    query: "rebuilt safely".to_string(),
+                    ..Default::default()
+                },
+                &entries,
+            )
+            .expect("search rebuilt index");
+        assert_eq!(results.first().map(|result| result.id.as_str()), Some(entry.id.as_str()));
+    }
+
+    #[test]
+    fn mismatched_versioned_open_preserves_the_existing_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cas_root = temp.path().join(".cas");
+        let current_dir = crate::hybrid_search::tantivy_index_dir(&cas_root);
+        create_mismatched_legacy_index(&current_dir);
+        let metadata = current_dir.join("meta.json");
+        let metadata_before = std::fs::read(&metadata).expect("read mismatched metadata");
+
+        let error = match SearchIndex::open(&current_dir) {
+            Ok(_) => panic!("mismatch must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("schema mismatch"));
+        assert!(metadata.is_file(), "open must not delete a mismatched index");
+        assert_eq!(
+            std::fs::read(&metadata).expect("read preserved metadata"),
+            metadata_before,
+            "mismatch handling must leave the existing index byte-for-byte intact"
+        );
+    }
+
+    #[test]
+    fn explicit_rebuild_clears_documents_after_migration() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("create .cas");
+        let entry = Entry::new(
+            "rebuild-clears".to_string(),
+            "stale document must not survive explicit rebuild".to_string(),
+        );
+        let current_dir = crate::hybrid_search::tantivy_index_dir(&cas_root);
+        let index = SearchIndex::open(&current_dir).expect("open index");
+        index.index_entry(&entry).expect("index entry");
+        drop(index);
+
+        let rebuilt = SearchIndex::rebuild(&current_dir).expect("rebuild index");
+        let results = rebuilt
+            .search(
+                &SearchOptions {
+                    query: "stale document".to_string(),
+                    ..Default::default()
+                },
+                std::slice::from_ref(&entry),
+            )
+            .expect("search rebuilt index");
+        assert!(results.is_empty(), "explicit rebuild must clear prior documents");
     }
 
     #[test]

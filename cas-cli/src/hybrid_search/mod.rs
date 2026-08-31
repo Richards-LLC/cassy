@@ -169,12 +169,51 @@ impl DocType {
 /// Default memory budget for BM25 index writer (50MB)
 pub const DEFAULT_WRITER_MEMORY: usize = 50_000_000;
 
+/// Expected number of fields in the current schema version.
+///
+/// The field count is part of the on-disk path so an older binary can never
+/// mistake the current index for its own and delete it while rebuilding.
+/// Bump this when adding new fields to trigger a one-time migration.
+pub(crate) const EXPECTED_FIELD_COUNT: usize = 15;
+
+const TANTIVY_INDEX_PREFIX: &str = "tantivy-v";
+const LEGACY_TANTIVY_INDEX_NAME: &str = "tantivy";
+
 /// Canonical location of the unified Tantivy index below a Cassy root.
 ///
 /// Every reader and writer must use this resolver. Keeping the path derivation
 /// here prevents the background daemon from silently creating a sibling index.
+/// The schema version in the directory name isolates mixed-version processes:
+/// an older binary still using `index/tantivy` cannot remove this directory.
 pub fn tantivy_index_dir(cas_dir: &Path) -> PathBuf {
-    cas_dir.join("index").join("tantivy")
+    cas_dir
+        .join("index")
+        .join(format!("{TANTIVY_INDEX_PREFIX}{EXPECTED_FIELD_COUNT}"))
+}
+
+/// Location used by releases before the versioned resolver was introduced.
+pub(crate) fn legacy_tantivy_index_dir(cas_dir: &Path) -> PathBuf {
+    cas_dir.join("index").join(LEGACY_TANTIVY_INDEX_NAME)
+}
+
+/// Durable marker set when a legacy index had to be rebuilt rather than moved.
+/// The background indexer consumes it by re-queueing all entry rows once.
+pub(crate) fn tantivy_rebuild_marker(cas_dir: &Path) -> PathBuf {
+    cas_dir
+        .join("index")
+        .join(format!(".{TANTIVY_INDEX_PREFIX}{EXPECTED_FIELD_COUNT}-rebuild"))
+}
+
+/// Resolve the rebuild marker from an already-resolved canonical index path.
+pub(crate) fn tantivy_rebuild_marker_for_index(index_dir: &Path) -> PathBuf {
+    index_dir
+        .parent()
+        .map(|index_parent| {
+            index_parent.join(format!(
+                ".{TANTIVY_INDEX_PREFIX}{EXPECTED_FIELD_COUNT}-rebuild"
+            ))
+        })
+        .unwrap_or_else(|| PathBuf::from(format!(".{TANTIVY_INDEX_PREFIX}{EXPECTED_FIELD_COUNT}-rebuild")))
 }
 
 /// Search index backed by Tantivy
@@ -289,10 +328,6 @@ pub struct SearchResult {
     /// Score after boosts applied
     pub boosted_score: f64,
 }
-
-/// Expected number of fields in the current schema version.
-/// Bump this when adding new fields to trigger automatic index rebuild.
-pub(crate) const EXPECTED_FIELD_COUNT: usize = 15;
 
 #[cfg(test)]
 mod tests {

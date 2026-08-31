@@ -24,7 +24,6 @@
 //! let opts = SearchOptions {
 //!     query: "rust testing".to_string(),
 //!     limit: 10,
-//!     boost_feedback: true,
 //!     ..Default::default()
 //! };
 //! let results = index.search(&opts, &entries)?;
@@ -92,7 +91,6 @@ mod search_index_query;
 
 use std::sync::Mutex;
 
-use chrono::Duration;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
 use tantivy::{Index, IndexReader};
@@ -229,14 +227,6 @@ pub struct SearchOptions {
     pub query: String,
     /// Maximum number of results
     pub limit: usize,
-    /// Boost results by feedback score
-    pub boost_feedback: bool,
-    /// Boost results by recency
-    pub boost_recency: bool,
-    /// Boost results by importance/priority score
-    pub boost_importance: bool,
-    /// Half-life for recency decay
-    pub recency_half_life: Duration,
     /// Filter by tags (OR logic)
     pub tags: Vec<String>,
     /// Filter by entry types
@@ -259,10 +249,6 @@ impl Default for SearchOptions {
         Self {
             query: String::new(),
             limit: 10,
-            boost_feedback: false,
-            boost_recency: false,
-            boost_importance: false,
-            recency_half_life: Duration::days(30),
             tags: Vec::new(),
             types: Vec::new(),
             doc_types: Vec::new(), // Empty = all types
@@ -384,53 +370,6 @@ mod tests {
                 })
                 .is_err(),
             "registered fields must retain Tantivy's strict syntax validation"
-        );
-    }
-
-    #[test]
-    fn test_feedback_boost() {
-        let index = SearchIndex::in_memory().unwrap();
-
-        // Entry with low BM25 score but high feedback
-        let mut entry1 = create_test_entry("001", "Rust programming");
-        entry1.helpful_count = 10;
-
-        // Entry with higher BM25 score (more matching terms) but no feedback
-        let entry2 = create_test_entry("002", "Rust programming language tutorial guide");
-
-        let entries = vec![entry1, entry2];
-
-        for entry in &entries {
-            index.index_entry(entry).unwrap();
-        }
-
-        // Without boost: entry2 should rank higher due to more content
-        let opts = SearchOptions {
-            query: "programming".to_string(),
-            limit: 10,
-            boost_feedback: false,
-            ..Default::default()
-        };
-        let results_without = index.search(&opts, &entries).unwrap();
-
-        // With boost: entry1's feedback should help it compete or rank higher
-        let opts = SearchOptions {
-            query: "programming".to_string(),
-            limit: 10,
-            boost_feedback: true,
-            ..Default::default()
-        };
-        let results_with = index.search(&opts, &entries).unwrap();
-
-        // Find positions
-        let pos_without = results_without.iter().position(|r| r.id == "001").unwrap();
-        let pos_with = results_with.iter().position(|r| r.id == "001").unwrap();
-
-        // With feedback boost, entry1 should rank better (lower position = better)
-        // or at least maintain position
-        assert!(
-            pos_with <= pos_without,
-            "Feedback boost should improve ranking: pos_with={pos_with}, pos_without={pos_without}"
         );
     }
 

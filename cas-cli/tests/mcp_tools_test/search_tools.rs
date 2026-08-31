@@ -2,7 +2,10 @@ use crate::support::*;
 use cas::hooks::HookInput;
 use cas::mcp::tools::service::SearchContextRequest;
 use cas::mcp::tools::*;
-use cas_store::{SqliteStore, Store};
+use cas_store::{
+    DEFAULT_RETRIEVAL_POLICY, RetrievalHitIdentity, RetrievalStore, SqliteRetrievalStore,
+    SqliteStore, Store,
+};
 use cas_types::Entry;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ErrorCode;
@@ -697,4 +700,85 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
     assert!(!raw.contains("  Retrieval   PROVENANCE integration  "));
     assert!(!raw.contains("private-integration-actor"));
     assert!(!raw.contains("private-integration-session"));
+}
+
+#[tokio::test]
+async fn retrieval_metrics_filters_by_session_and_rejects_unsupported_filters() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let store = SqliteRetrievalStore::open(&cas_dir).expect("retrieval store should open");
+    let hits = [RetrievalHitIdentity {
+        result_id: "entry-session-filter".to_string(),
+        document_type: "entry".to_string(),
+        rank: 0,
+    }];
+    for (query_id, session_id) in [
+        ("query-session-a", "session-a"),
+        ("query-session-b", "session-b"),
+    ] {
+        store
+            .record_query(
+                query_id,
+                "session-filter query",
+                "session-filter",
+                DEFAULT_RETRIEVAL_POLICY,
+                Some(session_id),
+                &hits,
+            )
+            .expect("retrieval query should persist");
+    }
+
+    let service = CasService::new(core, None);
+    let metrics = |session_id: Option<&str>| {
+        serde_json::json!({
+            "action": "retrieval_metrics",
+            "session_id": session_id,
+        })
+    };
+    let response = service
+        .search(Parameters(
+            serde_json::from_value(metrics(None)).expect("unfiltered request should deserialize"),
+        ))
+        .await
+        .expect("unfiltered metrics should succeed");
+    let all: serde_json::Value =
+        serde_json::from_str(&extract_text(response)).expect("metrics should be JSON");
+    assert_eq!(all["groups"][0]["results"], 2);
+
+    let response = service
+        .search(Parameters(
+            serde_json::from_value(metrics(Some("session-a")))
+                .expect("session-filtered request should deserialize"),
+        ))
+        .await
+        .expect("session-filtered metrics should succeed");
+    let filtered: serde_json::Value =
+        serde_json::from_str(&extract_text(response)).expect("filtered metrics should be JSON");
+    assert_eq!(filtered["groups"][0]["results"], 1);
+
+    let response = service
+        .search(Parameters(
+            serde_json::from_value(metrics(Some("session-missing")))
+                .expect("different session request should deserialize"),
+        ))
+        .await
+        .expect("different session metrics should succeed");
+    let missing: serde_json::Value =
+        serde_json::from_str(&extract_text(response)).expect("missing metrics should be JSON");
+    assert_eq!(missing["groups"], serde_json::json!([]));
+
+    let unsupported: SearchContextRequest = serde_json::from_value(serde_json::json!({
+        "action": "retrieval_metrics",
+        "doc_type": "entry",
+    }))
+    .expect("unsupported filter request should deserialize");
+    let error = service
+        .search(Parameters(unsupported))
+        .await
+        .expect_err("unsupported metrics filters must fail explicitly");
+    assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+    assert!(
+        error.message.contains("doc_type"),
+        "unexpected error: {error:?}"
+    );
 }

@@ -1,8 +1,9 @@
 use crate::hooks::context::{
     BasicContextScorer, ContextQuery, ContextScorer, RuleMatchCache, estimate_tokens,
-    is_factory_participant, remap_tool_prefix, rule_matches_path, token_display, truncate,
+    is_factory_participant, remap_tool_prefix, rule_matches_path, select_task_titles,
+    token_display, truncate,
 };
-use cas_types::{AgentRole, Entry, EntryType, Rule, RuleStatus};
+use cas_types::{AgentRole, Entry, EntryType, Rule, RuleStatus, Task};
 
 #[test]
 fn test_estimate_tokens() {
@@ -103,6 +104,7 @@ fn test_context_query_to_string() {
         cwd: "/home/user/my-project".to_string(),
         user_prompt: Some("help me debug".to_string()),
         recent_files: vec![],
+        git_branch: None,
     };
 
     let query_str = query.to_query_string();
@@ -159,12 +161,76 @@ fn test_context_query_has_content() {
     };
     assert!(with_prompt.has_content());
 
-    // Query with only cwd doesn't have content (not semantic)
+    // Project identity is content: a fresh session with nothing but a cwd is
+    // still a session *about a project*, and cas-3b80 measured that treating it
+    // as empty is what pinned the production Helpful-Memories ranking to a
+    // single query-blind list (distinct top-5 = 1 across all 56 eval cases).
     let with_cwd = ContextQuery {
         cwd: "/project".to_string(),
         ..Default::default()
     };
-    assert!(!with_cwd.has_content());
+    assert!(with_cwd.has_content());
+
+    // A checked-out branch is content on its own.
+    let with_branch = ContextQuery {
+        git_branch: Some("epic/memory-effectiveness".to_string()),
+        ..Default::default()
+    };
+    assert!(with_branch.has_content());
+
+    // A branch that contributes no usable term is not content.
+    let generic_branch = ContextQuery {
+        git_branch: Some("main".to_string()),
+        ..Default::default()
+    };
+    assert!(!generic_branch.has_content());
+}
+
+#[test]
+fn context_query_includes_branch_terms_but_drops_generic_ones() {
+    let query = ContextQuery {
+        git_branch: Some("epic/memory-effectiveness-program".to_string()),
+        ..Default::default()
+    };
+    let text = query.to_query_string();
+    assert!(
+        text.contains("memory"),
+        "branch terms missing from {text:?}"
+    );
+    assert!(text.contains("effectiveness"));
+    assert!(
+        !text.contains("epic"),
+        "generic branch prefix leaked into {text:?}"
+    );
+}
+
+#[test]
+fn task_titles_prefer_the_reading_agent_over_the_whole_project() {
+    let mut mine = Task::new(
+        "cas-1111".to_string(),
+        "Fix the retrieval scorer".to_string(),
+    );
+    mine.assignee = Some("agent-me".to_string());
+    let mut theirs = Task::new(
+        "cas-2222".to_string(),
+        "Rewrite the release script".to_string(),
+    );
+    theirs.assignee = Some("agent-other".to_string());
+    let unassigned = Task::new("cas-3333".to_string(), "Audit the tier filter".to_string());
+
+    let tasks = vec![mine.clone(), theirs.clone(), unassigned.clone()];
+
+    // With an identity, only the reader's own in-progress work seeds the query:
+    // four concurrent factory lanes must not soup each other's titles together.
+    assert_eq!(
+        select_task_titles(&tasks, Some("agent-me")),
+        vec!["Fix the retrieval scorer".to_string()]
+    );
+
+    // No task of one's own → project-wide titles remain the fallback rather
+    // than leaving the query empty.
+    assert_eq!(select_task_titles(&tasks, Some("agent-nobody")).len(), 3);
+    assert_eq!(select_task_titles(&tasks, None).len(), 3);
 }
 
 #[test]

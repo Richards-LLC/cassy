@@ -690,14 +690,32 @@ pub fn build_context_with_stores(
         let mut task_titles = Vec::new();
         if let Some(ts) = stores.task_store {
             if let Ok(in_progress) = ts.list(Some(TaskStatus::InProgress)) {
-                task_titles = in_progress.iter().map(|t| t.title.clone()).collect();
+                task_titles = super::select_task_titles(&in_progress, stores.agent_id.as_deref());
             }
         }
+        let has_live_task = !task_titles.is_empty();
         let context_query = ContextQuery {
             task_titles,
             cwd: input.cwd.clone(),
-            user_prompt: input.user_prompt.clone(),
+            // SessionStart never carries a prompt of its own, so the previous
+            // session's last prompt is the only statement of intent available
+            // to a session that has not started talking yet — but only when
+            // nothing better is available. A live in-progress task is both more
+            // current and more specific, and *adding* the carried prompt on top
+            // of it measurably diluted ranking: the retrieval eval's
+            // all_working/seeded_task precision@5 halved (0.0500 -> 0.0250,
+            // distinct rankings 51 -> 35) when both were in the query, because
+            // the hybrid channel's adaptive weights spread over a longer,
+            // less focused query. Fallback, not addition.
+            user_prompt: input.user_prompt.clone().or_else(|| {
+                if has_live_task {
+                    None
+                } else {
+                    stores.carried_prompt.clone()
+                }
+            }),
             recent_files: stores.recent_files.clone(),
+            git_branch: stores.git_branch.clone(),
         };
 
         // Helpful Memories is a live, curated corpus. Cold/archive entries
@@ -833,7 +851,7 @@ pub fn build_context_with_stores(
         // Skip in minimal mode
         if !minimal_start
             && budget_remaining(total_tokens) > 100
-            && context_query.has_content()
+            && context_query.has_focused_content()
             && scorer.name() == "hybrid"
         {
             // Reuse scored entries from above — no need to re-score

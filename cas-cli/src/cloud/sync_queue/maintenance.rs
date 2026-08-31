@@ -91,6 +91,61 @@ impl SyncQueue {
         Ok(count as usize)
     }
 
+    /// Get the number of pending personal rows for one entity scope.
+    pub fn pending_count_for_entity_type(
+        &self,
+        entity_type: Option<crate::cloud::EntityType>,
+        max_retries: i32,
+    ) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            r#"
+            SELECT COUNT(*) FROM sync_queue
+            WHERE retry_count < ?1 AND (team_id IS NULL OR team_id = '')
+              AND entity_type != 'knowledge_page'
+              AND (?2 IS NULL OR entity_type = ?2)
+            "#,
+            params![max_retries, entity_type.map(|kind| kind.as_str())],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Get the number of failed personal rows for one entity scope.
+    pub fn failed_count_for_entity_type(
+        &self,
+        entity_type: Option<crate::cloud::EntityType>,
+        max_retries: i32,
+    ) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            r#"
+            SELECT COUNT(*) FROM sync_queue
+            WHERE retry_count >= ?1 AND (team_id IS NULL OR team_id = '')
+              AND entity_type != 'knowledge_page'
+              AND (?2 IS NULL OR entity_type = ?2)
+            "#,
+            params![max_retries, entity_type.map(|kind| kind.as_str())],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Get the number of failed rows for one active team.
+    pub fn failed_count_for_team(
+        &self,
+        team_id: &str,
+        max_retries: i32,
+    ) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE retry_count >= ?1 AND team_id = ?2",
+            params![max_retries, team_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// Clear failed items older than the specified number of days.
     pub fn prune_failed(&self, older_than_days: i64, max_retries: i32) -> Result<usize, CasError> {
         let conn = self.conn.lock().unwrap();

@@ -5,8 +5,9 @@ use std::io::Write;
 use std::time::Instant;
 use tracing::warn;
 
+use crate::cloud::sync_queue::PendingByType;
 use crate::cloud::syncer::{
-    CloudSyncer, PushItemizedFailure, PushPlan, PushResponse, PushScope, SyncResult,
+    CloudSyncer, PushBacklog, PushItemizedFailure, PushPlan, PushResponse, PushScope, SyncResult,
 };
 use crate::cloud::{QueuedSync, SyncOperation};
 use crate::error::CasError;
@@ -25,6 +26,9 @@ impl CloudSyncer {
             batch_limit,
             self.config.max_retries,
         )?;
+        let total_matching = self
+            .queue
+            .pending_count_for_entity_type(scope.entity_type(), self.config.max_retries)?;
         let mut counts = scope
             .planned_keys()
             .iter()
@@ -41,6 +45,7 @@ impl CloudSyncer {
             scope,
             counts,
             total_in_next_batch: items.len(),
+            total_matching,
             batch_limit,
             batch_limit_reached: items.len() == batch_limit,
         })
@@ -49,6 +54,17 @@ impl CloudSyncer {
     /// Push only queue rows selected by `scope`.
     pub fn push_scoped(&self, scope: PushScope) -> Result<SyncResult, CasError> {
         self.push_scoped_with_sessions(scope, &[])
+    }
+
+    /// Push at most `max_batches` queue batches. This is an escape hatch for
+    /// operators who need to bound a large backlog; the default remains an
+    /// unbounded drain with the per-request limits in [`CloudSyncerConfig`].
+    pub fn push_scoped_with_max_batches(
+        &self,
+        scope: PushScope,
+        max_batches: usize,
+    ) -> Result<SyncResult, CasError> {
+        self.push_scoped_with_sessions_and_limit(scope, &[], Some(max_batches.max(1)))
     }
 
     /// Push queued changes and sessions to cloud
@@ -61,6 +77,15 @@ impl CloudSyncer {
         scope: PushScope,
         sessions: &[Session],
     ) -> Result<SyncResult, CasError> {
+        self.push_scoped_with_sessions_and_limit(scope, sessions, None)
+    }
+
+    fn push_scoped_with_sessions_and_limit(
+        &self,
+        scope: PushScope,
+        sessions: &[Session],
+        max_batches: Option<usize>,
+    ) -> Result<SyncResult, CasError> {
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -69,151 +94,58 @@ impl CloudSyncer {
         }
 
         let batch_limit = self.config.batch_size.max(1);
-        let pending = match scope.entity_type() {
-            Some(entity_type) => self.queue.pending_by_type_for_entity(
-                entity_type,
-                batch_limit,
-                self.config.max_retries,
-            )?,
-            None => self
-                .queue
-                .pending_by_type(batch_limit, self.config.max_retries)?,
-        };
-
-        // Check if there's anything to push
-        if pending.is_empty() && sessions.is_empty() {
-            result.duration_ms = start.elapsed().as_millis() as u64;
-            return Ok(result);
-        }
-
         let token = self
             .cloud_config
             .token
             .as_ref()
             .ok_or_else(|| CasError::Other("Not logged in".to_string()))?;
 
-        // Push each entity type
-        if !pending.entries.is_empty() {
-            match self.push_batch(&pending.entries, "entries", token) {
-                Ok(count) => result.pushed_entries = count,
-                Err(e) => {
-                    result.errors.push(format!("Entry push failed: {e}"));
-                }
+        loop {
+            if max_batches.is_some_and(|limit| result.batches_run >= limit) {
+                break;
             }
-        }
 
-        if !pending.tasks.is_empty() {
-            match self.push_batch(&pending.tasks, "tasks", token) {
-                Ok(count) => result.pushed_tasks = count,
-                Err(e) => {
-                    result.errors.push(format!("Task push failed: {e}"));
-                }
-            }
-        }
+            let pending = match scope.entity_type() {
+                Some(entity_type) => self.queue.pending_by_type_for_entity(
+                    entity_type,
+                    batch_limit,
+                    self.config.max_retries,
+                )?,
+                None => self
+                    .queue
+                    .pending_by_type(batch_limit, self.config.max_retries)?,
+            };
 
-        if !pending.rules.is_empty() {
-            match self.push_batch(&pending.rules, "rules", token) {
-                Ok(count) => result.pushed_rules = count,
-                Err(e) => {
-                    result.errors.push(format!("Rule push failed: {e}"));
+            if pending.is_empty() {
+                if !sessions.is_empty() {
+                    result.batches_run += 1;
+                    match self.push_sessions(sessions, token) {
+                        Ok(count) => result.pushed_sessions += count,
+                        Err(e) => result.errors.push(format!("Session push failed: {e}")),
+                    }
                 }
+                break;
             }
-        }
 
-        if !pending.skills.is_empty() {
-            match self.push_batch(&pending.skills, "skills", token) {
-                Ok(count) => result.pushed_skills = count,
-                Err(e) => {
-                    result.errors.push(format!("Skill push failed: {e}"));
-                }
-            }
-        }
+            let before = self
+                .queue
+                .pending_count_for_entity_type(scope.entity_type(), self.config.max_retries)?;
+            let round = self.push_pending_batch(&pending, token);
+            let round_had_errors = !round.errors.is_empty();
+            result.batches_run += 1;
+            Self::merge_push_result(&mut result, round);
 
-        // Push sessions (queued or directly passed)
-        if !pending.sessions.is_empty() {
-            match self.push_batch(&pending.sessions, "sessions", token) {
-                Ok(count) => result.pushed_sessions = count,
-                Err(e) => {
-                    result.errors.push(format!("Session push failed: {e}"));
-                }
+            let after = self
+                .queue
+                .pending_count_for_entity_type(scope.entity_type(), self.config.max_retries)?;
+            if after >= before {
+                result.errors.push(format!(
+                    "Push stopped after making no progress; {after} matching row(s) remain pending"
+                ));
+                break;
             }
-        } else if !sessions.is_empty() {
-            // Fallback to directly-passed sessions
-            match self.push_sessions(sessions, token) {
-                Ok(count) => result.pushed_sessions = count,
-                Err(e) => {
-                    result.errors.push(format!("Session push failed: {e}"));
-                }
-            }
-        }
-
-        // Push verifications
-        if !pending.verifications.is_empty() {
-            match self.push_batch(&pending.verifications, "verifications", token) {
-                Ok(count) => result.pushed_verifications = count,
-                Err(e) => {
-                    result.errors.push(format!("Verification push failed: {e}"));
-                }
-            }
-        }
-
-        // Push events
-        if !pending.events.is_empty() {
-            match self.push_batch(&pending.events, "events", token) {
-                Ok(count) => result.pushed_events = count,
-                Err(e) => {
-                    result.errors.push(format!("Event push failed: {e}"));
-                }
-            }
-        }
-
-        // Push prompts
-        if !pending.prompts.is_empty() {
-            match self.push_batch(&pending.prompts, "prompts", token) {
-                Ok(count) => result.pushed_prompts = count,
-                Err(e) => {
-                    result.errors.push(format!("Prompt push failed: {e}"));
-                }
-            }
-        }
-
-        // Push file changes
-        if !pending.file_changes.is_empty() {
-            match self.push_batch(&pending.file_changes, "file_changes", token) {
-                Ok(count) => result.pushed_file_changes = count,
-                Err(e) => {
-                    result.errors.push(format!("FileChange push failed: {e}"));
-                }
-            }
-        }
-
-        // Push commit links
-        if !pending.commit_links.is_empty() {
-            match self.push_batch(&pending.commit_links, "commit_links", token) {
-                Ok(count) => result.pushed_commit_links = count,
-                Err(e) => {
-                    result.errors.push(format!("CommitLink push failed: {e}"));
-                }
-            }
-        }
-
-        // Push agents
-        if !pending.agents.is_empty() {
-            match self.push_batch(&pending.agents, "agents", token) {
-                Ok(count) => result.pushed_agents = count,
-                Err(e) => {
-                    result.errors.push(format!("Agent push failed: {e}"));
-                }
-            }
-        }
-
-        // Push worktrees
-        if !pending.worktrees.is_empty() {
-            match self.push_batch(&pending.worktrees, "worktrees", token) {
-                Ok(count) => result.pushed_worktrees = count,
-                Err(e) => {
-                    result.errors.push(format!("Worktree push failed: {e}"));
-                }
+            if round_had_errors {
+                break;
             }
         }
 
@@ -222,8 +154,129 @@ impl CloudSyncer {
             .queue
             .set_metadata("last_push_at", &Utc::now().to_rfc3339());
 
+        result.remaining_backlog = self.remaining_backlog(scope)?;
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
+    }
+
+    fn push_pending_batch(&self, pending: &PendingByType, token: &str) -> SyncResult {
+        let mut result = SyncResult::default();
+
+        macro_rules! push_type {
+            ($field:ident, $items:expr, $label:literal, $error:literal) => {
+                if !$items.is_empty() {
+                    match self.push_batch($items, $label, token) {
+                        Ok(count) => result.$field = count,
+                        Err(e) => result.errors.push(format!(concat!($error, ": {}"), e)),
+                    }
+                }
+            };
+        }
+
+        push_type!(
+            pushed_entries,
+            &pending.entries,
+            "entries",
+            "Entry push failed"
+        );
+        push_type!(pushed_tasks, &pending.tasks, "tasks", "Task push failed");
+        push_type!(pushed_rules, &pending.rules, "rules", "Rule push failed");
+        push_type!(
+            pushed_skills,
+            &pending.skills,
+            "skills",
+            "Skill push failed"
+        );
+        push_type!(
+            pushed_sessions,
+            &pending.sessions,
+            "sessions",
+            "Session push failed"
+        );
+        push_type!(
+            pushed_verifications,
+            &pending.verifications,
+            "verifications",
+            "Verification push failed"
+        );
+        push_type!(
+            pushed_events,
+            &pending.events,
+            "events",
+            "Event push failed"
+        );
+        push_type!(
+            pushed_prompts,
+            &pending.prompts,
+            "prompts",
+            "Prompt push failed"
+        );
+        push_type!(
+            pushed_file_changes,
+            &pending.file_changes,
+            "file_changes",
+            "FileChange push failed"
+        );
+        push_type!(
+            pushed_commit_links,
+            &pending.commit_links,
+            "commit_links",
+            "CommitLink push failed"
+        );
+        push_type!(
+            pushed_agents,
+            &pending.agents,
+            "agents",
+            "Agent push failed"
+        );
+        push_type!(
+            pushed_worktrees,
+            &pending.worktrees,
+            "worktrees",
+            "Worktree push failed"
+        );
+
+        result
+    }
+
+    fn merge_push_result(target: &mut SyncResult, source: SyncResult) {
+        target.pushed_entries += source.pushed_entries;
+        target.pushed_tasks += source.pushed_tasks;
+        target.pushed_rules += source.pushed_rules;
+        target.pushed_skills += source.pushed_skills;
+        target.pushed_sessions += source.pushed_sessions;
+        target.pushed_verifications += source.pushed_verifications;
+        target.pushed_events += source.pushed_events;
+        target.pushed_prompts += source.pushed_prompts;
+        target.pushed_file_changes += source.pushed_file_changes;
+        target.pushed_commit_links += source.pushed_commit_links;
+        target.pushed_agents += source.pushed_agents;
+        target.pushed_worktrees += source.pushed_worktrees;
+        target.errors.extend(source.errors);
+    }
+
+    fn remaining_backlog(&self, scope: PushScope) -> Result<PushBacklog, CasError> {
+        const ERROR_LIMIT: usize = 20;
+        let failed = self
+            .queue
+            .failed_count_for_entity_type(scope.entity_type(), self.config.max_retries)?;
+        let failed_errors = self
+            .queue
+            .failed_for_entity_type(scope.entity_type(), self.config.max_retries, ERROR_LIMIT)?
+            .into_iter()
+            .filter_map(|item| {
+                item.last_error
+                    .map(|error| format!("{} {}: {error}", item.entity_type, item.entity_id))
+            })
+            .collect();
+
+        Ok(PushBacklog {
+            pending: self
+                .queue
+                .pending_count_for_entity_type(scope.entity_type(), self.config.max_retries)?,
+            failed,
+            failed_errors,
+        })
     }
 
     /// Push sessions to cloud

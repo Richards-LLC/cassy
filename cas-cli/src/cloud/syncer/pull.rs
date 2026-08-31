@@ -1375,6 +1375,8 @@ impl CloudSyncer {
                 pull_result.errors,
             ]
             .concat(),
+            batches_run: push_result.batches_run + team_push_result.batches_run,
+            remaining_backlog: push_result.remaining_backlog,
             duration_ms: start.elapsed().as_millis() as u64,
         })
     }

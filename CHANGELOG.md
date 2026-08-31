@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.7.5] - 2026-08-31
+
+### Added
+- `cas setup` guides a newly installed machine through PATH, cloud login and
+  team selection, device pairing, hub service, optional Viktor credentials, and
+  first-project initialization with safe reruns and dry-run status reporting.
+
+### Changed
+- `cas cloud push` drains the complete personal backlog by default, stops when
+  no progress is possible, and reports remaining team-scoped rows explicitly.
+
 ## [3.7.4] - 2026-08-31
 
 ### Changed
@@ -1578,7 +1589,8 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 ### Added
 - Initial stable release with core functionality.
 
-[Unreleased]: https://github.com/Richards-LLC/cassy/compare/v3.7.4...HEAD
+[Unreleased]: https://github.com/Richards-LLC/cassy/compare/v3.7.5...HEAD
+[3.7.5]: https://github.com/Richards-LLC/cassy/compare/v3.7.4...v3.7.5
 [3.7.4]: https://github.com/Richards-LLC/cassy/compare/v3.7.3...v3.7.4
 [3.7.3]: https://github.com/Richards-LLC/cassy/compare/v3.7.2...v3.7.3
 [3.7.2]: https://github.com/Richards-LLC/cassy/compare/v3.7.1...v3.7.2

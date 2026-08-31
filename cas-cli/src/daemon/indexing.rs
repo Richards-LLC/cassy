@@ -17,6 +17,18 @@ pub(crate) fn generate_bm25_index(
 ) -> Result<crate::hybrid_search::IndexingResult, CasError> {
     use crate::hybrid_search::{BackgroundIndexer, IndexingConfig};
 
+    let repaired = match crate::hybrid_search::repair_legacy_index(&config.cas_root, store.as_ref())
+    {
+        Ok(Some(repair)) => repair.indexed_entries,
+        Ok(None) => 0,
+        Err(error) => {
+            return Ok(crate::hybrid_search::IndexingResult {
+                indexed: 0,
+                errors: vec![("legacy-index-repair".to_string(), error.to_string())],
+            });
+        }
+    };
+
     let indexer = match BackgroundIndexer::open(&config.cas_root) {
         Ok(indexer) => indexer,
         Err(error) => {
@@ -32,7 +44,9 @@ pub(crate) fn generate_bm25_index(
         max_per_run: config.index_max_per_run,
     };
 
-    indexer.process_pending(store.as_ref(), &index_config)
+    let mut result = indexer.process_pending(store.as_ref(), &index_config)?;
+    result.indexed += repaired;
+    Ok(result)
 }
 
 /// Run indexing-only maintenance cycle (for incremental BM25 updates).

@@ -225,6 +225,25 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                     message: format!("Could not check migrations before fix: {e}"),
                 }),
             }
+
+            match open_store(path).and_then(|store| {
+                crate::hybrid_search::repair_legacy_index(path, store.as_ref())
+            }) {
+                Ok(Some(repair)) => checks.push(Check {
+                    name: "auto-fix".to_string(),
+                    status: CheckStatus::Ok,
+                    message: format!(
+                        "Repaired legacy Tantivy root: {} document(s), {} entry row(s) re-queued, {} pending entry row(s) indexed",
+                        repair.legacy_documents, repair.requeued_entries, repair.indexed_entries
+                    ),
+                }),
+                Ok(None) => {}
+                Err(error) => checks.push(Check {
+                    name: "auto-fix".to_string(),
+                    status: CheckStatus::Warning,
+                    message: format!("Failed to repair legacy Tantivy root: {error}"),
+                }),
+            }
         }
     }
 
@@ -470,7 +489,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     // Check 4: Search index
-    let index_dir = cas_root.join("index/tantivy");
+    checks.push(legacy_search_index_check(&cas_root));
+    let index_dir = crate::hybrid_search::tantivy_index_dir(&cas_root);
     if index_dir.exists() {
         match SearchIndex::open(&index_dir) {
             Ok(_) => {
@@ -812,6 +832,30 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     output_checks(&checks, cli)
+}
+
+fn legacy_search_index_check(cas_root: &Path) -> Check {
+    match crate::hybrid_search::inspect_legacy_index(cas_root) {
+        Ok(Some(state)) => Check {
+            name: "legacy search index".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "{} document(s), including {} memory entry id(s), are stranded in `.cas/index/` and invisible to search; run `cas doctor --fix`",
+                state.documents,
+                state.entry_ids.len()
+            ),
+        },
+        Ok(None) => Check {
+            name: "legacy search index".to_string(),
+            status: CheckStatus::Ok,
+            message: "no stray Tantivy root below `.cas/index/`".to_string(),
+        },
+        Err(error) => Check {
+            name: "legacy search index".to_string(),
+            status: CheckStatus::Warning,
+            message: format!("cannot inspect stray Tantivy root: {error}"),
+        },
+    }
 }
 
 /// Turn a contamination scan into a single `cas doctor` row.
@@ -1802,6 +1846,48 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn doctor_reports_legacy_tantivy_root_before_repair_and_clean_after() {
+        let temp = TempDir::new().expect("tempdir");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("create .cas");
+        let store = open_store(&cas_root).expect("store");
+        let entry = crate::types::Entry::new(
+            "doctor-legacy-entry".to_string(),
+            "doctor legacy index repair".to_string(),
+        );
+        store.add(&entry).expect("add entry");
+        {
+            let legacy = SearchIndex::open(&cas_root.join("index")).expect("legacy index");
+            legacy.index_entry(&entry).expect("index legacy entry");
+        }
+        store.mark_indexed(&entry.id).expect("mark indexed");
+
+        let before = legacy_search_index_check(&cas_root);
+        assert!(matches!(before.status, CheckStatus::Warning));
+        assert!(
+            before.message.contains("1 document(s)"),
+            "{}",
+            before.message
+        );
+        assert!(
+            before.message.contains("cas doctor --fix"),
+            "{}",
+            before.message
+        );
+
+        crate::hybrid_search::repair_legacy_index(&cas_root, store.as_ref())
+            .expect("repair")
+            .expect("legacy repair result");
+        let after = legacy_search_index_check(&cas_root);
+        assert!(matches!(after.status, CheckStatus::Ok));
+        assert!(
+            after.message.contains("no stray Tantivy root"),
+            "{}",
+            after.message
+        );
+    }
 
     fn factory_agent(
         id: &str,

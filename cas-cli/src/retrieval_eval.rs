@@ -344,7 +344,7 @@ impl ProductionScorerState {
 /// "no lexical index": the temporal channel returns results either way.
 /// Returns 0 when the index does not exist.
 pub fn indexed_document_count(cas_dir: &Path) -> usize {
-    let meta_path = cas_dir.join("index").join("tantivy").join("meta.json");
+    let meta_path = crate::hybrid_search::tantivy_index_dir(cas_dir).join("meta.json");
     let Ok(bytes) = std::fs::read(&meta_path) else {
         return 0;
     };

@@ -65,6 +65,28 @@ impl SqliteStore {
         }
         Ok(())
     }
+    pub(crate) fn store_mark_index_pending_batch(&self, ids: &[&str]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        const CHUNK_SIZE: usize = 500;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        for chunk in ids.chunks(CHUNK_SIZE) {
+            let placeholders: Vec<String> =
+                (0..chunk.len()).map(|i| format!("?{}", i + 1)).collect();
+            let query = format!(
+                "UPDATE entries SET indexed_at = NULL WHERE id IN ({})",
+                placeholders.join(", ")
+            );
+            let params: Vec<&dyn rusqlite::ToSql> = chunk
+                .iter()
+                .map(|id| &*id as &dyn rusqlite::ToSql)
+                .collect();
+            conn.execute(&query, params.as_slice())?;
+        }
+        Ok(())
+    }
     pub(crate) fn store_cas_dir(&self) -> &Path {
         &self.cas_dir
     }

@@ -277,6 +277,22 @@ impl SearchIndex {
     /// This is 10-100x faster than calling index_entry() for each entry
     /// because it uses a single commit for all documents.
     pub fn index_entries_batch(&self, entries: &[Entry]) -> Result<usize, MemError> {
+        self.index_entries_batch_inner(entries, false)
+    }
+
+    /// Index a background batch and wait for Tantivy's merge policy to finish.
+    ///
+    /// A short-lived daemon writer otherwise drops immediately after commit,
+    /// before its asynchronous merge can collapse the accumulated segments.
+    pub fn index_entries_batch_and_merge(&self, entries: &[Entry]) -> Result<usize, MemError> {
+        self.index_entries_batch_inner(entries, true)
+    }
+
+    fn index_entries_batch_inner(
+        &self,
+        entries: &[Entry],
+        wait_for_merge: bool,
+    ) -> Result<usize, MemError> {
         if entries.is_empty() {
             return Ok(0);
         }
@@ -320,7 +336,15 @@ impl SearchIndex {
         }
 
         writer.commit()?;
+        if wait_for_merge {
+            writer.wait_merging_threads()?;
+        }
         Ok(count)
+    }
+
+    /// Number of currently searchable Tantivy segments.
+    pub fn segment_count(&self) -> Result<usize, MemError> {
+        Ok(self.index.searchable_segment_ids()?.len())
     }
 
     /// Index a single task

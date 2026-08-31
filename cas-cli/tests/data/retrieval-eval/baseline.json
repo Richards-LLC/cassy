@@ -2,7 +2,7 @@
   "version": 1,
   "fixture_id": "cas-e0ed-retrieval-eval-v1",
   "captured_at": "2026-08-31",
-  "note": "Captured by CAS_RETRIEVAL_EVAL_REBASELINE=1. See the test module header for the re-baseline procedure and what each metric means. Reading the three production query modes (cas-3b80): fresh_session is a TRUE cold start whose only query content is project identity and branch, so one distinct ranking across 56 cases is correct by construction here (all cases share one cwd, temp corpus has no branch) \u2014 its result is that it beats the Basic control at all. fresh_session_carried_prompt seeds the case's OWN prompt as the previous session's, i.e. perfect topic continuity, so its precision is a CEILING and not an expectation; the assumption-free number there is distinct_rankings. seeded_task is unchanged from the pre-cas-3b80 baseline.",
+  "note": "Captured by CAS_RETRIEVAL_EVAL_REBASELINE=1. See the test module header for the re-baseline procedure and what each metric means. READING THE THREE PRODUCTION QUERY MODES (cas-3b80). fresh_session_cold_start: no in-progress task, empty session files, NO carried prompt \u2014 project identity (cwd) and git branch are the only query content. This row is what is ATTRIBUTABLE TO PROJECT/BRANCH IDENTITY ALONE: compare it to the helpful_memories Basic control (0.007143 / 0.005102, 1 case with a hit). Identity alone buys recall 0.005102 -> 0.009566 and hits 1 -> 2 on live_tiers, and recall 0.005102 -> 0.007015 with hits 1 -> 2 on all_working, at unchanged precision on all_working. Its distinct_rankings = 1 is CORRECT BY CONSTRUCTION, not a residual defect: all 56 fixture cases share one cwd and the temp corpus is not a git repository, so a cold start issues one identical query; cwd/branch can only discriminate ACROSS projects or branches, which a single-project fixture cannot exhibit. fresh_session_carried_prompt: the same cold start in a project with history, where production carries the last captured prompt forward. The harness seeds the case's OWN prompt, i.e. perfect topic continuity, so its precision is a CEILING and never an expectation; the assumption-free number in that row is distinct_rankings (1 before cas-3b80 -> 33 live_tiers / 35 all_working). seeded_task: unchanged from the pre-cas-3b80 baseline, by design \u2014 the carried prompt is a fallback used only when no in-progress task states the topic.",
   "selectors": [
     {
       "selector": "helpful_memories_production",
@@ -21,7 +21,7 @@
     {
       "selector": "helpful_memories_production",
       "tier_mode": "live_tiers",
-      "query_mode": "fresh_session",
+      "query_mode": "fresh_session_cold_start",
       "cases": 56,
       "precision_at_5": 0.010714,
       "recall_at_5": 0.009566,
@@ -105,7 +105,7 @@
     {
       "selector": "helpful_memories_production",
       "tier_mode": "all_working",
-      "query_mode": "fresh_session",
+      "query_mode": "fresh_session_cold_start",
       "cases": 56,
       "precision_at_5": 0.007143,
       "recall_at_5": 0.007015,

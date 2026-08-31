@@ -392,7 +392,7 @@ fn a_fresh_session_is_query_aware_and_the_number_says_so() {
     let corpus = EvalCorpus::materialize_with_index(&fixture, dir.path(), TierMode::AllWorking)
         .expect("seed + index");
 
-    let fresh = distinct_rankings(&fixture, &corpus, QueryMode::FreshSession);
+    let fresh = distinct_rankings(&fixture, &corpus, QueryMode::FreshSessionColdStart);
     let carried = distinct_rankings(&fixture, &corpus, QueryMode::FreshSessionCarriedPrompt);
     let seeded = distinct_rankings(&fixture, &corpus, QueryMode::SeededTask);
     println!(
@@ -425,7 +425,7 @@ fn a_fresh_session_is_query_aware_and_the_number_says_so() {
     // mode exists to measure.
     let case = &fixture.cases[0];
     let runner = retrieval_eval::ProductionRunner::open(&corpus).expect("runner");
-    let cold = runner.rank(case, QueryMode::FreshSession).expect("cold");
+    let cold = runner.rank(case, QueryMode::FreshSessionColdStart).expect("cold");
     let basic = retrieval_eval::helpful_memories_ranking(&corpus, case).expect("basic");
     println!("cold-start top-5: {cold:?}\nbasic top-5:      {basic:?}");
     assert_ne!(
@@ -451,7 +451,7 @@ fn the_production_scorer_state_is_reported_not_guessed() {
         "an index plus an in-progress task is the full hybrid path"
     );
     assert_eq!(
-        retrieval_eval::probe_production_scorer_state(&with_index, case, QueryMode::FreshSession),
+        retrieval_eval::probe_production_scorer_state(&with_index, case, QueryMode::FreshSessionColdStart),
         ProductionScorerState::QueryAwareWithLexicalIndex,
         "since cas-3b80 project identity alone satisfies has_content(), so even \
          a true cold start stops early-returning onto query-blind Basic at \

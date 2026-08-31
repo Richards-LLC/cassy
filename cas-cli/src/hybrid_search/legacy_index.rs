@@ -3,6 +3,7 @@
 use std::path::{Component, Path};
 
 use tantivy::collector::DocSetCollector;
+use tantivy::directory::{Directory, INDEX_WRITER_LOCK, META_LOCK};
 use tantivy::query::AllQuery;
 use tantivy::schema::Value;
 
@@ -115,6 +116,18 @@ pub fn repair_legacy_index(
 
 fn retire_legacy_index_files(cas_dir: &Path) -> Result<()> {
     let legacy_dir = cas_dir.join("index");
+    let index = tantivy::Index::open_in_dir(&legacy_dir)?;
+    // Coordinate with any still-running pre-fix daemon. Deleting a live
+    // writer's segments would corrupt the repair source; a held writer/meta
+    // lock turns that race into a retryable doctor warning instead.
+    let _writer_lock = index
+        .directory()
+        .acquire_lock(&INDEX_WRITER_LOCK)
+        .map_err(|error| CasError::Other(format!("legacy index writer is active: {error}")))?;
+    let _meta_lock = index
+        .directory()
+        .acquire_lock(&META_LOCK)
+        .map_err(|error| CasError::Other(format!("legacy index metadata is active: {error}")))?;
     let managed_path = legacy_dir.join(".managed.json");
     let managed: Vec<String> = serde_json::from_slice(&std::fs::read(&managed_path)?)?;
 
@@ -132,8 +145,6 @@ fn retire_legacy_index_files(cas_dir: &Path) -> Result<()> {
     for metadata in [
         "meta.json",
         ".managed.json",
-        ".tantivy-meta.lock",
-        ".tantivy-writer.lock",
     ] {
         remove_file_if_present(&legacy_dir.join(metadata))?;
     }

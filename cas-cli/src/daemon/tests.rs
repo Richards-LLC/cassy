@@ -980,3 +980,93 @@ fn a_failing_legacy_repair_still_indexes_pending_entries() {
         "the unrelated pending entry must have reached the canonical index"
     );
 }
+
+/// cas-25a9 AC1 at the DAEMON call site: a held legacy lock must not wedge the
+/// maintenance cycle.
+///
+/// This is the site that matters most — `run_maintenance` awaits the indexing
+/// cycle inside the daemon's `select!`, so a block here stalls agent reaping,
+/// lease reclaim and worktree cleanup for every session on the box. The
+/// companion `doctor_fix_against_a_held_legacy_lock_warns_within_a_bounded_time`
+/// covers the other call site.
+#[test]
+fn a_held_legacy_lock_does_not_wedge_the_daemon_cycle() {
+    use crate::hybrid_search::SearchIndex;
+    use std::time::{Duration, Instant};
+    use tantivy::directory::Directory;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cas_root = temp.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("create .cas");
+    let store = crate::store::open_store(&cas_root).expect("store");
+
+    let stranded = Entry::new(
+        "daemon-locked-stranded".to_string(),
+        "daemonlocked stranded in the legacy root".to_string(),
+    );
+    store.add(&stranded).expect("add stranded");
+    {
+        let legacy = SearchIndex::open(&cas_root.join("index")).expect("legacy index");
+        legacy.index_entry(&stranded).expect("index legacy");
+    }
+    store.mark_indexed(&stranded.id).expect("mark indexed");
+
+    // An unrelated entry that the cycle must still index while the legacy root
+    // is unavailable.
+    let healthy = Entry::new(
+        "daemon-locked-healthy".to_string(),
+        "daemonhealthy entry awaiting the canonical index".to_string(),
+    );
+    store.add(&healthy).expect("add healthy");
+
+    // A pre-fix `cas serve` is holding the legacy root.
+    let holder = tantivy::Index::open_in_dir(cas_root.join("index")).expect("open legacy root");
+    let held = holder
+        .directory()
+        .acquire_lock(&tantivy::directory::META_LOCK)
+        .expect("hold the meta lock");
+
+    let config = DaemonConfig {
+        cas_root: cas_root.clone(),
+        index_bm25: true,
+        ..DaemonConfig::default()
+    };
+    let store_arc: Arc<dyn Store> = store.clone();
+
+    let started = Instant::now();
+    let result = crate::daemon::indexing::generate_bm25_index(&store_arc, &config)
+        .expect("the cycle must not fail");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "a held legacy lock must not wedge the maintenance cycle; took {elapsed:?}"
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|(id, message)| id == "legacy-index-repair" && message.contains("skipped")),
+        "the skipped repair must be recorded: {:?}",
+        result.errors
+    );
+    assert!(
+        result.indexed >= 1,
+        "the cycle must keep indexing while the legacy root is busy; indexed {} errors {:?}",
+        result.indexed,
+        result.errors
+    );
+    assert!(
+        store
+            .list_pending_index(10)
+            .expect("pending")
+            .iter()
+            .all(|entry| entry.id != healthy.id),
+        "the unrelated entry must have reached the canonical index"
+    );
+
+    // Release before anything opens a tantivy reader: `IndexReader` acquires
+    // META_LOCK itself, so touching the root while still holding it would
+    // deadlock this test against itself.
+    drop(held);
+}

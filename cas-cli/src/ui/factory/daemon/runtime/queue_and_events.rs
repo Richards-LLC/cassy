@@ -4,6 +4,13 @@ use crate::ui::factory::director::AgentSummary;
 
 const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const SPAWN_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
+/// Registration proves that the MCP child answered, not that the interactive
+/// harness accepted the selected model. Keep watching the pane for this long
+/// after registration so a boot-time model rejection cannot remain a false
+/// `registered` lifecycle result.
+const SPAWN_BOOT_VERIFICATION_WINDOW: Duration = Duration::from_secs(
+    crate::mcp::tools::service::factory_ops::SPAWN_BOOT_VERIFICATION_WINDOW_SECS as u64,
+);
 /// cas-2702: hard ceiling on background worktree provisioning. Generous enough
 /// for a cold `git worktree add` on a large repo, short enough that a hung git
 /// process cannot wedge the spawn queue for a whole session.
@@ -57,6 +64,33 @@ fn timeout_pane_tail(buffer: Option<&super::relay::PaneBuffer>) -> Option<String
     }
     let tail: String = trimmed.chars().rev().take(MAX_CHARS).collect();
     Some(tail.chars().rev().collect())
+}
+
+/// Return a bounded pane excerpt when a harness reports a model rejection
+/// during boot. Claude Code emits these messages before a rejected worker
+/// necessarily exits, so polling this signal closes the gap between pane
+/// output and `PaneExited` delivery.
+fn boot_model_error_detail(
+    cli: cas_mux::SupervisorCli,
+    pane_tail: Option<&str>,
+) -> Option<String> {
+    let tail = pane_tail.filter(|tail| !tail.trim().is_empty())?;
+    let lower = tail.to_ascii_lowercase();
+    let marker = match cli {
+        cas_mux::SupervisorCli::Claude => [
+            "there's an issue with the selected model",
+            "there is an issue with the selected model",
+            "is not a model this version of claude code recognizes",
+            "not a model this version of claude code recognizes",
+            "may not exist or you may not have access to it",
+        ]
+        .into_iter()
+        .find(|marker| lower.contains(marker)),
+        _ => None,
+    }?;
+    Some(format!(
+        "Harness reported boot model error ({marker}):\n{tail}"
+    ))
 }
 
 fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
@@ -1816,42 +1850,18 @@ impl FactoryDaemon {
         worker_name: &str,
         exit_code: Option<i32>,
     ) -> anyhow::Result<()> {
-        let unverified = take_unverified_spawn_on_exit(&mut self.spawn_verifications, worker_name);
+        let verification = take_unverified_spawn_on_exit(&mut self.spawn_verifications, worker_name);
+        let registered_during_boot = verification
+            .as_ref()
+            .and_then(|verification| verification.registered_at)
+            .is_some();
+        let pane_tail = timeout_pane_tail(self.pane_buffers.get(worker_name));
 
-        // Look up the authoritative registration id before director state is
-        // refreshed/removed, then load the full store row needed by the
-        // durable supervisor lifecycle relay.
-        let agent_id = self
-            .app
-            .director_data()
-            .agents
-            .iter()
-            .find(|a| is_exact_agent_name_match(a, worker_name))
-            .map(|agent| agent.id.clone());
-
-        if let Some(agent_id) = agent_id {
-            if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {
-                if let Ok(agent) = agent_store.get(&agent_id) {
-                    // Staling revokes leases. Snapshot first: leased work can
-                    // lack an assignee mirror, but must be named and parked.
-                    let held = agent_store
-                        .list_agent_leases(&agent.id)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|lease| lease.task_id)
-                        .collect::<Vec<_>>();
-                    let _ = agent_store.mark_stale(&agent.id);
-                    crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
-                        self.app.cas_dir(),
-                        agent_store.as_ref(),
-                        &agent,
-                        &held,
-                        "worker PTY exited",
-                    );
-                }
-            }
-        }
-
+        // A registered worker can still be a dead harness whose MCP child
+        // answered first. Mark the durable agent stale before removing the
+        // pane so task leases are parked and worker_status cannot retain the
+        // transcript-backed active row.
+        self.mark_registered_worker_stale(worker_name, "worker PTY exited");
         self.app.mark_worker_crashed(worker_name).await;
         self.dead_workers.insert(worker_name.to_string());
 
@@ -1865,8 +1875,17 @@ impl FactoryDaemon {
             .set_error(format!("Worker '{worker_name}' {exit_info}"));
         self.app.notifier().notify_crash(worker_name, &exit_info);
 
-        if let Some(verification) = unverified {
-            let detail = format!("Worker process {exit_info} before Cassy agent registration.");
+        if let Some(verification) = verification {
+            let detail = if registered_during_boot {
+                boot_model_error_detail(self.app.harness_for(worker_name), pane_tail.as_deref())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "Worker process {exit_info} during post-registration boot verification."
+                        )
+                    })
+            } else {
+                format!("Worker process {exit_info} before Cassy agent registration.")
+            };
             append_spawn_audit(
                 self.app.cas_dir(),
                 &self.session_name,
@@ -1897,6 +1916,42 @@ impl FactoryDaemon {
         Ok(())
     }
 
+    /// Mark the current worker registration stale and park any leases before
+    /// the pane is removed. The daemon-side heartbeat gate normally handles
+    /// this, but boot failures can arrive before its next tick.
+    fn mark_registered_worker_stale(&self, worker_name: &str, reason: &str) {
+        let agent_id = self
+            .app
+            .director_data()
+            .agents
+            .iter()
+            .find(|agent| is_exact_agent_name_match(agent, worker_name))
+            .map(|agent| agent.id.clone());
+        let Some(agent_id) = agent_id else {
+            return;
+        };
+        let Ok(agent_store) = open_agent_store(self.app.cas_dir()) else {
+            return;
+        };
+        let Ok(agent) = agent_store.get(&agent_id) else {
+            return;
+        };
+        let held = agent_store
+            .list_agent_leases(&agent.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|lease| lease.task_id)
+            .collect::<Vec<_>>();
+        let _ = agent_store.mark_stale(&agent.id);
+        crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+            self.app.cas_dir(),
+            agent_store.as_ref(),
+            &agent,
+            &held,
+            reason,
+        );
+    }
+
     pub(super) async fn reconcile_spawn_verifications(&mut self) {
         if self.spawn_verifications.is_empty() {
             return;
@@ -1915,53 +1970,122 @@ impl FactoryDaemon {
             })
             .map(|agent| agent.name.as_str())
             .collect();
+        enum VerificationAction {
+            Confirmed,
+            Expired,
+            Failed(String),
+        }
+
         let now = Instant::now();
-        let finished: Vec<(String, bool)> = self
+        let actions: Vec<(String, VerificationAction)> = self
             .spawn_verifications
-            .iter()
+            .iter_mut()
             .filter_map(|(worker, verification)| {
+                let pane_tail = timeout_pane_tail(self.pane_buffers.get(worker));
+                if let Some(detail) = boot_model_error_detail(
+                    self.app.harness_for(worker),
+                    pane_tail.as_deref(),
+                ) {
+                    return Some((worker.clone(), VerificationAction::Failed(detail)));
+                }
+
                 if registered.contains(worker.as_str()) {
-                    Some((worker.clone(), true))
+                    let process_exited = active_agents.iter().any(|agent| {
+                        agent.name == *worker
+                            && agent.pid.is_some()
+                            && !crate::mcp::tools::service::factory_ops::agent_process_is_alive(
+                                agent,
+                            )
+                    });
+                    if process_exited {
+                        return Some((
+                            worker.clone(),
+                            VerificationAction::Failed(format!(
+                                "Worker harness process exited during post-registration boot verification.{}",
+                                pane_tail
+                                    .as_deref()
+                                    .map(|tail| format!("\n\nLast worker pane output:\n{tail}"))
+                                    .unwrap_or_default()
+                            )),
+                        ));
+                    }
+                    if verification.registered_at.is_none() {
+                        verification.registered_at = Some(now);
+                        return Some((worker.clone(), VerificationAction::Confirmed));
+                    }
+                    if now.saturating_duration_since(verification.registered_at.unwrap())
+                        >= SPAWN_BOOT_VERIFICATION_WINDOW
+                    {
+                        return Some((worker.clone(), VerificationAction::Expired));
+                    }
+                } else if let Some(registered_at) = verification.registered_at {
+                    if now.saturating_duration_since(registered_at)
+                        >= SPAWN_BOOT_VERIFICATION_WINDOW
+                    {
+                        return Some((
+                            worker.clone(),
+                            VerificationAction::Failed(format!(
+                                "Worker disappeared during post-registration boot verification; \
+                                 inspect the harness process.{}",
+                                pane_tail
+                                    .as_deref()
+                                    .map(|tail| format!("\n\nLast worker pane output:\n{tail}"))
+                                    .unwrap_or_default()
+                            )),
+                        ));
+                    }
                 } else if now.saturating_duration_since(verification.launched_at)
                     >= SPAWN_REGISTRATION_TIMEOUT
                 {
-                    Some((worker.clone(), false))
-                } else {
-                    None
+                    return Some((worker.clone(), VerificationAction::Failed(registration_timeout_detail(
+                        SPAWN_REGISTRATION_TIMEOUT,
+                        self.app.harness_for(worker),
+                        pane_tail.as_deref(),
+                    ))));
                 }
+                None
             })
             .collect();
 
-        for (worker, success) in finished {
-            let Some(verification) = self.spawn_verifications.remove(&worker) else {
+        for (worker, action) in actions {
+            let is_confirmed = matches!(&action, VerificationAction::Confirmed);
+            let is_expired = matches!(&action, VerificationAction::Expired);
+            if is_expired {
+                self.spawn_verifications.remove(&worker);
+                continue;
+            }
+            let verification = if is_confirmed {
+                self.spawn_verifications.get(&worker).cloned()
+            } else {
+                self.spawn_verifications.remove(&worker)
+            };
+            let Some(verification) = verification else {
                 continue;
             };
-            let (outcome, detail) = if success {
-                (
+            let (outcome, success, detail) = match action {
+                VerificationAction::Confirmed => (
                     "confirmed",
+                    true,
                     "Worker is active in the Cassy agent registry for this factory session."
                         .to_string(),
-                )
-            } else {
-                (
-                    "timeout",
-                    registration_timeout_detail(
-                        SPAWN_REGISTRATION_TIMEOUT,
-                        self.app.harness_for(&worker),
-                        timeout_pane_tail(self.pane_buffers.get(&worker)).as_deref(),
-                    ),
-                )
+                ),
+                VerificationAction::Failed(detail) => ("failed", false, detail),
+                VerificationAction::Expired => unreachable!(),
             };
             if !success {
-                // A worker that never registered is not reachable through the
-                // normal shutdown path (which correctly requires an agent row).
-                // Kill its tracked PTY process group directly, then apply the
-                // existing crash cleanup so no unmanaged child survives.
+                // A worker that failed during boot may not be reachable through
+                // the normal shutdown path. Reap its PTY, stale its registry
+                // row immediately, and remove it from the live pane roster.
                 if let Err(error) = self.app.mux.kill_worker(&worker, true).await {
-                    tracing::warn!(worker = %worker, error = %error, "failed to reap registration-timeout worker PTY");
+                    tracing::warn!(worker = %worker, error = %error, "failed to reap boot-failed worker PTY");
                 }
+                self.mark_registered_worker_stale(&worker, "worker harness failed during boot");
                 self.app.mark_worker_crashed(&worker).await;
+                self.dead_workers.insert(worker.clone());
                 self.pane_buffers.remove(&worker);
+                self.app
+                    .set_error(format!("Worker '{worker}' failed during harness boot"));
+                self.app.notifier().notify_crash(&worker, &detail);
             }
             append_spawn_audit(
                 self.app.cas_dir(),
@@ -1993,8 +2117,8 @@ impl FactoryDaemon {
                     self.settle_worker_preassignment(&worker, task_id, verification.request_id);
                 } else {
                     let detail = format!(
-                        "Task {task_id} was promised to worker '{worker}', which never registered \
-                         with Cassy. The task is not being worked — re-assign it or re-spawn."
+                        "Task {task_id} was promised to worker '{worker}', whose harness failed \
+                         during boot. The task is not being worked — re-assign it or re-spawn."
                     );
                     append_spawn_audit(
                         self.app.cas_dir(),
@@ -4908,6 +5032,7 @@ impl FactoryDaemon {
                                 SpawnVerification {
                                     request_id,
                                     launched_at: Instant::now(),
+                                    registered_at: None,
                                     task_id: pending_task_id.clone(),
                                 },
                             );
@@ -6010,7 +6135,7 @@ mod tests {
         reminder_matches_factory_session, report_stale_reminder_expiry, shutdown_targets,
         spawn_predates_shutdown, spawn_provisioning_timed_out, stalled_spawn_requests,
         take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
-        timeout_pane_tail,
+        timeout_pane_tail, boot_model_error_detail,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
@@ -8605,6 +8730,7 @@ mod tests {
             SpawnVerification {
                 request_id: Some(407),
                 launched_at: Instant::now(),
+                registered_at: None,
                 task_id: None,
             },
         )]);
@@ -9116,6 +9242,7 @@ mod tests {
             SpawnVerification {
                 request_id: Some(414),
                 launched_at: Instant::now(),
+                registered_at: None,
                 task_id: Some("cas-aee6".to_string()),
             },
         )]);
@@ -9141,6 +9268,16 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(daemon).unwrap(), line);
         assert_eq!(std::fs::read_to_string(trace).unwrap(), line);
+    }
+
+    #[test]
+    fn claude_boot_model_error_detail_preserves_stub_output() {
+        let tail = "There's an issue with the selected model: opus-5 is not a model this version of Claude Code recognizes.";
+        let detail = boot_model_error_detail(cas_mux::SupervisorCli::Claude, Some(tail))
+            .expect("Claude's rejected-model output must fail boot verification");
+        assert!(detail.contains("selected model"), "{detail}");
+        assert!(detail.contains("opus-5"), "{detail}");
+        assert!(boot_model_error_detail(cas_mux::SupervisorCli::Codex, Some(tail)).is_none());
     }
 
     // -----------------------------------------------------------------------

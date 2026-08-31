@@ -1133,6 +1133,37 @@ mod tests {
         assert!(row.state_at.is_some());
     }
 
+    #[test]
+    fn registered_spawn_can_be_downgraded_to_failed_for_boot_death() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), None)
+            .unwrap();
+
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Registered,
+                Some("boot-failed-worker"),
+                Some("MCP child registered; boot verification pending"),
+            )
+            .unwrap();
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Failed,
+                Some("boot-failed-worker"),
+                Some("Claude Code rejected the selected model during boot"),
+            )
+            .unwrap();
+
+        let rows = store.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.state, SpawnLifecycleState::Failed);
+        assert_eq!(row.worker_name.as_deref(), Some("boot-failed-worker"));
+        assert!(row.detail.as_deref().unwrap().contains("rejected"));
+    }
+
     /// A spawn that launches but never registers is FAILED with a reason —
     /// the exact silence GH #60 reported (receipt says queued, nothing else
     /// ever contradicts it).

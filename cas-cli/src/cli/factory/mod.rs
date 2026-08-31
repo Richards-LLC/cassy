@@ -299,7 +299,7 @@ pub struct FactoryArgs {
     /// A JSON object with optional fields `cli`, `model`, `effort`.
     /// Overrides `--supervisor-cli`/`--supervisor-model`/`--supervisor-effort`
     /// and `[factory.supervisor]` config.  Example:
-    ///   --supervisor-spec '{"cli":"claude","model":"claude-opus-4-7","effort":"xhigh"}'
+    ///   --supervisor-spec '{"cli":"claude","model":"claude-opus-5","effort":"xhigh"}'
     #[arg(long = "supervisor-spec", value_name = "JSON")]
     pub supervisor_spec: Option<String>,
 

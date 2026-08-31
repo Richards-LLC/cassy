@@ -193,6 +193,49 @@ pub(crate) const WORKER_DEAD_SECS: i64 = 75;
 /// than diverging on an arbitrary event count or activity class.
 const WORKER_ACTIVITY_WINDOW_SECS: i64 = 600;
 const WORKER_FILE_WRITE_SCAN_LIMIT: usize = 2_000;
+pub(crate) const SPAWN_BOOT_VERIFICATION_WINDOW_SECS: i64 = 60;
+
+/// Mark a just-registered spawn as failed when its harness PID has already
+/// disappeared and the daemon missed the pane-exit event. The state-at age
+/// keeps this scoped to the post-registration boot window; an old, unrelated
+/// registered lifecycle row must not be rewritten because a later generation
+/// of the same worker name died.
+fn mark_recent_registered_spawn_failed(
+    cas_root: &std::path::Path,
+    factory_session: &str,
+    worker_name: &str,
+    detail: &str,
+) {
+    use cas_store::SpawnLifecycleState;
+
+    let Ok(queue) = crate::store::open_spawn_queue_store(cas_root) else {
+        return;
+    };
+    let Ok(rows) = queue.recent_spawn_lifecycle(factory_session, 50) else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    let boot_window_secs = SPAWN_BOOT_VERIFICATION_WINDOW_SECS;
+    for row in rows {
+        if row.worker_name.as_deref() != Some(worker_name)
+            || row.state != SpawnLifecycleState::Registered
+        {
+            continue;
+        }
+        let Some(state_at) = row.state_at else {
+            continue;
+        };
+        let age_secs = (now - state_at).num_seconds();
+        if (0..=boot_window_secs).contains(&age_secs) {
+            let _ = queue.record_spawn_state(
+                row.id,
+                SpawnLifecycleState::Failed,
+                Some(worker_name),
+                Some(detail),
+            );
+        }
+    }
+}
 
 /// Whether an event is evidence of work a worker actually performed.
 ///
@@ -991,6 +1034,27 @@ fn spawn_specs_warning(
             spawn_spec_warning(model_explicit, effort_explicit, &spec_json)
         })
         .collect()
+}
+
+/// Lane resolution supplies a complete recipe, including model and effort.
+/// Do not emit the legacy omitted-field warning for that request shape: it
+/// falsely tells operators that a lane's model was an accidental fallback and
+/// obscures the lane receipt they actually selected.
+fn spawn_warning_for_request(
+    lane_requested: bool,
+    model_explicit: bool,
+    effort_explicit: bool,
+    legacy_single_spec_payload: bool,
+    spec_json: &str,
+    specs: &[cas_mux::WorkerSpec],
+) -> String {
+    if lane_requested {
+        String::new()
+    } else if legacy_single_spec_payload {
+        spawn_spec_warning(model_explicit, effort_explicit, spec_json)
+    } else {
+        spawn_specs_warning(model_explicit, effort_explicit, specs)
+    }
 }
 
 fn current_factory_session() -> Option<String> {
@@ -1831,11 +1895,14 @@ impl CasService {
                 notice
             })
             .unwrap_or_default();
-        let spec_warning = if legacy_single_spec_payload {
-            spawn_spec_warning(req.model.is_some(), req.effort.is_some(), &spec_json_owned)
-        } else {
-            spawn_specs_warning(req.model.is_some(), req.effort.is_some(), &specs)
-        };
+        let spec_warning = spawn_warning_for_request(
+            req.lane.is_some(),
+            req.model.is_some(),
+            req.effort.is_some(),
+            legacy_single_spec_payload,
+            &spec_json_owned,
+            &specs,
+        );
         let isolation_warning = if isolate {
             String::new()
         } else {
@@ -2476,12 +2543,62 @@ impl CasService {
                     .collect();
                 if store.mark_stale(&agent.id).is_ok() {
                     stale_pruned += 1;
+                    if let Some(session) = factory_session.as_deref() {
+                        mark_recent_registered_spawn_failed(
+                            &self.inner.cas_root,
+                            session,
+                            &agent.name,
+                            "Harness process exited during post-registration boot verification; worker_status observed a dead PID.",
+                        );
+                    }
                     let _ = super::orphan_recovery::recover_worker_vanished(
                         &self.inner.cas_root,
                         store.as_ref(),
                         &agent,
                         &held,
                         "worker_status stale prune (heartbeat gone, process not alive)",
+                    );
+                }
+            }
+        }
+
+        // A shared `cas serve` process can keep heartbeating after the
+        // interactive harness has exited. Fresh heartbeat data must not make
+        // that dead harness look active until the daemon's next heartbeat
+        // tick; worker_status is an operator poll and can resolve the typed
+        // PID fingerprint immediately. Legacy rows without a PID retain the
+        // heartbeat-only behavior.
+        if let Ok(active_agents) = store.list(Some(AgentStatus::Active)) {
+            for agent in active_agents {
+                if !agent.visible_to_factory_session(factory_session.as_deref())
+                    || agent.role != AgentRole::Worker
+                    || agent.pid.is_none()
+                    || agent_process_is_alive(&agent)
+                {
+                    continue;
+                }
+                let held: Vec<String> = store
+                    .list_agent_leases(&agent.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|lease| lease.task_id)
+                    .collect();
+                if store.mark_stale(&agent.id).is_ok() {
+                    stale_pruned += 1;
+                    if let Some(session) = factory_session.as_deref() {
+                        mark_recent_registered_spawn_failed(
+                            &self.inner.cas_root,
+                            session,
+                            &agent.name,
+                            "Harness process exited during post-registration boot verification; worker_status observed a dead PID.",
+                        );
+                    }
+                    let _ = super::orphan_recovery::recover_worker_vanished(
+                        &self.inner.cas_root,
+                        store.as_ref(),
+                        &agent,
+                        &held,
+                        "worker_status process liveness check (harness exited)",
                     );
                 }
             }
@@ -3397,25 +3514,33 @@ impl CasService {
                 format!("Failed to open agent store: {e}"),
             )
         })?;
-        let mut visible_workers: Vec<_> = agent_store
+        let all_agents = agent_store
             .list(None)
             .map_err(|e| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!("Failed to list agents: {e}"),
                 )
-            })?
-            .into_iter()
-            .filter(|a| {
-                a.role == AgentRole::Worker
-                    && matches!(a.status, AgentStatus::Active | AgentStatus::Idle)
-                    && a.visible_to_factory_session(factory_session.as_deref())
-                    && owned.as_ref().is_none_or(|set| set.contains(&a.name))
-            })
-            .collect();
+            })?;
+        let mut dead_workers = Vec::new();
+        let mut visible_workers = Vec::new();
+        for agent in all_agents.into_iter().filter(|agent| {
+            agent.role == AgentRole::Worker
+                && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+                && agent.visible_to_factory_session(factory_session.as_deref())
+                && owned.as_ref().is_none_or(|set| set.contains(&agent.name))
+        }) {
+            if agent.pid.is_some() && !agent_process_is_alive(&agent) {
+                dead_workers.push(agent);
+            } else {
+                visible_workers.push(agent);
+            }
+        }
 
         if !requested_names.is_empty() {
             visible_workers
+                .retain(|a| requested_names.contains(&a.name) || requested_names.contains(&a.id));
+            dead_workers
                 .retain(|a| requested_names.contains(&a.name) || requested_names.contains(&a.id));
         }
 
@@ -3570,6 +3695,7 @@ impl CasService {
             transcript_activity.len(),
             worktree_activity.len(),
             terminal_event_count,
+            dead_workers.len(),
         ) && opencode_activity.is_empty()
         {
             return Ok(Self::success(
@@ -3582,6 +3708,12 @@ impl CasService {
             output.push_str(&format!(
                 "⚠ {terminal_event_count} terminal-task activity row{} suppressed; closed work is not live worker activity.\n",
                 if terminal_event_count == 1 { "" } else { "s" }
+            ));
+        }
+        for agent in dead_workers {
+            output.push_str(&format!(
+                "• {} - harness process gone (dead; process liveness check)\n",
+                agent.name
             ));
         }
         for event in worker_events {
@@ -5557,11 +5689,13 @@ fn worker_activity_has_no_rows(
     transcript_activity_count: usize,
     worktree_activity_count: usize,
     terminal_event_count: usize,
+    dead_worker_count: usize,
 ) -> bool {
     worker_event_count == 0
         && transcript_activity_count == 0
         && worktree_activity_count == 0
         && terminal_event_count == 0
+        && dead_worker_count == 0
 }
 
 /// cas-f53c: shared resolution for worker clone/worktree path used by both
@@ -9548,7 +9682,10 @@ mod tests {
         assert_eq!(specs.0[0].name.as_deref(), Some("research"));
         assert_eq!(specs.0[1].name.as_deref(), Some("review"));
         assert_eq!(specs.0[0].config_dir.as_deref(), Some("~/.claude-alt"));
-        assert_eq!(specs.0[0].model.as_deref(), Some("haiku-4.5"));
+        assert_eq!(
+            specs.0[0].model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
         assert_eq!(specs.0[0].effort, Some(cas_mux::Effort::Low));
         assert!(specs.2.is_empty(), "static primary should not warn");
     }
@@ -9640,7 +9777,7 @@ mod tests {
     #[test]
     fn spawn_spec_omitted_cli_follows_an_explicit_claude_model() {
         let _home = TestEnvGuard::temp_home();
-        let json = build_spawn_spec_json(None, Some("claude-opus-4-5"), None).unwrap();
+        let json = build_spawn_spec_json(None, Some("claude-opus-5"), None).unwrap();
         let spec = decoded_spawn_spec(&json);
 
         assert_eq!(
@@ -9648,7 +9785,7 @@ mod tests {
             cas_mux::SupervisorCli::Claude,
             "an explicit claude model must not be spawned on codex"
         );
-        assert_eq!(spec.model.as_deref(), Some("claude-opus-4-5"));
+        assert_eq!(spec.model.as_deref(), Some("claude-opus-5"));
     }
 
     #[test]
@@ -10013,6 +10150,22 @@ model = "local/qwen3.8"
             warning.contains("policy default claude/opus/high"),
             "{warning}"
         );
+    }
+
+    #[test]
+    fn lane_recipe_does_not_emit_omitted_model_or_effort_warning() {
+        let _home = TestEnvGuard::temp_home();
+        let json = build_spawn_spec_json(
+            Some("claude"),
+            Some("claude-opus-5"),
+            Some("high"),
+        )
+        .unwrap();
+        let spec = decoded_spawn_spec(&json);
+
+        let warning = spawn_warning_for_request(true, false, false, true, &json, &[spec]);
+
+        assert!(warning.is_empty(), "lane recipes are complete: {warning}");
     }
 
     #[test]
@@ -13791,8 +13944,12 @@ effort = "high"
         let rendered = format_worker_activity_worktree_snapshot(&snapshot);
 
         assert!(
-            !worker_activity_has_no_rows(0, 0, 1, 0),
+            !worker_activity_has_no_rows(0, 0, 1, 0, 0),
             "the live floor must bypass worker_activity's empty response"
+        );
+        assert!(
+            !worker_activity_has_no_rows(0, 0, 0, 0, 1),
+            "a dead harness must bypass worker_activity's empty response"
         );
         assert!(
             !rendered.contains("No recent worker activity"),

@@ -720,7 +720,7 @@ fn supervisor_spec_factory_supervisor_toml_model_override() {
     let project = toml_file(
         r#"
 [factory.supervisor]
-model = "claude-opus-4-7"
+model = "claude-opus-5"
 "#,
     );
 
@@ -731,7 +731,7 @@ model = "claude-opus-4-7"
     })
     .unwrap();
 
-    assert_eq!(spec.model.as_deref(), Some("claude-opus-4-7"));
+    assert_eq!(spec.model.as_deref(), Some("claude-opus-5"));
 }
 
 #[test]

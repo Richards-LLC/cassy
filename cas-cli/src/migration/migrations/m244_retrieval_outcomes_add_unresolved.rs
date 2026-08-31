@@ -118,4 +118,62 @@ mod tests {
         )
         .unwrap();
     }
+
+    #[test]
+    fn migration_preserves_existing_judge_attribution() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE retrieval_queries (
+                id TEXT PRIMARY KEY,
+                query_fingerprint TEXT NOT NULL,
+                query_family TEXT NOT NULL,
+                ranking_policy TEXT NOT NULL,
+                session_hash TEXT,
+                created_at TEXT NOT NULL
+             );
+             CREATE TABLE retrieval_query_results (
+                query_id TEXT NOT NULL,
+                result_id TEXT NOT NULL,
+                document_type TEXT NOT NULL,
+                rank INTEGER NOT NULL,
+                PRIMARY KEY (query_id, result_id)
+             );
+             CREATE TABLE retrieval_outcomes (
+                id TEXT PRIMARY KEY,
+                query_id TEXT NOT NULL,
+                result_id TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK (
+                    outcome IN ('used', 'helpful', 'ignored', 'corrected', 'harmful')
+                ),
+                actor_hash TEXT NOT NULL,
+                session_hash TEXT NOT NULL,
+                correction_ref TEXT,
+                created_at TEXT NOT NULL,
+                attribution TEXT NOT NULL DEFAULT 'explicit'
+             );
+             INSERT INTO retrieval_queries VALUES
+                ('q1', 'fingerprint', 'ambient_transition', 'policy', 'session', 'now');
+             INSERT INTO retrieval_query_results VALUES ('q1', 'entry-1', 'entry', 0);
+             INSERT INTO retrieval_outcomes
+                (id, query_id, result_id, outcome, actor_hash, session_hash,
+                 correction_ref, created_at, attribution)
+             VALUES
+                ('judge-row', 'q1', 'entry-1', 'helpful', 'actor', 'session',
+                 NULL, 'now', 'judge');",
+        )
+        .unwrap();
+
+        for statement in super::MIGRATION.up {
+            conn.execute(statement, []).unwrap();
+        }
+
+        let attribution: String = conn
+            .query_row(
+                "SELECT attribution FROM retrieval_outcomes WHERE id = 'judge-row'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attribution, "judge");
+    }
 }

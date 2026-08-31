@@ -850,6 +850,7 @@ impl SqliteRetrievalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use tempfile::TempDir;
 
     fn hit(id: &str, document_type: &str, rank: usize) -> RetrievalHitIdentity {
@@ -863,6 +864,74 @@ mod tests {
     #[test]
     fn unresolved_is_a_supported_retrieval_outcome() {
         assert!(RetrievalOutcome::from_str("unresolved").is_ok());
+    }
+
+    #[test]
+    fn opening_pre_m244_schema_never_silently_drops_unresolved_outcome() {
+        let temp = TempDir::new().unwrap();
+        let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE retrieval_queries (
+                id TEXT PRIMARY KEY,
+                query_fingerprint TEXT NOT NULL,
+                query_family TEXT NOT NULL,
+                ranking_policy TEXT NOT NULL,
+                session_hash TEXT,
+                created_at TEXT NOT NULL
+             );
+             CREATE TABLE retrieval_query_results (
+                query_id TEXT NOT NULL,
+                result_id TEXT NOT NULL,
+                document_type TEXT NOT NULL,
+                rank INTEGER NOT NULL,
+                PRIMARY KEY (query_id, result_id),
+                FOREIGN KEY (query_id) REFERENCES retrieval_queries(id) ON DELETE CASCADE
+             );
+             CREATE TABLE retrieval_outcomes (
+                id TEXT PRIMARY KEY,
+                query_id TEXT NOT NULL,
+                result_id TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK (
+                    outcome IN ('used', 'helpful', 'ignored', 'corrected', 'harmful')
+                ),
+                actor_hash TEXT NOT NULL,
+                session_hash TEXT NOT NULL,
+                correction_ref TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (query_id, result_id)
+                    REFERENCES retrieval_query_results(query_id, result_id) ON DELETE CASCADE
+             );
+             INSERT INTO retrieval_queries VALUES
+                ('q1', 'fingerprint', 'ambient_transition', 'policy', 'session', 'now');
+             INSERT INTO retrieval_query_results VALUES ('q1', 'entry-1', 'entry', 0);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = SqliteRetrievalStore::open(temp.path()).unwrap();
+        store
+            .record_outcome_with_attribution(
+                "out-unresolved",
+                "q1",
+                "entry-1",
+                RetrievalOutcome::Unresolved,
+                "actor",
+                "session",
+                None,
+                RETRIEVAL_ATTRIBUTION_AUTOMATIC,
+            )
+            .unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let persisted: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM retrieval_outcomes
+                 WHERE id = 'out-unresolved' AND outcome = 'unresolved'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted, 1, "a successful outcome write must be durable");
     }
 
     #[test]
@@ -1146,5 +1215,34 @@ mod tests {
             .sample_injected_relevance(10, |_| Ok(Some(true)))
             .unwrap();
         assert_eq!(second.sampled, 0, "judge rows are idempotently excluded");
+    }
+
+    #[test]
+    fn unlabeled_injected_results_enter_a_cooldown() {
+        let temp = TempDir::new().unwrap();
+        let store = SqliteRetrievalStore::open(temp.path()).unwrap();
+        store
+            .record_query(
+                "ambient-unlabeled",
+                "query unavailable to judge",
+                "ambient_transition",
+                DEFAULT_RETRIEVAL_POLICY,
+                Some("session"),
+                &[hit("entry-unlabeled", "entry", 0)],
+            )
+            .unwrap();
+
+        let first = store.sample_injected_relevance(1, |_| Ok(None)).unwrap();
+        assert_eq!(first.sampled, 1);
+        assert_eq!(first.labels_recorded, 0);
+        assert_eq!(first.unlabeled, 1);
+
+        let second = store
+            .sample_injected_relevance(1, |_| Ok(Some(true)))
+            .unwrap();
+        assert_eq!(
+            second.sampled, 0,
+            "the same item must not consume the next judge pass"
+        );
     }
 }

@@ -8,22 +8,18 @@
 //!
 //! # Why the command name is a constant
 //!
-//! The front door is expected to become `cas setup` (cas-b635). That command
-//! does not exist yet, and pointing someone at a command that does not exist is
-//! worse than pointing them at a plainer one that works. So the name lives in
-//! exactly one place: cas-b635 changes [`FRONT_DOOR_COMMAND`] and nothing else,
-//! and the test below refuses to let either version ship if the named command
-//! is not a real subcommand.
+//! The front door is `cas setup`, and the name lives in exactly one place. The
+//! test below refuses to let a first-run hint ship if its named command is not
+//! a real subcommand.
 
 use std::path::Path;
 
 /// The single command a brand-new machine is told to run.
 ///
-/// Change this to `"setup"` when `cas setup` exists (cas-b635). The test
-/// `front_door_command_is_a_real_subcommand` fails the build if the name here
-/// is not an actual clap subcommand, so the pointer can never become a
-/// dead end.
-pub const FRONT_DOOR_COMMAND: &str = "init";
+/// The test `front_door_command_is_a_real_subcommand` fails the build if the
+/// name here is not an actual clap subcommand, so the pointer can never become
+/// a dead end.
+pub const FRONT_DOOR_COMMAND: &str = "setup";
 
 /// A machine nobody has set up yet: no host-level `~/.cas/` and no project to
 /// stand in for it.

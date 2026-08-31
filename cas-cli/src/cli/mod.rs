@@ -58,6 +58,7 @@ pub mod memory;
 mod open;
 mod queue;
 pub mod retrieval_parity;
+mod setup;
 mod status;
 mod statusline;
 mod sync;
@@ -88,6 +89,7 @@ pub use list::ListArgs;
 pub use mcp_cmd::McpCommands;
 pub use open::OpenArgs;
 pub use provider_default::DefaultArgs;
+pub use setup::SetupArgs;
 pub use status::StatusArgs;
 pub use statusline::StatusLineArgs;
 pub use sync::SyncCommands;
@@ -166,6 +168,9 @@ pub enum Commands {
 
     /// Initialize Cassy in current directory
     Init(InitArgs),
+
+    /// Guide a complete machine through installation, login, pairing, and a first project
+    Setup(SetupArgs),
 
     /// Attach to a running factory session
     Attach(AttachArgs),
@@ -366,6 +371,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
 
         // Local/offline commands
         Commands::Init(_)
+        | Commands::Setup(_)
         | Commands::Open(_)
         | Commands::Doctor(_)
         | Commands::Viktor(_)
@@ -561,6 +567,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
     match cmd {
         Commands::Open(_) => "open".to_string(),
         Commands::Init(_) => "init".to_string(),
+        Commands::Setup(_) => "setup".to_string(),
         Commands::Attach(_) => "attach".to_string(),
         Commands::List(_) => "list".to_string(),
         Commands::Kill(_) => "kill".to_string(),
@@ -638,6 +645,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     match command {
         Commands::Open(args) => open::execute(args),
         Commands::Init(args) => init::execute(args, cli),
+        Commands::Setup(args) => setup::execute(args, cli),
         Commands::Attach(args) => factory::execute_attach(args),
         Commands::List(args) => factory::execute_list(cli, args),
         Commands::Kill(args) => factory::execute_kill(args.name.as_deref(), args.force),

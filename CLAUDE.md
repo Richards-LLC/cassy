@@ -52,6 +52,8 @@ with `cargo check`, then run only the affected `--lib` or `--test` target; the
 PreToolUse guard rejects an unscoped worker test run. Full suites are owned by
 the supervisor integration merge and release gate.
 
+Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
+
 Factory worker spawns use `sccache` automatically when it is installed, while
 keeping a separate target directory per worktree so concurrent Cargo builds do
 not serialize. An existing `RUSTC_WRAPPER` wins; set

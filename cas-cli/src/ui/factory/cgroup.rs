@@ -352,19 +352,6 @@ fn own_cgroup_dir() -> Option<PathBuf> {
     None
 }
 
-#[cfg(test)]
-pub(super) fn own_scope_for_test() -> Option<PathBuf> {
-    own_cgroup_dir()
-}
-
-/// Return the calling process's cgroup scope for durable process records.
-///
-/// This is intentionally best effort: hosts without delegated cgroup v2
-/// support still get the process-group containment tier.
-pub(crate) fn current_scope() -> Option<PathBuf> {
-    own_cgroup_dir()
-}
-
 /// The containment root in which worker and shared-server scopes are siblings.
 ///
 /// An MCP server invoked by a worker already runs *inside* that worker's
@@ -382,6 +369,53 @@ fn containment_root(own: &Path) -> PathBuf {
     } else {
         own.to_path_buf()
     }
+}
+
+/// Return whether `dir` is the caller's cgroup or one of its ancestors.
+///
+/// A persisted cgroup path is not ownership evidence. In particular, the
+/// launcher's inherited terminal/session scope is normally an ancestor of the
+/// caller, and writing `cgroup.kill` there would terminate the whole session.
+fn is_own_or_ancestor_scope(dir: &Path, own: &Path) -> bool {
+    dir == own || own.starts_with(dir)
+}
+
+/// Return whether `dir` has a Cassy-generated scope name in the caller's
+/// delegated containment tree.
+///
+/// Shared hub and worker scopes are direct children of the containment root.
+/// Private registered-server scopes are the one intentional nested case: they
+/// are direct children of a Cassy worker scope. Keeping the parent check here
+/// prevents an arbitrary directory merely named `cas-server-*` from becoming
+/// a kill target.
+fn is_cassy_owned_scope(dir: &Path, own: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if !metadata.file_type().is_dir() {
+        return false;
+    }
+    let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(parent) = dir.parent() else {
+        return false;
+    };
+    let root = containment_root(own);
+    if parent == root {
+        return name.starts_with("cas-server-") || name.starts_with("cas-worker-");
+    }
+
+    name.starts_with("cas-private-server-")
+        && parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("cas-worker-"))
+        && parent.parent() == Some(root.as_path())
+}
+
+fn scope_is_safe(dir: &Path, own: &Path) -> bool {
+    !is_own_or_ancestor_scope(dir, own) && is_cassy_owned_scope(dir, own)
 }
 
 /// Prove that `parent` is a writable delegated cgroup v2 tree.
@@ -590,7 +624,25 @@ fn listening_ports_for_pid(pid: u32, listening: &HashMap<u64, u16>) -> Vec<u16> 
 /// Prefers `cgroup.kill` (kernel 5.14+), which terminates the whole subtree
 /// atomically — no fork races. Falls back to SIGKILL per pid.
 pub(crate) fn kill_scope(dir: &Path) -> io::Result<Vec<ReapedProcess>> {
+    kill_scope_with_own(dir, own_cgroup_dir().as_deref())
+}
+
+fn kill_scope_with_own(dir: &Path, own: Option<&Path>) -> io::Result<Vec<ReapedProcess>> {
     if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let Some(own) = own else {
+        tracing::warn!(
+            cgroup = %dir.display(),
+            "cas-1187: refusing to kill cgroup without a verifiable caller scope"
+        );
+        return Ok(Vec::new());
+    };
+    if !scope_is_safe(dir, own) {
+        tracing::warn!(
+            cgroup = %dir.display(),
+            "cas-1187: refusing to kill cgroup that is not a Cassy-owned leaf outside the caller scope"
+        );
         return Ok(Vec::new());
     }
     let reaped = snapshot(dir);
@@ -629,6 +681,23 @@ pub(crate) fn kill_scope(dir: &Path) -> io::Result<Vec<ReapedProcess>> {
 
 /// Remove the (expected-empty) scope directory once its processes are gone.
 pub(crate) fn remove_scope(dir: &Path) {
+    if !dir.exists() {
+        return;
+    }
+    let Some(own) = own_cgroup_dir() else {
+        tracing::warn!(
+            cgroup = %dir.display(),
+            "cas-1187: refusing to remove cgroup without a verifiable caller scope"
+        );
+        return;
+    };
+    if !scope_is_safe(dir, &own) {
+        tracing::warn!(
+            cgroup = %dir.display(),
+            "cas-1187: refusing to remove cgroup that is not a Cassy-owned leaf outside the caller scope"
+        );
+        return;
+    }
     for _ in 0..20 {
         remove_empty_descendant_scopes(dir);
         match std::fs::remove_dir(dir) {
@@ -749,6 +818,68 @@ mod tests {
 
         let lookalike = Path::new("/delegated/session/not-cas-worker-a");
         assert_eq!(containment_root(lookalike), lookalike);
+    }
+
+    #[test]
+    fn kill_scope_decision_table_rejects_inherited_and_unknown_scopes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("delegated");
+        let own = root.join("cas-worker-session-own");
+        let ancestor = root.clone();
+        let sibling_host = root.join("terminal.scope");
+        let server = root.join("cas-server-session-hub");
+        let worker = root.join("cas-worker-session-peer");
+        let missing = root.join("cas-server-session-missing");
+        for dir in [&own, &sibling_host, &server, &worker] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+
+        let cases = [
+            ("own scope", own.as_path(), false),
+            ("ancestor", ancestor.as_path(), false),
+            ("sibling host scope", sibling_host.as_path(), false),
+            ("cas-server leaf", server.as_path(), true),
+            ("cas-worker leaf", worker.as_path(), true),
+            ("missing dir", missing.as_path(), false),
+        ];
+        for (label, dir, expected) in cases {
+            assert_eq!(
+                scope_is_safe(dir, &own),
+                expected,
+                "unexpected scope decision for {label}: {}",
+                dir.display()
+            );
+            if dir.exists() {
+                std::fs::write(dir.join("cgroup.kill"), b"keep\n").unwrap();
+            }
+            let reaped = kill_scope_with_own(dir, Some(&own)).unwrap();
+            if expected {
+                assert!(reaped.is_empty(), "synthetic scope had no members: {label}");
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("cgroup.kill")).unwrap(),
+                    "1\n",
+                    "owned scope should be eligible for teardown: {label}"
+                );
+            } else if dir.exists() {
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("cgroup.kill")).unwrap(),
+                    "keep\n",
+                    "refused scope must not be touched: {label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn private_server_scope_remains_owned_when_nested_under_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("delegated");
+        let own = root.join("cas-worker-session-own");
+        let private = own.join("cas-private-server-session-dev");
+        std::fs::create_dir_all(&private).unwrap();
+
+        assert!(scope_is_safe(&private, &own));
+        assert!(!scope_is_safe(&own, &own));
     }
 
     #[test]

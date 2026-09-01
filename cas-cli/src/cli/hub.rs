@@ -175,6 +175,9 @@ pub struct HubServeArgs {
     /// Internal timestamp captured by the detached launcher.
     #[arg(long, hide = true)]
     pub launched_at: Option<String>,
+    /// Cassy-created cgroup scope passed through the detached launch barrier.
+    #[arg(long, hide = true)]
+    pub cgroup: Option<std::path::PathBuf>,
 }
 
 impl Default for HubServeArgs {
@@ -184,6 +187,7 @@ impl Default for HubServeArgs {
             port: DEFAULT_HUB_PORT,
             launched_by: "cli".to_owned(),
             launched_at: None,
+            cgroup: None,
         }
     }
 }
@@ -442,8 +446,7 @@ fn start_with_output_from(
     // before it forks or execs anything, then execs the hub in the same fresh
     // session. Thus the recorded hub pid is also the session/process-group
     // leader and worker cgroup teardown cannot reach it.
-    let launcher_script =
-        r#"printf '%s' "$$" > "$1"; while [ ! -f "$2" ]; do sleep 0.01; done; shift 2; exec "$0" "$@""#;
+    let launcher_script = r#"printf '%s' "$$" > "$1"; while [ ! -f "$2" ]; do sleep 0.01; done; cgroup=; IFS= read -r cgroup < "$2" || :; shift 2; if [ -n "$cgroup" ]; then set -- "$@" --cgroup "$cgroup"; fi; exec "$0" "$@""#;
     let executable = std::env::current_exe()?;
     let mut command = Command::new("sh");
     command
@@ -497,7 +500,11 @@ fn start_with_output_from(
         crate::ui::factory::cgroup::join_shared_scope(&session, "hub", launcher_pid)
     });
     drop(launch_guard);
-    if let Err(error) = std::fs::write(&launch_file, b"go\n") {
+    let launch_metadata = cgroup
+        .as_deref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if let Err(error) = std::fs::write(&launch_file, launch_metadata) {
         terminate_failed_launch(&mut child, cgroup.as_deref());
         return Err(error.into());
     }
@@ -645,7 +652,7 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             port: actual.port(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             started_at: started_at.clone(),
-            cgroup: crate::ui::factory::cgroup::current_scope(),
+            cgroup: args.cgroup.clone(),
             launched_by: Some(launched_by),
             launched_at: Some(launched_at.unwrap_or(started_at)),
             public_url: tailscale.as_ref().map(|receipt| receipt.public_url.clone()),

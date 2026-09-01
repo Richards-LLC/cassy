@@ -8732,19 +8732,13 @@ fn get_task_attributable_diff_stat(
     if !is_safe_git_refname(parent_branch) || window.identity.is_empty() {
         return None;
     }
-    let since = format!(
-        "@{}",
-        window.task_floor.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
-    );
-    let history = Command::new("git")
-        .args([
-            "log",
-            "--reverse",
-            "--first-parent",
-            &format!("--since={since}"),
-            "--format=%H%x1f%B%x1e",
-            "HEAD",
-        ])
+    let mut history_command = Command::new("git");
+    history_command.args(["log", "--reverse", "--first-parent"]);
+    if let Some(since) = task_commit_receipt_since(window.task_floor) {
+        history_command.arg(format!("--since={since}"));
+    }
+    let history = history_command
+        .args(["--format=%H%x1f%B%x1e", "HEAD"])
         .current_dir(repo_path)
         .output()
         .ok()?;
@@ -9048,15 +9042,14 @@ const COMMIT_RECEIPT_CLOCK_SKEW_SECS: i64 = 5;
 ///
 /// Git interprets a negative `@<epoch>` value as a different date expression
 /// (currently effectively "now"), not as an epoch before Unix time. Keep the
-/// lower bound at Unix epoch so synthetic/legacy task fixtures still include
-/// all attributable commits while real positive task floors retain their
+/// omit the filter for synthetic/legacy task fixtures whose adjusted floor is
+/// at or before Unix epoch, while real positive task floors retain their
 /// clock-skew allowance.
-fn task_commit_receipt_since(task_floor: chrono::DateTime<chrono::Utc>) -> String {
+fn task_commit_receipt_since(task_floor: chrono::DateTime<chrono::Utc>) -> Option<String> {
     let earliest_epoch = task_floor
         .timestamp()
-        .saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS)
-        .max(0);
-    format!("@{earliest_epoch}")
+        .saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS);
+    (earliest_epoch > 0).then(|| format!("@{earliest_epoch}"))
 }
 
 /// Durable lower bound used to attribute a receipt to one task work cycle.
@@ -12199,18 +12192,13 @@ pub(crate) fn has_task_attributable_reviewable_changes(
         return None;
     }
 
-    let since = format!(
-        "@{}",
-        window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
-    );
-    let log_out = Command::new("git")
-        .args([
-            "log",
-            &format!("--since={since}"),
-            "--name-only",
-            "--pretty=format:",
-            &format!("{merge_base}..HEAD"),
-        ])
+    let mut log_command = Command::new("git");
+    log_command.args(["log", "--name-only", "--pretty=format:"]);
+    if let Some(since) = task_commit_receipt_since(window.not_before) {
+        log_command.arg(format!("--since={since}"));
+    }
+    let log_out = log_command
+        .arg(format!("{merge_base}..HEAD"))
         .current_dir(repo_path)
         .output()
         .ok()?;
@@ -23361,12 +23349,12 @@ mod commit_claim_integrity_tests {
     }
 
     #[test]
-    fn task_commit_receipt_since_clamps_negative_epoch_cas_653f() {
+    fn task_commit_receipt_since_omits_non_positive_epoch_cas_653f() {
         let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
-        assert_eq!(task_commit_receipt_since(epoch), "@0");
+        assert_eq!(task_commit_receipt_since(epoch), None);
 
         let positive_floor = chrono::DateTime::from_timestamp(10, 0).unwrap();
-        assert_eq!(task_commit_receipt_since(positive_floor), "@5");
+        assert_eq!(task_commit_receipt_since(positive_floor), Some("@5".to_string()));
     }
 
     #[test]

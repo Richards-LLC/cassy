@@ -2396,6 +2396,52 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn doctor_proxy_stdio_check_names_missing_commands_and_passes_resolved_commands() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let executable = temp.path().join("stdio-server");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions).unwrap();
+        }
+
+        let mut config = cmcp_core::config::Config::default();
+        config.add_server(
+            "working".to_string(),
+            cmcp_core::config::ServerConfig::Stdio {
+                command: executable.to_string_lossy().into_owned(),
+                args: Vec::new(),
+                env: BTreeMap::new().into_iter().collect(),
+            },
+        );
+        config.add_server(
+            "missing".to_string(),
+            cmcp_core::config::ServerConfig::Stdio {
+                command: temp
+                    .path()
+                    .join("removed-interpreter")
+                    .to_string_lossy()
+                    .into_owned(),
+                args: Vec::new(),
+                env: BTreeMap::new().into_iter().collect(),
+            },
+        );
+        config.save_to(&cas_root.join("proxy.toml")).unwrap();
+
+        let check = proxy_stdio_commands_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("missing"), "{}", check.message);
+        assert!(check.message.contains("removed-interpreter"), "{}", check.message);
+        assert!(check.message.contains("working"), "{}", check.message);
+    }
+
     #[test]
     fn foreign_rows_check_warns_when_a_peer_db_could_not_be_read_cas_fc6fa() {
         use crate::cli::foreign_rows::{ForeignRowReport, UnreadablePeer};

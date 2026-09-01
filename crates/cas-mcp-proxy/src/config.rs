@@ -405,6 +405,59 @@ tool = "ask_viktor"
     }
 
     #[test]
+    fn allowlist_accepts_canonical_and_legacy_string_route_spellings() {
+        let config: Config = toml::from_str(
+            r#"
+allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.allowlist,
+            vec![
+                ExternalToolConfig {
+                    server: "neon".to_string(),
+                    tool: "run_sql".to_string(),
+                },
+                ExternalToolConfig {
+                    server: "neon".to_string(),
+                    tool: "write".to_string(),
+                },
+                ExternalToolConfig {
+                    server: "neon".to_string(),
+                    tool: "read".to_string(),
+                },
+                ExternalToolConfig {
+                    server: "*".to_string(),
+                    tool: "run_sql".to_string(),
+                },
+                ExternalToolConfig {
+                    server: "neon".to_string(),
+                    tool: "*".to_string(),
+                },
+            ]
+        );
+
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(serialized.contains("allowlist = ["));
+        assert!(serialized.contains("neon.run_sql"));
+    }
+
+    #[test]
+    fn allowlist_rejects_empty_or_malformed_string_route_spellings() {
+        for source in [
+            "allowlist = [\"\"]",
+            "allowlist = [\"neon.\"]",
+            "allowlist = [\"neon:*:run_sql\"]",
+            "allowlist = [\"*\"]",
+        ] {
+            let error = toml::from_str::<Config>(source).unwrap_err();
+            assert!(error.to_string().contains("allowlist entry"), "{source}: {error}");
+        }
+    }
+
+    #[test]
     fn add_and_remove_server() {
         let mut config = Config::default();
         config.add_server(

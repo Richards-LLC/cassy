@@ -1657,6 +1657,54 @@ mod tests {
     }
 
     #[test]
+    fn external_tool_allowlist_normalizes_aliases_and_supports_server_wildcards() {
+        let routes = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "github.*"]
+            .into_iter()
+            .map(ExternalToolRoute::parse_allowlist_entry)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let policy = ExternalToolAllowlistPolicy::new(routes);
+
+        assert!(policy.allows("neon", "run_sql"));
+        assert!(policy.allows("neon", "write"));
+        assert!(policy.allows("neon", "read"));
+        assert!(policy.allows("other", "run_sql"));
+        assert!(policy.allows("github", "list_issues"));
+        assert!(!policy.allows("github-shadow", "list_issues"));
+        assert!(!policy.allows("neon", "run_sql_with_full_context"));
+    }
+
+    #[test]
+    fn external_tool_allowlist_denial_names_canonical_entry_to_add() {
+        let policy = ExternalToolAllowlistPolicy::default();
+        let caller = registered_worker_caller();
+        let arguments = None;
+        assert_eq!(
+            policy.decide(&ProxyPolicyRequest {
+                caller: &caller,
+                server: "neon",
+                tool: "run_sql",
+                arguments: &arguments,
+                dispatch_kind: ProxyDispatchKind::Direct,
+            }),
+            ProxyPolicyDecision::Deny {
+                reason: "external tool is not explicitly allowlisted; add \"neon.run_sql\" to [proxy].allowlist".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn external_tool_allowlist_catalog_decision_marks_denied_tools() {
+        let policy = ExternalToolAllowlistPolicy::default();
+        assert_eq!(
+            policy.catalog_decision("neon", "run_sql"),
+            ProxyPolicyDecision::Deny {
+                reason: "external tool is not explicitly allowlisted; add \"neon.run_sql\" to [proxy].allowlist".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn delegation_routes_require_internal_supervisor_dispatch_kind() {
         let policy = ExternalToolAllowlistPolicy::new([
             ExternalToolRoute::new("viktor", "ask_viktor"),
@@ -2297,7 +2345,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn retries_only_when_backoff_is_due_and_suppresses_repeated_error_visibility() {
+    async fn missing_stdio_executable_is_terminal_and_visible_without_retry() {
         let config = ServerConfig::Stdio {
             command: "cas-command-that-does-not-exist-for-proxy-test".to_string(),
             args: Vec::new(),
@@ -2310,25 +2358,12 @@ mod tests {
         let first = engine.health_snapshot().await.servers.remove(0);
         assert_eq!(first.attempts, 1);
         assert_eq!(first.consecutive_failures, 1);
-        let due = first
-            .next_retry_at_ms
-            .expect("failed upstream must back off");
-
-        assert_eq!(engine.retry_unhealthy_at(due - 1).await, 0);
-        assert_eq!(
-            engine.health_snapshot().await.servers[0].attempts,
-            1,
-            "retry before the deadline must be suppressed"
-        );
-
-        assert_eq!(engine.retry_unhealthy_at(due).await, 1);
-        let repeated = engine.health_snapshot().await.servers.remove(0);
-        assert_eq!(repeated.attempts, 2);
-        assert_eq!(repeated.consecutive_failures, 2);
-        assert!(
-            repeated.next_retry_at_ms.unwrap() >= due + 10_000,
-            "the second production-path failure must advance exponential backoff"
-        );
+        assert_eq!(first.state, UpstreamState::ExecutableMissing);
+        assert_eq!(first.last_error_code.as_deref(), Some("executable_missing"));
+        assert_eq!(first.next_retry_at_ms, None);
+        assert_eq!(first.executable.as_deref(), Some("cas-command-that-does-not-exist-for-proxy-test"));
+        assert_eq!(engine.retry_unhealthy().await, 0);
+        assert_eq!(engine.health_snapshot().await.servers[0].attempts, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

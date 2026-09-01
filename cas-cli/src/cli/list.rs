@@ -4,7 +4,8 @@ use clap::Args;
 
 /// Arguments for listing running factory sessions.
 ///
-/// This stays lightweight and local-only (reads session metadata under ~/.cas).
+/// This stays lightweight and local-only (reads session metadata and the local
+/// agent registry under ~/.cas).
 #[derive(Args, Debug, Clone, Default)]
 pub struct ListArgs {
     /// Filter to a specific session name (exact match)

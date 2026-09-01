@@ -222,15 +222,24 @@ fn test_pending_by_type() {
         .enqueue(EntityType::Task, "t1", SyncOperation::Upsert, None)
         .unwrap();
     queue
+        .enqueue(
+            EntityType::TaskDependency,
+            "t1:t2:blocks",
+            SyncOperation::Upsert,
+            Some(r#"{"from_id":"t1","to_id":"t2","dep_type":"blocks"}"#),
+        )
+        .unwrap();
+    queue
         .enqueue(EntityType::Rule, "r1", SyncOperation::Delete, None)
         .unwrap();
 
     let by_type = queue.pending_by_type(10, 5).unwrap();
     assert_eq!(by_type.entries.len(), 2);
     assert_eq!(by_type.tasks.len(), 1);
+    assert_eq!(by_type.task_dependencies.len(), 1);
     assert_eq!(by_type.rules.len(), 1);
     assert_eq!(by_type.skills.len(), 0);
-    assert_eq!(by_type.total(), 4);
+    assert_eq!(by_type.total(), 5);
 }
 
 #[test]

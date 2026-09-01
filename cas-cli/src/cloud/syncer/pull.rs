@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::cloud::syncer::{
@@ -15,7 +16,8 @@ use crate::store::{
     Store, TaskStore,
 };
 use crate::types::{
-    CommitLink, Entry, Event, FileChange, Prompt, Rule, Session, Skill, Spec, Task, TaskStatus,
+    CommitLink, Dependency, DependencyType, Entry, Event, FileChange, Prompt, Rule, Session, Skill,
+    Spec, Task, TaskStatus,
 };
 
 /// Path of the cloud sync pull endpoint.
@@ -43,6 +45,129 @@ fn deserialize_pulled_entity<T: DeserializeOwned>(
         .to_owned();
     serde_json::from_value(raw)
         .map_err(|error| format!("{entity_type} deserialize error (id={id}): {error}"))
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskDependencyRecord {
+    from_id: String,
+    to_id: String,
+    dep_type: DependencyType,
+    created_at: DateTime<Utc>,
+    #[serde(default)]
+    operation: Option<String>,
+    #[serde(default)]
+    deleted: bool,
+}
+
+impl TaskDependencyRecord {
+    fn is_delete(&self) -> bool {
+        self.deleted
+            || self
+                .operation
+                .as_deref()
+                .is_some_and(|operation| operation.eq_ignore_ascii_case("delete"))
+    }
+
+    fn dependency(self) -> Dependency {
+        Dependency {
+            from_id: self.from_id,
+            to_id: self.to_id,
+            dep_type: self.dep_type,
+            created_at: self.created_at,
+            created_by: None,
+        }
+    }
+}
+
+fn task_dependency_matches_project(raw: &serde_json::Value, current_project_id: &str) -> bool {
+    let project_field = raw
+        .get("project_canonical_id")
+        .or_else(|| raw.get("project_id"))
+        .or_else(|| raw.get("origin_project"));
+    let edge_id = raw
+        .get("id")
+        .or_else(|| raw.get("entity_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown>");
+    match project_field.and_then(serde_json::Value::as_str) {
+        Some(project) if project == current_project_id => true,
+        Some(project) => {
+            eprintln!(
+                "[Cassy sync] WARNING: skipping task dependency '{edge_id}' from foreign project '{project}' (expected '{current_project_id}')"
+            );
+            false
+        }
+        None => {
+            eprintln!(
+                "[Cassy sync] WARNING: parking task dependency '{edge_id}' — no project identity (expected '{current_project_id}')"
+            );
+            false
+        }
+    }
+}
+
+fn apply_task_dependencies(
+    raw_dependencies: Vec<serde_json::Value>,
+    task_store: &dyn TaskStore,
+    current_project_id: &str,
+    result: &mut SyncResult,
+) {
+    for raw in raw_dependencies {
+        if !task_dependency_matches_project(&raw, current_project_id) {
+            continue;
+        }
+        let edge_id = raw
+            .get("id")
+            .or_else(|| raw.get("entity_id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<unknown>")
+            .to_owned();
+        let record: TaskDependencyRecord = match serde_json::from_value(raw) {
+            Ok(record) => record,
+            Err(error) => {
+                result.errors.push(format!(
+                    "task dependency deserialize error (id={edge_id}): {error}"
+                ));
+                continue;
+            }
+        };
+        let is_delete = record.is_delete();
+        let dependency = record.dependency();
+        if is_delete {
+            if let Err(error) = task_store.remove_dependency_of_type(
+                &dependency.from_id,
+                &dependency.to_id,
+                dependency.dep_type,
+            ) {
+                result.errors.push(format!(
+                    "Task dependency delete error ({}:{}): {error}",
+                    dependency.from_id, dependency.to_id
+                ));
+            }
+            continue;
+        }
+
+        let from_exists = task_store.get(&dependency.from_id).is_ok();
+        let to_exists = task_store.get(&dependency.to_id).is_ok();
+        if !from_exists || !to_exists {
+            tracing::warn!(
+                from_id = %dependency.from_id,
+                to_id = %dependency.to_id,
+                dep_type = %dependency.dep_type,
+                "Parking dangling task dependency from cloud pull because one or both tasks are absent locally"
+            );
+            continue;
+        }
+
+        if let Err(error) = task_store.add_dependency(&dependency) {
+            result.errors.push(format!(
+                "Task dependency upsert error ({}:{}): {error}",
+                dependency.from_id, dependency.to_id
+            ));
+        } else {
+            result.pulled_task_dependencies += 1;
+        }
+    }
 }
 
 /// Read the cloud mutation timestamp carried by a team-pull entry.
@@ -876,6 +1001,16 @@ impl CloudSyncer {
             }
         }
 
+        // Dependencies are applied after tasks so a fresh pull can materialize
+        // an edge whose endpoints arrived in the same envelope. Pull uses
+        // local stores, so these writes are intentionally not re-enqueued.
+        apply_task_dependencies(
+            body.task_dependencies.unwrap_or_default(),
+            task_store,
+            current_project_id,
+            &mut result,
+        );
+
         // Process rules
         for raw_rule in body.rules.unwrap_or_default() {
             if !entity_matches_project(&raw_rule, &current_project_id, "rule") {
@@ -1547,6 +1682,8 @@ impl CloudSyncer {
                 + team_push_result.pushed_commit_links,
             pushed_agents: push_result.pushed_agents + team_push_result.pushed_agents,
             pushed_worktrees: push_result.pushed_worktrees + team_push_result.pushed_worktrees,
+            pushed_task_dependencies: push_result.pushed_task_dependencies
+                + team_push_result.pushed_task_dependencies,
             pulled_entries: pull_result.pulled_entries,
             pulled_tasks: pull_result.pulled_tasks,
             pulled_rules: pull_result.pulled_rules,
@@ -1556,6 +1693,7 @@ impl CloudSyncer {
             pulled_prompts: pull_result.pulled_prompts,
             pulled_file_changes: pull_result.pulled_file_changes,
             pulled_commit_links: pull_result.pulled_commit_links,
+            pulled_task_dependencies: pull_result.pulled_task_dependencies,
             task_status_transitions: pull_result.task_status_transitions,
             conflicts_resolved: pull_result.conflicts_resolved,
             errors: [
@@ -1749,6 +1887,15 @@ impl CloudSyncer {
                 }
             }
         }
+
+        // Dependencies are applied after tasks; missing endpoints are parked
+        // with a warning instead of creating dangling local rows.
+        apply_task_dependencies(
+            body.task_dependencies.unwrap_or_default(),
+            task_store,
+            current_project_id,
+            &mut result,
+        );
 
         // Process rules
         for raw_rule in body.rules.unwrap_or_default() {

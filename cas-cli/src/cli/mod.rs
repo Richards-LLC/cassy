@@ -418,6 +418,15 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         Commands::Cloud(cloud::CloudCommands::Unlink(args)) if !args.purge_remote => {
             AuthRequirement::NotRequired
         }
+        Commands::Cloud(cloud::CloudCommands::Project(args))
+            if args.adopt_aliases
+                || matches!(
+                    args.command.as_ref(),
+                    Some(cloud::CloudProjectCommands::AdoptAliases)
+                ) =>
+        {
+            AuthRequirement::NotRequired
+        }
         Commands::Cloud(_) => AuthRequirement::Required,
 
         Commands::Device(_) => AuthRequirement::Required,

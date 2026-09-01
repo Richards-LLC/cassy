@@ -41,9 +41,10 @@ pub use config::{
     TeamInfo, TeamScopeAdoption, adopt_team_scope_for_configs, canonical_id_from_cas_root,
     canonical_id_from_config_toml, clear_login_credentials, derive_canonical_id_from_git_remote,
     detect_canonical_id_collisions, get_project_canonical_id, invalidate_cached_project_id,
-    maybe_adopt_team_scope, maybe_mark_personal_scope_notice, normalize_project_canonical_id,
-    normalized_git_remote_for_push, personal_scope_notice_for_configs, resolve_canonical_id,
-    resolve_canonical_id_with_source, set_canonical_id_in_config_toml, should_adopt_canonical_id,
+    maybe_adopt_team_scope, maybe_mark_personal_scope_notice, canonical_project_id,
+    canonical_project_id_with_pin, normalize_project_canonical_id, normalized_git_remote_for_push,
+    personal_scope_notice_for_configs, resolve_canonical_id, resolve_canonical_id_with_source,
+    set_canonical_id_in_config_toml, should_adopt_canonical_id,
     store_login_credentials,
 };
 pub(crate) use config::{

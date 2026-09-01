@@ -3,7 +3,7 @@
 use assert_cmd::Command;
 use tempfile::TempDir;
 
-use cas::store::open_prompt_queue_store;
+use cas::store::{open_agent_store, open_prompt_queue_store};
 use cas::ui::factory::{SessionManager, create_metadata};
 
 #[path = "../src/test_env_guard.rs"]
@@ -49,6 +49,18 @@ fn openclaw_cli_bridge_smoke() {
     let manager = SessionManager::new();
     manager.save_metadata(&metadata).unwrap();
 
+    let agent_store = open_agent_store(&project.path().join(".cas")).unwrap();
+    for index in 0..5 {
+        let mut worker = cas_types::Agent::new(
+            format!("registry-worker-{index}"),
+            format!("registry-worker-{index}"),
+        );
+        worker.agent_type = cas_types::AgentType::Worker;
+        worker.role = cas_types::AgentRole::Worker;
+        worker.factory_session = Some(session_name.to_string());
+        agent_store.register(&worker).unwrap();
+    }
+
     // Make it attachable by creating the socket file path referenced in metadata.
     let sock_path = std::path::Path::new(&metadata.socket_path);
     if let Some(parent) = sock_path.parent() {
@@ -65,6 +77,8 @@ fn openclaw_cli_bridge_smoke() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["schema_version"], 1);
     assert_eq!(v["sessions"][0]["name"], session_name);
+    assert_eq!(v["sessions"][0]["worker_count"], 5);
+    assert_eq!(v["sessions"][0]["workers"].as_array().unwrap().len(), 5);
 
     // `cas factory targets --json` should resolve targets.
     let out = cas_cmd(project.path(), home.path())

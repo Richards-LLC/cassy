@@ -699,6 +699,7 @@ struct SessionJson {
     epic_id: Option<String>,
     supervisor: String,
     workers: Vec<String>,
+    worker_count: usize,
     is_running: bool,
     socket_exists: bool,
     can_attach: bool,
@@ -709,6 +710,7 @@ struct SessionJson {
 
 impl SessionJson {
     fn from_session_info(session: &SessionInfo, include_metadata: bool) -> Self {
+        let workers = session.worker_names();
         Self {
             name: session.name.clone(),
             created_at: session.metadata.created_at.clone(),
@@ -718,12 +720,8 @@ impl SessionJson {
             project_dir: session.metadata.project_dir.clone(),
             epic_id: session.metadata.epic_id.clone(),
             supervisor: session.metadata.supervisor.name.clone(),
-            workers: session
-                .metadata
-                .workers
-                .iter()
-                .map(|w| w.name.clone())
-                .collect(),
+            worker_count: workers.len(),
+            workers,
             is_running: session.is_running,
             socket_exists: session.socket_exists,
             can_attach: session.can_attach(),

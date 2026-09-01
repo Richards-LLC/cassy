@@ -11,15 +11,14 @@ CREATE TABLE IF NOT EXISTS sync_queue (
     operation TEXT NOT NULL,
     payload TEXT,
     team_id TEXT,
+    project_id TEXT,
     created_at TEXT NOT NULL,
     retry_count INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    UNIQUE(entity_type, entity_id, team_id)
+    last_error TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_queue_created ON sync_queue(created_at);
 CREATE INDEX IF NOT EXISTS idx_sync_queue_retry ON sync_queue(retry_count);
-CREATE INDEX IF NOT EXISTS idx_sync_queue_team ON sync_queue(team_id);
 
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,
@@ -40,7 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_conflicts_resolved_at ON sync_conflicts(reso
 "#;
 
 impl SyncQueue {
-    /// Add team_id column to existing sync_queue tables.
+    /// Add team/project identity columns to existing sync_queue tables.
     pub(super) fn migrate_team_id(&self, conn: &Connection) -> Result<(), CasError> {
         let has_team_id: bool = conn
             .query_row(
@@ -50,14 +49,27 @@ impl SyncQueue {
             )
             .unwrap_or(false);
 
-        if !has_team_id {
-            conn.execute_batch(
-                r#"
-                ALTER TABLE sync_queue ADD COLUMN team_id TEXT;
-                CREATE INDEX IF NOT EXISTS idx_sync_queue_team ON sync_queue(team_id);
-                "#,
-            )?;
+        let has_project_id: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('sync_queue') WHERE name = 'project_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
 
+        if !has_team_id {
+            conn.execute_batch("ALTER TABLE sync_queue ADD COLUMN team_id TEXT;")?;
+        }
+        if !has_project_id {
+            conn.execute_batch("ALTER TABLE sync_queue ADD COLUMN project_id TEXT;")?;
+        }
+
+        // The original table had an inline UNIQUE(entity_type, entity_id,
+        // team_id). SQLite cannot replace that constraint with an expression
+        // index in place, so rebuild once when either identity column was
+        // added. Existing rows retain NULL project_id and therefore continue
+        // to coalesce under COALESCE(project_id, '').
+        if !has_team_id || !has_project_id {
             conn.execute_batch(
                 r#"
                 CREATE TABLE IF NOT EXISTS sync_queue_new (
@@ -67,29 +79,38 @@ impl SyncQueue {
                     operation TEXT NOT NULL,
                     payload TEXT,
                     team_id TEXT,
+                    project_id TEXT,
                     created_at TEXT NOT NULL,
                     retry_count INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    UNIQUE(entity_type, entity_id, team_id)
+                    last_error TEXT
                 );
-                INSERT INTO sync_queue_new (id, entity_type, entity_id, operation, payload, team_id, created_at, retry_count, last_error)
-                    SELECT id, entity_type, entity_id, operation, payload, COALESCE(team_id, ''), created_at, retry_count, last_error FROM sync_queue;
+                INSERT INTO sync_queue_new (id, entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count, last_error)
+                    SELECT id, entity_type, entity_id, operation, payload, COALESCE(team_id, ''), project_id, created_at, retry_count, last_error FROM sync_queue;
                 DROP TABLE sync_queue;
                 ALTER TABLE sync_queue_new RENAME TO sync_queue;
                 CREATE INDEX IF NOT EXISTS idx_sync_queue_created ON sync_queue(created_at);
                 CREATE INDEX IF NOT EXISTS idx_sync_queue_retry ON sync_queue(retry_count);
                 CREATE INDEX IF NOT EXISTS idx_sync_queue_team ON sync_queue(team_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_queue_entity_team_project
+                    ON sync_queue(entity_type, entity_id, team_id, COALESCE(project_id, ''));
                 "#,
             )?;
         }
 
         // Normalize any pre-migration NULL team_ids to '' so the UNIQUE
-        // constraint (entity_type, entity_id, team_id) properly deduplicates
+        // identity index properly deduplicates
         // personal-queue items. In SQLite, NULL != NULL and NULL != '' under
         // UNIQUE, so a row with team_id=NULL and a subsequent enqueue with
         // team_id='' would create duplicates (defect C / cas-8dd8).
         // This UPDATE is idempotent — a no-op when no NULLs remain.
         conn.execute_batch("UPDATE sync_queue SET team_id = '' WHERE team_id IS NULL;")?;
+        conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_sync_queue_team ON sync_queue(team_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_queue_entity_team_project
+                ON sync_queue(entity_type, entity_id, team_id, COALESCE(project_id, ''));
+            "#,
+        )?;
 
         Ok(())
     }

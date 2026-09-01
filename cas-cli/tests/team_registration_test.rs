@@ -155,6 +155,38 @@ fn decode_gzip_json(body: &[u8]) -> serde_json::Value {
     serde_json::from_slice(&decoded).expect("team request must decode as JSON")
 }
 
+/// A move destination must already belong to the active team. The check is
+/// deliberately read-only: unlike `ensure`, it must not register a typo or a
+/// project the caller is not authorized to move into.
+#[tokio::test]
+async fn move_destination_verification_rejects_unregistered_project() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(projects_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_project_list_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(team_push_path()))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let endpoint = server.uri();
+    let error = cas::cloud::TeamRegistration::new(
+        &endpoint,
+        "test-token",
+        TEST_TEAM,
+        "unregistered-destination",
+    )
+    .verify_registered()
+    .expect_err("an unregistered destination must be refused");
+    assert!(error.reason.contains("not registered"), "{error}");
+    assert!(error.interaction.contains(&projects_path()), "{error}");
+}
+
 /// THE regression test for the reported defect: the server accepts everything
 /// but never lists the project. Before the fix this was a green, exit-0 sync;
 /// now `execute_sync` fails with a non-zero exit and names the real reason.

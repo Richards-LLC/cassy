@@ -825,6 +825,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         &cas_root,
         collect_local_root_identities(),
     ));
+    checks.extend(canonical_alias_checks(&cas_root));
 
     // Check 15: residual cross-project contamination from the cas-ed15 pull
     // leak (cas-fc6fa / GH #133). Read-only comparison of this project's task
@@ -1197,7 +1198,8 @@ fn collect_local_root_identities() -> Result<Vec<crate::cloud::LocalRootIdentity
             let cas_root = project_root.join(".cas");
             let canonical_id = crate::cloud::resolve_canonical_id(&cas_root)?;
             Some(crate::cloud::LocalRootIdentity {
-                git_remote: crate::cloud::derive_canonical_id_from_git_remote(&cas_root),
+                git_remote: crate::cloud::derive_canonical_id_from_git_remote(&cas_root)
+                    .and_then(|remote| crate::cloud::canonical_project_id(&remote)),
                 project_root,
                 canonical_id,
             })
@@ -1229,7 +1231,7 @@ fn canonical_id_checks(
     // restores the old one, rather than letting sync quietly re-home.
     if source == crate::cloud::CanonicalIdSource::GitRemote
         && let Some(folder) = crate::cloud::canonical_id_from_cas_root(cas_root)
-        && folder != canonical_id
+        && crate::cloud::canonical_project_id(&folder).as_deref() != Some(canonical_id.as_str())
     {
         message.push_str(&format!(
             ". Earlier releases used the folder name `{folder}`; if that is where \
@@ -1279,6 +1281,94 @@ fn canonical_id_checks(
     }
 
     checks
+}
+
+/// Report persisted task origins that are equivalent to the current project
+/// but retain a legacy spelling. Doctor is intentionally report-only; users
+/// opt into the local rewrite with `cas cloud project --adopt-aliases`.
+fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
+    let Some(current_project) = crate::cloud::resolve_canonical_id(cas_root) else {
+        return Vec::new();
+    };
+    let db_path = cas_root.join("cas.db");
+    if !db_path.is_file() {
+        return Vec::new();
+    }
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(conn) => conn,
+        Err(error) => {
+            return vec![Check {
+                name: "project aliases".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("Could not inspect task project aliases: {error}"),
+            }];
+        }
+    };
+    let has_origin_project = conn
+        .prepare("PRAGMA table_info(tasks)")
+        .and_then(|mut stmt| {
+            let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            names.collect::<Result<Vec<_>, _>>()
+        })
+        .map(|columns| columns.iter().any(|column| column == "origin_project"))
+        .unwrap_or(false);
+    if !has_origin_project {
+        return Vec::new();
+    }
+
+    let mut stmt = match conn.prepare(
+        "SELECT origin_project FROM tasks
+         WHERE NULLIF(trim(origin_project), '') IS NOT NULL
+         ORDER BY origin_project",
+    ) {
+        Ok(stmt) => stmt,
+        Err(error) => {
+            return vec![Check {
+                name: "project aliases".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("Could not inspect task project aliases: {error}"),
+            }];
+        }
+    };
+    let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+        Ok(rows) => rows,
+        Err(error) => {
+            return vec![Check {
+                name: "project aliases".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("Could not inspect task project aliases: {error}"),
+            }];
+        }
+    };
+    let origins = rows.filter_map(Result::ok).collect::<Vec<_>>();
+    canonical_alias_counts(&origins, &current_project)
+        .into_iter()
+        .map(|(alias, count)| Check {
+            name: "project aliases".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "{count} rows use alias `{alias}` of this project; run `cas cloud project \
+                 --adopt-aliases` to rewrite and enqueue them"
+            ),
+        })
+        .collect()
+}
+
+fn canonical_alias_counts(origins: &[String], current_project: &str) -> BTreeMap<String, usize> {
+    origins
+        .iter()
+        .filter(|origin| {
+            crate::cloud::canonical_project_id_with_pin(origin, Some(current_project))
+                .is_some_and(|canonical| canonical == current_project)
+                && origin.trim() != current_project
+        })
+        .fold(BTreeMap::new(), |mut counts, origin| {
+            *counts.entry(origin.clone()).or_default() += 1;
+            counts
+        })
 }
 
 /// Observed state of the tree-sitter symbol index for the current project (cas-499c).
@@ -2445,6 +2535,26 @@ mod tests {
         assert!(msg.contains("folder name"), "got: {msg}");
         // No collision row when only one root is known.
         assert!(messages(&checks, "canonical id collision").is_empty());
+    }
+
+    #[test]
+    fn alias_doctor_counts_case_and_remote_spellings_but_not_owned_rows() {
+        let origins = vec![
+            "gabber-studio".to_string(),
+            "GABBER-STUDIO".to_string(),
+            "git@GitHub.com:Richards-LLC/gabber-studio.git".to_string(),
+            "github.com/other/pixel-hive".to_string(),
+        ];
+
+        let counts = canonical_alias_counts(&origins, "gabber-studio");
+
+        assert_eq!(counts.get("GABBER-STUDIO"), Some(&1));
+        assert_eq!(
+            counts.get("git@GitHub.com:Richards-LLC/gabber-studio.git"),
+            Some(&1)
+        );
+        assert!(!counts.contains_key("gabber-studio"));
+        assert!(!counts.contains_key("github.com/other/pixel-hive"));
     }
 
     #[test]

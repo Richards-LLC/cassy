@@ -38,7 +38,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use crate::cloud::{CloudSyncer, TeamProjectsResponse};
+use crate::cloud::{CloudSyncer, TeamProjectsResponse, canonical_project_id_with_pin};
 
 /// Timeout for both the lookup and the registration request. Matches the
 /// 30 s used by the other interactive team endpoints in `cli/cloud.rs`.
@@ -130,6 +130,7 @@ pub struct TeamRegistration<'a> {
     team_id: &'a str,
     canonical_id: &'a str,
     git_remote: Option<&'a str>,
+    pinned_canonical_id: Option<&'a str>,
     timeout: Duration,
 }
 
@@ -142,6 +143,7 @@ impl<'a> TeamRegistration<'a> {
             team_id,
             canonical_id,
             git_remote: None,
+            pinned_canonical_id: None,
             timeout: REGISTRATION_TIMEOUT,
         }
     }
@@ -151,6 +153,13 @@ impl<'a> TeamRegistration<'a> {
     /// instead of creating a second one.
     pub fn with_git_remote(mut self, git_remote: Option<&'a str>) -> Self {
         self.git_remote = git_remote;
+        self
+    }
+
+    /// Treat an explicit local pin as the authoritative target when a
+    /// project list contains a remote-shaped alias.
+    pub fn with_pinned_canonical_id(mut self, pinned: Option<&'a str>) -> Self {
+        self.pinned_canonical_id = pinned;
         self
     }
 
@@ -195,15 +204,19 @@ impl<'a> TeamRegistration<'a> {
     /// Returns `Ok` only when the *server* lists the project — a 2xx on the
     /// registration write is not treated as proof on its own.
     pub fn ensure(&self) -> Result<RegistrationOutcome, RegistrationFailure> {
-        if let Some(project_uuid) = self.lookup(self.canonical_id)? {
+        let canonical_id = self.wire_canonical_id();
+        if let Some(project_uuid) = self.lookup(&canonical_id)? {
             return Ok(RegistrationOutcome::AlreadyRegistered { project_uuid });
         }
 
         let (register_status, resolved_id) = self.register()?;
-        let expected_id = resolved_id.as_deref().unwrap_or(self.canonical_id);
+        let expected_id = resolved_id
+            .as_deref()
+            .and_then(|id| canonical_project_id_with_pin(id, self.pinned_canonical_id))
+            .unwrap_or_else(|| canonical_id.clone());
 
-        match self.lookup(expected_id)? {
-            Some(project_uuid) if expected_id == self.canonical_id => {
+        match self.lookup(&expected_id)? {
+            Some(project_uuid) if expected_id == canonical_id => {
                 Ok(RegistrationOutcome::Registered { project_uuid })
             }
             Some(project_uuid) => Ok(RegistrationOutcome::AdoptedExisting {
@@ -211,20 +224,20 @@ impl<'a> TeamRegistration<'a> {
                 canonical_id: expected_id.to_string(),
             }),
             None => Err(RegistrationFailure {
-                reason: if expected_id == self.canonical_id {
+                reason: if expected_id == canonical_id {
                     format!(
                         "Project '{}' is still not registered with team {} on {} after the \
                          registration request succeeded. The server accepted the write but does \
                          not list the project, so team memories and team pushes for this project \
                          cannot work. This is a server-side defect — report the interaction below.",
-                        self.canonical_id, self.team_id, self.endpoint
+                        canonical_id, self.team_id, self.endpoint
                     )
                 } else {
                     format!(
                         "The server resolved project '{}' to '{}' during registration, but \
                          team {} on {} did not list the resolved project afterward. The client \
                          will not adopt '{}' until that verification succeeds.",
-                        self.canonical_id, expected_id, self.team_id, self.endpoint, expected_id,
+                        canonical_id, expected_id, self.team_id, self.endpoint, expected_id,
                     )
                 },
                 interaction: format!(
@@ -232,7 +245,7 @@ impl<'a> TeamRegistration<'a> {
                      (resolved canonical_id: {}); \
                      GET {} -> 200 but no project with canonical_id \"{}\"",
                     self.push_url(),
-                    self.canonical_id,
+                    canonical_id,
                     match self.git_remote {
                         Some(remote) => format!(",\"git_remote\":\"{remote}\""),
                         None => String::new(),
@@ -311,10 +324,15 @@ impl<'a> TeamRegistration<'a> {
                 interaction: format!("GET {url} -> 200 {}", body_excerpt(&body)),
             })?;
 
+        let expected = canonical_project_id_with_pin(canonical_id, self.pinned_canonical_id)
+            .unwrap_or_else(|| canonical_id.to_string());
         Ok(parsed
             .projects
             .into_iter()
-            .find(|p| p.canonical_id == canonical_id)
+            .find(|p| {
+                canonical_project_id_with_pin(&p.canonical_id, self.pinned_canonical_id)
+                    .is_some_and(|id| id == expected)
+            })
             .map(|p| p.id))
     }
 
@@ -331,7 +349,7 @@ impl<'a> TeamRegistration<'a> {
         payload.insert("entries".to_string(), serde_json::json!([]));
         payload.insert(
             "project_canonical_id".to_string(),
-            serde_json::json!(self.canonical_id),
+            serde_json::json!(self.wire_canonical_id()),
         );
         if let Some(remote) = self.git_remote {
             payload.insert("git_remote".to_string(), serde_json::json!(remote));
@@ -400,7 +418,9 @@ impl<'a> TeamRegistration<'a> {
             _ => format!(
                 "Could not register project '{}' with team {} on {}: the server returned \
                  HTTP {status}.",
-                self.canonical_id, self.team_id, self.endpoint
+                self.wire_canonical_id(),
+                self.team_id,
+                self.endpoint
             ),
         };
         RegistrationFailure {
@@ -408,10 +428,15 @@ impl<'a> TeamRegistration<'a> {
             interaction: format!(
                 "POST {url} (body: {{\"entries\":[],\"project_canonical_id\":\"{}\"}}) -> \
                  {status} {}",
-                self.canonical_id,
+                self.wire_canonical_id(),
                 body_excerpt(body)
             ),
         }
+    }
+
+    fn wire_canonical_id(&self) -> String {
+        canonical_project_id_with_pin(self.canonical_id, self.pinned_canonical_id)
+            .unwrap_or_else(|| self.canonical_id.trim().to_string())
     }
 }
 

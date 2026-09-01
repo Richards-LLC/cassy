@@ -9,7 +9,9 @@ use crate::cloud::syncer::{
     CloudSyncer, ConflictAction, ConflictResolution, PullResponse, SyncResult,
     TaskStatusTransition, TeamPullResponse, UpsertResult,
 };
-use crate::cloud::{EntityType, get_project_canonical_id};
+use crate::cloud::{
+    EntityType, get_project_canonical_id, project_ids_match as canonical_project_ids_match,
+};
 use crate::error::CasError;
 use crate::store::{
     CommitLinkStore, EventStore, FileChangeStore, PromptStore, RuleStore, SkillStore, SpecStore,
@@ -90,7 +92,7 @@ fn task_dependency_matches_project(raw: &serde_json::Value, current_project_id: 
         .and_then(serde_json::Value::as_str)
         .unwrap_or("<unknown>");
     match project_field.and_then(serde_json::Value::as_str) {
-        Some(project) if project == current_project_id => true,
+        Some(project) if project_ids_match(project, current_project_id) => true,
         Some(project) => {
             eprintln!(
                 "[Cassy sync] WARNING: skipping task dependency '{edge_id}' from foreign project '{project}' (expected '{current_project_id}')"
@@ -334,9 +336,9 @@ pub(crate) fn build_scoped_pull_url_with(
 /// so both directions of the sync client apply *one* definition of "is this
 /// row mine", rather than a second implementation that can drift from this one.
 ///
-/// The equality is deliberately byte-exact — see the protocol invariant in
-/// `docs/`/ARCHITECTURE and `canonical_id_equality_is_byte_exact_by_protocol`
-/// below. Normalizing here would silently merge two distinct projects.
+/// Project identities are compared through the canonical cloud normalizer so
+/// a legacy remote-shaped row can match an explicit bare-slug pin. Values that
+/// normalize to different host/org/repository identities remain foreign.
 pub(crate) fn entity_matches_project(
     raw: &serde_json::Value,
     current_project_id: &str,
@@ -370,7 +372,7 @@ pub(crate) fn entity_matches_project(
             false
         }
         Some(serde_json::Value::String(s)) => {
-            if s == current_project_id {
+            if project_ids_match(s, current_project_id) {
                 true
             } else {
                 eprintln!(
@@ -389,6 +391,10 @@ pub(crate) fn entity_matches_project(
             false
         }
     }
+}
+
+fn project_ids_match(candidate: &str, current: &str) -> bool {
+    canonical_project_ids_match(candidate, current)
 }
 
 fn task_wire_id(raw: &serde_json::Value) -> Option<&str> {
@@ -412,8 +418,9 @@ fn task_wire_cloud_project<'a>(raw: &'a serde_json::Value, requested_project: &'
 }
 
 fn task_wire_is_owner(raw: &serde_json::Value, requested_project: &str) -> bool {
-    task_wire_origin_project(raw)
-        .is_some_and(|origin| origin == task_wire_cloud_project(raw, requested_project))
+    task_wire_origin_project(raw).is_some_and(|origin| {
+        project_ids_match(origin, task_wire_cloud_project(raw, requested_project))
+    })
 }
 
 fn task_wire_updated_at(raw: &serde_json::Value) -> Option<DateTime<Utc>> {
@@ -723,7 +730,14 @@ impl CloudSyncer {
         source: &str,
     ) -> Result<UpsertResult, CasError> {
         if let Ok(local) = store.get(&task.id) {
-            let origins_differ = local.origin_project != task.origin_project;
+            let origins_differ = match (
+                local.origin_project.as_deref(),
+                task.origin_project.as_deref(),
+            ) {
+                (Some(local), Some(incoming)) => !project_ids_match(local, incoming),
+                (None, None) => false,
+                _ => true,
+            };
             if incoming_is_owner && origins_differ {
                 return self.upsert_owner_task(store, task, sync_id, source);
             }
@@ -959,8 +973,10 @@ impl CloudSyncer {
             if remote_task.origin_project.is_none() {
                 remote_task.origin_project = Some(current_project_id.to_string());
             }
-            let incoming_is_owner =
-                remote_task.origin_project.as_deref() == Some(current_project_id);
+            let incoming_is_owner = remote_task
+                .origin_project
+                .as_deref()
+                .is_some_and(|origin| project_ids_match(origin, &current_project_id));
             let previous_status = task_store.get(&remote_task.id).ok().map(|task| task.status);
             let task_outcome = if web_close {
                 reconcile_web_close(
@@ -1856,8 +1872,11 @@ impl CloudSyncer {
             if remote_task.origin_project.is_none() {
                 remote_task.origin_project = Some(current_project_id.to_string());
             }
-            let incoming_is_owner =
-                wire_is_owner || remote_task.origin_project.as_deref() == Some(current_project_id);
+            let incoming_is_owner = wire_is_owner
+                || remote_task
+                    .origin_project
+                    .as_deref()
+                    .is_some_and(|origin| project_ids_match(origin, current_project_id));
             let previous_status = task_store.get(&remote_task.id).ok().map(|task| task.status);
             match self.upsert_task_with_owner_preference(
                 task_store,
@@ -1970,7 +1989,7 @@ mod tests {
     use super::{
         PROPOSAL_PROVENANCE_BEGIN, PROPOSAL_PROVENANCE_END, PULL_PATH,
         build_scoped_pull_url_with, deserialize_pulled_entity, entity_matches_project,
-        render_task_proposal_provenance,
+        render_task_proposal_provenance, task_dependency_matches_project,
     };
     use crate::types::{Entry, Task};
     use serde_json::json;
@@ -2244,58 +2263,54 @@ mod tests {
         ));
     }
 
-    /// PROTOCOL INVARIANT — do not "fix" this test by making the comparison
-    /// case-insensitive or otherwise normalizing.
-    ///
-    /// Canonical-id equality is byte-exact on BOTH sides of the wire, by
-    /// agreement with the server. Two consequences the next reader needs:
-    ///
-    /// 1. **Normalizing here would be a data-merge, not a convenience.**
-    ///    `Accounting` and `accounting` are two distinct projects as far as
-    ///    every stored row is concerned; folding them together would
-    ///    cross-contaminate them permanently and unattributably.
-    /// 2. **This is the SECOND line of defence, not the first.** The server
-    ///    filters on the id the client SENDS and echoes the stored column, so
-    ///    an id divergence does not present here as a rejected row — the
-    ///    client receives an *empty envelope*, indefinitely, with no warning
-    ///    on either side. Silent starvation, not contamination. If you are
-    ///    debugging "sync returns nothing", suspect an id mismatch upstream of
-    ///    this function rather than assuming this check is dropping rows.
-    ///
-    /// The remedy for divergence is client-side pinning of the canonical id;
-    /// the server deliberately refused to normalize for exactly the reason in
-    /// (1).
     #[test]
-    fn canonical_id_equality_is_byte_exact_by_protocol() {
+    fn alias_project_row_is_owned_after_normalization() {
+        let entity = json!({
+            "id": "alias-row",
+            "project_canonical_id": "git@GitHub.com:Richards-LLC/gabber-studio.git"
+        });
+
+        assert!(entity_matches_project(
+            &entity,
+            "gabber-studio",
+            "task"
+        ));
+    }
+
+    #[test]
+    fn canonical_identity_pull_accepts_remote_alias_spellings() {
         let entity = json!({ "id": "t-1", "project_canonical_id": "github.com/Acme/Ledger" });
 
-        assert!(
-            entity_matches_project(&entity, "github.com/Acme/Ledger", "task"),
-            "exact match must be accepted"
-        );
-        // Case variants are DIFFERENT projects. Each of these must be refused.
+        assert!(entity_matches_project(&entity, "github.com/Acme/Ledger", "task"));
         for variant in [
             "github.com/acme/ledger",
             "github.com/ACME/LEDGER",
             "github.com/Acme/ledger",
+            " https://github.com/Acme/Ledger.git/ ",
         ] {
             assert!(
-                !entity_matches_project(&entity, variant, "task"),
-                "case variant '{variant}' must not match — normalizing here would \
-                 silently merge two distinct projects"
+                entity_matches_project(&entity, variant, "task"),
+                "alias '{variant}' must match the canonical project"
             );
         }
-        // Whitespace and trailing-separator variants are likewise distinct.
-        for variant in [
-            "github.com/Acme/Ledger ",
-            " github.com/Acme/Ledger",
-            "github.com/Acme/Ledger/",
-        ] {
-            assert!(
-                !entity_matches_project(&entity, variant, "task"),
-                "variant '{variant:?}' must not match: equality is byte-exact"
-            );
-        }
+        assert!(!entity_matches_project(
+            &entity,
+            "github.com/other/Ledger",
+            "task"
+        ));
+    }
+
+    #[test]
+    fn canonical_identity_pull_accepts_bare_alias_for_remote_scope_dependency() {
+        let dependency = json!({
+            "id": "alias-edge",
+            "project_id": "gabber-studio",
+        });
+
+        assert!(task_dependency_matches_project(
+            &dependency,
+            "github.com/richards-llc/gabber-studio"
+        ));
     }
 }
 

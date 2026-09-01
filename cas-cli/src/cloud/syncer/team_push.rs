@@ -5,7 +5,9 @@ use crate::cloud::syncer::{
     CloudSyncer, PushItemizedFailure, PushRowResult, SyncResult, TeamPushResponse,
     itemized_failures_for, row_results_for,
 };
-use crate::cloud::{EntityType, QueuedSync, SyncOperation, get_project_canonical_id};
+use crate::cloud::{
+    EntityType, QueuedSync, SyncOperation, canonical_project_id_with_pin, get_project_canonical_id,
+};
 use crate::error::CasError;
 use chrono::Utc;
 
@@ -30,14 +32,25 @@ fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
         // Supervisor reassignment is carried by a non-empty origin_project in
         // the queued payload. Only legacy rows without a usable identity need
         // to inherit the project performing the push.
-        let has_explicit_origin = task
+        let explicit_origin = task
             .get("origin_project")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|origin| !origin.trim().is_empty());
-        if !has_explicit_origin {
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty());
+        if let Some(origin) = explicit_origin {
+            if let Some(canonical) = canonical_project_id_with_pin(origin, Some(project_id)) {
+                task.insert(
+                    "origin_project".to_string(),
+                    serde_json::Value::String(canonical),
+                );
+            }
+        } else {
             task.insert(
                 "origin_project".to_string(),
-                serde_json::Value::String(project_id.to_string()),
+                serde_json::Value::String(
+                    canonical_project_id_with_pin(project_id, Some(project_id))
+                        .unwrap_or_else(|| project_id.to_string()),
+                ),
             );
         }
     }
@@ -47,14 +60,25 @@ fn stamp_task_dependency_origin_project(value: &mut serde_json::Value, project_i
     let Some(object) = value.as_object_mut() else {
         return;
     };
-    let has_explicit_origin = object
+    let explicit_origin = object
         .get("origin_project")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|origin| !origin.trim().is_empty());
-    if !has_explicit_origin {
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty());
+    if let Some(origin) = explicit_origin {
+        if let Some(canonical) = canonical_project_id_with_pin(origin, Some(project_id)) {
+            object.insert(
+                "origin_project".to_string(),
+                serde_json::Value::String(canonical),
+            );
+        }
+    } else {
         object.insert(
             "origin_project".to_string(),
-            serde_json::Value::String(project_id.to_string()),
+            serde_json::Value::String(
+                canonical_project_id_with_pin(project_id, Some(project_id))
+                    .unwrap_or_else(|| project_id.to_string()),
+            ),
         );
     }
 }
@@ -918,6 +942,39 @@ mod tests {
             value
                 .get("origin_project")
                 .is_some_and(serde_json::Value::is_null)
+        );
+    }
+
+    #[test]
+    fn canonical_identity_team_push_stamps_remote_alias_as_canonical() {
+        let mut value = serde_json::json!({
+            "id": "cas-alias",
+            "scope": "project",
+        });
+
+        super::stamp_task_origin_project(
+            &mut value,
+            "git@GitHub.com:Richards-LLC/gabber-studio.git",
+        );
+
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("github.com/richards-llc/gabber-studio")
+        );
+    }
+
+    #[test]
+    fn canonical_identity_team_push_stamps_dependency_alias_as_canonical() {
+        let mut value = serde_json::json!({
+            "id": "edge-alias",
+            "origin_project": "git@GitHub.com:Richards-LLC/gabber-studio.git",
+        });
+
+        super::stamp_task_dependency_origin_project(&mut value, "gabber-studio");
+
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("gabber-studio")
         );
     }
 }

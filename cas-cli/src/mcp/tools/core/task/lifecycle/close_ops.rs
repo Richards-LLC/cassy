@@ -9284,8 +9284,9 @@ pub(crate) fn check_zero_commit_close(
                docs-only, characterization-only): update the task with an \
                execution_note to signal intentional no-code work:\n\
                `mcp__cas__task action=update id={task_id} execution_note=additive-only`\n\
-            4. Ask the supervisor to audit the merge and record the close \
-               decision if the work was intentionally resolved without code."
+            4. Ask the supervisor to audit the merge. Only a supervisor may \
+               close with `supervisor_override=true` and a reason recording \
+               that audit if the work was intentionally resolved without code."
         ));
     }
     if let Some(outcome) = resolve_merge_evidence(
@@ -9322,8 +9323,9 @@ pub(crate) fn check_zero_commit_close(
            historical commit), verify it is an ancestor of \
            {parent_branch}, then retry close with \
            `commit_receipt=<sha>` (full or an unambiguous abbreviation).\n\
-        4. If no task commit receipt is available, ask the supervisor to \
-           audit the merge and record the close decision."
+        4. If no task commit receipt is available, ask the supervisor to audit \
+           the merge. Only a supervisor may close with \
+           `supervisor_override=true` and a reason recording that audit."
     ))
 }
 

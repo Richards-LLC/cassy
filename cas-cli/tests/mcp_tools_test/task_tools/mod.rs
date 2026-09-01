@@ -7,5 +7,4 @@ mod double_close;
 mod gate;
 mod operations;
 mod reopen_atomicity;
-mod supervisor_review_flow;
 mod verification_flow;

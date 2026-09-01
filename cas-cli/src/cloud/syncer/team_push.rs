@@ -1,8 +1,8 @@
+use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::cloud::syncer::{
-    CloudSyncer, GroupedQueuedItems, PushItemizedFailure, SyncResult, TeamPushResponse,
-    itemized_failures_for,
+    CloudSyncer, PushItemizedFailure, SyncResult, TeamPushResponse, itemized_failures_for,
 };
 use crate::cloud::{EntityType, QueuedSync, SyncOperation, get_project_canonical_id};
 use crate::error::CasError;
@@ -10,6 +10,13 @@ use chrono::Utc;
 
 fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
     if let Some(task) = value.as_object_mut() {
+        // Global tasks are personal-only and deliberately carry no project
+        // identity in their queued payload. Leave both fields untouched if a
+        // legacy caller routes one through this helper.
+        if task.get("scope").and_then(serde_json::Value::as_str) == Some("global") {
+            return;
+        }
+
         // Team task rows are project-scoped. Legacy queue payloads may have
         // been serialized before Task::scope existed, but the cloud contract
         // requires the explicit field or it may accept the batch while
@@ -18,10 +25,20 @@ fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
             "scope".to_string(),
             serde_json::Value::String("project".to_string()),
         );
-        task.insert(
-            "origin_project".to_string(),
-            serde_json::Value::String(project_id.to_string()),
-        );
+
+        // Supervisor reassignment is carried by a non-empty origin_project in
+        // the queued payload. Only legacy rows without a usable identity need
+        // to inherit the project performing the push.
+        let has_explicit_origin = task
+            .get("origin_project")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|origin| !origin.trim().is_empty());
+        if !has_explicit_origin {
+            task.insert(
+                "origin_project".to_string(),
+                serde_json::Value::String(project_id.to_string()),
+            );
+        }
     }
 }
 
@@ -61,7 +78,7 @@ impl CloudSyncer {
         // immediately replay the destructive team delete.
         let mut sendable = Vec::with_capacity(queued.len());
         for item in queued {
-            if item.operation == SyncOperation::Delete {
+            if item.operation == SyncOperation::Delete && item.project_id.is_none() {
                 match self.queue.neutralize_delete_if_local_entity_exists(&item) {
                     Ok(true) => {
                         tracing::warn!(
@@ -94,11 +111,6 @@ impl CloudSyncer {
             return Ok(result);
         }
 
-        // Group deletes for the existing one-per-entity delete path. Upserts
-        // stay associated with their queue rows below so sub-batches can be
-        // marked synced/failed independently.
-        let grouped = self.group_queued_items(&queued);
-
         // Include project_canonical_id (required for project scoping)
         let project_id = get_project_canonical_id().ok_or_else(|| {
             CasError::Other("Cannot sync: not inside a Cassy project directory".to_string())
@@ -112,18 +124,39 @@ impl CloudSyncer {
             .ok()
             .and_then(|cas_root| crate::cloud::normalized_git_remote_for_push(&cas_root));
 
-        let has_deletes = !grouped.delete_entries.is_empty()
-            || !grouped.delete_tasks.is_empty()
-            || !grouped.delete_rules.is_empty()
-            || !grouped.delete_skills.is_empty()
-            || !grouped.delete_sessions.is_empty()
-            || !grouped.delete_verifications.is_empty()
-            || !grouped.delete_events.is_empty()
-            || !grouped.delete_prompts.is_empty()
-            || !grouped.delete_file_changes.is_empty()
-            || !grouped.delete_commit_links.is_empty()
-            || !grouped.delete_agents.is_empty()
-            || !grouped.delete_worktrees.is_empty();
+        let has_deletes = queued
+            .iter()
+            .any(|item| item.operation == SyncOperation::Delete);
+
+        // A project move must remove the old (project, id) key before the
+        // replacement upsert is sent. A failed move-delete blocks only its
+        // matching upsert, leaving both rows queued with the same diagnostic.
+        let move_deletes: Vec<&QueuedSync> = queued
+            .iter()
+            .filter(|item| item.operation == SyncOperation::Delete && item.project_id.is_some())
+            .collect();
+        let mut blocked_upserts = HashSet::new();
+        if !move_deletes.is_empty() {
+            let (successful, failures) =
+                self.send_team_deletes(team_id, &move_deletes, token, &project_id);
+            for queue_id in successful {
+                let _ = self.queue.mark_synced(queue_id);
+            }
+            for (queue_id, error) in failures {
+                let _ = self.queue.mark_failed(queue_id, &error);
+                if let Some(delete) = queued.iter().find(|item| item.id == queue_id) {
+                    for upsert in queued.iter().filter(|item| {
+                        item.operation == SyncOperation::Upsert
+                            && item.entity_type == delete.entity_type
+                            && item.entity_id == delete.entity_id
+                    }) {
+                        let _ = self.queue.mark_failed(upsert.id, &error);
+                        blocked_upserts.insert(upsert.id);
+                    }
+                }
+                result.errors.push(error);
+            }
+        }
 
         for (entity_type, entity_key) in [
             (EntityType::Entry, "entries"),
@@ -147,30 +180,26 @@ impl CloudSyncer {
                 token,
                 &project_id,
                 git_remote.as_deref(),
+                &blocked_upserts,
             );
             Self::add_team_count(&mut result, entity_key, synced);
             result.errors.extend(errors);
         }
 
-        if result.errors.is_empty() && has_deletes {
-            // Process deletes (after successful upserts or if no upserts)
-            let (deleted_count, delete_errors) =
-                self.send_team_deletes(team_id, &grouped, token, &project_id);
-            // Track successful deletes (deleted_count is total across all types)
-            if deleted_count > 0 {
-                // Note: delete counts aren't tracked separately in SyncResult,
-                // they're part of the overall push operation
-                let _ = deleted_count; // Acknowledge the count
+        let normal_deletes: Vec<&QueuedSync> = queued
+            .iter()
+            .filter(|item| item.operation == SyncOperation::Delete && item.project_id.is_none())
+            .collect();
+        if result.errors.is_empty() && has_deletes && !normal_deletes.is_empty() {
+            // Ordinary deletes retain the historical after-upsert ordering.
+            let (successful, failures) =
+                self.send_team_deletes(team_id, &normal_deletes, token, &project_id);
+            for queue_id in successful {
+                let _ = self.queue.mark_synced(queue_id);
             }
-            if !delete_errors.is_empty() {
-                result.errors.extend(delete_errors);
-            } else {
-                for item in queued
-                    .iter()
-                    .filter(|item| item.operation == SyncOperation::Delete)
-                {
-                    let _ = self.queue.mark_synced(item.id);
-                }
+            for (queue_id, error) in failures {
+                let _ = self.queue.mark_failed(queue_id, &error);
+                result.errors.push(error);
             }
         }
 
@@ -195,11 +224,14 @@ impl CloudSyncer {
         token: &str,
         project_id: &str,
         git_remote: Option<&str>,
+        blocked_upserts: &HashSet<i64>,
     ) -> (usize, Vec<String>) {
         let mut upserts = Vec::new();
 
         for item in queued.iter().filter(|item| {
-            item.operation == SyncOperation::Upsert && item.entity_type == entity_type
+            item.operation == SyncOperation::Upsert
+                && item.entity_type == entity_type
+                && !blocked_upserts.contains(&item.id)
         }) {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
@@ -568,172 +600,37 @@ impl CloudSyncer {
         }
     }
 
-    /// Group queued items by entity type and operation
-    fn group_queued_items(&self, items: &[QueuedSync]) -> GroupedQueuedItems {
-        let mut result = GroupedQueuedItems::default();
-
-        for item in items {
-            match item.operation {
-                SyncOperation::Upsert => {
-                    if let Some(payload) = &item.payload {
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
-                            match item.entity_type {
-                                EntityType::Entry => result.upsert_entries.push(value),
-                                EntityType::Task => result.upsert_tasks.push(value),
-                                EntityType::Rule => result.upsert_rules.push(value),
-                                EntityType::Skill => result.upsert_skills.push(value),
-                                EntityType::Session => result.upsert_sessions.push(value),
-                                EntityType::Verification => result.upsert_verifications.push(value),
-                                EntityType::Event => result.upsert_events.push(value),
-                                EntityType::Prompt => result.upsert_prompts.push(value),
-                                EntityType::FileChange => result.upsert_file_changes.push(value),
-                                EntityType::CommitLink => result.upsert_commit_links.push(value),
-                                EntityType::Agent => result.upsert_agents.push(value),
-                                EntityType::Worktree => result.upsert_worktrees.push(value),
-                                // Pages ship via `push_knowledge_pages` (it
-                                // needs the body from disk), so nothing
-                                // enqueues them today. Arm kept explicit so a
-                                // future queue producer is a compile error.
-                                EntityType::KnowledgePage => {}
-                            }
-                        }
-                    }
-                }
-                SyncOperation::Delete => match item.entity_type {
-                    EntityType::Entry => result.delete_entries.push(item.entity_id.clone()),
-                    EntityType::Task => result.delete_tasks.push(item.entity_id.clone()),
-                    EntityType::Rule => result.delete_rules.push(item.entity_id.clone()),
-                    EntityType::Skill => result.delete_skills.push(item.entity_id.clone()),
-                    EntityType::Session => result.delete_sessions.push(item.entity_id.clone()),
-                    EntityType::Verification => {
-                        result.delete_verifications.push(item.entity_id.clone())
-                    }
-                    EntityType::Event => result.delete_events.push(item.entity_id.clone()),
-                    EntityType::Prompt => result.delete_prompts.push(item.entity_id.clone()),
-                    EntityType::FileChange => {
-                        result.delete_file_changes.push(item.entity_id.clone())
-                    }
-                    EntityType::CommitLink => {
-                        result.delete_commit_links.push(item.entity_id.clone())
-                    }
-                    EntityType::Agent => result.delete_agents.push(item.entity_id.clone()),
-                    EntityType::Worktree => result.delete_worktrees.push(item.entity_id.clone()),
-                    EntityType::KnowledgePage => {}
-                },
-            }
-        }
-
-        result
-    }
-
-    /// Send team delete requests for each entity type
+    /// Send team delete requests in queue order, retaining each row's target
+    /// project when this is a project move. Normal deletes use the current
+    /// pushing project as before.
     fn send_team_deletes(
         &self,
         team_id: &str,
-        grouped: &GroupedQueuedItems,
+        items: &[&QueuedSync],
         token: &str,
         project_id: &str,
-    ) -> (usize, Vec<String>) {
-        let mut deleted = 0;
+    ) -> (Vec<i64>, Vec<(i64, String)>) {
+        let mut successful = Vec::new();
         let mut errors = Vec::new();
 
-        // Delete entries
-        for cas_id in &grouped.delete_entries {
-            match self.send_team_delete(team_id, EntityType::Entry, cas_id, token, project_id) {
-                Ok(()) => deleted += 1,
-                Err(e) => errors.push(format!("Entry delete {cas_id}: {e}")),
-            }
-        }
-
-        // Delete tasks
-        for cas_id in &grouped.delete_tasks {
-            match self.send_team_delete(team_id, EntityType::Task, cas_id, token, project_id) {
-                Ok(()) => deleted += 1,
-                Err(e) => errors.push(format!("Task delete {cas_id}: {e}")),
-            }
-        }
-
-        // Delete rules
-        for cas_id in &grouped.delete_rules {
-            match self.send_team_delete(team_id, EntityType::Rule, cas_id, token, project_id) {
-                Ok(()) => deleted += 1,
-                Err(e) => errors.push(format!("Rule delete {cas_id}: {e}")),
-            }
-        }
-
-        // Delete skills
-        for cas_id in &grouped.delete_skills {
-            match self.send_team_delete(team_id, EntityType::Skill, cas_id, token, project_id) {
-                Ok(()) => deleted += 1,
-                Err(e) => errors.push(format!("Skill delete {cas_id}: {e}")),
-            }
-        }
-
-        // Delete sessions
-        for cas_id in &grouped.delete_sessions {
-            match self.send_team_delete(team_id, EntityType::Session, cas_id, token, project_id) {
-                Ok(()) => deleted += 1,
-                Err(e) => errors.push(format!("Session delete {cas_id}: {e}")),
-            }
-        }
-
-        // Delete verifications
-        for cas_id in &grouped.delete_verifications {
+        for item in items {
+            let target_project = item.project_id.as_deref().unwrap_or(project_id);
             match self.send_team_delete(
                 team_id,
-                EntityType::Verification,
-                cas_id,
+                item.entity_type,
+                &item.entity_id,
                 token,
-                project_id,
+                target_project,
             ) {
-                Ok(()) => deleted += 1,
-                Err(e) => errors.push(format!("Verification delete {cas_id}: {e}")),
+                Ok(()) => successful.push(item.id),
+                Err(error) => errors.push((
+                    item.id,
+                    format!("{} delete {}: {error}", item.entity_type, item.entity_id),
+                )),
             }
         }
 
-        // Delete events
-        for cas_id in &grouped.delete_events {
-            match self.send_team_delete(team_id, EntityType::Event, cas_id, token, project_id) {
-                Ok(()) => deleted += 1,
-                Err(e) => errors.push(format!("Event delete {cas_id}: {e}")),
-            }
-        }
-
-        // Delete prompts
-        for cas_id in &grouped.delete_prompts {
-            match self.send_team_delete(team_id, EntityType::Prompt, cas_id, token, project_id) {
-                Ok(()) => deleted += 1,
-                Err(e) => errors.push(format!("Prompt delete {cas_id}: {e}")),
-            }
-        }
-
-        // Delete file changes
-        for cas_id in &grouped.delete_file_changes {
-            match self.send_team_delete(team_id, EntityType::FileChange, cas_id, token, project_id)
-            {
-                Ok(()) => deleted += 1,
-                Err(e) => errors.push(format!("FileChange delete {cas_id}: {e}")),
-            }
-        }
-
-        // Delete commit links
-        for cas_id in &grouped.delete_commit_links {
-            match self.send_team_delete(team_id, EntityType::CommitLink, cas_id, token, project_id)
-            {
-                Ok(()) => deleted += 1,
-                Err(e) => errors.push(format!("CommitLink delete {cas_id}: {e}")),
-            }
-        }
-
-        // Delete agents
-        for cas_id in &grouped.delete_agents {
-            match self.send_team_delete(team_id, EntityType::Agent, cas_id, token, project_id) {
-                Ok(()) => deleted += 1,
-                Err(e) => errors.push(format!("Agent delete {cas_id}: {e}")),
-            }
-        }
-
-        (deleted, errors)
+        (successful, errors)
     }
 
     /// Send a single team delete request
@@ -793,6 +690,71 @@ mod tests {
         assert_eq!(
             value.get("origin_project").and_then(|value| value.as_str()),
             Some("acme/accounting")
+        );
+    }
+
+    #[test]
+    fn explicit_task_origin_project_survives_team_push_stamping() {
+        let mut value = serde_json::json!({
+            "id": "cas-reassigned",
+            "scope": "project",
+            "origin_project": "pulse-card",
+        });
+
+        super::stamp_task_origin_project(&mut value, "acme/accounting");
+
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("pulse-card")
+        );
+    }
+
+    #[test]
+    fn missing_task_origin_project_receives_current_project_identity() {
+        let mut value = serde_json::json!({"id": "cas-legacy", "scope": "project"});
+
+        super::stamp_task_origin_project(&mut value, "acme/accounting");
+
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("acme/accounting")
+        );
+    }
+
+    #[test]
+    fn empty_task_origin_project_receives_current_project_identity() {
+        let mut value = serde_json::json!({
+            "id": "cas-legacy",
+            "scope": "project",
+            "origin_project": "",
+        });
+
+        super::stamp_task_origin_project(&mut value, "acme/accounting");
+
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("acme/accounting")
+        );
+    }
+
+    #[test]
+    fn global_task_origin_project_remains_unstamped() {
+        let mut value = serde_json::json!({
+            "id": "cas-global",
+            "scope": "global",
+            "origin_project": null,
+        });
+
+        super::stamp_task_origin_project(&mut value, "acme/accounting");
+
+        assert_eq!(
+            value.get("scope").and_then(|value| value.as_str()),
+            Some("global")
+        );
+        assert!(
+            value
+                .get("origin_project")
+                .is_some_and(serde_json::Value::is_null)
         );
     }
 }

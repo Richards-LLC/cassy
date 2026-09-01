@@ -230,7 +230,9 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // Full update: binary + every local project's migration/sync/cloud state.
     let mut steps = UpdateStepTracker::new(2, !cli.json);
     steps.run("Updating Cassy binary", || {
-        perform_update(args, current_version, cli)
+        let installed_version = perform_update(args, current_version, cli)?;
+        super::hub::restart_stale_hub(&installed_version, cli)?;
+        Ok(installed_version)
     })?;
     if !cli.json {
         let mut out = io::stdout();
@@ -1515,7 +1517,7 @@ fn check_for_updates(
 }
 
 /// Download and install the latest (or specified) version
-fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow::Result<()> {
+fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow::Result<String> {
     use self_update::Status;
     use self_update::backends::github::Update;
 
@@ -1563,7 +1565,7 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
             fmt.newline()?;
             fmt.write_raw("  ")?;
             fmt.success("Already on the latest version")?;
-            return Ok(());
+            return Ok(current_version.to_owned());
         }
 
         fmt.newline()?;
@@ -1584,14 +1586,14 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
             updated,
             version.trim_start_matches('v')
         );
-        return Ok(());
+        return Ok(version.trim_start_matches('v').to_owned());
     }
 
     let mut out = io::stdout();
     let theme = ActiveTheme::default();
     let mut fmt = Formatter::stdout(&mut out, theme);
 
-    match status {
+    let installed_version = match status {
         Status::UpToDate(v) => {
             fmt.newline()?;
             fmt.write_raw("  ")?;
@@ -1599,6 +1601,7 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
                 "Already up to date ({})",
                 v.trim_start_matches('v')
             ))?;
+            v.trim_start_matches('v').to_owned()
         }
         Status::Updated(v) => {
             fmt.newline()?;
@@ -1612,10 +1615,11 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
             fmt.write_accent("cas changelog")?;
             fmt.write_raw(" to see what's new")?;
             fmt.newline()?;
+            v.trim_start_matches('v').to_owned()
         }
-    }
+    };
 
-    Ok(())
+    Ok(installed_version)
 }
 
 /// Try to get a GitHub auth token from `gh auth token` or GITHUB_TOKEN env var.

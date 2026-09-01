@@ -22,6 +22,7 @@ use crate::hub::{AuthStore, HubRuntimePaths, MachineIdentityStore, Scope};
 
 const RELAY_PREFIX: &str = "/api/hub/pairing";
 const WIRE_VERSION: u8 = 1;
+const LAST_HUB_URL_FILE: &str = "last-public-url";
 
 #[derive(Debug, Deserialize)]
 struct ClaimResponse {
@@ -282,7 +283,19 @@ pub(super) fn authorize(args: &HubAuthorizeArgs, cli: &Cli) -> Result<()> {
     };
     let relay = RelayClient::from_config(cloud)?;
     let paths = HubRuntimePaths::default_for_user()?;
-    authorize_with_relay(args, cli, &relay, &paths)
+    let config_root = crate::store::find_cas_root().ok();
+    let configured_hub_url = config_root
+        .as_deref()
+        .and_then(|cas_root| crate::config::Config::load(cas_root).ok())
+        .and_then(|config| config.hub.and_then(|hub| hub.public_url));
+    authorize_with_relay_with_config(
+        args,
+        cli,
+        &relay,
+        &paths,
+        configured_hub_url.as_deref(),
+        config_root.as_deref(),
+    )
 }
 
 fn authorize_with_relay(
@@ -291,10 +304,21 @@ fn authorize_with_relay(
     relay: &impl PairingRelay,
     paths: &HubRuntimePaths,
 ) -> Result<()> {
+    authorize_with_relay_with_config(args, cli, relay, paths, None, None)
+}
+
+fn authorize_with_relay_with_config(
+    args: &HubAuthorizeArgs,
+    cli: &Cli,
+    relay: &impl PairingRelay,
+    paths: &HubRuntimePaths,
+    configured_hub_url: Option<&str>,
+    config_root: Option<&Path>,
+) -> Result<()> {
     let code = args.code.trim().to_ascii_uppercase();
     anyhow::ensure!(!code.is_empty(), "pairing code must not be empty");
     let override_scopes = parse_override_scopes(args.scopes.as_deref())?;
-    let hub_url = resolve_hub_url(paths, args.hub_url.as_deref())?;
+    let hub_url = resolve_hub_url(paths, args.hub_url.as_deref(), configured_hub_url)?;
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
     let auth = AuthStore::open(paths.root(), machine.id)?;
     let machine_label = hostname::get()
@@ -347,6 +371,12 @@ fn authorize_with_relay(
         complete.pairing_request_id == claim.pairing_request_id,
         "relay completion response did not match the claimed request"
     );
+    persist_last_hub_url(paths, &hub_url)?;
+    if args.hub_url.is_some()
+        && let Some(config_root) = config_root
+    {
+        persist_configured_hub_url(config_root, &hub_url)?;
+    }
     attempt.finish()?;
     if cli.json {
         println!("{}", serde_json::to_string(&complete)?);
@@ -386,22 +416,20 @@ fn confirm(yes: bool, cli: &Cli, claim: &ClaimResponse, granted: &BTreeSet<Scope
 fn print_confirmation_summary(claim: &ClaimResponse, granted: &BTreeSet<Scope>) {
     println!("Commander origin to verify: {}", claim.controller_origin);
     println!(
-        "Read access requested: {}",
-        display_scopes_by_kind(&claim.requested_scopes, false)
-    );
-    println!(
-        "CONTROL ACCESS REQUESTED: {}",
-        display_scopes_by_kind(&claim.requested_scopes, true)
-    );
-    println!(
-        "Read access to grant: {}",
-        display_scopes_by_kind(granted, false)
-    );
-    println!(
-        "CONTROL ACCESS TO GRANT: {}",
-        display_scopes_by_kind(granted, true)
+        "{summary}",
+        summary = confirmation_scope_summary(claim, granted)
     );
     println!("Verify the Commander origin before approving this one-time invitation.");
+}
+
+fn confirmation_scope_summary(claim: &ClaimResponse, granted: &BTreeSet<Scope>) -> String {
+    format!(
+        "Scopes requested: read: {}; control: {}\nScopes granted: read: {}; control: {}",
+        display_scopes_by_kind(&claim.requested_scopes, false),
+        display_scopes_by_kind(&claim.requested_scopes, true),
+        display_scopes_by_kind(granted, false),
+        display_scopes_by_kind(granted, true),
+    )
 }
 
 fn display_scopes_by_kind(
@@ -432,21 +460,31 @@ fn is_control_scope(scope: Scope) -> bool {
     )
 }
 
-fn resolve_hub_url(paths: &HubRuntimePaths, explicit: Option<&str>) -> Result<String> {
+fn resolve_hub_url(
+    paths: &HubRuntimePaths,
+    explicit: Option<&str>,
+    configured_hub_url: Option<&str>,
+) -> Result<String> {
     let record = paths.read_process_record()?;
     anyhow::ensure!(
         record_is_live(&record),
         "cas hub is not running; start it before authorizing a Commander page"
     );
-    let url = explicit.or(record.public_url.as_deref()).context(
-        "Hub has no public URL. Start it with `cas hub --tailscale-serve start` or pass --hub-url.",
-    )?;
+    let remembered_hub_url = read_last_hub_url(paths)?;
+    let url = explicit
+        .or(record.public_url.as_deref())
+        .or(configured_hub_url)
+        .or(remembered_hub_url.as_deref())
+        .context(
+            "hub is running without a public URL; pass --hub-url https://<commander-host> (remembered for next time) or `cas hub restart --tailscale-serve`",
+        )?;
     let parsed = validate_hub_url(url)?;
     Ok(parsed.origin().ascii_serialization())
 }
 
 fn validate_hub_url(url: &str) -> Result<Url> {
-    let parsed = Url::parse(url).context("invalid hub URL")?;
+    let normalized = normalize_hub_url(url);
+    let parsed = Url::parse(&normalized).context("invalid hub URL")?;
     anyhow::ensure!(
         parsed.username().is_empty()
             && parsed.password().is_none()
@@ -457,10 +495,81 @@ fn validate_hub_url(url: &str) -> Result<Url> {
         "hub URL must be an HTTPS origin or an HTTP IP-loopback origin"
     );
     anyhow::ensure!(
-        parsed.scheme() == "https" || is_loopback_origin(url),
+        parsed.scheme() == "https" || is_loopback_origin(&normalized),
         "hub URL must be an HTTPS origin or an HTTP IP-loopback origin"
     );
     Ok(parsed)
+}
+
+fn normalize_hub_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.contains("://") {
+        return trimmed.to_owned();
+    }
+
+    // A literal IP-loopback address is safe for local development over HTTP;
+    // other bare hosts default to HTTPS so Commander origins remain secure.
+    let loopback_candidate = format!("http://{trimmed}");
+    if is_loopback_origin(&loopback_candidate) {
+        loopback_candidate
+    } else {
+        format!("https://{trimmed}")
+    }
+}
+
+fn last_hub_url_path(paths: &HubRuntimePaths) -> PathBuf {
+    paths.root().join(LAST_HUB_URL_FILE)
+}
+
+fn read_last_hub_url(paths: &HubRuntimePaths) -> Result<Option<String>> {
+    let path = last_hub_url_path(paths);
+    match fs::read_to_string(&path) {
+        Ok(url) => {
+            let url = url.trim();
+            Ok((!url.is_empty()).then(|| url.to_owned()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("read remembered hub URL at {}", path.display()))
+        }
+    }
+}
+
+fn persist_last_hub_url(paths: &HubRuntimePaths, hub_url: &str) -> Result<()> {
+    crate::hub::ensure_private_dir(paths.root())?;
+    let target = last_hub_url_path(paths);
+    let temporary = paths
+        .root()
+        .join(format!(".{LAST_HUB_URL_FILE}.{}.tmp", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .with_context(|| format!("open remembered hub URL at {}", temporary.display()))?;
+    file.write_all(hub_url.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    fs::rename(&temporary, &target)
+        .with_context(|| format!("save remembered hub URL at {}", target.display()))?;
+    Ok(())
+}
+
+fn persist_configured_hub_url(cas_root: &Path, hub_url: &str) -> Result<()> {
+    let mut config = crate::config::Config::load(cas_root)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    config
+        .hub
+        .get_or_insert_with(crate::config::HubConfig::default)
+        .public_url = Some(hub_url.to_owned());
+    config
+        .save_toml(cas_root)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(())
 }
 
 fn is_loopback_origin(origin: &str) -> bool {
@@ -697,6 +806,26 @@ mod tests {
     }
 
     #[test]
+    fn confirmation_scope_summary_prints_requested_and_granted_blocks_once() {
+        let scopes = [Scope::MachineRead, Scope::SessionRead, Scope::PaneInput];
+        let claim = ClaimResponse {
+            wire_version: WIRE_VERSION,
+            authorization_id: "authorization".to_owned(),
+            pairing_request_id: "pairing-request".to_owned(),
+            controller_origin: "https://commander.example".to_owned(),
+            requested_scopes: scopes.to_vec(),
+            claim_expires_at: Utc::now(),
+        };
+        let granted: BTreeSet<_> = scopes.iter().copied().collect();
+        let summary = confirmation_scope_summary(&claim, &granted);
+
+        assert_eq!(summary.matches("Scopes requested:").count(), 1);
+        assert_eq!(summary.matches("Scopes granted:").count(), 1);
+        assert!(summary.contains("read: machine:read, session:read"));
+        assert!(summary.contains("control: pane:input"));
+    }
+
+    #[test]
     fn loopback_hub_url_requires_a_literal_http_loopback_origin() {
         for origin in [
             "http://127.0.0.1",
@@ -721,6 +850,68 @@ mod tests {
         ] {
             assert!(!is_loopback_origin(origin), "{origin}");
         }
+    }
+
+    #[test]
+    fn bare_hub_hosts_are_https_and_bare_ip_loopback_is_http() {
+        assert_eq!(
+            validate_hub_url("hub.petrastella.io")
+                .unwrap()
+                .origin()
+                .ascii_serialization(),
+            "https://hub.petrastella.io"
+        );
+        assert_eq!(
+            validate_hub_url("127.0.0.1:4173")
+                .unwrap()
+                .origin()
+                .ascii_serialization(),
+            "http://127.0.0.1:4173"
+        );
+    }
+
+    #[test]
+    fn hub_url_resolution_obeys_explicit_record_config_then_remembered_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let (port, health) = serve_ready_health_checks(4);
+        write_live_record(&paths, port, Some("https://record.example"));
+
+        assert_eq!(
+            resolve_hub_url(&paths, Some("explicit.example"), Some("config.example")).unwrap(),
+            "https://explicit.example"
+        );
+        assert_eq!(
+            resolve_hub_url(&paths, None, Some("config.example")).unwrap(),
+            "https://record.example"
+        );
+
+        write_live_record(&paths, port, None);
+        assert_eq!(
+            resolve_hub_url(&paths, None, Some("config.example")).unwrap(),
+            "https://config.example"
+        );
+        fs::create_dir_all(paths.root()).unwrap();
+        fs::write(paths.root().join(LAST_HUB_URL_FILE), "remembered.example\n").unwrap();
+        assert_eq!(
+            resolve_hub_url(&paths, None, None).unwrap(),
+            "https://remembered.example"
+        );
+        health.join().unwrap();
+    }
+
+    #[test]
+    fn running_hub_without_public_origin_has_state_aware_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let (port, health) = serve_ready_health_checks(1);
+        write_live_record(&paths, port, None);
+
+        let error = resolve_hub_url(&paths, None, None).unwrap_err().to_string();
+        assert!(error.contains("hub is running without a public URL"));
+        assert!(error.contains("cas hub restart --tailscale-serve"));
+        assert!(!error.contains("cas hub --tailscale-serve start"));
+        health.join().unwrap();
     }
 
     #[derive(Default)]
@@ -870,7 +1061,11 @@ mod tests {
         let (port, health) = serve_ready_health_checks(2);
         write_live_record(&paths, port, None);
         let unpublished = authorize_with_relay(&args, &test_cli(), &relay, &paths).unwrap_err();
-        assert!(unpublished.to_string().contains("Hub has no public URL"));
+        assert!(
+            unpublished
+                .to_string()
+                .contains("hub is running without a public URL")
+        );
         assert!(relay.claims.lock().unwrap().is_empty());
 
         write_live_record(&paths, port, Some("https://workstation.tail.example/"));
@@ -884,6 +1079,41 @@ mod tests {
             *relay.completed_hub_urls.lock().unwrap(),
             ["https://workstation.tail.example"]
         );
+        assert_eq!(
+            read_last_hub_url(&paths).unwrap().as_deref(),
+            Some("https://workstation.tail.example")
+        );
+    }
+
+    #[test]
+    fn successful_explicit_origin_is_saved_to_project_hub_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let config_root = temp.path().join("cas");
+        fs::create_dir_all(&config_root).unwrap();
+        crate::config::Config::default()
+            .save_toml(&config_root)
+            .unwrap();
+        let (port, health) = serve_ready_health_checks(1);
+        write_live_record(&paths, port, None);
+        let mut args = authorize_args("K7MW-4H2Q");
+        args.hub_url = Some("configured.example".to_owned());
+
+        authorize_with_relay_with_config(
+            &args,
+            &test_cli(),
+            &RecordingRelay::default(),
+            &paths,
+            None,
+            Some(&config_root),
+        )
+        .unwrap();
+        let config = crate::config::Config::load(&config_root).unwrap();
+        assert_eq!(
+            config.hub.and_then(|hub| hub.public_url),
+            Some("https://configured.example".to_owned())
+        );
+        health.join().unwrap();
     }
 
     #[test]

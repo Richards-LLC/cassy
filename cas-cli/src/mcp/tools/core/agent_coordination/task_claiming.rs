@@ -578,7 +578,7 @@ impl CasCore {
     /// List tasks available for claiming
     pub async fn cas_tasks_available(
         &self,
-        Parameters(req): Parameters<LimitRequest>,
+        Parameters(req): Parameters<TaskAvailableRequest>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
         let agent_store = self.open_agent_store()?;
@@ -595,11 +595,25 @@ impl CasCore {
         let claimed_ids: std::collections::HashSet<_> =
             active_leases.iter().map(|l| l.task_id.as_str()).collect();
 
-        // Filter to unclaimed tasks
+        // Filter to unclaimed tasks. Legacy rows with no origin remain visible;
+        // explicitly foreign rows require the opt-in flag.
         let project_id = super::super::task::current_project_id(&self.cas_root);
+        let hidden_foreign = if req.include_foreign {
+            0
+        } else {
+            ready_tasks
+                .iter()
+                .filter(|task| {
+                    !super::super::task::task_visible_in_project(task, project_id.as_deref())
+                })
+                .count()
+        };
         let mut available: Vec<_> = ready_tasks
             .iter()
-            .filter(|t| super::super::task::task_belongs_to_project(t, project_id.as_deref()))
+            .filter(|t| {
+                req.include_foreign
+                    || super::super::task::task_visible_in_project(t, project_id.as_deref())
+            })
             .filter(|t| !claimed_ids.contains(t.id.as_str()))
             .collect();
 
@@ -617,9 +631,12 @@ impl CasCore {
         crate::mcp::tools::sort_task_refs(&mut available, &sort_opts);
 
         if available.is_empty() {
-            return Ok(Self::success(
-                "No available tasks (all claimed or none ready)",
-            ));
+            let mut output = "No available tasks (all claimed or none ready)".to_string();
+            if let Some(footer) = super::super::task::foreign_tasks_hidden_footer(hidden_foreign) {
+                output.push('\n');
+                output.push_str(&footer);
+            }
+            return Ok(Self::success(output));
         }
 
         // cas-e163 (GH #109): the total here was already honest, but nothing
@@ -646,6 +663,10 @@ impl CasCore {
             ));
         }
         output.push_str(&crate::mcp::tools::truncated_list_footer(total, shown));
+        if let Some(footer) = super::super::task::foreign_tasks_hidden_footer(hidden_foreign) {
+            output.push('\n');
+            output.push_str(&footer);
+        }
 
         Ok(Self::success(output))
     }

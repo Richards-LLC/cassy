@@ -6,8 +6,10 @@
 //! For unified session metadata (worker count, epic ID, etc.), use
 //! `cas_factory::SessionSummary` and `cas_factory::UnifiedSessionManager`.
 
+use crate::store::{find_cas_root_from, open_agent_store};
 use crate::ui::factory::protocol::{AgentInfo, SessionMetadata};
 use cas_factory::{SessionState, SessionSummary, SessionType};
+use cas_types::{AgentStatus, AgentType};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
@@ -300,9 +302,44 @@ impl SessionInfo {
         &self.metadata.socket_path
     }
 
-    /// Get worker count from daemon metadata
+    /// Get the names of live workers from the registry, falling back to the
+    /// daemon roster when the session's registry cannot be read.
+    pub fn worker_names(&self) -> Vec<String> {
+        self.live_registry_worker_names().unwrap_or_else(|| {
+            self.metadata
+                .workers
+                .iter()
+                .map(|w| w.name.clone())
+                .collect()
+        })
+    }
+
+    fn live_registry_worker_names(&self) -> Option<Vec<String>> {
+        let project_dir = self.metadata.project_dir.as_deref()?;
+        let cas_root = find_cas_root_from(Path::new(project_dir)).ok()?;
+        let agent_store = open_agent_store(&cas_root).ok()?;
+        let agents = agent_store.list(None).ok()?;
+
+        Some(
+            agents
+                .into_iter()
+                .filter(|agent| {
+                    agent.agent_type == AgentType::Worker
+                        && agent.factory_session.as_deref() == Some(self.name.as_str())
+                        && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+                        && !agent.is_heartbeat_expired(
+                            crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS,
+                        )
+                })
+                .map(|agent| agent.name)
+                .collect(),
+        )
+    }
+
+    /// Get the number of live workers from the registry, falling back to
+    /// daemon metadata only when the registry is unreachable.
     pub fn worker_count(&self) -> usize {
-        self.metadata.workers.len()
+        self.worker_names().len()
     }
 
     /// Convert to a unified SessionSummary with full metadata.
@@ -322,7 +359,7 @@ impl SessionInfo {
             } else {
                 SessionState::Paused
             },
-            worker_count: self.metadata.workers.len(),
+            worker_count: self.worker_count(),
             supervisor_name: Some(self.metadata.supervisor.name.clone()),
             created_at,
             project_dir: self
@@ -558,5 +595,91 @@ mod tests {
             result.is_none()
                 || result.unwrap().metadata.project_dir != Some("/some/project".to_string())
         );
+    }
+
+    #[test]
+    fn worker_count_uses_live_factory_registry_workers() {
+        use crate::store::{AgentStore, SqliteAgentStore, init_cas_dir};
+        use cas_types::{AgentRole, AgentStatus, AgentType};
+
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = init_cas_dir(project.path()).unwrap();
+        let session_name = "factory-registry-count";
+        let metadata = create_metadata(
+            session_name,
+            std::process::id(),
+            "supervisor",
+            &[],
+            None,
+            Some(project.path().to_str().unwrap()),
+            None,
+        );
+        let session = SessionInfo {
+            name: session_name.to_string(),
+            metadata,
+            is_running: true,
+            socket_exists: false,
+        };
+        let agents = SqliteAgentStore::open(&cas_root).unwrap();
+        agents.init().unwrap();
+
+        for index in 0..5 {
+            let mut worker = cas_types::Agent::new(
+                format!("registry-worker-{index}"),
+                format!("worker-{index}"),
+            );
+            worker.agent_type = AgentType::Worker;
+            worker.role = AgentRole::Worker;
+            worker.factory_session = Some(session_name.to_string());
+            agents.register(&worker).unwrap();
+        }
+
+        assert_eq!(
+            session.worker_count(),
+            5,
+            "live registry workers must replace an empty metadata roster"
+        );
+        assert_eq!(session.to_session_summary().worker_count, 5);
+
+        let mut shutdown = agents.get("registry-worker-0").unwrap();
+        shutdown.status = AgentStatus::Shutdown;
+        agents.update(&shutdown).unwrap();
+        assert_eq!(session.worker_count(), 4, "shutdown workers are not live");
+
+        let mut stale = agents.get("registry-worker-1").unwrap();
+        stale.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(31);
+        agents.update(&stale).unwrap();
+        assert_eq!(
+            session.worker_count(),
+            3,
+            "workers with stale heartbeats are not live"
+        );
+
+        let fallback_metadata = create_metadata(
+            "factory-registry-unavailable",
+            std::process::id(),
+            "supervisor",
+            &[
+                "metadata-worker-a".to_string(),
+                "metadata-worker-b".to_string(),
+            ],
+            None,
+            None,
+            None,
+        );
+        let fallback = SessionInfo {
+            name: "factory-registry-unavailable".to_string(),
+            metadata: fallback_metadata,
+            is_running: true,
+            socket_exists: false,
+        };
+        assert_eq!(
+            fallback.worker_count(),
+            2,
+            "metadata is retained when the registry cannot be reached"
+        );
+
+        drop(env);
     }
 }

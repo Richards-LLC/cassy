@@ -525,6 +525,7 @@ impl CasService {
             epic: req.epic,
             sort: req.sort.clone(),
             sort_order: req.sort_order.clone(),
+            include_foreign: req.include_foreign.unwrap_or(false),
         };
         self.inner.cas_task_list(Parameters(inner_req)).await
     }
@@ -537,6 +538,7 @@ impl CasService {
             sort: req.sort.clone(),
             sort_order: req.sort_order.clone(),
             epic: req.epic,
+            include_foreign: req.include_foreign.unwrap_or(false),
         };
         self.inner.cas_task_ready(Parameters(inner_req)).await
     }
@@ -549,6 +551,7 @@ impl CasService {
             sort: req.sort.clone(),
             sort_order: req.sort_order.clone(),
             epic: req.epic,
+            include_foreign: req.include_foreign.unwrap_or(false),
         };
         self.inner.cas_task_blocked(Parameters(inner_req)).await
     }
@@ -681,13 +684,13 @@ impl CasService {
         &self,
         req: TaskRequest,
     ) -> Result<CallToolResult, McpError> {
-        use crate::mcp::tools::LimitRequest;
-        let inner_req = LimitRequest {
+        use crate::mcp::tools::TaskAvailableRequest;
+        let inner_req = TaskAvailableRequest {
             limit: req.limit,
             scope: req.scope.unwrap_or_else(|| "all".to_string()),
             sort: req.sort.clone(),
             sort_order: req.sort_order.clone(),
-            team_id: None, // TaskRequest team_id support added in separate task
+            include_foreign: req.include_foreign.unwrap_or(false),
         };
         self.inner.cas_tasks_available(Parameters(inner_req)).await
     }

@@ -140,6 +140,7 @@ pub(crate) struct SessionJson {
     pub(crate) epic_id: Option<String>,
     pub(crate) supervisor: String,
     pub(crate) workers: Vec<String>,
+    pub(crate) worker_count: usize,
     pub(crate) is_running: bool,
     pub(crate) socket_exists: bool,
     pub(crate) can_attach: bool,
@@ -238,6 +239,7 @@ pub(crate) struct PaneTailJson {
 }
 
 pub(crate) fn session_json(s: &crate::ui::factory::SessionInfo) -> SessionJson {
+    let workers = s.worker_names();
     SessionJson {
         name: s.name.clone(),
         created_at: s.metadata.created_at.clone(),
@@ -247,7 +249,8 @@ pub(crate) fn session_json(s: &crate::ui::factory::SessionInfo) -> SessionJson {
         project_dir: s.metadata.project_dir.clone(),
         epic_id: s.metadata.epic_id.clone(),
         supervisor: s.metadata.supervisor.name.clone(),
-        workers: s.metadata.workers.iter().map(|w| w.name.clone()).collect(),
+        worker_count: workers.len(),
+        workers,
         is_running: s.is_running,
         socket_exists: s.socket_exists,
         can_attach: s.can_attach(),

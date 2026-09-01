@@ -59,6 +59,37 @@ pub struct LimitRequest {
     pub team_id: Option<String>,
 }
 
+/// Request for the task `available` query. Kept separate from the shared
+/// limit request so unrelated memory, rule, skill, and agent operations do
+/// not grow a task-specific field.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskAvailableRequest {
+    /// Maximum number of items
+    #[schemars(description = "Maximum items to return")]
+    #[serde(default)]
+    pub limit: Option<usize>,
+
+    /// Scope filter
+    #[schemars(description = "Filter by scope: 'project' or 'all'")]
+    #[serde(default = "default_scope_all")]
+    pub scope: String,
+
+    /// Sort field
+    #[schemars(description = "Sort by: 'created', 'updated', 'priority', 'title'")]
+    #[serde(default)]
+    pub sort: Option<String>,
+
+    /// Sort order
+    #[schemars(description = "Sort order (default: desc for dates, asc for priority)")]
+    #[serde(default)]
+    pub sort_order: Option<String>,
+
+    /// Include rows whose origin belongs to another project.
+    #[schemars(description = "Include foreign-origin task rows (default: false)")]
+    #[serde(default)]
+    pub include_foreign: bool,
+}
+
 /// Request type for task ready/blocked operations with epic filtering
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskReadyBlockedRequest {
@@ -88,6 +119,11 @@ pub struct TaskReadyBlockedRequest {
     #[schemars(description = "Filter to subtasks of this epic ID")]
     #[serde(default)]
     pub epic: Option<String>,
+
+    /// Include rows whose origin belongs to another project.
+    #[schemars(description = "Include foreign-origin task rows (default: false)")]
+    #[serde(default)]
+    pub include_foreign: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -140,4 +176,9 @@ pub struct TaskListRequest {
     )]
     #[serde(default)]
     pub sort_order: Option<String>,
+
+    /// Include rows whose origin belongs to another project.
+    #[schemars(description = "Include foreign-origin task rows (default: false)")]
+    #[serde(default)]
+    pub include_foreign: bool,
 }

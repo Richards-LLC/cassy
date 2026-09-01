@@ -1,10 +1,132 @@
 use crate::support::*;
-use cas::mcp::CasCore;
+use cas::cloud::CloudConfig;
+use cas::mcp::{CasCore, CasService};
 use cas::mcp::tools::*;
-use cas::store::{open_agent_store, open_event_store, open_task_store};
-use cas::types::EventType;
+use cas::store::{open_agent_store, open_event_store, open_task_store, SqliteTaskStore, TaskStore};
+use cas::types::{EventType, Task};
 use rmcp::handler::server::wrapper::Parameters;
 use rusqlite::Connection;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const MOVE_TEAM: &str = "move-team-uuid";
+
+fn promote_default_test_agent(cas_dir: &std::path::Path) {
+    let agent_store = open_agent_store(cas_dir).expect("agent store");
+    let id = format!("test-session-{}", std::process::id());
+    let mut agent = agent_store.get(&id).expect("default test agent");
+    agent.role = cas::types::AgentRole::Supervisor;
+    agent.heartbeat();
+    agent_store.update(&agent).expect("promote test agent");
+}
+
+#[tokio::test]
+async fn origin_project_move_refuses_unregistered_destination_before_local_write() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    promote_default_test_agent(&cas_dir);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{MOVE_TEAM}/projects")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "projects": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut cloud_config = CloudConfig::default();
+    cloud_config.endpoint = server.uri();
+    cloud_config.token = Some("test-token".to_string());
+    cloud_config.set_team(MOVE_TEAM, "move-team");
+    cloud_config.save_to_cas_dir(&cas_dir).unwrap();
+
+    let local_store = cas::store::open_task_store_local(&cas_dir).unwrap();
+    let mut task = cas::types::Task::new("cas-move-refuse".into(), "move refusal".into());
+    task.origin_project = Some("project-a".into());
+    local_store.add(&task).unwrap();
+
+    let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": task.id,
+        "origin_project": "project-b"
+    }))
+    .unwrap();
+    let error = core
+        .cas_task_update(Parameters(request))
+        .await
+        .expect_err("an unregistered destination must be rejected");
+    assert!(
+        error.message.contains("not registered"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        local_store.get(&task.id).unwrap().origin_project.as_deref(),
+        Some("project-a")
+    );
+}
+
+#[tokio::test]
+async fn origin_project_move_updates_local_row_audit_and_team_queue() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    promote_default_test_agent(&cas_dir);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{MOVE_TEAM}/projects")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "projects": [{
+                "id": "project-b-uuid",
+                "canonical_id": "project-b",
+                "name": "Project B",
+                "contributor_count": 1,
+                "memory_count": 0
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut cloud_config = CloudConfig::default();
+    cloud_config.endpoint = server.uri();
+    cloud_config.token = Some("test-token".to_string());
+    cloud_config.set_team(MOVE_TEAM, "move-team");
+    cloud_config.save_to_cas_dir(&cas_dir).unwrap();
+
+    let local_store = cas::store::open_task_store_local(&cas_dir).unwrap();
+    let mut task = cas::types::Task::new("cas-move-local".into(), "move local".into());
+    task.origin_project = Some("project-a".into());
+    local_store.add(&task).unwrap();
+
+    let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": task.id,
+        "origin_project": "project-b"
+    }))
+    .unwrap();
+    core.cas_task_update(Parameters(request))
+        .await
+        .expect("registered destination move should succeed");
+
+    let updated = local_store.get(&task.id).unwrap();
+    assert_eq!(updated.origin_project.as_deref(), Some("project-b"));
+    assert!(
+        updated
+            .notes
+            .contains("DECISION: moved from project-a to project-b by test-agent"),
+        "audit note missing: {}",
+        updated.notes
+    );
+    let queue = cas::cloud::SyncQueue::open(&cas_dir).unwrap();
+    let pending = queue.pending_for_team(MOVE_TEAM, 10, 5).unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0].operation, cas::cloud::SyncOperation::Delete);
+    assert_eq!(pending[0].project_id.as_deref(), Some("project-a"));
+    assert_eq!(pending[1].operation, cas::cloud::SyncOperation::Upsert);
+}
 
 /// cas-0447 (GH #187): a context-poor worker needs a bounded start response
 /// that preserves its own task notes without inheriting an epic's potentially
@@ -1039,6 +1161,7 @@ async fn test_task_list() {
         epic: None,
         sort: None,
         sort_order: None,
+        include_foreign: false,
     };
     let result = service
         .cas_task_list(Parameters(list_req))
@@ -1085,6 +1208,7 @@ async fn test_task_ready() {
         sort: None,
         sort_order: None,
         epic: None,
+        include_foreign: false,
     };
     let result = service
         .cas_task_ready(Parameters(ready_req))
@@ -1127,6 +1251,7 @@ async fn test_task_ready_excludes_foreign_origin_project_and_show_exposes_it() {
                 sort: None,
                 sort_order: None,
                 epic: None,
+                include_foreign: false,
             }))
             .await
             .expect("task_ready should succeed"),
@@ -1150,6 +1275,155 @@ async fn test_task_ready_excludes_foreign_origin_project_and_show_exposes_it() {
     assert!(
         extract_text(shown).contains("Origin project: acme/other"),
         "show must expose foreign origin for diagnosis"
+    );
+}
+
+#[tokio::test]
+async fn test_task_board_hides_foreign_rows_by_default_and_supports_include_foreign() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[project]\ncanonical_id = \"cas-src\"\n",
+    )
+    .expect("project identity config should be writable");
+
+    // Use a store opened without a default origin to retain the null-origin
+    // fixture row. The MCP core resolves the current project from config.toml.
+    let fixture_store = SqliteTaskStore::open(&cas_dir).expect("fixture task store");
+    fixture_store.init().expect("fixture task store init");
+    let mut null_origin = Task::new("cas-null1".to_string(), "Own null-origin task".to_string());
+    null_origin.origin_project = None;
+    fixture_store
+        .add(&null_origin)
+        .expect("add null-origin task");
+
+    let mut own = Task::new("cas-own1".to_string(), "Own explicit task".to_string());
+    own.origin_project = Some("cas-src".to_string());
+    fixture_store.add(&own).expect("add own task");
+
+    for (id, title) in [
+        ("cas-for1", "Foreign ready task one"),
+        ("cas-for2", "Foreign ready task two"),
+    ] {
+        let mut foreign = Task::new(id.to_string(), title.to_string());
+        foreign.origin_project = Some("gabber-studio".to_string());
+        fixture_store.add(&foreign).expect("add foreign task");
+    }
+
+    let service = CasService::new(core, None);
+    let default_ready: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "ready",
+        "limit": 20,
+    }))
+    .expect("default ready request");
+    let default_ready_text = extract_text(
+        service
+            .task(Parameters(default_ready))
+            .await
+            .expect("default ready should succeed"),
+    );
+    assert!(
+        default_ready_text.contains("cas-null1"),
+        "null-origin own row hidden: {default_ready_text}"
+    );
+    assert!(
+        default_ready_text.contains("cas-own1"),
+        "own row hidden: {default_ready_text}"
+    );
+    assert!(
+        !default_ready_text.contains("cas-for1"),
+        "foreign row leaked: {default_ready_text}"
+    );
+    assert!(
+        !default_ready_text.contains("cas-for2"),
+        "foreign row leaked: {default_ready_text}"
+    );
+    assert!(
+        default_ready_text.contains("2 foreign-origin tasks hidden (include_foreign=true to show)"),
+        "hidden count footer missing: {default_ready_text}"
+    );
+
+    let all_ready: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "ready",
+        "limit": 20,
+        "include_foreign": true,
+    }))
+    .expect("include_foreign ready request");
+    let all_ready_text = extract_text(
+        service
+            .task(Parameters(all_ready))
+            .await
+            .expect("include_foreign ready should succeed"),
+    );
+    for id in ["cas-null1", "cas-own1", "cas-for1", "cas-for2"] {
+        assert!(
+            all_ready_text.contains(id),
+            "include_foreign omitted {id}: {all_ready_text}"
+        );
+    }
+    assert!(
+        !all_ready_text.contains("foreign-origin tasks hidden"),
+        "opt-in still reports hidden rows: {all_ready_text}"
+    );
+
+    let default_list: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "list",
+        "limit": 20,
+    }))
+    .expect("default list request");
+    let default_list_text = extract_text(
+        service
+            .task(Parameters(default_list))
+            .await
+            .expect("default list should succeed"),
+    );
+    assert!(
+        !default_list_text.contains("cas-for1"),
+        "foreign list row leaked: {default_list_text}"
+    );
+    assert!(
+        default_list_text.contains("2 foreign-origin tasks hidden"),
+        "list hidden footer missing: {default_list_text}"
+    );
+
+    let all_list: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "list",
+        "limit": 20,
+        "include_foreign": true,
+    }))
+    .expect("include_foreign list request");
+    let all_list_text = extract_text(
+        service
+            .task(Parameters(all_list))
+            .await
+            .expect("include_foreign list should succeed"),
+    );
+    for id in ["cas-null1", "cas-own1", "cas-for1", "cas-for2"] {
+        assert!(
+            all_list_text.contains(id),
+            "include_foreign list omitted {id}: {all_list_text}"
+        );
+    }
+    assert!(
+        !all_list_text.contains("foreign-origin tasks hidden"),
+        "include_foreign list still reports hidden rows: {all_list_text}"
+    );
+
+    let show_foreign: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "show",
+        "id": "cas-for1",
+        "with_deps": false,
+    }))
+    .expect("show foreign request");
+    let shown = service
+        .task(Parameters(show_foreign))
+        .await
+        .expect("show foreign task");
+    assert!(
+        extract_text(shown)
+            .contains("Origin project: gabber-studio — this task is owned elsewhere"),
+        "foreign ownership banner missing"
     );
 }
 
@@ -1223,6 +1497,7 @@ async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
                 sort: None,
                 sort_order: None,
                 epic: None,
+                include_foreign: false,
             }))
             .await
             .expect("task_ready should succeed"),
@@ -1274,8 +1549,6 @@ async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
 /// never learn which call shows the rest.
 #[tokio::test]
 async fn test_tasks_available_names_withheld_rows() {
-    use cas::mcp::tools::LimitRequest;
-
     let (_temp, service) = setup_cas();
     for i in 0..25 {
         service
@@ -1302,12 +1575,12 @@ async fn test_tasks_available_names_withheld_rows() {
 
     let text = extract_text(
         service
-            .cas_tasks_available(Parameters(LimitRequest {
+            .cas_tasks_available(Parameters(TaskAvailableRequest {
                 limit: None, // the default cap is what hides rows
                 scope: "all".to_string(),
                 sort: None,
                 sort_order: None,
-                team_id: None,
+                include_foreign: false,
             }))
             .await
             .expect("tasks_available should succeed"),
@@ -1333,8 +1606,6 @@ async fn test_tasks_available_names_withheld_rows() {
 /// to tell. The last of the advertised-but-inert family.
 #[tokio::test]
 async fn test_tasks_available_honours_an_explicit_sort() {
-    use cas::mcp::tools::LimitRequest;
-
     let (_temp, service) = setup_cas();
     // Priority order and title order disagree, so the assertion can only pass
     // if the requested field is the one actually applied.
@@ -1363,12 +1634,12 @@ async fn test_tasks_available_honours_an_explicit_sort() {
 
     let by_title = extract_text(
         service
-            .cas_tasks_available(Parameters(LimitRequest {
+            .cas_tasks_available(Parameters(TaskAvailableRequest {
                 limit: None,
                 scope: "all".to_string(),
                 sort: Some("title".to_string()),
                 sort_order: Some("asc".to_string()),
-                team_id: None,
+                include_foreign: false,
             }))
             .await
             .expect("tasks_available should succeed"),
@@ -1389,12 +1660,12 @@ async fn test_tasks_available_honours_an_explicit_sort() {
     // Default is unchanged: priority first.
     let by_default = extract_text(
         service
-            .cas_tasks_available(Parameters(LimitRequest {
+            .cas_tasks_available(Parameters(TaskAvailableRequest {
                 limit: None,
                 scope: "all".to_string(),
                 sort: None,
                 sort_order: None,
-                team_id: None,
+                include_foreign: false,
             }))
             .await
             .expect("tasks_available should succeed"),
@@ -1416,8 +1687,6 @@ async fn test_tasks_available_honours_an_explicit_sort() {
 /// — silently wrong.
 #[tokio::test]
 async fn test_tasks_available_sorts_before_truncating() {
-    use cas::mcp::tools::LimitRequest;
-
     let (_temp, service) = setup_cas();
     // Creation order is load-bearing and easy to get backwards: `list_ready`
     // returns priority ASC, created_at DESC, so the NEWEST task is already
@@ -1453,12 +1722,12 @@ async fn test_tasks_available_sorts_before_truncating() {
 
     let text = extract_text(
         service
-            .cas_tasks_available(Parameters(LimitRequest {
+            .cas_tasks_available(Parameters(TaskAvailableRequest {
                 limit: Some(1),
                 scope: "all".to_string(),
                 sort: Some("title".to_string()),
                 sort_order: Some("asc".to_string()),
-                team_id: None,
+                include_foreign: false,
             }))
             .await
             .expect("tasks_available should succeed"),
@@ -1478,8 +1747,6 @@ async fn test_tasks_available_sorts_before_truncating() {
 /// it does on ready/blocked — keep the priority field, flip the direction.
 #[tokio::test]
 async fn test_tasks_available_sort_order_alone_flips_priority_direction() {
-    use cas::mcp::tools::LimitRequest;
-
     let (_temp, service) = setup_cas();
     for (priority, title) in [(0u8, "critical one"), (3, "low one")] {
         service
@@ -1506,12 +1773,12 @@ async fn test_tasks_available_sort_order_alone_flips_priority_direction() {
 
     let text = extract_text(
         service
-            .cas_tasks_available(Parameters(LimitRequest {
+            .cas_tasks_available(Parameters(TaskAvailableRequest {
                 limit: None,
                 scope: "all".to_string(),
                 sort: None,
                 sort_order: Some("desc".to_string()),
-                team_id: None,
+                include_foreign: false,
             }))
             .await
             .expect("tasks_available should succeed"),
@@ -1529,8 +1796,6 @@ async fn test_tasks_available_sort_order_alone_flips_priority_direction() {
 /// on ready/blocked — it must not silently resurrect creation order.
 #[tokio::test]
 async fn test_tasks_available_unparseable_sort_falls_back_to_priority() {
-    use cas::mcp::tools::LimitRequest;
-
     let (_temp, service) = setup_cas();
     // Order matters: the P0 is created FIRST, so a fallback to created/desc
     // (the trap #104 fixed) would put "low one" at the top and the row
@@ -1560,12 +1825,12 @@ async fn test_tasks_available_unparseable_sort_falls_back_to_priority() {
 
     let text = extract_text(
         service
-            .cas_tasks_available(Parameters(LimitRequest {
+            .cas_tasks_available(Parameters(TaskAvailableRequest {
                 limit: None,
                 scope: "all".to_string(),
                 sort: Some("highest".to_string()), // not a valid field
                 sort_order: None,
-                team_id: None,
+                include_foreign: false,
             }))
             .await
             .expect("tasks_available should succeed"),
@@ -1585,8 +1850,6 @@ async fn test_tasks_available_unparseable_sort_falls_back_to_priority() {
 /// ("pass limit=N") a lie.
 #[tokio::test]
 async fn test_tasks_available_footer_tracks_an_explicit_limit() {
-    use cas::mcp::tools::LimitRequest;
-
     let (_temp, service) = setup_cas();
     for i in 0..25 {
         service
@@ -1613,12 +1876,12 @@ async fn test_tasks_available_footer_tracks_an_explicit_limit() {
 
     let text = extract_text(
         service
-            .cas_tasks_available(Parameters(LimitRequest {
+            .cas_tasks_available(Parameters(TaskAvailableRequest {
                 limit: Some(5),
                 scope: "all".to_string(),
                 sort: None,
                 sort_order: None,
-                team_id: None,
+                include_foreign: false,
             }))
             .await
             .expect("tasks_available should succeed"),
@@ -1641,8 +1904,6 @@ async fn test_tasks_available_footer_tracks_an_explicit_limit() {
 /// and must not inflate either the total or the withheld count.
 #[tokio::test]
 async fn test_tasks_available_total_excludes_claimed_tasks() {
-    use cas::mcp::tools::LimitRequest;
-
     let (temp, service) = setup_cas();
     let cas_dir = temp.path().join(".cas");
     let mut ids = Vec::new();
@@ -1685,12 +1946,12 @@ async fn test_tasks_available_total_excludes_claimed_tasks() {
 
     let text = extract_text(
         service
-            .cas_tasks_available(Parameters(LimitRequest {
+            .cas_tasks_available(Parameters(TaskAvailableRequest {
                 limit: None,
                 scope: "all".to_string(),
                 sort: None,
                 sort_order: None,
-                team_id: None,
+                include_foreign: false,
             }))
             .await
             .expect("tasks_available should succeed"),
@@ -1709,8 +1970,6 @@ async fn test_tasks_available_total_excludes_claimed_tasks() {
 /// cas-e163: a list that fits must not claim anything was withheld.
 #[tokio::test]
 async fn test_tasks_available_has_no_footer_when_nothing_is_withheld() {
-    use cas::mcp::tools::LimitRequest;
-
     let (_temp, service) = setup_cas();
     for i in 0..3 {
         service
@@ -1737,12 +1996,12 @@ async fn test_tasks_available_has_no_footer_when_nothing_is_withheld() {
 
     let text = extract_text(
         service
-            .cas_tasks_available(Parameters(LimitRequest {
+            .cas_tasks_available(Parameters(TaskAvailableRequest {
                 limit: None,
                 scope: "all".to_string(),
                 sort: None,
                 sort_order: None,
-                team_id: None,
+                include_foreign: false,
             }))
             .await
             .expect("tasks_available should succeed"),
@@ -1842,6 +2101,7 @@ async fn test_task_blocked_is_priority_sorted_and_states_the_true_total() {
                 sort: None,
                 sort_order: None,
                 epic: None,
+                include_foreign: false,
             }))
             .await
             .expect("task_blocked should succeed"),
@@ -1901,6 +2161,7 @@ async fn test_task_ready_unparseable_sort_falls_back_to_priority_not_creation_or
                 sort: Some("highest".to_string()), // not a valid sort field
                 sort_order: None,
                 epic: None,
+                include_foreign: false,
             }))
             .await
             .expect("task_ready should succeed"),
@@ -1953,6 +2214,7 @@ async fn test_task_ready_header_is_plain_when_nothing_is_withheld() {
                 sort: None,
                 sort_order: None,
                 epic: None,
+                include_foreign: false,
             }))
             .await
             .expect("task_ready should succeed"),
@@ -1999,6 +2261,7 @@ async fn test_task_ready_explicit_sort_overrides_the_priority_default() {
                 sort: Some("created".to_string()),
                 sort_order: Some("desc".to_string()),
                 epic: None,
+                include_foreign: false,
             }))
             .await
             .expect("task_ready should succeed"),
@@ -2104,6 +2367,7 @@ async fn test_task_ready_epic_filter() {
             sort: None,
             sort_order: None,
             epic: Some(epic_id.clone()),
+            include_foreign: false,
         }))
         .await
         .expect("task_ready with epic filter should succeed");
@@ -2125,6 +2389,7 @@ async fn test_task_ready_epic_filter() {
             sort: None,
             sort_order: None,
             epic: None,
+            include_foreign: false,
         }))
         .await
         .expect("task_ready without epic filter should succeed");
@@ -2569,6 +2834,7 @@ async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
             epic: Some(epic_1_id),
             sort: None,
             sort_order: None,
+            include_foreign: false,
         }))
         .await
         .expect("task list by epic should succeed");
@@ -3220,6 +3486,7 @@ async fn test_release_active_started_task_resets_status_to_open_and_ready() {
             sort: None,
             sort_order: None,
             epic: None,
+            include_foreign: false,
         }))
         .await
         .expect("ready after release");

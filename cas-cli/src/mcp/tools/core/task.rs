@@ -7,14 +7,23 @@ pub(crate) mod repo_context;
 mod update;
 
 /// Return the canonical identity of the project represented by a Cassy root.
-/// Task surfaces must fail closed when the identity cannot be derived: an
-/// unassigned legacy row cannot safely be ranked as local in that case.
 pub(crate) fn current_project_id(cas_root: &std::path::Path) -> Option<String> {
     crate::cloud::resolve_canonical_id(cas_root)
 }
 
 pub(crate) fn task_belongs_to_project(task: &cas_types::Task, project_id: Option<&str>) -> bool {
     project_id.is_some_and(|project_id| task.origin_project.as_deref() == Some(project_id))
+}
+
+/// Task board reads retain legacy rows that have no origin attribution. Rows
+/// with an origin are local only when that origin matches the current project.
+pub(crate) fn task_visible_in_project(task: &cas_types::Task, project_id: Option<&str>) -> bool {
+    task.origin_project.is_none() || task_belongs_to_project(task, project_id)
+}
+
+pub(crate) fn foreign_tasks_hidden_footer(hidden: usize) -> Option<String> {
+    (hidden > 0)
+        .then(|| format!("{hidden} foreign-origin tasks hidden (include_foreign=true to show)"))
 }
 
 #[cfg(test)]

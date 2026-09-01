@@ -1,6 +1,14 @@
 use cas_factory::AutoPromptConfig;
 use serde::{Deserialize, Serialize};
 
+/// Hub origin configuration. Lives at `[hub]` in `.cas/config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HubConfig {
+    /// Public origin used when authorizing a Commander page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+}
+
 /// Project-scoped GitHub issue intake configuration. Lives at `[issues]` in
 /// `.cas/config.toml`.
 ///

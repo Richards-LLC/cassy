@@ -160,6 +160,28 @@ impl<'a> TeamRegistration<'a> {
         self
     }
 
+    /// Verify that the project is already registered with the team without
+    /// creating a registration as a side effect. Reassignment uses this
+    /// read-only path so an invalid destination is rejected before the local
+    /// task or its sync queue changes.
+    pub fn verify_registered(&self) -> Result<(), RegistrationFailure> {
+        if self.lookup(self.canonical_id)?.is_some() {
+            return Ok(());
+        }
+
+        Err(RegistrationFailure {
+            reason: format!(
+                "Project '{}' is not registered with team {} on {}.",
+                self.canonical_id, self.team_id, self.endpoint
+            ),
+            interaction: format!(
+                "GET {} -> 200 but no project with canonical_id \"{}\"",
+                self.projects_url(),
+                self.canonical_id
+            ),
+        })
+    }
+
     fn projects_url(&self) -> String {
         format!("{}/api/teams/{}/projects", self.endpoint, self.team_id)
     }

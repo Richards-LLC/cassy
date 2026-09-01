@@ -99,15 +99,14 @@ fn test_menu_navigation() {
         .wait_for_text_timeout("Menu", Duration::from_secs(3))
         .unwrap();
 
-    // Navigate down through menu items
+    // Navigate down through menu items. PTY writes preserve order, so no
+    // fixed delay is needed between input events.
     for _ in 0..3 {
         runner.send_key(Key::Down).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
     }
 
     // Navigate back up
     runner.send_key(Key::Up).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
 
     // Clean exit
     runner.send_input("q").unwrap();
@@ -145,12 +144,10 @@ fn test_counter_screen() {
     // Increment counter multiple times
     for _ in 0..3 {
         runner.send_input("+").unwrap();
-        std::thread::sleep(Duration::from_millis(150));
     }
 
     // Decrement once
     runner.send_input("-").unwrap();
-    std::thread::sleep(Duration::from_millis(150));
 
     // Go back to menu
     runner.send_key(Key::Escape).unwrap();
@@ -177,9 +174,7 @@ fn test_about_screen() {
 
     // Navigate to About (third item)
     runner.send_key(Key::Down).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
     runner.send_key(Key::Down).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
     runner.send_key(Key::Enter).unwrap();
     wait_for_render(&mut runner);
 
@@ -225,7 +220,6 @@ fn test_input_screen() {
 
     // Navigate to Input (second item)
     runner.send_key(Key::Down).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
     runner.send_key(Key::Enter).unwrap();
     wait_for_render(&mut runner);
 
@@ -236,7 +230,6 @@ fn test_input_screen() {
 
     // Type some text
     input().text("Hello").execute(&mut runner).unwrap();
-    std::thread::sleep(Duration::from_millis(200));
 
     // Verify text appears
     wait_for_screen_text(&runner, "Hello", Duration::from_secs(3), 80, 24)
@@ -244,7 +237,6 @@ fn test_input_screen() {
 
     // Submit with Enter
     runner.send_key(Key::Enter).unwrap();
-    std::thread::sleep(Duration::from_millis(200));
 
     // Go back
     runner.send_key(Key::Escape).unwrap();
@@ -302,11 +294,8 @@ fn test_vim_navigation() {
 
     // Use j/k for navigation
     runner.send_input("j").unwrap();
-    std::thread::sleep(Duration::from_millis(100));
     runner.send_input("j").unwrap();
-    std::thread::sleep(Duration::from_millis(100));
     runner.send_input("k").unwrap();
-    std::thread::sleep(Duration::from_millis(100));
 
     // Select (should be on Input now)
     runner.send_key(Key::Enter).unwrap();
@@ -319,7 +308,6 @@ fn test_vim_navigation() {
 
     // Go back and exit
     runner.send_key(Key::Escape).unwrap();
-    std::thread::sleep(Duration::from_millis(200));
     runner.send_input("q").unwrap();
 }
 

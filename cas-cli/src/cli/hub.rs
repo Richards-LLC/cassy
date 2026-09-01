@@ -142,11 +142,102 @@ impl Default for HubServeArgs {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HubStartDecision {
+    Keep,
+    Restart {
+        version_drift: bool,
+        flags_differ: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HubRestartSpec {
+    bind: IpAddr,
+    port: u16,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+}
+
+fn default_hub_command() -> HubCommands {
+    HubCommands::Status
+}
+
+fn tailscale_enabled(record: &HubProcessRecord) -> bool {
+    record.tailscale_cli.is_some()
+        || record.tailscale_serve_port.is_some()
+        || record.public_url.is_some()
+}
+
+fn decide_live_start(
+    record: &HubProcessRecord,
+    args: &HubServeArgs,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+    binary_version: &str,
+) -> HubStartDecision {
+    let version_drift = record.version != binary_version;
+    let tailscale_flags_differ = tailscale_enabled(record) != tailscale_serve
+        || (tailscale_serve
+            && record
+                .tailscale_serve_port
+                .is_some_and(|port| port != tailscale_port));
+    let flags_differ = record.bind != args.bind.to_string()
+        || record.port != args.port
+        || tailscale_flags_differ;
+
+    if version_drift || flags_differ {
+        HubStartDecision::Restart {
+            version_drift,
+            flags_differ,
+        }
+    } else {
+        HubStartDecision::Keep
+    }
+}
+
+fn restart_spec_for_record(
+    record: &HubProcessRecord,
+    binary_version: &str,
+) -> Result<Option<HubRestartSpec>> {
+    if record.version == binary_version {
+        return Ok(None);
+    }
+    Ok(Some(HubRestartSpec {
+        bind: record
+            .bind
+            .parse()
+            .with_context(|| format!("invalid bind address in hub record: {}", record.bind))?,
+        port: record.port,
+        tailscale_serve: tailscale_enabled(record),
+        tailscale_port: record.tailscale_serve_port.unwrap_or(443),
+    }))
+}
+
+fn render_status(record: &HubProcessRecord, live: bool, binary_version: &str) -> String {
+    if live {
+        let endpoint = record
+            .public_url
+            .as_deref()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
+        format!(
+            "Cassy hub is running at {endpoint} (pid {}, version {}, binary: {binary_version})",
+            record.pid, record.version
+        )
+    } else {
+        format!(
+            "Cassy hub is not running; stale record for pid {} remains (version {}, binary: {binary_version})",
+            record.pid, record.version
+        )
+    }
+}
+
 pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
     match args
         .command
         .clone()
-        .unwrap_or(HubCommands::Start(HubServeArgs::default()))
+        .unwrap_or_else(default_hub_command)
     {
         HubCommands::Start(serve) => {
             start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
@@ -647,21 +738,18 @@ fn status(cli: &Cli) -> Result<()> {
     let record = paths.read_process_record()?;
     let live = record_is_live(&record);
     if cli.json {
-        println!("{}", serde_json::json!({"running":live,"record":record}));
-    } else if live {
-        let endpoint = record
-            .public_url
-            .as_deref()
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
         println!(
-            "Cassy hub is running at {} (pid {}, version {})",
-            endpoint, record.pid, record.version
+            "{}",
+            serde_json::json!({
+                "running": live,
+                "record": record,
+                "binary": env!("CARGO_PKG_VERSION"),
+            })
         );
     } else {
         println!(
-            "Cassy hub is not running; stale record for pid {} remains",
-            record.pid
+            "{}",
+            render_status(&record, live, env!("CARGO_PKG_VERSION"))
         );
     }
     anyhow::ensure!(live, "cas hub is not running");

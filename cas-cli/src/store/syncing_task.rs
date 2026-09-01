@@ -722,6 +722,42 @@ mod tests {
     }
 
     #[test]
+    fn task_origin_project_move_removes_legacy_unkeyed_team_upsert() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+
+        let mut task = Task::new("p-task-move-legacy".to_string(), "move me".to_string());
+        task.origin_project = Some("project-a".to_string());
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+
+        // Rows written before project-keyed team queue identities were added
+        // have a NULL project_id. Preserve one here to reproduce a live move
+        // where the stale generic upsert survived beside the move pair.
+        let legacy_payload =
+            serde_json::to_string(&task).expect("legacy task payload should serialize");
+        queue
+            .enqueue_for_team(
+                EntityType::Task,
+                &task.id,
+                SyncOperation::Upsert,
+                Some(&legacy_payload),
+                TEST_TEAM,
+            )
+            .unwrap();
+
+        task.origin_project = Some("project-b".to_string());
+        store.update(&task).unwrap();
+
+        let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+        assert_eq!(pending.len(), 2, "a move must replace stale generic upserts");
+        assert_eq!(pending[0].operation, SyncOperation::Delete);
+        assert_eq!(pending[0].project_id.as_deref(), Some("project-a"));
+        assert_eq!(pending[1].operation, SyncOperation::Upsert);
+        assert_eq!(pending[1].project_id.as_deref(), Some("project-b"));
+    }
+
+    #[test]
     fn task_origin_project_move_later_edit_stays_on_new_owner_key() {
         let (temp, store) = create_team_store(None);
         let queue = SyncQueue::open(temp.path()).unwrap();
@@ -741,6 +777,31 @@ mod tests {
         let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].operation, SyncOperation::Upsert);
+        assert_eq!(pending[0].project_id.as_deref(), Some("project-b"));
+    }
+
+    #[test]
+    fn task_delete_after_origin_project_move_targets_current_owner_key() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+
+        let mut task = Task::new(
+            "p-task-move-delete".to_string(),
+            "move then delete".to_string(),
+        );
+        task.origin_project = Some("project-a".to_string());
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+
+        task.origin_project = Some("project-b".to_string());
+        store.update(&task).unwrap();
+        queue.clear().unwrap();
+
+        store.delete(&task.id).unwrap();
+
+        let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].operation, SyncOperation::Delete);
         assert_eq!(pending[0].project_id.as_deref(), Some("project-b"));
     }
 

@@ -457,6 +457,74 @@ async fn personal_push_keeps_itemized_invalid_revision_visible_in_queue_health()
     assert_eq!(remaining[0].retry_count, 1);
 }
 
+#[tokio::test]
+async fn team_push_serializes_task_dependency_collection() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let team_id = "team-cas-616e";
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{team_id}/sync/push")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "synced": {
+                "task_dependencies": {
+                    "inserted": 1,
+                    "updated": 0,
+                    "skipped": 0
+                }
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::TaskDependency,
+            "cas-616e-from:cas-616e-to:blocks",
+            SyncOperation::Upsert,
+            Some(
+                r#"{"from_id":"cas-616e-from","to_id":"cas-616e-to","dep_type":"blocks","created_at":"2026-09-01T12:00:00Z"}"#,
+            ),
+            team_id,
+        )
+        .unwrap();
+
+    let syncer = CloudSyncer::new(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+    );
+    let result = tokio::task::spawn_blocking(move || syncer.push_team(team_id))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(result.pushed_task_dependencies, 1);
+    assert!(queue.pending_for_team(team_id, 10, 5).unwrap().is_empty());
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let mut decoder = GzDecoder::new(requests[0].body.as_slice());
+    let mut decoded = Vec::new();
+    decoder.read_to_end(&mut decoded).unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+    assert_eq!(payload["task_dependencies"][0]["from_id"], "cas-616e-from");
+    assert_eq!(payload["task_dependencies"][0]["dep_type"], "blocks");
+}
+
 #[test]
 fn push_response_is_backward_compatible_with_legacy_payload() {
     // Older cloud builds may return shapes like {"synced": {...}} or just
@@ -523,10 +591,49 @@ fn team_task_fixture(
     raw
 }
 
+fn team_dependency_fixture(
+    dependency: &crate::types::Dependency,
+    project_id: &str,
+    operation: Option<&str>,
+) -> serde_json::Value {
+    let mut raw = serde_json::to_value(dependency).unwrap();
+    raw["id"] = serde_json::json!(format!(
+        "{}:{}:{}",
+        dependency.from_id, dependency.to_id, dependency.dep_type
+    ));
+    raw["project_id"] = serde_json::json!(project_id);
+    if let Some(operation) = operation {
+        raw["operation"] = serde_json::json!(operation);
+    }
+    raw
+}
+
 async fn pull_team_task_fixtures(
     project_id: &str,
     tasks: Vec<serde_json::Value>,
     local_task: Option<Task>,
+) -> (
+    tempfile::TempDir,
+    SyncResult,
+    Arc<dyn TaskStore>,
+    Arc<SyncQueue>,
+) {
+    pull_team_task_and_dependency_fixtures(
+        project_id,
+        tasks,
+        local_task.into_iter().collect(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .await
+}
+
+async fn pull_team_task_and_dependency_fixtures(
+    project_id: &str,
+    tasks: Vec<serde_json::Value>,
+    local_tasks: Vec<Task>,
+    local_dependencies: Vec<crate::types::Dependency>,
+    task_dependencies: Vec<serde_json::Value>,
 ) -> (
     tempfile::TempDir,
     SyncResult,
@@ -551,6 +658,7 @@ async fn pull_team_task_fixtures(
             "tasks": tasks,
             "rules": [],
             "skills": [],
+            "task_dependencies": task_dependencies,
             "pulled_at": "2026-09-01T12:00:00Z",
             "team_id": team_id,
             "status": "ok",
@@ -564,8 +672,11 @@ async fn pull_team_task_fixtures(
     queue.init().unwrap();
     let store = open_store_local(temp.path()).unwrap();
     let task_store = open_task_store_local(temp.path()).unwrap();
-    if let Some(local_task) = local_task {
+    for local_task in local_tasks {
         task_store.add(&local_task).unwrap();
+    }
+    for dependency in local_dependencies {
+        task_store.add_dependency(&dependency).unwrap();
     }
     let rule_store = open_rule_store_local(temp.path()).unwrap();
     let skill_store = open_skill_store_local(temp.path()).unwrap();
@@ -589,6 +700,73 @@ async fn pull_team_task_fixtures(
         )
         .unwrap();
     (temp, result, task_store, queue)
+}
+
+#[tokio::test]
+async fn team_pull_applies_and_deletes_task_dependencies_without_requeue() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "dependency-project";
+    let from = Task::new("cas-616e-from".to_string(), "from".to_string());
+    let to = Task::new("cas-616e-to".to_string(), "to".to_string());
+    let existing = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Related);
+    let pulled = Dependency::new(to.id.clone(), from.id.clone(), DependencyType::Blocks);
+    let delete = team_dependency_fixture(&existing, project_id, Some("delete"));
+    let upsert = team_dependency_fixture(&pulled, project_id, None);
+
+    let (_temp, result, task_store, queue) = pull_team_task_and_dependency_fixtures(
+        project_id,
+        Vec::new(),
+        vec![from.clone(), to.clone()],
+        vec![existing],
+        vec![delete, upsert],
+    )
+    .await;
+
+    assert!(
+        result.errors.is_empty(),
+        "unexpected dependency pull errors: {:?}",
+        result.errors
+    );
+    assert_eq!(result.pulled_task_dependencies, 1);
+    assert!(task_store.get_dependencies(&from.id).unwrap().is_empty());
+    assert_eq!(task_store.get_dependencies(&to.id).unwrap().len(), 1);
+    assert_eq!(
+        task_store.get_dependencies(&to.id).unwrap()[0].dep_type,
+        DependencyType::Blocks
+    );
+    assert!(queue.pending(10, 5).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn team_pull_parks_dangling_task_dependency_without_error() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "dependency-project";
+    let from = Task::new("cas-616e-dangling-from".to_string(), "from".to_string());
+    let missing = Dependency::new(
+        from.id.clone(),
+        "cas-616e-missing".to_string(),
+        DependencyType::Blocks,
+    );
+    let dangling = team_dependency_fixture(&missing, project_id, None);
+
+    let (_temp, result, task_store, _queue) = pull_team_task_and_dependency_fixtures(
+        project_id,
+        Vec::new(),
+        vec![from.clone()],
+        Vec::new(),
+        vec![dangling],
+    )
+    .await;
+
+    assert!(
+        result.errors.is_empty(),
+        "dangling dependency should be parked: {:?}",
+        result.errors
+    );
+    assert_eq!(result.pulled_task_dependencies, 0);
+    assert!(task_store.get_dependencies(&from.id).unwrap().is_empty());
 }
 
 #[tokio::test]

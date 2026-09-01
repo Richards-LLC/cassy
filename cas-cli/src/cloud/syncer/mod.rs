@@ -59,6 +59,8 @@ pub struct SyncResult {
     pub pushed_agents: usize,
     /// Number of worktrees pushed
     pub pushed_worktrees: usize,
+    /// Number of task dependency edges pushed
+    pub pushed_task_dependencies: usize,
     /// Number of distilled knowledge pages pushed (T5)
     pub pushed_knowledge_pages: usize,
     /// Number of entries pulled
@@ -79,6 +81,8 @@ pub struct SyncResult {
     pub pulled_file_changes: usize,
     /// Number of commit links pulled
     pub pulled_commit_links: usize,
+    /// Number of task dependency edges pulled
+    pub pulled_task_dependencies: usize,
     /// Number of distilled knowledge pages pulled (T5)
     pub pulled_knowledge_pages: usize,
     /// Number of conflicts resolved
@@ -151,6 +155,7 @@ impl PushScope {
                 "commit_links",
                 "agents",
                 "worktrees",
+                "task_dependencies",
             ],
         }
     }
@@ -186,6 +191,7 @@ impl SyncResult {
             + self.pushed_commit_links
             + self.pushed_agents
             + self.pushed_worktrees
+            + self.pushed_task_dependencies
             + self.pushed_knowledge_pages
     }
 
@@ -199,6 +205,7 @@ impl SyncResult {
             + self.pulled_prompts
             + self.pulled_file_changes
             + self.pulled_commit_links
+            + self.pulled_task_dependencies
             + self.pulled_knowledge_pages
     }
 
@@ -525,6 +532,10 @@ struct PullResponse {
     #[serde(default)]
     #[allow(dead_code)]
     knowledge_pages: Option<Vec<serde_json::Value>>,
+    /// Task dependency edges are opaque cloud blobs but use a dedicated
+    /// envelope key so the pull path can materialize them after tasks.
+    #[serde(default)]
+    task_dependencies: Option<Vec<serde_json::Value>>,
     pulled_at: Option<String>,
 }
 
@@ -541,6 +552,8 @@ struct TeamPullResponse {
     rules: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     skills: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    task_dependencies: Option<Vec<serde_json::Value>>,
     pulled_at: Option<String>,
     #[allow(dead_code)]
     team_id: Option<String>,

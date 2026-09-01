@@ -42,6 +42,22 @@ fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
     }
 }
 
+fn stamp_task_dependency_origin_project(value: &mut serde_json::Value, project_id: &str) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let has_explicit_origin = object
+        .get("origin_project")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|origin| !origin.trim().is_empty());
+    if !has_explicit_origin {
+        object.insert(
+            "origin_project".to_string(),
+            serde_json::Value::String(project_id.to_string()),
+        );
+    }
+}
+
 impl CloudSyncer {
     pub fn push_team(&self, team_id: &str) -> Result<SyncResult, CasError> {
         let mut result = SyncResult::default();
@@ -171,6 +187,7 @@ impl CloudSyncer {
             (EntityType::CommitLink, "commit_links"),
             (EntityType::Agent, "agents"),
             (EntityType::Worktree, "worktrees"),
+            (EntityType::TaskDependency, "task_dependencies"),
         ] {
             let (synced, errors) = self.push_team_upserts_for_type(
                 team_id,
@@ -242,6 +259,9 @@ impl CloudSyncer {
                         // task consumers also rely on the row-level field.
                         if entity_type == EntityType::Task {
                             stamp_task_origin_project(&mut value, project_id);
+                        }
+                        if entity_type == EntityType::TaskDependency {
+                            stamp_task_dependency_origin_project(&mut value, project_id);
                         }
                         upserts.push((item, value));
                     }
@@ -559,6 +579,7 @@ impl CloudSyncer {
             "commit_links" => result.pushed_commit_links += count,
             "agents" => result.pushed_agents += count,
             "worktrees" => result.pushed_worktrees += count,
+            "task_dependencies" => result.pushed_task_dependencies += count,
             _ => {}
         }
     }

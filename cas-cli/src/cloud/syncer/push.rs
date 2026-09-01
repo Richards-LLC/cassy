@@ -235,6 +235,12 @@ impl CloudSyncer {
             "worktrees",
             "Worktree push failed"
         );
+        push_type!(
+            pushed_task_dependencies,
+            &pending.task_dependencies,
+            "task_dependencies",
+            "Task dependency push failed"
+        );
 
         result
     }
@@ -252,6 +258,7 @@ impl CloudSyncer {
         target.pushed_commit_links += source.pushed_commit_links;
         target.pushed_agents += source.pushed_agents;
         target.pushed_worktrees += source.pushed_worktrees;
+        target.pushed_task_dependencies += source.pushed_task_dependencies;
         target.errors.extend(source.errors);
     }
 

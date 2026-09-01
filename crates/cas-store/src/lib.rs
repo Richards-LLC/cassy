@@ -540,6 +540,13 @@ pub trait TaskStore: Send + Sync {
     /// Add a new task
     fn add(&self, task: &Task) -> Result<()>;
 
+    /// Canonical project identity attached to this store, when available.
+    /// Used by shared context builders that cannot depend on the CLI's cloud
+    /// configuration module.
+    fn project_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Atomically create a task and its initial dependencies.
     ///
     /// The default implementation is non-transactional and exists for compatibility with
@@ -630,8 +637,51 @@ pub trait TaskStore: Send + Sync {
     /// List tasks that are ready to work on (open, not blocked)
     fn list_ready(&self) -> Result<Vec<Task>>;
 
+    /// List ready tasks scoped to a project identity.
+    fn list_ready_scoped(
+        &self,
+        project_id: Option<&str>,
+        include_foreign: bool,
+    ) -> Result<Vec<Task>> {
+        let tasks = self.list_ready()?;
+        if include_foreign {
+            return Ok(tasks);
+        }
+        Ok(tasks
+            .into_iter()
+            .filter(|task| {
+                task.origin_project.is_none()
+                    || project_id.is_some_and(|project_id| {
+                        task.origin_project.as_deref() == Some(project_id)
+                    })
+            })
+            .collect())
+    }
+
     /// List blocked tasks with their blockers
     fn list_blocked(&self) -> Result<Vec<(Task, Vec<Task>)>>;
+
+    /// List blocked tasks scoped to a project identity. Blocker payloads are
+    /// preserved so an explicitly requested foreign task remains diagnosable.
+    fn list_blocked_scoped(
+        &self,
+        project_id: Option<&str>,
+        include_foreign: bool,
+    ) -> Result<Vec<(Task, Vec<Task>)>> {
+        let blocked = self.list_blocked()?;
+        if include_foreign {
+            return Ok(blocked);
+        }
+        Ok(blocked
+            .into_iter()
+            .filter(|(task, _)| {
+                task.origin_project.is_none()
+                    || project_id.is_some_and(|project_id| {
+                        task.origin_project.as_deref() == Some(project_id)
+                    })
+            })
+            .collect())
+    }
 
     /// List tasks with pending_verification=true (for PreToolUse jail check)
     fn list_pending_verification(&self) -> Result<Vec<Task>>;

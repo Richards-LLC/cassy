@@ -737,7 +737,17 @@ impl CasCore {
         };
 
         let project_id = super::current_project_id(&self.cas_root);
-        tasks.retain(|task| super::task_belongs_to_project(task, project_id.as_deref()));
+        let hidden_foreign = if req.include_foreign {
+            0
+        } else {
+            tasks
+                .iter()
+                .filter(|task| !super::task_visible_in_project(task, project_id.as_deref()))
+                .count()
+        };
+        if !req.include_foreign {
+            tasks.retain(|task| super::task_visible_in_project(task, project_id.as_deref()));
+        }
 
         // Apply sorting. cas-06f9 (GH #104): unspecified means priority order
         // here, not creation order — this is the "what should I pick up next"
@@ -755,7 +765,12 @@ impl CasCore {
             } else {
                 "No ready tasks"
             };
-            return Ok(Self::success(msg));
+            let mut output = msg.to_string();
+            if let Some(footer) = super::foreign_tasks_hidden_footer(hidden_foreign) {
+                output.push_str("\n");
+                output.push_str(&footer);
+            }
+            return Ok(Self::success(output));
         }
 
         // cas-06f9 (GH #104): the cap stays (an unbounded dump is its own
@@ -774,6 +789,10 @@ impl CasCore {
             ));
         }
         output.push_str(&crate::mcp::tools::truncated_list_footer(total, shown));
+        if let Some(footer) = super::foreign_tasks_hidden_footer(hidden_foreign) {
+            output.push_str("\n");
+            output.push_str(&footer);
+        }
 
         Ok(Self::success(output))
     }

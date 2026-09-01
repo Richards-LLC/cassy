@@ -35,6 +35,7 @@ fn task_list_field_coverage() {
         epic: None,
         sort: None,
         sort_order: None,
+        include_foreign: false,
     };
 
     assert_eq!(

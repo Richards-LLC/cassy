@@ -6969,6 +6969,7 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
             epic: None,
             sort: None,
             sort_order: None,
+            include_foreign: false,
         }))
         .await
         .expect("list");

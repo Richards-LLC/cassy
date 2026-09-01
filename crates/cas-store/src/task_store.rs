@@ -560,6 +560,10 @@ impl TaskStore for SqliteTaskStore {
         Ok(())
     }
 
+    fn project_id(&self) -> Option<&str> {
+        self.origin_project.as_deref()
+    }
+
     fn generate_id(&self) -> Result<String> {
         self.generate_hash_id()
     }

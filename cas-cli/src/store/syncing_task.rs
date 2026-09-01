@@ -112,6 +112,10 @@ impl TaskStore for SyncingTaskStore {
         self.inner.generate_id()
     }
 
+    fn project_id(&self) -> Option<&str> {
+        self.inner.project_id()
+    }
+
     fn add(&self, task: &Task) -> Result<()> {
         self.inner.add(task)?;
         let persisted = self.persisted_for_queue(task)?;

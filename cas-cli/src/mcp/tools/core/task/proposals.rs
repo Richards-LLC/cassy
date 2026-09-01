@@ -527,6 +527,7 @@ mod tests {
                 epic: None,
                 sort: None,
                 sort_order: None,
+                include_foreign: false,
             }))
             .await
             .unwrap();
@@ -548,6 +549,7 @@ mod tests {
                 epic: None,
                 sort: None,
                 sort_order: None,
+                include_foreign: false,
             }))
             .await
             .unwrap_err();

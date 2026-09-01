@@ -680,6 +680,7 @@ async fn test_task_list_type_filter() {
         epic: None,
         sort: None,
         sort_order: None,
+        include_foreign: false,
     };
     let result = service
         .cas_task_list(Parameters(list_req))
@@ -786,6 +787,7 @@ async fn test_task_list_epic_filter() {
         epic: Some(epic_id.to_string()),
         sort: None,
         sort_order: None,
+        include_foreign: false,
     };
     let result = service
         .cas_task_list(Parameters(list_req))

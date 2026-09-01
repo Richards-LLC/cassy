@@ -288,6 +288,7 @@ async fn test_task_create_invalid_epic_does_not_persist_task() {
         epic: None,
         sort: None,
         sort_order: None,
+        include_foreign: false,
     };
     let list_result = service
         .cas_task_list(Parameters(list_req))
@@ -376,6 +377,7 @@ async fn test_task_create_surfaces_dependency_write_failure() {
                 epic: None,
                 sort: None,
                 sort_order: None,
+                include_foreign: false,
             }))
             .await
             .expect("task_list should succeed"),

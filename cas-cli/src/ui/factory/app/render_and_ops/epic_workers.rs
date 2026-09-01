@@ -118,6 +118,10 @@ pub(crate) struct TaskEpicBase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SpawnWorkTarget {
     pub task_id: String,
+    /// Portable selector for the repository whose target branch owns this
+    /// spawn. A task's store remains in the factory session repository, but
+    /// the worker's Git worktree may live in this sibling checkout.
+    pub repo_selector: String,
     pub target_branch: String,
     pub owner: WorkTargetOwner,
 }
@@ -420,6 +424,77 @@ pub(crate) fn base_diverges_from_focus(
     ) && focused_epic_branch.is_some_and(|focus| focus != base)
 }
 
+/// Resolve the repository in which an isolated worker worktree must be
+/// provisioned.
+///
+/// The task store is deliberately not moved: `cas_dir` remains the spawning
+/// session's `.cas` directory and is passed to the worker as `CAS_ROOT`. A
+/// declared WorkTarget can, however, identify a sibling checkout. Resolve
+/// that selector through the host repository bindings before any branch or
+/// worktree operation so a branch that exists only there is never looked up in
+/// the session repository.
+pub(crate) fn resolve_spawn_worktree_repo(
+    cas_dir: &std::path::Path,
+    session_repo_root: &std::path::Path,
+    target: Option<&SpawnWorkTarget>,
+) -> anyhow::Result<std::path::PathBuf> {
+    let Some(target) = target else {
+        return Ok(session_repo_root.to_path_buf());
+    };
+
+    if crate::mcp::tools::core::task::repo_context::repo_answers_to(
+        session_repo_root,
+        &target.repo_selector,
+    ) {
+        return Ok(session_repo_root.to_path_buf());
+    }
+
+    let work_target = cas_types::WorkTarget {
+        repo_selector: target.repo_selector.clone(),
+        target_branch: target.target_branch.clone(),
+    };
+    let context = crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+        cas_dir,
+        &work_target,
+    )
+    .map_err(|reason| {
+        anyhow::anyhow!(
+            "cross-repo spawn: target_repo {} — {}",
+            target.repo_selector,
+            reason
+        )
+    })?;
+    let target_root = context.repo_root;
+    let target_git = crate::worktree::GitOperations::new(target_root.clone());
+    if !target_git.has_commits().unwrap_or(false) {
+        anyhow::bail!(
+            "cross-repo spawn: target_repo {} — repository has no commits",
+            target_root.display()
+        );
+    }
+    if !ref_exists(&target_root, &target.target_branch) {
+        anyhow::bail!(
+            "cross-repo spawn: target_repo {} — target branch '{}' does not resolve to a commit",
+            target_root.display(),
+            target.target_branch
+        );
+    }
+    Ok(target_root)
+}
+
+/// Human-readable provision receipt. Keep the session store implicit in this
+/// line: `Worktree repository` is the Git venue, while the worker's `CAS_ROOT`
+/// continues to be the spawning session's store.
+pub(crate) fn spawn_provision_receipt(prep: &crate::ui::factory::app::WorkerSpawnPrep) -> String {
+    match prep.worktree_info.as_ref() {
+        Some(worktree) => format!(
+            "Preparing worker filesystem and worktree. Worktree repository: {} (CAS_ROOT remains the factory session store).",
+            worktree.repo_root.display()
+        ),
+        None => "Preparing worker filesystem (no isolated worktree).".to_string(),
+    }
+}
+
 /// cas-7587: resolve `task_id` → its epic → that epic's branch.
 ///
 /// A task that *is* an epic resolves to itself. The branch is the one persisted
@@ -465,6 +540,7 @@ pub(crate) fn task_epic_base(
         .as_ref()
         .map(|target| SpawnWorkTarget {
             task_id: task_id.to_string(),
+            repo_selector: target.repo_selector.clone(),
             target_branch: target.target_branch.clone(),
             owner: if task.task_type == cas_types::TaskType::Epic {
                 WorkTargetOwner::Epic {
@@ -539,6 +615,7 @@ pub(crate) fn task_epic_base(
                     .as_ref()
                     .map(|target| SpawnWorkTarget {
                         task_id: task_id.to_string(),
+                        repo_selector: target.repo_selector.clone(),
                         target_branch: target.target_branch.clone(),
                         owner: WorkTargetOwner::Epic {
                             epic_id: epic.id.clone(),
@@ -551,24 +628,23 @@ pub(crate) fn task_epic_base(
 /// Return a supervisor-visible warning when a resolved spawn base cannot be
 /// proven to contain the focused epic's current tip.
 fn worker_base_mismatch_notice(
-    manager: &WorktreeManager,
+    repo_root: &std::path::Path,
     worker_base: &str,
     epic_branch: &str,
 ) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", epic_branch, worker_base])
-        .current_dir(manager.repo_root())
+        .current_dir(repo_root)
         .output();
 
     match output {
         Ok(output) if output.status.success() => None,
         Ok(_) => {
-            let epic_tip = manager
-                .git()
+            let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
+            let epic_tip = git
                 .ref_sha(epic_branch)
                 .unwrap_or_else(|_| "unknown".to_string());
-            let base_tip = manager
-                .git()
+            let base_tip = git
                 .ref_sha(worker_base)
                 .unwrap_or_else(|_| "unknown".to_string());
             Some(format!(
@@ -1699,18 +1775,29 @@ impl FactoryApp {
                     );
                 }
 
-                let worktree_path = manager.worktree_path_for_worker(&worker_name);
+                let session_repo_root = manager.repo_root().to_path_buf();
+                let task_base = task_id
+                    .map(|tid| task_epic_base(&self.cas_dir, &session_repo_root, tid))
+                    .unwrap_or(TaskBase::Unresolved);
+                let repo_root = resolve_spawn_worktree_repo(
+                    &self.cas_dir,
+                    &session_repo_root,
+                    task_base.work_target(),
+                )?;
+                let cross_repo = repo_root != session_repo_root;
+                let spawn_git = crate::worktree::GitOperations::new(repo_root.clone());
+                let worktree_path = if cross_repo {
+                    repo_root.join(".cas/worktrees").join(&worker_name)
+                } else {
+                    manager.worktree_path_for_worker(&worker_name)
+                };
                 let branch_name = manager.branch_name_for_worker(&worker_name);
-                let repo_root = manager.repo_root().to_path_buf();
                 // Dynamic spawns must match startup spawns: never the
                 // supervisor's incidental HEAD. cas-7587 (GH #122): precedence
                 // is the pre-assigned task's epic branch first, pinned epic
                 // focus second, trunk last.
-                let configured_trunk = Config::configured_epic_base_branch(manager.repo_root())
-                    .unwrap_or_else(|| manager.git().detect_default_branch());
-                let task_base = task_id
-                    .map(|tid| task_epic_base(&self.cas_dir, manager.repo_root(), tid))
-                    .unwrap_or(TaskBase::Unresolved);
+                let configured_trunk = Config::configured_epic_base_branch(&repo_root)
+                    .unwrap_or_else(|| spawn_git.detect_default_branch());
                 // An epic's declared delivery target is authoritative for both
                 // a no-epic child fallback and stale-base comparison. Falling
                 // back to factory configuration keeps legacy/taskless spawns.
@@ -1742,7 +1829,7 @@ impl FactoryApp {
                     });
                 if let Some((epic_branch, recorded_parent)) = recorded_base_parent {
                     let refresh = fast_forward_epic_base_from_parent(
-                        manager.repo_root(),
+                        &repo_root,
                         &epic_branch,
                         &recorded_parent,
                     )
@@ -1755,7 +1842,7 @@ impl FactoryApp {
                 // resolved to the fresher of its local and origin refs — a
                 // stale local ref silently backdates every worker cut from it.
                 let (base_ref, freshness_notice, checkout_ref) =
-                    checkout_ref_for_spawn_base(manager.repo_root(), &parent_branch, &base_source);
+                    checkout_ref_for_spawn_base(&repo_root, &parent_branch, &base_source);
                 if let Some(notice) = freshness_notice {
                     notices.push(notice);
                 }
@@ -1769,7 +1856,7 @@ impl FactoryApp {
                     &base_source,
                     self.epic_branch.as_deref(),
                 );
-                let checkout_sha = short_sha(manager.repo_root(), effective_base);
+                let checkout_sha = short_sha(&repo_root, effective_base);
                 provenance.push_str(&format!(
                     " CHECKOUT BASE: '{checkout_ref}' @ {checkout_sha}."
                 ));
@@ -1790,7 +1877,7 @@ impl FactoryApp {
                     _ => self.epic_branch.clone(),
                 };
                 if let Some(notice) = epic_to_contain.as_deref().and_then(|epic_branch| {
-                    worker_base_mismatch_notice(manager, effective_base, epic_branch)
+                    worker_base_mismatch_notice(&repo_root, effective_base, epic_branch)
                 }) {
                     notices.push(notice);
                 }
@@ -1818,7 +1905,7 @@ impl FactoryApp {
                 // spawn time instead of leaving it to whoever happens to read
                 // `behind:` in worker_status.
                 if let Some(notice) =
-                    stale_spawn_base_notice(manager.repo_root(), effective_base, &trunk)
+                    stale_spawn_base_notice(&repo_root, effective_base, &trunk)
                 {
                     notices.push(notice);
                 }
@@ -2511,6 +2598,7 @@ impl FactoryApp {
 #[cfg(test)]
 mod spawn_base_tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -2567,6 +2655,14 @@ mod spawn_base_tests {
             .unwrap();
     }
 
+    fn add_origin(repo: &std::path::Path, url: &str) {
+        Command::new("git")
+            .args(["remote", "add", "origin", url])
+            .current_dir(repo)
+            .output()
+            .expect("git remote add origin");
+    }
+
     fn seed_epic(cas_dir: &std::path::Path, epic_id: &str, title: &str, branch: Option<&str>) {
         let store = crate::store::open_task_store(cas_dir).unwrap();
         let mut epic = cas_types::Task::new(epic_id.to_string(), title.to_string());
@@ -2588,6 +2684,173 @@ mod spawn_base_tests {
                 created_by: None,
             })
             .unwrap();
+    }
+
+    /// GH #670: a task's durable WorkTarget selector may resolve to a sibling
+    /// checkout. The worker worktree must be cut from that checkout, where its
+    /// target-only branch exists, rather than from the session repository.
+    #[test]
+    fn cross_repo_spawn_resolves_target_only_branch_and_worktree_repo_cas_052a() {
+        TestEnvGuard::run_with_temp_home(|_| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+
+            let tmp = TempDir::new().unwrap();
+            let session_repo = tmp.path().join("session-repo");
+            let target_repo = tmp.path().join("target-repo");
+            std::fs::create_dir(&session_repo).unwrap();
+            std::fs::create_dir(&target_repo).unwrap();
+            init_repo(&session_repo);
+            init_repo(&target_repo);
+            let session_cas = crate::store::init_cas_dir(&session_repo).unwrap();
+            let _target_cas = crate::store::init_cas_dir(&target_repo).unwrap();
+            add_origin(&session_repo, "https://github.com/example/session.git");
+            add_origin(&target_repo, "https://github.com/example/target.git");
+            branch_at(&target_repo, "cursor/target-only", "main");
+            Command::new("git")
+                .args(["checkout", "-q", "cursor/target-only"])
+                .current_dir(&target_repo)
+                .output()
+                .unwrap();
+            commit_file(&target_repo, "target-only.txt", "target");
+            Command::new("git")
+                .args(["checkout", "-q", "main"])
+                .current_dir(&target_repo)
+                .output()
+                .unwrap();
+            crate::store::known_repos::register_repo_strict(&target_repo).unwrap();
+
+            let target = SpawnWorkTarget {
+                task_id: "cas-target-only".into(),
+                repo_selector: "remote:github.com/example/target".into(),
+                target_branch: "cursor/target-only".into(),
+                owner: WorkTargetOwner::Task,
+            };
+            let target_root = resolve_spawn_worktree_repo(
+                &session_cas,
+                &session_repo,
+                Some(&target),
+            )
+            .expect("target selector must resolve in the sibling checkout");
+            assert_eq!(target_root, target_repo);
+
+            let worker_path = target_root.join(".cas/worktrees/cross-repo-worker");
+            WorkerSpawnPrep {
+                worker_name: "cross-repo-worker".into(),
+                worktree_info: Some(WorktreePrep {
+                    worktree_path: worker_path.clone(),
+                    branch_name: "factory/cross-repo-worker".into(),
+                    parent_branch: target.target_branch.clone(),
+                    base_ref: None,
+                    repo_root: target_root,
+                    cas_dir: session_cas.clone(),
+                }),
+                warnings: Vec::new(),
+                base_provenance: None,
+            }
+            .run()
+            .expect("target repository should provision the worker worktree");
+            assert!(worker_path.join("target-only.txt").is_file());
+            assert!(worker_path.join(".git").is_file());
+            assert_eq!(
+                std::process::Command::new("git")
+                    .args(["-C", worker_path.to_str().unwrap(), "branch", "--show-current"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+                b"factory/cross-repo-worker\n"
+            );
+
+            let mut manager = WorktreeManager::new(
+                &session_repo,
+                WorktreeConfig {
+                    enabled: true,
+                    base_path: session_repo
+                        .join(".cas/worktrees")
+                        .to_string_lossy()
+                        .to_string(),
+                    branch_prefix: "factory/".into(),
+                    auto_merge: false,
+                    cleanup_on_close: false,
+                    promote_entries_on_merge: false,
+                },
+            )
+            .unwrap();
+            manager.register_worktree(
+                "cross-repo-worker",
+                Worktree::new(
+                    Worktree::generate_id(),
+                    "factory/cross-repo-worker".into(),
+                    target.target_branch,
+                    worker_path.clone(),
+                ),
+            );
+            manager
+                .remove_worker("cross-repo-worker", false)
+                .expect("manager should clean up the target-repository worktree");
+            assert!(!worker_path.exists());
+        });
+    }
+
+    /// GH #670: a target selector that resolves to a real sibling repository
+    /// must still fail with an explicit cross-repo message when its branch is
+    /// absent there (and the session repo does not have it either).
+    #[test]
+    fn cross_repo_spawn_missing_target_branch_has_explicit_failure_cas_052a() {
+        TestEnvGuard::run_with_temp_home(|_| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let tmp = TempDir::new().unwrap();
+            let session_repo = tmp.path().join("session-repo");
+            let target_repo = tmp.path().join("target-repo");
+            std::fs::create_dir(&session_repo).unwrap();
+            std::fs::create_dir(&target_repo).unwrap();
+            init_repo(&session_repo);
+            init_repo(&target_repo);
+            let session_cas = crate::store::init_cas_dir(&session_repo).unwrap();
+            let _target_cas = crate::store::init_cas_dir(&target_repo).unwrap();
+            add_origin(&target_repo, "https://github.com/example/target-missing.git");
+            crate::store::known_repos::register_repo_strict(&target_repo).unwrap();
+
+            let target = SpawnWorkTarget {
+                task_id: "cas-target-missing".into(),
+                repo_selector: "remote:github.com/example/target-missing".into(),
+                target_branch: "cursor/exists-nowhere".into(),
+                owner: WorkTargetOwner::Task,
+            };
+            let error = resolve_spawn_worktree_repo(
+                &session_cas,
+                &session_repo,
+                Some(&target),
+            )
+            .expect_err("missing target branch must fail before git worktree add");
+            let text = error.to_string();
+            assert!(
+                text.starts_with("cross-repo spawn: target_repo "),
+                "{text}"
+            );
+            assert!(text.contains(target_repo.to_str().unwrap()), "{text}");
+            assert!(text.contains("cursor/exists-nowhere"), "{text}");
+            assert!(!text.contains("Refusing to create worktree branch"), "{text}");
+        });
+    }
+
+    #[test]
+    fn cross_repo_spawn_receipt_names_target_repository_cas_052a() {
+        let target_repo = std::path::Path::new("/workspace/target-repo");
+        let prep = WorkerSpawnPrep {
+            worker_name: "receipt-worker".into(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: target_repo.join(".cas/worktrees/receipt-worker"),
+                branch_name: "factory/receipt-worker".into(),
+                parent_branch: "main".into(),
+                base_ref: None,
+                repo_root: target_repo.to_path_buf(),
+                cas_dir: std::path::PathBuf::from("/workspace/session/.cas"),
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        };
+        let receipt = spawn_provision_receipt(&prep);
+        assert!(receipt.contains("Worktree repository: /workspace/target-repo"), "{receipt}");
     }
 
     /// GH #122 repro, end to end: focus pinned to epic A, spawn requested with
@@ -3523,7 +3786,7 @@ mod spawn_base_tests {
         )
         .unwrap();
         let worker_base = worker_base_for_spawn(Some("epic/stacked"), &manager);
-        assert!(worker_base_mismatch_notice(&manager, &worker_base, "epic/stacked").is_none());
+        assert!(worker_base_mismatch_notice(manager.repo_root(), &worker_base, "epic/stacked").is_none());
 
         let worker_path = worktree_root.join("stacked-worker");
         let result = WorkerSpawnPrep {
@@ -3586,7 +3849,7 @@ mod spawn_base_tests {
             },
         )
         .unwrap();
-        let notice = worker_base_mismatch_notice(&manager, "main", "epic/ahead").unwrap();
+        let notice = worker_base_mismatch_notice(manager.repo_root(), "main", "epic/ahead").unwrap();
         assert!(notice.contains("WORKER BASE MISMATCH"));
         assert!(notice.contains("does not contain"));
         assert!(notice.contains("epic/ahead"));
@@ -4230,6 +4493,7 @@ mod spawn_base_tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
+        add_origin(&repo, "https://github.com/example/test.git");
 
         Command::new("git")
             .args(["checkout", "-q", "-b", "epic/diverged-support"])
@@ -4250,7 +4514,7 @@ mod spawn_base_tests {
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/diverged-support".into());
         epic.deliverables.work_target = Some(cas_types::WorkTarget {
-            repo_selector: "project:test".into(),
+            repo_selector: "remote:github.com/example/test".into(),
             target_branch: "main".into(),
         });
         store.add(&epic).unwrap();

@@ -723,27 +723,11 @@ impl TeamsManager {
 
     /// Tools that must reach the `PreToolUse` hook for factory-specific
     /// routing or denial, but must not be listed in `permissions.allow`.
-    /// `Skill` and `Workflow` are here for cas-bcfb (GH #125): the
-    /// `cas-code-review` ownership gate can only refuse a worker if the hook
-    /// actually fires for the tools that reach the pipeline, and both of them
-    /// bypass CAS MCP entirely. They must NOT be auto-approved — they are
-    /// intercept-only, exactly like `SendMessage`.
-    /// `Agent` is here for cas-62b0 (GH #152): the review gate's cost lives in
-    /// the persona fan-out, and a worker that spawns those personas itself
-    /// reaches the pipeline without touching `Skill` or `Workflow`. `Agent` is
-    /// the current spelling of that tool and appeared in no matcher Cassy
-    /// generated, so the fan-out had no seam at all. It is intercept-only for
-    /// exactly one purpose — `pre_tool.rs` refuses a review dispatch and then
-    /// returns no decision for every other `Agent` call, so adding it here does
-    /// not switch on the other `Task | "Agent"` branches in that handler.
+    /// `Agent` is the current Claude Code spelling of the subagent tool. It is
+    /// intercept-only so supervisor worktree spawns can be denied without
+    /// auto-approving the call.
     pub(crate) fn factory_pre_tool_intercept_list() -> &'static [&'static str] {
-        &[
-            "SendMessage",
-            "AskUserQuestion",
-            "Skill",
-            "Workflow",
-            "Agent",
-        ]
+        &["SendMessage", "AskUserQuestion", "Agent"]
     }
 
     /// `hooks` block for per-role settings files. Wires `PreToolUse` (belt
@@ -2614,18 +2598,7 @@ mod tests {
                 "worker allowlist must include {tool}, got {names:?}"
             );
         }
-        // cas-bcfb: `Skill`/`Workflow` must reach the hook (review dispatch
-        // gate) but must never be pre-approved, or the gate's deny would race
-        // an allow already granted by the permissions list.
-        // cas-62b0: `Agent` joins them — it is intercepted only so the review
-        // gate can see a hand-spawned persona fan-out, never pre-approved.
-        for tool in [
-            "SendMessage",
-            "AskUserQuestion",
-            "Skill",
-            "Workflow",
-            "Agent",
-        ] {
+        for tool in ["SendMessage", "AskUserQuestion", "Agent"] {
             assert!(
                 !names.contains(&tool),
                 "worker allowlist must not auto-allow intercept-only tool {tool}: {names:?}"
@@ -2685,11 +2658,6 @@ mod tests {
                 "NotebookEdit",
                 "SendMessage",
                 "AskUserQuestion",
-                // cas-bcfb: without these the review dispatch gate never runs.
-                "Skill",
-                "Workflow",
-                // cas-62b0 (GH #152): and without this it never sees the
-                // persona fan-out, which is where the tokens actually go.
                 "Agent",
             ] {
                 assert!(

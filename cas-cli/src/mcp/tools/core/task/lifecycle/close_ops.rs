@@ -11814,6 +11814,13 @@ fn format_review_execution_unreported(task_id: &str, supervisor_owned: bool) -> 
     )
 }
 
+fn is_factory_worker_from_env() -> bool {
+    std::env::var("CAS_AGENT_ROLE")
+        .map(|r| r.eq_ignore_ascii_case("worker"))
+        .unwrap_or(false)
+        && std::env::var("CAS_FACTORY_MODE").is_ok()
+}
+
 fn format_code_review_required(supervisor_owned: bool) -> String {
     // cas-62b0 (GH #152): a factory worker under supervisor-owned review must
     // never be told to produce this envelope.
@@ -11832,7 +11839,7 @@ fn format_code_review_required(supervisor_owned: bool) -> String {
     // A solo (non-factory) close under the supervisor-owned default has no
     // supervisor to defer to — that caller IS the review owner and keeps the
     // original instructions. Only a factory worker is redirected.
-    if supervisor_owned && crate::code_review_dispatch::is_factory_worker_from_env() {
+    if supervisor_owned && is_factory_worker_from_env() {
         return "⚠️ SUPERVISOR-OWNED REVIEW — DO NOT RUN cas-code-review\n\n\
              task close rejected: this task has reviewable code changes and no \
              review has been recorded for them.\n\n\
@@ -16433,11 +16440,10 @@ mod code_review_gate_tests {
         }
     }
 
-    /// Pins the caller-role env `format_code_review_required` keys on
-    /// (`code_review_dispatch::is_factory_worker_from_env`) and restores it on
-    /// drop — including on panic, which a plain restore-at-the-end helper does
-    /// not do. A leaked `CAS_AGENT_ROLE` would silently change the branch every
-    /// later test in this module takes.
+    /// Pins the caller-role env `format_code_review_required` keys and restores
+    /// it on drop — including on panic, which a plain restore-at-the-end helper
+    /// does not do. A leaked `CAS_AGENT_ROLE` would silently change the branch
+    /// every later test in this module takes.
     ///
     /// Every test that asserts on this gate's TEXT must hold one. cas-62b0 made
     /// the guidance caller-aware, so the ambient environment now decides which

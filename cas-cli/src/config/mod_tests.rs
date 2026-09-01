@@ -578,110 +578,17 @@ fn test_llm_harness_top_level_override_suppresses_worker_stock_floor() {
     assert_eq!(config.llm().harness_for_role("supervisor"), "claude");
 }
 
-// ── cas-62b0 / GH #152: `[code_review] owner` is a first-class config key ──
-//
-// The struct has existed since cas-b51a and every runtime gate reads it, but
-// the CLI surface (get/set/list/registry) never knew the key. A downstream
-// project set `owner = "supervisor"`, asked `cas config get
-// code_review.owner`, was told "Unknown config key", and reasonably concluded
-// the setting did nothing — while five multi-persona review runs (~500k
-// subagent tokens each) proceeded against it.
-
 #[test]
-fn code_review_owner_is_readable_settable_and_listed() {
-    let temp = TempDir::new().unwrap();
+fn code_review_owner_is_unknown_after_dispatch_layer_removal() {
     let mut config = Config::default();
 
-    // Absent section must report the *effective* value, not empty. The
-    // runtime default is supervisor-owned (cas-865b), so anything else here
-    // would misreport which gate the project is actually under.
-    assert!(config.code_review.is_none());
-    assert_eq!(
-        config.get("code_review.owner"),
-        Some("supervisor".to_string()),
-        "an absent [code_review] section must still report the effective default"
-    );
+    assert_eq!(config.get("code_review.owner"), None);
     assert!(
-        config
+        !config
             .list()
-            .contains(&("code_review.owner".to_string(), "supervisor".to_string())),
-        "`cas config list` must show the key so the policy is auditable"
-    );
-
-    config.set("code_review.owner", "worker").unwrap();
-    assert_eq!(config.get("code_review.owner"), Some("worker".to_string()));
-    assert!(!config.code_review.as_ref().unwrap().supervisor_owned());
-
-    // Round-trips through TOML — the shape a project actually commits.
-    config.save(temp.path()).unwrap();
-    let raw = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
-    assert!(raw.contains("[code_review]"));
-    assert!(raw.contains("owner = \"worker\""));
-    let loaded = Config::load(temp.path()).unwrap();
-    assert_eq!(loaded.get("code_review.owner"), Some("worker".to_string()));
-
-    // Case-tolerant on the way in, canonical on the way out, because
-    // `supervisor_owned()` compares case-insensitively and a value that reads
-    // back differently than it was written is how "the setting isn't
-    // recognized" gets reported a second time. (Surrounding whitespace is
-    // rejected by the registry's OneOf constraint before `set` is reached —
-    // same as every other enum-valued key, e.g. llm.harness; not special-cased
-    // here.)
-    config.set("code_review.owner", "SUPERVISOR").unwrap();
-    assert_eq!(
-        config.get("code_review.owner"),
-        Some("supervisor".to_string())
-    );
-    assert!(config.code_review.as_ref().unwrap().supervisor_owned());
-}
-
-#[test]
-fn code_review_owner_rejects_values_the_runtime_cannot_honour() {
-    let mut config = Config::default();
-
-    // `supervisor_owned()` is an equality test against "supervisor"; every
-    // other string silently means "worker". A typo must fail loudly at set
-    // time rather than quietly reinstate the ~500k-token inline pipeline.
-    let err = config.set("code_review.owner", "supervisors").unwrap_err();
-    assert!(
-        err.to_string().contains("supervisor") && err.to_string().contains("worker"),
-        "rejection must name both accepted owners, got: {err}"
-    );
-    assert!(
-        config.code_review.is_none(),
-        "a rejected set must not mutate"
-    );
-
-    assert!(
-        meta::registry()
-            .validate("code_review.owner", "worker")
-            .is_ok(),
-        "registry must recognize the key for `cas config set` validation"
-    );
-    assert!(
-        meta::registry()
-            .validate("code_review.owner", "nobody")
-            .is_err(),
-        "registry constraint must reject unknown owners"
-    );
-}
-
-#[test]
-fn code_review_owner_has_registry_metadata_so_describe_and_search_find_it() {
-    let reg = meta::registry();
-    let meta_entry = reg
-        .get("code_review.owner")
-        .expect("code_review.owner must be registered — this is the GH #152 'Unknown config key'");
-    assert_eq!(meta_entry.section, "code_review");
-    assert_eq!(meta_entry.default, "supervisor");
-    assert!(
-        reg.section_description("code_review").is_some(),
-        "a section with keys but no description renders headerless in `cas config list`"
-    );
-    assert!(
-        reg.search("cas-code-review")
             .iter()
-            .any(|m| m.key == "code_review.owner"),
-        "searching for the skill name must surface the key that governs it"
+            .any(|(key, _)| key == "code_review.owner")
     );
+    assert!(meta::registry().get("code_review.owner").is_none());
+    assert!(config.set("code_review.owner", "supervisor").is_err());
 }

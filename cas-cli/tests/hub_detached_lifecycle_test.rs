@@ -47,6 +47,39 @@ fn own_cgroup_dir() -> PathBuf {
 }
 
 #[cfg(target_os = "linux")]
+fn cgroup_delegation_available() -> bool {
+    let own = own_cgroup_dir();
+    let parent = own
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.starts_with("cas-worker-"))
+        .and_then(|_| own.parent())
+        .map(Path::to_path_buf)
+        .unwrap_or(own);
+    if !parent.join("cgroup.controllers").exists() {
+        return false;
+    }
+
+    // Match production's writable_scope_parent probe: creating and removing
+    // a child is the proof that this cgroup tree is delegated to the runner.
+    let probe = parent.join(format!(
+        ".cas-b2c4-containment-probe-{}",
+        std::process::id()
+    ));
+    match fs::create_dir(&probe) {
+        Ok(()) => {
+            let _ = fs::remove_dir(&probe);
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_dir(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn exited_pid() -> u32 {
     let mut child = Command::new("true")
         .spawn()
@@ -151,11 +184,18 @@ fn factory_worker_hub_record_uses_its_joined_server_scope() {
         String::from_utf8_lossy(&start.stderr)
     );
     let record: Value = serde_json::from_slice(&start.stdout).expect("worker hub start JSON");
-    let cgroup = record["cgroup"].as_str().expect("worker hub record cgroup");
-    assert!(
-        cgroup.contains("/cas-server-") && cgroup.ends_with("-hub"),
-        "worker hub must record its joined cas-server scope: {cgroup}"
-    );
+    if cgroup_delegation_available() {
+        let cgroup = record["cgroup"].as_str().expect("worker hub record cgroup");
+        assert!(
+            cgroup.contains("/cas-server-") && cgroup.ends_with("-hub"),
+            "worker hub must record its joined cas-server scope: {cgroup}"
+        );
+    } else {
+        assert!(
+            record["cgroup"].is_null(),
+            "worker hub must omit cgroup when delegation is unavailable: {record}"
+        );
+    }
 
     let stop = cas_command(home.path(), &path)
         .env("CAS_AGENT_ROLE", "worker")

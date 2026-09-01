@@ -835,6 +835,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         if args.foreign_rows {
             return output_foreign_rows_detail(report, cli);
         }
+        checks.push(cloud_queue_check(&cas_root));
         checks.push(foreign_rows_check(report.as_ref()));
     } else if args.foreign_rows {
         anyhow::bail!(
@@ -1949,6 +1950,67 @@ fn integration_checks(project_root: &Path) -> Vec<crate::cli::integrate::doctor:
     crate::cli::integrate::doctor::render_for_doctor(&reports)
 }
 
+/// Surface the exact content queue rows that keep `purge-foreign` fail-closed.
+/// The remediation is intentionally executable in order: reset terminal rows,
+/// push them, then preview the purge again. A count from the generic queue
+/// stats would include knowledge pages, so this reuses the purge's own content
+/// predicate instead.
+fn cloud_queue_check(cas_root: &Path) -> Check {
+    let db_path = cas_root.join("cas.db");
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(conn) => conn,
+        Err(error) => {
+            return Check {
+                name: "cloud sync queue".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot count queued content changes: {error}"),
+            };
+        }
+    };
+
+    let pending = match crate::cli::cloud::pending_content_pushes(&conn) {
+        Ok(pending) => pending,
+        Err(error) => {
+            return Check {
+                name: "cloud sync queue".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot count queued content changes: {error}"),
+            };
+        }
+    };
+
+    let mut by_type = BTreeMap::<String, usize>::new();
+    for (entity_type, _) in &pending {
+        *by_type.entry(entity_type.clone()).or_default() += 1;
+    }
+    let breakdown = by_type
+        .iter()
+        .map(|(entity_type, count)| format!("{entity_type}: {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remediation = "Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.";
+
+    if pending.is_empty() {
+        Check {
+            name: "cloud sync queue".to_string(),
+            status: CheckStatus::Ok,
+            message: format!("0 queued content change(s) block purge-foreign; {remediation}"),
+        }
+    } else {
+        Check {
+            name: "cloud sync queue".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "{} queued content change(s) block purge-foreign ({breakdown}); {remediation}",
+                pending.len()
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2281,6 +2343,50 @@ mod tests {
             "{}",
             check.message
         );
+    }
+
+    #[test]
+    fn doctor_queue_check_names_retry_push_purge_and_exact_blocking_counts() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
+            INSERT INTO sync_queue
+                (id, entity_type, entity_id, operation, created_at, retry_count)
+            VALUES
+                (1, 'entry', 'entry-a', 'upsert', '2026-09-01T00:00:00Z', 0),
+                (2, 'entry', 'entry-b', 'upsert', '2026-09-01T00:00:01Z', 5),
+                (3, 'task', 'task-a', 'upsert', '2026-09-01T00:00:02Z', 0),
+                (4, 'knowledge_page', 'page-a', 'upsert', '2026-09-01T00:00:03Z', 0);
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("3 queued content change(s)"));
+        assert!(check.message.contains("entry: 2"));
+        assert!(check.message.contains("task: 1"));
+        let retry = check.message.find("cas cloud queue --retry").unwrap();
+        let push = check.message.find("cas cloud push").unwrap();
+        let purge = check.message.find("cas cloud purge-foreign --dry-run").unwrap();
+        assert!(retry < push && push < purge, "{message}", message = check.message);
     }
 
     #[test]

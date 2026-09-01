@@ -9041,10 +9041,10 @@ const COMMIT_RECEIPT_CLOCK_SKEW_SECS: i64 = 5;
 /// Build the Git date filter used when attributing commits to a task.
 ///
 /// Git interprets a negative `@<epoch>` value as a different date expression
-/// (currently effectively "now"), not as an epoch before Unix time. Keep the
-/// omit the filter for synthetic/legacy task fixtures whose adjusted floor is
-/// at or before Unix epoch, while real positive task floors retain their
-/// clock-skew allowance.
+/// (currently effectively "now"), not as an epoch before Unix time. Omit the
+/// filter for synthetic/legacy task fixtures whose adjusted floor is at or
+/// before Unix epoch, while real positive task floors retain their clock-skew
+/// allowance.
 fn task_commit_receipt_since(task_floor: chrono::DateTime<chrono::Utc>) -> Option<String> {
     let earliest_epoch = task_floor
         .timestamp()
@@ -23363,7 +23363,8 @@ mod commit_claim_integrity_tests {
         std::fs::write(dir.path().join("backdated.rs"), "fn backdated() {}\n").unwrap();
         // This commit is several seconds behind any test invocation. The
         // pre-fix `@-5` expression is parsed by Git as "now" and drops it;
-        // the clamped `@0` window must retain it deterministically.
+        // the omitted filter for the non-positive floor must retain it
+        // deterministically.
         git(dir.path(), &["add", "backdated.rs"]);
         git_at(
             dir.path(),

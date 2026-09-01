@@ -1,14 +1,8 @@
 use crate::mcp::tools::core::imports::*;
 
-// Matches the close-time proof-cycle lifetime. A supervisor-direct recovery
-// creates the same short-lived, durable boundary that a normal worker close
-// would have created before an external merge left the task review-pending.
-const SUPERVISOR_DIRECT_RECOVERY_DISPATCH_TIMEOUT_SECS: i64 = 600;
 /// Structured task label marking an Open task that was reopened by a rejected
 /// supervisor review and therefore needs a supervisor recovery decision.
 pub const VERIFICATION_REJECTED_REOPEN_LABEL: &str = "verification-rejected-reopen";
-pub const VERIFICATION_REJECTED_REOPEN_RECOVERY: &str =
-    "Verification rejected; worker remains assigned but inactive. Resume the existing worker or replace it.";
 
 impl CasCore {
     pub async fn cas_verification_add(
@@ -316,68 +310,13 @@ impl CasCore {
         } else if let Some(dispatch_id) = req.dispatch_id.clone() {
             dispatch_id
         } else {
-            // An external merge can leave the task in the same durable
-            // PendingSupervisorReview projection that normal close creates,
-            // but without its companion dispatch. Do not make a supervisor
-            // who has just completed that review invent an ID that does not
-            // exist. Recover exactly this missing boundary, and no broader
-            // no-dispatch supervisor authority.
-            if task.status != cas_types::TaskStatus::PendingSupervisorReview
-                || !task.pending_verification
-            {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
-                        "Registered supervisor-direct verification without dispatch_id is allowed only for a task that is pending supervisor review with a missing dispatch. Task {} is {}; retry task close to create an exact dispatch, then name it here.",
-                        req.task_id, task.status
-                    )),
-                    data: None,
-                });
-            }
-
-            match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id) {
-                Ok(Some(dispatch)) => {
-                    return Err(McpError {
-                        code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(format!(
-                            "Registered supervisor-direct verification must name the existing exact dispatch {} (state: {}).",
-                            dispatch.id, dispatch.state
-                        )),
-                        data: None,
-                    });
-                }
-                Err(error) => {
-                    return Err(McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!(
-                            "Unable to inspect the pending supervisor-review dispatch for task {}: {error}",
-                            req.task_id
-                        )),
-                        data: None,
-                    });
-                }
-                Ok(None) => {}
-            }
-
-            cas_store::create_verification_dispatch_bound(
-                &self.cas_root,
-                &req.task_id,
-                &caller_id,
-                &caller_id,
-                &cas_types::VerificationProofBoundary::task(),
-                chrono::Utc::now()
-                    + chrono::Duration::seconds(SUPERVISOR_DIRECT_RECOVERY_DISPATCH_TIMEOUT_SECS),
-                false,
-            )
-            .map(|dispatch| dispatch.id)
-            .map_err(|error| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
-                    "Failed to create a missing supervisor-review dispatch for task {}: {error}",
-                    req.task_id
-                )),
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Verification requires dispatch_id naming an exact active proof boundary.",
+                ),
                 data: None,
-            })?
+            });
         };
 
         // cas-b269: urgent stop halt blocks verification MCP.
@@ -514,7 +453,6 @@ impl CasCore {
             }
         }
 
-        let mut rejection_reopened_at = None;
         // Atomically persist the verdict, resolve any active exact-task
         // dispatch, and clear that task's pending transition. If any step
         // fails, all authority and lifecycle writes roll back.
@@ -688,61 +626,11 @@ impl CasCore {
                 false
             };
 
-            if !approved_delivery && task.status == TaskStatus::PendingSupervisorReview {
-                // A rejected exact supervisor review is a completed proof
-                // cycle, not a terminal task state. Reopen every PSR boundary
-                // (plain task, repository-proof, or delivery-backed) so the
-                // assigned worker can amend and immediately restart. Keeping
-                // this projection independent of the boundary shape avoids a
-                // repository proof silently leaving the task wedged in PSR.
-                let decision = format!(
-                    "Decision: supervisor review rejected (dispatch {}; verification {}): {}",
-                    dispatch.id, verification.id, verification.summary
-                );
-                let notes = if task.notes.trim().is_empty() {
-                    decision
-                } else {
-                    format!("{}\n\n{}", task.notes.trim_end(), decision)
-                };
-                let mut labels = task.labels.clone();
-                if !labels.iter().any(|label| label == VERIFICATION_REJECTED_REOPEN_LABEL) {
-                    labels.push(VERIFICATION_REJECTED_REOPEN_LABEL.to_string());
-                }
-                let labels = serde_json::to_string(&labels).map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to serialize rejection recovery label: {e}")),
-                    data: None,
-                })?;
-                let reopened_at = chrono::Utc::now();
-                let changed = tx
-                    .execute(
-                        "UPDATE tasks
-                         SET status = 'open', pending_verification = 0, notes = ?2, labels = ?3, updated_at = ?4
-                         WHERE id = ?1 AND status = 'pending_supervisor_review'",
-                        rusqlite::params![req.task_id, notes, labels, reopened_at.to_rfc3339(),],
-                    )
-                    .map_err(|e| McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!(
-                            "Failed to project supervisor-review rejection: {e}"
-                        )),
-                        data: None,
-                    })?;
-                if changed != 1 {
-                    return Err(McpError {
-                        code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(
-                            "Supervisor-review rejection raced with a task status change.",
-                        ),
-                        data: None,
-                    });
-                }
-                rejection_reopened_at = Some(reopened_at);
-            } else if delivery_transitioned {
+            if delivery_transitioned {
                 tx.execute(
                     "UPDATE tasks
                      SET status = ?2, pending_verification = 0, updated_at = ?3
-                     WHERE id = ?1 AND status = 'pending_supervisor_review'",
+                     WHERE id = ?1 AND status IN ('in_progress', 'awaiting_merge')",
                     rusqlite::params![
                         req.task_id,
                         if approved_delivery {
@@ -775,46 +663,6 @@ impl CasCore {
             tx.commit().map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to commit verification transaction: {e}")),
-                data: None,
-            })?;
-        }
-
-        // Reopening after a rejected supervisor review leaves the prior worker
-        // assigned but without an active lease. This is not ordinary ready work:
-        // a supervisor must explicitly resume that worker or replace it. Route
-        // the transition through the durable lifecycle outbox so an idle
-        // supervisor receives one wake-eligible, acknowledgeable recovery cue.
-        if let Some(reopened_at) = rejection_reopened_at {
-            use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
-                emit_task_lifecycle_transition, occurrence_from_updated_at, LifecycleTransition,
-            };
-            let supervisor_queue = crate::store::open_supervisor_queue_store(&self.cas_root)
-                .map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to open supervisor queue for rejection wake: {e}")),
-                    data: None,
-                })?;
-            let prompt_queue = crate::store::open_prompt_queue_store(&self.cas_root).map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to open prompt queue for rejection wake: {e}")),
-                data: None,
-            })?;
-            emit_task_lifecycle_transition(
-                supervisor_queue.as_ref(),
-                Some(prompt_queue.as_ref()),
-                agent_store.as_ref(),
-                &req.task_id,
-                &task.title,
-                TaskStatus::PendingSupervisorReview,
-                TaskStatus::Open,
-                &caller_id,
-                Some(VERIFICATION_REJECTED_REOPEN_RECOVERY),
-                LifecycleTransition::VerificationRejectedReopened,
-                &occurrence_from_updated_at(reopened_at),
-            )
-            .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Verification rejection reopened task but supervisor recovery wake failed: {e}")),
                 data: None,
             })?;
         }

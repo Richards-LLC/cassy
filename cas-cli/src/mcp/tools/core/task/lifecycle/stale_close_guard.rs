@@ -351,7 +351,7 @@ pub fn is_merge_reclose_exempt_urgent(text: &str, target_awaiting_merge_task_ids
 /// - It fires **only** when the task being closed is `AwaitingMerge` OR
 ///   `InProgress` and its `assignee` is exactly the calling agent's own
 ///   display name — someone else's task, or this same task in any other
-///   status (`Open`, `Blocked`, `Closed`, `PendingSupervisorReview`), still
+///   status (`Open`, `Blocked`, `Closed`, `AwaitingMerge`), still
 ///   halts.
 /// - It does **not** clear `halt_task_work` — every other close/verify call
 ///   remains blocked until the worker demonstrably answers the urgent
@@ -391,33 +391,6 @@ pub fn halt_exempt_for_owned_task(
     }
 }
 
-/// cas-a699: permit exactly one additional close-only halt escape.
-///
-/// `PendingSupervisorReview` cannot use the normal `task start` recovery:
-/// start deliberately preserves the completed review state. Once the caller
-/// owns that task and its current review cycle has an approved verdict,
-/// re-close is its only legitimate lifecycle exit. The caller supplies the
-/// approval result after validating the exact current-cycle verification;
-/// this predicate keeps the ownership/status portion pure and fail-closed.
-/// It must not be used by `verification action=add`, where a parked task may
-/// not bootstrap a new verdict through an unrelated urgent halt.
-pub fn halt_exempt_for_owned_approved_supervisor_review(
-    task_status: TaskStatus,
-    task_assignee: Option<&str>,
-    caller_agent_name: Option<&str>,
-    current_cycle_review_approved: bool,
-) -> bool {
-    if task_status != TaskStatus::PendingSupervisorReview || !current_cycle_review_approved {
-        return false;
-    }
-    match (task_assignee, caller_agent_name) {
-        (Some(assignee), Some(caller)) if !assignee.is_empty() && !caller.is_empty() => {
-            assignee == caller
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,7 +402,6 @@ mod tests {
         assert!(!is_terminal_closed(TaskStatus::InProgress));
         assert!(!is_terminal_closed(TaskStatus::Open));
         assert!(!is_terminal_closed(TaskStatus::AwaitingMerge));
-        assert!(!is_terminal_closed(TaskStatus::PendingSupervisorReview));
     }
 
     #[test]
@@ -728,7 +700,6 @@ mod tests {
     fn test_b269_failed_start_statuses_do_not_clear_halt_policy() {
         let no_clear = [
             TaskStatus::Closed,
-            TaskStatus::PendingSupervisorReview,
             TaskStatus::AwaitingMerge,
         ];
         for status in no_clear {
@@ -776,7 +747,6 @@ mod tests {
             TaskStatus::Open,
             TaskStatus::Blocked,
             TaskStatus::Closed,
-            TaskStatus::PendingSupervisorReview,
         ] {
             assert!(
                 !halt_exempt_for_owned_task(status, Some("swift-fox-12"), Some("swift-fox-12"),),
@@ -785,36 +755,6 @@ mod tests {
         }
     }
 
-    /// cas-a699: PendingSupervisorReview is never exempt through the broad
-    /// owned-task predicate. The close-only exception additionally requires a
-    /// current-cycle approved supervisor verdict.
-    #[test]
-    fn test_a699_only_owned_approved_supervisor_review_is_halt_exempt() {
-        assert!(halt_exempt_for_owned_approved_supervisor_review(
-            TaskStatus::PendingSupervisorReview,
-            Some("swift-fox-12"),
-            Some("swift-fox-12"),
-            true,
-        ));
-        assert!(!halt_exempt_for_owned_approved_supervisor_review(
-            TaskStatus::PendingSupervisorReview,
-            Some("swift-fox-12"),
-            Some("swift-fox-12"),
-            false,
-        ));
-        assert!(!halt_exempt_for_owned_approved_supervisor_review(
-            TaskStatus::PendingSupervisorReview,
-            Some("other-worker"),
-            Some("swift-fox-12"),
-            true,
-        ));
-        assert!(!halt_exempt_for_owned_approved_supervisor_review(
-            TaskStatus::InProgress,
-            Some("swift-fox-12"),
-            Some("swift-fox-12"),
-            true,
-        ));
-    }
 
     /// cas-60393: missing assignee or unknown caller identity must fail
     /// closed (never exempt) rather than assume ownership.

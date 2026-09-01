@@ -138,7 +138,7 @@ fn exact_proof_locks_scope(cas_root: &Path, task: &Task) -> Result<bool, String>
     // legacy escape hatch.
     if matches!(
         task.status,
-        TaskStatus::PendingSupervisorReview | TaskStatus::AwaitingMerge
+        TaskStatus::AwaitingMerge
     ) {
         return Ok(true);
     }

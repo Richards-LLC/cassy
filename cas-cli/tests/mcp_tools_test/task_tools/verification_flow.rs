@@ -1651,6 +1651,7 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
 async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipts_cas_6c50() {
     let (temp, service, supervisor_id) = setup_cas_with_supervisor_session();
     let _env_lock = env_test_lock();
+    let _supervisor_env = ScopedSupervisorEnv::new();
     let cas_dir = temp.path().join(".cas");
     let artifacts_root = temp.path().join("durable-artifacts");
     std::fs::create_dir_all(&artifacts_root).unwrap();
@@ -4389,9 +4390,8 @@ enabled = false
     );
 
     // --- Scenario C: value-only is the accurate posture for a copy/i18n
-    //     change to an existing file. It must reach ordinary supervisor
-    //     review, without a worker-supplied envelope or weakening
-    //     additive-only.
+    //     change to an existing file. It follows the ordinary close path;
+    //     no worker-supplied review envelope or queue transition is needed.
     git(&["checkout", "-q", "main"]);
     git(&["checkout", "-q", "-b", "factory/value-only"]);
     std::fs::write(worktree_path.join("existing.txt"), "localized value\n").unwrap();
@@ -4414,8 +4414,8 @@ enabled = false
         t.worktree_id = Some(worktree_id.clone());
         task_store.update(&t).expect("update task");
     }
-    // Customer-visible value changes are reviewable under the default
-    // owner=supervisor policy. Make the fixture a factory worker explicitly:
+    // Customer-visible value changes remain reviewable by the normal
+    // verification/merge gates. Make the fixture a factory worker explicitly:
     // setup_cas clears ambient factory env so the test cannot accidentally
     // exercise a solo caller's close behavior.
     let _worker = FactoryWorkerEnv::enter();
@@ -4433,14 +4433,11 @@ enabled = false
             .await
             .expect("close returns"),
     );
-    assert!(
-        resp_c.contains("supervisor review") || resp_c.contains("pending_supervisor_review"),
-        "value-only modification must queue ordinary supervisor review: {resp_c}"
-    );
+    assert!(resp_c.contains("Closed task:"), "value-only close should complete: {resp_c}");
     assert_eq!(
         task_store.get(&id_c).expect("task").status,
-        cas::types::TaskStatus::PendingSupervisorReview,
-        "value-only must not bypass supervisor-owned review"
+        cas::types::TaskStatus::Closed,
+        "value-only must not enter the retired review queue"
     );
 }
 
@@ -4844,11 +4841,9 @@ enabled = false
 }
 
 /// cas-a699: an unrelated urgent halt must not strand a worker after its own
-/// supervisor-review queue entry has received an approved, current-cycle
-/// verdict. `task start` intentionally refuses PendingSupervisorReview, so
-/// re-close is the only legitimate lifecycle exit from this completed state.
+/// completed delivery has received an approved, current-cycle verdict.
 #[tokio::test]
-async fn test_a699_halted_approved_pending_supervisor_review_recloses() {
+async fn test_a699_halted_approved_delivery_recloses() {
     let (temp, service) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
@@ -4873,15 +4868,15 @@ async fn test_a699_halted_approved_pending_supervisor_review_recloses() {
         .await
         .expect("start task");
 
-    // Model the durable queue projection after the worker's first close. The
-    // exact supervisor verdict below resolves the same current review cycle.
+    // Model the durable delivery projection after the worker's first close.
+    // The exact supervisor verdict below resolves the same current cycle.
     let task_store = open_task_store(&cas_dir).expect("task store");
     let mut task = task_store.get(&id).expect("task exists");
-    task.status = TaskStatus::PendingSupervisorReview;
+    task.status = TaskStatus::AwaitingMerge;
     task.pending_verification = true;
     task_store
         .update(&task)
-        .expect("park for supervisor review");
+        .expect("park for delivery verification");
     add_exact_supervisor_fixture_verdict(
         &cas_dir,
         Verification::approved(
@@ -6408,35 +6403,21 @@ owner = "worker"
 }
 
 // =============================================================================
-// cas-8edb: clean worker closes under `[code_review] owner = "supervisor"`
-// must NOT hit VERIFICATION_JAIL_BLOCKED.
+// Retired supervisor-owned review mode: workers use the standard exact
+// verification dispatch regardless of the old `[code_review]` setting.
 //
-// Background: cas-865b (v2.13.0, May 4) flipped the default code-review
-// owner from "worker" to "supervisor". Under the new default, workers do
-// not run cas-code-review at close — review happens at supervisor
-// cherry-pick. But the verification jail + the close_ops verification gate
-// were both still gated on a worker-supplied ReviewOutcome envelope (which
-// workers no longer submit), so every clean worker close re-stranded.
-//
-// These tests pin the post-fix behavior: under owner=supervisor (default),
-// workers can close cleanly without supervisor intervention for the two
-// shapes that were broken in production:
-//   1. Diagnostic / zero-diff close (no reviewable changes).
-//   2. Additive-only close (one or more new commits, additive-only marker).
-//
-// We also keep a regression for the third shape — a normal reviewable
-// close that hits the `PendingSupervisorReview` transition — to ensure the
-// supervisor_review_mode block at close_ops.rs:1084 still runs after the
-// gate is bypassed.
+// These tests pin the post-migration behavior for diagnostic and
+// additive-only worker closes: neither shape invokes the deleted review
+// queue, and both still receive the normal exact verification gate.
 // =============================================================================
 
 #[tokio::test]
-async fn test_worker_close_zero_diff_passes_jail_under_supervisor_owned_review_cas_8edb() {
+async fn test_worker_close_zero_diff_uses_standard_verification_cas_8387() {
     let (_temp, core) = setup_cas();
     let _env_lock = env_test_lock();
 
-    // No config.toml written ⇒ load_config falls back to default, and the
-    // default code_review owner is "supervisor" (cas-865b).
+    // No config.toml written: the removed code-review owner setting has no
+    // bearing on the standard verification gate.
     let service = CasService::new(core, None);
     let _env = FactoryWorkerEnv::enter();
 
@@ -6460,13 +6441,8 @@ async fn test_worker_close_zero_diff_passes_jail_under_supervisor_owned_review_c
         .await
         .expect("start");
 
-    // Close. Pre-fix this hit VERIFICATION_JAIL_BLOCKED because the worker
-    // held an InProgress leased task with no Approved/Skipped verification
-    // row and the auth gate fired. With cas-8edb the jail is bypassed for
-    // workers under owner=supervisor, and the close completes because
-    // `has_reviewable_changes` returns false on the test's non-git temp dir
-    // (supervisor_review_mode block falls through; run_code_review_gate
-    // proceeds; task closes normally).
+    // Close: the MCP action is admitted, then close_ops creates the exact
+    // verification dispatch required by the current contract.
     let result = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "close",
@@ -6474,28 +6450,24 @@ async fn test_worker_close_zero_diff_passes_jail_under_supervisor_owned_review_c
             "reason": "Diagnostic only — no code changes.",
         }))))
         .await
-        .expect("worker close must not hit jail under owner=supervisor");
+        .expect("worker close must return verification guidance");
     let text = extract_text(result);
     assert!(
         !text.contains("VERIFICATION_JAIL_BLOCKED"),
         "owner=supervisor worker close must bypass MCP jail, got: {text}"
     );
     assert!(
-        !text.contains("VERIFICATION REQUIRED"),
-        "owner=supervisor worker close must bypass close_ops gate, got: {text}"
-    );
-    assert!(
-        text.contains("Closed"),
-        "close response should indicate the task is closed, got: {text}"
+        text.contains("VERIFICATION REQUIRED"),
+        "worker close must use the standard close_ops verification gate, got: {text}"
     );
 }
 
 #[tokio::test]
-async fn test_worker_close_additive_only_passes_jail_under_supervisor_owned_review_cas_8edb() {
+async fn test_worker_close_additive_only_uses_standard_verification_cas_8387() {
     let (_temp, core) = setup_cas();
     let _env_lock = env_test_lock();
 
-    // Default config ⇒ owner=supervisor.
+    // Default config: the removed code-review owner setting is irrelevant.
     let service = CasService::new(core, None);
     let _env = FactoryWorkerEnv::enter();
 
@@ -6520,9 +6492,7 @@ async fn test_worker_close_additive_only_passes_jail_under_supervisor_owned_revi
         .await
         .expect("start");
 
-    // Additive-only tasks have an explicit gate skip in run_code_review_gate
-    // (line ~2361). Combined with the cas-8edb verification-jail bypass,
-    // the close completes without any envelope or supervisor intervention.
+    // Additive-only is a data-state declaration, not a verification bypass.
     let result = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "close",
@@ -6530,19 +6500,15 @@ async fn test_worker_close_additive_only_passes_jail_under_supervisor_owned_revi
             "reason": "Additive-only docs change — no existing files modified.",
         }))))
         .await
-        .expect("worker close must not hit jail under owner=supervisor (additive-only)");
+        .expect("worker close must return verification guidance");
     let text = extract_text(result);
     assert!(
         !text.contains("VERIFICATION_JAIL_BLOCKED"),
         "owner=supervisor additive-only worker close must bypass MCP jail, got: {text}"
     );
     assert!(
-        !text.contains("VERIFICATION REQUIRED"),
-        "owner=supervisor additive-only worker close must bypass close_ops gate, got: {text}"
-    );
-    assert!(
-        text.contains("Closed"),
-        "close response should indicate the task is closed, got: {text}"
+        text.contains("VERIFICATION REQUIRED"),
+        "additive-only worker close must use standard verification, got: {text}"
     );
 }
 

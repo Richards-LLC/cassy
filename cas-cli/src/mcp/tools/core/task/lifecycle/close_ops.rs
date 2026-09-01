@@ -671,12 +671,6 @@ pub(crate) enum VerificationSkipReason {
     /// A live registered supervisor closed a Gate after recording the
     /// decision in the task timeline. No code delivery is being approved.
     SupervisorDecision,
-    /// cas-1932 (GH #62, minor): an assignee-lookup failure would have
-    /// reported "verification skipped", but a current-cycle APPROVED
-    /// verification for this task already exists. The close is authorized
-    /// by that verdict, so name it instead of claiming nothing verified
-    /// the work.
-    ExistingApprovedVerification { verification_id: String },
 }
 
 impl VerificationSkipReason {
@@ -725,9 +719,6 @@ impl VerificationSkipReason {
             VerificationSkipReason::SupervisorDecision => {
                 " (decision recorded — supervisor-authorized gate)".to_string()
             }
-            VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
-                format!(" (verified — approved verification {verification_id} on record)")
-            }
         }
     }
 
@@ -774,72 +765,7 @@ impl VerificationSkipReason {
                  was recorded; no code delivery was required or approved."
                     .to_string()
             }
-            VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
-                format!(
-                    "Closed on the approved verification {verification_id} already recorded for \
-                     this task's current work cycle; the assignee lookup could not resolve a live \
-                     verifier, but the verdict exists and authorizes the close."
-                )
-            }
         }
-    }
-}
-
-/// cas-1932 (GH #62 symptom 1): does an existing verification row authorize
-/// the close that would otherwise be re-queued for supervisor review?
-///
-/// Accepted only when the verdict is `Approved`, matches the verification
-/// type the task requires, and was recorded inside the task's current work
-/// cycle (same `TaskCommitReceiptWindow` used to attribute commits, with the
-/// same clock-skew allowance). A verdict from an earlier cycle — for example
-/// one that predates a reopen and its rework — can never authorize a fresh
-/// close.
-pub(crate) fn approved_verification_satisfies_review_queue(
-    verification: &Verification,
-    window: Option<&TaskCommitReceiptWindow>,
-    required_type: VerificationType,
-) -> bool {
-    if verification.status != VerificationStatus::Approved {
-        return false;
-    }
-    if verification.verification_type != required_type {
-        return false;
-    }
-    match window {
-        Some(window) => {
-            verification.created_at.timestamp()
-                >= window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
-        }
-        None => true,
-    }
-}
-
-/// cas-1932 (GH #62, minor): the close path reported
-/// "verification skipped — assignee unknown" while verification
-/// `ver-fd59de6ef422` existed for the task. An assignee-resolution failure is
-/// not evidence that nothing verified the work — when a current-cycle
-/// approved verdict is on record, cite it instead.
-///
-/// Only *lookup-failure* reasons are replaced. `SupervisorBypass` and
-/// `EpicOwnerClosed` are deliberate decisions and keep their own audit text;
-/// `None` is not a skip at all.
-pub(crate) fn skip_reason_with_existing_verification(
-    reason: VerificationSkipReason,
-    approved: Option<&Verification>,
-) -> VerificationSkipReason {
-    let is_lookup_failure = matches!(
-        reason,
-        VerificationSkipReason::NoAssignee
-            | VerificationSkipReason::AssigneeUnknown
-            | VerificationSkipReason::AssigneeInactive { .. }
-    );
-    match approved {
-        Some(verification) if is_lookup_failure => {
-            VerificationSkipReason::ExistingApprovedVerification {
-                verification_id: verification.id.clone(),
-            }
-        }
-        _ => reason,
     }
 }
 
@@ -1259,7 +1185,7 @@ impl CasCore {
         };
 
         // cas-2b667 / GH #588: the receipt path must not project an
-        // unmerged current source tip into PendingSupervisorReview. The
+        // unmerged current source tip into the merged-delivery states. The
         // receipt's commit/target fields are a snapshot supplied by the
         // worker; re-fetch and inspect the live branch immediately before
         // creating the immutable delivery boundary so a straggler commit
@@ -1270,7 +1196,7 @@ impl CasCore {
             &input.target_branch,
         ) {
             return Ok(Self::tool_error(format!(
-                "DELIVERY RECEIPT REJECTED: task {} cannot enter pending_supervisor_review until the current source tip is merged.\n\n{message}",
+                "DELIVERY RECEIPT REJECTED: task {} cannot accept a completion receipt until the current source tip is merged.\n\n{message}",
                 task.id
             )));
         }
@@ -1336,7 +1262,7 @@ impl CasCore {
                 )),
                 data: None,
             })?;
-            (TaskStatus::PendingSupervisorReview, true)
+            (TaskStatus::InProgress, true)
         } else if transaction.state == cas_types::WorkerDeliveryState::AwaitingMerge {
             (TaskStatus::AwaitingMerge, false)
         } else {
@@ -1975,8 +1901,8 @@ impl CasCore {
 
         // cas-e74c: resolve the work-cycle identity before the urgent-halt
         // gate as well as the later delivery/review gates. cas-a699 needs the
-        // same current-cycle boundary before it can safely recognize the one
-        // completed PendingSupervisorReview exit below.
+        // same current-cycle boundary used by the delivery and verification
+        // gates below.
         let task_commit_identity = task_commit_identity(
             &task,
             cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
@@ -2020,16 +1946,6 @@ impl CasCore {
                         task.status,
                         task.assignee.as_deref(),
                         Some(agent.name.as_str()),
-                    ) || super::stale_close_guard::halt_exempt_for_owned_approved_supervisor_review(
-                        task.status,
-                        task.assignee.as_deref(),
-                        Some(agent.name.as_str()),
-                        self.current_cycle_approved_verification(
-                            &req.id,
-                            required_verification_type(task.task_type),
-                            commit_receipt_window.as_ref(),
-                        )
-                        .is_some(),
                     );
                     if super::stale_close_guard::agent_task_work_halted(&agent.metadata)
                         && !halt_exempt
@@ -2557,29 +2473,6 @@ impl CasCore {
                 policy.task_required()
             };
 
-        // cas-8edb: under the supervisor-owned review policy, a worker close
-        // is a pure transition
-        // operation — for reviewable diffs the `supervisor_review_mode`
-        // block further down transitions the task to
-        // `PendingSupervisorReview`; for additive-only / docs-only /
-        // zero-diff shapes the rest of the close pipeline handles the
-        // close normally. Either way, the verification-jail path (which
-        // arms `pending_verification=true` and dispatches `task-verifier`)
-        // is the legacy `owner=worker` mechanism and must not fire for a
-        // worker under supervisor-owned review — workers don't submit a
-        // worker-supplied review envelope in this mode. Skip the legacy
-        // worker-owned verification jail here; the supervisor review queue
-        // replaces it.
-        //
-        // Supervisor-driven close paths are unaffected: `is_factory_worker`
-        // is false for supervisors, so `worker_under_supervisor_review`
-        // is false and the existing gate runs (with supervisor exemptions
-        // already in place).
-        // The legacy configurable review owner is being removed. Keep the
-        // supervisor-owned transition behavior until cas-8387 removes this
-        // PendingSupervisorReview block.
-        let worker_under_supervisor_review = is_factory_worker && task.task_type != TaskType::Epic;
-
         // Skip verification for orphaned tasks: if caller is supervisor and the
         // task's assignee is inactive (heartbeat expired or lease gone), allow
         // close without verification. cas-3bd4: compute the reason as a typed
@@ -2597,21 +2490,7 @@ impl CasCore {
                 // would mislabel a healthy owner-close as orphan recovery.
                 VerificationSkipReason::EpicOwnerClosed
             } else {
-                // cas-1932 (GH #62, minor): an assignee that cannot be
-                // resolved is not evidence that nothing verified the work.
-                // The incident close reported "verification skipped —
-                // assignee unknown" while verification ver-fd59de6ef422 was
-                // on record for the task, losing the audit linkage. When a
-                // current-cycle approved verdict exists, cite it instead.
-                skip_reason_with_existing_verification(
-                    self.compute_verification_skip_reason(&task, &req),
-                    self.current_cycle_approved_verification(
-                        &req.id,
-                        required_verification_type(task.task_type),
-                        commit_receipt_window.as_ref(),
-                    )
-                    .as_ref(),
-                )
+                self.compute_verification_skip_reason(&task, &req)
             }
         } else {
             VerificationSkipReason::None
@@ -2647,7 +2526,6 @@ impl CasCore {
         // as today.
         if verification_enabled
             && !skip_verification
-            && !worker_under_supervisor_review
             && !depth_light
         {
             let is_worker_without_subagents = is_worker_without_subagents_from_env();
@@ -3636,7 +3514,7 @@ impl CasCore {
         // beyond the parent branch, AND was never pushed to origin (no remote
         // tracking ref), the close is refused.
         //
-        // Skip conditions mirror the supervisor-review block below:
+        // Skip conditions mirror the ordinary close gate:
         //   * Epic tasks — not a per-worker task.
         //   * `execution_note = "additive-only"` — no commit expected by spec.
         //   * `bypass_close_gates` — this close disposition has no delivery.
@@ -3661,202 +3539,6 @@ impl CasCore {
                     MergeRealityOutcome::Refuse(msg) => {
                         return Ok(Self::tool_error(msg));
                     }
-                }
-            }
-        }
-
-        // cas-b51a: supervisor-owned review mode.
-        //
-        // When supervisor-owned review mode is active AND the caller is a
-        // factory worker AND the task has reviewable code changes, skip the
-        // full 14-min multi-persona dispatch and instead:
-        //   1. Run the lightweight structural lint (<1s).
-        //   2. On lint pass, flip the task to `PendingSupervisorReview` and
-        //      return success. The supervisor picks up the review queue at
-        //      their own pace.
-        //   3. On lint fail, return an error so the worker fixes the basics
-        //      before the branch reaches the review queue.
-        //
-        // Override conditions (fall through to normal close):
-        //   * `supervisor_override=true` by a supervisor — they can force-close
-        //     the review gate regardless of mode.
-        //   * Epic tasks — the subtask-receipts gate handles epics; the
-        //     supervisor-owned path is for individual worker tasks.
-        //   * Additive-only tasks — already skipped by the gate below.
-        //   * `has_reviewable_changes` returns false — docs-only or empty
-        //     diff; normal close path is appropriate.
-        //   * `owner=worker` — legacy opt-out path, unchanged.
-        //
-        // The close path now uses the supervisor-owned transition unconditionally.
-        // The PendingSupervisorReview transition itself remains owned by cas-8387.
-        let supervisor_review_mode = true;
-
-        // cas-6538: under `owner = "supervisor"` the worker close normally
-        // transitions to `PendingSupervisorReview` — that queue hop IS the P0
-        // code-review gate for this mode (the supervisor runs cas-code-review
-        // off the queue). For `depth_light` we treat the P0 gate as satisfied,
-        // so skip the pend-transition and let the close complete immediately
-        // (AC: "close succeeds", demo: "closes immediately"). `Deep`/unset is
-        // unaffected — `!depth_light` keeps the transition firing as today.
-        // cas-1932 (GH #62 symptom 1): the queue hop is the review gate for
-        // this mode — but once the supervisor has recorded an APPROVED verdict
-        // for this work cycle, that gate is satisfied. Before this fix the
-        // worker's re-close re-queued the task to `PendingSupervisorReview`
-        // forever: the approved verification on record was never consulted
-        // here, so no close by the worker could ever complete and the
-        // supervisor had to close on their behalf.
-        //
-        // Deliberately scoped to the supervisor-owned review path: there the
-        // supervisor's verdict IS the code review. The verification jail and
-        // supervisor review queue remain independent gates and neither may
-        // stand in for the other.
-        let review_queue_verdict = if supervisor_review_mode
-            && is_factory_worker
-            && task.task_type != TaskType::Epic
-            && !bypass_close_gates
-        {
-            self.current_cycle_approved_verification(
-                &req.id,
-                required_verification_type(task.task_type),
-                commit_receipt_window.as_ref(),
-            )
-        } else {
-            None
-        };
-        if supervisor_review_mode
-            && is_factory_worker
-            && task.task_type != TaskType::Epic
-            && task.execution_note.as_deref() != Some("additive-only")
-            && !bypass_close_gates
-            && effective_has_reviewable
-            && !depth_light
-            && review_queue_verdict.is_none()
-        {
-            // cas-dc5d: scope lightweight lint to the closing worker's
-            // worktree + committed task range (merge-base..HEAD), never
-            // the shared main checkout's working-tree WIP. Sibling gates
-            // (cas-ee2b / cas-bc1b) already use this authority; lint was
-            // the remaining caller of bare `close_project_root`.
-            let lint_outcome = if declared_hook_evidence.is_some() {
-                LightweightLintOutcome::Pass
-            } else if let Some(worker_wt) = worker_worktree_path.as_ref() {
-                // cas-7efe: single close-time resolver, not a bare "main".
-                run_lightweight_structural_lint_with_scope(
-                    worker_wt,
-                    Some(resolved_parent_branch.as_str()),
-                )
-            } else {
-                run_lightweight_structural_lint(&close_project_root)
-            };
-            match lint_outcome {
-                LightweightLintOutcome::Fail(msg) => {
-                    return Ok(Self::tool_error(format!(
-                        "⚠️ LIGHTWEIGHT LINT FAILED\n\n\
-                        Worker close (supervisor-review mode) rejected by structural lint.\n\n\
-                        {msg}\n\n\
-                        Fix the violations above and retry close."
-                    )));
-                }
-                LightweightLintOutcome::Pass => {
-                    // cas-2b667 / GH #588: this is the final decision point
-                    // before the task becomes PendingSupervisorReview. The
-                    // earlier merge gate may have used a parked task anchor
-                    // (which is correct for final-close/content accounting),
-                    // but that cached anchor cannot authorize this queue hop
-                    // while the current factory branch has a straggler tip.
-                    if is_factory_worker && let Some(assignee) = task.assignee.as_deref() {
-                        let factory_branch = format!("factory/{assignee}");
-                        if let Err(message) = validate_current_factory_branch_tip_ancestry(
-                            &close_project_root,
-                            &factory_branch,
-                            &resolved_parent_branch,
-                        ) {
-                            return Ok(Self::tool_error(format!(
-                                "⚠️ MERGE REQUIRED\n\nTask {} cannot enter pending_supervisor_review until its current factory branch tip is merged.\n\n{message}",
-                                req.id
-                            )));
-                        }
-                    }
-
-                    // Transition to PendingSupervisorReview.
-                    let mut task_to_pend = task.clone();
-                    let now = chrono::Utc::now();
-                    task_to_pend.status = TaskStatus::PendingSupervisorReview;
-                    task_to_pend.pending_verification = true;
-                    task_to_pend.updated_at = now;
-                    task_to_pend.deliverables.pre_close_hook = declared_hook_evidence.clone();
-                    // Persist the close reason so the supervisor can see it.
-                    if let Some(ref reason) = req.reason {
-                        task_to_pend.close_reason = Some(reason.clone());
-                        let timestamp = now.format("%Y-%m-%d %H:%M");
-                        let note = format!(
-                            "[{timestamp}] Pending supervisor review — close reason: {reason}"
-                        );
-                        if task_to_pend.notes.is_empty() {
-                            task_to_pend.notes = note;
-                        } else {
-                            task_to_pend.notes = format!("{}\n\n{}", task_to_pend.notes, note);
-                        }
-                    }
-                    let requester_id = self.get_agent_id()?;
-                    let owner_id = self.verification_dispatch_owner(&requester_id)?;
-                    let dispatch = match cas_store::pend_task_for_supervisor_review_with_dispatch(
-                        &self.cas_root,
-                        &task_to_pend,
-                        task.status,
-                        &requester_id,
-                        &owner_id,
-                        chrono::Utc::now()
-                            + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
-                    ) {
-                        Ok(dispatch) => dispatch,
-                        Err(e) => {
-                            tracing::warn!(
-                                task_id = %req.id,
-                                error = %e,
-                                "failed to atomically bind supervisor-review dispatch"
-                            );
-                            return Ok(Self::tool_error(format!(
-                                "Internal error: failed to create the exact supervisor-review dispatch and pending task transition: {e}"
-                            )));
-                        }
-                    };
-
-                    // Emit activity event so the supervisor TUI shows the
-                    // new review item immediately.
-                    if let Ok(agent_id) = self.get_agent_id() {
-                        let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
-                            session_id: agent_id,
-                            event_type: "worker_pending_supervisor_review".to_string(),
-                            description: format!("Task ready for supervisor review: {}", req.id),
-                            entity_id: Some(req.id.clone()),
-                        };
-                        let _ = crate::mcp::socket::send_event(&self.cas_root, &event);
-                    }
-
-                    // cas-7fe9: release the worker's lease so the supervisor
-                    // can claim the task immediately for review. Without this,
-                    // the worker holds a phantom lease for ~10 min and
-                    // `task action=claim` by the supervisor is blocked.
-                    if let Ok(agent_store) = self.open_agent_store() {
-                        let _ = agent_store
-                            .release_lease_for_task(&req.id, "Queued for supervisor review");
-                    }
-
-                    return Ok(Self::success(format!(
-                        "Task {} queued for supervisor review\n\n\
-                        Lightweight structural lint passed (<1s). The full \
-                        cas-code-review skill will be dispatched by the supervisor.\n\n\
-                        Status: pending_supervisor_review\n\
-                        Dispatch: {}\n\n\
-                        After reviewing, the registered supervisor records the exact verdict with:\n\
-                        `mcp__cas__verification action=add task_id={} dispatch_id={} status=approved summary=\"...\"`\n\n\
-                        You can now pick up the next task immediately. \
-                        The supervisor will either:\n\
-                        - Approve → closes + merges your branch\n\
-                        - Reject → sends P0 findings back via coordination message",
-                        req.id, dispatch.id, req.id, dispatch.id
-                    )));
                 }
             }
         }
@@ -4047,26 +3729,6 @@ impl CasCore {
                 task.notes = decision_note;
             } else {
                 task.notes = format!("{}\n\n{}", task.notes, decision_note);
-            }
-        }
-
-        // cas-1932: record which supervisor verdict authorized this close on
-        // the same in-memory task the final write uses. The code-review gate's
-        // eager clone-persist above is overwritten by that write, and this
-        // audit linkage — the thing GH #62's "verification skipped" minor was
-        // about — has to survive the close.
-        if let Some(verdict) = review_queue_verdict.as_ref() {
-            let timestamp = now.format("%Y-%m-%d %H:%M");
-            let note = format!(
-                "[{timestamp}] DECISION: close authorized by approved verification {} \
-                 recorded {} — supervisor review already complete, task not re-queued.",
-                verdict.id,
-                verdict.created_at.to_rfc3339(),
-            );
-            if task.notes.is_empty() {
-                task.notes = note;
-            } else {
-                task.notes = format!("{}\n\n{}", task.notes, note);
             }
         }
 
@@ -4636,27 +4298,6 @@ impl CasCore {
                 .map_err(|error| error.to_string())?;
         }
         Ok(system_b)
-    }
-
-    /// cas-1932 (GH #62): the APPROVED verification for this task's current
-    /// work cycle, if one is on record.
-    ///
-    /// Two close-path questions share this lookup: whether the supervisor's
-    /// verdict already satisfies the review queue (so the worker's re-close
-    /// completes instead of re-queuing), and whether a "verification skipped"
-    /// message would be lying about a verdict that exists. Store failures are
-    /// treated as "no verdict" — this only ever *grants* an exit, so an
-    /// unreadable store must never manufacture one.
-    pub(crate) fn current_cycle_approved_verification(
-        &self,
-        task_id: &str,
-        required_type: VerificationType,
-        window: Option<&TaskCommitReceiptWindow>,
-    ) -> Option<Verification> {
-        let store = self.open_verification_store().ok()?;
-        let latest = store.get_latest_for_task(task_id).ok()??;
-        approved_verification_satisfies_review_queue(&latest, window, required_type)
-            .then_some(latest)
     }
 
     /// Compute why (if at all) the task-verifier step should be skipped
@@ -5281,16 +4922,16 @@ impl CasCore {
     }
 }
 
-/// cas-6538: audit text recorded on a `depth=light` task at close time,
-/// stating exactly which rigor gates were skipped and why. Kept as a
+/// Audit text recorded on a `depth=light` task at close time, stating exactly
+/// which rigor gates were skipped and why. Kept as a
 /// self-contained `pub(crate)` fn (not an inline literal) so the wording
 /// is unit-testable and stays in one place. The caller prepends a
 /// `[timestamp]` and appends it to the task notes timeline.
 pub(crate) fn light_skip_decision_note() -> String {
-    "decision: depth=light close (EPIC cas-1255 speed mode) — skipped the \
-     verification jail (no task-verifier dispatch; pending_verification left \
-     false) and the supervisor-review queue hop. Reason: task depth=light. \
-     Data-state guards (merge-state, uncommitted-work, additive-only) still ran."
+    "decision: depth=light close (speed mode) — skipped the verification jail \
+     (no task-verifier dispatch; pending_verification left false). Reason: task \
+     depth=light. Data-state guards (merge-state, uncommitted-work, \
+     additive-only) still ran."
         .to_string()
 }
 
@@ -6339,20 +5980,20 @@ fn delivery_content_anchor_at_close<'a>(
 }
 
 /// Re-fetch the integration target and verify the *live* factory branch tip
-/// before a close path enters `PendingSupervisorReview`.
+/// before accepting a completion receipt.
 ///
 /// The ordinary merge gate may intentionally use a parked anchor for an
 /// `AwaitingMerge` task: that anchor keeps a recycled worker lane's later,
 /// unrelated commits from re-stranding an already-delivered task. That
-/// historical proof is not sufficient for the supervisor-review queue,
-/// however. Queueing review advertises the current branch as ready, so the
-/// current branch tip must itself be reachable from the current target.
+/// historical proof is not sufficient for a completion receipt, however. A
+/// receipt advertises the current branch as ready for delivery, so the current
+/// branch tip must itself be reachable from the current target.
 ///
 /// `fetch_parent_branch_best_effort` refreshes `origin/<parent_branch>` before
 /// the target ref is selected. When that remote-tracking ref exists it is the
 /// authoritative target view; local-only repositories retain their local
 /// target behavior. Missing or unresolvable Git state fails closed because a
-/// review-pending transition must never be based on a cached anchor alone.
+/// delivery transition must never be based on a cached anchor alone.
 pub(crate) fn validate_current_factory_branch_tip_ancestry(
     repo_path: &std::path::Path,
     factory_branch: &str,
@@ -12312,20 +11953,13 @@ mod additive_only_tests {
 }
 
 // ---------------------------------------------------------------------------
-// cas-b51a: Lightweight structural lint (supervisor-owned review mode)
+// Lightweight structural lint used by the declared pre-close hook.
 // ---------------------------------------------------------------------------
 
-/// Outcome of the lightweight structural lint run at worker close-time when
-/// Supervisor-owned review mode.
-///
-/// The full multi-persona `cas-code-review` skill is deferred to the
-/// supervisor; this gate only catches the most egregious anti-patterns
-/// (leftover debug statements, `unimplemented!`, large commented-out
-/// blocks) that should never leave a worker branch regardless of who
-/// reviews.
+/// Outcome of the lightweight structural lint run used by the pre-close hook.
 #[derive(Debug)]
 pub(crate) enum LightweightLintOutcome {
-    /// Lint passed — proceed to `PendingSupervisorReview` transition.
+    /// Lint passed — the pre-close hook may continue.
     Pass,
     /// Lint found violations — worker must fix before close.
     Fail(String),
@@ -23149,18 +22783,12 @@ mod epic_close_owner_gate_tests {
 
 #[cfg(test)]
 mod zero_diff_spike_close_tests {
-    //! cas-1932 (GH #62 symptoms 1-2 + minor): a zero-diff spike closed in a
-    //! dirty shared checkout was a two-stage trap.
-    //!
-    //! - Symptom 1: after the supervisor recorded an APPROVED verification,
-    //!   the worker's re-close re-queued to `PendingSupervisorReview` forever.
-    //!   The review-queue hop now consumes a current-cycle approved verdict.
+    //! cas-1932 (GH #62 symptom 2): a zero-diff spike closed in a dirty shared
+    //! checkout could read inherited WIP as the task's diff.
     //! - Symptom 2: `CODE_REVIEW_REQUIRED` fired because reviewable-change
     //!   detection read the shared checkout's pre-existing WIP as the task's
     //!   diff. Detection is now scoped to commits attributable to this task's
     //!   work cycle for tasks whose own spec declares no-code work.
-    //! - Minor: close reported "verification skipped — assignee unknown"
-    //!   although a verification row existed; the lookup now finds it.
     use super::*;
     use std::process::Command;
     use tempfile::TempDir;
@@ -23391,126 +23019,4 @@ mod zero_diff_spike_close_tests {
         );
     }
 
-    // --- symptom 1: approved verification satisfies the review queue ---------
-
-    fn approved_row(created_epoch: i64) -> Verification {
-        let mut row = Verification::new("ver-fd59de6ef422".to_string(), "cas-208b".to_string());
-        row.status = VerificationStatus::Approved;
-        row.verification_type = VerificationType::Task;
-        row.created_at = chrono::DateTime::from_timestamp(created_epoch, 0).unwrap();
-        row
-    }
-
-    #[test]
-    fn approved_verdict_from_this_cycle_satisfies_the_review_queue() {
-        let row = approved_row(CYCLE_START_EPOCH + 600);
-        assert!(
-            approved_verification_satisfies_review_queue(
-                &row,
-                Some(&window()),
-                VerificationType::Task
-            ),
-            "the supervisor's approval must let the worker's re-close complete"
-        );
-    }
-
-    #[test]
-    fn unapproved_or_stale_or_mistyped_verdicts_do_not_satisfy_the_queue() {
-        let mut rejected = approved_row(CYCLE_START_EPOCH + 600);
-        rejected.status = VerificationStatus::Rejected;
-        assert!(
-            !approved_verification_satisfies_review_queue(
-                &rejected,
-                Some(&window()),
-                VerificationType::Task
-            ),
-            "a rejected verdict must never satisfy the review queue"
-        );
-
-        let stale = approved_row(CYCLE_START_EPOCH - 86_400);
-        assert!(
-            !approved_verification_satisfies_review_queue(
-                &stale,
-                Some(&window()),
-                VerificationType::Task
-            ),
-            "an approval from a previous work cycle cannot authorize this close"
-        );
-
-        let mistyped = approved_row(CYCLE_START_EPOCH + 600);
-        assert!(
-            !approved_verification_satisfies_review_queue(
-                &mistyped,
-                Some(&window()),
-                VerificationType::Epic
-            ),
-            "a task verdict cannot stand in for the required epic verdict"
-        );
-    }
-
-    #[test]
-    fn approval_within_clock_skew_of_the_cycle_start_is_accepted() {
-        let row = approved_row(CYCLE_START_EPOCH - 1);
-        assert!(
-            approved_verification_satisfies_review_queue(
-                &row,
-                Some(&window()),
-                VerificationType::Task
-            ),
-            "a verdict recorded a second before the lease timestamp is the same cycle"
-        );
-    }
-
-    // --- minor: close must find an existing verification --------------------
-
-    #[test]
-    fn existing_approved_verification_replaces_a_lookup_failure_skip_reason() {
-        let row = approved_row(CYCLE_START_EPOCH + 600);
-        let resolved = skip_reason_with_existing_verification(
-            VerificationSkipReason::AssigneeUnknown,
-            Some(&row),
-        );
-        assert_eq!(
-            resolved,
-            VerificationSkipReason::ExistingApprovedVerification {
-                verification_id: "ver-fd59de6ef422".to_string()
-            },
-            "an existing approved verdict must be cited instead of an assignee-lookup failure"
-        );
-        let suffix = resolved.response_suffix(true);
-        assert!(
-            suffix.contains("ver-fd59de6ef422"),
-            "the close response must name the verification it found: {suffix}"
-        );
-        assert!(
-            !suffix.contains("assignee unknown"),
-            "the close response must stop claiming the verification was skipped: {suffix}"
-        );
-        assert!(
-            resolved.audit_reason().contains("ver-fd59de6ef422"),
-            "the audit row must record which verdict authorized the close"
-        );
-    }
-
-    #[test]
-    fn skip_reason_is_untouched_without_an_approved_verification() {
-        assert_eq!(
-            skip_reason_with_existing_verification(VerificationSkipReason::AssigneeUnknown, None),
-            VerificationSkipReason::AssigneeUnknown,
-            "with no verdict on record the real skip reason must survive"
-        );
-        assert_eq!(
-            skip_reason_with_existing_verification(
-                VerificationSkipReason::SupervisorBypass,
-                Some(&approved_row(CYCLE_START_EPOCH + 600)),
-            ),
-            VerificationSkipReason::SupervisorBypass,
-            "an explicit supervisor bypass is intent, not a lookup failure — keep it"
-        );
-        assert_eq!(
-            skip_reason_with_existing_verification(VerificationSkipReason::None, None),
-            VerificationSkipReason::None,
-            "the non-skip path is unaffected"
-        );
-    }
 }

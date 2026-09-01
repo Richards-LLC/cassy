@@ -1146,10 +1146,6 @@ fn format_assigned_task_info(
                     "finished, awaiting merge",
                     "WAITING ON YOU: merge its branch, then it can close",
                 ),
-                cas_types::TaskStatus::PendingSupervisorReview => (
-                    "finished, awaiting supervisor review",
-                    "WAITING ON YOU: review it, then it can close",
-                ),
                 cas_types::TaskStatus::Blocked => (
                     "blocked",
                     "WAITING ON YOU: clear the blocker or reassign — the worker cannot proceed",
@@ -1660,7 +1656,7 @@ impl CasService {
             // Standing in for an epic is a stronger claim than being a legal
             // pre-assignment target, so it is held to a stricter bar: the task
             // must be work a NEW worker can actually pick up. A task parked in
-            // AwaitingMerge / PendingSupervisorReview is finished and waiting on
+            // AwaitingMerge is finished and waiting on
             // the supervisor; a Blocked task cannot be started; a task that
             // already has an assignee belongs to another worker, and
             // `assign_task_to_new_worker` will refuse to steal it — the spawned
@@ -2834,7 +2830,6 @@ impl CasService {
                 .map(|ts| {
                     [
                         cas_types::TaskStatus::AwaitingMerge,
-                        cas_types::TaskStatus::PendingSupervisorReview,
                         // cas-e728: Blocked literally means "waiting on
                         // something". It is not in progress, so it must not
                         // count toward the stall verdict — but it must still be
@@ -2874,7 +2869,7 @@ impl CasService {
         // that is still Open — that IS work in flight, so Open counts as
         // unfinished here. What must NOT count is a task that has reached a
         // terminal-for-the-worker state (Closed, AwaitingMerge,
-        // PendingSupervisorReview): the work is over, and only the lease row
+        // AwaitingMerge): the work is over, and only the lease row
         // outlived it.
         unfinished_task_ids.extend(all_open_tasks.iter().map(|t| t.id.clone()));
         let assigned_open_tasks: Vec<cas_types::Task> = all_open_tasks
@@ -6052,7 +6047,7 @@ pub(crate) struct WorkerTaskBinding {
     /// Operator-facing task label (id, plus status for parked states).
     pub label: String,
     /// True for statuses whose commits must not be rewritten under the worker
-    /// (`InProgress`, `PendingSupervisorReview`, `AwaitingMerge`).
+    /// (`InProgress`, `AwaitingMerge`).
     pub blocks_rebase: bool,
     /// Branch this task's work integrates into.
     pub affinity: BranchAffinity,
@@ -6177,7 +6172,7 @@ fn awaiting_merge_delivery_is_already_integrated(
 
 /// Map worker display name -> the task binding sync must respect.
 ///
-/// `InProgress` is the obvious rebase-blocker. `PendingSupervisorReview` and
+/// `InProgress` is the obvious rebase-blocker. `AwaitingMerge` and
 /// `AwaitingMerge` are included because their commits are already named by a
 /// delivery receipt: rebasing rewrites exactly the SHAs the supervisor is
 /// about to verify and merge. `Open` rows are collected too — they carry no
@@ -6194,7 +6189,6 @@ fn worker_task_bindings(
     };
     for status in [
         TaskStatus::InProgress,
-        TaskStatus::PendingSupervisorReview,
         TaskStatus::AwaitingMerge,
         TaskStatus::Open,
     ] {
@@ -11240,17 +11234,6 @@ effort = "high"
         assert!(merge.contains("WAITING ON YOU"), "{merge}");
         assert!(!merge.contains("none assigned"), "{merge}");
 
-        let review = format_assigned_task_info(
-            None,
-            None,
-            Some((
-                "cas-5678",
-                "Reviewed work",
-                cas_types::TaskStatus::PendingSupervisorReview,
-            )),
-            false,
-        );
-        assert!(review.contains("awaiting supervisor review"), "{review}");
     }
 
     /// A live in-progress task still outranks a parked one.

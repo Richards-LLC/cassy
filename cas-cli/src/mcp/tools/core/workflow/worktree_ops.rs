@@ -226,7 +226,7 @@ fn assignee_task_is_merge_relevant(status: cas_types::TaskStatus) -> bool {
     use cas_types::TaskStatus::*;
     matches!(
         status,
-        Open | InProgress | Blocked | AwaitingMerge | PendingSupervisorReview
+        Open | InProgress | Blocked | AwaitingMerge
     )
 }
 

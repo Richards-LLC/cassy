@@ -42,14 +42,13 @@ pub struct OrphanRecoverySummary {
     pub held_task_ids: Vec<String>,
 }
 
-/// Statuses that must NOT be auto-parked (cas-6e4c PSR + merge-gate work).
+/// Statuses that must NOT be auto-parked while work is already parked or done.
 fn is_protected_status(status: TaskStatus) -> bool {
     matches!(
         status,
         TaskStatus::Closed
             | TaskStatus::Cancelled
             | TaskStatus::Open
-            | TaskStatus::PendingSupervisorReview
             | TaskStatus::AwaitingMerge
     )
 }

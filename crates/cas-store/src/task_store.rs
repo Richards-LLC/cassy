@@ -855,15 +855,6 @@ impl TaskStore for SqliteTaskStore {
                             format!("Task reopened: {}", task.title),
                             RecordingEventType::TaskCreated,
                         ),
-                        // cas-b51a: supervisor-owned review mode — task awaits
-                        // supervisor code-review dispatch before final close.
-                        // Reuse TaskBlocked event type for TUI visibility since there
-                        // is no dedicated supervisor-review event type yet.
-                        TaskStatus::PendingSupervisorReview => (
-                            EventType::TaskBlocked,
-                            format!("Task pending supervisor review: {}", task.title),
-                            RecordingEventType::TaskBlocked,
-                        ),
                         TaskStatus::AwaitingMerge => (
                             EventType::TaskBlocked,
                             format!("Task awaiting merge: {}", task.title),

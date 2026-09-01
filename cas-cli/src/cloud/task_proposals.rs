@@ -281,11 +281,12 @@ impl TaskProposalClient {
             }
 
             let page: DependencyPage = self.get_json(&url)?;
-            for dependency in &page.dependencies {
-                validate_external_dependency(dependency, origin)?;
-            }
             let continuation = page.continuation();
-            dependencies.extend(page.dependencies);
+            for dependency in page.dependencies {
+                let dependency = normalize_legacy_dependency_status(dependency);
+                validate_external_dependency(&dependency, origin)?;
+                dependencies.push(dependency);
+            }
             if page.cursor.is_some() {
                 watermark = page.cursor.clone();
             }
@@ -574,6 +575,18 @@ fn validate_external_dependency(
     Ok(())
 }
 
+fn normalize_legacy_dependency_status(
+    mut dependency: ExternalTaskDependency,
+) -> ExternalTaskDependency {
+    if matches!(
+        dependency.target_task_status.as_deref(),
+        Some("pending_supervisor_review" | "pending-supervisor-review")
+    ) {
+        dependency.target_task_status = Some("awaiting_merge".to_string());
+    }
+    dependency
+}
+
 fn valid_dependency_state_matrix(dependency: &ExternalTaskDependency) -> bool {
     let unresolved =
         dependency.resolution_state == "unresolved" && dependency.resolved_at.is_none();
@@ -597,7 +610,6 @@ fn valid_dependency_state_matrix(dependency: &ExternalTaskDependency) -> bool {
                 | "in_progress"
                 | "blocked"
                 | "cancelled"
-                | "pending_supervisor_review"
                 | "awaiting_merge",
             ) => unresolved,
             _ => false,
@@ -980,6 +992,46 @@ mod tests {
         assert_eq!(feed.dependencies.len(), 1);
         assert_eq!(feed.dependencies[0].resolution_state, "handoff_rejected");
         assert_eq!(feed.cursor.as_deref(), Some("server-watermark"));
+    }
+
+    #[tokio::test]
+    async fn dependency_feed_maps_legacy_pending_supervisor_review_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/teams/team-1/cross-project-task-dependencies",
+            ))
+            .and(query_param("origin_project_id", "origin-project"))
+            .and(query_param("limit", PAGE_LIMIT_PARAM))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "dependencies": [{
+                    "origin_task_id": "cas-origin",
+                    "proposal_id": "proposal-1",
+                    "target_project_canonical_id": "target-project",
+                    "target_task_id": "cas-0123456789abcdef",
+                    "proposal_state": "accepted",
+                    "target_task_status": "pending_supervisor_review",
+                    "resolution_state": "unresolved",
+                    "resolved_at": null
+                }],
+                "next_cursor": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let feed = tokio::task::spawn_blocking(move || {
+            client(&server).dependency_feed_all("origin-project", None)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(feed.dependencies.len(), 1);
+        assert_eq!(
+            feed.dependencies[0].target_task_status.as_deref(),
+            Some("awaiting_merge")
+        );
     }
 
     /// Pagination is opt-in on production: a request carrying neither `limit`

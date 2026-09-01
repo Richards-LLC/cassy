@@ -22,6 +22,7 @@ use crate::hub::{AuthStore, HubRuntimePaths, MachineIdentityStore, Scope};
 
 const RELAY_PREFIX: &str = "/api/hub/pairing";
 const WIRE_VERSION: u8 = 1;
+const LAST_HUB_URL_FILE: &str = "last-public-url";
 
 #[derive(Debug, Deserialize)]
 struct ClaimResponse {
@@ -282,7 +283,11 @@ pub(super) fn authorize(args: &HubAuthorizeArgs, cli: &Cli) -> Result<()> {
     };
     let relay = RelayClient::from_config(cloud)?;
     let paths = HubRuntimePaths::default_for_user()?;
-    authorize_with_relay(args, cli, &relay, &paths)
+    let configured_hub_url = crate::store::find_cas_root()
+        .ok()
+        .and_then(|cas_root| crate::config::Config::load(&cas_root).ok())
+        .and_then(|config| config.hub.and_then(|hub| hub.public_url));
+    authorize_with_relay(args, cli, &relay, &paths, configured_hub_url.as_deref())
 }
 
 fn authorize_with_relay(
@@ -290,11 +295,12 @@ fn authorize_with_relay(
     cli: &Cli,
     relay: &impl PairingRelay,
     paths: &HubRuntimePaths,
+    configured_hub_url: Option<&str>,
 ) -> Result<()> {
     let code = args.code.trim().to_ascii_uppercase();
     anyhow::ensure!(!code.is_empty(), "pairing code must not be empty");
     let override_scopes = parse_override_scopes(args.scopes.as_deref())?;
-    let hub_url = resolve_hub_url(paths, args.hub_url.as_deref())?;
+    let hub_url = resolve_hub_url(paths, args.hub_url.as_deref(), configured_hub_url)?;
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
     let auth = AuthStore::open(paths.root(), machine.id)?;
     let machine_label = hostname::get()
@@ -432,7 +438,11 @@ fn is_control_scope(scope: Scope) -> bool {
     )
 }
 
-fn resolve_hub_url(paths: &HubRuntimePaths, explicit: Option<&str>) -> Result<String> {
+fn resolve_hub_url(
+    paths: &HubRuntimePaths,
+    explicit: Option<&str>,
+    configured_hub_url: Option<&str>,
+) -> Result<String> {
     let record = paths.read_process_record()?;
     anyhow::ensure!(
         record_is_live(&record),
@@ -723,6 +733,73 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bare_hub_hosts_are_https_and_bare_ip_loopback_is_http() {
+        assert_eq!(
+            validate_hub_url("hub.petrastella.io")
+                .unwrap()
+                .origin()
+                .ascii_serialization(),
+            "https://hub.petrastella.io"
+        );
+        assert_eq!(
+            validate_hub_url("127.0.0.1:4173")
+                .unwrap()
+                .origin()
+                .ascii_serialization(),
+            "http://127.0.0.1:4173"
+        );
+    }
+
+    #[test]
+    fn hub_url_resolution_obeys_explicit_record_config_then_remembered_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let (port, health) = serve_ready_health_checks(1);
+        write_live_record(&paths, port, Some("https://record.example"));
+
+        assert_eq!(
+            resolve_hub_url(&paths, Some("explicit.example"), Some("config.example"))
+                .unwrap(),
+            "https://explicit.example"
+        );
+        assert_eq!(
+            resolve_hub_url(&paths, None, Some("config.example")).unwrap(),
+            "https://record.example"
+        );
+
+        write_live_record(&paths, port, None);
+        assert_eq!(
+            resolve_hub_url(&paths, None, Some("config.example")).unwrap(),
+            "https://config.example"
+        );
+        fs::create_dir_all(paths.root()).unwrap();
+        fs::write(
+            paths.root().join(LAST_HUB_URL_FILE),
+            "remembered.example\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_hub_url(&paths, None, None).unwrap(),
+            "https://remembered.example"
+        );
+        health.join().unwrap();
+    }
+
+    #[test]
+    fn running_hub_without_public_origin_has_state_aware_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let (port, health) = serve_ready_health_checks(1);
+        write_live_record(&paths, port, None);
+
+        let error = resolve_hub_url(&paths, None, None).unwrap_err().to_string();
+        assert!(error.contains("hub is running without a public URL"));
+        assert!(error.contains("cas hub restart --tailscale-serve"));
+        assert!(!error.contains("cas hub --tailscale-serve start"));
+        health.join().unwrap();
+    }
+
     #[derive(Default)]
     struct RecordingRelay {
         claims: std::sync::Mutex<Vec<(String, String)>>,
@@ -863,18 +940,20 @@ mod tests {
         let relay = RecordingRelay::default();
         let args = authorize_args("K7MW-4H2Q");
 
-        let stopped = authorize_with_relay(&args, &test_cli(), &relay, &paths).unwrap_err();
+        let stopped =
+            authorize_with_relay(&args, &test_cli(), &relay, &paths, None).unwrap_err();
         assert!(stopped.to_string().contains("no cas hub runtime record"));
         assert!(relay.claims.lock().unwrap().is_empty());
 
         let (port, health) = serve_ready_health_checks(2);
         write_live_record(&paths, port, None);
-        let unpublished = authorize_with_relay(&args, &test_cli(), &relay, &paths).unwrap_err();
+        let unpublished =
+            authorize_with_relay(&args, &test_cli(), &relay, &paths, None).unwrap_err();
         assert!(unpublished.to_string().contains("Hub has no public URL"));
         assert!(relay.claims.lock().unwrap().is_empty());
 
         write_live_record(&paths, port, Some("https://workstation.tail.example/"));
-        authorize_with_relay(&args, &test_cli(), &relay, &paths).unwrap();
+        authorize_with_relay(&args, &test_cli(), &relay, &paths, None).unwrap();
         health.join().unwrap();
 
         let claims = relay.claims.lock().unwrap();
@@ -895,9 +974,10 @@ mod tests {
         let (port, health) = serve_ready_health_checks(2);
         write_live_record(&paths, port, Some("https://workstation.tail.example/"));
 
-        let first = authorize_with_relay(&args, &test_cli(), &relay, &paths).unwrap_err();
+        let first =
+            authorize_with_relay(&args, &test_cli(), &relay, &paths, None).unwrap_err();
         assert!(first.to_string().contains("deliberate completion failure"));
-        authorize_with_relay(&args, &test_cli(), &relay, &paths).unwrap();
+        authorize_with_relay(&args, &test_cli(), &relay, &paths, None).unwrap();
         health.join().unwrap();
 
         let claims = relay.claims.lock().unwrap();

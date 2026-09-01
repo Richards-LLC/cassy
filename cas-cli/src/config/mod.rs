@@ -133,6 +133,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
 
+    /// `[hub]` — public origin used for Commander reverse pairing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub: Option<HubConfig>,
+
     /// `[project]` — project-scoped configuration (cas-1ced). Holds the
     /// canonical project slug for cloud-sync scoping. Set eagerly by
     /// `cas cloud team set` (auto-derived from git remote) or manually
@@ -178,6 +182,7 @@ impl Config {
         merge_option!(code_review);
         merge_option!(issues);
         merge_option!(memory);
+        merge_option!(hub);
         merge_option!(project);
         changed
     }

@@ -1,6 +1,6 @@
 use crate::cli::update::*;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
 
@@ -16,12 +16,25 @@ fn test_is_newer() {
 }
 
 #[test]
-fn post_swap_command_targets_installed_binary_and_passes_previous_version() {
-    let command = build_post_swap_command(Path::new("/tmp/cas-new"), "3.7.7", true);
+fn post_swap_command_targets_install_destination_path() {
+    let install_destination = Path::new("/usr/local/bin/cas");
+    let command = build_post_swap_command(install_destination, "3.7.7", true);
 
-    assert_eq!(command.get_program(), "/tmp/cas-new");
+    assert_eq!(command.get_program(), "/usr/local/bin/cas");
     let args: Vec<_> = command.get_args().collect();
     assert_eq!(args, ["update", "--post-swap", "--from", "3.7.7", "--json"]);
+}
+
+#[test]
+fn strip_deleted_suffix_from_linux_process_path() {
+    assert_eq!(
+        strip_deleted_suffix(PathBuf::from("/usr/local/bin/cas (deleted)")),
+        PathBuf::from("/usr/local/bin/cas")
+    );
+    assert_eq!(
+        strip_deleted_suffix(PathBuf::from("/usr/local/bin/cas")),
+        PathBuf::from("/usr/local/bin/cas")
+    );
 }
 
 #[test]

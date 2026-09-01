@@ -1536,11 +1536,7 @@ fn check_for_updates(
 fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow::Result<String> {
     use self_update::Status;
     use self_update::backends::github::Update;
-
-    // Resolve this before the swap. Once `updater.update()` succeeds, this
-    // path points at the newly installed executable even though this process
-    // is still running the old code.
-    let installed_binary = std::env::current_exe().context("resolve the running cas binary")?;
+    use self_update::update::ReleaseUpdate;
 
     let mut updater = Update::configure();
     updater
@@ -1560,6 +1556,10 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
     }
 
     let updater = updater.build()?;
+    // self_update resolves its install destination before the replacement.
+    // Keep that stable path: after a Linux rename swap, current_exe() can
+    // report the old process image as `/path/cas (deleted)`.
+    let installed_binary = strip_deleted_suffix(updater.bin_install_path());
 
     // Check what we're updating to
     let latest = updater.get_latest_release()?;
@@ -1598,7 +1598,11 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
     let status = updater.update()?;
 
     if matches!(&status, Status::Updated(_)) {
-        run_post_swap_hook(&installed_binary, current_version, cli.json)?;
+        if let Err(error) = run_post_swap_hook(&installed_binary, current_version, cli.json) {
+            eprintln!(
+                "Post-update hook unavailable ({error}); using in-process hub restart fallback"
+            );
+        }
     }
 
     if cli.json {
@@ -1670,6 +1674,16 @@ fn build_post_swap_command(
         command.arg("--json");
     }
     command
+}
+
+fn strip_deleted_suffix(path: std::path::PathBuf) -> std::path::PathBuf {
+    let Some(path_str) = path.to_str() else {
+        return path;
+    };
+    path_str
+        .strip_suffix(" (deleted)")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(path)
 }
 
 fn run_post_swap_hook(

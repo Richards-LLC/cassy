@@ -318,7 +318,7 @@ fn authorize_with_relay_with_config(
     let code = args.code.trim().to_ascii_uppercase();
     anyhow::ensure!(!code.is_empty(), "pairing code must not be empty");
     let override_scopes = parse_override_scopes(args.scopes.as_deref())?;
-    let hub_url = resolve_hub_url_with_config(paths, args.hub_url.as_deref(), configured_hub_url)?;
+    let hub_url = resolve_hub_url(paths, args.hub_url.as_deref(), configured_hub_url)?;
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
     let auth = AuthStore::open(paths.root(), machine.id)?;
     let machine_label = hostname::get()
@@ -460,15 +460,7 @@ fn is_control_scope(scope: Scope) -> bool {
     )
 }
 
-fn resolve_hub_url(paths: &HubRuntimePaths, explicit: Option<&str>) -> Result<String> {
-    let configured_hub_url = crate::store::find_cas_root()
-        .ok()
-        .and_then(|cas_root| crate::config::Config::load(&cas_root).ok())
-        .and_then(|config| config.hub.and_then(|hub| hub.public_url));
-    resolve_hub_url_with_config(paths, explicit, configured_hub_url.as_deref())
-}
-
-fn resolve_hub_url_with_config(
+fn resolve_hub_url(
     paths: &HubRuntimePaths,
     explicit: Option<&str>,
     configured_hub_url: Option<&str>,
@@ -886,24 +878,23 @@ mod tests {
         write_live_record(&paths, port, Some("https://record.example"));
 
         assert_eq!(
-            resolve_hub_url_with_config(&paths, Some("explicit.example"), Some("config.example"),)
-                .unwrap(),
+            resolve_hub_url(&paths, Some("explicit.example"), Some("config.example")).unwrap(),
             "https://explicit.example"
         );
         assert_eq!(
-            resolve_hub_url_with_config(&paths, None, Some("config.example")).unwrap(),
+            resolve_hub_url(&paths, None, Some("config.example")).unwrap(),
             "https://record.example"
         );
 
         write_live_record(&paths, port, None);
         assert_eq!(
-            resolve_hub_url_with_config(&paths, None, Some("config.example")).unwrap(),
+            resolve_hub_url(&paths, None, Some("config.example")).unwrap(),
             "https://config.example"
         );
         fs::create_dir_all(paths.root()).unwrap();
         fs::write(paths.root().join(LAST_HUB_URL_FILE), "remembered.example\n").unwrap();
         assert_eq!(
-            resolve_hub_url_with_config(&paths, None, None).unwrap(),
+            resolve_hub_url(&paths, None, None).unwrap(),
             "https://remembered.example"
         );
         health.join().unwrap();
@@ -916,9 +907,7 @@ mod tests {
         let (port, health) = serve_ready_health_checks(1);
         write_live_record(&paths, port, None);
 
-        let error = resolve_hub_url_with_config(&paths, None, None)
-            .unwrap_err()
-            .to_string();
+        let error = resolve_hub_url(&paths, None, None).unwrap_err().to_string();
         assert!(error.contains("hub is running without a public URL"));
         assert!(error.contains("cas hub restart --tailscale-serve"));
         assert!(!error.contains("cas hub --tailscale-serve start"));

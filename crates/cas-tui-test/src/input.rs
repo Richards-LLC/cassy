@@ -138,7 +138,7 @@ pub fn input() -> InputSequence {
 
 #[cfg(test)]
 mod tests {
-    use crate::input::*;
+    use crate::{WaitExt, input::*};
 
     #[test]
     fn test_input_sequence_builder() {
@@ -177,9 +177,9 @@ mod tests {
         let seq = input().text("test").enter();
         seq.execute(&mut runner).expect("execute failed");
 
-        std::thread::sleep(Duration::from_millis(50));
-        let output = runner.read_available().expect("read failed");
-        assert!(output.contains("test"), "output: {}", output.as_str());
+        runner
+            .wait_for_text_timeout("test", Duration::from_secs(2))
+            .expect("input echo should arrive before the deadline");
 
         runner.send_key(Key::CtrlD).expect("ctrl-d failed");
     }

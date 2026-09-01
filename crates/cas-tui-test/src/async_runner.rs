@@ -506,9 +506,6 @@ mod tests {
         let mut runner = AsyncPtyRunner::new();
         runner.spawn("cat", &[]).await.expect("spawn failed");
 
-        // Give cat time to start
-        runner.wait(Duration::from_millis(100)).await;
-
         // Send input
         runner
             .send_input("test input\n")
@@ -628,9 +625,6 @@ mod tests {
             .spawn("sh", &["-c", "exit 0"])
             .await
             .expect("spawn failed");
-
-        // Wait for process to exit
-        runner.wait(Duration::from_millis(200)).await;
 
         // Now waiting for text should fail with ProcessExited
         let result = runner

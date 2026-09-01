@@ -1,4 +1,4 @@
-use crate::pty_runner::*;
+use crate::{WaitExt, pty_runner::*};
 
 #[test]
 fn test_config_default() {
@@ -52,11 +52,9 @@ fn test_spawn_echo() {
         .spawn("sh", &["-c", "sleep 0.2; echo hello"])
         .expect("spawn failed");
 
-    // Give the process time to complete
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let output = runner.read_available().expect("read failed");
-    assert!(output.contains("hello"), "output was: {}", output.as_str());
+    runner
+        .wait_for_text_timeout("hello", std::time::Duration::from_secs(2))
+        .expect("echo output should arrive before the deadline");
 }
 
 #[test]
@@ -68,14 +66,9 @@ fn test_spawn_with_env() {
         .spawn("sh", &["-c", "echo $TEST_VAR"])
         .expect("spawn failed");
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let output = runner.read_available().expect("read failed");
-    assert!(
-        output.contains("test_value"),
-        "output was: {}",
-        output.as_str()
-    );
+    runner
+        .wait_for_text_timeout("test_value", std::time::Duration::from_secs(2))
+        .expect("environment output should arrive before the deadline");
 }
 
 #[test]
@@ -84,14 +77,9 @@ fn test_send_input() {
     runner.spawn("cat", &[]).expect("spawn failed");
 
     runner.send_input("test input\n").expect("send failed");
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let output = runner.read_available().expect("read failed");
-    assert!(
-        output.contains("test input"),
-        "output was: {}",
-        output.as_str()
-    );
+    runner
+        .wait_for_text_timeout("test input", std::time::Duration::from_secs(2))
+        .expect("cat echo should arrive before the deadline");
 
     runner.send_key(Key::CtrlD).expect("send key failed");
 }

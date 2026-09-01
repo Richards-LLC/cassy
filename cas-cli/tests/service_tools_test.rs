@@ -437,7 +437,8 @@ fn test_task_transfer_supervisor_override_deserializes() {
 
     let req: TaskRequest = serde_json::from_value(json).unwrap();
     assert_eq!(req.to_agent, Some("agent-5678".to_string()));
-    assert_eq!(req.bypass_code_review, Some(true));
+    assert_eq!(req.effective_supervisor_override(), Some(true));
+    assert!(req.used_deprecated_supervisor_override_alias());
     assert_eq!(req.notes, Some("Supervisor reassign".to_string()));
 }
 

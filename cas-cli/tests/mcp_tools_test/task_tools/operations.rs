@@ -1,8 +1,8 @@
 use crate::support::*;
 use cas::cloud::CloudConfig;
-use cas::mcp::{CasCore, CasService};
 use cas::mcp::tools::*;
-use cas::store::{open_agent_store, open_event_store, open_task_store, SqliteTaskStore, TaskStore};
+use cas::mcp::{CasCore, CasService};
+use cas::store::{SqliteTaskStore, TaskStore, open_agent_store, open_event_store, open_task_store};
 use cas::types::{EventType, Task};
 use rmcp::handler::server::wrapper::Parameters;
 use rusqlite::Connection;
@@ -318,8 +318,8 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
             stranded_branch_override: Some(narrative.clone()),
             id: epic_id.clone(),
             reason: Some("override incident-shaped epic close".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -2717,8 +2717,8 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             stranded_branch_override: None,
             id: blocker_id,
             reason: Some("done".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))

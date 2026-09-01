@@ -33,7 +33,6 @@
 pub mod error;
 
 mod agent;
-mod code_review;
 mod commit_link;
 mod delivery;
 mod dependency;
@@ -62,12 +61,6 @@ mod worktree;
 pub use agent::{
     Agent, AgentCapability, AgentRole, AgentStatus, AgentType, DEFAULT_HEARTBEAT_INTERVAL_SECS,
     DEFAULT_HEARTBEAT_TIMEOUT_SECS, DEFAULT_LEASE_DURATION_SECS, DEFAULT_MAX_CONCURRENT_TASKS,
-};
-pub use code_review::{
-    AutofixClass, FINDING_OPTIONAL_FIELDS, FINDING_REQUIRED_FIELDS, Finding,
-    FindingValidationError, MAX_TITLE_LEN, Owner, ReviewExecution, ReviewExecutionStatus,
-    ReviewOutcome, ReviewOutcomeParseError, ReviewerOutput, Severity as FindingSeverity,
-    parse_review_outcome, parse_reviewer_output, review_outcome_shape_hint,
 };
 pub use commit_link::{CommitLink, LINK_METHOD_HOOK_OBSERVED};
 pub use delivery::{

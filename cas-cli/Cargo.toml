@@ -246,7 +246,3 @@ harness = false
 [[bench]]
 name = "memory_overlap"
 harness = false
-
-[[bench]]
-name = "code_review_pipeline"
-harness = false

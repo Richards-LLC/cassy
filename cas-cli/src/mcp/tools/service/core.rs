@@ -425,6 +425,7 @@ impl CasService {
     pub(super) async fn task_close(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskCloseRequest;
         let inline_external_ref = req.external_ref.clone();
+        let effective_supervisor_override = req.effective_supervisor_override();
         let negative_result = req.negative_result.unwrap_or(false).then(|| {
             crate::mcp::tools::NegativeResultCloseRequest {
                 artifact_path: req.negative_result_artifact_path,
@@ -439,8 +440,8 @@ impl CasService {
                 .id
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for close — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=close id=cas-abc1"))?,
             reason: req.reason,
-            bypass_code_review: req.bypass_code_review,
-            code_review_findings: req.code_review_findings,
+            supervisor_override: effective_supervisor_override,
+            legacy_bypass_code_review: req.legacy_bypass_code_review,
             search_manifest: req.search_manifest,
             commit_receipt: req.commit_receipt,
         };
@@ -659,6 +660,7 @@ impl CasService {
 
     pub(super) async fn task_transfer(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskTransferRequest;
+        let effective_supervisor_override = req.effective_supervisor_override();
         let inner_req = TaskTransferRequest {
             task_id: req
                 .id
@@ -676,9 +678,9 @@ impl CasService {
                     )
                 })?,
             note: req.notes,
-            // `bypass_code_review` is reused here as the supervisor-override flag for transfer.
-            // It is the existing mechanism for supervisor privilege escalation in TaskRequest.
-            supervisor_override: req.bypass_code_review,
+            // Keep the one-release close-gate alias usable for transfer while
+            // exposing the surviving name consistently at the unified boundary.
+            supervisor_override: effective_supervisor_override,
         };
         self.inner.cas_task_transfer(Parameters(inner_req)).await
     }

@@ -140,6 +140,7 @@ pub struct MemoryRequest {
 
 /// Unified task operations request
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TaskRequest {
     /// Action to perform
     #[schemars(
@@ -266,17 +267,27 @@ pub struct TaskRequest {
     #[serde(default)]
     pub superseded_by: Option<String>,
 
-    /// Supervisor override for the cas-code-review P0 close gate (cas-b39f, Unit 9).
+    /// Supervisor override for close gates.
     ///
-    /// When `true`, the close path skips the multi-persona code-review
-    /// gate that would otherwise hard-block on P0 findings. Only honored
-    /// when the caller runs under a supervisor role; other callers get
-    /// an explicit rejection. Logs a decision note on the task.
-    #[schemars(description = "Supervisor override for the code-review P0 gate. \
-                       Only honored when the caller is a supervisor; other \
-                       roles are rejected. Logs a decision note on the task.")]
+    /// When `true`, the close path honors only the explicitly documented
+    /// supervisor exceptions. The caller must be a registered supervisor and
+    /// provide a non-empty close reason; the accepted decision is logged on
+    /// the task.
+    #[schemars(
+        description = "Supervisor override for close gates. Only honored when the caller is a registered supervisor and a non-empty reason is supplied; logs the accepted decision on the task."
+    )]
     #[serde(default, deserialize_with = "deser::option_bool")]
-    pub bypass_code_review: Option<bool>,
+    pub supervisor_override: Option<bool>,
+
+    /// One-release compatibility alias for `supervisor_override`.
+    #[schemars(skip)]
+    #[serde(
+        default,
+        rename = "bypass_code_review",
+        skip_serializing,
+        deserialize_with = "deser::option_bool"
+    )]
+    pub legacy_bypass_code_review: Option<bool>,
 
     /// Supervisor override for the epic close stranded-branch gate (cas-b192).
     ///
@@ -292,7 +303,7 @@ pub struct TaskRequest {
     /// Supervisor-authorized close for a measured negative result whose
     /// experimental branch is deliberately not merged.
     ///
-    /// This is distinct from `bypass_code_review`: it is accepted only from
+    /// This is distinct from `supervisor_override`: it is accepted only from
     /// a registered supervisor and requires both structured evidence fields
     /// below plus a non-empty close `reason`. Ordinary closes that omit this
     /// flag retain the merge-state gate unchanged.
@@ -317,36 +328,6 @@ pub struct TaskRequest {
     )]
     #[serde(default)]
     pub negative_result_reference: Option<String>,
-
-    /// Serialized ReviewOutcome JSON envelope from the worker's
-    /// cas-code-review skill run (cas-b39f option (a)). Forwarded to
-    /// the close handler, where it is parsed and validated before the
-    /// P0 gate decision.
-    #[schemars(description = "LEGACY `[code_review] owner = \"worker\"` MODE ONLY. \
-                       Serialized ReviewOutcome JSON envelope from a \
-                       cas-code-review run. Under the DEFAULT \
-                       owner = \"supervisor\" configuration a factory worker \
-                       must NOT run cas-code-review (skill, workflow, or \
-                       hand-spawned personas) and must NOT pass this field — \
-                       attempt the close without it; the close transitions \
-                       the task to PendingSupervisorReview and the supervisor \
-                       runs the review on their own schedule (cas-4fef). \
-                       Check with `cas config get code_review.owner`. \
-                       Under owner = \"worker\" it is required for tasks with \
-                       reviewable code changes unless bypass_code_review is \
-                       set or the task is additive-only. Shape: \
-                       {residual: Finding[], pre_existing: Finding[], mode: string, \
-                       execution: {personas_run: int, personas_failed: string[], \
-                       required_personas_missing: string[], skipped_reason: string|null}}. \
-                       `execution` is required and must be copied from the review \
-                       result, not hand-written: without it an empty residual[] is \
-                       indistinguishable from a review that never ran (cas-acf83). \
-                       Each Finding requires: title, severity, file, line, \
-                       why_it_matters, autofix_class, owner, confidence, \
-                       evidence, pre_existing (optional: suggested_fix, \
-                       requires_verification).")]
-    #[serde(default)]
-    pub code_review_findings: Option<String>,
 
     /// Search manifest for investigation-task (`Spike`) closes (cas-49f1).
     ///
@@ -1141,6 +1122,16 @@ pub struct PatternRequest {
     #[schemars(description = "Include dismissed suggestions in listing (default: false)")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub include_dismissed: Option<bool>,
+}
+
+impl TaskRequest {
+    pub fn effective_supervisor_override(&self) -> Option<bool> {
+        self.supervisor_override.or(self.legacy_bypass_code_review)
+    }
+
+    pub fn used_deprecated_supervisor_override_alias(&self) -> bool {
+        self.legacy_bypass_code_review.is_some()
+    }
 }
 
 pub(crate) mod deser;

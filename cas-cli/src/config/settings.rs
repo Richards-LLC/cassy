@@ -1071,49 +1071,6 @@ impl Default for SyncConfig {
     }
 }
 
-/// Code-review ownership configuration (cas-b51a).
-///
-/// Controls whether the multi-persona review pipeline runs in the worker's
-/// close gate (legacy) or is deferred to the supervisor's review queue.
-///
-/// ```toml
-/// [code_review]
-/// owner = "worker"  # opt-out: legacy inline dispatch
-/// ```
-///
-/// - `"supervisor"` (default, cas-865b): worker runs a lightweight structural
-///   lint and transitions the task to `PendingSupervisorReview`; supervisor
-///   invokes `cas-code-review` on their own schedule.
-/// - `"worker"`: legacy behaviour — worker dispatches `cas-code-review` before
-///   close (~14 min per close). Use this to opt back in to the old inline flow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodeReviewConfig {
-    /// Who owns the full cas-code-review dispatch: `"supervisor"` (default) or `"worker"`.
-    /// Default is `"supervisor"` (cas-865b). Set to `"worker"` to opt out to
-    /// the legacy inline dispatch.
-    #[serde(default = "default_code_review_owner")]
-    pub owner: String,
-}
-
-fn default_code_review_owner() -> String {
-    "supervisor".to_string()
-}
-
-impl Default for CodeReviewConfig {
-    fn default() -> Self {
-        Self {
-            owner: default_code_review_owner(),
-        }
-    }
-}
-
-impl CodeReviewConfig {
-    /// Returns true when the supervisor owns the full review dispatch.
-    pub fn supervisor_owned(&self) -> bool {
-        self.owner.eq_ignore_ascii_case("supervisor")
-    }
-}
-
 /// `[memory]` — gates auto-extraction behavior for the session-learn skill
 /// (cas-39f5, EPIC cas-ebea). Default-off so the v1 rollout opts in per-user
 /// rather than spending a Haiku call (~$0.001, ~1–3 s) on every `Stop` hook

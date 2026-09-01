@@ -856,10 +856,8 @@ fn declared_system_b_merge_target(
     // epic scope rather than a deliberate task lane. The live epic branch
     // must therefore win for merge just as it does for task creation/spawn.
     let target_is_epic_default = epic.is_some_and(|epic| {
-        crate::mcp::tools::core::task::repo_context::default_child_work_target_from_epic(
-            task, epic,
-        )
-        .is_some()
+        crate::mcp::tools::core::task::repo_context::default_child_work_target_from_epic(task, epic)
+            .is_some()
     });
     if let Some(target) = target.filter(|_| !target_is_epic_default) {
         return Some(ResolvedSystemBMergeTarget {
@@ -2036,79 +2034,74 @@ impl CasCore {
             })?,
         };
 
-        let (
-            mut worktree,
-            is_system_b,
-            source_worktree_live,
-            target_reason,
-            trunk_fallback,
-        ) = match system_a {
-            Some(wt) => {
-                let source_worktree_live = is_git_worktree(&wt.path);
-                (wt, false, source_worktree_live, String::new(), false)
-            }
-            None => {
-                let assignee = id.strip_prefix("factory/").unwrap_or(id);
-                let path = manager.worktree_path_for_worker(assignee);
-                let source_worktree_live = is_git_worktree(&path);
-                if !source_worktree_live && transactional_delivery.is_none() {
-                    return Err(McpError {
-                        code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(format!(
-                            "Worktree not found: {id} (checked System A worktree store and \
-                             the System B path {})",
-                            path.display()
-                        )),
-                        data: None,
-                    });
+        let (mut worktree, is_system_b, source_worktree_live, target_reason, trunk_fallback) =
+            match system_a {
+                Some(wt) => {
+                    let source_worktree_live = is_git_worktree(&wt.path);
+                    (wt, false, source_worktree_live, String::new(), false)
                 }
-                let task_store = self.open_task_store()?;
-                // cas-bd5f: agent store needed to bind explicit task_id to the
-                // System-B worker (assignee name and/or active lease holder).
-                let agent_store =
-                    crate::store::open_agent_store(&cas_root).map_err(|e| McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!(
-                            "Failed to open agent store for worktree_merge authorization: {e}"
-                        )),
-                        data: None,
-                    })?;
-                let resolved_target = resolve_system_b_merge_target(
-                    task_store.as_ref(),
-                    agent_store.as_ref(),
-                    task_id,
-                    assignee,
-                    allow_trunk, // NOT force — dirty bypass stays separate (cas-0b32 review P1)
-                    || {
-                        Config::configured_epic_base_branch(&cwd)
-                            .unwrap_or_else(|| manager.git().detect_default_branch())
-                    },
-                )?;
-                let mut target_reason = resolved_target.reason;
-                let parent_branch = match declared_repo_context.as_ref() {
-                    Some(context) => {
-                        target_reason = format!(
-                            "task WorkTarget {} branch {}",
-                            context.repo_selector, context.target_branch
-                        );
-                        context.target_branch.clone()
+                None => {
+                    let assignee = id.strip_prefix("factory/").unwrap_or(id);
+                    let path = manager.worktree_path_for_worker(assignee);
+                    let source_worktree_live = is_git_worktree(&path);
+                    if !source_worktree_live && transactional_delivery.is_none() {
+                        return Err(McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(format!(
+                                "Worktree not found: {id} (checked System A worktree store and \
+                             the System B path {})",
+                                path.display()
+                            )),
+                            data: None,
+                        });
                     }
-                    None => resolved_target.branch,
-                };
-                (
-                    crate::types::Worktree::new(
-                        format!("system-b-{assignee}"),
-                        format!("factory/{assignee}"),
-                        parent_branch,
-                        path,
-                    ),
-                    true,
-                    source_worktree_live,
-                    target_reason,
-                    resolved_target.trunk_fallback,
-                )
-            }
-        };
+                    let task_store = self.open_task_store()?;
+                    // cas-bd5f: agent store needed to bind explicit task_id to the
+                    // System-B worker (assignee name and/or active lease holder).
+                    let agent_store =
+                        crate::store::open_agent_store(&cas_root).map_err(|e| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!(
+                                "Failed to open agent store for worktree_merge authorization: {e}"
+                            )),
+                            data: None,
+                        })?;
+                    let resolved_target = resolve_system_b_merge_target(
+                        task_store.as_ref(),
+                        agent_store.as_ref(),
+                        task_id,
+                        assignee,
+                        allow_trunk, // NOT force — dirty bypass stays separate (cas-0b32 review P1)
+                        || {
+                            Config::configured_epic_base_branch(&cwd)
+                                .unwrap_or_else(|| manager.git().detect_default_branch())
+                        },
+                    )?;
+                    let mut target_reason = resolved_target.reason;
+                    let parent_branch = match declared_repo_context.as_ref() {
+                        Some(context) => {
+                            target_reason = format!(
+                                "task WorkTarget {} branch {}",
+                                context.repo_selector, context.target_branch
+                            );
+                            context.target_branch.clone()
+                        }
+                        None => resolved_target.branch,
+                    };
+                    (
+                        crate::types::Worktree::new(
+                            format!("system-b-{assignee}"),
+                            format!("factory/{assignee}"),
+                            parent_branch,
+                            path,
+                        ),
+                        true,
+                        source_worktree_live,
+                        target_reason,
+                        resolved_target.trunk_fallback,
+                    )
+                }
+            };
 
         // Bind this mutation to the task's declared work repository before
         // merge/reachability checks. A cleaned-up source is the sole
@@ -2170,18 +2163,17 @@ impl CasCore {
         if let (Some((receipt, transaction)), Some(authority)) =
             (transactional_delivery.as_ref(), delivery_authority.as_ref())
         {
-            let canonical_repo =
-                manager
-                    .git()
-                    .canonical_repo_key()
-                    .map_err(|error| McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!(
-                            "Transactional delivery cannot resolve canonical repository \
+            let canonical_repo = manager
+                .git()
+                .canonical_repo_key()
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Transactional delivery cannot resolve canonical repository \
                              identity for the merge target: {error}"
-                        )),
-                        data: None,
-                    })?;
+                    )),
+                    data: None,
+                })?;
             _delivery_target_lock = crate::worktree::target_lock::lock_delivery_target(
                 &cas_root,
                 &canonical_repo,
@@ -2707,11 +2699,7 @@ impl CasCore {
                 manager
                     .cleanup_merged_worktree(&mut worktree)
                     .map_err(|error| {
-                        worktree_merge_mcp_error(
-                            error,
-                            &worktree.branch,
-                            &worktree.parent_branch,
-                        )
+                        worktree_merge_mcp_error(error, &worktree.branch, &worktree.parent_branch)
                     })?;
             }
 
@@ -2721,8 +2709,8 @@ impl CasCore {
                         stranded_branch_override: None,
                         id: task_id.to_string(),
                         reason: Some(receipt.scope_summary.clone()),
-                        bypass_code_review: None,
-                        code_review_findings: None,
+                        supervisor_override: None,
+                        legacy_bypass_code_review: None,
                         search_manifest: None,
                         commit_receipt: Some(receipt.commit_sha.clone()),
                     }))
@@ -2839,10 +2827,9 @@ impl CasCore {
             // likely *why* the close gate fired — append the diagnosis rather
             // than letting the caller re-derive it. Appended as an extra
             // content block so the gate's own text stays verbatim.
-            close_result.content.insert(
-                0,
-                Content::text(format!("{ci_prefix}{trunk_notice}")),
-            );
+            close_result
+                .content
+                .insert(0, Content::text(format!("{ci_prefix}{trunk_notice}")));
             if !push_outcome.is_published() {
                 close_result.content.push(Content::text(push_note));
             }
@@ -3227,8 +3214,8 @@ mod tests {
             cas_types::WorkerDeliveryState::TipChanged
         );
         // cas-0a21: target drift is typed as a recoverable tip change.
-        let target_drift = classify_delivery_merge_preflight(true, true, false, true, false, true)
-            .unwrap_err();
+        let target_drift =
+            classify_delivery_merge_preflight(true, true, false, true, false, true).unwrap_err();
         assert_eq!(target_drift.0, cas_types::WorkerDeliveryState::TipChanged);
         assert!(target_drift.0.is_recoverable_failure());
         assert_eq!(target_drift.1, "target_tip_changed");
@@ -3419,7 +3406,10 @@ mod tests {
     // real exit if that stays true, so pin it.
     // -----------------------------------------------------------------------
 
-    fn agent_store_with_worker(cas_dir: &Path, worker: &str) -> std::sync::Arc<dyn cas_store::AgentStore> {
+    fn agent_store_with_worker(
+        cas_dir: &Path,
+        worker: &str,
+    ) -> std::sync::Arc<dyn cas_store::AgentStore> {
         let store = crate::store::open_agent_store(cas_dir).expect("open agent store");
         let mut agent = cas_types::Agent::new(format!("{worker}-session"), worker.to_string());
         agent.role = cas_types::AgentRole::Worker;

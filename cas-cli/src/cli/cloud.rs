@@ -269,9 +269,15 @@ pub struct CloudQueueArgs {
     #[arg(long)]
     pub prune: Option<i64>,
 
-    /// Requeue all terminally failed items, preserving their last error
+    /// Requeue all terminally failed items, preserving their last error.
+    /// Combine with --retry-reason to target only diagnostics containing a
+    /// repaired server reason.
     #[arg(long, conflicts_with_all = ["prune", "clear"])]
     pub retry: bool,
+
+    /// Requeue only terminal items whose diagnostic contains this reason.
+    #[arg(long, alias = "reason", requires = "retry")]
+    pub retry_reason: Option<String>,
 
     /// Clear all items from the queue
     #[arg(long)]
@@ -2203,14 +2209,30 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
     // gets another chance to accept them.
     if args.retry {
         let max_retries = 5;
-        let retried = queue.retry_failed(max_retries)?;
+        let retried = match args.retry_reason.as_deref() {
+            Some(reason) => queue.retry_failed_for_reason(reason, max_retries)?,
+            None => queue.retry_failed(max_retries)?,
+        };
         if cli.json {
-            println!(r#"{{"status":"ok","retried":{retried}}}"#);
+            let mut output = serde_json::json!({
+                "status": "ok",
+                "retried": retried,
+            });
+            if let Some(reason) = &args.retry_reason {
+                output["reason"] = serde_json::Value::String(reason.clone());
+            }
+            println!("{output}");
         } else {
             let theme = ActiveTheme::default();
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, theme);
-            fmt.success(&format!("Requeued {retried} failed item(s)"))?;
+            let message = match &args.retry_reason {
+                Some(reason) => {
+                    format!("Requeued {retried} failed item(s) matching reason {reason:?}")
+                }
+                None => format!("Requeued {retried} failed item(s)"),
+            };
+            fmt.success(&message)?;
         }
         return Ok(());
     }
@@ -4572,7 +4594,9 @@ fn evaluate_purge_safety(
 /// decode) is propagated so the purge refuses loudly. Silently returning zero
 /// here would disable the unpushed-rows guard in a destructive path — the one
 /// place a reassuring wrong answer is most expensive.
-fn pending_content_pushes(conn: &rusqlite::Connection) -> anyhow::Result<Vec<(String, String)>> {
+pub(crate) fn pending_content_pushes(
+    conn: &rusqlite::Connection,
+) -> anyhow::Result<Vec<(String, String)>> {
     let mut stmt = match conn.prepare(
         "SELECT entity_type, entity_id FROM sync_queue
          WHERE lower(entity_type) IN ('entry', 'task', 'rule', 'skill')
@@ -4922,6 +4946,25 @@ mod team_cmd_tests {
     use tempfile::TempDir;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn queue_retry_reason_is_available_as_a_targeted_retry_flag() {
+        use clap::Parser;
+
+        let args = CloudQueueArgs::try_parse_from([
+            "queue",
+            "--retry",
+            "--retry-reason",
+            "project_mismatch",
+        ])
+        .unwrap();
+        assert!(args.retry);
+        assert_eq!(args.retry_reason.as_deref(), Some("project_mismatch"));
+
+        let alias =
+            CloudQueueArgs::try_parse_from(["queue", "--retry", "--reason", "timeout"]).unwrap();
+        assert_eq!(alias.retry_reason.as_deref(), Some("timeout"));
+    }
 
     #[test]
     fn active_team_backlog_is_reported_with_sync_command() {

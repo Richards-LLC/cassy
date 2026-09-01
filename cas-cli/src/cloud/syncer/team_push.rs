@@ -10,6 +10,13 @@ use chrono::Utc;
 
 fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
     if let Some(task) = value.as_object_mut() {
+        // Global tasks are personal-only and deliberately carry no project
+        // identity in their queued payload. Leave both fields untouched if a
+        // legacy caller routes one through this helper.
+        if task.get("scope").and_then(serde_json::Value::as_str) == Some("global") {
+            return;
+        }
+
         // Team task rows are project-scoped. Legacy queue payloads may have
         // been serialized before Task::scope existed, but the cloud contract
         // requires the explicit field or it may accept the batch while
@@ -18,10 +25,20 @@ fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
             "scope".to_string(),
             serde_json::Value::String("project".to_string()),
         );
-        task.insert(
-            "origin_project".to_string(),
-            serde_json::Value::String(project_id.to_string()),
-        );
+
+        // Supervisor reassignment is carried by a non-empty origin_project in
+        // the queued payload. Only legacy rows without a usable identity need
+        // to inherit the project performing the push.
+        let has_explicit_origin = task
+            .get("origin_project")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|origin| !origin.trim().is_empty());
+        if !has_explicit_origin {
+            task.insert(
+                "origin_project".to_string(),
+                serde_json::Value::String(project_id.to_string()),
+            );
+        }
     }
 }
 
@@ -793,6 +810,71 @@ mod tests {
         assert_eq!(
             value.get("origin_project").and_then(|value| value.as_str()),
             Some("acme/accounting")
+        );
+    }
+
+    #[test]
+    fn explicit_task_origin_project_survives_team_push_stamping() {
+        let mut value = serde_json::json!({
+            "id": "cas-reassigned",
+            "scope": "project",
+            "origin_project": "pulse-card",
+        });
+
+        super::stamp_task_origin_project(&mut value, "acme/accounting");
+
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("pulse-card")
+        );
+    }
+
+    #[test]
+    fn missing_task_origin_project_receives_current_project_identity() {
+        let mut value = serde_json::json!({"id": "cas-legacy", "scope": "project"});
+
+        super::stamp_task_origin_project(&mut value, "acme/accounting");
+
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("acme/accounting")
+        );
+    }
+
+    #[test]
+    fn empty_task_origin_project_receives_current_project_identity() {
+        let mut value = serde_json::json!({
+            "id": "cas-legacy",
+            "scope": "project",
+            "origin_project": "",
+        });
+
+        super::stamp_task_origin_project(&mut value, "acme/accounting");
+
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("acme/accounting")
+        );
+    }
+
+    #[test]
+    fn global_task_origin_project_remains_unstamped() {
+        let mut value = serde_json::json!({
+            "id": "cas-global",
+            "scope": "global",
+            "origin_project": null,
+        });
+
+        super::stamp_task_origin_project(&mut value, "acme/accounting");
+
+        assert_eq!(
+            value.get("scope").and_then(|value| value.as_str()),
+            Some("global")
+        );
+        assert!(
+            value
+                .get("origin_project")
+                .is_some_and(serde_json::Value::is_null)
         );
     }
 }

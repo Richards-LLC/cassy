@@ -6,11 +6,11 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
 use crate::store::share_policy::{eligible_for_team_task, resolve_team_id};
 use crate::store::{Result, TaskStore};
 use crate::types::{Dependency, DependencyType, Scope, Task, TaskStatus};
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 /// A task store wrapper that queues changes for cloud sync
@@ -47,12 +47,7 @@ impl SyncingTaskStore {
             Err(_) => return,
         };
 
-        let _ = self.queue.enqueue(
-            EntityType::Task,
-            &task.id,
-            SyncOperation::Upsert,
-            Some(&payload),
-        );
+        self.queue_personal_upsert(task, &payload);
 
         if let Some(team_id) = self.team_id.as_deref()
             && eligible_for_team_task(task)
@@ -62,6 +57,35 @@ impl SyncingTaskStore {
                 &task.id,
                 SyncOperation::Upsert,
                 Some(&payload),
+                team_id,
+            );
+        }
+    }
+
+    fn queue_personal_upsert(&self, task: &Task, payload: &str) {
+        let _ = self.queue.enqueue(
+            EntityType::Task,
+            &task.id,
+            SyncOperation::Upsert,
+            Some(payload),
+        );
+    }
+
+    fn queue_origin_project_move(&self, task: &Task, old_project_id: &str) {
+        let payload = match serde_json::to_string(task) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        self.queue_personal_upsert(task, &payload);
+
+        if let Some(team_id) = self.team_id.as_deref()
+            && eligible_for_team_task(task)
+        {
+            let _ = self.queue.enqueue_team_move(
+                EntityType::Task,
+                &task.id,
+                old_project_id,
+                &payload,
                 team_id,
             );
         }
@@ -146,6 +170,7 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
+        let previous = self.inner.get(&task.id)?;
         let persisted_at = self.inner.update(task)?;
         // The inner store may enforce transition invariants while persisting
         // (for example, clearing a prior close-cycle branch anchor when a
@@ -156,7 +181,16 @@ impl TaskStore for SyncingTaskStore {
         if task.scope == Scope::Global {
             persisted.origin_project = None;
         }
-        self.queue_upsert(&persisted);
+        if let Some(old_project_id) = previous.origin_project.as_deref()
+            && persisted
+                .origin_project
+                .as_deref()
+                .is_some_and(|new_project_id| new_project_id != old_project_id)
+        {
+            self.queue_origin_project_move(&persisted, old_project_id);
+        } else {
+            self.queue_upsert(&persisted);
+        }
         Ok(persisted_at)
     }
 
@@ -205,7 +239,8 @@ impl TaskStore for SyncingTaskStore {
         to_id: &str,
         dep_type: DependencyType,
     ) -> Result<bool> {
-        self.inner.remove_dependency_of_type(from_id, to_id, dep_type)
+        self.inner
+            .remove_dependency_of_type(from_id, to_id, dep_type)
     }
 
     fn get_dependencies(&self, task_id: &str) -> Result<Vec<Dependency>> {
@@ -444,6 +479,35 @@ mod tests {
     }
 
     #[test]
+    fn task_origin_project_move_queues_old_delete_before_new_upsert() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+
+        let mut task = Task::new("p-task-move-001".to_string(), "move me".to_string());
+        task.origin_project = Some("project-a".to_string());
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+
+        task.origin_project = Some("project-b".to_string());
+        store.update(&task).unwrap();
+
+        let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+        assert_eq!(pending.len(), 2, "a move must retain both team operations");
+        assert_eq!(pending[0].operation, SyncOperation::Delete);
+        assert_eq!(pending[0].entity_id, task.id);
+        assert_eq!(pending[0].project_id.as_deref(), Some("project-a"));
+        assert_eq!(pending[1].operation, SyncOperation::Upsert);
+        assert_eq!(pending[1].entity_id, task.id);
+        assert_eq!(pending[1].project_id, None);
+        assert!(
+            pending[1]
+                .payload
+                .as_deref()
+                .is_some_and(|payload| payload.contains("\"origin_project\":\"project-b\""))
+        );
+    }
+
+    #[test]
     fn task_delete_personal_only_when_kill_switch_engaged() {
         let (temp, store) = create_team_store(Some(false));
         let queue = SyncQueue::open(temp.path()).unwrap();
@@ -491,7 +555,10 @@ mod tests {
 
         let queue = SyncQueue::open(temp.path()).unwrap();
         let (personal, team) = queue_counts(&queue);
-        assert_eq!(personal, 1, "personal project must enqueue to personal queue");
+        assert_eq!(
+            personal, 1,
+            "personal project must enqueue to personal queue"
+        );
         assert_eq!(
             team, 0,
             "cas-f8e3: personal project (no team_id) must NOT enqueue to team queue \

@@ -1,10 +1,132 @@
 use crate::support::*;
+use cas::cloud::CloudConfig;
 use cas::mcp::CasCore;
 use cas::mcp::tools::*;
 use cas::store::{open_agent_store, open_event_store, open_task_store};
 use cas::types::EventType;
 use rmcp::handler::server::wrapper::Parameters;
 use rusqlite::Connection;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const MOVE_TEAM: &str = "move-team-uuid";
+
+fn promote_default_test_agent(cas_dir: &std::path::Path) {
+    let agent_store = open_agent_store(cas_dir).expect("agent store");
+    let id = format!("test-session-{}", std::process::id());
+    let mut agent = agent_store.get(&id).expect("default test agent");
+    agent.role = cas::types::AgentRole::Supervisor;
+    agent.heartbeat();
+    agent_store.update(&agent).expect("promote test agent");
+}
+
+#[tokio::test]
+async fn origin_project_move_refuses_unregistered_destination_before_local_write() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    promote_default_test_agent(&cas_dir);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{MOVE_TEAM}/projects")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "projects": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut cloud_config = CloudConfig::default();
+    cloud_config.endpoint = server.uri();
+    cloud_config.token = Some("test-token".to_string());
+    cloud_config.set_team(MOVE_TEAM, "move-team");
+    cloud_config.save_to_cas_dir(&cas_dir).unwrap();
+
+    let local_store = cas::store::open_task_store_local(&cas_dir).unwrap();
+    let mut task = cas::types::Task::new("cas-move-refuse".into(), "move refusal".into());
+    task.origin_project = Some("project-a".into());
+    local_store.add(&task).unwrap();
+
+    let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": task.id,
+        "origin_project": "project-b"
+    }))
+    .unwrap();
+    let error = core
+        .cas_task_update(Parameters(request))
+        .await
+        .expect_err("an unregistered destination must be rejected");
+    assert!(
+        error.message.contains("not registered"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        local_store.get(&task.id).unwrap().origin_project.as_deref(),
+        Some("project-a")
+    );
+}
+
+#[tokio::test]
+async fn origin_project_move_updates_local_row_audit_and_team_queue() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    promote_default_test_agent(&cas_dir);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{MOVE_TEAM}/projects")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "projects": [{
+                "id": "project-b-uuid",
+                "canonical_id": "project-b",
+                "name": "Project B",
+                "contributor_count": 1,
+                "memory_count": 0
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut cloud_config = CloudConfig::default();
+    cloud_config.endpoint = server.uri();
+    cloud_config.token = Some("test-token".to_string());
+    cloud_config.set_team(MOVE_TEAM, "move-team");
+    cloud_config.save_to_cas_dir(&cas_dir).unwrap();
+
+    let local_store = cas::store::open_task_store_local(&cas_dir).unwrap();
+    let mut task = cas::types::Task::new("cas-move-local".into(), "move local".into());
+    task.origin_project = Some("project-a".into());
+    local_store.add(&task).unwrap();
+
+    let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": task.id,
+        "origin_project": "project-b"
+    }))
+    .unwrap();
+    core.cas_task_update(Parameters(request))
+        .await
+        .expect("registered destination move should succeed");
+
+    let updated = local_store.get(&task.id).unwrap();
+    assert_eq!(updated.origin_project.as_deref(), Some("project-b"));
+    assert!(
+        updated
+            .notes
+            .contains("DECISION: moved from project-a to project-b by test-agent"),
+        "audit note missing: {}",
+        updated.notes
+    );
+    let queue = cas::cloud::SyncQueue::open(&cas_dir).unwrap();
+    let pending = queue.pending_for_team(MOVE_TEAM, 10, 5).unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0].operation, cas::cloud::SyncOperation::Delete);
+    assert_eq!(pending[0].project_id.as_deref(), Some("project-a"));
+    assert_eq!(pending[1].operation, cas::cloud::SyncOperation::Upsert);
+}
 
 /// cas-0447 (GH #187): a context-poor worker needs a bounded start response
 /// that preserves its own task notes without inheriting an epic's potentially

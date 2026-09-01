@@ -1,5 +1,7 @@
 use crate::mcp::tools::core::imports::*;
 
+use crate::cloud::{CloudConfig, TeamRegistration};
+
 /// Heartbeat staleness window for epic_verification_owner transfer targets
 /// (cas-cc74). Aligned with claim/close assignee liveness (~5 min).
 const EPIC_OWNER_TARGET_STALE_SECS: i64 = 300;
@@ -48,6 +50,54 @@ fn assignee_batch_abort(fields: &[&str], rejection: impl std::fmt::Display) -> S
         "TASK UPDATE BATCH ABORTED: assignee validation rejected the request; no requested task fields were applied. Fields not applied: [{}]. Rejection: {rejection}",
         fields.join(", ")
     )
+}
+
+fn verify_origin_project_registered(
+    cas_root: &std::path::Path,
+    origin_project: &str,
+) -> Result<(), McpError> {
+    let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)
+        .map_err(|error| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!(
+                "TASK UPDATE REJECTED: origin_project reassignment requires an active cloud team configuration: {error}"
+            )),
+            data: None,
+        })?;
+    let team_id = cloud_config.active_team_id().ok_or_else(|| McpError {
+        code: ErrorCode::INVALID_PARAMS,
+        message: Cow::from(
+            "TASK UPDATE REJECTED: origin_project reassignment requires an active registered team project; configure a team before moving the task.",
+        ),
+        data: None,
+    })?;
+    let token = cloud_config
+        .token
+        .as_deref()
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(
+                "TASK UPDATE REJECTED: origin_project reassignment requires an authenticated cloud session.",
+            ),
+            data: None,
+        })?;
+
+    TeamRegistration::new(
+        &cloud_config.endpoint,
+        token,
+        &team_id,
+        origin_project,
+    )
+    .verify_registered()
+    .map_err(|error| McpError {
+        code: ErrorCode::INVALID_PARAMS,
+        message: Cow::from(format!(
+            "TASK UPDATE REJECTED: destination origin_project '{}' must already be registered with team {}: {}",
+            origin_project, team_id, error
+        )),
+        data: None,
+    })
 }
 
 /// Normalize `epic_verification_owner` at write boundaries (cas-cc74 discovery).
@@ -321,8 +371,8 @@ impl CasCore {
                 })
             })
             .transpose()?;
-        if req.origin_project.is_some() {
-            self.resolve_live_supervisor_authority().map_err(|error| {
+        let origin_project_supervisor = if req.origin_project.is_some() {
+            Some(self.resolve_live_supervisor_authority().map_err(|error| {
                 McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
@@ -330,7 +380,14 @@ impl CasCore {
                     )),
                     data: None,
                 }
-            })?;
+            })?)
+        } else {
+            None
+        };
+        if let Some(origin_project) = origin_project.as_deref()
+            && task.origin_project.as_deref() != Some(origin_project)
+        {
+            verify_origin_project_registered(&self.cas_root, origin_project)?;
         }
         // Validate before applying any ordinary task fields. The store repeats
         // this validation while holding its write lock, so a malformed patch
@@ -706,10 +763,14 @@ impl CasCore {
                     .as_deref()
                     .unwrap_or("unassigned legacy row");
                 let audit = format!(
-                    "[{}] DECISION: origin_project reassigned {} → {} by live supervisor (cas-e0c5)",
+                    "[{}] DECISION: moved from {} to {} by {} (origin_project reassignment, cas-e0c5)",
                     chrono::Utc::now().format("%Y-%m-%d %H:%M"),
                     previous,
                     origin_project,
+                    origin_project_supervisor
+                        .as_ref()
+                        .map(|supervisor| supervisor.name.as_str())
+                        .unwrap_or("live supervisor"),
                 );
                 task.notes = if task.notes.is_empty() {
                     audit

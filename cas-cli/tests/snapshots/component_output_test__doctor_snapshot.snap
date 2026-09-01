@@ -17,6 +17,7 @@ cas doctor
 [OK] embedding drain: no cloud embedding capability (not logged in); nothing is queued
 [WARN] code history index: cannot check code history index: not a git repository: [TEMP_PATH] ([GIT_NOT_REPOSITORY])
 [OK] configuration: Loaded (sync: enabled)
+[OK] MCP stdio upstreams: [N] registered command(s) resolve to executable files
 [OK] sync target: Will sync to .claude/rules/cas (not yet created)
 [OK] memory stats: [N] total () | tiers:  | compressed: [N] | helpful: [N] | harmful: [N]
 [OK] memory decay: Memory decay (last cycle): unavailable (no completed decay cycle recorded)
@@ -26,6 +27,7 @@ cas doctor
 [OK] mcp config: MCP configured in .mcp.json
 [OK] integrations: no integrations configured
 [OK] canonical id: Cloud bucket `[BUCKET]` (from folder name)
+[OK] cloud sync queue: [N] queued content change(s) block purge-foreign; Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.
 [OK] cross-project rows: [N] project DB(s) compared (0 local task row(s), 0 DB(s) unreadable) — task replication was not checked; 0 foreign knowledge page(s): [N] attributed page(s) checked
 
 [WARN] All critical checks passed with some warnings.

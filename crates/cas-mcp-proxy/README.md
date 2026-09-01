@@ -64,15 +64,25 @@ url = "https://example.com/sse"
 
 ### External dispatch policy
 
-`cas serve` installs an exact `(server, tool)` allowlist at startup and on hot
+`cas serve` installs a parsed `(server, tool)` allowlist at startup and on hot
 reload. The default is fail-closed: configuring a server makes its catalog
 searchable, but an empty or omitted `allowlist` forwards no external calls.
+Catalog results include `policy = "denied by policy"` for tools that are
+visible but not admitted, so discovery cannot be mistaken for authorization.
 
 ```toml
-[[allowlist]]
-server = "github"
-tool = "list_issues"
+allowlist = ["github.list_issues", "github.*"]
 ```
+
+`allowlist` is a top-level key, so place it before any `[servers.<name>]`
+tables in a combined file.
+
+The canonical spelling is `server.tool`. `server:tool`, `server/tool`,
+`mcp__server__tool`, bare tool names (matching any server), and the historical
+`[[allowlist]]` tables remain accepted as compatibility input. A `server.*`
+entry admits every tool from one server; `*.tool` admits one tool from every
+server. Serialized configuration uses canonical strings. Denials identify the
+exact canonical entry to add, for example `neon.run_sql`.
 
 When `.cas/proxy.toml` exists its allowlist and delegation sections replace the
 user-scoped values rather than unioning them. This prevents a broader personal
@@ -86,16 +96,10 @@ epic plus a non-secret local proof reference, and writes a budget reservation
 to the project's `cas.db` before starting the upstream run. A timed-out run is
 resumed by its recorded run ID; the gateway never starts a replacement run.
 
-Both gateway tools must also appear in the exact allowlist:
+Both gateway tools must also appear in the allowlist:
 
 ```toml
-[[allowlist]]
-server = "viktor"
-tool = "ask_viktor"
-
-[[allowlist]]
-server = "viktor"
-tool = "wait_for_run"
+allowlist = ["viktor.ask_viktor", "viktor.wait_for_run"]
 
 [delegation.external_production_verification]
 server = "viktor"
@@ -124,6 +128,12 @@ configuration and is never copied into tool arguments or model context.
 An explicit `server:<name>` query for a configured upstream that is disconnected returns an
 `upstream ... is absent` error instead of an empty catalog. Inspect `proxy_health` and repair the
 credential or connection before retrying a run-starting call.
+
+When a stdio command or interpreter path no longer exists, `proxy_health` reports
+`state = "executable_missing"`, `last_error_code = "executable_missing"`, and the
+configured executable. This is terminal for the current daemon session and does
+not enter retry backoff. `cas doctor` checks configured stdio commands before a
+restart and names the registrations that need repair.
 
 ## Execute
 

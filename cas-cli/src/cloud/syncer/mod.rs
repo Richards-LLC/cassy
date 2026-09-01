@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::cloud::{CloudConfig, EntityType, SyncQueue};
+use crate::error::CasError;
 use crate::types::{Entry, Rule, Skill};
 
 mod knowledge;
@@ -59,6 +60,8 @@ pub struct SyncResult {
     pub pushed_agents: usize,
     /// Number of worktrees pushed
     pub pushed_worktrees: usize,
+    /// Number of task dependency edges pushed
+    pub pushed_task_dependencies: usize,
     /// Number of distilled knowledge pages pushed (T5)
     pub pushed_knowledge_pages: usize,
     /// Number of entries pulled
@@ -79,6 +82,14 @@ pub struct SyncResult {
     pub pulled_file_changes: usize,
     /// Number of commit links pulled
     pub pulled_commit_links: usize,
+    /// Number of task dependency edges pulled
+    pub pulled_task_dependencies: usize,
+    /// Number of local task dependency edges queued for cloud healing.
+    pub healed_task_dependencies_to_cloud: usize,
+    /// Number of task dependency edges materialized from the cloud during
+    /// healing. This is separate from `pulled_task_dependencies` so callers
+    /// can distinguish ordinary pull application from reconciliation.
+    pub healed_task_dependencies_from_cloud: usize,
     /// Number of distilled knowledge pages pulled (T5)
     pub pulled_knowledge_pages: usize,
     /// Number of conflicts resolved
@@ -151,6 +162,7 @@ impl PushScope {
                 "commit_links",
                 "agents",
                 "worktrees",
+                "task_dependencies",
             ],
         }
     }
@@ -173,6 +185,20 @@ pub struct PushPlan {
 }
 
 impl SyncResult {
+    /// Render the one-line dependency healing receipt when reconciliation did
+    /// work. A quiet no-op is intentional for steady-state pulls.
+    pub fn dependency_heal_summary(&self) -> Option<String> {
+        (self.healed_task_dependencies_to_cloud > 0
+            || self.healed_task_dependencies_from_cloud > 0)
+            .then(|| {
+                format!(
+                    "healed {} edge(s) to cloud, {} from cloud",
+                    self.healed_task_dependencies_to_cloud,
+                    self.healed_task_dependencies_from_cloud
+                )
+            })
+    }
+
     pub fn total_pushed(&self) -> usize {
         self.pushed_entries
             + self.pushed_tasks
@@ -186,6 +212,7 @@ impl SyncResult {
             + self.pushed_commit_links
             + self.pushed_agents
             + self.pushed_worktrees
+            + self.pushed_task_dependencies
             + self.pushed_knowledge_pages
     }
 
@@ -199,6 +226,7 @@ impl SyncResult {
             + self.pulled_prompts
             + self.pulled_file_changes
             + self.pulled_commit_links
+            + self.pulled_task_dependencies
             + self.pulled_knowledge_pages
     }
 
@@ -437,6 +465,19 @@ impl CloudSyncer {
         self.cloud_config.is_logged_in()
     }
 
+    /// Requeue terminal cloud failures whose version gate is satisfied by the
+    /// current client before either personal or team push reads the queue.
+    pub(crate) fn requeue_version_gated_items(&self) -> Result<usize, CasError> {
+        let requeued = self.queue.requeue_version_gated_failures(
+            env!("CARGO_PKG_VERSION"),
+            self.config.max_retries,
+        )?;
+        if requeued > 0 {
+            eprintln!("requeued {requeued} version-gated item(s)");
+        }
+        Ok(requeued)
+    }
+
     /// Get the sync queue
     pub fn queue(&self) -> &SyncQueue {
         &self.queue
@@ -525,6 +566,10 @@ struct PullResponse {
     #[serde(default)]
     #[allow(dead_code)]
     knowledge_pages: Option<Vec<serde_json::Value>>,
+    /// Task dependency edges are opaque cloud blobs but use a dedicated
+    /// envelope key so the pull path can materialize them after tasks.
+    #[serde(default)]
+    task_dependencies: Option<Vec<serde_json::Value>>,
     pulled_at: Option<String>,
 }
 
@@ -541,6 +586,8 @@ struct TeamPullResponse {
     rules: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     skills: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    task_dependencies: Option<Vec<serde_json::Value>>,
     pulled_at: Option<String>,
     #[allow(dead_code)]
     team_id: Option<String>,
@@ -571,7 +618,13 @@ struct TeamPushResponse {
     /// returns `{inserted, updated, skipped}` objects instead. Keep the wire
     /// value raw so the team path can recognize both and fail closed on a
     /// malformed-but-present skip signal.
+    #[serde(default)]
     synced: serde_json::Value,
+    /// Newer cloud builds may return complete per-row outcomes at the top
+    /// level. Keep this alongside `synced` so the team path can consume both
+    /// response generations without changing the aggregate contract.
+    #[serde(default)]
+    rows: Option<Vec<PushRowResult>>,
     /// cas-8ca5 / contract §5: the canonical project id the server's resolver
     /// mapped this push to. `None` on older cloud builds that predate the
     /// resolver echo — the client then leaves its local pin untouched.
@@ -655,6 +708,93 @@ impl PushInvalidReason {
 pub(crate) enum PushItemizedFailure {
     Rejection(PushRejection),
     Invalid(PushInvalid),
+}
+
+/// Outcome for one row in a push response. The server may include these rows
+/// in addition to aggregate counts so the client can distinguish a benign LWW
+/// loss from a rejected write without retrying or parking neighboring rows.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PushRowOutcome {
+    Inserted,
+    Updated,
+    SkippedLww,
+    Rejected,
+}
+
+/// A complete per-row push result returned by newer cloud builds.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct PushRowResult {
+    pub id: String,
+    pub outcome: PushRowOutcome,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl PushRowResult {
+    pub(crate) fn acknowledges(&self) -> bool {
+        matches!(
+            self.outcome,
+            PushRowOutcome::Inserted | PushRowOutcome::Updated | PushRowOutcome::SkippedLww
+        )
+    }
+
+    /// Rejection reasons which describe a temporary server-side condition.
+    /// Unknown rejection reasons remain parked: losing a diagnostic row is
+    /// worse than requiring an operator to explicitly requeue it.
+    pub(crate) fn rejection_is_retryable(&self) -> bool {
+        let Some(reason) = self.reason.as_deref() else {
+            return false;
+        };
+        matches!(
+            reason.to_ascii_lowercase().as_str(),
+            "retryable"
+                | "temporary"
+                | "transient"
+                | "server_error"
+                | "internal_error"
+                | "service_unavailable"
+                | "rate_limited"
+                | "timeout"
+        )
+    }
+}
+
+/// Parse and validate a complete per-row result list for one entity response.
+/// A present list must cover exactly the submitted queue rows so an omitted
+/// result can never be mistaken for an acknowledgement.
+pub(crate) fn row_results_for(
+    entity: &serde_json::Value,
+    location: &str,
+    queued_ids: impl Iterator<Item = String>,
+) -> Result<Option<HashMap<String, PushRowResult>>, String> {
+    let Some(detail) = entity.as_object() else {
+        return Ok(None);
+    };
+    let Some(value) = detail.get("rows") else {
+        return Ok(None);
+    };
+    let rows: Vec<PushRowResult> = serde_json::from_value(value.clone())
+        .map_err(|error| format!("unrecognized {location}.rows: {error}"))?;
+    let queued_ids = queued_ids.collect::<std::collections::HashSet<_>>();
+    let mut by_id = HashMap::with_capacity(rows.len());
+    for row in rows {
+        if !queued_ids.contains(&row.id) {
+            return Err(format!(
+                "{location}.rows names row {} that was not in this sub-batch",
+                row.id
+            ));
+        }
+        if by_id.insert(row.id.clone(), row).is_some() {
+            return Err(format!("{location}.rows contains a duplicate id"));
+        }
+    }
+    for id in queued_ids {
+        if !by_id.contains_key(&id) {
+            return Err(format!("{location}.rows missing row {id}"));
+        }
+    }
+    Ok(Some(by_id))
 }
 
 impl PushItemizedFailure {
@@ -817,9 +957,9 @@ pub(crate) fn itemized_failures_for(
 /// excluded count per entity type and surfaces it here so the client can:
 ///
 /// 1. Emit a structured warning to ops/users.
-/// 2. Leave the affected local queue items un-marked-synced, record the raw
-///    response, and consume their bounded retry budget instead of silently
-///    dropping or retrying them forever.
+/// 2. Consume rows named by per-row rejection results and park or retry them
+///    according to the supplied reason; aggregate-only skips are acknowledged
+///    under the server's LWW semantics because their row identities are absent.
 ///
 /// Both the proposed top-level map and the live per-entity result objects are
 /// accepted so the wire format can evolve without silently losing skips.
@@ -848,7 +988,7 @@ impl PushResponse {
     /// Both the older proposed top-level map and the live nested entity shape
     /// are accepted. Absence remains backward-compatible (`Ok(0)`), but a
     /// present skip signal with an unknown type or contradictory counts is an
-    /// error. Callers must then retain the queue row/watermark for retry.
+    /// error. Callers must then retain the affected queue rows for retry.
     pub fn skipped_count_for(&self, entity_type: &str) -> Result<usize, String> {
         fn count(value: &serde_json::Value, location: &str) -> Result<usize, String> {
             value
@@ -897,6 +1037,28 @@ impl PushResponse {
             return Ok(None);
         };
         itemized_failures_for(entity, entity_type, skipped, queued_ids)
+    }
+
+    pub(crate) fn row_results_for(
+        &self,
+        entity_type: &str,
+        queued_ids: impl Iterator<Item = String>,
+    ) -> Result<Option<HashMap<String, PushRowResult>>, String> {
+        let queued_ids = queued_ids.collect::<Vec<_>>();
+        if let Some(entity) = self.fields.get(entity_type) {
+            if let Some(rows) = row_results_for(
+                entity,
+                entity_type,
+                queued_ids.iter().cloned(),
+            )? {
+                return Ok(Some(rows));
+            }
+        }
+        if let Some(rows) = self.fields.get("rows") {
+            let wrapped = serde_json::json!({"rows": rows});
+            return row_results_for(&wrapped, "rows", queued_ids.into_iter());
+        }
+        Ok(None)
     }
 }
 

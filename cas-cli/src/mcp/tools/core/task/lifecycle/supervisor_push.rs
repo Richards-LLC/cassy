@@ -17,6 +17,7 @@ use cas_store::{
     SupervisorNotification, SupervisorQueueStore,
 };
 use cas_types::{AgentRole, TaskStatus};
+use std::path::Path;
 
 use super::TaskLifecycleGateError;
 use crate::mcp::server::CasCore;
@@ -213,6 +214,192 @@ pub fn prepare_task_lifecycle_outbox(
 /// Stable prompt_queue dedupe key for one durable lifecycle notification (cas-ecff).
 pub fn lifecycle_prompt_dedupe_key(notification_id: i64) -> String {
     format!("lifecycle-outbox:{notification_id}")
+}
+
+const AUTO_UNBLOCK_ASSIGNEE_STALE_SECS: i64 = 300;
+const AUTO_UNBLOCK_SPAWN_RECEIPT_LIMIT: usize = 100;
+
+/// Result of trying to wake the worker that owns an automatically unblocked
+/// task. The worker prompt uses the normal, non-urgent coordination-message
+/// queue path, while the idempotent key keeps one unblock occurrence from
+/// producing duplicate turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AutoUnblockWakeResult {
+    Queued {
+        worker_name: String,
+        prompt_id: i64,
+        dedupe_key: String,
+    },
+    Skipped {
+        reason: String,
+    },
+}
+
+enum AutoUnblockWorkerTarget {
+    Worker(String),
+    Skipped(String),
+}
+
+fn append_auto_unblock_wake_note(
+    cas_root: &Path,
+    task_id: &str,
+    marker: &str,
+    note: &str,
+) -> Result<(), String> {
+    let task_store = crate::store::open_task_store(cas_root).map_err(|error| {
+        format!("task store open failed while recording auto-unblock wake: {error}")
+    })?;
+    let mut task = task_store
+        .get(task_id)
+        .map_err(|error| format!("task read failed while recording auto-unblock wake: {error}"))?;
+    if task.notes.contains(marker) {
+        return Ok(());
+    }
+    task.notes = if task.notes.is_empty() {
+        note.to_string()
+    } else {
+        format!("{}\n\n{note}", task.notes)
+    };
+    task.updated_at = Utc::now();
+    task_store.update(&task).map(|_| ()).map_err(|error| {
+        format!("task note update failed while recording auto-unblock wake: {error}")
+    })
+}
+
+fn auto_unblock_worker_target(
+    cas_root: &Path,
+    task: &cas_types::Task,
+) -> Result<AutoUnblockWorkerTarget, String> {
+    let factory_session = std::env::var("CAS_FACTORY_SESSION")
+        .ok()
+        .filter(|session| !session.trim().is_empty());
+
+    if let Some(assignee) = task.assignee.as_deref() {
+        let agent_store = crate::store::open_agent_store(cas_root).map_err(|error| {
+            format!("agent store open failed while resolving assignee: {error}")
+        })?;
+        let agents = agent_store
+            .list(None)
+            .map_err(|error| format!("agent list failed while resolving assignee: {error}"))?;
+        let live_assignee = agents.into_iter().find(|agent| {
+            agent.role == AgentRole::Worker
+                && agent.visible_to_factory_session(factory_session.as_deref())
+                && (agent.name == assignee || agent.id == assignee)
+                && agent.is_alive()
+                && !agent.is_heartbeat_expired(AUTO_UNBLOCK_ASSIGNEE_STALE_SECS)
+        });
+        return Ok(match live_assignee {
+            Some(agent) => AutoUnblockWorkerTarget::Worker(agent.name),
+            None => AutoUnblockWorkerTarget::Skipped(format!(
+                "assignee '{assignee}' has no registered worker with a fresh heartbeat"
+            )),
+        });
+    }
+
+    let Some(factory_session) = factory_session.as_deref() else {
+        return Ok(AutoUnblockWorkerTarget::Skipped(
+            "no live assignee or matching pre-assignment receipt".to_string(),
+        ));
+    };
+    let spawn_queue = crate::store::open_spawn_queue_store(cas_root).map_err(|error| {
+        format!("spawn queue open failed while resolving pre-assignment: {error}")
+    })?;
+    let worker_name = spawn_queue
+        .recent_spawn_lifecycle(factory_session, AUTO_UNBLOCK_SPAWN_RECEIPT_LIMIT)
+        .map_err(|error| {
+            format!("spawn receipt lookup failed while resolving pre-assignment: {error}")
+        })?
+        .into_iter()
+        .filter(|receipt| receipt.task_id.as_deref() == Some(task.id.as_str()))
+        .filter(|receipt| !receipt.state.is_terminal())
+        .find_map(|receipt| {
+            receipt
+                .worker_name
+                .filter(|name| !name.trim().is_empty())
+                .or_else(|| {
+                    (receipt.requested_names.len() == 1).then(|| receipt.requested_names[0].clone())
+                })
+        });
+    Ok(match worker_name {
+        Some(worker_name) => AutoUnblockWorkerTarget::Worker(worker_name),
+        None => AutoUnblockWorkerTarget::Skipped(
+            "no live assignee or matching pre-assignment receipt".to_string(),
+        ),
+    })
+}
+
+/// Queue the synthetic worker wake emitted by the blocked→open transition.
+///
+/// This deliberately uses the same prompt queue consumed by
+/// `coordination action=message`, with `urgent = false`; the daemon therefore
+/// applies its ordinary idle-gate PTY nudge. The dedupe key is scoped to the
+/// task, worker, blocker, and post-update occurrence, so a replay cannot add a
+/// second prompt while a later unblock cycle can still wake the same worker.
+pub(crate) fn queue_auto_unblock_worker_wake(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    blocker_id: &str,
+    occurrence_id: &str,
+) -> Result<AutoUnblockWakeResult, String> {
+    let target = auto_unblock_worker_target(cas_root, task)?;
+    let base_key = format!(
+        "task-unblocked:{}:{}:{}",
+        task.id, blocker_id, occurrence_id
+    );
+    let (worker_name, prompt_id, dedupe_key) = match target {
+        AutoUnblockWorkerTarget::Skipped(reason) => {
+            let marker = format!("auto-unblock-wake-skip:{base_key}");
+            let timestamp = Utc::now().format("%Y-%m-%d %H:%M");
+            let note =
+                format!("[{timestamp}] Auto-unblock wake skipped: {reason}. (marker={marker})");
+            append_auto_unblock_wake_note(cas_root, &task.id, &marker, &note)?;
+            return Ok(AutoUnblockWakeResult::Skipped { reason });
+        }
+        AutoUnblockWorkerTarget::Worker(worker_name) => {
+            let dedupe_key = format!("{base_key}:worker:{worker_name}");
+            let prompt = format!(
+                "Task {} is now unblocked (blocker {} closed): run task start id={}",
+                task.id, blocker_id, task.id
+            );
+            let summary = format!("Task unblocked: {}", task.id);
+            let factory_session = std::env::var("CAS_FACTORY_SESSION")
+                .ok()
+                .filter(|session| !session.trim().is_empty());
+            let queue = crate::store::open_prompt_queue_store(cas_root).map_err(|error| {
+                format!("prompt queue open failed for auto-unblock wake: {error}")
+            })?;
+            let result = queue
+                .enqueue_idempotent(
+                    "supervisor",
+                    &worker_name,
+                    &prompt,
+                    factory_session.as_deref(),
+                    Some(&summary),
+                    Some(cas_store::NotificationPriority::Normal),
+                    &dedupe_key,
+                )
+                .map_err(|error| format!("auto-unblock worker wake enqueue failed: {error}"))?;
+            let prompt_id = match result {
+                cas_store::EnqueueIdempotentResult::Created(id)
+                | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+            };
+            crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(cas_root);
+            (worker_name, prompt_id, dedupe_key)
+        }
+    };
+
+    let marker = format!("auto-unblock-wake:{dedupe_key}");
+    let timestamp = Utc::now().format("%Y-%m-%d %H:%M");
+    let note = format!(
+        "[{timestamp}] Auto-unblock wake queued for worker '{worker_name}' (prompt_id={prompt_id}): Task {} is now unblocked (blocker {blocker_id} closed): run task start id={} (dedupe_key={dedupe_key}; marker={marker}).",
+        task.id, task.id
+    );
+    append_auto_unblock_wake_note(cas_root, &task.id, &marker, &note)?;
+    Ok(AutoUnblockWakeResult::Queued {
+        worker_name,
+        prompt_id,
+        dedupe_key,
+    })
 }
 
 /// Truthful repair guidance after task mutation succeeded but lifecycle push failed.
@@ -819,10 +1006,10 @@ mod tests {
     use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_RECOVERY;
     use crate::test_support::TestEnvGuard;
     use cas_store::{
-        PromptQueueStore, SqliteAgentStore, SqlitePromptQueueStore, SqliteSupervisorQueueStore,
-        SupervisorQueueStore,
+        PromptQueueStore, SpawnQueueStore, SqliteAgentStore, SqlitePromptQueueStore,
+        SqliteSpawnQueueStore, SqliteSupervisorQueueStore, SupervisorQueueStore, TaskStore,
     };
-    use cas_types::{Agent, AgentRole, AgentStatus};
+    use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
     use tempfile::TempDir;
 
     // cas-acb4: `CAS_FACTORY_SESSION` mutations here go through `TestEnvGuard`,
@@ -957,6 +1144,166 @@ mod tests {
         assert!(!is_lifecycle_wake_source(&fyi));
         // The non-waking form must not be a prefix-match false positive.
         assert!(!is_lifecycle_wake_source("lifecycle:70"));
+    }
+
+    #[test]
+    fn auto_unblock_wakes_fresh_idle_assignee_once_and_records_note() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-auto-wake")]);
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut worker = agent_in_session(
+            "worker-auto-id",
+            "quiet-worker",
+            AgentRole::Worker,
+            "sess-auto-wake",
+        );
+        worker.status = AgentStatus::Idle;
+        agents.register(&worker).unwrap();
+
+        let task_store = cas_store::SqliteTaskStore::open(temp.path()).unwrap();
+        task_store.init().unwrap();
+        let mut task = Task::new("cas-auto-wake".into(), "Wake me after blocker close".into());
+        task.status = TaskStatus::Blocked;
+        task.assignee = Some("quiet-worker".into());
+        task_store.add(&task).unwrap();
+
+        let result = queue_auto_unblock_worker_wake(
+            temp.path(),
+            &task,
+            "cas-blocker",
+            "unblock-occurrence-1",
+        )
+        .unwrap();
+        assert!(matches!(result, AutoUnblockWakeResult::Queued { .. }));
+
+        // A repeated attempt represents a replay of the same unblock event;
+        // the idempotent queue row is the only prompt.
+        queue_auto_unblock_worker_wake(temp.path(), &task, "cas-blocker", "unblock-occurrence-1")
+            .unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, "supervisor");
+        assert_eq!(rows[0].target, "quiet-worker");
+        assert!(!rows[0].urgent);
+        assert_eq!(
+            rows[0].prompt,
+            "Task cas-auto-wake is now unblocked (blocker cas-blocker closed): run task start id=cas-auto-wake"
+        );
+        assert!(
+            task_store
+                .get("cas-auto-wake")
+                .unwrap()
+                .notes
+                .contains("Auto-unblock wake queued for worker 'quiet-worker'")
+        );
+    }
+
+    #[test]
+    fn auto_unblock_without_assignee_does_not_queue_a_message() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-auto-none")]);
+        let temp = TempDir::new().unwrap();
+        let task_store = cas_store::SqliteTaskStore::open(temp.path()).unwrap();
+        task_store.init().unwrap();
+        let mut task = Task::new("cas-auto-none".into(), "No worker yet".into());
+        task.status = TaskStatus::Blocked;
+        task_store.add(&task).unwrap();
+
+        let result = queue_auto_unblock_worker_wake(
+            temp.path(),
+            &task,
+            "cas-blocker",
+            "unblock-occurrence-none",
+        )
+        .unwrap();
+        assert!(matches!(result, AutoUnblockWakeResult::Skipped { .. }));
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert_eq!(queue.pending_count().unwrap(), 0);
+        assert!(task_store.get("cas-auto-none").unwrap().notes.contains(
+            "Auto-unblock wake skipped: no live assignee or matching pre-assignment receipt"
+        ));
+    }
+
+    #[test]
+    fn auto_unblock_stale_assignee_does_not_queue_a_message_and_records_note() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-auto-stale")]);
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut worker = agent_in_session(
+            "worker-stale-id",
+            "stale-worker",
+            AgentRole::Worker,
+            "sess-auto-stale",
+        );
+        worker.status = AgentStatus::Idle;
+        worker.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(301);
+        agents.register(&worker).unwrap();
+
+        let task_store = cas_store::SqliteTaskStore::open(temp.path()).unwrap();
+        task_store.init().unwrap();
+        let mut task = Task::new("cas-auto-stale".into(), "Stale worker".into());
+        task.status = TaskStatus::Blocked;
+        task.assignee = Some("stale-worker".into());
+        task_store.add(&task).unwrap();
+
+        let result = queue_auto_unblock_worker_wake(
+            temp.path(),
+            &task,
+            "cas-blocker",
+            "unblock-occurrence-stale",
+        )
+        .unwrap();
+        assert!(matches!(result, AutoUnblockWakeResult::Skipped { .. }));
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert_eq!(queue.pending_count().unwrap(), 0);
+        let notes = task_store.get("cas-auto-stale").unwrap().notes;
+        assert!(
+            notes.contains("stale-worker")
+                && notes.contains("no registered worker with a fresh heartbeat")
+        );
+    }
+
+    #[test]
+    fn auto_unblock_uses_named_spawn_receipt_when_task_is_unassigned() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-auto-preassign")]);
+        let temp = TempDir::new().unwrap();
+        let task_store = cas_store::SqliteTaskStore::open(temp.path()).unwrap();
+        task_store.init().unwrap();
+        let mut task = Task::new("cas-auto-preassign".into(), "Spawn receipt target".into());
+        task.status = TaskStatus::Blocked;
+        task_store.add(&task).unwrap();
+
+        let spawn_queue = SqliteSpawnQueueStore::open(temp.path()).unwrap();
+        spawn_queue.init().unwrap();
+        spawn_queue
+            .enqueue_spawn(
+                1,
+                &["spawned-worker".into()],
+                false,
+                None,
+                Some("sess-auto-preassign"),
+                Some("cas-auto-preassign"),
+            )
+            .unwrap();
+
+        let result = queue_auto_unblock_worker_wake(
+            temp.path(),
+            &task,
+            "cas-blocker",
+            "unblock-occurrence-preassign",
+        )
+        .unwrap();
+        assert!(matches!(result, AutoUnblockWakeResult::Queued { .. }));
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "spawned-worker");
     }
 
     /// cas-f02b end to end: parking a task as AwaitingMerge enqueues a

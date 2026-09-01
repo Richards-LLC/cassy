@@ -4557,6 +4557,41 @@ impl CasCore {
                         let dep_title = dependent_task.title.clone();
                         let occurrence =
                             super::supervisor_push::occurrence_from_updated_at(persisted_at);
+                        // GH #673: task_ready is also a worker wake. A lifecycle
+                        // relay to the supervisor is not enough for an idle PTY
+                        // worker, whose message delivery is the turn trigger.
+                        match super::supervisor_push::queue_auto_unblock_worker_wake(
+                            &self.cas_root,
+                            &dependent_task,
+                            &req.id,
+                            &occurrence,
+                        ) {
+                            Ok(super::supervisor_push::AutoUnblockWakeResult::Queued {
+                                worker_name,
+                                prompt_id,
+                                ..
+                            }) => tracing::info!(
+                                task_id = %dep_id,
+                                worker = %worker_name,
+                                prompt_id,
+                                blocker = %req.id,
+                                "cas-673: queued synthetic auto-unblock wake for worker"
+                            ),
+                            Ok(super::supervisor_push::AutoUnblockWakeResult::Skipped {
+                                reason,
+                            }) => tracing::debug!(
+                                task_id = %dep_id,
+                                blocker = %req.id,
+                                %reason,
+                                "cas-673: skipped synthetic auto-unblock wake"
+                            ),
+                            Err(error) => tracing::warn!(
+                                task_id = %dep_id,
+                                blocker = %req.id,
+                                %error,
+                                "cas-673: synthetic auto-unblock wake failed after task_ready"
+                            ),
+                        }
                         let actor = self
                             .get_agent_id()
                             .ok()

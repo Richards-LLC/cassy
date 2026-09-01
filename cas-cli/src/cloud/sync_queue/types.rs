@@ -19,6 +19,9 @@ pub enum EntityType {
     CommitLink,
     Agent,
     Worktree,
+    /// A task-to-task dependency edge. The cloud stores this as an opaque
+    /// blob because the local dependency table remains authoritative.
+    TaskDependency,
     /// A distilled project-knowledge page (T5). Local SQLite remains the
     /// source of truth; the cloud carries pages so teammates share them.
     KnowledgePage,
@@ -39,6 +42,7 @@ impl EntityType {
             EntityType::CommitLink => "commit_link",
             EntityType::Agent => "agent",
             EntityType::Worktree => "worktree",
+            EntityType::TaskDependency => "task_dependency",
             EntityType::KnowledgePage => "knowledge_page",
         }
     }
@@ -57,6 +61,7 @@ impl EntityType {
             "commit_link" => Some(EntityType::CommitLink),
             "agent" => Some(EntityType::Agent),
             "worktree" => Some(EntityType::Worktree),
+            "task_dependency" | "task_dependencies" => Some(EntityType::TaskDependency),
             "knowledge_page" => Some(EntityType::KnowledgePage),
             _ => None,
         }
@@ -77,6 +82,7 @@ impl EntityType {
             EntityType::CommitLink => "commit_links",
             EntityType::Agent => "agents",
             EntityType::Worktree => "worktrees",
+            EntityType::TaskDependency => "task_dependencies",
             EntityType::KnowledgePage => "knowledge_pages",
         }
     }
@@ -136,8 +142,10 @@ pub struct QueuedSync {
     pub payload: Option<String>,
     /// Team ID for team-scoped sync (None for personal sync)
     pub team_id: Option<String>,
-    /// Project identity targeted by a project-scoped delete. `None` preserves
-    /// the normal behavior of using the project performing the push.
+    /// Project identity targeted by a project-scoped operation. `None`
+    /// preserves the normal behavior of using the project performing the
+    /// push. Move deletes target the old owner; move upserts and later edits
+    /// to foreign-owned tasks target the new owner.
     pub project_id: Option<String>,
     /// When the item was queued
     pub created_at: DateTime<Utc>,
@@ -208,6 +216,7 @@ pub struct PendingByType {
     pub commit_links: Vec<QueuedSync>,
     pub agents: Vec<QueuedSync>,
     pub worktrees: Vec<QueuedSync>,
+    pub task_dependencies: Vec<QueuedSync>,
     pub knowledge_pages: Vec<QueuedSync>,
 }
 
@@ -225,6 +234,7 @@ impl PendingByType {
             && self.commit_links.is_empty()
             && self.agents.is_empty()
             && self.worktrees.is_empty()
+            && self.task_dependencies.is_empty()
             && self.knowledge_pages.is_empty()
     }
 
@@ -241,5 +251,6 @@ impl PendingByType {
             + self.commit_links.len()
             + self.agents.len()
             + self.worktrees.len()
+            + self.task_dependencies.len()
     }
 }

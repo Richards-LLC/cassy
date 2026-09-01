@@ -7,6 +7,51 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.9.0] - 2026-09-01
+
+### Added
+- Task dependency edges (epic→child, blocks, related, duplicate) sync to the
+  team cloud as a `task_dependencies` entity: enqueued on add/remove/epic
+  create, pushed in both envelopes, applied and deleted on pull, with dangling
+  edges parked instead of inserted.
+- Every pull/sync self-heals dependency edges: edges the cloud lacks are
+  re-pushed, edges the local store lacks are materialized, deletes in the same
+  envelope are honored, and a one-line "healed N edge(s)" summary appears only
+  when something changed (a second sync heals 0).
+- `spawn_workers` provisions the worker worktree inside the task's
+  `target_repo` (start point resolved there, worktree under that repo's
+  `.cas/worktrees/`) and fails fast with an explicit `cross-repo spawn:` message
+  when it cannot.
+- `cas update` runs the freshly installed binary's post-update hook after the
+  swap, so a stale running hub restarts on the same run even across a version
+  boundary.
+
+### Changed
+- One canonical project identity: git-remote and case variants of a project
+  slug resolve to the pinned slug for registration, push stamping, pull
+  ownership, dependency ownership and `purge-foreign`; `cas doctor` reports
+  rows still attributed to an alias and `cas cloud project --adopt-aliases`
+  rewrites them and re-pushes under the canonical identity.
+- Cloud push treats a last-write-wins skip as an acknowledgement, consumes
+  per-row outcomes/reasons when the server provides them (parking real
+  rejections without poisoning the batch), and requeues terminal
+  version-gated failures automatically once the client meets the server
+  minimum.
+- The PTY-timing test family uses bounded deadline polling instead of fixed
+  sleeps, ending the recurring merge-queue ejections.
+- Moving a task to another project keys the replacement upsert to the
+  destination project, so the old project no longer keeps a stale copy.
+- A task that becomes unblocked wakes its assigned worker with a start message
+  instead of waiting for the stall detector.
+- The worker MCP proxy allowlist uses one documented `<server>.<tool>` /
+  `<server>.*` format with alias normalization and live reload, denials name
+  the exact entry to add, and a missing stdio executable is reported as
+  `executable_missing` (also checked by `cas doctor`).
+- The sync queue collapses legacy duplicate rows during migration and upserts
+  on conflict, `cas cloud queue --retry --retry-reason <reason>` requeues only
+  matching parked rows, and `cas doctor` prints the exact counts blocking
+  `purge-foreign` with a runnable retry → push → purge remediation.
+
 ## [3.8.0] - 2026-09-01
 
 ### Added

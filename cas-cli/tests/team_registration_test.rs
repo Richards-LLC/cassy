@@ -384,6 +384,41 @@ async fn registration_adopts_the_server_resolved_existing_bucket() {
     );
 }
 
+/// A previously registered project may be returned in its git-remote spelling
+/// while this checkout has the server's short slug pinned. Registration must
+/// recognize the existing row without issuing a duplicate registration push.
+#[tokio::test]
+async fn alias_registration_project_list_remote_alias_is_owned() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(projects_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(project_list_body(
+            "https://GitHub.com/Richards-LLC/gabber-studio.git/",
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(team_push_path()))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let endpoint = server.uri();
+    let outcome = tokio::task::spawn_blocking(move || {
+        cas::cloud::TeamRegistration::new(&endpoint, "test-token", TEST_TEAM, "gabber-studio")
+            .with_pinned_canonical_id(Some("gabber-studio"))
+            .ensure()
+    })
+    .await
+    .unwrap()
+    .expect("a remote alias in the team project list must count as registered");
+
+    assert_eq!(outcome.project_uuid(), "project-uuid-1");
+    assert!(!outcome.newly_registered());
+}
+
 /// A divergent server response is an identity-resolution result, not evidence
 /// of a server-side defect. If its listed bucket disappears between the push
 /// and the verification GET, name the resolved id honestly for recovery.

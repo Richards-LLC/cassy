@@ -222,15 +222,24 @@ fn test_pending_by_type() {
         .enqueue(EntityType::Task, "t1", SyncOperation::Upsert, None)
         .unwrap();
     queue
+        .enqueue(
+            EntityType::TaskDependency,
+            "t1:t2:blocks",
+            SyncOperation::Upsert,
+            Some(r#"{"from_id":"t1","to_id":"t2","dep_type":"blocks"}"#),
+        )
+        .unwrap();
+    queue
         .enqueue(EntityType::Rule, "r1", SyncOperation::Delete, None)
         .unwrap();
 
     let by_type = queue.pending_by_type(10, 5).unwrap();
     assert_eq!(by_type.entries.len(), 2);
     assert_eq!(by_type.tasks.len(), 1);
+    assert_eq!(by_type.task_dependencies.len(), 1);
     assert_eq!(by_type.rules.len(), 1);
     assert_eq!(by_type.skills.len(), 0);
-    assert_eq!(by_type.total(), 4);
+    assert_eq!(by_type.total(), 5);
 }
 
 #[test]
@@ -549,6 +558,93 @@ fn test_retry_failed_requeues_without_erasing_diagnostic() {
     );
 }
 
+/// GH #652: migration must repair duplicate rows created before the unique
+/// identity index existed, retaining the newest payload for the next push.
+#[test]
+fn queue_migration_collapses_legacy_duplicate_personal_rows() {
+    use rusqlite::Connection;
+
+    let temp = TempDir::new().unwrap();
+    let db_path = temp.path().join("cas.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
+            INSERT INTO sync_queue
+                (entity_type, entity_id, operation, payload, team_id, created_at)
+            VALUES
+                ('entry', 'entry-duplicate', 'upsert', '{"v":1}', NULL, '2026-08-20T00:00:00Z'),
+                ('entry', 'entry-duplicate', 'upsert', '{"v":2}', '', '2026-08-21T00:00:00Z');
+            "#,
+        )
+        .unwrap();
+    }
+
+    let queue = SyncQueue::open(temp.path()).unwrap();
+    queue.init().unwrap();
+
+    let rows = queue.pending(10, 5).unwrap();
+    assert_eq!(rows.len(), 1, "legacy duplicate identities must collapse");
+    assert_eq!(rows[0].payload.as_deref(), Some(r#"{"v":2}"#));
+}
+
+/// GH #652: an operator can retry only the parked rows whose diagnostic names
+/// the repaired server reason, leaving unrelated terminal rows untouched.
+#[test]
+fn retry_failed_by_reason_requeues_only_matching_terminal_rows() {
+    let (_temp, queue) = create_test_queue();
+    const MAX_RETRIES: i32 = 5;
+
+    for (id, reason) in [
+        ("project-mismatch", "project_mismatch"),
+        ("scope-mismatch", "scope_mismatch"),
+    ] {
+        queue
+            .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
+            .unwrap();
+        let row_id = queue
+            .pending(10, MAX_RETRIES)
+            .unwrap()
+            .iter()
+            .find(|row| row.entity_id == id)
+            .unwrap()
+            .id;
+        for _ in 0..MAX_RETRIES {
+            queue
+                .mark_failed(row_id, &format!("server reason={reason}"))
+                .unwrap();
+        }
+    }
+
+    assert_eq!(
+        queue
+            .retry_failed_for_reason("project_mismatch", MAX_RETRIES)
+            .unwrap(),
+        1
+    );
+    let pending = queue.pending(10, MAX_RETRIES).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].entity_id, "project-mismatch");
+    assert_eq!(
+        queue
+            .failed_for_entity_type(None, MAX_RETRIES, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 /// AC4: A row with team_id=NULL (inserted by an older code path that did not
 /// normalise the personal-queue sentinel) must coalesce with a new personal-
 /// queue enqueue (team_id='') instead of creating a duplicate.
@@ -661,6 +757,7 @@ fn project_id_migration_preserves_legacy_rows_and_allows_move_pair() {
             EntityType::Task,
             "move-after-migration",
             "project-a",
+            "project-b",
             r#"{"id":"move-after-migration","origin_project":"project-b"}"#,
             "team-123",
         )
@@ -670,6 +767,27 @@ fn project_id_migration_preserves_legacy_rows_and_allows_move_pair() {
     assert_eq!(moved[1].operation, SyncOperation::Delete);
     assert_eq!(moved[1].project_id.as_deref(), Some("project-a"));
     assert_eq!(moved[2].operation, SyncOperation::Upsert);
+    assert_eq!(moved[2].project_id.as_deref(), Some("project-b"));
+}
+
+#[test]
+fn enqueue_for_team_project_targets_a_foreign_owner() {
+    let (_temp, queue) = create_test_queue();
+
+    queue
+        .enqueue_for_team_project(
+            EntityType::Task,
+            "foreign-task",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"foreign-task"}"#),
+            "team-123",
+            Some("destination-project"),
+        )
+        .unwrap();
+
+    let pending = queue.pending_for_team("team-123", 10, 5).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].project_id.as_deref(), Some("destination-project"));
 }
 
 #[test]

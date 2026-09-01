@@ -4415,12 +4415,24 @@ mod tests {
     // is sent at the Pane/Mux layer (`Pane::break_turn`). These tests lock the
     // byte values against a real PTY so we never regress the payload.
 
-    // Run 32067496804 exhausted the former 20s ceiling in 20.061s while its
-    // saturated runner completed the full suite in 128.862s. Keep one shared,
-    // event-driven ceiling for both sides of this behavioral contrast: healthy
-    // runs still return on the first event, while runner starvation gets nearly
-    // a full suite's scheduling slack without introducing polling or retries.
-    const PTY_CONTROL_EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+    const PTY_CONTROL_EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const PTY_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+    async fn next_pty_event_until(
+        pty: &mut Pty,
+        deadline: tokio::time::Instant,
+    ) -> Option<PtyEvent> {
+        loop {
+            if let Some(event) = pty.try_recv() {
+                return Some(event);
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            tokio::time::sleep((deadline - now).min(PTY_EVENT_POLL_INTERVAL)).await;
+        }
+    }
 
     /// Esc (0x1b) is NOT a signal-generating control char (unlike 0x03 = INTR),
     /// so it traverses the PTY rather than killing the child. We send Esc then a
@@ -4450,32 +4462,31 @@ mod tests {
         // canonical-mode cat flushes the line back to us.
         pty.write(&[0x1b]).await.expect("write esc");
         pty.write(b"\r").await.expect("write newline");
+        // The PTY reader retains four trailing bytes while checking for a
+        // cursor-position response. A second, ordinary line makes the
+        // expected short echo observable without sleeping or closing cat.
+        pty.write(b"flush\r").await.expect("write reader flush");
 
-        // Wait for output events until a generous absolute deadline. This has
-        // no wall-clock SLA: loaded CI runners have exhausted both the former
-        // polling deadline and the first event-driven ceiling even though the
-        // PTY behavior was correct.
-        // Keep the ceiling large enough for runner contention, while returning
-        // immediately once the expected echo event arrives. Accept raw 0x1b OR
-        // the ECHOCTL rendering "^[". Also assert the child stays ALIVE (no
-        // Exited event) — Esc must not behave like Ctrl+C.
+        // Poll events to a bounded deadline, returning immediately once the
+        // expected echo arrives. Accept raw 0x1b OR the ECHOCTL rendering
+        // "^[". Also assert the child stays ALIVE (no Exited event) — Esc must
+        // not behave like Ctrl+C.
         let mut saw_esc = false;
         let mut exited = false;
         let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
         while !saw_esc {
-            match tokio::time::timeout_at(deadline, pty.recv()).await {
-                Ok(Some(PtyEvent::Output(data))) => {
+            match next_pty_event_until(&mut pty, deadline).await {
+                Some(PtyEvent::Output(data)) => {
                     let rendered_caret = data.windows(2).any(|w| w == [0x5e, 0x5b]); // "^["
                     if data.contains(&0x1b) || rendered_caret {
                         saw_esc = true;
                     }
                 }
-                Ok(Some(PtyEvent::Exited(_))) | Ok(Some(PtyEvent::Error(_))) => {
+                Some(PtyEvent::Exited(_)) | Some(PtyEvent::Error(_)) => {
                     exited = true;
                     break;
                 }
-                Ok(None) => break,
-                Err(_) => break, // absolute deadline elapsed
+                None => break, // absolute deadline elapsed
             }
         }
         pty.kill();
@@ -4511,24 +4522,19 @@ mod tests {
         pty.interrupt().await.expect("interrupt"); // writes 0x03
 
         // 0x03 = INTR → SIGINT → cat exits. Wait on events with the same
-        // generous ceiling as the Esc test: CI runner load is not a PTY
-        // behavior contract, and an event ends the test immediately.
-        let mut exited = false;
+        // bounded ceiling as the Esc test: an event ends the test immediately.
         let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
-        loop {
-            match tokio::time::timeout_at(deadline, pty.recv()).await {
-                Ok(Some(PtyEvent::Exited(_))) | Ok(Some(PtyEvent::Error(_))) => {
-                    exited = true;
-                    break;
+        let exited = loop {
+            match next_pty_event_until(&mut pty, deadline).await {
+                Some(PtyEvent::Exited(_)) | Some(PtyEvent::Error(_)) => {
+                    break true;
                 }
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    exited = true; // channel closed = process gone
-                    break;
+                Some(_) => {}
+                None => {
+                    break false; // no exit event before the deadline
                 }
-                Err(_) => break, // absolute deadline elapsed
             }
-        }
+        };
         pty.kill();
         assert!(
             exited,

@@ -2,7 +2,7 @@
 //!
 //! Enables syncing Cassy data with Cassy Cloud service.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -42,8 +42,7 @@ pub enum CloudCommands {
     #[command(subcommand)]
     Team(CloudTeamCommands),
     /// Configure the project canonical slug (overrides auto-derivation)
-    #[command(subcommand)]
-    Project(CloudProjectCommands),
+    Project(CloudProjectArgs),
     /// List team projects in cloud
     Projects(CloudProjectsArgs),
     /// Pull team memories for the current project
@@ -124,6 +123,25 @@ pub enum CloudTeamAutoCommands {
 pub enum CloudProjectCommands {
     /// Set the project canonical id (writes `.cas/config.toml [project] canonical_id`)
     Set(CloudProjectSetArgs),
+    /// Rewrite local task origins that are aliases of this project's identity
+    /// and enqueue canonical upserts for the next cloud sync.
+    AdoptAliases,
+}
+
+/// Arguments for `cas cloud project`.
+///
+/// The alias-repair action is deliberately a flag so doctor can print one
+/// copy/pasteable command that does not require a positional project id.
+#[derive(Args)]
+pub struct CloudProjectArgs {
+    /// Rewrite local task origins that are aliases of this project's identity
+    /// and enqueue canonical upserts for the next cloud sync.
+    #[arg(long)]
+    pub adopt_aliases: bool,
+
+    /// Optional project subcommand (`set` or the legacy `adopt-aliases` form).
+    #[command(subcommand)]
+    pub command: Option<CloudProjectCommands>,
 }
 
 #[derive(Parser)]
@@ -269,9 +287,15 @@ pub struct CloudQueueArgs {
     #[arg(long)]
     pub prune: Option<i64>,
 
-    /// Requeue all terminally failed items, preserving their last error
+    /// Requeue all terminally failed items, preserving their last error.
+    /// Combine with --retry-reason to target only diagnostics containing a
+    /// repaired server reason.
     #[arg(long, conflicts_with_all = ["prune", "clear"])]
     pub retry: bool,
+
+    /// Requeue only terminal items whose diagnostic contains this reason.
+    #[arg(long, alias = "reason", requires = "retry")]
+    pub retry_reason: Option<String>,
 
     /// Clear all items from the queue
     #[arg(long)]
@@ -298,7 +322,15 @@ pub fn execute(cmd: &CloudCommands, cli: &Cli, cas_root: &Path) -> anyhow::Resul
         CloudCommands::Pull(args) => execute_pull(args, cli, cas_root),
         CloudCommands::Sync(args) => execute_sync(args, cli, cas_root),
         CloudCommands::Team(cmd) => execute_team(cmd, cli, cas_root),
-        CloudCommands::Project(cmd) => execute_project(cmd, cli, cas_root),
+        CloudCommands::Project(args) => {
+            if args.adopt_aliases {
+                execute_project_adopt_aliases(cli, cas_root)
+            } else if let Some(cmd) = args.command.as_ref() {
+                execute_project(cmd, cli, cas_root)
+            } else {
+                anyhow::bail!("`cas cloud project` requires a subcommand or --adopt-aliases")
+            }
+        }
         CloudCommands::Projects(args) => execute_projects(args, cli),
         CloudCommands::TeamMemories(args) => execute_team_memories(args, cli, cas_root),
         CloudCommands::Unlink(args) => execute_unlink(args, cli, cas_root),
@@ -514,7 +546,7 @@ fn collect_unlink_records(
                         "scoped cloud pull returned `{key}` row without project_id; refusing unlink"
                     )
                 })?;
-            if row_project_id != project_id {
+            if !project_ids_match(row_project_id, project_id) {
                 anyhow::bail!(
                     "scoped cloud pull returned `{key}` row for foreign project `{row_project_id}`; refusing unlink"
                 );
@@ -959,6 +991,7 @@ pub fn execute_project(
 ) -> anyhow::Result<()> {
     match cmd {
         CloudProjectCommands::Set(args) => execute_project_set(args, cli, cas_root),
+        CloudProjectCommands::AdoptAliases => execute_project_adopt_aliases(cli, cas_root),
     }
 }
 
@@ -990,6 +1023,89 @@ fn execute_project_set(
         fmt.write_muted("  canonical_id: ")?;
         fmt.write_raw(&args.canonical_id)?;
         fmt.newline()?;
+    }
+    Ok(())
+}
+
+/// Rewrite task rows whose persisted `origin_project` is a remote/case alias
+/// of the current project. The change is local and queue-backed: every updated
+/// task receives both a personal upsert and, when team scope is active, the
+/// same team upsert that an ordinary task edit would produce.
+fn execute_project_adopt_aliases(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+    use crate::store::share_policy::eligible_for_team_task;
+
+    let project_id = crate::cloud::resolve_canonical_id(cas_root)
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine the current project identity"))?;
+    let task_store = crate::store::open_task_store_local(cas_root)?;
+    let queue = SyncQueue::open(cas_root)?;
+    queue.init()?;
+    let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root).ok();
+    let team_id = cloud_config.as_ref().and_then(CloudConfig::active_team_id);
+
+    let mut aliases = BTreeMap::<String, usize>::new();
+    let mut rewritten = 0usize;
+    let mut enqueued = 0usize;
+    for mut task in task_store.list(None)? {
+        let Some(origin) = task.origin_project.as_deref() else {
+            continue;
+        };
+        let Some(canonical_origin) =
+            crate::cloud::canonical_project_id_with_pin(origin, Some(&project_id))
+        else {
+            continue;
+        };
+        if canonical_origin != project_id || origin.trim() == project_id {
+            continue;
+        }
+
+        *aliases.entry(origin.to_string()).or_default() += 1;
+        task.origin_project = Some(project_id.clone());
+        task_store.update(&task)?;
+        let persisted = task_store.get(&task.id)?;
+        let payload = serde_json::to_string(&persisted)?;
+        queue.enqueue(
+            crate::cloud::EntityType::Task,
+            &persisted.id,
+            crate::cloud::SyncOperation::Upsert,
+            Some(&payload),
+        )?;
+        if let Some(team_id) = team_id.as_deref() && eligible_for_team_task(&persisted) {
+            queue.enqueue_for_team(
+                crate::cloud::EntityType::Task,
+                &persisted.id,
+                crate::cloud::SyncOperation::Upsert,
+                Some(&payload),
+                team_id,
+            )?;
+        }
+        rewritten += 1;
+        enqueued += 1;
+    }
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "ok",
+                "project_id": project_id,
+                "aliases": aliases,
+                "rewritten": rewritten,
+                "enqueued_upserts": enqueued,
+            })
+        );
+    } else {
+        let theme = ActiveTheme::default();
+        let mut out = io::stdout();
+        let mut fmt = Formatter::stdout(&mut out, theme);
+        fmt.newline()?;
+        fmt.write_raw(&format!(
+            "  Adopted {rewritten} alias row(s) for project {project_id}; enqueued {enqueued} upsert(s)."
+        ))?;
+        fmt.newline()?;
+        for (alias, count) in aliases {
+            fmt.write_raw(&format!("  {count} row(s) rewritten from alias {alias}"))?;
+            fmt.newline()?;
+        }
     }
     Ok(())
 }
@@ -1461,7 +1577,9 @@ fn resolve_project_slug_for_team_set(cas_root: &Path) -> SlugResolution {
     if let Some(slug) = crate::cloud::canonical_id_from_config_toml(cas_root) {
         return SlugResolution::FromConfig(slug);
     }
-    if let Some(slug) = crate::cloud::derive_canonical_id_from_git_remote(cas_root) {
+    if let Some(slug) = crate::cloud::derive_canonical_id_from_git_remote(cas_root)
+        .and_then(|remote| crate::cloud::canonical_project_id(&remote))
+    {
         if crate::cloud::set_canonical_id_in_config_toml(cas_root, &slug).is_ok() {
             return SlugResolution::FromGitRemote(slug);
         }
@@ -1511,11 +1629,13 @@ pub(crate) fn check_bucket_ambiguity(
     resolved_id: &str,
     projects: &[crate::cloud::TeamProject],
 ) -> Option<(String, u32, u32)> {
-    let resolved = projects.iter().find(|p| p.canonical_id == resolved_id)?;
+    let resolved = projects
+        .iter()
+        .find(|p| project_ids_match(&p.canonical_id, resolved_id))?;
 
     let richest = projects
         .iter()
-        .filter(|p| p.canonical_id != resolved_id)
+        .filter(|p| !project_ids_match(&p.canonical_id, resolved_id))
         .max_by_key(|p| p.memory_count)?;
 
     if richest.memory_count >= 50
@@ -2203,14 +2323,30 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
     // gets another chance to accept them.
     if args.retry {
         let max_retries = 5;
-        let retried = queue.retry_failed(max_retries)?;
+        let retried = match args.retry_reason.as_deref() {
+            Some(reason) => queue.retry_failed_for_reason(reason, max_retries)?,
+            None => queue.retry_failed(max_retries)?,
+        };
         if cli.json {
-            println!(r#"{{"status":"ok","retried":{retried}}}"#);
+            let mut output = serde_json::json!({
+                "status": "ok",
+                "retried": retried,
+            });
+            if let Some(reason) = &args.retry_reason {
+                output["reason"] = serde_json::Value::String(reason.clone());
+            }
+            println!("{output}");
         } else {
             let theme = ActiveTheme::default();
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, theme);
-            fmt.success(&format!("Requeued {retried} failed item(s)"))?;
+            let message = match &args.retry_reason {
+                Some(reason) => {
+                    format!("Requeued {retried} failed item(s) matching reason {reason:?}")
+                }
+                None => format!("Requeued {retried} failed item(s)"),
+            };
+            fmt.success(&message)?;
         }
         return Ok(());
     }
@@ -2359,8 +2495,8 @@ pub fn check_canonical_id_rehome(
     match stored {
         None => Ok(()), // First push — no prior slug on record
         Some(ref stored_id)
-            if crate::cloud::normalize_project_canonical_id(stored_id)
-                == crate::cloud::normalize_project_canonical_id(project_id) =>
+            if crate::cloud::canonical_project_id(stored_id)
+                == crate::cloud::canonical_project_id(project_id) =>
         {
             Ok(()) // Case/protocol drift only — unchanged, safe.
         }
@@ -3147,9 +3283,11 @@ pub fn ensure_team_project_registration(
         .ok()
         .and_then(|root| crate::cloud::normalized_git_remote_for_push(&root));
 
+    let pinned_canonical_id = crate::cloud::canonical_id_from_config_toml(cas_root);
     let registration =
         crate::cloud::TeamRegistration::new(&cloud_config.endpoint, token, &team_id, &canonical_id)
-            .with_git_remote(git_remote.as_deref());
+            .with_git_remote(git_remote.as_deref())
+            .with_pinned_canonical_id(pinned_canonical_id.as_deref());
 
     match registration.ensure() {
         Ok(outcome) => {
@@ -3894,7 +4032,7 @@ fn execute_team_memories(
     let project = projects_body
         .projects
         .iter()
-        .find(|p| p.canonical_id == canonical_id);
+        .find(|p| project_ids_match(&p.canonical_id, &canonical_id));
 
     let project_uuid = match project {
         Some(p) => p.id.clone(),
@@ -4212,6 +4350,10 @@ const PURGE_PROJECT_COLUMNS: &[&str] = &[
     "project_id",
 ];
 
+fn project_ids_match(candidate: &str, current: &str) -> bool {
+    crate::cloud::project_ids_match(candidate, current)
+}
+
 fn first_existing_project_column(
     conn: &rusqlite::Connection,
     table: &str,
@@ -4254,20 +4396,27 @@ fn attributed_rows(
     };
 
     let sql = format!(
-        "SELECT id, {label_sql} FROM {table}
+        "SELECT id, {label_sql}, {project_column} FROM {table}
          WHERE NULLIF(trim({project_column}), '') IS NOT NULL
-           AND trim({project_column}) <> ?1
          ORDER BY id"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mapped = stmt.query_map([current_project], |row| {
-        Ok(PurgeEntity {
-            kind,
-            id: row.get::<_, String>(0)?,
-            label: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-        })
+    let mapped = stmt.query_map([], |row| {
+        Ok((
+            PurgeEntity {
+                kind,
+                id: row.get::<_, String>(0)?,
+                label: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            },
+            row.get::<_, String>(2)?,
+        ))
     })?;
-    mapped.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    let rows = mapped.collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, stored_project)| !project_ids_match(stored_project, current_project))
+        .map(|(row, _)| row)
+        .collect())
 }
 
 fn count_proven_attributed_rules(
@@ -4283,12 +4432,19 @@ fn count_proven_attributed_rules(
         return Ok(0);
     }
     let sql = format!(
-        "SELECT COUNT(*) FROM rules
+        "SELECT {project_column} FROM rules
          WHERE lower(status) = 'proven'
-           AND NULLIF(trim({project_column}), '') IS NOT NULL
-           AND trim({project_column}) <> ?1"
+           AND NULLIF(trim({project_column}), '') IS NOT NULL"
     );
-    Ok(conn.query_row(&sql, [current_project], |row| row.get::<_, i64>(0))? as usize)
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut count = 0;
+    for row in rows {
+        if !project_ids_match(&row?, current_project) {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn count_purge_dependencies(
@@ -4572,7 +4728,9 @@ fn evaluate_purge_safety(
 /// decode) is propagated so the purge refuses loudly. Silently returning zero
 /// here would disable the unpushed-rows guard in a destructive path — the one
 /// place a reassuring wrong answer is most expensive.
-fn pending_content_pushes(conn: &rusqlite::Connection) -> anyhow::Result<Vec<(String, String)>> {
+pub(crate) fn pending_content_pushes(
+    conn: &rusqlite::Connection,
+) -> anyhow::Result<Vec<(String, String)>> {
     let mut stmt = match conn.prepare(
         "SELECT entity_type, entity_id FROM sync_queue
          WHERE lower(entity_type) IN ('entry', 'task', 'rule', 'skill')
@@ -4922,6 +5080,44 @@ mod team_cmd_tests {
     use tempfile::TempDir;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn queue_retry_reason_is_available_as_a_targeted_retry_flag() {
+        use clap::Parser;
+
+        let args = CloudQueueArgs::try_parse_from([
+            "queue",
+            "--retry",
+            "--retry-reason",
+            "project_mismatch",
+        ])
+        .unwrap();
+        assert!(args.retry);
+        assert_eq!(args.retry_reason.as_deref(), Some("project_mismatch"));
+
+        let alias =
+            CloudQueueArgs::try_parse_from(["queue", "--retry", "--reason", "timeout"]).unwrap();
+        assert_eq!(alias.retry_reason.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn alias_project_command_accepts_adopt_aliases_flag() {
+        let cli = crate::cli::try_parse_from_with_wordmark([
+            "cas",
+            "cloud",
+            "project",
+            "--adopt-aliases",
+        ])
+        .expect("the doctor-provided alias adoption command must parse");
+
+        match cli.command {
+            Some(crate::cli::Commands::Cloud(CloudCommands::Project(args))) => {
+                assert!(args.adopt_aliases);
+                assert!(args.command.is_none());
+            }
+            _ => panic!("unexpected command parsed"),
+        }
+    }
 
     #[test]
     fn active_team_backlog_is_reported_with_sync_command() {
@@ -5613,6 +5809,21 @@ mod team_cmd_tests {
     }
 
     #[test]
+    fn bucket_ambiguity_matches_project_aliases_case_insensitively() {
+        let projects = vec![
+            make_project("https://GitHub.com/Richards-LLC/gabber-studio.git", 20),
+            make_project("other-project", 1_000),
+        ];
+
+        let result = check_bucket_ambiguity("gabber-studio", &projects);
+        let (richer_id, resolved_count, richer_count) =
+            result.expect("remote project alias must match the resolved slug");
+        assert_eq!(richer_id, "other-project");
+        assert_eq!(resolved_count, 20);
+        assert_eq!(richer_count, 1_000);
+    }
+
+    #[test]
     fn bucket_ambiguity_no_warn_when_richest_below_threshold() {
         // All projects are small; the 50-memory guard suppresses the warning
         // so new teams don't see noise on early setup.
@@ -5664,6 +5875,8 @@ mod team_cmd_tests {
 #[cfg(test)]
 mod purge_foreign_safety_tests {
     use super::*;
+    use crate::store::init_cas_dir;
+    use crate::types::Task;
     use rusqlite::Connection;
     use tempfile::TempDir;
 
@@ -5725,6 +5938,87 @@ mod purge_foreign_safety_tests {
         assert!(set.skills.is_empty());
         assert_eq!(set.dependencies, 1);
         assert!(set.tasks.len() <= 5, "delete count cannot exceed rows present");
+    }
+
+    #[test]
+    fn alias_rows_are_not_classified_as_foreign() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        conn.execute(
+            "UPDATE tasks SET origin_project = 'gabber-studio' WHERE id IN ('own-1', 'own-2')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE tasks SET origin_project = ?1 WHERE id = 'foreign-1'",
+            ["git@GitHub.com:Richards-LLC/gabber-studio.git"],
+        )
+        .unwrap();
+
+        let set = collect_purge_delete_set(&conn, "gabber-studio").unwrap();
+
+        assert_eq!(
+            set.tasks.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+            vec!["foreign-2"]
+        );
+    }
+
+    #[test]
+    fn alias_adoption_rewrites_tasks_and_enqueues_canonical_upserts() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path().join("gabber-studio");
+        let cas_root = init_cas_dir(&project).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&cas_root, "gabber-studio").unwrap();
+
+        let task_store = crate::store::open_task_store_local(&cas_root).unwrap();
+        let mut alias_task = Task::new("alias-adopt-1".to_string(), "legacy alias".to_string());
+        alias_task.origin_project =
+            Some("https://GitHub.com/Richards-LLC/gabber-studio.git/".to_string());
+        task_store.add(&alias_task).unwrap();
+
+        let mut canonical_task = Task::new(
+            "canonical-adopt-1".to_string(),
+            "already canonical".to_string(),
+        );
+        canonical_task.origin_project = Some("gabber-studio".to_string());
+        task_store.add(&canonical_task).unwrap();
+
+        let cli = Cli {
+            json: true,
+            full: false,
+            verbose: false,
+            command: None,
+        };
+        execute_project_adopt_aliases(&cli, &cas_root).unwrap();
+
+        assert_eq!(
+            task_store
+                .get("alias-adopt-1")
+                .unwrap()
+                .origin_project
+                .as_deref(),
+            Some("gabber-studio")
+        );
+        assert_eq!(
+            task_store
+                .get("canonical-adopt-1")
+                .unwrap()
+                .origin_project
+                .as_deref(),
+            Some("gabber-studio")
+        );
+
+        let queue = SyncQueue::open(&cas_root).unwrap();
+        queue.init().unwrap();
+        let queued = queue.pending(10, 5).unwrap();
+        assert_eq!(queued.len(), 1, "only the rewritten alias should enqueue");
+        assert_eq!(queued[0].entity_id, "alias-adopt-1");
+        assert!(
+            queued[0]
+                .payload
+                .as_deref()
+                .is_some_and(|payload| payload.contains("\"origin_project\":\"gabber-studio\""))
+        );
     }
 
     #[test]

@@ -1,21 +1,26 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::cloud::syncer::{
     CloudSyncer, ConflictAction, ConflictResolution, PullResponse, SyncResult,
     TaskStatusTransition, TeamPullResponse, UpsertResult,
 };
-use crate::cloud::{EntityType, get_project_canonical_id};
+use crate::cloud::{
+    EntityType, SyncOperation, get_project_canonical_id,
+    project_ids_match as canonical_project_ids_match,
+};
 use crate::error::CasError;
 use crate::store::{
     CommitLinkStore, EventStore, FileChangeStore, PromptStore, RuleStore, SkillStore, SpecStore,
     Store, TaskStore,
 };
 use crate::types::{
-    CommitLink, Entry, Event, FileChange, Prompt, Rule, Session, Skill, Spec, Task, TaskStatus,
+    CommitLink, Dependency, DependencyType, Entry, Event, FileChange, Prompt, Rule, Session, Skill,
+    Spec, Task, TaskStatus,
 };
 
 /// Path of the cloud sync pull endpoint.
@@ -43,6 +48,313 @@ fn deserialize_pulled_entity<T: DeserializeOwned>(
         .to_owned();
     serde_json::from_value(raw)
         .map_err(|error| format!("{entity_type} deserialize error (id={id}): {error}"))
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskDependencyRecord {
+    from_id: String,
+    to_id: String,
+    dep_type: DependencyType,
+    /// Older cloud tombstones omit this field. It is unused for deletes, but
+    /// defaulting it lets those records still protect the local edge.
+    #[serde(default = "default_dependency_created_at")]
+    created_at: DateTime<Utc>,
+    #[serde(default)]
+    operation: Option<String>,
+    #[serde(default)]
+    deleted: bool,
+}
+
+fn default_dependency_created_at() -> DateTime<Utc> {
+    Utc::now()
+}
+
+impl TaskDependencyRecord {
+    fn is_delete(&self) -> bool {
+        self.deleted
+            || self
+                .operation
+                .as_deref()
+                .is_some_and(|operation| operation.eq_ignore_ascii_case("delete"))
+    }
+
+    fn dependency(self) -> Dependency {
+        Dependency {
+            from_id: self.from_id,
+            to_id: self.to_id,
+            dep_type: self.dep_type,
+            created_at: self.created_at,
+            created_by: None,
+        }
+    }
+}
+
+fn task_dependency_matches_project(raw: &serde_json::Value, current_project_id: &str) -> bool {
+    let project_field = raw
+        .get("project_canonical_id")
+        .or_else(|| raw.get("project_id"))
+        .or_else(|| raw.get("origin_project"));
+    let edge_id = raw
+        .get("id")
+        .or_else(|| raw.get("entity_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown>");
+    match project_field.and_then(serde_json::Value::as_str) {
+        Some(project) if project_ids_match(project, current_project_id) => true,
+        Some(project) => {
+            eprintln!(
+                "[Cassy sync] WARNING: skipping task dependency '{edge_id}' from foreign project '{project}' (expected '{current_project_id}')"
+            );
+            false
+        }
+        None => {
+            eprintln!(
+                "[Cassy sync] WARNING: parking task dependency '{edge_id}' — no project identity (expected '{current_project_id}')"
+            );
+            false
+        }
+    }
+}
+
+fn dependency_entity_id(dependency: &Dependency) -> String {
+    format!(
+        "{}:{}:{}",
+        dependency.from_id, dependency.to_id, dependency.dep_type
+    )
+}
+
+#[derive(Debug, Default)]
+struct RemoteDependencyState {
+    live: BTreeMap<String, Dependency>,
+    deleted: BTreeSet<String>,
+}
+
+fn remote_dependency_state(
+    raw_dependencies: &[serde_json::Value],
+    current_project_id: &str,
+) -> RemoteDependencyState {
+    let mut state = RemoteDependencyState::default();
+    for raw in raw_dependencies {
+        let project_matches = raw
+            .get("project_canonical_id")
+            .or_else(|| raw.get("project_id"))
+            .or_else(|| raw.get("origin_project"))
+            .and_then(serde_json::Value::as_str)
+            == Some(current_project_id);
+        if !project_matches {
+            continue;
+        }
+        let Ok(record) = serde_json::from_value::<TaskDependencyRecord>(raw.clone()) else {
+            continue;
+        };
+        let is_delete = record.is_delete();
+        let dependency = record.dependency();
+        let entity_id = dependency_entity_id(&dependency);
+        if is_delete {
+            state.live.remove(&entity_id);
+            state.deleted.insert(entity_id);
+        } else if !state.deleted.contains(&entity_id) {
+            state.live.insert(entity_id, dependency);
+        }
+    }
+    state
+}
+
+fn local_dependency_map(
+    task_store: &dyn TaskStore,
+) -> Result<BTreeMap<String, Dependency>, CasError> {
+    Ok(task_store
+        .list_dependencies(None)?
+        .into_iter()
+        .map(|dependency| (dependency_entity_id(&dependency), dependency))
+        .collect())
+}
+
+fn apply_task_dependencies(
+    raw_dependencies: &[serde_json::Value],
+    task_store: &dyn TaskStore,
+    current_project_id: &str,
+    result: &mut SyncResult,
+    deleted_dependency_ids: &BTreeSet<String>,
+) {
+    for raw in raw_dependencies {
+        if !task_dependency_matches_project(raw, current_project_id) {
+            continue;
+        }
+        let edge_id = raw
+            .get("id")
+            .or_else(|| raw.get("entity_id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<unknown>")
+            .to_owned();
+        let record: TaskDependencyRecord = match serde_json::from_value(raw.clone()) {
+            Ok(record) => record,
+            Err(error) => {
+                result.errors.push(format!(
+                    "task dependency deserialize error (id={edge_id}): {error}"
+                ));
+                continue;
+            }
+        };
+        let is_delete = record.is_delete();
+        let dependency = record.dependency();
+        let dependency_id = dependency_entity_id(&dependency);
+        if is_delete {
+            if let Err(error) = task_store.remove_dependency_of_type(
+                &dependency.from_id,
+                &dependency.to_id,
+                dependency.dep_type,
+            ) {
+                result.errors.push(format!(
+                    "Task dependency delete error ({}:{}): {error}",
+                    dependency.from_id, dependency.to_id
+                ));
+            }
+            continue;
+        }
+
+        // A delete tombstone wins for the whole response, regardless of wire
+        // ordering. This prevents a stale upsert in the same envelope from
+        // recreating an edge just removed by the user.
+        if deleted_dependency_ids.contains(&dependency_id) {
+            continue;
+        }
+
+        let from_exists = task_store.get(&dependency.from_id).is_ok();
+        let to_exists = task_store.get(&dependency.to_id).is_ok();
+        if !from_exists || !to_exists {
+            tracing::warn!(
+                from_id = %dependency.from_id,
+                to_id = %dependency.to_id,
+                dep_type = %dependency.dep_type,
+                "Parking dangling task dependency from cloud pull because one or both tasks are absent locally"
+            );
+            continue;
+        }
+
+        if let Err(error) = task_store.add_dependency(&dependency) {
+            result.errors.push(format!(
+                "Task dependency upsert error ({}:{}): {error}",
+                dependency.from_id, dependency.to_id
+            ));
+        } else {
+            result.pulled_task_dependencies += 1;
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DependencyHealReport {
+    to_cloud: usize,
+    from_cloud: usize,
+}
+
+impl CloudSyncer {
+    /// Apply the endpoint's dependency envelope, then reconcile the complete
+    /// local edge set against it. An omitted field is handled by the caller as
+    /// an older endpoint response and intentionally skips healing.
+    fn apply_and_heal_task_dependencies(
+        &self,
+        raw_dependencies: Vec<serde_json::Value>,
+        task_store: &dyn TaskStore,
+        current_project_id: &str,
+        team_id: Option<&str>,
+        result: &mut SyncResult,
+    ) -> Result<DependencyHealReport, CasError> {
+        let local_before = local_dependency_map(task_store)?;
+        let remote = remote_dependency_state(&raw_dependencies, current_project_id);
+
+        apply_task_dependencies(
+            &raw_dependencies,
+            task_store,
+            current_project_id,
+            result,
+            &remote.deleted,
+        );
+
+        let local_after = local_dependency_map(task_store)?;
+        let from_cloud = remote
+            .live
+            .keys()
+            .filter(|entity_id| {
+                !local_before.contains_key(*entity_id) && local_after.contains_key(*entity_id)
+            })
+            .count();
+
+        // Existing queue state is authoritative for idempotency. In
+        // particular, a pending delete must never be replaced by this
+        // best-effort reconciliation when the deployed endpoint cannot yet
+        // provide deletion tombstones.
+        let pending = match team_id {
+            Some(team_id) => self.queue.pending_for_team(team_id, usize::MAX, i32::MAX)?,
+            None => self.queue.pending_for_entity_type(
+                Some(EntityType::TaskDependency),
+                usize::MAX,
+                i32::MAX,
+            )?,
+        };
+        let pending_operations = pending
+            .into_iter()
+            .map(|item| (item.entity_id, item.operation))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut to_cloud = 0;
+        for (entity_id, dependency) in local_after {
+            // The currently deployed endpoint has no deletion tombstone feed,
+            // so an omitted edge is indistinguishable from a cloud-missing
+            // edge. Explicit tombstones (when supplied) and pending local
+            // deletes are protected above; until the feed ships, this is the
+            // documented safe degradation for that ambiguity.
+            if remote.live.contains_key(&entity_id) || remote.deleted.contains(&entity_id) {
+                continue;
+            }
+            if pending_operations.contains_key(&entity_id) {
+                continue;
+            }
+
+            let payload = serde_json::json!({
+                "from_id": dependency.from_id,
+                "to_id": dependency.to_id,
+                "dep_type": dependency.dep_type.to_string(),
+                "created_at": dependency.created_at,
+                "origin_project": current_project_id,
+            });
+            let payload = serde_json::to_string(&payload).map_err(|error| {
+                CasError::Other(format!(
+                    "Could not serialize healed task dependency: {error}"
+                ))
+            })?;
+            match team_id {
+                Some(team_id) => self.queue.enqueue_for_team(
+                    EntityType::TaskDependency,
+                    &entity_id,
+                    SyncOperation::Upsert,
+                    Some(&payload),
+                    team_id,
+                )?,
+                None => self.queue.enqueue(
+                    EntityType::TaskDependency,
+                    &entity_id,
+                    SyncOperation::Upsert,
+                    Some(&payload),
+                )?,
+            }
+            to_cloud += 1;
+        }
+
+        Ok(DependencyHealReport {
+            to_cloud,
+            from_cloud,
+        })
+    }
+
+    fn record_dependency_heal(result: &mut SyncResult, report: DependencyHealReport) {
+        result.healed_task_dependencies_to_cloud += report.to_cloud;
+        result.healed_task_dependencies_from_cloud += report.from_cloud;
+        if let Some(summary) = result.dependency_heal_summary() {
+            eprintln!("{summary}");
+        }
+    }
 }
 
 /// Read the cloud mutation timestamp carried by a team-pull entry.
@@ -209,9 +521,9 @@ pub(crate) fn build_scoped_pull_url_with(
 /// so both directions of the sync client apply *one* definition of "is this
 /// row mine", rather than a second implementation that can drift from this one.
 ///
-/// The equality is deliberately byte-exact — see the protocol invariant in
-/// `docs/`/ARCHITECTURE and `canonical_id_equality_is_byte_exact_by_protocol`
-/// below. Normalizing here would silently merge two distinct projects.
+/// Project identities are compared through the canonical cloud normalizer so
+/// a legacy remote-shaped row can match an explicit bare-slug pin. Values that
+/// normalize to different host/org/repository identities remain foreign.
 pub(crate) fn entity_matches_project(
     raw: &serde_json::Value,
     current_project_id: &str,
@@ -245,7 +557,7 @@ pub(crate) fn entity_matches_project(
             false
         }
         Some(serde_json::Value::String(s)) => {
-            if s == current_project_id {
+            if project_ids_match(s, current_project_id) {
                 true
             } else {
                 eprintln!(
@@ -264,6 +576,10 @@ pub(crate) fn entity_matches_project(
             false
         }
     }
+}
+
+fn project_ids_match(candidate: &str, current: &str) -> bool {
+    canonical_project_ids_match(candidate, current)
 }
 
 fn task_wire_id(raw: &serde_json::Value) -> Option<&str> {
@@ -287,8 +603,9 @@ fn task_wire_cloud_project<'a>(raw: &'a serde_json::Value, requested_project: &'
 }
 
 fn task_wire_is_owner(raw: &serde_json::Value, requested_project: &str) -> bool {
-    task_wire_origin_project(raw)
-        .is_some_and(|origin| origin == task_wire_cloud_project(raw, requested_project))
+    task_wire_origin_project(raw).is_some_and(|origin| {
+        project_ids_match(origin, task_wire_cloud_project(raw, requested_project))
+    })
 }
 
 fn task_wire_updated_at(raw: &serde_json::Value) -> Option<DateTime<Utc>> {
@@ -598,7 +915,14 @@ impl CloudSyncer {
         source: &str,
     ) -> Result<UpsertResult, CasError> {
         if let Ok(local) = store.get(&task.id) {
-            let origins_differ = local.origin_project != task.origin_project;
+            let origins_differ = match (
+                local.origin_project.as_deref(),
+                task.origin_project.as_deref(),
+            ) {
+                (Some(local), Some(incoming)) => !project_ids_match(local, incoming),
+                (None, None) => false,
+                _ => true,
+            };
             if incoming_is_owner && origins_differ {
                 return self.upsert_owner_task(store, task, sync_id, source);
             }
@@ -834,8 +1158,10 @@ impl CloudSyncer {
             if remote_task.origin_project.is_none() {
                 remote_task.origin_project = Some(current_project_id.to_string());
             }
-            let incoming_is_owner =
-                remote_task.origin_project.as_deref() == Some(current_project_id);
+            let incoming_is_owner = remote_task
+                .origin_project
+                .as_deref()
+                .is_some_and(|origin| project_ids_match(origin, &current_project_id));
             let previous_status = task_store.get(&remote_task.id).ok().map(|task| task.status);
             let task_outcome = if web_close {
                 reconcile_web_close(
@@ -874,6 +1200,21 @@ impl CloudSyncer {
                     result.errors.push(format!("Task error: {e}"));
                 }
             }
+        }
+
+        // Dependencies are applied after tasks so a fresh pull can materialize
+        // an edge whose endpoints arrived in the same envelope. A response
+        // without this optional field predates dependency healing, so it is
+        // left untouched until the endpoint supports the collection.
+        if let Some(raw_dependencies) = body.task_dependencies {
+            let report = self.apply_and_heal_task_dependencies(
+                raw_dependencies,
+                task_store,
+                current_project_id,
+                None,
+                &mut result,
+            )?;
+            Self::record_dependency_heal(&mut result, report);
         }
 
         // Process rules
@@ -1068,7 +1409,10 @@ impl CloudSyncer {
         // fetched and rejected forever. Foreign/malformed rows never reach
         // `conflicts_resolved`, so the GH #192 empty/wrong-bucket safeguard
         // remains intact.
-        if (had_prior_watermark || result.total_pulled() > 0 || result.conflicts_resolved > 0)
+        if (had_prior_watermark
+            || result.total_pulled() > 0
+            || result.conflicts_resolved > 0
+            || result.healed_task_dependencies_to_cloud > 0)
             && let Some(pulled_at) = body.pulled_at
         {
             let _ = self.queue.set_metadata("last_pull_at", &pulled_at);
@@ -1547,6 +1891,8 @@ impl CloudSyncer {
                 + team_push_result.pushed_commit_links,
             pushed_agents: push_result.pushed_agents + team_push_result.pushed_agents,
             pushed_worktrees: push_result.pushed_worktrees + team_push_result.pushed_worktrees,
+            pushed_task_dependencies: push_result.pushed_task_dependencies
+                + team_push_result.pushed_task_dependencies,
             pulled_entries: pull_result.pulled_entries,
             pulled_tasks: pull_result.pulled_tasks,
             pulled_rules: pull_result.pulled_rules,
@@ -1556,6 +1902,9 @@ impl CloudSyncer {
             pulled_prompts: pull_result.pulled_prompts,
             pulled_file_changes: pull_result.pulled_file_changes,
             pulled_commit_links: pull_result.pulled_commit_links,
+            pulled_task_dependencies: pull_result.pulled_task_dependencies,
+            healed_task_dependencies_to_cloud: pull_result.healed_task_dependencies_to_cloud,
+            healed_task_dependencies_from_cloud: pull_result.healed_task_dependencies_from_cloud,
             task_status_transitions: pull_result.task_status_transitions,
             conflicts_resolved: pull_result.conflicts_resolved,
             errors: [
@@ -1718,8 +2067,11 @@ impl CloudSyncer {
             if remote_task.origin_project.is_none() {
                 remote_task.origin_project = Some(current_project_id.to_string());
             }
-            let incoming_is_owner =
-                wire_is_owner || remote_task.origin_project.as_deref() == Some(current_project_id);
+            let incoming_is_owner = wire_is_owner
+                || remote_task
+                    .origin_project
+                    .as_deref()
+                    .is_some_and(|origin| project_ids_match(origin, current_project_id));
             let previous_status = task_store.get(&remote_task.id).ok().map(|task| task.status);
             match self.upsert_task_with_owner_preference(
                 task_store,
@@ -1748,6 +2100,21 @@ impl CloudSyncer {
                     result.errors.push(format!("Task error: {e}"));
                 }
             }
+        }
+
+        // Dependencies are applied after tasks; missing endpoints are parked
+        // with a warning instead of creating dangling local rows. A response
+        // without this optional field predates dependency healing, so it is
+        // left untouched until the endpoint supports the collection.
+        if let Some(raw_dependencies) = body.task_dependencies {
+            let report = self.apply_and_heal_task_dependencies(
+                raw_dependencies,
+                task_store,
+                current_project_id,
+                Some(team_id),
+                &mut result,
+            )?;
+            Self::record_dependency_heal(&mut result, report);
         }
 
         // Process rules
@@ -1823,7 +2190,7 @@ mod tests {
     use super::{
         PROPOSAL_PROVENANCE_BEGIN, PROPOSAL_PROVENANCE_END, PULL_PATH,
         build_scoped_pull_url_with, deserialize_pulled_entity, entity_matches_project,
-        render_task_proposal_provenance,
+        render_task_proposal_provenance, task_dependency_matches_project,
     };
     use crate::types::{Entry, Task};
     use serde_json::json;
@@ -2097,58 +2464,54 @@ mod tests {
         ));
     }
 
-    /// PROTOCOL INVARIANT — do not "fix" this test by making the comparison
-    /// case-insensitive or otherwise normalizing.
-    ///
-    /// Canonical-id equality is byte-exact on BOTH sides of the wire, by
-    /// agreement with the server. Two consequences the next reader needs:
-    ///
-    /// 1. **Normalizing here would be a data-merge, not a convenience.**
-    ///    `Accounting` and `accounting` are two distinct projects as far as
-    ///    every stored row is concerned; folding them together would
-    ///    cross-contaminate them permanently and unattributably.
-    /// 2. **This is the SECOND line of defence, not the first.** The server
-    ///    filters on the id the client SENDS and echoes the stored column, so
-    ///    an id divergence does not present here as a rejected row — the
-    ///    client receives an *empty envelope*, indefinitely, with no warning
-    ///    on either side. Silent starvation, not contamination. If you are
-    ///    debugging "sync returns nothing", suspect an id mismatch upstream of
-    ///    this function rather than assuming this check is dropping rows.
-    ///
-    /// The remedy for divergence is client-side pinning of the canonical id;
-    /// the server deliberately refused to normalize for exactly the reason in
-    /// (1).
     #[test]
-    fn canonical_id_equality_is_byte_exact_by_protocol() {
+    fn alias_project_row_is_owned_after_normalization() {
+        let entity = json!({
+            "id": "alias-row",
+            "project_canonical_id": "git@GitHub.com:Richards-LLC/gabber-studio.git"
+        });
+
+        assert!(entity_matches_project(
+            &entity,
+            "gabber-studio",
+            "task"
+        ));
+    }
+
+    #[test]
+    fn canonical_identity_pull_accepts_remote_alias_spellings() {
         let entity = json!({ "id": "t-1", "project_canonical_id": "github.com/Acme/Ledger" });
 
-        assert!(
-            entity_matches_project(&entity, "github.com/Acme/Ledger", "task"),
-            "exact match must be accepted"
-        );
-        // Case variants are DIFFERENT projects. Each of these must be refused.
+        assert!(entity_matches_project(&entity, "github.com/Acme/Ledger", "task"));
         for variant in [
             "github.com/acme/ledger",
             "github.com/ACME/LEDGER",
             "github.com/Acme/ledger",
+            " https://github.com/Acme/Ledger.git/ ",
         ] {
             assert!(
-                !entity_matches_project(&entity, variant, "task"),
-                "case variant '{variant}' must not match — normalizing here would \
-                 silently merge two distinct projects"
+                entity_matches_project(&entity, variant, "task"),
+                "alias '{variant}' must match the canonical project"
             );
         }
-        // Whitespace and trailing-separator variants are likewise distinct.
-        for variant in [
-            "github.com/Acme/Ledger ",
-            " github.com/Acme/Ledger",
-            "github.com/Acme/Ledger/",
-        ] {
-            assert!(
-                !entity_matches_project(&entity, variant, "task"),
-                "variant '{variant:?}' must not match: equality is byte-exact"
-            );
-        }
+        assert!(!entity_matches_project(
+            &entity,
+            "github.com/other/Ledger",
+            "task"
+        ));
+    }
+
+    #[test]
+    fn canonical_identity_pull_accepts_bare_alias_for_remote_scope_dependency() {
+        let dependency = json!({
+            "id": "alias-edge",
+            "project_id": "gabber-studio",
+        });
+
+        assert!(task_dependency_matches_project(
+            &dependency,
+            "github.com/richards-llc/gabber-studio"
+        ));
     }
 }
 

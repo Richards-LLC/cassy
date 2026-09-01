@@ -582,6 +582,9 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    #[cfg(feature = "mcp-proxy")]
+    checks.push(proxy_stdio_commands_check(&cas_root));
+
     // Check 6: Sync target
     let config = Config::load(&cas_root).unwrap_or_default();
     if config.sync.enabled {
@@ -825,6 +828,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         &cas_root,
         collect_local_root_identities(),
     ));
+    checks.extend(canonical_alias_checks(&cas_root));
 
     // Check 15: residual cross-project contamination from the cas-ed15 pull
     // leak (cas-fc6fa / GH #133). Read-only comparison of this project's task
@@ -835,6 +839,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         if args.foreign_rows {
             return output_foreign_rows_detail(report, cli);
         }
+        checks.push(cloud_queue_check(&cas_root));
         checks.push(foreign_rows_check(report.as_ref()));
     } else if args.foreign_rows {
         anyhow::bail!(
@@ -1196,7 +1201,8 @@ fn collect_local_root_identities() -> Result<Vec<crate::cloud::LocalRootIdentity
             let cas_root = project_root.join(".cas");
             let canonical_id = crate::cloud::resolve_canonical_id(&cas_root)?;
             Some(crate::cloud::LocalRootIdentity {
-                git_remote: crate::cloud::derive_canonical_id_from_git_remote(&cas_root),
+                git_remote: crate::cloud::derive_canonical_id_from_git_remote(&cas_root)
+                    .and_then(|remote| crate::cloud::canonical_project_id(&remote)),
                 project_root,
                 canonical_id,
             })
@@ -1228,7 +1234,7 @@ fn canonical_id_checks(
     // restores the old one, rather than letting sync quietly re-home.
     if source == crate::cloud::CanonicalIdSource::GitRemote
         && let Some(folder) = crate::cloud::canonical_id_from_cas_root(cas_root)
-        && folder != canonical_id
+        && crate::cloud::canonical_project_id(&folder).as_deref() != Some(canonical_id.as_str())
     {
         message.push_str(&format!(
             ". Earlier releases used the folder name `{folder}`; if that is where \
@@ -1278,6 +1284,94 @@ fn canonical_id_checks(
     }
 
     checks
+}
+
+/// Report persisted task origins that are equivalent to the current project
+/// but retain a legacy spelling. Doctor is intentionally report-only; users
+/// opt into the local rewrite with `cas cloud project --adopt-aliases`.
+fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
+    let Some(current_project) = crate::cloud::resolve_canonical_id(cas_root) else {
+        return Vec::new();
+    };
+    let db_path = cas_root.join("cas.db");
+    if !db_path.is_file() {
+        return Vec::new();
+    }
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(conn) => conn,
+        Err(error) => {
+            return vec![Check {
+                name: "project aliases".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("Could not inspect task project aliases: {error}"),
+            }];
+        }
+    };
+    let has_origin_project = conn
+        .prepare("PRAGMA table_info(tasks)")
+        .and_then(|mut stmt| {
+            let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            names.collect::<Result<Vec<_>, _>>()
+        })
+        .map(|columns| columns.iter().any(|column| column == "origin_project"))
+        .unwrap_or(false);
+    if !has_origin_project {
+        return Vec::new();
+    }
+
+    let mut stmt = match conn.prepare(
+        "SELECT origin_project FROM tasks
+         WHERE NULLIF(trim(origin_project), '') IS NOT NULL
+         ORDER BY origin_project",
+    ) {
+        Ok(stmt) => stmt,
+        Err(error) => {
+            return vec![Check {
+                name: "project aliases".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("Could not inspect task project aliases: {error}"),
+            }];
+        }
+    };
+    let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+        Ok(rows) => rows,
+        Err(error) => {
+            return vec![Check {
+                name: "project aliases".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("Could not inspect task project aliases: {error}"),
+            }];
+        }
+    };
+    let origins = rows.filter_map(Result::ok).collect::<Vec<_>>();
+    canonical_alias_counts(&origins, &current_project)
+        .into_iter()
+        .map(|(alias, count)| Check {
+            name: "project aliases".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "{count} rows use alias `{alias}` of this project; run `cas cloud project \
+                 --adopt-aliases` to rewrite and enqueue them"
+            ),
+        })
+        .collect()
+}
+
+fn canonical_alias_counts(origins: &[String], current_project: &str) -> BTreeMap<String, usize> {
+    origins
+        .iter()
+        .filter(|origin| {
+            crate::cloud::canonical_project_id_with_pin(origin, Some(current_project))
+                .is_some_and(|canonical| canonical == current_project)
+                && origin.trim() != current_project
+        })
+        .fold(BTreeMap::new(), |mut counts, origin| {
+            *counts.entry(origin.clone()).or_default() += 1;
+            counts
+        })
 }
 
 /// Observed state of the tree-sitter symbol index for the current project (cas-499c).
@@ -1949,6 +2043,123 @@ fn integration_checks(project_root: &Path) -> Vec<crate::cli::integrate::doctor:
     crate::cli::integrate::doctor::render_for_doctor(&reports)
 }
 
+/// Surface the exact content queue rows that keep `purge-foreign` fail-closed.
+/// The remediation is intentionally executable in order: reset terminal rows,
+/// push them, then preview the purge again. A count from the generic queue
+/// stats would include knowledge pages, so this reuses the purge's own content
+/// predicate instead.
+fn cloud_queue_check(cas_root: &Path) -> Check {
+    let db_path = cas_root.join("cas.db");
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(conn) => conn,
+        Err(error) => {
+            return Check {
+                name: "cloud sync queue".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot count queued content changes: {error}"),
+            };
+        }
+    };
+
+    let pending = match crate::cli::cloud::pending_content_pushes(&conn) {
+        Ok(pending) => pending,
+        Err(error) => {
+            return Check {
+                name: "cloud sync queue".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot count queued content changes: {error}"),
+            };
+        }
+    };
+
+    let mut by_type = BTreeMap::<String, usize>::new();
+    for (entity_type, _) in &pending {
+        *by_type.entry(entity_type.clone()).or_default() += 1;
+    }
+    let breakdown = by_type
+        .iter()
+        .map(|(entity_type, count)| format!("{entity_type}: {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remediation = "Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.";
+
+    if pending.is_empty() {
+        Check {
+            name: "cloud sync queue".to_string(),
+            status: CheckStatus::Ok,
+            message: format!("0 queued content change(s) block purge-foreign; {remediation}"),
+        }
+    } else {
+        Check {
+            name: "cloud sync queue".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "{} queued content change(s) block purge-foreign ({breakdown}); {remediation}",
+                pending.len()
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn proxy_stdio_commands_check(cas_root: &Path) -> Check {
+    let proxy_path = cas_root.join("proxy.toml");
+    let config = match cmcp_core::config::Config::load_merged(
+        proxy_path.exists().then_some(proxy_path.as_path()),
+    ) {
+        Ok(config) => config,
+        Err(error) => {
+            return Check {
+                name: "MCP stdio upstreams".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot validate registered stdio commands: {error}"),
+            };
+        }
+    };
+
+    let mut commands = config
+        .servers
+        .iter()
+        .filter_map(|(name, config)| match config {
+            cmcp_core::config::ServerConfig::Stdio { command, .. } => {
+                Some((name.as_str(), command.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    commands.sort_unstable_by_key(|(name, _)| *name);
+    let missing = commands
+        .iter()
+        .filter(|(_, command)| cmcp_core::resolve_stdio_executable(command).is_none())
+        .map(|(name, command)| format!("{name} = {command}"))
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        Check {
+            name: "MCP stdio upstreams".to_string(),
+            status: CheckStatus::Ok,
+            message: format!(
+                "{} registered command(s) resolve to executable files",
+                commands.len()
+            ),
+        }
+    } else {
+        Check {
+            name: "MCP stdio upstreams".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "{} of {} registered command(s) do not resolve: {}; repair proxy.toml before restarting cas serve",
+                missing.len(),
+                commands.len(),
+                missing.join(", ")
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2284,6 +2495,127 @@ mod tests {
     }
 
     #[test]
+    fn doctor_queue_check_names_retry_push_purge_and_exact_blocking_counts() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
+            INSERT INTO sync_queue
+                (id, entity_type, entity_id, operation, created_at, retry_count)
+            VALUES
+                (1, 'entry', 'entry-a', 'upsert', '2026-09-01T00:00:00Z', 0),
+                (2, 'entry', 'entry-b', 'upsert', '2026-09-01T00:00:01Z', 5),
+                (3, 'task', 'task-a', 'upsert', '2026-09-01T00:00:02Z', 0),
+                (4, 'knowledge_page', 'page-a', 'upsert', '2026-09-01T00:00:03Z', 0);
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("3 queued content change(s)"));
+        assert!(check.message.contains("entry: 2"));
+        assert!(check.message.contains("task: 1"));
+        let retry = check.message.find("cas cloud queue --retry").unwrap();
+        let push = check.message.find("cas cloud push").unwrap();
+        let purge = check
+            .message
+            .find("cas cloud purge-foreign --dry-run")
+            .unwrap();
+        assert!(
+            retry < push && push < purge,
+            "{message}",
+            message = check.message
+        );
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn doctor_proxy_stdio_check_names_missing_commands_and_passes_resolved_commands() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|_| {
+            let temp = TempDir::new().unwrap();
+            let cas_root = temp.path().join(".cas");
+            fs::create_dir_all(&cas_root).unwrap();
+            let executable = temp.path().join("stdio-server");
+            fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+            let stale_interpreter = temp.path().join("stale-interpreter");
+            fs::write(&stale_interpreter, "#!/missing/interpreter\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = fs::metadata(&executable).unwrap().permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&executable, permissions).unwrap();
+                let mut permissions = fs::metadata(&stale_interpreter).unwrap().permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&stale_interpreter, permissions).unwrap();
+            }
+
+            let mut config = cmcp_core::config::Config::default();
+            config.add_server(
+                "working".to_string(),
+                cmcp_core::config::ServerConfig::Stdio {
+                    command: executable.to_string_lossy().into_owned(),
+                    args: Vec::new(),
+                    env: BTreeMap::new().into_iter().collect(),
+                },
+            );
+            config.add_server(
+                "missing".to_string(),
+                cmcp_core::config::ServerConfig::Stdio {
+                    command: temp
+                        .path()
+                        .join("removed-interpreter")
+                        .to_string_lossy()
+                        .into_owned(),
+                    args: Vec::new(),
+                    env: BTreeMap::new().into_iter().collect(),
+                },
+            );
+            config.add_server(
+                "stale-interpreter".to_string(),
+                cmcp_core::config::ServerConfig::Stdio {
+                    command: stale_interpreter.to_string_lossy().into_owned(),
+                    args: Vec::new(),
+                    env: BTreeMap::new().into_iter().collect(),
+                },
+            );
+            config.save_to(&cas_root.join("proxy.toml")).unwrap();
+
+            let check = proxy_stdio_commands_check(&cas_root);
+            assert!(matches!(check.status, CheckStatus::Warning));
+            assert!(check.message.contains("missing"), "{}", check.message);
+            assert!(
+                check.message.contains("removed-interpreter"),
+                "{}",
+                check.message
+            );
+            assert!(
+                check.message.contains("stale-interpreter"),
+                "{}",
+                check.message
+            );
+            assert!(!check.message.contains("working ="), "{}", check.message);
+        });
+    }
+
+    #[test]
     fn foreign_rows_check_warns_when_a_peer_db_could_not_be_read_cas_fc6fa() {
         use crate::cli::foreign_rows::{ForeignRowReport, UnreadablePeer};
 
@@ -2332,6 +2664,26 @@ mod tests {
         assert!(msg.contains("folder name"), "got: {msg}");
         // No collision row when only one root is known.
         assert!(messages(&checks, "canonical id collision").is_empty());
+    }
+
+    #[test]
+    fn alias_doctor_counts_case_and_remote_spellings_but_not_owned_rows() {
+        let origins = vec![
+            "gabber-studio".to_string(),
+            "GABBER-STUDIO".to_string(),
+            "git@GitHub.com:Richards-LLC/gabber-studio.git".to_string(),
+            "github.com/other/pixel-hive".to_string(),
+        ];
+
+        let counts = canonical_alias_counts(&origins, "gabber-studio");
+
+        assert_eq!(counts.get("GABBER-STUDIO"), Some(&1));
+        assert_eq!(
+            counts.get("git@GitHub.com:Richards-LLC/gabber-studio.git"),
+            Some(&1)
+        );
+        assert!(!counts.contains_key("gabber-studio"));
+        assert!(!counts.contains_key("github.com/other/pixel-hive"));
     }
 
     #[test]

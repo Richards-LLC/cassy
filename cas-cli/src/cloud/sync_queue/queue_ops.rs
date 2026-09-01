@@ -63,7 +63,32 @@ impl SyncQueue {
         payload: Option<&str>,
         team_id: &str,
     ) -> Result<(), CasError> {
-        self.enqueue_with_team_project(entity_type, entity_id, operation, payload, team_id, None)
+        self.enqueue_for_team_project(entity_type, entity_id, operation, payload, team_id, None)
+    }
+
+    /// Enqueue a team operation targeted at a specific project identity.
+    ///
+    /// Ordinary writes leave `project_id` unset so the pusher's project is
+    /// used. Foreign-owned task replicas and project-move replacements set it
+    /// to the destination owner so their envelopes cannot recreate the row
+    /// under the pusher's project key.
+    pub fn enqueue_for_team_project(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        operation: SyncOperation,
+        payload: Option<&str>,
+        team_id: &str,
+        project_id: Option<&str>,
+    ) -> Result<(), CasError> {
+        self.enqueue_with_team_project(
+            entity_type,
+            entity_id,
+            operation,
+            payload,
+            team_id,
+            project_id,
+        )
     }
 
     fn enqueue_with_team(
@@ -123,6 +148,7 @@ impl SyncQueue {
         entity_type: EntityType,
         entity_id: &str,
         old_project_id: &str,
+        new_project_id: &str,
         payload: &str,
         team_id: &str,
     ) -> Result<(), CasError> {
@@ -155,16 +181,23 @@ impl SyncQueue {
         tx.execute(
             r#"
             INSERT INTO sync_queue (entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count)
-            VALUES (?1, ?2, 'upsert', ?3, ?4, NULL, ?5, 0)
+            VALUES (?1, ?2, 'upsert', ?3, ?4, ?5, ?6, 0)
             ON CONFLICT DO UPDATE SET
                 operation = excluded.operation,
                 payload = excluded.payload,
-                project_id = NULL,
+                project_id = excluded.project_id,
                 created_at = excluded.created_at,
                 retry_count = 0,
                 last_error = NULL
             "#,
-            params![entity_type.as_str(), entity_id, payload, team_id, upsert_time],
+            params![
+                entity_type.as_str(),
+                entity_id,
+                payload,
+                team_id,
+                new_project_id,
+                upsert_time,
+            ],
         )?;
 
         tx.commit()?;

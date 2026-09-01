@@ -8,6 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use clap::Args;
 
 use crate::builtins::{
@@ -184,12 +185,27 @@ pub struct UpdateArgs {
     /// every cloud-linked project.
     #[arg(long)]
     pub all_projects: bool,
+
+    /// Run the post-swap hook from a freshly installed binary.
+    #[arg(long = "post-swap", hide = true)]
+    pub post_swap: bool,
+
+    /// Version replaced by the post-swap invocation.
+    #[arg(long = "from", hide = true, requires = "post_swap")]
+    pub from: Option<String>,
 }
 
 pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     // Note: update command accepts Option<&Path> because it can run without an initialized Cassy
     // (e.g., binary update only, or checking for updates before init)
     let current_version = env!("CARGO_PKG_VERSION");
+
+    // A post-swap invocation is dispatched by the newly installed binary. It
+    // must terminate before any path that can download or install another
+    // binary, otherwise every update would recursively launch updates.
+    if args.post_swap {
+        return execute_post_swap(args, cli, current_version);
+    }
 
     // This is also the no-download entry point for a host which already has
     // the desired binary. It deliberately does the same complete sweep that a
@@ -1520,6 +1536,7 @@ fn check_for_updates(
 fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow::Result<String> {
     use self_update::Status;
     use self_update::backends::github::Update;
+    use self_update::update::ReleaseUpdate;
 
     let mut updater = Update::configure();
     updater
@@ -1539,6 +1556,10 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
     }
 
     let updater = updater.build()?;
+    // self_update resolves its install destination before the replacement.
+    // Keep that stable path: after a Linux rename swap, current_exe() can
+    // report the old process image as `/path/cas (deleted)`.
+    let installed_binary = strip_deleted_suffix(updater.bin_install_path());
 
     // Check what we're updating to
     let latest = updater.get_latest_release()?;
@@ -1575,6 +1596,14 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
 
     // Perform the update
     let status = updater.update()?;
+
+    if matches!(&status, Status::Updated(_)) {
+        if let Err(error) = run_post_swap_hook(&installed_binary, current_version, cli.json) {
+            eprintln!(
+                "Post-update hook unavailable ({error}); using in-process hub restart fallback"
+            );
+        }
+    }
 
     if cli.json {
         let (updated, version) = match &status {
@@ -1620,6 +1649,63 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
     };
 
     Ok(installed_version)
+}
+
+fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> anyhow::Result<()> {
+    // Keep the old version available to the internal protocol and future
+    // diagnostics without rendering it into the normal update receipt.
+    let _previous_version = args
+        .from
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("post-swap mode requires --from"))?;
+    super::hub::restart_stale_hub(current_version, cli)?;
+    Ok(())
+}
+
+fn build_post_swap_command(
+    installed_binary: &Path,
+    previous_version: &str,
+    json: bool,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(installed_binary);
+    command.args(["update", "--post-swap", "--from"]);
+    command.arg(previous_version);
+    if json {
+        command.arg("--json");
+    }
+    command
+}
+
+fn strip_deleted_suffix(path: std::path::PathBuf) -> std::path::PathBuf {
+    let Some(path_str) = path.to_str() else {
+        return path;
+    };
+    path_str
+        .strip_suffix(" (deleted)")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(path)
+}
+
+fn run_post_swap_hook(
+    installed_binary: &Path,
+    previous_version: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let status = build_post_swap_command(installed_binary, previous_version, json)
+        .status()
+        .with_context(|| {
+            format!(
+                "run post-update hook from installed binary {}",
+                installed_binary.display()
+            )
+        })?;
+    if !status.success() {
+        anyhow::bail!(
+            "post-update hook from {} exited with {status}",
+            installed_binary.display()
+        );
+    }
+    Ok(())
 }
 
 /// Try to get a GitHub auth token from `gh auth token` or GITHUB_TOKEN env var.

@@ -128,13 +128,12 @@ pub fn resolve_canonical_id_with_source(cas_root: &Path) -> Option<(String, Cano
         // from legacy bare-slug buckets because team pull matches verbatim.
         return Some((id, CanonicalIdSource::ConfigToml));
     }
-    if let Some(id) = derive_canonical_id_from_git_remote(cas_root)
-        .and_then(|id| normalize_project_canonical_id(&id))
+    if let Some(id) =
+        derive_canonical_id_from_git_remote(cas_root).and_then(|id| canonical_project_id(&id))
     {
         return Some((id, CanonicalIdSource::GitRemote));
     }
-    if let Some(id) =
-        canonical_id_from_cas_root(cas_root).and_then(|id| normalize_project_canonical_id(&id))
+    if let Some(id) = canonical_id_from_cas_root(cas_root).and_then(|id| canonical_project_id(&id))
     {
         return Some((id, CanonicalIdSource::FolderName));
     }
@@ -153,17 +152,19 @@ pub fn canonical_id_from_config_toml(cas_root: &Path) -> Option<String> {
         .get("project")?
         .get("canonical_id")?
         .as_str()
-        .and_then(normalize_project_canonical_id)
+        .and_then(canonical_project_id)
 }
 
-/// Normalize a project identity to the single wire form used by push and
-/// pull. Older releases preserved remote URL case in one path, lowercased it
-/// in another, and sometimes retained whitespace in a config pin. That made
-/// the same repository appear to be several cloud projects.
+/// Resolve one project identity to the single wire form used by registration,
+/// push, pull, and local ownership checks. Remote-shaped values are reduced to
+/// `host/owner/repository`; host, owner, and legacy bare slugs are folded to
+/// lowercase so URL, SSH, and server-slug spellings cannot fork a project.
 ///
-/// Bare server-assigned slugs remain valid pins; only their spelling is
-/// normalized. Remote-shaped values are first reduced to host/owner/repo.
-pub fn normalize_project_canonical_id(value: &str) -> Option<String> {
+/// This is deliberately the one-argument normalizer used at every cloud
+/// boundary. [`canonical_project_id_with_pin`] adds the explicit-pin alias
+/// rule for callers that are comparing a stored identity to the current
+/// project.
+pub fn canonical_project_id(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
@@ -172,6 +173,58 @@ pub fn normalize_project_canonical_id(value: &str) -> Option<String> {
         .or_else(|| normalize_git_remote_url(&trimmed.to_ascii_lowercase()))
         .unwrap_or_else(|| trimmed.to_string());
     Some(normalized.trim_matches('/').to_ascii_lowercase())
+}
+
+/// Normalize an identity while treating an explicit project pin as the
+/// authoritative alias target. A remote form whose repository name is the
+/// pinned bare slug is therefore represented by the pin,
+/// preserving the legacy server bucket instead of creating a remote-shaped
+/// sibling bucket.
+pub fn canonical_project_id_with_pin(value: &str, pinned_id: Option<&str>) -> Option<String> {
+    let normalized = canonical_project_id(value)?;
+    let Some(pin) = pinned_id.and_then(canonical_project_id) else {
+        return Some(normalized);
+    };
+
+    if normalized == pin || project_id_aliases(&normalized, &pin) {
+        Some(pin)
+    } else {
+        Some(normalized)
+    }
+}
+
+/// Compare two project identities after normalization, accepting the legacy
+/// bare-repository-name alias in either direction. This is intentionally
+/// separate from [`canonical_project_id_with_pin`]: a pin determines which
+/// spelling to emit, while ownership checks must recognize both spellings
+/// without changing the current project's selected identity.
+pub fn project_ids_match(candidate: &str, current: &str) -> bool {
+    let Some(candidate) = canonical_project_id(candidate) else {
+        return false;
+    };
+    let Some(current) = canonical_project_id(current) else {
+        return false;
+    };
+
+    candidate == current
+        || project_id_aliases(&candidate, &current)
+        || project_id_aliases(&current, &candidate)
+}
+
+/// Backwards-compatible name retained for cloud callers outside this module.
+/// New identity code should call [`canonical_project_id`] directly.
+pub fn normalize_project_canonical_id(value: &str) -> Option<String> {
+    canonical_project_id(value)
+}
+
+fn project_id_aliases(candidate: &str, pinned: &str) -> bool {
+    fn final_segment(value: &str) -> &str {
+        value.rsplit('/').next().unwrap_or(value)
+    }
+    let candidate_is_remote = candidate.matches('/').count() >= 2;
+    let pinned_is_remote = pinned.matches('/').count() >= 2;
+
+    candidate_is_remote && !pinned_is_remote && final_segment(candidate) == pinned
 }
 
 /// Write `[project] canonical_id = "<value>"` to `<cas_root>/config.toml`,
@@ -184,7 +237,7 @@ pub fn set_canonical_id_in_config_toml(
     cas_root: &Path,
     canonical_id: &str,
 ) -> Result<(), CasError> {
-    let canonical_id = normalize_project_canonical_id(canonical_id)
+    let canonical_id = canonical_project_id(canonical_id)
         .ok_or_else(|| CasError::Other("canonical project id must not be empty".to_string()))?;
     let toml_path = cas_root.join("config.toml");
 
@@ -264,8 +317,7 @@ pub fn derive_canonical_id_from_git_remote(cas_root: &Path) -> Option<String> {
 /// case for response comparison, while the cloud resolver treats remotes
 /// case-insensitively on the wire.
 pub fn normalized_git_remote_for_push(cas_root: &Path) -> Option<String> {
-    derive_canonical_id_from_git_remote(cas_root)
-        .and_then(|remote| normalize_project_canonical_id(&remote))
+    derive_canonical_id_from_git_remote(cas_root).and_then(|remote| canonical_project_id(&remote))
 }
 
 /// Normalize a git remote URL to `<host>/<owner>/<repo>` form.
@@ -303,11 +355,13 @@ pub fn normalize_git_remote_url(url: &str) -> Option<String> {
         return None;
     };
 
-    // Strip optional `.git` suffix.
-    let without_dot_git = without_ssh_user
+    // Strip optional trailing slash before `.git` so both `repo.git/` and
+    // `repo/` converge on the same identity. A second trim handles a slash
+    // after the suffix without making the accepted URL shapes order-sensitive.
+    let without_trailing_slash = without_ssh_user.trim_end_matches('/');
+    let without_dot_git = without_trailing_slash
         .strip_suffix(".git")
-        .unwrap_or(&without_ssh_user);
-    // Strip optional trailing slash for paranoia.
+        .unwrap_or(without_trailing_slash);
     let clean = without_dot_git.trim_end_matches('/');
 
     if clean.is_empty() {
@@ -345,13 +399,13 @@ pub fn should_adopt_canonical_id(
     if local.is_empty() || resp_remote.is_empty() || canonical.is_empty() {
         return None;
     }
-    if !local.eq_ignore_ascii_case(resp_remote) {
+    if canonical_project_id(local) != canonical_project_id(resp_remote) {
         return None;
     }
     if current_pin.is_some() {
         return None;
     }
-    normalize_project_canonical_id(canonical)
+    canonical_project_id(canonical)
 }
 
 /// Derive the canonical project ID from a `.cas` directory path.
@@ -2956,6 +3010,57 @@ mod tests {
             normalize_project_canonical_id("github.com/Richards-LLC/gabber-studio").as_deref(),
             Some("github.com/richards-llc/gabber-studio"),
         );
+    }
+
+    #[test]
+    fn canonical_identity_maps_remote_alias_to_explicit_slug_pin() {
+        for alias in [
+            "gabber-studio",
+            "git@GitHub.com:Richards-LLC/gabber-studio.git",
+            "https://github.com/richards-llc/gabber-studio/",
+        ] {
+            assert_eq!(
+                canonical_project_id_with_pin(alias, Some("gabber-studio")).as_deref(),
+                Some("gabber-studio"),
+                "alias {alias} must resolve to the explicit slug pin",
+            );
+        }
+        for alias in [
+            "pixel-hive",
+            "ssh://git@GitHub.com/Pixel-Hive/pixel-hive.git",
+        ] {
+            assert_eq!(
+                canonical_project_id_with_pin(alias, Some("pixel-hive")).as_deref(),
+                Some("pixel-hive"),
+                "alias {alias} must resolve to the explicit slug pin",
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_identity_keeps_different_repository_foreign_to_slug_pin() {
+        assert_eq!(
+            canonical_project_id_with_pin(
+                "git@github.com:someone-else/other-repo.git",
+                Some("gabber-studio"),
+            )
+            .as_deref(),
+            Some("github.com/someone-else/other-repo"),
+        );
+    }
+
+    #[test]
+    fn canonical_identity_matches_bare_alias_to_explicit_remote_pin() {
+        for alias in ["gabber-studio", "GABBER-STUDIO"] {
+            assert_eq!(
+                project_ids_match(
+                    alias,
+                    "https://GitHub.com/Richards-LLC/gabber-studio.git",
+                ),
+                true,
+                "alias {alias} must match the explicit remote pin",
+            );
+        }
     }
 
     #[test]

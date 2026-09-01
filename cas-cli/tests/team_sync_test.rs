@@ -72,6 +72,7 @@ fn seed_team_task_move(queue: &SyncQueue, task_id: &str) {
             EntityType::Task,
             task_id,
             "project-a",
+            "project-b",
             &format!(
                 r#"{{"id":"{task_id}","title":"moved","scope":"project","origin_project":"project-b"}}"#
             ),
@@ -120,6 +121,9 @@ async fn team_task_move_deletes_old_project_before_upserting_new_owner() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].method.as_str(), "DELETE");
     assert_eq!(requests[1].method.as_str(), "POST");
+    let payload = decode_gzip_json(&requests[1].body);
+    assert_eq!(payload["project_canonical_id"], "project-b");
+    assert_eq!(payload["tasks"][0]["origin_project"], "project-b");
     assert!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().is_empty());
 }
 
@@ -269,7 +273,7 @@ async fn team_push_drains_queue_when_team_configured() {
 }
 
 #[tokio::test]
-async fn team_push_nested_skip_response_becomes_visible_failed_queue_item() {
+async fn team_push_nested_skip_response_acknowledges_lww_row() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
@@ -280,7 +284,7 @@ async fn team_push_nested_skip_response_becomes_visible_failed_queue_item() {
             "canonical_id": "cas-src",
             "git_remote": "github.com/pippenz/cas"
         })))
-        .expect(5)
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -303,31 +307,15 @@ async fn team_push_nested_skip_response_becomes_visible_failed_queue_item() {
     .unwrap();
     let result = &results[0];
 
-    assert_eq!(result.pushed_entries, 0);
+    assert_eq!(result.pushed_entries, 1);
     assert!(
-        result
-            .errors
-            .iter()
-            .any(|error| error.contains("skipped 1")),
-        "skip must be surfaced: {:?}",
+        result.errors.is_empty(),
+        "aggregate LWW skip is an acknowledgement: {:?}",
         result.errors
     );
     assert_eq!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().len(), 0);
-    assert_eq!(queue.stats(5).unwrap().failed, 1);
-    let items = queue.list_all(10).unwrap();
-    assert!(
-        items[0]
-            .last_error
-            .as_deref()
-            .is_some_and(|diagnostic| diagnostic.contains("cloud skipped 1 of 1 team entries")),
-        "queue output must expose why this team row failed: {items:?}"
-    );
-    assert!(
-        items[0].last_error.as_deref().is_some_and(|diagnostic| {
-            diagnostic.contains("server response:") && diagnostic.contains("\"synced\"")
-        }),
-        "queue output must preserve the raw team server response: {items:?}"
-    );
+    assert_eq!(queue.stats(5).unwrap().failed, 0);
+    assert!(queue.list_all(10).unwrap().is_empty());
 }
 
 #[tokio::test]

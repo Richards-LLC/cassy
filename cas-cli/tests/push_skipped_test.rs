@@ -1,16 +1,8 @@
-//! Integration test for the cas-f645 client-side defense.
+//! Integration tests for the cas-2cce push response contract.
 //!
-//! When the cloud server's push route silently skips rows due to a
-//! cross-project `project_canonical_id` conflict (via Postgres
-//! `ON CONFLICT DO UPDATE ... WHERE false ... RETURNING`), the response
-//! carries a per-entity-type `skipped` count. The client must inspect that
-//! count, surface it as a push error, and advance the corresponding local
-//! queue rows toward the visible failed state instead of retrying them
-//! silently forever.
-//!
-//! This test exercises the full `CloudSyncer::push` path through a
-//! wiremock-backed `/api/sync/push` endpoint to lock that behavior in.
-//! Companion server-side change is tracked under cas-d656 / cas-0bdc.
+//! Aggregate-only `skipped` counts acknowledge local rows under the server's
+//! last-write-wins semantics. A response that identifies a row-level
+//! `rejected` outcome still parks that row with its actionable reason.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,12 +30,11 @@ fn entry_payload(id: &str) -> String {
     .to_string()
 }
 
-/// When the server reports `skipped > 0` for an entity type, the affected
-/// queue items must not be marked synced. Each explicit rejection consumes a
-/// retry, so a persistent refusal becomes a visible failed row instead of
-/// remaining pending forever.
+/// Aggregate-only skips are last-write-wins acknowledgements: the row is
+/// removed from the local queue, counted as pushed, and does not become an
+/// error or visible failed item.
 #[tokio::test]
-async fn skipped_response_becomes_visible_failed_queue_item() {
+async fn skipped_response_is_acknowledged_as_lww() {
     let server = MockServer::start().await;
 
     // Live server shape: counts are nested under the entity key rather than
@@ -53,7 +44,7 @@ async fn skipped_response_becomes_visible_failed_queue_item() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "entries": { "inserted": 0, "updated": 0, "skipped": 1 }
         })))
-        .expect(1..)
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -97,55 +88,98 @@ async fn skipped_response_becomes_visible_failed_queue_item() {
 
     // `push` is sync + blocking ureq; the wiremock runtime needs us off
     // the executor thread to serve the POST.
-    let (push_results, syncer) = tokio::task::spawn_blocking(move || {
-        let results = (0..5)
-            .map(|_| syncer.push().expect("push() returned Err"))
-            .collect::<Vec<_>>();
-        (results, syncer)
-    })
-    .await
-    .expect("spawn_blocking join");
-    let push_result = &push_results[0];
+    let (push_result, syncer) =
+        tokio::task::spawn_blocking(move || (syncer.push().expect("push() returned Err"), syncer))
+            .await
+            .expect("spawn_blocking join");
 
-    // Server reported 1 skipped → the client must NOT count this as
-    // pushed. The legacy "trust the 200" path would have set pushed_entries
-    // to 1; this assertion locks in the new behavior.
     assert_eq!(
-        push_result.pushed_entries, 0,
-        "client must not count server-skipped rows as pushed",
+        push_result.pushed_entries, 1,
+        "aggregate skips must count as acknowledged pushes",
     );
-
     assert!(
-        push_result
-            .errors
-            .iter()
-            .any(|error| error.contains("cloud skipped 1 of 1 entries")),
-        "server skips must make the overall push incomplete: {push_result:?}"
+        push_result.errors.is_empty(),
+        "aggregate skips are acknowledged without an error: {push_result:?}"
     );
-
-    // Critical AC: the queue item is neither silently discarded nor retried
-    // indefinitely. It becomes a failed row with an operator-visible reason.
     let queue_after = syncer.queue();
     assert_eq!(
         queue_after.pending_count(5).unwrap(),
         0,
-        "persistent server skips must leave the pending queue after max retries",
+        "acknowledged aggregate skips must be removed from the pending queue",
     );
+    assert_eq!(queue_after.stats(5).unwrap().failed, 0);
+    assert!(queue_after.list_all(10).unwrap().is_empty());
+}
+
+/// A row-level rejection is different from an aggregate skip: it identifies
+/// the exact queue item and must remain visible with its server-provided
+/// reason for operator repair.
+#[tokio::test]
+async fn per_row_rejected_outcome_stays_visible_with_reason() {
+    let server = MockServer::start().await;
+    let entry_id = "rejected-outcome-entry-001";
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": {
+                "inserted": 0,
+                "updated": 0,
+                "skipped": 1,
+                "rows": [{
+                    "id": entry_id,
+                    "outcome": "rejected",
+                    "reason": "project_mismatch"
+                }]
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let queue = SyncQueue::open(tmp.path()).unwrap();
+    queue.init().unwrap();
+    queue
+        .enqueue(
+            EntityType::Entry,
+            entry_id,
+            SyncOperation::Upsert,
+            Some(&entry_payload(entry_id)),
+        )
+        .unwrap();
+
+    let mut cfg = make_cloud_config(server.uri());
+    cfg.team_id = None;
+    let syncer = CloudSyncer::new(
+        Arc::new(queue),
+        cfg,
+        CloudSyncerConfig {
+            timeout: Duration::from_secs(5),
+            max_retries: 5,
+            ..Default::default()
+        },
+    );
+
+    let (push_result, syncer) =
+        tokio::task::spawn_blocking(move || (syncer.push().expect("push() returned Err"), syncer))
+            .await
+            .expect("spawn_blocking join");
+
+    assert_eq!(push_result.pushed_entries, 0);
+    assert_eq!(push_result.errors.len(), 1);
+    assert!(push_result.errors[0].contains("cloud rejected 1 of 1 entries"));
+    let queue_after = syncer.queue();
+    assert_eq!(queue_after.pending_count(5).unwrap(), 0);
     assert_eq!(queue_after.stats(5).unwrap().failed, 1);
     let items = queue_after.list_all(10).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].entity_id, entry_id);
     assert!(
         items[0]
             .last_error
             .as_deref()
-            .is_some_and(|diagnostic| diagnostic.contains("cloud skipped 1 of 1 entries")),
-        "queue output must expose why this row failed: {items:?}"
-    );
-    assert!(
-        items[0]
-            .last_error
-            .as_deref()
-            .is_some_and(|diagnostic| diagnostic.contains("server response: {\"entries\"")),
-        "queue output must preserve the raw server response: {items:?}"
+            .is_some_and(|diagnostic| diagnostic.contains("reason=project_mismatch")),
+        "queue output must expose the rejection reason: {items:?}"
     );
 }
 

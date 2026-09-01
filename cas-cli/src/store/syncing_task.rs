@@ -13,6 +13,15 @@ use crate::types::{Dependency, DependencyType, Scope, Task, TaskStatus};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+#[derive(serde::Serialize)]
+struct TaskDependencyPayload<'a> {
+    from_id: &'a str,
+    to_id: &'a str,
+    dep_type: String,
+    created_at: DateTime<Utc>,
+    origin_project: Option<&'a str>,
+}
+
 /// A task store wrapper that queues changes for cloud sync
 pub struct SyncingTaskStore {
     inner: Arc<dyn TaskStore>,
@@ -52,12 +61,17 @@ impl SyncingTaskStore {
         if let Some(team_id) = self.team_id.as_deref()
             && eligible_for_team_task(task)
         {
-            let _ = self.queue.enqueue_for_team(
+            let destination_project = task
+                .origin_project
+                .as_deref()
+                .filter(|project_id| !project_id.trim().is_empty());
+            let _ = self.queue.enqueue_for_team_project(
                 EntityType::Task,
                 &task.id,
                 SyncOperation::Upsert,
                 Some(&payload),
                 team_id,
+                destination_project,
             );
         }
     }
@@ -81,10 +95,14 @@ impl SyncingTaskStore {
         if let Some(team_id) = self.team_id.as_deref()
             && eligible_for_team_task(task)
         {
+            let Some(new_project_id) = task.origin_project.as_deref() else {
+                return;
+            };
             let _ = self.queue.enqueue_team_move(
                 EntityType::Task,
                 &task.id,
                 old_project_id,
+                new_project_id,
                 &payload,
                 team_id,
             );
@@ -125,6 +143,73 @@ impl SyncingTaskStore {
             );
         }
     }
+
+    fn queue_dependency_upsert(&self, dep: &Dependency, from_task: &Task) {
+        let origin_project = match from_task.scope {
+            Scope::Global => None,
+            Scope::Project => from_task
+                .origin_project
+                .as_deref()
+                .or(self.inner.project_id()),
+        };
+        let payload = TaskDependencyPayload {
+            from_id: &dep.from_id,
+            to_id: &dep.to_id,
+            dep_type: dep.dep_type.to_string(),
+            created_at: dep.created_at,
+            origin_project,
+        };
+        let Ok(payload) = serde_json::to_string(&payload) else {
+            return;
+        };
+        let entity_id = dependency_entity_id(dep);
+        let _ = self.queue.enqueue(
+            EntityType::TaskDependency,
+            &entity_id,
+            SyncOperation::Upsert,
+            Some(&payload),
+        );
+
+        if let Some(team_id) = self.team_id.as_deref()
+            && eligible_for_team_task(from_task)
+        {
+            let _ = self.queue.enqueue_for_team(
+                EntityType::TaskDependency,
+                &entity_id,
+                SyncOperation::Upsert,
+                Some(&payload),
+                team_id,
+            );
+        }
+    }
+
+    fn queue_dependency_delete(&self, dep: &Dependency) {
+        let entity_id = dependency_entity_id(dep);
+        let _ = self.queue.enqueue(
+            EntityType::TaskDependency,
+            &entity_id,
+            SyncOperation::Delete,
+            None,
+        );
+
+        // A delete must fan out when a team is configured, even when the
+        // source task is no longer available to evaluate the promotion
+        // predicate. This prevents stale cloud edges from surviving local
+        // task/dependency deletion.
+        if let Some(team_id) = self.team_id.as_deref() {
+            let _ = self.queue.enqueue_for_team(
+                EntityType::TaskDependency,
+                &entity_id,
+                SyncOperation::Delete,
+                None,
+                team_id,
+            );
+        }
+    }
+}
+
+fn dependency_entity_id(dep: &Dependency) -> String {
+    format!("{}:{}:{}", dep.from_id, dep.to_id, dep.dep_type)
 }
 
 impl TaskStore for SyncingTaskStore {
@@ -158,6 +243,9 @@ impl TaskStore for SyncingTaskStore {
             .create_atomic(task, blocked_by, epic_id, created_by)?;
         let persisted = self.persisted_for_queue(task)?;
         self.queue_upsert(&persisted);
+        for dep in self.inner.get_dependencies(&task.id)? {
+            self.queue_dependency_upsert(&dep, &persisted);
+        }
         Ok(())
     }
 
@@ -199,8 +287,21 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
+        let mut dependencies = self.inner.get_dependencies(id)?;
+        for dep in self.inner.get_dependents(id)? {
+            if !dependencies.iter().any(|existing| {
+                existing.from_id == dep.from_id
+                    && existing.to_id == dep.to_id
+                    && existing.dep_type == dep.dep_type
+            }) {
+                dependencies.push(dep);
+            }
+        }
         self.inner.delete(id)?;
         self.queue_delete(id);
+        for dep in &dependencies {
+            self.queue_dependency_delete(dep);
+        }
         Ok(())
     }
 
@@ -228,13 +329,36 @@ impl TaskStore for SyncingTaskStore {
         self.inner.close()
     }
 
-    // Dependency operations - don't sync these as they're derived from task relationships
+    // Dependency operations are first-class cloud entities. The local
+    // dependency table remains authoritative; queue writes mirror successful
+    // local mutations without routing pulled rows back through this wrapper.
     fn add_dependency(&self, dep: &Dependency) -> Result<()> {
-        self.inner.add_dependency(dep)
+        let previous = self
+            .inner
+            .get_dependencies(&dep.from_id)?
+            .into_iter()
+            .find(|existing| existing.to_id == dep.to_id);
+        self.inner.add_dependency(dep)?;
+        if let Some(previous) = previous.filter(|previous| previous.dep_type != dep.dep_type) {
+            self.queue_dependency_delete(&previous);
+        }
+        let from_task = self.inner.get(&dep.from_id)?;
+        self.queue_dependency_upsert(dep, &from_task);
+        Ok(())
     }
 
     fn remove_dependency(&self, from_id: &str, to_id: &str) -> Result<()> {
-        self.inner.remove_dependency(from_id, to_id)
+        let dependencies: Vec<Dependency> = self
+            .inner
+            .get_dependencies(from_id)?
+            .into_iter()
+            .filter(|dep| dep.to_id == to_id)
+            .collect();
+        self.inner.remove_dependency(from_id, to_id)?;
+        for dep in &dependencies {
+            self.queue_dependency_delete(dep);
+        }
+        Ok(())
     }
 
     fn remove_dependency_of_type(
@@ -243,8 +367,19 @@ impl TaskStore for SyncingTaskStore {
         to_id: &str,
         dep_type: DependencyType,
     ) -> Result<bool> {
-        self.inner
-            .remove_dependency_of_type(from_id, to_id, dep_type)
+        let removed = self
+            .inner
+            .remove_dependency_of_type(from_id, to_id, dep_type)?;
+        if removed {
+            self.queue_dependency_delete(&Dependency {
+                from_id: from_id.to_string(),
+                to_id: to_id.to_string(),
+                dep_type,
+                created_at: Utc::now(),
+                created_by: None,
+            });
+        }
+        Ok(removed)
     }
 
     fn get_dependencies(&self, task_id: &str) -> Result<Vec<Dependency>> {
@@ -398,6 +533,81 @@ mod tests {
         assert_eq!(pending[0].operation, SyncOperation::Delete);
     }
 
+    #[test]
+    fn dependency_add_queues_task_dependency_upsert() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let from = Task::new("task-dep-from".to_string(), "from".to_string());
+        let to = Task::new("task-dep-to".to_string(), "to".to_string());
+        store.add(&from).unwrap();
+        store.add(&to).unwrap();
+        queue.clear().unwrap();
+
+        let dep = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+        store.add_dependency(&dep).unwrap();
+
+        let pending = queue.pending_for_entity_type(Some(EntityType::TaskDependency), 10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].entity_id, "task-dep-from:task-dep-to:blocks");
+        assert_eq!(pending[0].operation, SyncOperation::Upsert);
+        let payload: serde_json::Value = serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["from_id"], "task-dep-from");
+        assert_eq!(payload["to_id"], "task-dep-to");
+        assert_eq!(payload["dep_type"], "blocks");
+        assert!(payload["created_at"].is_string());
+        assert!(payload.get("origin_project").is_some());
+    }
+
+    #[test]
+    fn dependency_remove_queues_task_dependency_delete() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let from = Task::new("task-remove-from".to_string(), "from".to_string());
+        let to = Task::new("task-remove-to".to_string(), "to".to_string());
+        store.add(&from).unwrap();
+        store.add(&to).unwrap();
+        let dep = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Related);
+        store.add_dependency(&dep).unwrap();
+        queue.clear().unwrap();
+
+        assert!(store
+            .remove_dependency_of_type(&from.id, &to.id, DependencyType::Related)
+            .unwrap());
+
+        let pending = queue.pending_for_entity_type(Some(EntityType::TaskDependency), 10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].entity_id, "task-remove-from:task-remove-to:related");
+        assert_eq!(pending[0].operation, SyncOperation::Delete);
+        assert!(pending[0].payload.is_none());
+    }
+
+    #[test]
+    fn create_atomic_queues_all_created_task_dependencies() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+
+        let mut epic = Task::new("task-dep-epic".to_string(), "epic".to_string());
+        epic.task_type = crate::types::TaskType::Epic;
+        store.add(&epic).unwrap();
+        let blocker = Task::new("task-dep-blocker".to_string(), "blocker".to_string());
+        store.add(&blocker).unwrap();
+        queue.clear().unwrap();
+
+        let child = Task::new("task-dep-child".to_string(), "child".to_string());
+        store
+            .create_atomic(&child, &[blocker.id.clone()], Some(&epic.id), Some("test"))
+            .unwrap();
+
+        let pending = queue
+            .pending_for_entity_type(Some(EntityType::TaskDependency), 10, 5)
+            .unwrap();
+        let ids: std::collections::HashSet<_> =
+            pending.iter().map(|item| item.entity_id.as_str()).collect();
+        assert_eq!(pending.len(), 2);
+        assert!(ids.contains("task-dep-child:task-dep-blocker:blocks"));
+        assert!(ids.contains("task-dep-child:task-dep-epic:parent-child"));
+    }
+
     // ── Dual-enqueue behaviour (cas-82a1) ────────────────────────────────
 
     use cas_types::Scope;
@@ -502,13 +712,36 @@ mod tests {
         assert_eq!(pending[0].project_id.as_deref(), Some("project-a"));
         assert_eq!(pending[1].operation, SyncOperation::Upsert);
         assert_eq!(pending[1].entity_id, task.id);
-        assert_eq!(pending[1].project_id, None);
+        assert_eq!(pending[1].project_id.as_deref(), Some("project-b"));
         assert!(
             pending[1]
                 .payload
                 .as_deref()
                 .is_some_and(|payload| payload.contains("\"origin_project\":\"project-b\""))
         );
+    }
+
+    #[test]
+    fn task_origin_project_move_later_edit_stays_on_new_owner_key() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+
+        let mut task = Task::new("p-task-move-002".to_string(), "move me".to_string());
+        task.origin_project = Some("project-a".to_string());
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+
+        task.origin_project = Some("project-b".to_string());
+        store.update(&task).unwrap();
+        queue.clear().unwrap();
+
+        task.title = "edited after move".to_string();
+        store.update(&task).unwrap();
+
+        let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].operation, SyncOperation::Upsert);
+        assert_eq!(pending[0].project_id.as_deref(), Some("project-b"));
     }
 
     #[test]

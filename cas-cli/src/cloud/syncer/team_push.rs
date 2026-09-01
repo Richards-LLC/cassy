@@ -1,10 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::cloud::syncer::{
-    CloudSyncer, PushItemizedFailure, SyncResult, TeamPushResponse, itemized_failures_for,
+    CloudSyncer, PushItemizedFailure, PushRowResult, SyncResult, TeamPushResponse,
+    itemized_failures_for, row_results_for,
 };
-use crate::cloud::{EntityType, QueuedSync, SyncOperation, get_project_canonical_id};
+use crate::cloud::{
+    EntityType, QueuedSync, SyncOperation, canonical_project_id_with_pin, get_project_canonical_id,
+};
 use crate::error::CasError;
 use chrono::Utc;
 
@@ -29,16 +32,54 @@ fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
         // Supervisor reassignment is carried by a non-empty origin_project in
         // the queued payload. Only legacy rows without a usable identity need
         // to inherit the project performing the push.
-        let has_explicit_origin = task
+        let explicit_origin = task
             .get("origin_project")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|origin| !origin.trim().is_empty());
-        if !has_explicit_origin {
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty());
+        if let Some(origin) = explicit_origin {
+            if let Some(canonical) = canonical_project_id_with_pin(origin, Some(project_id)) {
+                task.insert(
+                    "origin_project".to_string(),
+                    serde_json::Value::String(canonical),
+                );
+            }
+        } else {
             task.insert(
                 "origin_project".to_string(),
-                serde_json::Value::String(project_id.to_string()),
+                serde_json::Value::String(
+                    canonical_project_id_with_pin(project_id, Some(project_id))
+                        .unwrap_or_else(|| project_id.to_string()),
+                ),
             );
         }
+    }
+}
+
+fn stamp_task_dependency_origin_project(value: &mut serde_json::Value, project_id: &str) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let explicit_origin = object
+        .get("origin_project")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty());
+    if let Some(origin) = explicit_origin {
+        if let Some(canonical) = canonical_project_id_with_pin(origin, Some(project_id)) {
+            object.insert(
+                "origin_project".to_string(),
+                serde_json::Value::String(canonical),
+            );
+        }
+    } else {
+        object.insert(
+            "origin_project".to_string(),
+            serde_json::Value::String(
+                canonical_project_id_with_pin(project_id, Some(project_id))
+                    .unwrap_or_else(|| project_id.to_string()),
+            ),
+        );
     }
 }
 
@@ -46,6 +87,8 @@ impl CloudSyncer {
     pub fn push_team(&self, team_id: &str) -> Result<SyncResult, CasError> {
         let mut result = SyncResult::default();
         let start = Instant::now();
+
+        self.requeue_version_gated_items()?;
 
         if !self.is_available() {
             return Ok(result);
@@ -171,6 +214,7 @@ impl CloudSyncer {
             (EntityType::CommitLink, "commit_links"),
             (EntityType::Agent, "agents"),
             (EntityType::Worktree, "worktrees"),
+            (EntityType::TaskDependency, "task_dependencies"),
         ] {
             let (synced, errors) = self.push_team_upserts_for_type(
                 team_id,
@@ -226,7 +270,12 @@ impl CloudSyncer {
         git_remote: Option<&str>,
         blocked_upserts: &HashSet<i64>,
     ) -> (usize, Vec<String>) {
-        let mut upserts = Vec::new();
+        // A move replacement (and every later edit to a moved task) carries
+        // its destination in the queue row. Keep those rows out of the
+        // pusher's envelope: the cloud keys the upsert by this envelope's
+        // project_canonical_id, not by the row's origin_project field.
+        let mut upserts_by_project: HashMap<String, Vec<(&QueuedSync, serde_json::Value)>> =
+            HashMap::new();
 
         for item in queued.iter().filter(|item| {
             item.operation == SyncOperation::Upsert
@@ -236,14 +285,21 @@ impl CloudSyncer {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
                     Ok(mut value) => {
+                        let target_project = item.project_id.as_deref().unwrap_or(project_id);
                         // Rows queued before origin_project existed still need
-                        // the current scoped identity when they are retried.
-                        // The outer project_canonical_id is not a substitute:
-                        // task consumers also rely on the row-level field.
+                        // the target scoped identity when they are retried. The
+                        // outer project_canonical_id is not a substitute: task
+                        // consumers also rely on the row-level field.
                         if entity_type == EntityType::Task {
-                            stamp_task_origin_project(&mut value, project_id);
+                            stamp_task_origin_project(&mut value, target_project);
                         }
-                        upserts.push((item, value));
+                        if entity_type == EntityType::TaskDependency {
+                            stamp_task_dependency_origin_project(&mut value, target_project);
+                        }
+                        upserts_by_project
+                            .entry(target_project.to_string())
+                            .or_default()
+                            .push((item, value));
                     }
                     Err(_) => {
                         let _ = self
@@ -262,13 +318,29 @@ impl CloudSyncer {
         let mut synced = 0;
         let mut errors = Vec::new();
 
-        for sub_batch in self.split_into_sub_batches(upserts) {
+        let sub_batches: Vec<_> = upserts_by_project
+            .into_iter()
+            .flat_map(|(target_project, upserts)| {
+                self.split_into_sub_batches(upserts)
+                    .into_iter()
+                    .map(move |sub_batch| (target_project.clone(), sub_batch))
+            })
+            .collect();
+
+        for (target_project, sub_batch) in sub_batches {
             let (batch_items, values): (Vec<&QueuedSync>, Vec<serde_json::Value>) =
                 sub_batch.into_iter().unzip();
             let sent_count = values.len();
 
             match self
-                .push_team_sub_batch(team_id, entity_key, values, token, project_id, git_remote)
+                .push_team_sub_batch(
+                    team_id,
+                    entity_key,
+                    values,
+                    token,
+                    &target_project,
+                    git_remote,
+                )
             {
                 Ok(response) => {
                     if let Some(body) = response.as_ref() {
@@ -276,6 +348,39 @@ impl CloudSyncer {
                     }
 
                     let raw_response = response.as_ref().map_or("", |body| body.raw_body.as_str());
+                    match response.as_ref() {
+                        Some(body) => match Self::team_row_results_for(
+                            body,
+                            entity_key,
+                            batch_items.iter().map(|item| item.entity_id.clone()),
+                        ) {
+                            Ok(Some(rows)) => {
+                                self.settle_team_row_results(
+                                    &batch_items,
+                                    entity_key,
+                                    raw_response,
+                                    rows,
+                                    &mut synced,
+                                    &mut errors,
+                                );
+                                continue;
+                            }
+                            Err(error) => {
+                                let diagnostic = format!(
+                                    "team {entity_key} push returned invalid per-row results: {error}; marking {} row(s) failed; server response: {raw_response}",
+                                    batch_items.len()
+                                );
+                                for item in &batch_items {
+                                    let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                }
+                                errors.push(diagnostic);
+                                continue;
+                            }
+                            Ok(None) => {}
+                        },
+                        None => {}
+                    }
+
                     let (accepted, skipped) = match response.as_ref() {
                         Some(body) => match Self::team_counts_for(body, entity_key) {
                             Ok(Some(counts)) => counts,
@@ -296,6 +401,17 @@ impl CloudSyncer {
                         None => (sent_count, 0),
                     };
                     if skipped > 0 {
+                        if skipped > batch_items.len() {
+                            let diagnostic = format!(
+                                "cloud reported {skipped} skipped team {entity_key} row(s) for a {}-row sub-batch; marking sub-batch failed; server response: {raw_response}",
+                                batch_items.len()
+                            );
+                            for item in &batch_items {
+                                let _ = self.queue.mark_failed(item.id, &diagnostic);
+                            }
+                            errors.push(diagnostic);
+                            continue;
+                        }
                         let itemized = Self::team_itemized_failures_for(
                             response
                                 .as_ref()
@@ -308,14 +424,19 @@ impl CloudSyncer {
                             Ok(Some(rejections)) => rejections,
                             Ok(None) => {
                                 let diagnostic = format!(
-                                    "cloud skipped {skipped} of {} team {entity_key} row(s); marking the indistinguishable sub-batch failed; server response: {}",
+                                    "cloud skipped {skipped} of {} team {entity_key} row(s); treating skips as LWW acknowledgements",
                                     batch_items.len(),
-                                    raw_response
+                                );
+                                tracing::warn!(
+                                    entity_type = entity_key,
+                                    skipped,
+                                    batch_size = batch_items.len(),
+                                    "{diagnostic}"
                                 );
                                 for item in &batch_items {
-                                    let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                    let _ = self.queue.mark_synced(item.id);
                                 }
-                                errors.push(diagnostic);
+                                synced += batch_items.len();
                                 continue;
                             }
                             Err(error) => {
@@ -332,8 +453,21 @@ impl CloudSyncer {
                             }
                         };
 
+                        let mut failure_details = Vec::new();
                         for item in &batch_items {
                             if let Some(failure) = itemized.get(&item.entity_id) {
+                                let reason = match failure {
+                                    PushItemizedFailure::Rejection(rejection) => {
+                                        rejection.reason.as_str().to_string()
+                                    }
+                                    PushItemizedFailure::Invalid(invalid) => {
+                                        format!(
+                                            "{}: {}",
+                                            invalid.reason.as_str(),
+                                            invalid.detail
+                                        )
+                                    }
+                                };
                                 let diagnostic = match failure {
                                     PushItemizedFailure::Rejection(rejection) => format!(
                                         "permanent cloud rejection: reason={}; entity={entity_key}; id={}; existing_project={}",
@@ -359,11 +493,19 @@ impl CloudSyncer {
                                 } else {
                                     let _ = self.queue.mark_failed(item.id, &diagnostic);
                                 }
-                                errors.push(diagnostic);
+                                failure_details.push(format!("{} ({reason})", item.entity_id));
                             } else {
                                 let _ = self.queue.mark_synced(item.id);
                                 synced += 1;
                             }
+                        }
+                        if !failure_details.is_empty() {
+                            errors.push(format!(
+                                "cloud rejected {} of {} team {entity_key} row(s): {}",
+                                failure_details.len(),
+                                batch_items.len(),
+                                failure_details.join(", ")
+                            ));
                         }
                         continue;
                     }
@@ -383,6 +525,51 @@ impl CloudSyncer {
         }
 
         (synced, errors)
+    }
+
+    fn settle_team_row_results(
+        &self,
+        batch_items: &[&QueuedSync],
+        entity_key: &str,
+        raw_response: &str,
+        rows: HashMap<String, PushRowResult>,
+        synced: &mut usize,
+        errors: &mut Vec<String>,
+    ) {
+        let mut rejected = Vec::new();
+        for item in batch_items {
+            let row = rows
+                .get(&item.entity_id)
+                .expect("row_results_for validates every queue identity");
+            if row.acknowledges() {
+                let _ = self.queue.mark_synced(item.id);
+                *synced += 1;
+                continue;
+            }
+
+            let reason = row.reason.as_deref().unwrap_or("unspecified");
+            let diagnostic = format!(
+                "cloud rejected team {entity_key} {}: reason={reason}; server response: {raw_response}",
+                item.entity_id
+            );
+            if row.rejection_is_retryable() {
+                let _ = self.queue.mark_failed(item.id, &diagnostic);
+            } else {
+                let _ = self
+                    .queue
+                    .park_failed(item.id, &diagnostic, self.config.max_retries);
+            }
+            rejected.push(format!("{} ({reason})", item.entity_id));
+        }
+
+        if !rejected.is_empty() {
+            errors.push(format!(
+                "cloud rejected {} of {} team {entity_key} row(s): {}",
+                rejected.len(),
+                batch_items.len(),
+                rejected.join(", ")
+            ));
+        }
     }
 
     fn push_team_sub_batch(
@@ -526,6 +713,30 @@ impl CloudSyncer {
         Ok(Some((inserted.saturating_add(updated), skipped)))
     }
 
+    fn team_row_results_for(
+        response: &TeamPushResponse,
+        entity_key: &str,
+        queued_ids: impl Iterator<Item = String>,
+    ) -> Result<Option<HashMap<String, PushRowResult>>, String> {
+        let queued_ids = queued_ids.collect::<Vec<_>>();
+        if let Some(rows) = response.rows.as_ref() {
+            let wrapped = serde_json::json!({"rows": rows});
+            return row_results_for(&wrapped, "rows", queued_ids.into_iter());
+        }
+
+        let Some(synced) = response.synced.as_object() else {
+            return Ok(None);
+        };
+        let Some(entity) = synced.get(entity_key) else {
+            return Ok(None);
+        };
+        row_results_for(
+            entity,
+            &format!("synced.{entity_key}"),
+            queued_ids.into_iter(),
+        )
+    }
+
     fn team_itemized_failures_for(
         response: &TeamPushResponse,
         entity_key: &str,
@@ -559,6 +770,7 @@ impl CloudSyncer {
             "commit_links" => result.pushed_commit_links += count,
             "agents" => result.pushed_agents += count,
             "worktrees" => result.pushed_worktrees += count,
+            "task_dependencies" => result.pushed_task_dependencies += count,
             _ => {}
         }
     }
@@ -755,6 +967,39 @@ mod tests {
             value
                 .get("origin_project")
                 .is_some_and(serde_json::Value::is_null)
+        );
+    }
+
+    #[test]
+    fn canonical_identity_team_push_stamps_remote_alias_as_canonical() {
+        let mut value = serde_json::json!({
+            "id": "cas-alias",
+            "scope": "project",
+        });
+
+        super::stamp_task_origin_project(
+            &mut value,
+            "git@GitHub.com:Richards-LLC/gabber-studio.git",
+        );
+
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("github.com/richards-llc/gabber-studio")
+        );
+    }
+
+    #[test]
+    fn canonical_identity_team_push_stamps_dependency_alias_as_canonical() {
+        let mut value = serde_json::json!({
+            "id": "edge-alias",
+            "origin_project": "git@GitHub.com:Richards-LLC/gabber-studio.git",
+        });
+
+        super::stamp_task_dependency_origin_project(&mut value, "gabber-studio");
+
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("gabber-studio")
         );
     }
 }

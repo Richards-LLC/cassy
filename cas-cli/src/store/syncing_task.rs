@@ -126,7 +126,7 @@ impl SyncingTaskStore {
         Ok(persisted)
     }
 
-    fn queue_delete(&self, id: &str) {
+    fn queue_delete(&self, id: &str, project_id: Option<&str>) {
         let _ = self
             .queue
             .enqueue(EntityType::Task, id, SyncOperation::Delete, None);
@@ -134,12 +134,13 @@ impl SyncingTaskStore {
         // See `share_policy` module docs: delete fans out unconditionally
         // when a team is configured.
         if let Some(team_id) = self.team_id.as_deref() {
-            let _ = self.queue.enqueue_for_team(
+            let _ = self.queue.enqueue_for_team_project(
                 EntityType::Task,
                 id,
                 SyncOperation::Delete,
                 None,
                 team_id,
+                project_id,
             );
         }
     }
@@ -287,6 +288,7 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
+        let task = self.inner.get(id)?;
         let mut dependencies = self.inner.get_dependencies(id)?;
         for dep in self.inner.get_dependents(id)? {
             if !dependencies.iter().any(|existing| {
@@ -298,7 +300,11 @@ impl TaskStore for SyncingTaskStore {
             }
         }
         self.inner.delete(id)?;
-        self.queue_delete(id);
+        let project_id = task
+            .origin_project
+            .as_deref()
+            .filter(|project_id| !project_id.trim().is_empty());
+        self.queue_delete(id, project_id);
         for dep in &dependencies {
             self.queue_dependency_delete(dep);
         }

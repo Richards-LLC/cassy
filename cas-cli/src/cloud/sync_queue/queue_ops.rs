@@ -155,6 +155,22 @@ impl SyncQueue {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
 
+        // Legacy team upserts predate project-keyed queue identities and use a
+        // NULL project_id. Remove any before writing the move pair so an
+        // edit-then-move sequence cannot leave a third row that would replay
+        // the task under the pusher's project after the old key is deleted.
+        tx.execute(
+            r#"
+            DELETE FROM sync_queue
+            WHERE entity_type = ?1
+              AND entity_id = ?2
+              AND operation = 'upsert'
+              AND team_id = ?3
+              AND project_id IS NULL
+            "#,
+            params![entity_type.as_str(), entity_id, team_id],
+        )?;
+
         let delete_time = Utc::now().to_rfc3339();
         tx.execute(
             r#"

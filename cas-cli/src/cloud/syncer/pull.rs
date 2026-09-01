@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -265,6 +266,84 @@ pub(crate) fn entity_matches_project(
     }
 }
 
+fn task_wire_id(raw: &serde_json::Value) -> Option<&str> {
+    raw.get("id").and_then(serde_json::Value::as_str)
+}
+
+fn task_wire_origin_project(raw: &serde_json::Value) -> Option<&str> {
+    raw.get("origin_project")
+        .and_then(serde_json::Value::as_str)
+}
+
+/// Return the project key that owns a task row on the cloud. The team pull
+/// endpoint currently exposes this as `project_id` (some builds use
+/// `project_canonical_id`); when it is absent, the requested scope is the
+/// only available signal and is therefore used as a documented fallback.
+fn task_wire_cloud_project<'a>(raw: &'a serde_json::Value, requested_project: &'a str) -> &'a str {
+    raw.get("project_canonical_id")
+        .or_else(|| raw.get("project_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(requested_project)
+}
+
+fn task_wire_is_owner(raw: &serde_json::Value, requested_project: &str) -> bool {
+    task_wire_origin_project(raw)
+        .is_some_and(|origin| origin == task_wire_cloud_project(raw, requested_project))
+}
+
+fn task_wire_updated_at(raw: &serde_json::Value) -> Option<DateTime<Utc>> {
+    raw.get("updated_at")
+        .or_else(|| raw.get("updatedAt"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+}
+
+/// Collapse duplicate task IDs in a team envelope before deserialization and
+/// upsert. A row whose origin matches its cloud project key is the owner row;
+/// owner status wins even when a foreign replica row has a newer timestamp.
+/// Rows without an owner signal retain timestamp ordering, but are still
+/// reduced to one row so wire order cannot make the result nondeterministic.
+fn select_owner_task_rows(
+    raw_tasks: Vec<serde_json::Value>,
+    requested_project: &str,
+) -> (Vec<serde_json::Value>, Vec<(String, serde_json::Value)>) {
+    let mut grouped = BTreeMap::<String, Vec<serde_json::Value>>::new();
+    let mut unkeyed = Vec::new();
+    for raw in raw_tasks {
+        let Some(id) = task_wire_id(&raw) else {
+            unkeyed.push(raw);
+            continue;
+        };
+        grouped.entry(id.to_owned()).or_default().push(raw);
+    }
+
+    let mut selected = unkeyed;
+    let mut discarded = Vec::new();
+    for (id, mut rows) in grouped {
+        if rows.len() == 1 {
+            selected.push(rows.pop().expect("one-row task group is non-empty"));
+            continue;
+        }
+
+        let winner_index = rows
+            .iter()
+            .enumerate()
+            .max_by(|(left_index, left), (right_index, right)| {
+                task_wire_is_owner(left, requested_project)
+                    .cmp(&task_wire_is_owner(right, requested_project))
+                    .then_with(|| task_wire_updated_at(left).cmp(&task_wire_updated_at(right)))
+                    .then_with(|| left_index.cmp(right_index))
+            })
+            .map(|(index, _)| index)
+            .expect("multi-row task group is non-empty");
+        let winner = rows.swap_remove(winner_index);
+        discarded.extend(rows.into_iter().map(|row| (id.clone(), row)));
+        selected.push(winner);
+    }
+    (selected, discarded)
+}
+
 /// cas-fc52: detect a teammate's web-initiated close (cloud contract §4).
 ///
 /// The cloud server records a web close as a soft tombstone merged into the
@@ -445,6 +524,111 @@ fn append_sync_status_provenance(merged: &mut Task, local: &Task, sync_id: &str,
 }
 
 impl CloudSyncer {
+    fn record_owner_conflict_value(
+        &self,
+        task_id: &str,
+        discarded_row: &serde_json::Value,
+    ) -> Result<(), CasError> {
+        let discarded_row_json = serde_json::to_string(&serde_json::json!({
+            "rejected_remote": discarded_row,
+            "reason": "owner_wins",
+        }))
+        .map_err(|error| {
+            CasError::Other(format!("Could not serialize owner sync conflict: {error}"))
+        })?;
+        self.queue.record_conflict(
+            EntityType::Task.as_str(),
+            task_id,
+            &discarded_row_json,
+            "owner",
+            "owner_wins",
+        )?;
+        Ok(())
+    }
+
+    fn upsert_owner_task(
+        &self,
+        store: &dyn TaskStore,
+        task: Task,
+        sync_id: &str,
+        source: &str,
+    ) -> Result<UpsertResult, CasError> {
+        match store.get(&task.id) {
+            Ok(local) => {
+                if rejects_terminal_regression(&local, &task) {
+                    self.record_terminal_regression_conflict(&local, &task)?;
+                    return Ok(UpsertResult::Skipped);
+                }
+                let notes_differ = local.notes != task.notes;
+                self.journal_local_overwrite(
+                    EntityType::Task,
+                    &task.id,
+                    &local,
+                    "owner",
+                    "owner_wins",
+                )?;
+                let mut merged = task;
+                if notes_differ {
+                    merged.notes = merge_task_notes(&local.notes, &merged.notes);
+                }
+                append_sync_status_provenance(&mut merged, &local, sync_id, source);
+                store.update(&merged)?;
+                Ok(UpsertResult::Updated)
+            }
+            Err(cas_store::StoreError::TaskNotFound(_)) => {
+                store.add(&task)?;
+                Ok(UpsertResult::Created)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Apply owner identity before the ordinary timestamp/strategy resolver.
+    /// A local row carrying a different owner is a replica and cannot replace
+    /// the owner row. Conversely, an owner row replaces a foreign replica even
+    /// when its timestamp is older. Terminal regressions still use the
+    /// existing explicit-reopen guard.
+    fn upsert_task_with_owner_preference(
+        &self,
+        store: &dyn TaskStore,
+        task: Task,
+        incoming_is_owner: bool,
+        strategy: Option<ConflictResolution>,
+        sync_id: &str,
+        source: &str,
+    ) -> Result<UpsertResult, CasError> {
+        if let Ok(local) = store.get(&task.id) {
+            let origins_differ = local.origin_project != task.origin_project;
+            if incoming_is_owner && origins_differ {
+                return self.upsert_owner_task(store, task, sync_id, source);
+            }
+            if !incoming_is_owner && origins_differ && local.origin_project.is_some() {
+                // Preserve the existing terminal guard's conflict strategy and
+                // audit shape for an active row attempting to reopen a close.
+                if local.is_terminal() && !task.is_terminal() {
+                    return match strategy {
+                        Some(strategy) => {
+                            self.upsert_task_with_strategy(store, task, strategy, sync_id, source)
+                        }
+                        None => self.upsert_task(store, task, sync_id, source),
+                    };
+                }
+                let discarded = serde_json::to_value(&task).map_err(|error| {
+                    CasError::Other(format!("Could not serialize owner sync conflict: {error}"))
+                })?;
+                self.record_owner_conflict_value(&task.id, &discarded)?;
+                return Ok(UpsertResult::Skipped);
+            }
+        }
+
+        match strategy {
+            Some(strategy) => {
+                self.upsert_task_with_strategy(store, task, strategy, sync_id, source)
+            }
+            None => self.upsert_task(store, task, sync_id, source),
+        }
+    }
+
     fn record_terminal_regression_conflict(
         &self,
         local: &Task,
@@ -645,10 +829,13 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            // The scoped response proves which project supplied the row; use
-            // that same resolved identity as the local ownership stamp rather
-            // than trusting an optional payload field from an older server.
-            remote_task.origin_project = Some(current_project_id.to_string());
+            // The scoped response proves which project supplied a legacy row;
+            // preserve an explicit origin stamped by the cloud.
+            if remote_task.origin_project.is_none() {
+                remote_task.origin_project = Some(current_project_id.to_string());
+            }
+            let incoming_is_owner =
+                remote_task.origin_project.as_deref() == Some(current_project_id);
             let previous_status = task_store.get(&remote_task.id).ok().map(|task| task.status);
             let task_outcome = if web_close {
                 reconcile_web_close(
@@ -658,9 +845,11 @@ impl CloudSyncer {
                     "personal_pull",
                 )
             } else {
-                self.upsert_task(
+                self.upsert_task_with_owner_preference(
                     task_store,
                     remote_task.clone(),
+                    incoming_is_owner,
+                    None,
                     &task_sync_id,
                     "personal_pull",
                 )
@@ -1395,7 +1584,9 @@ impl CloudSyncer {
     ///   "second project sees stale `since=` from the first" regression
     ///   that surfaced as hypothesis #2 of the cas-ffc4 bug doc).
     /// - The `project_id=` URL query param.
-    /// - The client-side `entity_matches_project` filter.
+    /// - The client-side `entity_matches_project` filter for non-task rows.
+    ///   Task rows retain their wire project/origin identity so duplicate
+    ///   owner rows can win over stale replica copies.
     pub fn pull_team(
         &self,
         team_id: &str,
@@ -1503,11 +1694,18 @@ impl CloudSyncer {
 
         // Process tasks
         let task_sync_id = uuid::Uuid::new_v4().to_string();
-        for mut raw_task in body.tasks.unwrap_or_default() {
-            if !entity_matches_project(&raw_task, &current_project_id, "task") {
-                continue;
-            }
+        // Unlike entries/rules/skills, team tasks may be replicas keyed by a
+        // different project. Group them before any project filtering so the
+        // owner row can win over a stale foreign-keyed row.
+        let (raw_tasks, discarded_task_rows) =
+            select_owner_task_rows(body.tasks.unwrap_or_default(), current_project_id);
+        for (task_id, discarded_row) in discarded_task_rows {
+            self.record_owner_conflict_value(&task_id, &discarded_row)?;
+            result.conflicts_resolved += 1;
+        }
+        for mut raw_task in raw_tasks {
             render_task_proposal_provenance(&mut raw_task);
+            let wire_is_owner = task_wire_is_owner(&raw_task, current_project_id);
             let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
@@ -1515,15 +1713,19 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            // Team pulls are already filtered by the scoped project ID; stamp
-            // the accepted row explicitly so subsequent local surfaces cannot
-            // mistake an unscoped legacy payload for a local task.
-            remote_task.origin_project = Some(current_project_id.to_string());
+            // Preserve the cloud's owner identity. For legacy rows without an
+            // origin, the requested scope is the only available signal.
+            if remote_task.origin_project.is_none() {
+                remote_task.origin_project = Some(current_project_id.to_string());
+            }
+            let incoming_is_owner =
+                wire_is_owner || remote_task.origin_project.as_deref() == Some(current_project_id);
             let previous_status = task_store.get(&remote_task.id).ok().map(|task| task.status);
-            match self.upsert_task_with_strategy(
+            match self.upsert_task_with_owner_preference(
                 task_store,
                 remote_task.clone(),
-                strategy,
+                incoming_is_owner,
+                Some(strategy),
                 &task_sync_id,
                 "team_pull",
             ) {

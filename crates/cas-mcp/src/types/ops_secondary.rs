@@ -567,6 +567,13 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub task_id: Option<String>,
 
+    /// Factory delivery route for spawn_workers/focus_epic.
+    #[schemars(
+        description = "Factory delivery mode: 'push_branch' (default) or 'local_merge' (supervisor merges local worker branches)"
+    )]
+    #[serde(default)]
+    pub delivery_mode: Option<String>,
+
     /// Target agent for hold_worker, release_worker, clear_context, or remind
     #[schemars(
         description = "Target agent name for hold_worker/release_worker/clear_context/remind (or 'all_workers' for broadcast where supported). For remind: agent who receives the reminder (defaults to self)"
@@ -780,6 +787,13 @@ pub struct CoordinationRequest {
     )]
     #[serde(default)]
     pub task_id: Option<String>,
+
+    /// Factory delivery route for spawn_workers/focus_epic.
+    #[schemars(
+        description = "Factory delivery mode: 'push_branch' (default) or 'local_merge' (supervisor merges local worker branches)"
+    )]
+    #[serde(default)]
+    pub delivery_mode: Option<String>,
 
     /// Explicit worker merge-request message type. Only this type receives
     /// CAS's structured merge envelope and stale-merge suppression.
@@ -1184,6 +1198,7 @@ impl CoordinationRequest {
             count: self.count,
             worker_names: self.worker_names.clone(),
             task_id: self.task_id.clone(),
+            delivery_mode: self.delivery_mode.clone(),
             target: self.target.clone(),
             message: self.message.clone(),
             force: self.force,

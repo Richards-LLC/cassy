@@ -238,6 +238,15 @@ pub fn handle_pre_tool_use(
                 .as_ref()
                 .and_then(|ti| ti.get("command").and_then(|v| v.as_str()));
             if let Some(cmd) = command {
+                if looks_like_git_push_to_origin(cmd)
+                    && worker_delivery_mode() == cas_types::DeliveryMode::LocalMerge
+                    && !local_merge_push_override()
+                {
+                    return Ok(HookOutput::with_pre_tool_permission(
+                        "deny",
+                        "🚫 LOCAL-MERGE DELIVERY: git push origin is disabled for this factory session. Commit locally; the supervisor merges your local factory branch. Set CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1 only when explicitly authorized by the supervisor.",
+                    ));
+                }
                 if looks_like_git_write_op(cmd) {
                     if let Some(deny_msg) = check_worker_git_commit_scope(&input.cwd) {
                         return Ok(HookOutput::with_pre_tool_permission("deny", &deny_msg));
@@ -1095,6 +1104,62 @@ pub(crate) fn looks_like_git_write_op(cmd: &str) -> bool {
     }
 }
 
+/// Return true when a shell command invokes `git push origin`.
+///
+/// The local-merge route only blocks publication to the configured origin;
+/// local commits and other git writes remain governed by the existing branch
+/// and worktree guards.
+pub(crate) fn looks_like_git_push_to_origin(cmd: &str) -> bool {
+    let mut saw_git = false;
+    let mut saw_push = false;
+    for token in cmd.split_whitespace() {
+        let token = token.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | ';' | '&' | '|'));
+        if !saw_git {
+            if token == "git" {
+                saw_git = true;
+            }
+            continue;
+        }
+        if !saw_push {
+            if token == "push" {
+                saw_push = true;
+            }
+            continue;
+        }
+        if token == "origin" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Read the route selected for the current factory session. Missing or
+/// malformed metadata intentionally falls back to the legacy push route.
+pub(crate) fn worker_delivery_mode() -> cas_types::DeliveryMode {
+    let Some(session) = std::env::var_os("CAS_FACTORY_SESSION") else {
+        return cas_types::DeliveryMode::PushBranch;
+    };
+    let session = session.to_string_lossy();
+    let data = std::fs::read_to_string(crate::ui::factory::metadata_path(&session)).ok();
+    data.and_then(|data| {
+        serde_json::from_str::<crate::ui::factory::SessionMetadata>(&data)
+            .ok()
+            .map(|metadata| metadata.delivery_mode)
+    })
+    .unwrap_or_default()
+}
+
+fn local_merge_push_override() -> bool {
+    std::env::var("CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Run `git symbolic-ref --short HEAD` in `cwd` and return the branch name.
 /// Returns `None` on detached HEAD, git unavailable, or any error.
 pub(crate) fn get_branch_at_cwd(cwd: &str) -> Option<String> {
@@ -1241,8 +1306,7 @@ pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
     {
-        match crate::factory_isolation::classify_worker_binding(&registered_name, Some(&branch))
-        {
+        match crate::factory_isolation::classify_worker_binding(&registered_name, Some(&branch)) {
             crate::factory_isolation::WorkerBinding::Own => {}
             crate::factory_isolation::WorkerBinding::Sibling { owner } => {
                 return Some(crate::factory_isolation::sibling_misbinding_message(
@@ -1581,8 +1645,8 @@ fn unsanctioned_factory_path_with_worktree(
     // Once a durable clone binding exists, cwd is only a tool location and
     // must not widen the contract. Keep cwd as the standalone-worker fallback
     // for sessions that have no registered or environment-provided root.
-    let mut sanctioned = vec![worktree_root
-        .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd))];
+    let mut sanctioned =
+        vec![worktree_root.unwrap_or_else(|| std::path::PathBuf::from(&input.cwd))];
     sanctioned.push(crate::config::resolved_factory_artifacts_root(
         configured_artifacts_root.as_deref(),
     ));
@@ -1930,10 +1994,8 @@ mod workspace_contract_tests {
         std::fs::create_dir_all(&frontend).expect("frontend");
         std::fs::create_dir_all(&backend).expect("backend");
         let clone_path = cwd.path().to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            "CAS_CLONE_PATH",
-            Some(clone_path.as_str()),
-        )]);
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(clone_path.as_str()))]);
         let input = bash_input("true", &backend);
 
         assert_eq!(
@@ -1961,10 +2023,8 @@ mod workspace_contract_tests {
         std::fs::create_dir_all(real_root.join("apps/backend")).expect("real subtrees");
         symlink(&real_root, &linked_root).expect("worktree symlink");
         let clone_path = linked_root.to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            "CAS_CLONE_PATH",
-            Some(clone_path.as_str()),
-        )]);
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(clone_path.as_str()))]);
         let input = bash_input("true", &linked_root.join("apps/backend"));
 
         assert_eq!(
@@ -1994,21 +2054,13 @@ mod workspace_contract_tests {
         std::fs::create_dir_all(&outside).expect("outside");
         symlink(&outside, worktree.join("link-out")).expect("escape symlink");
         let clone_path = worktree.to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            "CAS_CLONE_PATH",
-            Some(clone_path.as_str()),
-        )]);
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(clone_path.as_str()))]);
         let input = bash_input("true", worktree.as_path());
         let target = worktree.join("link-out/escape.txt");
 
         assert_eq!(
-            unsanctioned_factory_path(
-                &input,
-                &None,
-                None,
-                false,
-                &target.to_string_lossy(),
-            ),
+            unsanctioned_factory_path(&input, &None, None, false, &target.to_string_lossy(),),
             Some(outside.join("escape.txt")),
             "canonical containment must reject a symlinked subtree outside the worktree"
         );
@@ -2022,16 +2074,11 @@ mod workspace_contract_tests {
         let parent = tempfile::tempdir().expect("parent");
         let worktree = parent.path().join("worktree");
         std::fs::create_dir_all(&worktree).expect("worktree");
-        symlink(
-            worktree.join("missing-target"),
-            worktree.join("dangling"),
-        )
-        .expect("dangling symlink");
+        symlink(worktree.join("missing-target"), worktree.join("dangling"))
+            .expect("dangling symlink");
         let clone_path = worktree.to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            "CAS_CLONE_PATH",
-            Some(clone_path.as_str()),
-        )]);
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(clone_path.as_str()))]);
         let input = bash_input("true", worktree.as_path());
         let target = worktree.join("dangling/escape.txt");
 
@@ -2066,11 +2113,8 @@ mod workspace_contract_tests {
 
         let input = bash_input("true", &second_root.path().join("apps/backend"));
         assert_eq!(
-            registered_factory_worktree_root(
-                &mut ToolHookStores::new(cas_root.path()),
-                &input,
-            )
-            .as_deref(),
+            registered_factory_worktree_root(&mut ToolHookStores::new(cas_root.path()), &input,)
+                .as_deref(),
             Some(first_root.path()),
             "the initial durable registration should be authoritative"
         );
@@ -2122,9 +2166,7 @@ mod workspace_contract_tests {
             "registered-worker".to_string(),
         );
         agent.role = AgentRole::Worker;
-        agent
-            .metadata
-            .insert("clone_path".to_string(), clone_path);
+        agent.metadata.insert("clone_path".to_string(), clone_path);
         agent_store.register(&agent).expect("register worker");
 
         let input = HookInput {
@@ -2142,8 +2184,7 @@ mod workspace_contract_tests {
         let output = handle_pre_tool_use(&input, Some(cas_root.path())).expect("handler ok");
         let value = serde_json::to_value(output).expect("hook output JSON");
         assert_eq!(
-            value["hookSpecificOutput"]["permissionDecision"],
-            "allow",
+            value["hookSpecificOutput"]["permissionDecision"], "allow",
             "a registered worktree sibling must not be rejected: {value}"
         );
     }
@@ -2156,21 +2197,13 @@ mod workspace_contract_tests {
         std::fs::create_dir_all(&worktree).expect("worktree");
         std::fs::create_dir_all(&sibling).expect("sibling");
         let clone_path = worktree.to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            "CAS_CLONE_PATH",
-            Some(clone_path.as_str()),
-        )]);
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(clone_path.as_str()))]);
         let input = bash_input("true", worktree.as_path());
         let target = sibling.join("not-allowed.txt");
 
         assert_eq!(
-            unsanctioned_factory_path(
-                &input,
-                &None,
-                None,
-                false,
-                &target.to_string_lossy(),
-            ),
+            unsanctioned_factory_path(&input, &None, None, false, &target.to_string_lossy(),),
             Some(target),
             "a sibling path sharing the root's string prefix must remain outside"
         );
@@ -2181,10 +2214,8 @@ mod workspace_contract_tests {
         let worktree = tempfile::tempdir().expect("worktree");
         let outside = tempfile::tempdir().expect("outside");
         let clone_path = worktree.path().to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            "CAS_CLONE_PATH",
-            Some(clone_path.as_str()),
-        )]);
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(clone_path.as_str()))]);
         let input = bash_input("true", outside.path());
         let target = outside.path().join("not-allowed.txt");
 
@@ -2221,9 +2252,10 @@ mod workspace_contract_tests {
         };
 
         log_factory_workspace_rejection(cas_root.path(), &input, &violation);
-        let log_path = cas_root
-            .path()
-            .join(format!("logs/factory-session-{}.log", chrono::Utc::now().format("%Y-%m-%d")));
+        let log_path = cas_root.path().join(format!(
+            "logs/factory-session-{}.log",
+            chrono::Utc::now().format("%Y-%m-%d")
+        ));
         let line = std::fs::read_to_string(log_path).expect("workspace rejection log");
         let record: serde_json::Value = serde_json::from_str(line.trim()).expect("JSON event");
         let expected_payload_bytes = serde_json::to_vec(input.tool_input.as_ref().unwrap())
@@ -2591,6 +2623,20 @@ mod worker_commit_guard_tests {
     }
 
     #[test]
+    fn local_merge_guard_detects_origin_push_forms() {
+        assert!(looks_like_git_push_to_origin(
+            "git push origin factory/worker"
+        ));
+        assert!(looks_like_git_push_to_origin(
+            "git -C /repo push --set-upstream origin factory/worker"
+        ));
+        assert!(!looks_like_git_push_to_origin(
+            "git push upstream factory/worker"
+        ));
+        assert!(!looks_like_git_push_to_origin("git commit -m 'local work'"));
+    }
+
+    #[test]
     fn git_status_not_detected() {
         assert!(!looks_like_git_write_op("git status"));
     }
@@ -2883,7 +2929,9 @@ mod worker_commit_guard_tests {
             "the consequence must be attributable to the incident: {msg}"
         );
         // The old advice ended here; it must no longer be the last word.
-        let switch_c = msg.find("git switch -c factory/bright-eagle-91").expect("fallback");
+        let switch_c = msg
+            .find("git switch -c factory/bright-eagle-91")
+            .expect("fallback");
         let restore = msg.find("git switch main").expect("restore");
         assert!(
             restore > switch_c,

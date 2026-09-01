@@ -202,6 +202,45 @@ pub enum TaskDepth {
     Light,
 }
 
+/// How a factory worker delivers its committed branch.
+///
+/// `PushBranch` preserves the normal remote-branch/PR flow. `LocalMerge` is
+/// an operator-selected session mode: workers commit locally and the
+/// supervisor merges their factory branch from the shared local repository.
+/// The default keeps legacy task rows and non-factory work unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    /// Publish the worker branch to the configured origin as usual.
+    #[default]
+    PushBranch,
+    /// Keep the worker branch local; the supervisor performs the merge.
+    LocalMerge,
+}
+
+impl fmt::Display for DeliveryMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PushBranch => write!(f, "push_branch"),
+            Self::LocalMerge => write!(f, "local_merge"),
+        }
+    }
+}
+
+impl FromStr for DeliveryMode {
+    type Err = TypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("push_branch") || s.eq_ignore_ascii_case("push-branch") {
+            Ok(Self::PushBranch)
+        } else if s.eq_ignore_ascii_case("local_merge") || s.eq_ignore_ascii_case("local-merge") {
+            Ok(Self::LocalMerge)
+        } else {
+            Err(TypeError::Parse(format!("invalid delivery mode: {s}")))
+        }
+    }
+}
+
 impl fmt::Display for TaskDepth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -751,6 +790,11 @@ pub struct Task {
     /// when absent so existing tasks read as deep.
     #[serde(default)]
     pub depth: TaskDepth,
+
+    /// Factory branch delivery route. Legacy rows and non-factory tasks use
+    /// `push_branch`; factory epics may opt into supervisor-local merging.
+    #[serde(default)]
+    pub delivery_mode: DeliveryMode,
 }
 
 impl Task {
@@ -789,6 +833,7 @@ impl Task {
             demo_statement: String::new(),
             execution_note: None,
             depth: TaskDepth::Deep,
+            delivery_mode: DeliveryMode::PushBranch,
         }
     }
 
@@ -902,6 +947,7 @@ impl Default for Task {
             demo_statement: String::new(),
             execution_note: None,
             depth: TaskDepth::Deep,
+            delivery_mode: DeliveryMode::PushBranch,
         }
     }
 }
@@ -1092,5 +1138,29 @@ mod tests {
         }
         assert_eq!(TaskDepth::Light.to_string(), "light");
         assert_eq!(TaskDepth::Deep.to_string(), "deep");
+    }
+
+    #[test]
+    fn test_delivery_mode_parse_display_and_legacy_json_default() {
+        assert_eq!(DeliveryMode::default(), DeliveryMode::PushBranch);
+        assert_eq!(
+            DeliveryMode::from_str("push_branch").unwrap(),
+            DeliveryMode::PushBranch
+        );
+        assert_eq!(
+            DeliveryMode::from_str("local-merge").unwrap(),
+            DeliveryMode::LocalMerge
+        );
+        assert_eq!(DeliveryMode::LocalMerge.to_string(), "local_merge");
+        assert!(DeliveryMode::from_str("remote").is_err());
+
+        let mut legacy = serde_json::to_value(Task::new(
+            "cas-delivery-legacy".to_string(),
+            "Legacy task".to_string(),
+        ))
+        .unwrap();
+        legacy.as_object_mut().unwrap().remove("delivery_mode");
+        let decoded: Task = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.delivery_mode, DeliveryMode::PushBranch);
     }
 }

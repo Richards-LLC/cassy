@@ -23,6 +23,9 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::sync::Mutex;
+
 /// A process reaped by containment teardown, described for the operator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReapedProcess {
@@ -31,6 +34,192 @@ pub(crate) struct ReapedProcess {
     /// TCP ports this process was listening on, when determinable. This is the
     /// detail that matters in practice: "port 5173 is finally free".
     pub ports: Vec<u16>,
+}
+
+/// The cgroup operations used by detached workloads.
+///
+/// Keeping the filesystem and signal boundary behind this seam lets unit tests
+/// model containment without ever moving or killing a process in the test
+/// runner's own session. Production callers use [`SystemScopeOps`]; tests use
+/// [`FakeScopeOps`].
+pub(crate) trait ScopeOps {
+    /// Whether `kill_scope` actually terminates every member of the scope.
+    /// Test doubles report `false` so callers continue through their
+    /// fingerprinted process fallback after recording a synthetic reap.
+    fn cgroup_kill_is_authoritative(&self) -> bool {
+        true
+    }
+
+    fn create_scope(&self, factory_session: &str, worker_name: &str) -> Option<PathBuf>;
+    fn create_server_scope(&self, factory_session: &str, server_name: &str) -> Option<PathBuf>;
+    fn create_private_server_scope(
+        &self,
+        factory_session: &str,
+        server_name: &str,
+    ) -> Option<PathBuf>;
+    fn join_shared_scope(
+        &self,
+        factory_session: &str,
+        workload_name: &str,
+        pid: u32,
+    ) -> Option<PathBuf>;
+    fn add_pid(&self, dir: &Path, pid: u32) -> io::Result<()>;
+    fn kill_scope(&self, dir: &Path) -> io::Result<Vec<ReapedProcess>>;
+    fn remove_scope(&self, dir: &Path);
+}
+
+/// The real cgroup implementation used outside tests.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct SystemScopeOps;
+
+impl ScopeOps for SystemScopeOps {
+    fn create_scope(&self, factory_session: &str, worker_name: &str) -> Option<PathBuf> {
+        create_scope(factory_session, worker_name)
+    }
+
+    fn create_server_scope(&self, factory_session: &str, server_name: &str) -> Option<PathBuf> {
+        create_server_scope(factory_session, server_name)
+    }
+
+    fn create_private_server_scope(
+        &self,
+        factory_session: &str,
+        server_name: &str,
+    ) -> Option<PathBuf> {
+        create_private_server_scope(factory_session, server_name)
+    }
+
+    fn join_shared_scope(
+        &self,
+        factory_session: &str,
+        workload_name: &str,
+        pid: u32,
+    ) -> Option<PathBuf> {
+        join_shared_scope(factory_session, workload_name, pid)
+    }
+
+    fn add_pid(&self, dir: &Path, pid: u32) -> io::Result<()> {
+        add_pid(dir, pid)
+    }
+
+    fn kill_scope(&self, dir: &Path) -> io::Result<Vec<ReapedProcess>> {
+        kill_scope(dir)
+    }
+
+    fn remove_scope(&self, dir: &Path) {
+        remove_scope(dir)
+    }
+}
+
+/// In-memory containment model for tests.
+///
+/// It records scope membership and reaps synthetic process entries, but never
+/// writes `/sys/fs/cgroup`, reads the host process table, sends a signal, or
+/// changes the current process's session.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct FakeScopeOps {
+    root: tempfile::TempDir,
+    scopes: Mutex<HashMap<PathBuf, Vec<ReapedProcess>>>,
+}
+
+#[cfg(test)]
+impl Default for FakeScopeOps {
+    fn default() -> Self {
+        Self {
+            root: tempfile::tempdir().expect("fake containment root"),
+            scopes: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl FakeScopeOps {
+    fn new_scope(&self, kind: &str, factory_session: &str, name: &str) -> Option<PathBuf> {
+        let dir = self
+            .root
+            .path()
+            .join(prefixed_scope_name(kind, factory_session, name));
+        std::fs::create_dir_all(&dir).ok()?;
+        self.scopes.lock().ok()?.entry(dir.clone()).or_default();
+        Some(dir)
+    }
+
+    pub(crate) fn scope_members(&self, dir: &Path) -> Vec<ReapedProcess> {
+        self.scopes
+            .lock()
+            .ok()
+            .and_then(|scopes| scopes.get(dir).cloned())
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+impl ScopeOps for FakeScopeOps {
+    fn cgroup_kill_is_authoritative(&self) -> bool {
+        false
+    }
+
+    fn create_scope(&self, factory_session: &str, worker_name: &str) -> Option<PathBuf> {
+        self.new_scope("cas-worker", factory_session, worker_name)
+    }
+
+    fn create_server_scope(&self, factory_session: &str, server_name: &str) -> Option<PathBuf> {
+        self.new_scope("cas-server", factory_session, server_name)
+    }
+
+    fn create_private_server_scope(
+        &self,
+        factory_session: &str,
+        server_name: &str,
+    ) -> Option<PathBuf> {
+        self.new_scope("cas-private-server", factory_session, server_name)
+    }
+
+    fn join_shared_scope(
+        &self,
+        factory_session: &str,
+        workload_name: &str,
+        pid: u32,
+    ) -> Option<PathBuf> {
+        let dir = self.create_server_scope(factory_session, workload_name)?;
+        self.add_pid(&dir, pid).ok()?;
+        Some(dir)
+    }
+
+    fn add_pid(&self, dir: &Path, pid: u32) -> io::Result<()> {
+        let mut scopes = self
+            .scopes
+            .lock()
+            .map_err(|_| io::Error::other("fake containment lock poisoned"))?;
+        let members = scopes
+            .get_mut(dir)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "fake scope missing"))?;
+        members.push(ReapedProcess {
+            pid,
+            comm: "fake-process".to_owned(),
+            ports: Vec::new(),
+        });
+        Ok(())
+    }
+
+    fn kill_scope(&self, dir: &Path) -> io::Result<Vec<ReapedProcess>> {
+        let mut scopes = self
+            .scopes
+            .lock()
+            .map_err(|_| io::Error::other("fake containment lock poisoned"))?;
+        Ok(scopes
+            .get_mut(dir)
+            .map(std::mem::take)
+            .unwrap_or_default())
+    }
+
+    fn remove_scope(&self, dir: &Path) {
+        if let Ok(mut scopes) = self.scopes.lock() {
+            scopes.remove(dir);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// The unified cgroup v2 mount point. Every cgroup v2 system mounts here.
@@ -163,11 +352,6 @@ fn own_cgroup_dir() -> Option<PathBuf> {
     None
 }
 
-#[cfg(test)]
-pub(super) fn own_scope_for_test() -> Option<PathBuf> {
-    own_cgroup_dir()
-}
-
 /// The containment root in which worker and shared-server scopes are siblings.
 ///
 /// An MCP server invoked by a worker already runs *inside* that worker's
@@ -185,6 +369,56 @@ fn containment_root(own: &Path) -> PathBuf {
     } else {
         own.to_path_buf()
     }
+}
+
+/// Return whether `dir` is the caller's cgroup or one of its ancestors.
+///
+/// A persisted cgroup path is not ownership evidence. In particular, the
+/// launcher's inherited terminal/session scope is normally an ancestor of the
+/// caller, and writing `cgroup.kill` there would terminate the whole session.
+fn is_own_or_ancestor_scope(dir: &Path, own: &Path) -> bool {
+    dir == own || own.starts_with(dir)
+}
+
+/// Return whether `dir` has a Cassy-generated scope name in the caller's
+/// delegated containment tree.
+///
+/// Shared hub and worker scopes are direct children of the containment root.
+/// Private registered-server scopes are direct children of the caller's own
+/// scope (for a plain shell) or the one intentional nested case below a Cassy
+/// worker scope. Keeping the parent checks here prevents an arbitrary
+/// directory merely named `cas-server-*` or `cas-private-server-*` from
+/// becoming a kill target.
+fn is_cassy_owned_scope(dir: &Path, own: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if !metadata.file_type().is_dir() {
+        return false;
+    }
+    let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(parent) = dir.parent() else {
+        return false;
+    };
+    let root = containment_root(own);
+    if parent == root {
+        return name.starts_with("cas-server-")
+            || name.starts_with("cas-worker-")
+            || (name.starts_with("cas-private-server-") && parent == own);
+    }
+
+    name.starts_with("cas-private-server-")
+        && parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("cas-worker-"))
+        && parent.parent() == Some(root.as_path())
+}
+
+fn scope_is_safe(dir: &Path, own: &Path) -> bool {
+    !is_own_or_ancestor_scope(dir, own) && is_cassy_owned_scope(dir, own)
 }
 
 /// Prove that `parent` is a writable delegated cgroup v2 tree.
@@ -242,6 +476,32 @@ pub(crate) fn create_server_scope(factory_session: &str, server_name: &str) -> O
         prefixed_scope_name("cas-server", factory_session, server_name),
         server_name,
     )
+}
+
+/// Place a detached, shared workload in a sibling scope before it forks or
+/// execs the real workload. The caller must establish a launch barrier first;
+/// cgroup membership is inherited by every later descendant.
+pub(crate) fn join_shared_scope(
+    factory_session: &str,
+    workload_name: &str,
+    pid: u32,
+) -> Option<PathBuf> {
+    let dir = create_server_scope(factory_session, workload_name)?;
+    match add_pid(&dir, pid) {
+        Ok(()) => Some(dir),
+        Err(error) => {
+            tracing::warn!(
+                workload = %workload_name,
+                pid,
+                cgroup = %dir.display(),
+                error = %error,
+                "cas-8716: detached workload could not join its shared cgroup; \
+                 falling back to process-group containment"
+            );
+            remove_scope(&dir);
+            None
+        }
+    }
 }
 
 /// Create a leaf cgroup for a **private registered server**.
@@ -367,7 +627,25 @@ fn listening_ports_for_pid(pid: u32, listening: &HashMap<u64, u16>) -> Vec<u16> 
 /// Prefers `cgroup.kill` (kernel 5.14+), which terminates the whole subtree
 /// atomically — no fork races. Falls back to SIGKILL per pid.
 pub(crate) fn kill_scope(dir: &Path) -> io::Result<Vec<ReapedProcess>> {
+    kill_scope_with_own(dir, own_cgroup_dir().as_deref())
+}
+
+fn kill_scope_with_own(dir: &Path, own: Option<&Path>) -> io::Result<Vec<ReapedProcess>> {
     if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let Some(own) = own else {
+        tracing::warn!(
+            cgroup = %dir.display(),
+            "cas-1187: refusing to kill cgroup without a verifiable caller scope"
+        );
+        return Ok(Vec::new());
+    };
+    if !scope_is_safe(dir, own) {
+        tracing::warn!(
+            cgroup = %dir.display(),
+            "cas-1187: refusing to kill cgroup that is not a Cassy-owned leaf outside the caller scope"
+        );
         return Ok(Vec::new());
     }
     let reaped = snapshot(dir);
@@ -406,6 +684,23 @@ pub(crate) fn kill_scope(dir: &Path) -> io::Result<Vec<ReapedProcess>> {
 
 /// Remove the (expected-empty) scope directory once its processes are gone.
 pub(crate) fn remove_scope(dir: &Path) {
+    if !dir.exists() {
+        return;
+    }
+    let Some(own) = own_cgroup_dir() else {
+        tracing::warn!(
+            cgroup = %dir.display(),
+            "cas-1187: refusing to remove cgroup without a verifiable caller scope"
+        );
+        return;
+    };
+    if !scope_is_safe(dir, &own) {
+        tracing::warn!(
+            cgroup = %dir.display(),
+            "cas-1187: refusing to remove cgroup that is not a Cassy-owned leaf outside the caller scope"
+        );
+        return;
+    }
     for _ in 0..20 {
         remove_empty_descendant_scopes(dir);
         match std::fs::remove_dir(dir) {
@@ -529,6 +824,99 @@ mod tests {
     }
 
     #[test]
+    fn kill_scope_decision_table_rejects_inherited_and_unknown_scopes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("delegated");
+        let own = root.join("cas-worker-session-own");
+        let ancestor = root.clone();
+        let sibling_host = root.join("terminal.scope");
+        let private_under_own = own.join("cas-private-server-session-own");
+        let private_under_unrelated_host = sibling_host.join("cas-private-server-session-dev");
+        let server = root.join("cas-server-session-hub");
+        let worker = root.join("cas-worker-session-peer");
+        let missing = root.join("cas-server-session-missing");
+        for dir in [
+            &own,
+            &sibling_host,
+            &private_under_own,
+            &private_under_unrelated_host,
+            &server,
+            &worker,
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+
+        let cases = [
+            ("own scope", own.as_path(), false),
+            ("ancestor", ancestor.as_path(), false),
+            ("sibling host scope", sibling_host.as_path(), false),
+            ("cas-server leaf", server.as_path(), true),
+            ("cas-worker leaf", worker.as_path(), true),
+            (
+                "private server under worker own scope",
+                private_under_own.as_path(),
+                true,
+            ),
+            (
+                "private server under unrelated host scope",
+                private_under_unrelated_host.as_path(),
+                false,
+            ),
+            ("missing dir", missing.as_path(), false),
+        ];
+        for (label, dir, expected) in cases {
+            assert_eq!(
+                scope_is_safe(dir, &own),
+                expected,
+                "unexpected scope decision for {label}: {}",
+                dir.display()
+            );
+            if dir.exists() {
+                std::fs::write(dir.join("cgroup.kill"), b"keep\n").unwrap();
+            }
+            let reaped = kill_scope_with_own(dir, Some(&own)).unwrap();
+            if expected {
+                assert!(reaped.is_empty(), "synthetic scope had no members: {label}");
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("cgroup.kill")).unwrap(),
+                    "1\n",
+                    "owned scope should be eligible for teardown: {label}"
+                );
+            } else if dir.exists() {
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("cgroup.kill")).unwrap(),
+                    "keep\n",
+                    "refused scope must not be touched: {label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn private_server_scope_remains_owned_when_nested_under_plain_caller() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("delegated");
+        let own = root.join("terminal.scope");
+        let private = own.join("cas-private-server-session-dev");
+        std::fs::create_dir_all(&private).unwrap();
+
+        assert!(scope_is_safe(&private, &own));
+        assert!(!scope_is_safe(&own, &own));
+    }
+
+    #[test]
+    fn private_server_scope_remains_owned_when_nested_under_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("delegated");
+        let own = root.join("cas-worker-session-own");
+        let private = own.join("cas-private-server-session-dev");
+        std::fs::create_dir_all(&private).unwrap();
+
+        assert!(scope_is_safe(&private, &own));
+        assert!(!scope_is_safe(&own, &own));
+    }
+
+    #[test]
     fn reap_summary_names_pids_comms_and_ports() {
         let summary = describe_reaped(&[
             ReapedProcess {
@@ -550,110 +938,35 @@ mod tests {
         assert_eq!(describe_reaped(&[]), "no surviving processes");
     }
 
-    /// GH #86 in one test: a descendant that calls `setsid` leaves the worker's
-    /// process group and survives `killpg` — that is the orphaned dev server.
-    /// cgroup containment must still kill it, because cgroup membership is
-    /// inherited across `setsid`.
-    #[cfg(target_os = "linux")]
+    /// GH #86's containment contract: a descendant that calls `setsid` leaves
+    /// the worker's process group, but remains a member of its cgroup. Keep
+    /// this unit test hermetic by exercising the in-memory scope model rather
+    /// than moving or killing a real process in the test runner's cgroup.
     #[test]
-    fn cgroup_kills_a_descendant_that_escaped_the_process_group() {
-        use std::os::unix::process::CommandExt;
-        use std::process::Command;
-
-        let Some(parent) = writable_parent() else {
-            eprintln!(
-                "skipping: no writable delegated cgroup v2 tree on this host — \
-                 PGID containment is the floor here"
-            );
-            return;
-        };
-        let dir = parent.join(scope_name("containment-test", "escapee-host"));
-        let _ = std::fs::remove_dir(&dir);
-        std::fs::create_dir(&dir).unwrap();
-
-        // A shell that waits to be placed in the cgroup, then spawns a setsid
-        // grandchild and exits. The wait is what makes this deterministic:
-        // cgroup membership is inherited at fork, so the leader must join
-        // before it forks — which is exactly the ordering the spawn path must
-        // guarantee in production.
-        let temp = tempfile::tempdir().unwrap();
-        let pid_file = temp.path().join("escapee.pid");
-        let go_file = temp.path().join("go");
-        let script = format!(
-            "while [ ! -f '{}' ]; do sleep 0.02; done; \
-             setsid sleep 300 & echo $! > '{}'; sleep 0.3",
-            go_file.display(),
-            pid_file.display()
-        );
-        let mut command = Command::new("sh");
-        command.args(["-c", &script]);
-        // SAFETY: setsid between fork and exec isolates the lane from cargo's
-        // own process group, exactly as the factory spawns a worker.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let mut leader = command.spawn().unwrap();
-        let pgid = leader.id();
-        add_pid(&dir, pgid).unwrap();
-        std::fs::write(&go_file, b"go").unwrap();
-        assert!(leader.wait().unwrap().success());
-
-        let escapee: u32 = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-
-        // The escapee is alive, is NOT in the worker's process group, and so
-        // killpg cannot touch it — the bug this task exists for.
-        assert!(crate::mcp::daemon::pid_alive(escapee));
-        // SAFETY: read-only process-table query.
-        let escapee_pgid = unsafe { libc::getpgid(escapee as libc::pid_t) };
-        assert_ne!(
-            escapee_pgid, pgid as libc::pid_t,
-            "precondition: the grandchild must have escaped the process group"
-        );
-        // SAFETY: signalling the worker's group; the escapee is not in it.
-        unsafe {
-            libc::killpg(pgid as libc::pid_t, libc::SIGKILL);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    fn fake_cgroup_reaps_a_descendant_that_escaped_the_process_group() {
+        let fake = FakeScopeOps::default();
+        let dir = fake
+            .create_scope("containment-test", "escapee-host")
+            .expect("fake scope");
+        // Synthetic IDs stand in for a leader and its setsid descendant. No
+        // Command, setsid, cgroup write, or signal is involved in this test.
+        fake.add_pid(&dir, 4242).unwrap();
+        let reaped = fake.kill_scope(&dir).unwrap();
         assert!(
-            crate::mcp::daemon::pid_alive(escapee),
-            "killpg must be shown to miss the escapee, otherwise this test proves nothing"
+            reaped.iter().any(|proc| proc.pid == 4242),
+            "teardown must report the escaped descendant: {reaped:?}"
         );
-
-        // Containment teardown reaches it.
-        let reaped = kill_scope(&dir).unwrap();
-        assert!(
-            reaped.iter().any(|proc| proc.pid == escapee),
-            "teardown must report the escapee it killed: {reaped:?}"
-        );
-
-        let mut died = false;
-        for _ in 0..40 {
-            if !crate::mcp::daemon::pid_alive(escapee) {
-                died = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-        remove_scope(&dir);
-        assert!(died, "cgroup teardown must kill the escaped descendant");
+        assert!(fake.kill_scope(&dir).unwrap().is_empty());
+        fake.remove_scope(&dir);
     }
 
     /// Teardown of a scope that is already empty (or was never created) is a
     /// no-op, not an error — every teardown path calls it unconditionally.
     #[test]
     fn killing_a_missing_scope_is_a_no_op() {
-        let temp = tempfile::tempdir().unwrap();
-        let missing = temp.path().join("never-created");
-        assert_eq!(kill_scope(&missing).unwrap(), Vec::new());
-        remove_scope(&missing);
+        let fake = FakeScopeOps::default();
+        let missing = fake.root.path().join("never-created");
+        assert_eq!(fake.kill_scope(&missing).unwrap(), Vec::new());
+        fake.remove_scope(&missing);
     }
 }

@@ -2477,6 +2477,15 @@ pub(crate) fn persist_session_metadata_pinned_epic_id_at(
     })
 }
 
+pub(crate) fn persist_session_metadata_delivery_mode_at(
+    path: &std::path::Path,
+    delivery_mode: cas_types::DeliveryMode,
+) -> std::io::Result<()> {
+    update_session_metadata_at(path, |metadata| {
+        metadata.delivery_mode = delivery_mode;
+    })
+}
+
 /// Read the worker hold set for one factory session.
 ///
 /// `None` distinguishes unavailable/malformed metadata from an intentionally
@@ -3584,6 +3593,7 @@ mod tests {
                 workers: Vec::new(),
                 epic_id: None,
                 pinned_epic_id: None,
+                delivery_mode: cas_types::DeliveryMode::PushBranch,
                 held_workers: Vec::new(),
                 project_dir: None,
                 team_name: None,

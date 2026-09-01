@@ -1,11 +1,25 @@
 //! Tests for the server registry (cas-7c93, GH #87).
 //!
-//! These drive real processes, because every claim the issue makes is about
-//! process reality: that a registered-shared server outlives worker teardown,
-//! that an unregistered one does not, and that a dead pid is never resurrected
-//! or re-signalled.
+//! These drive real child processes for process-group claims, while cgroup
+//! scope creation and teardown use the in-memory test backend. This keeps the
+//! tests from writing the runner's cgroup or reaping unrelated processes.
 
 use super::*;
+
+use super::super::cgroup::{FakeScopeOps, ScopeOps};
+
+/// Keep registry tests focused on process-group behavior while replacing the
+/// cgroup filesystem/signal boundary with an in-memory model. The production
+/// `start`/`stop` wrappers still use `SystemScopeOps`.
+fn start(cas_root: &Path, spec: &ServerSpec) -> io::Result<RegisteredServer> {
+    let scope_ops = FakeScopeOps::default();
+    super::start_with_scope_ops(cas_root, spec, &scope_ops)
+}
+
+fn stop(cas_root: &Path, record: &RegisteredServer) -> io::Result<StopOutcome> {
+    let scope_ops = FakeScopeOps::default();
+    super::stop_with_scope_ops(cas_root, record, &scope_ops)
+}
 
 fn spec(name: &str, command: &str, cwd: &Path, shared: bool) -> ServerSpec {
     ServerSpec {
@@ -242,9 +256,7 @@ fn stop_does_not_claim_a_legacy_wrapper_is_the_whole_workload() {
     // Records created before cas-44d2 have no dedicated scope. Once their
     // wrapper pid is gone, a detached child is no longer discoverable by
     // ancestry. Honest failure is the only provable outcome.
-    if let Some(scope) = record.cgroup.take() {
-        super::super::cgroup::remove_scope(&scope);
-    }
+    record.cgroup = None;
     let error = stop(&cas_root, &record).unwrap_err();
     assert!(
         error.to_string().contains("cannot prove"),
@@ -503,9 +515,9 @@ fn shared_server_leaves_the_callers_process_group_and_a_private_one_stays() {
     let caller_pgid = unsafe { libc::getpgid(std::process::id() as libc::pid_t) } as u32;
 
     // Server names must be unique across this file's tests: shared scopes are
-    // named cas-server-<session>-<name>, and create_named_scope adopts an
-    // existing directory (restart semantics). Two parallel tests sharing a
-    // name land in one scope, and whichever calls stop() first reaps both.
+    // named cas-server-<session>-<name>. The fake scope backend gives each
+    // invocation an isolated root, so parallel tests cannot reap each other's
+    // synthetic scope entries.
     let shared = start(
         &cas_root,
         &spec("pg-shared-srv", "sleep 300", temp.path(), true),
@@ -528,27 +540,7 @@ fn shared_server_leaves_the_callers_process_group_and_a_private_one_stays() {
         Some(caller_pgid),
         "a private server must stay in the caller's group so it dies with it"
     );
-    if let Some(own_scope) = super::super::cgroup::own_scope_for_test()
-        && own_scope
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("cas-worker-"))
-    {
-        if let (Some(shared_scope), Some(private_scope)) =
-            (shared.cgroup.as_ref(), private.cgroup.as_ref())
-        {
-            assert_eq!(
-                shared_scope.parent(),
-                own_scope.parent(),
-                "shared server scope must be a worker sibling, not a child that teardown kills"
-            );
-            assert_eq!(
-                private_scope.parent(),
-                Some(own_scope.as_path()),
-                "private server scope must stay under its worker so teardown still owns it"
-            );
-        }
-    }
+    assert_ne!(shared.cgroup, private.cgroup);
 
     // And the signal targets follow from that: the shared server's own group
     // may be signalled; the private one may only ever be signalled by pid,
@@ -577,14 +569,14 @@ fn shared_server_leaves_the_callers_process_group_and_a_private_one_stays() {
 fn a_shared_server_still_in_the_callers_group_is_never_killpg_ed() {
     let temp = tempfile::tempdir().unwrap();
     let cas_root = temp.path().to_path_buf();
-    // SAFETY: read-only process-table query.
-    let caller_pgid = unsafe { libc::getpgid(std::process::id() as libc::pid_t) } as u32;
-
     let mut record = start(
         &cas_root,
         &spec("degraded", "sleep 300", temp.path(), false),
     )
     .unwrap();
+    // The private child inherits the caller's group. Use its recorded group
+    // rather than querying or mutating the test runner's current session.
+    let caller_pgid = record.pgid.expect("private server process group");
     record.shared = true;
     record.pgid = Some(caller_pgid);
 
@@ -593,44 +585,31 @@ fn a_shared_server_still_in_the_callers_group_is_never_killpg_ed() {
     let _ = stop(&cas_root, &record);
 }
 
-/// cgroup tier: the one containment tier with no escape hatch. A shared server
-/// must live in its *own* scope, so `cgroup.kill` on the worker's scope — the
-/// cas-99f5 teardown — cannot reach it, while an unregistered process started
-/// inside the worker's scope dies.
-#[cfg(target_os = "linux")]
+/// cgroup tier: the one containment tier with no escape hatch. The fake scope
+/// backend models the worker and shared scopes so this test never writes a host
+/// cgroup or signals a process through cgroup teardown.
 #[test]
-fn shared_server_survives_a_worker_cgroup_kill_that_reaps_an_unregistered_process() {
+fn shared_server_uses_a_sibling_scope_that_survives_worker_reap() {
     let temp = tempfile::tempdir().unwrap();
     let cas_root = temp.path().to_path_buf();
+    let scope_ops = FakeScopeOps::default();
 
-    let Some(worker_scope) = super::super::cgroup::create_scope("registry-test", "server-host")
-    else {
-        eprintln!(
-            "skipping: no writable delegated cgroup v2 tree on this host — \
-             the process-group tier is covered by the sibling test"
-        );
-        return;
-    };
+    let worker_scope = scope_ops
+        .create_scope("registry-test", "server-host")
+        .expect("fake worker scope");
 
-    // An unregistered straggler: started by the worker, left in the worker's
-    // scope. This is the `npm run dev &` the issue says must still die.
-    //
-    // Spawned as a bare `sleep`, NOT `sh -c "sleep 300"`: cgroup membership is
-    // inherited at fork, so a shell that forks its payload before add_pid runs
-    // leaves that payload outside the scope — kill_scope then reaps only the
-    // shell, the test still passes, and an orphaned 5-minute sleep holds the
-    // test binary's stdio pipe open, stalling every piped `cargo test` run.
-    // (The production spawn path joins the scope before forking anything; see
-    // cgroup_kills_a_descendant_that_escaped_the_process_group.)
-    let mut straggler = Command::new("sleep").arg("300").spawn().unwrap();
-    let straggler_pid = straggler.id();
-    super::super::cgroup::add_pid(&worker_scope, straggler_pid).unwrap();
+    // An unregistered synthetic straggler stays in the worker scope. The fake
+    // backend records the pid without starting a real process.
+    let straggler_pid = 42_424;
+    scope_ops.add_pid(&worker_scope, straggler_pid).unwrap();
 
-    // A registered shared server. `start` must place it outside the worker
-    // scope; nothing in this test moves it there.
-    let shared = start(
+    // A registered shared server is launched with the same fake backend and
+    // therefore gets a sibling scope; the process-group assertion remains
+    // covered by shared_server_leaves_the_callers_process_group_and_a_private_one_stays.
+    let shared = super::start_with_scope_ops(
         &cas_root,
         &spec("shared-srv", "sleep 300", temp.path(), true),
+        &scope_ops,
     )
     .unwrap();
     let scope = shared
@@ -645,30 +624,20 @@ fn shared_server_survives_a_worker_cgroup_kill_that_reaps_an_unregistered_proces
         !scope.starts_with(&worker_scope),
         "nor be nested under it: cgroup.kill reaps the whole subtree"
     );
+    let shared_members_before = scope_ops.scope_members(&scope);
 
-    // Worker teardown.
-    super::super::cgroup::kill_scope(&worker_scope).unwrap();
-    super::super::cgroup::remove_scope(&worker_scope);
-
-    // The straggler is a direct child of the test process, so it lingers as a
-    // zombie until reaped — wait for the exit status rather than for the pid
-    // to disappear, or this asserts on an artefact of the test harness.
-    let mut straggler_exited = false;
-    for _ in 0..80 {
-        if matches!(straggler.try_wait(), Ok(Some(_))) {
-            straggler_exited = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
+    // Worker teardown reaps the synthetic straggler but does not touch the
+    // shared scope. No process-group or cgroup signal is sent by this test.
+    let reaped = scope_ops.kill_scope(&worker_scope).unwrap();
+    scope_ops.remove_scope(&worker_scope);
     assert!(
-        straggler_exited,
-        "an unregistered process must not survive containment teardown"
+        reaped.iter().any(|process| process.pid == straggler_pid),
+        "worker teardown must report the unregistered straggler: {reaped:?}"
     );
     assert_eq!(
-        straggler_pid,
-        straggler.id(),
-        "sanity: the straggler we waited on is the one we contained"
+        scope_ops.scope_members(&scope),
+        shared_members_before,
+        "worker teardown must not reap the shared scope"
     );
     assert_eq!(
         liveness(&shared),
@@ -677,7 +646,7 @@ fn shared_server_survives_a_worker_cgroup_kill_that_reaps_an_unregistered_proces
     );
 
     // And stop still works on it afterwards, taking its scope with it.
-    let outcome = stop(&cas_root, &shared).unwrap();
+    let outcome = super::stop_with_scope_ops(&cas_root, &shared, &scope_ops).unwrap();
     assert!(matches!(outcome, StopOutcome::Stopped { .. }));
     assert!(wait_until_gone(shared.pid));
 }

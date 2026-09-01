@@ -353,6 +353,38 @@ pub(crate) fn listening_ports(record: &RegisteredServer) -> Vec<u16> {
 /// stdout/stderr go to a log file, never to the caller's: the MCP server
 /// speaks protocol over stdio, and a dev server's banner would corrupt it.
 pub(crate) fn start(cas_root: &Path, spec: &ServerSpec) -> io::Result<RegisteredServer> {
+    let scope_ops = super::cgroup::SystemScopeOps;
+    start_with_scope_ops(cas_root, spec, &scope_ops)
+}
+
+/// Launch a server with an explicit containment implementation.
+///
+/// Production uses [`SystemScopeOps`]. Tests inject an in-memory implementation
+/// so child-process assertions can remain focused on process-group behavior
+/// without writing the test runner's cgroup or reaping unrelated processes.
+#[cfg(test)]
+pub(super) fn start_with_scope_ops(
+    cas_root: &Path,
+    spec: &ServerSpec,
+    scope_ops: &dyn super::cgroup::ScopeOps,
+) -> io::Result<RegisteredServer> {
+    start_inner(cas_root, spec, scope_ops)
+}
+
+#[cfg(not(test))]
+fn start_with_scope_ops(
+    cas_root: &Path,
+    spec: &ServerSpec,
+    scope_ops: &dyn super::cgroup::ScopeOps,
+) -> io::Result<RegisteredServer> {
+    start_inner(cas_root, spec, scope_ops)
+}
+
+fn start_inner(
+    cas_root: &Path,
+    spec: &ServerSpec,
+    scope_ops: &dyn super::cgroup::ScopeOps,
+) -> io::Result<RegisteredServer> {
     if spec.command.trim().is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -449,34 +481,35 @@ pub(crate) fn start(cas_root: &Path, spec: &ServerSpec) -> io::Result<Registered
     // Every registered server gets a dedicated scope when cgroup v2 is
     // delegated. Private scopes stay below the worker so teardown still owns
     // them; shared scopes are true siblings so teardown cannot reach them.
-    let scope = if spec.shared {
-        super::cgroup::create_server_scope(
+    let cgroup = if spec.shared {
+        scope_ops.join_shared_scope(
             spec.factory_session.as_deref().unwrap_or("no-session"),
             &spec.name,
+            launcher_pid,
         )
     } else {
-        super::cgroup::create_private_server_scope(
+        let scope = scope_ops.create_private_server_scope(
             spec.factory_session.as_deref().unwrap_or("no-session"),
             &spec.name,
-        )
-    };
-    let cgroup = match scope {
-        Some(dir) => match super::cgroup::add_pid(&dir, launcher_pid) {
-            Ok(()) => Some(dir),
-            Err(error) => {
-                tracing::warn!(
-                    server = %spec.name,
-                    launcher_pid,
-                    shared = spec.shared,
-                    error = %error,
-                    "cas-44d2: server launcher could not join its dedicated cgroup; \
-                     falling back to process-tree containment"
-                );
-                super::cgroup::remove_scope(&dir);
-                None
-            }
-        },
-        None => None,
+        );
+        match scope {
+            Some(dir) => match scope_ops.add_pid(&dir, launcher_pid) {
+                Ok(()) => Some(dir),
+                Err(error) => {
+                    tracing::warn!(
+                        server = %spec.name,
+                        launcher_pid,
+                        shared = spec.shared,
+                        error = %error,
+                        "cas-44d2: server launcher could not join its dedicated cgroup; \
+                         falling back to process-tree containment"
+                    );
+                    scope_ops.remove_scope(&dir);
+                    None
+                }
+            },
+            None => None,
+        }
     };
 
     if let Err(error) = fs::write(&launch_file, b"go\n") {
@@ -487,8 +520,8 @@ pub(crate) fn start(cas_root: &Path, spec: &ServerSpec) -> io::Result<Registered
             libc::kill(launcher_pid as libc::pid_t, libc::SIGKILL);
         }
         if let Some(ref dir) = cgroup {
-            let _ = super::cgroup::kill_scope(dir);
-            super::cgroup::remove_scope(dir);
+            let _ = scope_ops.kill_scope(dir);
+            scope_ops.remove_scope(dir);
         }
         let _ = child.wait();
         return Err(error);
@@ -499,8 +532,8 @@ pub(crate) fn start(cas_root: &Path, spec: &ServerSpec) -> io::Result<Registered
     let status = child.wait()?;
     if !status.success() {
         if let Some(ref dir) = cgroup {
-            let _ = super::cgroup::kill_scope(dir);
-            super::cgroup::remove_scope(dir);
+            let _ = scope_ops.kill_scope(dir);
+            scope_ops.remove_scope(dir);
         }
         return Err(io::Error::other(format!(
             "server launcher exited with {status}; see {}",
@@ -512,8 +545,8 @@ pub(crate) fn start(cas_root: &Path, spec: &ServerSpec) -> io::Result<Registered
         Ok(pid) => pid,
         Err(error) => {
             if let Some(ref dir) = cgroup {
-                let _ = super::cgroup::kill_scope(dir);
-                super::cgroup::remove_scope(dir);
+                let _ = scope_ops.kill_scope(dir);
+                scope_ops.remove_scope(dir);
             }
             return Err(error);
         }
@@ -581,11 +614,38 @@ fn read_published_pid(pid_file: &Path) -> io::Result<u32> {
 /// private server shares the worker's group, so only its own pid is
 /// signalled: `killpg` there would take the worker down with it.
 pub(crate) fn stop(cas_root: &Path, record: &RegisteredServer) -> io::Result<StopOutcome> {
+    let scope_ops = super::cgroup::SystemScopeOps;
+    stop_with_scope_ops(cas_root, record, &scope_ops)
+}
+
+#[cfg(test)]
+pub(super) fn stop_with_scope_ops(
+    cas_root: &Path,
+    record: &RegisteredServer,
+    scope_ops: &dyn super::cgroup::ScopeOps,
+) -> io::Result<StopOutcome> {
+    stop_inner(cas_root, record, scope_ops)
+}
+
+#[cfg(not(test))]
+fn stop_with_scope_ops(
+    cas_root: &Path,
+    record: &RegisteredServer,
+    scope_ops: &dyn super::cgroup::ScopeOps,
+) -> io::Result<StopOutcome> {
+    stop_inner(cas_root, record, scope_ops)
+}
+
+fn stop_inner(
+    cas_root: &Path,
+    record: &RegisteredServer,
+    scope_ops: &dyn super::cgroup::ScopeOps,
+) -> io::Result<StopOutcome> {
     let mut record = record.clone();
     let outcome = match liveness(&record) {
         ServerLiveness::Live => {
             let ports = listening_ports(&record);
-            terminate_server(&record)?;
+            terminate_server(&record, scope_ops)?;
             StopOutcome::Stopped {
                 pid: record.pid,
                 ports,
@@ -595,7 +655,7 @@ pub(crate) fn stop(cas_root: &Path, record: &RegisteredServer) -> io::Result<Sto
             // The registered wrapper may exit before a detached descendant.
             // Its dedicated scope remains authoritative even after reparenting,
             // so drain it before claiming the workload was already gone.
-            terminate_server(&record)?;
+            terminate_server(&record, scope_ops)?;
             StopOutcome::AlreadyGone
         }
         ServerLiveness::Gone => {
@@ -641,11 +701,16 @@ pub(crate) fn stop(cas_root: &Path, record: &RegisteredServer) -> io::Result<Sto
 /// descendant even after `setsid`, and `kill_scope` now refuses success while
 /// members remain. Older records and hosts without delegated cgroup v2 use a
 /// platform fallback below.
-fn terminate_server(record: &RegisteredServer) -> io::Result<()> {
+fn terminate_server(
+    record: &RegisteredServer,
+    scope_ops: &dyn super::cgroup::ScopeOps,
+) -> io::Result<()> {
     if let Some(ref dir) = record.cgroup {
-        super::cgroup::kill_scope(dir)?;
-        super::cgroup::remove_scope(dir);
-        return verify_record_gone(record);
+        scope_ops.kill_scope(dir)?;
+        scope_ops.remove_scope(dir);
+        if scope_ops.cgroup_kill_is_authoritative() {
+            return verify_record_gone(record);
+        }
     }
 
     #[cfg(target_os = "linux")]

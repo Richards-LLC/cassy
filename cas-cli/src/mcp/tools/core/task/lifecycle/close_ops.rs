@@ -2607,18 +2607,20 @@ impl CasCore {
                 } else {
                     verification_store.get_latest_for_task(&req.id)
                 };
-                let mut typed_dispatch =
-                    match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
-                        Ok(dispatch) => dispatch,
-                        Err(error) => {
-                            return Ok(Self::tool_error(format!(
-                                "⚠️ VERIFICATION DISPATCH INVALID\n\n\
+                let mut typed_dispatch = match cas_store::get_latest_verification_dispatch(
+                    &self.cas_root,
+                    &req.id,
+                ) {
+                    Ok(dispatch) => dispatch,
+                    Err(error) => {
+                        return Ok(Self::tool_error(format!(
+                            "⚠️ VERIFICATION DISPATCH INVALID\n\n\
                                  Task {} has unreadable durable verification-dispatch state: {}. \
                                  Cassy refuses to infer authority or recovery from corrupt metadata.",
-                                req.id, error
-                            )));
-                        }
-                    };
+                            req.id, error
+                        )));
+                    }
+                };
 
                 // Revalidate repository-bound legacy proof even after a verdict
                 // was recorded. This prevents an approval from authorizing file
@@ -3965,9 +3967,7 @@ impl CasCore {
                     // (which is correct for final-close/content accounting),
                     // but that cached anchor cannot authorize this queue hop
                     // while the current factory branch has a straggler tip.
-                    if is_factory_worker
-                        && let Some(assignee) = task.assignee.as_deref()
-                    {
+                    if is_factory_worker && let Some(assignee) = task.assignee.as_deref() {
                         let factory_branch = format!("factory/{assignee}");
                         if let Err(message) = validate_current_factory_branch_tip_ancestry(
                             &close_project_root,
@@ -5300,15 +5300,12 @@ impl CasCore {
                 format!("task reopen rejected: attributed actor is unavailable: {error}"),
             )
         })?;
-        let actor = self
-            .open_agent_store()?
-            .get(&actor_id)
-            .map_err(|error| {
-                Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!("task reopen rejected: attributed actor is unavailable: {error}"),
-                )
-            })?;
+        let actor = self.open_agent_store()?.get(&actor_id).map_err(|error| {
+            Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("task reopen rejected: attributed actor is unavailable: {error}"),
+            )
+        })?;
         // Terminal exits must be independently intelligible after replication:
         // the actor and the reason are both embedded in the note, rather than
         // relying on ephemeral caller context or a generic updated_at stamp.
@@ -9744,8 +9741,12 @@ fn append_close_decision_note_detached(
                 Err(error) if attempt == 3 => {
                     tracing::warn!(task_id = %log_task_id, error = %error, "deferred epic close decision note task failed after retries")
                 }
-                Ok(Err(error)) => tracing::debug!(task_id = %log_task_id, attempt, error = %error, "retrying deferred epic close decision note"),
-                Err(error) => tracing::debug!(task_id = %log_task_id, attempt, error = %error, "retrying failed deferred epic close decision note task"),
+                Ok(Err(error)) => {
+                    tracing::debug!(task_id = %log_task_id, attempt, error = %error, "retrying deferred epic close decision note")
+                }
+                Err(error) => {
+                    tracing::debug!(task_id = %log_task_id, attempt, error = %error, "retrying failed deferred epic close decision note task")
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(25 * attempt)).await;
         }
@@ -10947,8 +10948,20 @@ pub(crate) enum EpicCloseGateOutcome {
 /// faithfully is.
 pub(crate) fn validate_stranded_branch_override_reason(reason: &str) -> Result<String, String> {
     const CONTENTLESS: &[&str] = &[
-        "ok", "okay", "fine", "yes", "y", "done", "n/a", "na", "-", "override", "force",
-        "looks fine", "lgtm", "trust me",
+        "ok",
+        "okay",
+        "fine",
+        "yes",
+        "y",
+        "done",
+        "n/a",
+        "na",
+        "-",
+        "override",
+        "force",
+        "looks fine",
+        "lgtm",
+        "trust me",
     ];
     let trimmed = reason.trim();
     if trimmed.is_empty() {
@@ -11026,10 +11039,7 @@ impl BranchContentDirection {
 }
 
 /// Run `git` in `repo_path`, returning trimmed stdout on success.
-fn git_stdout_lines(
-    repo_path: &std::path::Path,
-    args: &[&str],
-) -> Result<Vec<String>, String> {
+fn git_stdout_lines(repo_path: &std::path::Path, args: &[&str]) -> Result<Vec<String>, String> {
     use std::process::Command;
 
     let out = Command::new("git")
@@ -11243,7 +11253,8 @@ fn branch_content_direction_against_ref(
 ///
 /// Bypass-immune for the same reasons as cas-95ce
 /// [`run_factory_branch_merge_gate`]: this is a data-state guard,
-/// not a review gate. `_req` is intentionally unused.
+/// not a review gate. The close route is selected from the epic's persisted
+/// delivery mode.
 pub(crate) fn run_epic_close_merge_gate(
     task: &Task,
     _req: &TaskCloseRequest,
@@ -11410,6 +11421,12 @@ pub(crate) fn run_epic_close_merge_gate(
              literally and merge only what is marked as delivering absent content.",
             "Per-child guidance, measured by content rather than by ancestry:",
         )
+    } else if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+        (
+            "⚠️ MERGE REQUIRED",
+            "Each child's factory branch below was measured as carrying content absent from {parent}, so the supervisor must merge each local factory branch before the epic can close. Do NOT push origin.",
+            "Await supervisor local merge. If cleanup already removed the worktree, the supervisor merges the surviving branch directly from the epic checkout:",
+        )
     } else {
         (
             "⚠️ MERGE REQUIRED",
@@ -11421,8 +11438,14 @@ pub(crate) fn run_epic_close_merge_gate(
              directly from the epic checkout (the branch, not the stale recorded SHA):",
         )
     };
+    let delivery_route = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+        "Delivery mode is local_merge: await supervisor local merge — the supervisor merges your local branch; do NOT push origin."
+    } else {
+        ""
+    };
     EpicCloseGateOutcome::Reject(format!(
         "{headline}\n\n\
+         {delivery_route}\n\n\
          Epic {epic_id} cannot close — {n} child task(s) have factory branches \
          whose delivery is not accounted for on {parent}:\n{detail}\n\
          {closing_instruction}\n\
@@ -13500,7 +13523,9 @@ fn delivery_added_hunks_survive_on_tree(
         ])
         .current_dir(repo_path)
         .output()
-        .map_err(|error| format!("failed to render zero-context delivery patch for `{path}`: {error}"))?;
+        .map_err(|error| {
+            format!("failed to render zero-context delivery patch for `{path}`: {error}")
+        })?;
     if !patch.status.success() {
         return Err(format!(
             "Git could not render the zero-context delivery patch for `{path}` (exit {})",
@@ -13576,9 +13601,7 @@ fn delivery_added_hunks_survive_on_tree(
         .iter()
         .flat_map(|target_line| {
             target_line
-                .split(|character: char| {
-                    !character.is_ascii_alphanumeric() && character != '_'
-                })
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
                 .filter(|token| !token.is_empty())
         })
         .collect::<Vec<_>>();
@@ -13588,9 +13611,7 @@ fn delivery_added_hunks_survive_on_tree(
         .filter(|line| !line.trim().is_empty())
         .all(|line| {
             let added_tokens = line
-                .split(|character: char| {
-                    !character.is_ascii_alphanumeric() && character != '_'
-                })
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
                 .filter(|token| !token.is_empty())
                 .collect::<Vec<_>>();
             if added_tokens.is_empty() {
@@ -18258,7 +18279,12 @@ mod merge_state_gate_tests {
     fn restarted_task_with_known_unmerged_delivery_receipt_still_requires_merge_gh_473() {
         let dir = init_factory_repo("worker");
         let p = dir.path();
-        commit_file_at(p, "delivery.rs", "// delivered but unmerged\n", "2026-08-17T21:00:00Z");
+        commit_file_at(
+            p,
+            "delivery.rs",
+            "// delivered but unmerged\n",
+            "2026-08-17T21:00:00Z",
+        );
         let receipt = head_sha(p);
 
         let task = worker_task("worker");
@@ -18798,12 +18824,8 @@ mod merge_state_gate_tests {
             "precondition: the historical-anchor gate reproduces the GH #588 false Proceed"
         );
 
-        let rejection = validate_current_factory_branch_tip_ancestry(
-            p,
-            "factory/worker",
-            "main",
-        )
-        .expect_err("review queue must reject the unmerged current tip");
+        let rejection = validate_current_factory_branch_tip_ancestry(p, "factory/worker", "main")
+            .expect_err("review queue must reject the unmerged current tip");
         assert!(rejection.contains(&current_tip), "{rejection}");
         assert!(rejection.contains("not an ancestor of"), "{rejection}");
         assert!(rejection.contains("main"), "{rejection}");
@@ -18820,7 +18842,10 @@ mod merge_state_gate_tests {
             .expect("init bare origin");
         let dir = init_factory_repo("worker");
         let p = dir.path();
-        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(
+            p,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
         git(p, &["push", "-q", "origin", "main"]);
 
         for (name, contents) in [("a.rs", "// A\n"), ("b.rs", "// B\n")] {
@@ -18859,12 +18884,8 @@ mod merge_state_gate_tests {
             "precondition: remote target contains the partial merge"
         );
 
-        let rejection = validate_current_factory_branch_tip_ancestry(
-            p,
-            "factory/worker",
-            "main",
-        )
-        .expect_err("the current straggler tip must not pass against origin/main");
+        let rejection = validate_current_factory_branch_tip_ancestry(p, "factory/worker", "main")
+            .expect_err("the current straggler tip must not pass against origin/main");
         assert!(rejection.contains(&current_tip), "{rejection}");
         assert!(rejection.contains("origin/main"), "{rejection}");
     }
@@ -19035,7 +19056,11 @@ mod merge_state_gate_tests {
         let dir = init_factory_repo("worker");
         let p = dir.path();
 
-        std::fs::write(p.join("generated.pyc"), b"review must remove this artifact\n").unwrap();
+        std::fs::write(
+            p.join("generated.pyc"),
+            b"review must remove this artifact\n",
+        )
+        .unwrap();
         git(p, &["add", "generated.pyc"]);
         git(
             p,
@@ -19052,12 +19077,7 @@ mod merge_state_gate_tests {
         git(p, &["add", "generated.pyc"]);
         git(
             p,
-            &[
-                "commit",
-                "-q",
-                "-m",
-                "fix(cas-2598): apply review deletion",
-            ],
+            &["commit", "-q", "-m", "fix(cas-2598): apply review deletion"],
         );
         let reviewed_tip = rev_parse_local(p, "HEAD");
 
@@ -19188,7 +19208,10 @@ mod merge_state_gate_tests {
             MergeStateGateOutcome::Reject(message) => {
                 assert!(message.contains("DELIVERY CONTENT DROPPED"), "{message}");
                 assert!(message.contains("credits.rs"), "{message}");
-                assert!(message.contains("measured the missing tree effect"), "{message}");
+                assert!(
+                    message.contains("measured the missing tree effect"),
+                    "{message}"
+                );
                 assert!(
                     !message.contains("merge conflict resolution discarded"),
                     "dropped-content rejection must report the measurement, not infer a cause: {message}"
@@ -19252,14 +19275,20 @@ mod merge_state_gate_tests {
         let conflict = git_command(p, &["merge", "--no-ff", "factory/other"])
             .status()
             .expect("start conflicting schema merge");
-        assert!(!conflict.success(), "fixture must produce a real merge conflict");
+        assert!(
+            !conflict.success(),
+            "fixture must produce a real merge conflict"
+        );
         std::fs::write(
             p.join("schema.prisma"),
             "generator client {\n  provider = \"prisma-client-js\"\n}\n\nmodel DeliveryOne {\n  id Int @id\n}\n\nmodel RegeneratedSuperset {\n  id Int @id\n}\n\nmodel DeliveryTwo {\n  id Int @id\n}\n\nmodel OtherLane {\n  id Int @id\n}\n",
         )
         .unwrap();
         git(p, &["add", "schema.prisma"]);
-        git(p, &["commit", "-q", "-m", "merge: regenerate schema superset"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "merge: regenerate schema superset"],
+        );
 
         assert!(git_commit_is_ancestor(p, &delivery, "main"));
         assert_eq!(
@@ -19350,7 +19379,10 @@ mod merge_state_gate_tests {
         )
         .unwrap();
         git(p, &["add", "exports.rs", "doctor.rs"]);
-        git(p, &["commit", "-q", "-m", "merge: union parallel deliveries"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "merge: union parallel deliveries"],
+        );
 
         std::fs::write(
             p.join("doctor.rs"),
@@ -19358,7 +19390,15 @@ mod merge_state_gate_tests {
         )
         .unwrap();
         git(p, &["add", "doctor.rs"]);
-        git(p, &["commit", "-q", "-m", "fix: remove duplicate capability import"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fix: remove duplicate capability import",
+            ],
+        );
         let supervisor_fixup = rev_parse_local(p, "HEAD");
 
         assert!(git_commit_is_ancestor(p, &delivery, &supervisor_fixup));
@@ -19391,7 +19431,8 @@ mod merge_state_gate_tests {
     fn union_merged_parallel_delivery_proceeds_without_override_gh_597() {
         let dir = init_factory_repo("worker");
         let p = dir.path();
-        let base = "pub use routing::{\n    Alpha, Beta,\n    Gamma, Delta,\n    Epsilon, Zeta,\n};\n";
+        let base =
+            "pub use routing::{\n    Alpha, Beta,\n    Gamma, Delta,\n    Epsilon, Zeta,\n};\n";
         let delivery = "pub use routing::{\n    CAPABILITY_A, CAPABILITY_B,\n    Alpha, DeliveryMarker, Beta,\n    Gamma, Delta,\n    Epsilon, Zeta,\n};\n";
         let sibling = "pub use routing::{\n    Alpha, OtherMarker, Beta,\n    Gamma, Delta,\n    Epsilon, Zeta,\n};\n";
         let union = "pub use routing::{\n    CAPABILITY_A, CAPABILITY_B,\n    Alpha, DeliveryMarker, OtherMarker, Beta,\n    Gamma, Delta,\n    Epsilon, Zeta,\n};\n";
@@ -21945,7 +21986,10 @@ mod epic_status_gate_tests {
         if let Some((name, body)) = lane_extra {
             std::fs::write(p.join(name), body).unwrap();
             git(p, &["add", name]);
-            git(p, &["commit", "-q", "-m", "feat: work that never reached main"]);
+            git(
+                p,
+                &["commit", "-q", "-m", "feat: work that never reached main"],
+            );
         }
 
         // Main receives the same content by another route (squash), so the
@@ -22059,11 +22103,8 @@ mod epic_status_gate_tests {
         let task = epic("cas-epic-twin");
         let req = base_req(&task.id);
 
-        let statuses = collect_epic_branch_statuses(
-            std::slice::from_ref(&landed),
-            "main",
-            dir.path(),
-        );
+        let statuses =
+            collect_epic_branch_statuses(std::slice::from_ref(&landed), "main", dir.path());
         assert_eq!(
             statuses[0].unmerged_count, 0,
             "a lane whose content is fully on main is not stranded"
@@ -22207,13 +22248,7 @@ mod epic_status_gate_tests {
         let landed = child("cas-stale-ref", TaskStatus::Closed, Some("lane"));
         let task = epic("cas-epic-stale-ref");
         let req = base_req(&task.id);
-        match run_epic_close_merge_gate(
-            &task,
-            &req,
-            "main",
-            p,
-            std::slice::from_ref(&landed),
-        ) {
+        match run_epic_close_merge_gate(&task, &req, "main", p, std::slice::from_ref(&landed)) {
             EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_) => {}
             EpicCloseGateOutcome::Reject(message) => {
                 assert!(
@@ -22322,15 +22357,20 @@ mod epic_status_gate_tests {
         )
         .unwrap();
         git(p, &["add", "feature.rs"]);
-        git(p, &["commit", "-q", "-m", "feat: lane work that never lands"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "feat: lane work that never lands"],
+        );
         git(p, &["checkout", "-q", "main"]);
         std::fs::write(p.join("feature.rs"), "fn existing() { /* rewritten */ }\n").unwrap();
         git(p, &["add", "feature.rs"]);
-        git(p, &["commit", "-q", "-m", "refactor: unrelated rewrite on main"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "refactor: unrelated rewrite on main"],
+        );
 
         let child_task = child("cas-lost", TaskStatus::Closed, Some("lane"));
-        let statuses =
-            collect_epic_branch_statuses(std::slice::from_ref(&child_task), "main", p);
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&child_task), "main", p);
         assert!(
             statuses[0].unmerged_count > 0,
             "content that never landed must keep blocking even though the target \
@@ -22352,7 +22392,16 @@ mod epic_status_gate_tests {
         // The false-positive set otherwise grows with every respawn.
         let dir = init_epic_repo(&[("original", 1)]);
         let p = dir.path();
-        git(p, &["merge", "--no-ff", "-m", "land original", "factory/original"]);
+        git(
+            p,
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "land original",
+                "factory/original",
+            ],
+        );
         // The respawn lane is just the reconciled base: zero task commits.
         git(p, &["branch", "factory/respawn", "main"]);
         assert!(matches!(
@@ -22361,8 +22410,7 @@ mod epic_status_gate_tests {
         ));
         let mut respawned = child("cas-respawn", TaskStatus::Closed, Some("respawn"));
         respawned.deliverables.parked_branch = Some("factory/original".to_string());
-        let statuses =
-            collect_epic_branch_statuses(std::slice::from_ref(&respawned), "main", p);
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&respawned), "main", p);
         assert_eq!(
             statuses[0].unmerged_count, 0,
             "a zero-commit respawn lane over a landed delivery strands nothing"
@@ -22371,13 +22419,7 @@ mod epic_status_gate_tests {
         let req = base_req(&task.id);
         assert!(
             matches!(
-                run_epic_close_merge_gate(
-                    &task,
-                    &req,
-                    "main",
-                    p,
-                    std::slice::from_ref(&respawned)
-                ),
+                run_epic_close_merge_gate(&task, &req, "main", p, std::slice::from_ref(&respawned)),
                 EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
             ),
             "a respawn must not resurrect a solved epic block"
@@ -22395,8 +22437,7 @@ mod epic_status_gate_tests {
         git(p, &["commit", "-q", "-m", "refactor: evolve feature to v2"]);
 
         let stale = child("cas-stale", TaskStatus::Closed, Some("lane"));
-        let statuses =
-            collect_epic_branch_statuses(std::slice::from_ref(&stale), "main", p);
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&stale), "main", p);
         assert!(
             statuses[0].unmerged_count > 0,
             "a behind lane carrying possibly-unlanded work must keep blocking"
@@ -22416,13 +22457,8 @@ mod epic_status_gate_tests {
         let stale_child = child("cas-stale", TaskStatus::Closed, Some("lane"));
         let task = epic("cas-epic-stale");
         let req = base_req(&task.id);
-        match run_epic_close_merge_gate(
-            &task,
-            &req,
-            "main",
-            p,
-            std::slice::from_ref(&stale_child),
-        ) {
+        match run_epic_close_merge_gate(&task, &req, "main", p, std::slice::from_ref(&stale_child))
+        {
             EpicCloseGateOutcome::Reject(message) => {
                 assert!(
                     !message.contains("git merge --no-ff factory/lane"),
@@ -22739,7 +22775,15 @@ mod epic_status_gate_tests {
         )
         .unwrap();
         git(p, &["add", "hub-web/dist/app.js"]);
-        git(p, &["commit", "-q", "-m", "fix(cas-child): ship Commander change"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fix(cas-child): ship Commander change",
+            ],
+        );
         let anchor = epic_git_stdout(p, &["rev-parse", "HEAD"]);
 
         git(p, &["checkout", "-q", "main"]);
@@ -23389,7 +23433,10 @@ mod commit_claim_integrity_tests {
         assert_eq!(task_commit_receipt_since(epoch), None);
 
         let positive_floor = chrono::DateTime::from_timestamp(10, 0).unwrap();
-        assert_eq!(task_commit_receipt_since(positive_floor), Some("@5".to_string()));
+        assert_eq!(
+            task_commit_receipt_since(positive_floor),
+            Some("@5".to_string())
+        );
     }
 
     #[test]
@@ -23517,7 +23564,10 @@ mod commit_claim_integrity_tests {
         git(p, &["checkout", "-q", "-b", "factory/noble-crane-27"]);
         std::fs::write(p.join("task_a.rs"), "// cas-069d work\n").unwrap();
         git(p, &["add", "task_a.rs"]);
-        git(p, &["commit", "-q", "-m", "fix(cas-069d): release preflight"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "fix(cas-069d): release preflight"],
+        );
         let commit_a = git_rev_parse(p, "HEAD");
 
         // Create commit B for cas-66ee ON TOP of A.
@@ -25121,8 +25171,14 @@ mod zero_change_close_tests {
         );
 
         assert!(message.contains("supervisor merge commit"), "{message}");
-        assert!(message.contains(&merge), "merge receipt must be named: {message}");
-        assert!(message.contains(&format!("commit_receipt={merge}")), "{message}");
+        assert!(
+            message.contains(&merge),
+            "merge receipt must be named: {message}"
+        );
+        assert!(
+            message.contains(&format!("commit_receipt={merge}")),
+            "{message}"
+        );
     }
 
     #[test]

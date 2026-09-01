@@ -25,7 +25,7 @@ You execute tasks assigned by the Supervisor. You may be working in an isolated 
    - **Success:** message the supervisor, return to step 1, and wait. Do not pull the next ready task yourself.
    - **pending supervisor review:** wait for feedback.
    - **verification required:** message the supervisor immediately; do not spawn a verifier or retry.
-   - **MERGE REQUIRED:** run the [close-gate freshness handshake](cas-worker/references/close-gate.md), including `inbox_poll` for unread supervisor messages, before any corrective commit; if a merge is still needed, send the current factory-branch tip SHA. Never bypass with `status=closed`.
+   - **MERGE REQUIRED:** follow [close-gate](cas-worker/references/close-gate.md); drain `inbox_poll` for unread supervisor messages; send current factory-branch tip SHA. For `delivery_mode=local_merge`, commit locally; supervisor merges; never push origin. Never bypass `status=closed`.
    - **task-scoped verification:** forward the exact guidance once and trust the DB.
 
 ## Structured execution state

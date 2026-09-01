@@ -1322,10 +1322,15 @@ fn h1_runtime_state_is_single_instance_and_round_trips() {
 
     let record = HubProcessRecord {
         pid: std::process::id(),
+        sid: None,
+        pgid: None,
         bind: "127.0.0.1".into(),
         port: 4173,
         version: env!("CARGO_PKG_VERSION").into(),
         started_at: "2026-08-09T00:00:00Z".into(),
+        cgroup: None,
+        launched_by: None,
+        launched_at: None,
         public_url: None,
         tailscale_serve_port: None,
         tailscale_cli: None,

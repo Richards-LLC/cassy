@@ -39,6 +39,8 @@ If the task you're closing is `depth=light` (check the `Depth:` line in `task sh
 
 Close runs a merge-state guard before anything else: every commit on your `factory/<name>` branch must already be on the task's parent branch, or close rejects with `⚠️ MERGE REQUIRED`. This is a **data-state guard** — `bypass_code_review=true` does not skip it, and neither can the supervisor. Get merged *before* attempting close:
 
+When `delivery_mode=local_merge`, await supervisor local merge: the supervisor merges your local factory branch from the shared repository, and you must **not push origin**. `CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1` is allowed only after explicit supervisor authorization. The normal push/merge route below applies only to `delivery_mode=push_branch`.
+
 **Crossed-message freshness handshake.** After any push, `MERGE REQUIRED`, or late amendment—and before any corrective commit—run `mcp__cs__coordination action=inbox_poll` repeatedly to `No unread messages` so unread supervisor messages cannot cross the delivery, re-read the task, check `git merge-base --is-ancestor <delivered-tip> <target-tip>`, and inspect whether the task is already closed/merged. If the delivery already landed or the task closed, re-close or stop; do not edit stale state.
 
 Bad (observed): start a corrective commit from an old rejection while the merge/amendment crosses the worker. Good: drain, re-read, ancestor-check, then edit only if the current state still requires it.

@@ -1061,7 +1061,7 @@ mod tests {
         assert_eq!(pages[0].origin_project_id, None);
 
         let status = check_migrations(cas_dir).unwrap();
-        assert_eq!(status.current_version, 246);
+        assert_eq!(status.current_version, 247);
         assert!(status.pending.is_empty());
         let second = run_migrations(cas_dir, false).unwrap();
         assert_eq!(second.applied_count, 0, "repeated open must be idempotent");
@@ -1083,7 +1083,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246],
+                vec![225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247],
                 "recorded m225 and missing m226 must order all later work behind them"
             );
 
@@ -1167,7 +1167,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246]
+                vec![225, 226, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247]
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();
@@ -1206,7 +1206,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246]
+                vec![225, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247]
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();

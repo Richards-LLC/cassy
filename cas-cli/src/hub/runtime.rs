@@ -12,10 +12,24 @@ use super::ensure_private_dir;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HubProcessRecord {
     pub pid: u32,
+    /// Session and process-group identity prove that the hub does not share
+    /// the short-lived shell or worker pane that launched it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgid: Option<u32>,
     pub bind: String,
     pub port: u16,
     pub version: String,
     pub started_at: String,
+    /// The cgroup scope that contains the hub when it was launched from a
+    /// factory worker. Shared hub scopes are siblings of worker scopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

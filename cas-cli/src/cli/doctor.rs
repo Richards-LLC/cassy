@@ -835,6 +835,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         if args.foreign_rows {
             return output_foreign_rows_detail(report, cli);
         }
+        checks.push(cloud_queue_check(&cas_root));
         checks.push(foreign_rows_check(report.as_ref()));
     } else if args.foreign_rows {
         anyhow::bail!(
@@ -1947,6 +1948,67 @@ fn format_lag(secs: i64) -> String {
 fn integration_checks(project_root: &Path) -> Vec<crate::cli::integrate::doctor::DoctorRow> {
     let reports = crate::cli::integrate::doctor::collect_reports(project_root);
     crate::cli::integrate::doctor::render_for_doctor(&reports)
+}
+
+/// Surface the exact content queue rows that keep `purge-foreign` fail-closed.
+/// The remediation is intentionally executable in order: reset terminal rows,
+/// push them, then preview the purge again. A count from the generic queue
+/// stats would include knowledge pages, so this reuses the purge's own content
+/// predicate instead.
+fn cloud_queue_check(cas_root: &Path) -> Check {
+    let db_path = cas_root.join("cas.db");
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(conn) => conn,
+        Err(error) => {
+            return Check {
+                name: "cloud sync queue".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot count queued content changes: {error}"),
+            };
+        }
+    };
+
+    let pending = match crate::cli::cloud::pending_content_pushes(&conn) {
+        Ok(pending) => pending,
+        Err(error) => {
+            return Check {
+                name: "cloud sync queue".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot count queued content changes: {error}"),
+            };
+        }
+    };
+
+    let mut by_type = BTreeMap::<String, usize>::new();
+    for (entity_type, _) in &pending {
+        *by_type.entry(entity_type.clone()).or_default() += 1;
+    }
+    let breakdown = by_type
+        .iter()
+        .map(|(entity_type, count)| format!("{entity_type}: {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remediation = "Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.";
+
+    if pending.is_empty() {
+        Check {
+            name: "cloud sync queue".to_string(),
+            status: CheckStatus::Ok,
+            message: format!("0 queued content change(s) block purge-foreign; {remediation}"),
+        }
+    } else {
+        Check {
+            name: "cloud sync queue".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "{} queued content change(s) block purge-foreign ({breakdown}); {remediation}",
+                pending.len()
+            ),
+        }
+    }
 }
 
 #[cfg(test)]

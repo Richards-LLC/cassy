@@ -68,7 +68,9 @@ impl SyncQueue {
         // team_id). SQLite cannot replace that constraint with an expression
         // index in place, so rebuild once when either identity column was
         // added. Existing rows retain NULL project_id and therefore continue
-        // to coalesce under COALESCE(project_id, '').
+        // to coalesce under COALESCE(project_id, ''). Do not create the new
+        // unique index inside this rebuild: old databases may already contain
+        // duplicate rows, and cleanup below must run before index creation.
         if !has_team_id || !has_project_id {
             conn.execute_batch(
                 r#"
@@ -91,19 +93,32 @@ impl SyncQueue {
                 CREATE INDEX IF NOT EXISTS idx_sync_queue_created ON sync_queue(created_at);
                 CREATE INDEX IF NOT EXISTS idx_sync_queue_retry ON sync_queue(retry_count);
                 CREATE INDEX IF NOT EXISTS idx_sync_queue_team ON sync_queue(team_id);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_queue_entity_team_project
-                    ON sync_queue(entity_type, entity_id, team_id, COALESCE(project_id, ''));
                 "#,
             )?;
         }
 
-        // Normalize any pre-migration NULL team_ids to '' so the UNIQUE
-        // identity index properly deduplicates
-        // personal-queue items. In SQLite, NULL != NULL and NULL != '' under
-        // UNIQUE, so a row with team_id=NULL and a subsequent enqueue with
-        // team_id='' would create duplicates (defect C / cas-8dd8).
-        // This UPDATE is idempotent — a no-op when no NULLs remain.
+        // Normalize any pre-migration NULL team_ids to '' before creating the
+        // unique index. In SQLite, NULL != '' under UNIQUE, so a row with
+        // team_id=NULL and a subsequent enqueue with team_id='' would create
+        // duplicates (defect C / cas-8dd8).
         conn.execute_batch("UPDATE sync_queue SET team_id = '' WHERE team_id IS NULL;")?;
+
+        // Databases created before the identity index could contain several
+        // copies of one queue key. Retain the newest row (highest AUTOINCREMENT
+        // id, which is the latest enqueue) so its operation and payload are the
+        // values that the next push observes. This also makes index creation
+        // safe for a partially migrated database.
+        conn.execute_batch(
+            r#"
+            DELETE FROM sync_queue
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM sync_queue
+                GROUP BY entity_type, entity_id, team_id, COALESCE(project_id, '')
+            );
+            "#,
+        )?;
+
         conn.execute_batch(
             r#"
             CREATE INDEX IF NOT EXISTS idx_sync_queue_team ON sync_queue(team_id);

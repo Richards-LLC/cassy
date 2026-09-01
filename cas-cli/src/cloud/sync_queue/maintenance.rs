@@ -199,6 +199,31 @@ impl SyncQueue {
         Ok(reset)
     }
 
+    /// Requeue terminal rows whose last diagnostic contains a repaired reason.
+    /// Matching is case-insensitive and substring-based because push errors
+    /// retain structured reason text inside a user-readable diagnostic.
+    pub fn retry_failed_for_reason(
+        &self,
+        reason: &str,
+        max_retries: i32,
+    ) -> Result<usize, CasError> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Ok(0);
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let reset = conn.execute(
+            "UPDATE sync_queue
+             SET retry_count = 0
+             WHERE retry_count >= ?1
+               AND last_error IS NOT NULL
+               AND instr(lower(last_error), lower(?2)) > 0",
+            params![max_retries, reason],
+        )?;
+        Ok(reset)
+    }
+
     /// Requeue terminal failures caused by an older client once this build
     /// meets the server's recorded minimum version. The diagnostic is cleared
     /// with the retry counter so the operation is idempotent: a second push

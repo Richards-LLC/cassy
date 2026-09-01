@@ -246,7 +246,12 @@ impl CloudSyncer {
         git_remote: Option<&str>,
         blocked_upserts: &HashSet<i64>,
     ) -> (usize, Vec<String>) {
-        let mut upserts = Vec::new();
+        // A move replacement (and every later edit to a moved task) carries
+        // its destination in the queue row. Keep those rows out of the
+        // pusher's envelope: the cloud keys the upsert by this envelope's
+        // project_canonical_id, not by the row's origin_project field.
+        let mut upserts_by_project: HashMap<String, Vec<(&QueuedSync, serde_json::Value)>> =
+            HashMap::new();
 
         for item in queued.iter().filter(|item| {
             item.operation == SyncOperation::Upsert
@@ -256,17 +261,21 @@ impl CloudSyncer {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
                     Ok(mut value) => {
+                        let target_project = item.project_id.as_deref().unwrap_or(project_id);
                         // Rows queued before origin_project existed still need
-                        // the current scoped identity when they are retried.
-                        // The outer project_canonical_id is not a substitute:
-                        // task consumers also rely on the row-level field.
+                        // the target scoped identity when they are retried. The
+                        // outer project_canonical_id is not a substitute: task
+                        // consumers also rely on the row-level field.
                         if entity_type == EntityType::Task {
-                            stamp_task_origin_project(&mut value, project_id);
+                            stamp_task_origin_project(&mut value, target_project);
                         }
                         if entity_type == EntityType::TaskDependency {
-                            stamp_task_dependency_origin_project(&mut value, project_id);
+                            stamp_task_dependency_origin_project(&mut value, target_project);
                         }
-                        upserts.push((item, value));
+                        upserts_by_project
+                            .entry(target_project.to_string())
+                            .or_default()
+                            .push((item, value));
                     }
                     Err(_) => {
                         let _ = self
@@ -285,13 +294,29 @@ impl CloudSyncer {
         let mut synced = 0;
         let mut errors = Vec::new();
 
-        for sub_batch in self.split_into_sub_batches(upserts) {
+        let sub_batches: Vec<_> = upserts_by_project
+            .into_iter()
+            .flat_map(|(target_project, upserts)| {
+                self.split_into_sub_batches(upserts)
+                    .into_iter()
+                    .map(move |sub_batch| (target_project.clone(), sub_batch))
+            })
+            .collect();
+
+        for (target_project, sub_batch) in sub_batches {
             let (batch_items, values): (Vec<&QueuedSync>, Vec<serde_json::Value>) =
                 sub_batch.into_iter().unzip();
             let sent_count = values.len();
 
             match self
-                .push_team_sub_batch(team_id, entity_key, values, token, project_id, git_remote)
+                .push_team_sub_batch(
+                    team_id,
+                    entity_key,
+                    values,
+                    token,
+                    &target_project,
+                    git_remote,
+                )
             {
                 Ok(response) => {
                     if let Some(body) = response.as_ref() {

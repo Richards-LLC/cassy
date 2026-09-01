@@ -61,12 +61,17 @@ impl SyncingTaskStore {
         if let Some(team_id) = self.team_id.as_deref()
             && eligible_for_team_task(task)
         {
-            let _ = self.queue.enqueue_for_team(
+            let destination_project = task
+                .origin_project
+                .as_deref()
+                .filter(|project_id| !project_id.trim().is_empty());
+            let _ = self.queue.enqueue_for_team_project(
                 EntityType::Task,
                 &task.id,
                 SyncOperation::Upsert,
                 Some(&payload),
                 team_id,
+                destination_project,
             );
         }
     }
@@ -90,10 +95,14 @@ impl SyncingTaskStore {
         if let Some(team_id) = self.team_id.as_deref()
             && eligible_for_team_task(task)
         {
+            let Some(new_project_id) = task.origin_project.as_deref() else {
+                return;
+            };
             let _ = self.queue.enqueue_team_move(
                 EntityType::Task,
                 &task.id,
                 old_project_id,
+                new_project_id,
                 &payload,
                 team_id,
             );
@@ -703,14 +712,13 @@ mod tests {
         assert_eq!(pending[0].project_id.as_deref(), Some("project-a"));
         assert_eq!(pending[1].operation, SyncOperation::Upsert);
         assert_eq!(pending[1].entity_id, task.id);
-        assert_eq!(pending[1].project_id, None);
+        assert_eq!(pending[1].project_id.as_deref(), Some("project-b"));
         assert!(
             pending[1]
                 .payload
                 .as_deref()
                 .is_some_and(|payload| payload.contains("\"origin_project\":\"project-b\""))
         );
-        assert_eq!(pending[1].project_id.as_deref(), Some("project-b"));
     }
 
     #[test]

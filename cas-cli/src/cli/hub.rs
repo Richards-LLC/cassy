@@ -887,6 +887,42 @@ fn stop_with_output(cli: &Cli, emit_output: bool) -> Result<()> {
     Ok(())
 }
 
+/// Restart a live hub left behind by an older Cassy binary. This is called by
+/// `cas update` after the replacement version is known; a missing, dead, or
+/// already-current hub is intentionally a no-op.
+pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool> {
+    let paths = HubRuntimePaths::default_for_user()?;
+    let Ok(record) = paths.read_process_record() else {
+        return Ok(false);
+    };
+    if !record_is_live(&record) {
+        return Ok(false);
+    }
+    let Some(spec) = restart_spec_for_record(&record, binary_version)? else {
+        return Ok(false);
+    };
+
+    if !cli.json {
+        println!(
+            "cas update: restarting stale hub (pid {}, version {} -> {})",
+            record.pid, record.version, binary_version
+        );
+    }
+    stop_with_output(cli, !cli.json)?;
+    let args = HubServeArgs {
+        bind: spec.bind,
+        port: spec.port,
+    };
+    start_with_output(
+        &args,
+        cli,
+        spec.tailscale_serve,
+        spec.tailscale_port,
+        !cli.json,
+    )?;
+    Ok(true)
+}
+
 fn wait_for_process_and_lock_release(
     paths: &HubRuntimePaths,
     pid: u32,

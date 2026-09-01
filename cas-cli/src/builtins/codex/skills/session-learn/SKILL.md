@@ -98,7 +98,7 @@ Manual invocation works regardless of the flag. The flag only gates the auto-tri
 
 ## Worked example
 
-Session-end transcript shows: user corrected me twice on scope discipline, I discovered the cas-code-review skill description was stale (a non-obvious pattern), and we made a design decision to ship cas-ec8f's fix as a 3-commit stack instead of a rebase. Expected output:
+Session-end transcript shows: user corrected me twice on scope discipline, I discovered a shipped review description was stale (a non-obvious pattern), and we made a design decision to ship cas-ec8f's fix as a 3-commit stack instead of a rebase. Expected output:
 
 ```json
 [

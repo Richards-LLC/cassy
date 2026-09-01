@@ -212,18 +212,19 @@ the task notes so the audit trail shows the bypass was deliberate.
 3. Cherry-pick to base branch: `git cherry-pick <commit-sha>` (one per commit)
    - **If conflicts arise:** (a) non-overlapping additions (e.g., both workers added to Cargo.toml) — keep both entries, (b) semantic conflicts — review both changes and pick the correct merge, (c) if unsure — message the worker who committed for context before resolving
 4. Verify build after cherry-pick: `~/.cargo/bin/cargo build --quiet`
-5. Run the lightweight per-merge gate. Do **not** run the full multi-persona
-   `/cas-code-review` pipeline here by default; that review runs once in
-   Phase 4 after the epic is code-complete. For this merge:
-   - Read the direct diff against the task spec and acceptance criteria.
-   - Check ownership boundaries, obvious defects, missing files/tests, and
-     whether the worker proved the right command.
-   - Run targeted mechanical verification only when warranted by the diff.
-   - Record the audit trail:
-     `mcp__cs__verification action=add task_id=<task-id> status=approved summary="<per-merge gate: diff read + proof checked>"`.
-   - If the single diff is exceptionally risky, you may run
-     `/cas-code-review mode=interactive base_sha=<pre-cp-sha> task_id=<task-id>`
-     by explicit judgment; this is an exception, not the default cadence.
+5. Run the canonical merge-time diff review. This review is the acceptance gate
+   for every worker merge:
+   - Read the worker's direct diff against the task spec and acceptance
+     criteria, then inspect the resulting diff on the merged epic tree.
+   - Check ownership boundaries, behavior and interface contracts, missing
+     files or tests, and whether the worker supplied credible test receipts.
+   - Re-run the tests for touched modules (or the narrowest justified scoped
+     equivalent) on the merged tree and record the real exit status.
+   - Record the review receipt only after those checks pass:
+     `mcp__cs__verification action=add task_id=<task-id> verification_type=task status=approved summary="<merged-tree diff vs spec; ownership, tests, receipts, and touched-module proof checked>" files="<changed-files>"`.
+   - If the review finds a defect or a missing proof, do not merge or record an
+     approval. Create a bounded fix task or use `request_changes`, then repeat
+     this review after the correction lands.
 6. Bring the other worktrees onto the updated **local** branch (not `origin/`):
    ```
    mcp__cs__coordination action=sync_all_workers branch=<base-branch>
@@ -257,24 +258,22 @@ When workers share the main directory, there's no branch merging — workers com
 
 1. Verify all tasks closed: `mcp__cs__task action=list status=open epic=<epic-id>`
 2. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate.
-3. Run the single required full multi-persona review against the assembled EPIC
-   diff. The Phase 3 per-merge gate catches obvious per-task problems; this
-   step is the full `/cas-code-review` pass that catches cross-task integration
-   issues (e.g., two tasks individually clean but semantically conflicting).
-   From inside the epic branch checkout, invoke:
-   `/cas-code-review mode=interactive base_sha=<base-branch>`
-   (substitute `main`, `develop`, or your actual base branch name for `<base-branch>`)
-   For large diffs, write the literal diff to a file first:
+3. Run the final assembled-tree gate. Phase 3 review receipts cover each
+   worker merge; this gate checks cross-task integration on the final tree:
    ```bash
-   git diff <base-branch>..HEAD > /tmp/<epic-id>-diff.patch
+   cargo nextest run -p cas
    ```
-   Stay on the epic branch and pass that file path in the review context so personas read the literal assembled diff while exploring the correct tree.
-4. Turn any review finding that needs worker action into a bounded epic-child fix-round task before messaging a worker. Put the finding, required fix, acceptance criteria, and proof command in the task description; the coordination message only points at the task ID.
-5. After the fix lands, rerun the full gate yourself and capture the real exit code:
+4. Turn any final-gate failure or review gap that needs worker action into a
+   bounded epic-child fix-round task before messaging a worker. Put the finding,
+   required fix, acceptance criteria, and proof command in the task description;
+   the coordination message only points at the task ID.
+5. After the fix lands, rerun the final assembled-tree gate yourself and capture
+   the real exit code:
    ```bash
-   cargo test --no-fail-fast > /tmp/<epic-id>-cargo-test.log 2>&1; echo $?
+   cargo nextest run -p cas > /tmp/<epic-id>-cargo-nextest.log 2>&1; echo $?
    ```
-   Never pipe the test run to `tail`; that captures the pipe status, not the cargo status.
+   Never pipe the test run to `tail`; that captures the pipe status, not the
+   nextest status.
 6. **Isolated mode only**: land the lanes and reclaim the worktrees (can be 10GB+ each) only after the review loop is clean and the full gate exits 0. This is the end-of-lane consume, so `cleanup=true` is correct here:
    ```
    # One per worker lane — removes the worktree and deletes factory/<worker>

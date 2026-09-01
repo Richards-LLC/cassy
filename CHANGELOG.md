@@ -7,6 +7,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-09-01
+
+### Added
+- `mcp__cas__task` list/ready/blocked/available accept `include_foreign`; the
+  board is scoped to the current project by default and prints how many
+  foreign-origin rows were hidden. `show` on a foreign task names its owner.
+- Supervisor `task update origin_project=<project>` now moves the task in the
+  team cloud: the old project-keyed row is deleted before the row is upserted
+  under the new owner (delete failure withholds the upsert), the destination
+  must be a registered team project, and a decision note records the move.
+- `cas hub authorize` resolves the Commander origin without `--hub-url`
+  (explicit flag, then the hub process record, then `[hub].public_url`, then
+  the last origin that worked), accepts bare hostnames as HTTPS, and prints the
+  requested/granted scopes once.
+
+### Changed
+- Team push no longer overwrites an explicit `origin_project` with the pushing
+  project; only rows with a missing or blank origin inherit it, and Global
+  tasks stay unstamped.
+- Team pull keeps foreign-keyed task rows and arbitrates duplicates in favor of
+  the owning project; a stale replica can no longer reopen a task its owner
+  closed (discarded rows are logged as `owner_wins`).
+- `cas cloud purge-foreign` classifies only rows explicitly attributed to
+  another project as foreign; tasks with no attribution and every local rule are
+  kept, and it refuses (even with `--force`) to remove more than half of the
+  tasks or any proven rule.
+- Bare `cas hub` shows status (with both the running and installed versions);
+  `cas hub start` on a live hub whose version or flags differ restarts it
+  instead of failing; `cas update` restarts a running hub left on the old
+  binary.
+- `cas list` reports the live registered worker count for a factory session
+  instead of stale session metadata.
+
 ## [3.7.7] - 2026-09-01
 
 ### Changed

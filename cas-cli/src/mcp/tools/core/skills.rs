@@ -327,32 +327,6 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let start_time = std::time::Instant::now();
 
-        // cas-4fef: ownership gate. `cas-code-review` is supervisor-owned by
-        // default (cas-865b); a factory worker running the persona pipeline
-        // pre-close both burns ~14 minutes and produces an envelope the close
-        // path no longer wants. The prohibition used to live only in the skill
-        // description's tail and was violated twice in one session, so it is
-        // enforced here — before the usage is recorded — rather than asked for.
-        if crate::code_review_dispatch::is_cas_code_review_skill(&req.id) {
-            // cas-bcfb: shared resolver — the PreToolUse gate on the
-            // harness-native `Skill`/`Workflow` paths answers "who owns review
-            // here?" with this same function, so the two cannot drift.
-            let supervisor_owned =
-                crate::code_review_dispatch::supervisor_owned_at(Some(self.cas_root.as_path()));
-            if let crate::code_review_dispatch::ReviewDispatchDecision::Refused { message } =
-                crate::code_review_dispatch::review_dispatch_decision(
-                    crate::code_review_dispatch::is_factory_worker_from_env(),
-                    supervisor_owned,
-                )
-            {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_REQUEST,
-                    message: Cow::from(message),
-                    data: None,
-                });
-            }
-        }
-
         let skill_store = self.open_skill_store()?;
 
         let mut skill = skill_store.get(&req.id).map_err(|e| McpError {

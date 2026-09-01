@@ -209,6 +209,28 @@ fn test_task_depth_roundtrip() {
 }
 
 #[test]
+fn test_task_delivery_mode_roundtrip() {
+    use cas_types::DeliveryMode;
+    let (_temp, store) = create_test_store();
+    let id = store.generate_id().unwrap();
+    let mut task = Task::new(id.clone(), "local merge task".to_string());
+    task.delivery_mode = DeliveryMode::LocalMerge;
+    store.add(&task).unwrap();
+    assert_eq!(
+        store.get(&id).unwrap().delivery_mode,
+        DeliveryMode::LocalMerge
+    );
+
+    let mut fetched = store.get(&id).unwrap();
+    fetched.delivery_mode = DeliveryMode::PushBranch;
+    store.update(&fetched).unwrap();
+    assert_eq!(
+        store.get(&id).unwrap().delivery_mode,
+        DeliveryMode::PushBranch
+    );
+}
+
+#[test]
 fn closed_to_non_closed_update_clears_close_cycle_authority() {
     let (_temp, store) = create_test_store();
     let mut task = Task::new(

@@ -258,20 +258,22 @@ impl CasService {
         if let Some(target_project) = target_project {
             return self
                 .inner
-                .cas_task_proposal_create(
+                .cas_task_proposal_create_with_delivery_mode(
                     inner_req,
                     &target_project,
                     blocks_origin_task_id.as_deref(),
                     proposal_attempt_id.as_deref(),
+                    req.delivery_mode.as_deref(),
                 )
                 .await;
         }
         self.inner
-            .cas_task_create_with_target(
+            .cas_task_create_with_delivery_mode(
                 inner_req,
                 target_repo.as_deref(),
                 target_branch.as_deref(),
                 req.confirm_warning.unwrap_or(false),
+                req.delivery_mode.as_deref(),
             )
             .await
     }
@@ -395,13 +397,14 @@ impl CasService {
             depth: req.depth,
         };
         self.inner
-            .cas_task_update_with_target(
+            .cas_task_update_with_delivery_mode(
                 inner_req,
                 target_repo.as_deref(),
                 target_branch.as_deref(),
                 req.proof_scope_fix.unwrap_or(false),
                 req.reason.as_deref(),
                 state_patch,
+                req.delivery_mode.as_deref(),
             )
             .await
     }
@@ -833,8 +836,8 @@ impl CasService {
         &self,
         req: RuleRequest,
     ) -> Result<CallToolResult, McpError> {
-        use crate::store::open_rule_store;
         use crate::hybrid_search::{DocType, SearchOptions};
+        use crate::store::open_rule_store;
 
         let content = req.content.ok_or_else(|| {
             Self::error(
@@ -985,7 +988,10 @@ impl CasService {
         self.inner.cas_skill_delete(Parameters(inner_req)).await
     }
 
-    pub(super) async fn skill_history(&self, req: SkillRequest) -> Result<CallToolResult, McpError> {
+    pub(super) async fn skill_history(
+        &self,
+        req: SkillRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::VersionRequest;
         let inner_req = VersionRequest {
             id: req
@@ -999,7 +1005,10 @@ impl CasService {
         self.inner.cas_skill_history(Parameters(inner_req)).await
     }
 
-    pub(super) async fn skill_restore(&self, req: SkillRequest) -> Result<CallToolResult, McpError> {
+    pub(super) async fn skill_restore(
+        &self,
+        req: SkillRequest,
+    ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::VersionRequest;
         let inner_req = VersionRequest {
             id: req

@@ -1521,7 +1521,9 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
+        use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
         use cas_types::{TaskStatus, TaskType};
 
         let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
@@ -1530,6 +1532,8 @@ impl CasService {
                 format!("Failed to open task store: {e}"),
             )
         })?;
+        let requested_delivery_mode = validate_delivery_mode(req.delivery_mode.as_deref())
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         let workers_len = spawn_worker_entries_len(req.workers.as_deref())
             .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
@@ -1922,6 +1926,28 @@ impl CasService {
         };
 
         let factory_session = current_factory_session();
+        if let Some(delivery_mode) = requested_delivery_mode {
+            let session = factory_session.as_deref().ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    "delivery_mode requires an active factory session (CAS_FACTORY_SESSION is not set)",
+                )
+            })?;
+            persist_session_metadata_delivery_mode_at(&metadata_path(session), delivery_mode)
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("failed to persist factory delivery mode: {error}"),
+                    )
+                })?;
+        }
+        let delivery_mode_notice = requested_delivery_mode
+            .map(|mode| {
+                format!(
+                    "\nDelivery mode: {mode} (workers commit locally; supervisor merges their factory branches)"
+                )
+            })
+            .unwrap_or_default();
         // Legacy rows carry requester selectors in their own columns. New
         // multi-worker rows persist the provider-correct selectors on every
         // WorkerSpec, so the daemon never flattens distinct accounts again.
@@ -1970,6 +1996,13 @@ impl CasService {
                 ("workers", &worker_names_text),
                 ("task_id", req.task_id.as_deref().unwrap_or("")),
                 ("isolate", if isolate { "true" } else { "false" }),
+                (
+                    "delivery_mode",
+                    requested_delivery_mode
+                        .map(|mode| mode.to_string())
+                        .as_deref()
+                        .unwrap_or(""),
+                ),
             ],
         );
 
@@ -2002,11 +2035,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{delivery_mode_notice}{task_id_note}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{delivery_mode_notice}{task_id_note}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -4899,8 +4932,12 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::open_task_store;
-        use crate::ui::factory::{metadata_path, persist_session_metadata_pinned_epic_id_at};
+        use crate::ui::factory::{
+            metadata_path, persist_session_metadata_delivery_mode_at,
+            persist_session_metadata_pinned_epic_id_at,
+        };
         use cas_types::{TaskStatus, TaskType};
 
         let factory_session = current_factory_session().ok_or_else(|| {
@@ -4909,6 +4946,8 @@ impl CasService {
                 "focus_epic requires an active factory session (CAS_FACTORY_SESSION is not set)",
             )
         })?;
+        let requested_delivery_mode = validate_delivery_mode(req.delivery_mode.as_deref())
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         let clear = req.clear.unwrap_or(false);
         let epic_id = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty());
@@ -4921,7 +4960,7 @@ impl CasService {
                     format!("Failed to clear pinned epic focus: {e}"),
                 )
             })?;
-            self.record_focus_epic_event(&factory_session, None);
+            self.record_focus_epic_event(&factory_session, None, None);
             return Ok(Self::success(format!(
                 "Cleared pinned epic focus for factory session {factory_session}"
             )));
@@ -4941,7 +4980,7 @@ impl CasService {
             )
         })?;
 
-        let epic = task_store.get(epic_id).map_err(|e| {
+        let mut epic = task_store.get(epic_id).map_err(|e| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!("Task not found: {epic_id}: {e}"),
@@ -4968,20 +5007,42 @@ impl CasService {
             ));
         }
 
+        let delivery_mode = requested_delivery_mode.unwrap_or(epic.delivery_mode);
+        if requested_delivery_mode.is_some() {
+            epic.delivery_mode = delivery_mode;
+            task_store.update(&epic).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to persist epic delivery mode: {error}"),
+                )
+            })?;
+        }
+
         persist_session_metadata_pinned_epic_id_at(&metadata_path, Some(epic_id)).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to persist pinned epic focus: {e}"),
             )
         })?;
-        self.record_focus_epic_event(&factory_session, Some(epic_id));
+        persist_session_metadata_delivery_mode_at(&metadata_path, delivery_mode).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to persist factory delivery mode: {e}"),
+            )
+        })?;
+        self.record_focus_epic_event(&factory_session, Some(epic_id), Some(delivery_mode));
 
         Ok(Self::success(format!(
-            "Pinned epic focus to {epic_id} for factory session {factory_session}"
+            "Pinned epic focus to {epic_id} for factory session {factory_session} (delivery_mode={delivery_mode})"
         )))
     }
 
-    fn record_focus_epic_event(&self, factory_session: &str, epic_id: Option<&str>) {
+    fn record_focus_epic_event(
+        &self,
+        factory_session: &str,
+        epic_id: Option<&str>,
+        delivery_mode: Option<cas_types::DeliveryMode>,
+    ) {
         use crate::store::open_event_store;
         use cas_types::{Event, EventEntityType, EventType};
 
@@ -5002,6 +5063,7 @@ impl CasService {
         let metadata = serde_json::json!({
             "factory_session": factory_session,
             "epic_id": epic_id,
+            "delivery_mode": delivery_mode.map(|mode| mode.to_string()),
         });
         let event = Event::new(
             EventType::SupervisorInjected,

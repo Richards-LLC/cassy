@@ -25,7 +25,7 @@ You execute tasks assigned by the Supervisor. You may be working in an isolated 
    - **Success:** message the supervisor, return to step 1, and wait. Do not pull the next ready task yourself.
    - **pending supervisor review:** wait for feedback.
    - **verification required:** message the supervisor immediately; do not spawn a verifier or retry.
-   - **MERGE REQUIRED:** run the [close-gate freshness handshake](cas-worker/references/close-gate.md), including `inbox_poll` for unread supervisor messages, before any corrective commit; if a merge is still needed, send the current factory-branch tip SHA. Never bypass with `status=closed`.
+   - **MERGE REQUIRED:** run the [close-gate freshness handshake](cas-worker/references/close-gate.md), including `inbox_poll` for unread supervisor messages, before any corrective commit; if a merge is still needed, send the current factory-branch tip SHA. For `delivery_mode=local_merge`, await supervisor local merge and do not push origin; for `push_branch`, follow the normal remote merge route. Never bypass with `status=closed`.
    - **task-scoped verification:** forward the exact guidance once and trust the DB.
 
 ## Structured execution state
@@ -84,6 +84,7 @@ Null means use judgment; other values are invalid.
 - **Document important choices.** Use `cas__task action=notes note_type=decision` for non-obvious decisions.
 - **Keep durable discoveries deliberately.** Relays are attributed, not auto-saved; use `cas__memory action=remember` for cross-session facts.
 - **Never block the pane.** Background anything over ~2 minutes or use `action=remind` and end the turn. Foreground `gh run watch`/poll loops are banned; servers use `action=server_start`.
+- **Delivery mode:** when the task or active factory session says `delivery_mode=local_merge`, commit locally and do not run `git push origin`; the supervisor merges your local `factory/<name>` branch. Set `CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1` only when the supervisor explicitly authorizes a push.
 - Codex: checkpoint on last_token_usage/model_context_window, never total_token_usage; see discipline.md.
 - **Checkpoint, never compact.** When context is low: commit, push, hand off, and request a respawn. See [discipline.md](cas-worker/references/discipline.md).
 

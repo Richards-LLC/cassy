@@ -3,7 +3,7 @@ use std::str::FromStr;
 use rmcp::schemars::JsonSchema;
 use serde::Deserialize;
 
-use cas_types::TaskDepth;
+use cas_types::{DeliveryMode, TaskDepth};
 
 use crate::mcp::tools::types::defaults::{
     default_dep_type, default_note_type, default_priority, default_subagent_tokens,
@@ -64,6 +64,19 @@ pub fn validate_depth(value: Option<&str>) -> Result<Option<TaskDepth>, String> 
         Some(s) if s.is_empty() => Ok(None),
         Some(s) => TaskDepth::from_str(s).map(Some).map_err(|_| {
             format!("Invalid depth: '{s}'. Must be one of: light, deep (or empty/absent)")
+        }),
+    }
+}
+
+/// Validate and parse an incoming factory branch delivery route.
+pub fn validate_delivery_mode(value: Option<&str>) -> Result<Option<DeliveryMode>, String> {
+    match value.map(str::trim) {
+        None => Ok(None),
+        Some(s) if s.is_empty() => Ok(None),
+        Some(s) => DeliveryMode::from_str(s).map(Some).map_err(|_| {
+            format!(
+                "Invalid delivery_mode: '{s}'. Must be one of: push_branch, local_merge (or empty/absent)"
+            )
         }),
     }
 }

@@ -347,6 +347,28 @@ impl CasCore {
         proof_scope_fix_reason: Option<&str>,
         state_patch: Option<serde_json::Value>,
     ) -> Result<CallToolResult, McpError> {
+        self.cas_task_update_with_delivery_mode(
+            req,
+            target_repo,
+            target_branch,
+            proof_scope_fix,
+            proof_scope_fix_reason,
+            state_patch,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn cas_task_update_with_delivery_mode(
+        &self,
+        req: TaskUpdateRequest,
+        target_repo: Option<&str>,
+        target_branch: Option<&str>,
+        proof_scope_fix: bool,
+        proof_scope_fix_reason: Option<&str>,
+        state_patch: Option<serde_json::Value>,
+        delivery_mode: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
         let requested_fields =
             requested_update_fields(&req, target_repo.is_some(), target_branch.is_some());
@@ -863,6 +885,17 @@ impl CasCore {
         {
             task.depth = depth;
             changes.push("depth");
+        }
+
+        if let Some(delivery_mode) = crate::mcp::tools::types::validate_delivery_mode(delivery_mode)
+            .map_err(|msg| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(msg),
+                data: None,
+            })?
+        {
+            task.delivery_mode = delivery_mode;
+            changes.push("delivery_mode");
         }
 
         if target_repo.is_some() || target_branch.is_some() {

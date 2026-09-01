@@ -113,6 +113,24 @@ impl CasCore {
         blocks_origin_task_id: Option<&str>,
         proposal_attempt_id: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        self.cas_task_proposal_create_with_delivery_mode(
+            req,
+            target_project,
+            blocks_origin_task_id,
+            proposal_attempt_id,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn cas_task_proposal_create_with_delivery_mode(
+        &self,
+        req: TaskCreateRequest,
+        target_project: &str,
+        blocks_origin_task_id: Option<&str>,
+        proposal_attempt_id: Option<&str>,
+        delivery_mode: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
         let agent = self.proposal_authority()?;
         let origin_project = self.explicit_local_project()?;
         let target_project = target_project.trim();
@@ -123,6 +141,9 @@ impl CasCore {
             ));
         }
         let client = self.proposal_client_after_authority()?;
+        let delivery_mode = crate::mcp::tools::types::validate_delivery_mode(delivery_mode)
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?
+            .map(|mode| mode.to_string());
 
         if let Some(origin_task_id) = blocks_origin_task_id {
             self.open_task_store()?
@@ -145,6 +166,7 @@ impl CasCore {
             "design": req.design.unwrap_or_default(),
             "acceptance_criteria": req.acceptance_criteria.unwrap_or_default(),
             "external_ref": req.external_ref.unwrap_or_default(),
+            "delivery_mode": delivery_mode,
         });
         let client_request_id = validate_proposal_attempt_id(proposal_attempt_id)?;
         let request = CreateTaskProposalRequest {

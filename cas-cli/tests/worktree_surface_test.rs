@@ -17,12 +17,10 @@ use cas::mcp::tools::{
     VerificationAddRequest,
 };
 use cas::mcp::{CasCore, CasService};
-use cas::store::{
-    open_agent_store, open_task_store, open_verification_store, open_worktree_store,
-};
+use cas::store::{open_agent_store, open_task_store, open_verification_store, open_worktree_store};
 use cas::types::{
-    Agent, AgentRole, AgentType, Task, TaskDepth, TaskStatus, TaskType, WorkTarget,
-    Verification, VerificationStatus, WorkerCompletionReceiptInput, WorkerDeliveryState, Worktree,
+    Agent, AgentRole, AgentType, Task, TaskDepth, TaskStatus, TaskType, Verification,
+    VerificationStatus, WorkTarget, WorkerCompletionReceiptInput, WorkerDeliveryState, Worktree,
 };
 use cas_mcp::types::{CoordinationRequest, TaskRequest, VerificationRequest};
 use cas_store::KnownRepoStore;
@@ -44,10 +42,9 @@ fn process_home_mutation_uses_the_canonical_test_env_guard() {
         .lines()
         .enumerate()
         .filter(|(_, line)| {
-            let mutates_env = line.contains("std::env::set_var")
-                || line.contains("std::env::remove_var");
-            let mutates_home = line.contains("\"HOME\"")
-                || line.contains("\"XDG_CONFIG_HOME\"");
+            let mutates_env =
+                line.contains("std::env::set_var") || line.contains("std::env::remove_var");
+            let mutates_home = line.contains("\"HOME\"") || line.contains("\"XDG_CONFIG_HOME\"");
             mutates_env && mutates_home
         })
         .map(|(index, line)| format!("{}: {}", index + 1, line.trim()))
@@ -209,6 +206,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         action: action.to_string(),
         id: None,
         task_id: None,
+        delivery_mode: None,
         merge_request: None,
         in_reply_to: None,
         target: None,
@@ -390,11 +388,8 @@ fn seed_direct_close_delivery(
         scope_summary: "direct close delivery-state fixture".to_string(),
         artifact_path: None,
     };
-    let receipt = cas_store::build_worker_completion_receipt(
-        &input,
-        "delivery-worker",
-        chrono::Utc::now(),
-    );
+    let receipt =
+        cas_store::build_worker_completion_receipt(&input, "delivery-worker", chrono::Utc::now());
     let (mut transaction, dispatch) = cas_store::create_worker_delivery_with_dispatch(
         cas_root,
         &receipt,
@@ -418,8 +413,7 @@ fn seed_direct_close_delivery(
         .register(&supervisor)
         .expect("register delivery supervisor");
 
-    let mut verification =
-        Verification::new(format!("ver-{task_id}"), task_id.to_string());
+    let mut verification = Verification::new(format!("ver-{task_id}"), task_id.to_string());
     verification.provenance = cas::types::VerificationProvenance::SupervisorDirect;
     verification.agent_id = Some(supervisor.id.clone());
     verification.issuer_agent_id = Some(supervisor.id.clone());
@@ -491,10 +485,7 @@ fn seed_direct_close_delivery(
     panic!("unsupported direct-close delivery fixture state {state}");
 }
 
-async fn exercise_direct_close_delivery_state(
-    state: WorkerDeliveryState,
-    expect_close: bool,
-) {
+async fn exercise_direct_close_delivery_state(state: WorkerDeliveryState, expect_close: bool) {
     let project = GitRepo::new();
     run_git(&["branch", "factory/delivery-worker"], &project.root);
     let commit_sha = git_stdout(&project.root, &["rev-parse", "main"]);
@@ -586,10 +577,7 @@ async fn exercise_direct_close_delivery_state(
         .iter()
         .find_map(|(table, rows)| (table == "events").then_some(rows))
         .unwrap();
-    assert_eq!(
-        events_after.len(),
-        events_before.len() + 1
-    );
+    assert_eq!(events_after.len(), events_before.len() + 1);
     assert!(
         events_after
             .last()
@@ -2029,7 +2017,9 @@ async fn missing_work_target_refusal_names_resolved_trunk_cas_84df() {
         "Standalone task missing WorkTarget".to_string(),
     );
     standalone_task.assignee = Some("bob".to_string());
-    task_store.add(&standalone_task).expect("add standalone task");
+    task_store
+        .add(&standalone_task)
+        .expect("add standalone task");
 
     let wt_path = cas_root.join("worktrees").join("bob");
     repo.add_worktree(&wt_path, "factory/bob");
@@ -2081,7 +2071,9 @@ async fn authorized_trunk_fallback_push_is_loud_cas_84df() {
         "Explicit trunk fallback".to_string(),
     );
     standalone_task.assignee = Some("bob".to_string());
-    task_store.add(&standalone_task).expect("add standalone task");
+    task_store
+        .add(&standalone_task)
+        .expect("add standalone task");
 
     let wt_path = cas_root.join("worktrees").join("bob");
     repo.add_worktree(&wt_path, "factory/bob");
@@ -2348,7 +2340,6 @@ async fn test_worktree_merge_reassignment_ignores_closed_focused_epic_and_honors
     req.allow_trunk = Some(true);
     let result = svc.coordination(Parameters(req)).await;
 
-
     let text = get_text(&result.expect("allow_trunk merge should succeed"));
     assert!(
         text.contains("to main") && text.contains("allow_trunk=true"),
@@ -2435,7 +2426,6 @@ async fn test_worktree_merge_ignores_focused_epic_without_task_authority() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/erin".to_string());
     let result = svc.coordination(Parameters(req)).await;
-
 
     let error = result.expect_err("focused epic alone must not authorize a merge");
     let text = format!("{error:?}");
@@ -3100,11 +3090,8 @@ async fn submit_and_verify_delivery(
     // their coverage of the supervisor's merge/reconcile path. The public
     // receipt path cannot create this boundary until the source tip is merged.
     let worker = agent_store.get(worker_id).expect("delivery worker");
-    let durable_receipt = cas_store::build_worker_completion_receipt(
-        receipt,
-        &worker.name,
-        chrono::Utc::now(),
-    );
+    let durable_receipt =
+        cas_store::build_worker_completion_receipt(receipt, &worker.name, chrono::Utc::now());
     cas_store::create_worker_delivery_with_dispatch_for_lease(
         cas_root,
         &durable_receipt,
@@ -3230,7 +3217,13 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
     // validation. Keep the source tip in the already-merged/published state
     // required by the #588 decision-time ancestry and B2 reality gates.
     run_git(
-        &["merge", "--no-ff", "factory/alice", "-m", "merge receipt authority"],
+        &[
+            "merge",
+            "--no-ff",
+            "factory/alice",
+            "-m",
+            "merge receipt authority",
+        ],
         &repo.root,
     );
     run_git(
@@ -3739,14 +3732,7 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     });
     task_store.add(&task).expect("add delivery task");
     let receipt = delivery_receipt(&task.id, &worker_id, &repo, "alice");
-    submit_and_verify_delivery(
-        &cas_root,
-        &task.id,
-        &worker_id,
-        &supervisor_id,
-        &receipt,
-    )
-    .await;
+    submit_and_verify_delivery(&cas_root, &task.id, &worker_id, &supervisor_id, &receipt).await;
 
     // Arm a newer exact task proof cycle after the delivery proof is approved.
     // The post-merge internal close must surface this gate verbatim rather
@@ -3927,7 +3913,11 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
                 .await
                 .expect("public supervisor reopen")
         };
-        assert!(get_text(&reopen).contains("Reopened task"), "{}", get_text(&reopen));
+        assert!(
+            get_text(&reopen).contains("Reopened task"),
+            "{}",
+            get_text(&reopen)
+        );
         let reopened = task_store.get(&task.id).expect("reopened task");
         assert_eq!(reopened.status, TaskStatus::Open);
         assert!(
@@ -3950,7 +3940,11 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
             }))))
             .await
             .expect("start reopened delivery task");
-        assert!(get_text(&started).contains("Started task"), "{}", get_text(&started));
+        assert!(
+            get_text(&started).contains("Started task"),
+            "{}",
+            get_text(&started)
+        );
         assert!(
             open_agent_store(&cas_root)
                 .expect("agent store")
@@ -4103,7 +4097,12 @@ async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
     env.set("HOME", home.path());
     let repo = GitRepo::new();
     run_git(
-        &["remote", "add", "origin", "git@github.com:org/scope-lock.git"],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:org/scope-lock.git",
+        ],
         &repo.root,
     );
     let cas_root = init_cas_dir(&repo.root, &mut env).expect("init CAS");
@@ -4153,8 +4152,7 @@ async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
     let events_before =
         cas_store::list_worker_delivery_events(&cas_root, &transaction.id).expect("events");
     let task_before = serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap();
-    let deps_before =
-        serde_json::to_value(task_store.get_dependencies(&task.id).unwrap()).unwrap();
+    let deps_before = serde_json::to_value(task_store.get_dependencies(&task.id).unwrap()).unwrap();
 
     let service = make_service(cas_root.clone());
     let error = service
@@ -4843,7 +4841,12 @@ async fn terminal_task_rejects_fresh_completion_receipt_without_any_mutation() {
     env.set("HOME", home.path());
     let repo = GitRepo::new();
     run_git(
-        &["remote", "add", "origin", "git@github.com:org/terminal-replay.git"],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:org/terminal-replay.git",
+        ],
         &repo.root,
     );
     let cas_root = init_cas_dir(&repo.root, &mut env).expect("init CAS");
@@ -4860,7 +4863,10 @@ async fn terminal_task_rejects_fresh_completion_receipt_without_any_mutation() {
     repo.add_worktree(&worker_path, "factory/alice");
     std::fs::write(worker_path.join("replayed.rs"), "pub fn replayed() {}\n").unwrap();
     run_git(&["add", "replayed.rs"], &worker_path);
-    run_git(&["commit", "-m", "stale post-close worker commit"], &worker_path);
+    run_git(
+        &["commit", "-m", "stale post-close worker commit"],
+        &worker_path,
+    );
 
     let task_store = open_task_store(&cas_root).expect("task store");
     let mut task = Task::new(
@@ -4909,10 +4915,7 @@ async fn terminal_task_rejects_fresh_completion_receipt_without_any_mutation() {
         repo_selector: "remote:github.com/org/terminal-replay".to_string(),
         source_branch: "factory/alice".to_string(),
         commit_sha: git_stdout(&repo.root, &["rev-parse", "factory/alice"]),
-        merge_base_sha: git_stdout(
-            &repo.root,
-            &["merge-base", "factory/alice", "main"],
-        ),
+        merge_base_sha: git_stdout(&repo.root, &["merge-base", "factory/alice", "main"]),
         target_branch: "main".to_string(),
         target_sha: git_stdout(&repo.root, &["rev-parse", "main"]),
         proof_reference: "proof:terminal-replay".to_string(),
@@ -4986,7 +4989,10 @@ fn merge_worktree_branch_into_default(repo: &GitRepo, wt_path: &Path, branch: &s
     std::fs::write(wt_path.join("worker.txt"), "worker output\n").unwrap();
     run_in(wt_path, &["add", "worker.txt"]);
     run_in(wt_path, &["commit", "-m", "worker work"]);
-    run_in(&repo.root, &["merge", "--no-ff", "-m", "merge worker", branch]);
+    run_in(
+        &repo.root,
+        &["merge", "--no-ff", "-m", "merge worker", branch],
+    );
 }
 
 /// AC1: a retired worker's System-B worktree — merged branch, no live agent,

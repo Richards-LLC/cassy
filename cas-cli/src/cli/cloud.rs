@@ -1623,11 +1623,13 @@ pub(crate) fn check_bucket_ambiguity(
     resolved_id: &str,
     projects: &[crate::cloud::TeamProject],
 ) -> Option<(String, u32, u32)> {
-    let resolved = projects.iter().find(|p| p.canonical_id == resolved_id)?;
+    let resolved = projects
+        .iter()
+        .find(|p| project_ids_match(&p.canonical_id, resolved_id))?;
 
     let richest = projects
         .iter()
-        .filter(|p| p.canonical_id != resolved_id)
+        .filter(|p| !project_ids_match(&p.canonical_id, resolved_id))
         .max_by_key(|p| p.memory_count)?;
 
     if richest.memory_count >= 50
@@ -4008,7 +4010,7 @@ fn execute_team_memories(
     let project = projects_body
         .projects
         .iter()
-        .find(|p| p.canonical_id == canonical_id);
+        .find(|p| project_ids_match(&p.canonical_id, &canonical_id));
 
     let project_uuid = match project {
         Some(p) => p.id.clone(),
@@ -4327,11 +4329,7 @@ const PURGE_PROJECT_COLUMNS: &[&str] = &[
 ];
 
 fn project_ids_match(candidate: &str, current: &str) -> bool {
-    let Some(current) = crate::cloud::canonical_project_id(current) else {
-        return false;
-    };
-    crate::cloud::canonical_project_id_with_pin(candidate, Some(&current))
-        .is_some_and(|candidate| candidate == current)
+    crate::cloud::project_ids_match(candidate, current)
 }
 
 fn first_existing_project_column(
@@ -5765,6 +5763,21 @@ mod team_cmd_tests {
             check_bucket_ambiguity("new-project", &projects).is_none(),
             "should not warn when resolved id is absent from project list"
         );
+    }
+
+    #[test]
+    fn bucket_ambiguity_matches_project_aliases_case_insensitively() {
+        let projects = vec![
+            make_project("https://GitHub.com/Richards-LLC/gabber-studio.git", 20),
+            make_project("other-project", 1_000),
+        ];
+
+        let result = check_bucket_ambiguity("gabber-studio", &projects);
+        let (richer_id, resolved_count, richer_count) =
+            result.expect("remote project alias must match the resolved slug");
+        assert_eq!(richer_id, "other-project");
+        assert_eq!(resolved_count, 20);
+        assert_eq!(richer_count, 1_000);
     }
 
     #[test]

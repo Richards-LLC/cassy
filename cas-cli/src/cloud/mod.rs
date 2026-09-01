@@ -43,6 +43,7 @@ pub use config::{
     detect_canonical_id_collisions, get_project_canonical_id, invalidate_cached_project_id,
     maybe_adopt_team_scope, maybe_mark_personal_scope_notice, canonical_project_id,
     canonical_project_id_with_pin, normalize_project_canonical_id, normalized_git_remote_for_push,
+    project_ids_match,
     personal_scope_notice_for_configs, resolve_canonical_id, resolve_canonical_id_with_source,
     set_canonical_id_in_config_toml, should_adopt_canonical_id,
     store_login_credentials,

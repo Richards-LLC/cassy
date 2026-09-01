@@ -193,6 +193,24 @@ pub fn canonical_project_id_with_pin(value: &str, pinned_id: Option<&str>) -> Op
     }
 }
 
+/// Compare two project identities after normalization, accepting the legacy
+/// bare-repository-name alias in either direction. This is intentionally
+/// separate from [`canonical_project_id_with_pin`]: a pin determines which
+/// spelling to emit, while ownership checks must recognize both spellings
+/// without changing the current project's selected identity.
+pub fn project_ids_match(candidate: &str, current: &str) -> bool {
+    let Some(candidate) = canonical_project_id(candidate) else {
+        return false;
+    };
+    let Some(current) = canonical_project_id(current) else {
+        return false;
+    };
+
+    candidate == current
+        || project_id_aliases(&candidate, &current)
+        || project_id_aliases(&current, &candidate)
+}
+
 /// Backwards-compatible name retained for cloud callers outside this module.
 /// New identity code should call [`canonical_project_id`] directly.
 pub fn normalize_project_canonical_id(value: &str) -> Option<String> {
@@ -381,7 +399,7 @@ pub fn should_adopt_canonical_id(
     if local.is_empty() || resp_remote.is_empty() || canonical.is_empty() {
         return None;
     }
-    if !local.eq_ignore_ascii_case(resp_remote) {
+    if canonical_project_id(local) != canonical_project_id(resp_remote) {
         return None;
     }
     if current_pin.is_some() {
@@ -3029,6 +3047,20 @@ mod tests {
             .as_deref(),
             Some("github.com/someone-else/other-repo"),
         );
+    }
+
+    #[test]
+    fn canonical_identity_matches_bare_alias_to_explicit_remote_pin() {
+        for alias in ["gabber-studio", "GABBER-STUDIO"] {
+            assert_eq!(
+                project_ids_match(
+                    alias,
+                    "https://GitHub.com/Richards-LLC/gabber-studio.git",
+                ),
+                true,
+                "alias {alias} must match the explicit remote pin",
+            );
+        }
     }
 
     #[test]

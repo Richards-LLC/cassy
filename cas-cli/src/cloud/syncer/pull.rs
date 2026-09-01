@@ -10,7 +10,7 @@ use crate::cloud::syncer::{
     TaskStatusTransition, TeamPullResponse, UpsertResult,
 };
 use crate::cloud::{
-    EntityType, canonical_project_id, canonical_project_id_with_pin, get_project_canonical_id,
+    EntityType, get_project_canonical_id, project_ids_match as canonical_project_ids_match,
 };
 use crate::error::CasError;
 use crate::store::{
@@ -92,7 +92,7 @@ fn task_dependency_matches_project(raw: &serde_json::Value, current_project_id: 
         .and_then(serde_json::Value::as_str)
         .unwrap_or("<unknown>");
     match project_field.and_then(serde_json::Value::as_str) {
-        Some(project) if project == current_project_id => true,
+        Some(project) if project_ids_match(project, current_project_id) => true,
         Some(project) => {
             eprintln!(
                 "[Cassy sync] WARNING: skipping task dependency '{edge_id}' from foreign project '{project}' (expected '{current_project_id}')"
@@ -394,11 +394,7 @@ pub(crate) fn entity_matches_project(
 }
 
 fn project_ids_match(candidate: &str, current: &str) -> bool {
-    let Some(current) = canonical_project_id(current) else {
-        return false;
-    };
-    canonical_project_id_with_pin(candidate, Some(&current))
-        .is_some_and(|candidate| candidate == current)
+    canonical_project_ids_match(candidate, current)
 }
 
 fn task_wire_id(raw: &serde_json::Value) -> Option<&str> {
@@ -1993,7 +1989,7 @@ mod tests {
     use super::{
         PROPOSAL_PROVENANCE_BEGIN, PROPOSAL_PROVENANCE_END, PULL_PATH,
         build_scoped_pull_url_with, deserialize_pulled_entity, entity_matches_project,
-        render_task_proposal_provenance,
+        render_task_proposal_provenance, task_dependency_matches_project,
     };
     use crate::types::{Entry, Task};
     use serde_json::json;
@@ -2301,6 +2297,19 @@ mod tests {
             &entity,
             "github.com/other/Ledger",
             "task"
+        ));
+    }
+
+    #[test]
+    fn canonical_identity_pull_accepts_bare_alias_for_remote_scope_dependency() {
+        let dependency = json!({
+            "id": "alias-edge",
+            "project_id": "gabber-studio",
+        });
+
+        assert!(task_dependency_matches_project(
+            &dependency,
+            "github.com/richards-llc/gabber-studio"
         ));
     }
 }

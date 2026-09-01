@@ -563,6 +563,25 @@ mod delivery_audit_text_tests {
     }
 }
 
+#[cfg(test)]
+mod supervisor_override_tests {
+    use super::validate_supervisor_override;
+
+    #[test]
+    fn supervisor_override_requires_a_non_empty_reason() {
+        let error = validate_supervisor_override(true, Some("   "), true)
+            .expect_err("supervisor override without a reason must be rejected");
+        assert!(error.contains("reason"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn supervisor_override_is_supervisor_only() {
+        let error = validate_supervisor_override(true, Some("reviewed"), false)
+            .expect_err("workers must not issue supervisor overrides");
+        assert!(error.contains("supervisor"), "unexpected error: {error}");
+    }
+}
+
 /// Why the close path decided to skip (or not skip) the task-verifier step
 /// for a given close attempt.
 ///

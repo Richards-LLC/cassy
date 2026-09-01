@@ -770,6 +770,7 @@ mod tests {
                 name: raw_name.to_string(),
                 transport: "Bearer cache-secret".to_string(),
                 state: cmcp_core::UpstreamState::Backoff,
+                executable: None,
                 attempts: 1,
                 consecutive_failures: 1,
                 tool_count: 0,

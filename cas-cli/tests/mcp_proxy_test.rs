@@ -166,16 +166,18 @@ fn cas_serve_boot_installs_fail_closed_exact_allowlist_policy() {
     std::fs::write(
         sandbox.cas_root().join("proxy.toml"),
         r#"
+allowlist = ["github.list_issues"]
+
 [servers.github]
 transport = "stdio"
 command = "cas-f7ac-intentionally-missing-upstream"
-
-[[allowlist]]
-server = "github"
-tool = "list_issues"
 "#,
     )
     .unwrap();
+    let parsed = cmcp_core::config::Config::load_from(&sandbox.cas_root().join("proxy.toml"))
+        .expect("canonical string allowlist should parse");
+    assert_eq!(parsed.allowlist.len(), 1);
+    assert_eq!(parsed.allowlist[0].canonical_entry(), "github.list_issues");
     let mut client = McpClient::spawn(&sandbox);
     client.initialize();
     let listed = client.request("tools/list", json!({}));
@@ -221,7 +223,10 @@ tool = "list_issues"
         }),
     );
     let admitted_message = admitted["error"]["message"].as_str().unwrap();
-    assert!(admitted_message.contains("MCP upstream 'github' is absent: it is configured but not connected"));
+    assert!(
+        admitted_message.contains("MCP upstream 'github' is absent: it is configured but not connected"),
+        "unexpected admitted response: {admitted}"
+    );
     assert!(!admitted_message.contains("proxy policy denied"));
 }
 

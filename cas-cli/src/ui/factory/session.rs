@@ -559,4 +559,65 @@ mod tests {
                 || result.unwrap().metadata.project_dir != Some("/some/project".to_string())
         );
     }
+
+    #[test]
+    fn worker_count_uses_live_factory_registry_workers() {
+        use crate::store::{AgentStore, SqliteAgentStore, init_cas_dir};
+        use cas_types::{AgentRole, AgentStatus, AgentType};
+
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = init_cas_dir(project.path()).unwrap();
+        let session_name = "factory-registry-count";
+        let metadata = create_metadata(
+            session_name,
+            std::process::id(),
+            "supervisor",
+            &[],
+            None,
+            Some(project.path().to_str().unwrap()),
+            None,
+        );
+        let session = SessionInfo {
+            name: session_name.to_string(),
+            metadata,
+            is_running: true,
+            socket_exists: false,
+        };
+        let agents = SqliteAgentStore::open(&cas_root).unwrap();
+        agents.init().unwrap();
+
+        for index in 0..5 {
+            let mut worker = cas_types::Agent::new(
+                format!("registry-worker-{index}"),
+                format!("worker-{index}"),
+            );
+            worker.agent_type = AgentType::Worker;
+            worker.role = AgentRole::Worker;
+            worker.factory_session = Some(session_name.to_string());
+            agents.register(&worker).unwrap();
+        }
+
+        assert_eq!(
+            session.worker_count(),
+            5,
+            "live registry workers must replace an empty metadata roster"
+        );
+
+        let mut shutdown = agents.get("registry-worker-0").unwrap();
+        shutdown.status = AgentStatus::Shutdown;
+        agents.update(&shutdown).unwrap();
+        assert_eq!(session.worker_count(), 4, "shutdown workers are not live");
+
+        let mut stale = agents.get("registry-worker-1").unwrap();
+        stale.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(31);
+        agents.update(&stale).unwrap();
+        assert_eq!(
+            session.worker_count(),
+            3,
+            "workers with stale heartbeats are not live"
+        );
+
+        drop(env);
+    }
 }

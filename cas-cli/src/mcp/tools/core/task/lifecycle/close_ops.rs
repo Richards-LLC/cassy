@@ -9044,6 +9044,21 @@ pub(crate) enum ZeroCommitCloseOutcome {
 
 const COMMIT_RECEIPT_CLOCK_SKEW_SECS: i64 = 5;
 
+/// Build the Git date filter used when attributing commits to a task.
+///
+/// Git interprets a negative `@<epoch>` value as a different date expression
+/// (currently effectively "now"), not as an epoch before Unix time. Keep the
+/// lower bound at Unix epoch so synthetic/legacy task fixtures still include
+/// all attributable commits while real positive task floors retain their
+/// clock-skew allowance.
+fn task_commit_receipt_since(task_floor: chrono::DateTime<chrono::Utc>) -> String {
+    let earliest_epoch = task_floor
+        .timestamp()
+        .saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS)
+        .max(0);
+    format!("@{earliest_epoch}")
+}
+
 /// Durable lower bound used to attribute a receipt to one task work cycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TaskCommitReceiptWindow {
@@ -23240,6 +23255,26 @@ mod commit_claim_integrity_tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
+    fn git_at(dir: &Path, args: &[&str], committer_epoch: i64) {
+        let date = chrono::DateTime::from_timestamp(committer_epoch, 0)
+            .unwrap()
+            .to_rfc3339();
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
     /// Minimal worker repo: `main` with one seed commit, then branch off
     /// to `factory/test-worker`. Caller can add commits on top.
     fn init_worker_repo() -> TempDir {
@@ -23322,6 +23357,48 @@ mod commit_claim_integrity_tests {
         assert!(
             stat.is_empty(),
             "diff stat must be empty when no commits exist beyond base; got: {stat}"
+        );
+    }
+
+    #[test]
+    fn task_commit_receipt_since_clamps_negative_epoch_cas_653f() {
+        let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
+        assert_eq!(task_commit_receipt_since(epoch), "@0");
+
+        let positive_floor = chrono::DateTime::from_timestamp(10, 0).unwrap();
+        assert_eq!(task_commit_receipt_since(positive_floor), "@5");
+    }
+
+    #[test]
+    fn task_attributed_diff_includes_backdated_commit_cas_653f() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("backdated.rs"), "fn backdated() {}\n").unwrap();
+        // This commit is several seconds behind any test invocation. The
+        // pre-fix `@-5` expression is parsed by Git as "now" and drops it;
+        // the clamped `@0` window must retain it deterministically.
+        git(dir.path(), &["add", "backdated.rs"]);
+        git_at(
+            dir.path(),
+            &["commit", "-q", "-m", "fix(cas-653f): backdated fixture"],
+            2,
+        );
+
+        let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
+        let window = TaskCommitReceiptWindow {
+            not_before: epoch,
+            basis: "task creation time (test)",
+            task_floor: epoch,
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-653f".to_string()),
+                known_commits: Vec::new(),
+            },
+        };
+        let measurement = get_task_attributable_diff_stat(dir.path(), "main", &window)
+            .expect("backdated task commit must produce an attributable measurement");
+        assert!(
+            measurement.stat.contains("backdated.rs"),
+            "backdated task commit must be included in the diff stat: {}",
+            measurement.stat
         );
     }
 

@@ -499,6 +499,328 @@ fn push_response_skipped_count_threshold_drives_warn_path() {
     );
 }
 
+#[test]
+fn push_response_parses_complete_per_row_outcomes() {
+    let body = r#"{
+        "tasks": {
+            "inserted": 1,
+            "updated": 1,
+            "skipped": 1,
+            "rows": [
+                {"id": "task-inserted", "outcome": "inserted"},
+                {"id": "task-updated", "outcome": "updated"},
+                {"id": "task-skipped", "outcome": "skipped_lww"},
+                {"id": "task-rejected", "outcome": "rejected", "reason": "project_mismatch"}
+            ]
+        }
+    }"#;
+    let response: PushResponse = serde_json::from_str(body).expect("per-row response parses");
+    let rows = response
+        .row_results_for(
+            "tasks",
+            [
+                "task-inserted".to_string(),
+                "task-updated".to_string(),
+                "task-skipped".to_string(),
+                "task-rejected".to_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("row response validates")
+        .expect("rows are present");
+
+    assert!(matches!(
+        rows["task-inserted"].outcome,
+        PushRowOutcome::Inserted
+    ));
+    assert!(matches!(
+        rows["task-updated"].outcome,
+        PushRowOutcome::Updated
+    ));
+    assert!(matches!(
+        rows["task-skipped"].outcome,
+        PushRowOutcome::SkippedLww
+    ));
+    assert_eq!(
+        rows["task-rejected"].reason.as_deref(),
+        Some("project_mismatch")
+    );
+}
+
+#[test]
+fn push_response_rejects_incomplete_or_duplicate_per_row_outcomes() {
+    let incomplete: PushResponse = serde_json::from_str(
+        r#"{"entries":{"rows":[{"id":"entry-one","outcome":"inserted"}]}}"#,
+    )
+    .unwrap();
+    let error = incomplete
+        .row_results_for(
+            "entries",
+            ["entry-one".to_string(), "entry-two".to_string()].into_iter(),
+        )
+        .unwrap_err();
+    assert!(error.contains("missing row entry-two"));
+
+    let duplicate: PushResponse = serde_json::from_str(
+        r#"{"entries":{"rows":[
+            {"id":"entry-one","outcome":"inserted"},
+            {"id":"entry-one","outcome":"updated"}
+        ]}}"#,
+    )
+    .unwrap();
+    assert!(duplicate
+        .row_results_for("entries", ["entry-one".to_string()].into_iter())
+        .unwrap_err()
+        .contains("duplicate id"));
+}
+
+#[tokio::test]
+async fn push_response_aggregate_skip_acknowledges_the_whole_personal_batch() {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": {"inserted": 1, "updated": 0, "skipped": 1}
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    queue
+        .enqueue(
+            EntityType::Entry,
+            "entry-accepted",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"entry-accepted"}"#),
+        )
+        .unwrap();
+    queue
+        .enqueue(
+            EntityType::Entry,
+            "entry-lww-skipped",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"entry-lww-skipped"}"#),
+        )
+        .unwrap();
+
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "test-project".to_string(),
+        temp.path(),
+    );
+    let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
+
+    assert!(result.errors.is_empty(), "LWW skips are acknowledgements");
+    assert_eq!(result.pushed_entries, 2);
+    assert!(queue.list_all(10).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors() {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": {
+                "inserted": 1,
+                "updated": 0,
+                "skipped": 1,
+                "rows": [
+                    {"id": "entry-good", "outcome": "updated"},
+                    {"id": "entry-rejected", "outcome": "rejected", "reason": "project_mismatch"}
+                ]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    for id in ["entry-good", "entry-rejected"] {
+        queue
+            .enqueue(
+                EntityType::Entry,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}"}}"#)),
+            )
+            .unwrap();
+    }
+
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "test-project".to_string(),
+        temp.path(),
+    );
+    let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
+
+    assert_eq!(result.pushed_entries, 0, "the batch reports its queue error");
+    assert_eq!(result.errors.len(), 1);
+    let remaining = queue.list_all(10).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].entity_id, "entry-rejected");
+    assert_eq!(remaining[0].retry_count, 5);
+    assert!(remaining[0]
+        .last_error
+        .as_deref()
+        .is_some_and(|error| error.contains("project_mismatch")));
+}
+
+#[test]
+fn version_gate_requeues_only_after_minimum_and_is_idempotent() {
+    let (_temp, queue) = {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        queue
+            .enqueue(
+                crate::cloud::EntityType::Task,
+                "task-old-client",
+                crate::cloud::SyncOperation::Upsert,
+                Some(r#"{"id":"task-old-client"}"#),
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                crate::cloud::EntityType::Task,
+                "task-new-enough",
+                crate::cloud::SyncOperation::Upsert,
+                Some(r#"{"id":"task-new-enough"}"#),
+            )
+            .unwrap();
+        let ids = queue
+            .pending(10, 5)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        for _ in 0..5 {
+            queue
+                .mark_failed(
+                    ids[0],
+                    "Team push failed with status 400: Client version 3.4.2 is below minimum 3.5.0",
+                )
+                .unwrap();
+            queue
+                .mark_failed(
+                    ids[1],
+                    "Team push failed with status 400: Client version 3.4.2 is below minimum 3.4.9",
+                )
+                .unwrap();
+        }
+        (temp, queue)
+    };
+
+    assert_eq!(
+        queue
+            .requeue_version_gated_failures("3.4.8", 5)
+            .unwrap(),
+        0
+    );
+    assert!(queue
+        .list_all(10)
+        .unwrap()
+        .iter()
+        .all(|item| item.retry_count == 5 && item.last_error.is_some()));
+
+    assert_eq!(
+        queue
+            .requeue_version_gated_failures("3.5.0", 5)
+            .unwrap(),
+        2
+    );
+    let requeued = queue.list_all(10).unwrap();
+    assert!(requeued.iter().all(|item| {
+        item.retry_count == 0 && item.last_error.is_none()
+    }));
+    assert_eq!(
+        queue
+            .requeue_version_gated_failures("3.5.0", 5)
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn version_gate_push_requeues_terminal_items_before_reading_pending_queue() {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": {"inserted": 1, "updated": 0, "skipped": 0}
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    queue
+        .enqueue(
+            EntityType::Entry,
+            "entry-version-gated",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"entry-version-gated"}"#),
+        )
+        .unwrap();
+    let id = queue.pending(10, 5).unwrap()[0].id;
+    for _ in 0..5 {
+        queue
+            .mark_failed(
+                id,
+                "Push failed with status 400: Client version 3.4.2 is below minimum 3.5.0",
+            )
+            .unwrap();
+    }
+
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "test-project".to_string(),
+        temp.path(),
+    );
+    let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
+
+    assert!(result.errors.is_empty());
+    assert_eq!(result.pushed_entries, 1);
+    assert!(queue.list_all(10).unwrap().is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Cross-project team-task ownership (cas-2125).
 // ---------------------------------------------------------------------------

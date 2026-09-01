@@ -1,13 +1,15 @@
 use chrono::Utc;
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use std::collections::HashMap;
 use std::io::Write;
 use std::time::Instant;
 use tracing::warn;
 
 use crate::cloud::sync_queue::PendingByType;
 use crate::cloud::syncer::{
-    CloudSyncer, PushBacklog, PushItemizedFailure, PushPlan, PushResponse, PushScope, SyncResult,
+    CloudSyncer, PushBacklog, PushItemizedFailure, PushPlan, PushResponse, PushRowResult,
+    PushScope, SyncResult,
 };
 use crate::cloud::{QueuedSync, SyncOperation};
 use crate::error::CasError;
@@ -88,6 +90,8 @@ impl CloudSyncer {
     ) -> Result<SyncResult, CasError> {
         let mut result = SyncResult::default();
         let start = Instant::now();
+
+        self.requeue_version_gated_items()?;
 
         if !self.is_available() {
             return Ok(result);
@@ -331,6 +335,51 @@ impl CloudSyncer {
         }
     }
 
+    fn settle_personal_row_results(
+        &self,
+        batch_items: &[&QueuedSync],
+        entity_type: &str,
+        raw_response: &str,
+        rows: HashMap<String, PushRowResult>,
+        synced_count: &mut usize,
+        skip_errors: &mut Vec<String>,
+    ) {
+        let mut rejected = Vec::new();
+        for item in batch_items {
+            let row = rows
+                .get(&item.entity_id)
+                .expect("row_results_for validates every queue identity");
+            if row.acknowledges() {
+                let _ = self.queue.mark_synced(item.id);
+                *synced_count += 1;
+                continue;
+            }
+
+            let reason = row.reason.as_deref().unwrap_or("unspecified");
+            let diagnostic = format!(
+                "cloud rejected {entity_type} {}: reason={reason}; server response: {raw_response}",
+                item.entity_id
+            );
+            if row.rejection_is_retryable() {
+                let _ = self.queue.mark_failed(item.id, &diagnostic);
+            } else {
+                let _ = self
+                    .queue
+                    .park_failed(item.id, &diagnostic, self.config.max_retries);
+            }
+            rejected.push(format!("{} ({reason})", item.entity_id));
+        }
+
+        if !rejected.is_empty() {
+            skip_errors.push(format!(
+                "cloud rejected {} of {} {entity_type} row(s): {}",
+                rejected.len(),
+                batch_items.len(),
+                rejected.join(", ")
+            ));
+        }
+    }
+
     fn push_batch(
         &self,
         items: &[QueuedSync],
@@ -404,6 +453,36 @@ impl CloudSyncer {
                         // Backward-compat: older cloud builds omit `skipped`
                         // entirely, in which case `skipped_count` is 0 and
                         // we fall through to the legacy mark-synced path.
+                        match response.row_results_for(
+                            entity_type,
+                            batch_items.iter().map(|item| item.entity_id.clone()),
+                        ) {
+                            Ok(Some(rows)) => {
+                                self.settle_personal_row_results(
+                                    &batch_items,
+                                    entity_type,
+                                    &response.raw_body,
+                                    rows,
+                                    &mut synced_count,
+                                    &mut skip_errors,
+                                );
+                                continue;
+                            }
+                            Err(error) => {
+                                let diagnostic = format!(
+                                    "cloud returned invalid per-row results for {entity_type}: {error}; marking {} row(s) failed; server response: {}",
+                                    batch_items.len(),
+                                    response.raw_body
+                                );
+                                for item in &batch_items {
+                                    let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                }
+                                skip_errors.push(diagnostic);
+                                continue;
+                            }
+                            Ok(None) => {}
+                        }
+
                         let skipped_count = response.skipped_count_for(entity_type);
                         if let Err(error) = &skipped_count {
                             let diagnostic = format!(
@@ -425,6 +504,17 @@ impl CloudSyncer {
                         let skipped_count = skipped_count.unwrap_or_default();
                         if skipped_count > 0 {
                             let batch_size = batch_items.len();
+                            if skipped_count > batch_size {
+                                let diagnostic = format!(
+                                    "cloud reported {skipped_count} skipped {entity_type} row(s) for a {batch_size}-row sub-batch; marking sub-batch failed; server response: {}",
+                                    response.raw_body
+                                );
+                                for item in &batch_items {
+                                    let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                }
+                                skip_errors.push(diagnostic);
+                                continue;
+                            }
                             let itemized = response.itemized_failures_for(
                                 entity_type,
                                 skipped_count,
@@ -433,16 +523,22 @@ impl CloudSyncer {
                             let itemized = match itemized {
                                 Ok(Some(failures)) => failures,
                                 Ok(None) => {
-                                    // Aggregate-only servers cannot identify individual rows.
-                                    // Preserve cas-607a's conservative whole-batch retry path.
+                                    // Aggregate-only responses count benign LWW losses as
+                                    // skipped but do not identify the row. Trust the server's
+                                    // LWW semantics and consume the local rows as acknowledgements.
                                     let diagnostic = format!(
-                                        "cloud skipped {skipped_count} of {batch_size} {entity_type} row(s); marking the indistinguishable sub-batch failed; server response: {}",
-                                        response.raw_body
+                                        "cloud skipped {skipped_count} of {batch_size} {entity_type} row(s); treating skips as LWW acknowledgements"
+                                    );
+                                    warn!(
+                                        entity_type = entity_type,
+                                        skipped = skipped_count,
+                                        batch_size,
+                                        "{diagnostic}"
                                     );
                                     for item in &batch_items {
-                                        let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                        let _ = self.queue.mark_synced(item.id);
+                                        synced_count += 1;
                                     }
-                                    skip_errors.push(diagnostic);
                                     continue;
                                 }
                                 Err(error) => {
@@ -461,8 +557,21 @@ impl CloudSyncer {
                             // The server supplied a complete identity mapping: only named
                             // rows are terminal failures; owned neighbors in the same request
                             // are safely removed from the local queue.
+                            let mut failure_details = Vec::new();
                             for item in &batch_items {
                                 if let Some(failure) = itemized.get(&item.entity_id) {
+                                    let reason = match failure {
+                                        PushItemizedFailure::Rejection(rejection) => {
+                                            rejection.reason.as_str().to_string()
+                                        }
+                                        PushItemizedFailure::Invalid(invalid) => {
+                                            format!(
+                                                "{}: {}",
+                                                invalid.reason.as_str(),
+                                                invalid.detail
+                                            )
+                                        }
+                                    };
                                     let diagnostic = match failure {
                                         PushItemizedFailure::Rejection(rejection) => format!(
                                             "permanent cloud rejection: reason={}; entity={entity_type}; id={}; existing_project={}",
@@ -488,11 +597,19 @@ impl CloudSyncer {
                                     } else {
                                         let _ = self.queue.mark_failed(item.id, &diagnostic);
                                     }
-                                    skip_errors.push(diagnostic);
+                                    failure_details.push(format!("{} ({reason})", item.entity_id));
                                 } else {
                                     let _ = self.queue.mark_synced(item.id);
                                     synced_count += 1;
                                 }
+                            }
+                            if !failure_details.is_empty() {
+                                skip_errors.push(format!(
+                                    "cloud rejected {} of {} {entity_type} row(s): {}",
+                                    failure_details.len(),
+                                    batch_items.len(),
+                                    failure_details.join(", ")
+                                ));
                             }
                         } else {
                             for item in &batch_items {

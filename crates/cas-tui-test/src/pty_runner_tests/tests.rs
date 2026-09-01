@@ -48,7 +48,9 @@ fn test_key_bytes() {
 #[test]
 fn test_spawn_echo() {
     let mut runner = PtyRunner::new();
-    runner.spawn("echo", &["hello"]).expect("spawn failed");
+    runner
+        .spawn("sh", &["-c", "sleep 0.2; echo hello"])
+        .expect("spawn failed");
 
     // Give the process time to complete
     std::thread::sleep(std::time::Duration::from_millis(100));

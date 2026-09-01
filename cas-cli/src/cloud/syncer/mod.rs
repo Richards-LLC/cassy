@@ -84,6 +84,12 @@ pub struct SyncResult {
     pub pulled_commit_links: usize,
     /// Number of task dependency edges pulled
     pub pulled_task_dependencies: usize,
+    /// Number of local task dependency edges queued for cloud healing.
+    pub healed_task_dependencies_to_cloud: usize,
+    /// Number of task dependency edges materialized from the cloud during
+    /// healing. This is separate from `pulled_task_dependencies` so callers
+    /// can distinguish ordinary pull application from reconciliation.
+    pub healed_task_dependencies_from_cloud: usize,
     /// Number of distilled knowledge pages pulled (T5)
     pub pulled_knowledge_pages: usize,
     /// Number of conflicts resolved
@@ -179,6 +185,20 @@ pub struct PushPlan {
 }
 
 impl SyncResult {
+    /// Render the one-line dependency healing receipt when reconciliation did
+    /// work. A quiet no-op is intentional for steady-state pulls.
+    pub fn dependency_heal_summary(&self) -> Option<String> {
+        (self.healed_task_dependencies_to_cloud > 0
+            || self.healed_task_dependencies_from_cloud > 0)
+            .then(|| {
+                format!(
+                    "healed {} edge(s) to cloud, {} from cloud",
+                    self.healed_task_dependencies_to_cloud,
+                    self.healed_task_dependencies_from_cloud
+                )
+            })
+    }
+
     pub fn total_pushed(&self) -> usize {
         self.pushed_entries
             + self.pushed_tasks

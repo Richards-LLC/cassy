@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -9,7 +9,7 @@ use crate::cloud::syncer::{
     CloudSyncer, ConflictAction, ConflictResolution, PullResponse, SyncResult,
     TaskStatusTransition, TeamPullResponse, UpsertResult,
 };
-use crate::cloud::{EntityType, get_project_canonical_id};
+use crate::cloud::{EntityType, SyncOperation, get_project_canonical_id};
 use crate::error::CasError;
 use crate::store::{
     CommitLinkStore, EventStore, FileChangeStore, PromptStore, RuleStore, SkillStore, SpecStore,
@@ -52,11 +52,18 @@ struct TaskDependencyRecord {
     from_id: String,
     to_id: String,
     dep_type: DependencyType,
+    /// Older cloud tombstones omit this field. It is unused for deletes, but
+    /// defaulting it lets those records still protect the local edge.
+    #[serde(default = "default_dependency_created_at")]
     created_at: DateTime<Utc>,
     #[serde(default)]
     operation: Option<String>,
     #[serde(default)]
     deleted: bool,
+}
+
+fn default_dependency_created_at() -> DateTime<Utc> {
+    Utc::now()
 }
 
 impl TaskDependencyRecord {
@@ -106,14 +113,69 @@ fn task_dependency_matches_project(raw: &serde_json::Value, current_project_id: 
     }
 }
 
+fn dependency_entity_id(dependency: &Dependency) -> String {
+    format!(
+        "{}:{}:{}",
+        dependency.from_id, dependency.to_id, dependency.dep_type
+    )
+}
+
+#[derive(Debug, Default)]
+struct RemoteDependencyState {
+    live: BTreeMap<String, Dependency>,
+    deleted: BTreeSet<String>,
+}
+
+fn remote_dependency_state(
+    raw_dependencies: &[serde_json::Value],
+    current_project_id: &str,
+) -> RemoteDependencyState {
+    let mut state = RemoteDependencyState::default();
+    for raw in raw_dependencies {
+        let project_matches = raw
+            .get("project_canonical_id")
+            .or_else(|| raw.get("project_id"))
+            .or_else(|| raw.get("origin_project"))
+            .and_then(serde_json::Value::as_str)
+            == Some(current_project_id);
+        if !project_matches {
+            continue;
+        }
+        let Ok(record) = serde_json::from_value::<TaskDependencyRecord>(raw.clone()) else {
+            continue;
+        };
+        let is_delete = record.is_delete();
+        let dependency = record.dependency();
+        let entity_id = dependency_entity_id(&dependency);
+        if is_delete {
+            state.live.remove(&entity_id);
+            state.deleted.insert(entity_id);
+        } else if !state.deleted.contains(&entity_id) {
+            state.live.insert(entity_id, dependency);
+        }
+    }
+    state
+}
+
+fn local_dependency_map(
+    task_store: &dyn TaskStore,
+) -> Result<BTreeMap<String, Dependency>, CasError> {
+    Ok(task_store
+        .list_dependencies(None)?
+        .into_iter()
+        .map(|dependency| (dependency_entity_id(&dependency), dependency))
+        .collect())
+}
+
 fn apply_task_dependencies(
-    raw_dependencies: Vec<serde_json::Value>,
+    raw_dependencies: &[serde_json::Value],
     task_store: &dyn TaskStore,
     current_project_id: &str,
     result: &mut SyncResult,
+    deleted_dependency_ids: &BTreeSet<String>,
 ) {
     for raw in raw_dependencies {
-        if !task_dependency_matches_project(&raw, current_project_id) {
+        if !task_dependency_matches_project(raw, current_project_id) {
             continue;
         }
         let edge_id = raw
@@ -122,7 +184,7 @@ fn apply_task_dependencies(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("<unknown>")
             .to_owned();
-        let record: TaskDependencyRecord = match serde_json::from_value(raw) {
+        let record: TaskDependencyRecord = match serde_json::from_value(raw.clone()) {
             Ok(record) => record,
             Err(error) => {
                 result.errors.push(format!(
@@ -133,6 +195,7 @@ fn apply_task_dependencies(
         };
         let is_delete = record.is_delete();
         let dependency = record.dependency();
+        let dependency_id = dependency_entity_id(&dependency);
         if is_delete {
             if let Err(error) = task_store.remove_dependency_of_type(
                 &dependency.from_id,
@@ -144,6 +207,13 @@ fn apply_task_dependencies(
                     dependency.from_id, dependency.to_id
                 ));
             }
+            continue;
+        }
+
+        // A delete tombstone wins for the whole response, regardless of wire
+        // ordering. This prevents a stale upsert in the same envelope from
+        // recreating an edge just removed by the user.
+        if deleted_dependency_ids.contains(&dependency_id) {
             continue;
         }
 
@@ -166,6 +236,120 @@ fn apply_task_dependencies(
             ));
         } else {
             result.pulled_task_dependencies += 1;
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DependencyHealReport {
+    to_cloud: usize,
+    from_cloud: usize,
+}
+
+impl CloudSyncer {
+    /// Apply the endpoint's dependency envelope, then reconcile the complete
+    /// local edge set against it. An omitted field is handled by the caller as
+    /// an older endpoint response and intentionally skips healing.
+    fn apply_and_heal_task_dependencies(
+        &self,
+        raw_dependencies: Vec<serde_json::Value>,
+        task_store: &dyn TaskStore,
+        current_project_id: &str,
+        team_id: Option<&str>,
+        result: &mut SyncResult,
+    ) -> Result<DependencyHealReport, CasError> {
+        let local_before = local_dependency_map(task_store)?;
+        let remote = remote_dependency_state(&raw_dependencies, current_project_id);
+
+        apply_task_dependencies(
+            &raw_dependencies,
+            task_store,
+            current_project_id,
+            result,
+            &remote.deleted,
+        );
+
+        let local_after = local_dependency_map(task_store)?;
+        let from_cloud = remote
+            .live
+            .keys()
+            .filter(|entity_id| {
+                !local_before.contains_key(*entity_id) && local_after.contains_key(*entity_id)
+            })
+            .count();
+
+        // Existing queue state is authoritative for idempotency. In
+        // particular, a pending delete must never be replaced by this
+        // best-effort reconciliation when the deployed endpoint cannot yet
+        // provide deletion tombstones.
+        let pending = match team_id {
+            Some(team_id) => self.queue.pending_for_team(team_id, usize::MAX, i32::MAX)?,
+            None => self.queue.pending_for_entity_type(
+                Some(EntityType::TaskDependency),
+                usize::MAX,
+                i32::MAX,
+            )?,
+        };
+        let pending_operations = pending
+            .into_iter()
+            .map(|item| (item.entity_id, item.operation))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut to_cloud = 0;
+        for (entity_id, dependency) in local_after {
+            // The currently deployed endpoint has no deletion tombstone feed,
+            // so an omitted edge is indistinguishable from a cloud-missing
+            // edge. Explicit tombstones (when supplied) and pending local
+            // deletes are protected above; until the feed ships, this is the
+            // documented safe degradation for that ambiguity.
+            if remote.live.contains_key(&entity_id) || remote.deleted.contains(&entity_id) {
+                continue;
+            }
+            if pending_operations.contains_key(&entity_id) {
+                continue;
+            }
+
+            let payload = serde_json::json!({
+                "from_id": dependency.from_id,
+                "to_id": dependency.to_id,
+                "dep_type": dependency.dep_type.to_string(),
+                "created_at": dependency.created_at,
+                "origin_project": current_project_id,
+            });
+            let payload = serde_json::to_string(&payload).map_err(|error| {
+                CasError::Other(format!(
+                    "Could not serialize healed task dependency: {error}"
+                ))
+            })?;
+            match team_id {
+                Some(team_id) => self.queue.enqueue_for_team(
+                    EntityType::TaskDependency,
+                    &entity_id,
+                    SyncOperation::Upsert,
+                    Some(&payload),
+                    team_id,
+                )?,
+                None => self.queue.enqueue(
+                    EntityType::TaskDependency,
+                    &entity_id,
+                    SyncOperation::Upsert,
+                    Some(&payload),
+                )?,
+            }
+            to_cloud += 1;
+        }
+
+        Ok(DependencyHealReport {
+            to_cloud,
+            from_cloud,
+        })
+    }
+
+    fn record_dependency_heal(result: &mut SyncResult, report: DependencyHealReport) {
+        result.healed_task_dependencies_to_cloud += report.to_cloud;
+        result.healed_task_dependencies_from_cloud += report.from_cloud;
+        if let Some(summary) = result.dependency_heal_summary() {
+            eprintln!("{summary}");
         }
     }
 }
@@ -1002,14 +1186,19 @@ impl CloudSyncer {
         }
 
         // Dependencies are applied after tasks so a fresh pull can materialize
-        // an edge whose endpoints arrived in the same envelope. Pull uses
-        // local stores, so these writes are intentionally not re-enqueued.
-        apply_task_dependencies(
-            body.task_dependencies.unwrap_or_default(),
-            task_store,
-            current_project_id,
-            &mut result,
-        );
+        // an edge whose endpoints arrived in the same envelope. A response
+        // without this optional field predates dependency healing, so it is
+        // left untouched until the endpoint supports the collection.
+        if let Some(raw_dependencies) = body.task_dependencies {
+            let report = self.apply_and_heal_task_dependencies(
+                raw_dependencies,
+                task_store,
+                current_project_id,
+                None,
+                &mut result,
+            )?;
+            Self::record_dependency_heal(&mut result, report);
+        }
 
         // Process rules
         for raw_rule in body.rules.unwrap_or_default() {
@@ -1203,7 +1392,10 @@ impl CloudSyncer {
         // fetched and rejected forever. Foreign/malformed rows never reach
         // `conflicts_resolved`, so the GH #192 empty/wrong-bucket safeguard
         // remains intact.
-        if (had_prior_watermark || result.total_pulled() > 0 || result.conflicts_resolved > 0)
+        if (had_prior_watermark
+            || result.total_pulled() > 0
+            || result.conflicts_resolved > 0
+            || result.healed_task_dependencies_to_cloud > 0)
             && let Some(pulled_at) = body.pulled_at
         {
             let _ = self.queue.set_metadata("last_pull_at", &pulled_at);
@@ -1694,6 +1886,8 @@ impl CloudSyncer {
             pulled_file_changes: pull_result.pulled_file_changes,
             pulled_commit_links: pull_result.pulled_commit_links,
             pulled_task_dependencies: pull_result.pulled_task_dependencies,
+            healed_task_dependencies_to_cloud: pull_result.healed_task_dependencies_to_cloud,
+            healed_task_dependencies_from_cloud: pull_result.healed_task_dependencies_from_cloud,
             task_status_transitions: pull_result.task_status_transitions,
             conflicts_resolved: pull_result.conflicts_resolved,
             errors: [
@@ -1889,13 +2083,19 @@ impl CloudSyncer {
         }
 
         // Dependencies are applied after tasks; missing endpoints are parked
-        // with a warning instead of creating dangling local rows.
-        apply_task_dependencies(
-            body.task_dependencies.unwrap_or_default(),
-            task_store,
-            current_project_id,
-            &mut result,
-        );
+        // with a warning instead of creating dangling local rows. A response
+        // without this optional field predates dependency healing, so it is
+        // left untouched until the endpoint supports the collection.
+        if let Some(raw_dependencies) = body.task_dependencies {
+            let report = self.apply_and_heal_task_dependencies(
+                raw_dependencies,
+                task_store,
+                current_project_id,
+                Some(team_id),
+                &mut result,
+            )?;
+            Self::record_dependency_heal(&mut result, report);
+        }
 
         // Process rules
         for raw_rule in body.rules.unwrap_or_default() {

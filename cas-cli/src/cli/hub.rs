@@ -21,6 +21,44 @@ use crate::hub::{
 
 const HUB_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
 const HUB_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const HUB_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HubLaunchOrigin {
+    Cli,
+    Update,
+    Worker,
+}
+
+impl HubLaunchOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Update => "update",
+            Self::Worker => "worker",
+        }
+    }
+}
+
+fn cli_launch_origin() -> HubLaunchOrigin {
+    if std::env::var("CAS_AGENT_ROLE").ok().as_deref() == Some("worker") {
+        HubLaunchOrigin::Worker
+    } else {
+        HubLaunchOrigin::Cli
+    }
+}
+
+/// A hub launched by a factory worker must leave both worker containment
+/// tiers. The process-group tier is handled by `setsid`; the cgroup tier needs
+/// the shared-server sibling scope and a pre-exec barrier.
+fn factory_worker_session() -> Option<String> {
+    if std::env::var("CAS_AGENT_ROLE").ok().as_deref() != Some("worker") {
+        return None;
+    }
+    std::env::var("CAS_FACTORY_SESSION")
+        .ok()
+        .filter(|session| !session.trim().is_empty())
+}
 
 #[derive(Args, Debug, Clone)]
 pub struct HubArgs {
@@ -131,6 +169,12 @@ pub struct HubServeArgs {
     /// Stable listener port
     #[arg(long, default_value_t = DEFAULT_HUB_PORT)]
     pub port: u16,
+    /// Internal provenance for the durable process record.
+    #[arg(long, hide = true, default_value = "cli")]
+    pub launched_by: String,
+    /// Internal timestamp captured by the detached launcher.
+    #[arg(long, hide = true)]
+    pub launched_at: Option<String>,
 }
 
 impl Default for HubServeArgs {
@@ -138,6 +182,8 @@ impl Default for HubServeArgs {
         Self {
             bind: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port: DEFAULT_HUB_PORT,
+            launched_by: "cli".to_owned(),
+            launched_at: None,
         }
     }
 }
@@ -227,8 +273,15 @@ fn render_status(record: &HubProcessRecord, live: bool, binary_version: &str) ->
         )
     } else {
         format!(
-            "Cassy hub is not running; stale record for pid {} remains (version {}, binary: {binary_version})",
-            record.pid, record.version
+            "Cassy hub is not running (last pid {} exited; started by {} at {}) \
+             (version {}, binary: {binary_version})",
+            record.pid,
+            record.launched_by.as_deref().unwrap_or("unknown"),
+            record
+                .launched_at
+                .as_deref()
+                .unwrap_or(&record.started_at),
+            record.version,
         )
     }
 }
@@ -264,15 +317,23 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
 }
 
 fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: u16) -> Result<()> {
-    start_with_output(args, cli, tailscale_serve, tailscale_port, true)
+    start_with_output_from(
+        args,
+        cli,
+        tailscale_serve,
+        tailscale_port,
+        true,
+        cli_launch_origin(),
+    )
 }
 
-fn start_with_output(
+fn start_with_output_from(
     args: &HubServeArgs,
     cli: &Cli,
     tailscale_serve: bool,
     tailscale_port: u16,
     emit_output: bool,
+    launch_origin: HubLaunchOrigin,
 ) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
     validate_control_bind(
@@ -331,12 +392,13 @@ fn start_with_output(
                         );
                     }
                     stop_with_output(cli, emit_output)?;
-                    return start_with_output(
+                    return start_with_output_from(
                         args,
                         cli,
                         tailscale_serve,
                         tailscale_port,
                         emit_output,
+                        launch_origin,
                     );
                 }
             }
@@ -347,24 +409,59 @@ fn start_with_output(
     // authoritative machine lock before cleaning stale state or launching a
     // replacement, then release it immediately before the child takes over.
     let launch_guard = paths.wait_for_instance_lock(HUB_LIFECYCLE_TIMEOUT)?;
+    let stale_cgroup = paths
+        .read_process_record()
+        .ok()
+        .and_then(|record| record.cgroup);
     // A killed hub cannot tear down its owned proxy. Once exclusive ownership
     // is proven, remove only the exact unchanged mapping described by its
     // private receipt; this also recovers record-absent abrupt deaths.
     let _ = TailscaleServeManager::new(paths.root()).disable_owned();
+    if let Some(cgroup) = stale_cgroup {
+        let _ = crate::ui::factory::cgroup::kill_scope(&cgroup);
+        crate::ui::factory::cgroup::remove_scope(&cgroup);
+    }
     paths.remove_process_record()?;
     let log = OpenOptions::new()
         .create(true)
         .append(true)
         .open(paths.log_path())?;
     let error_log = log.try_clone()?;
-    let mut command = Command::new(std::env::current_exe()?);
+    let launched_at = chrono::Utc::now().to_rfc3339();
+    let stamp = chrono::Utc::now().timestamp_micros();
+    let launcher_pid_file = paths
+        .root()
+        .join(format!(".launcher-{stamp}-{}.pid", std::process::id()));
+    let launch_file = paths
+        .root()
+        .join(format!(".launcher-{stamp}-{}.go", std::process::id()));
+    let _launcher_pid_file_guard = ScopedFile::new(launcher_pid_file.clone());
+    let _launch_file_guard = ScopedFile::new(launch_file.clone());
+
+    // The shell is only a barrier launcher. It is placed in its final cgroup
+    // before it forks or execs anything, then execs the hub in the same fresh
+    // session. Thus the recorded hub pid is also the session/process-group
+    // leader and worker cgroup teardown cannot reach it.
+    let launcher_script =
+        r#"printf '%s' "$$" > "$1"; while [ ! -f "$2" ]; do sleep 0.01; done; shift 2; exec "$0" "$@""#;
+    let executable = std::env::current_exe()?;
+    let mut command = Command::new("sh");
     command
+        .arg("-c")
+        .arg(launcher_script)
+        .arg(&executable)
+        .arg(&launcher_pid_file)
+        .arg(&launch_file)
         .arg("hub")
         .arg("serve")
         .arg("--bind")
         .arg(args.bind.to_string())
         .arg("--port")
         .arg(args.port.to_string())
+        .arg("--launched-by")
+        .arg(launch_origin.as_str())
+        .arg("--launched-at")
+        .arg(&launched_at)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(error_log));
@@ -377,7 +474,8 @@ fn start_with_output(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: setsid is async-signal-safe and runs in the child between fork and exec.
+        // SAFETY: setsid is async-signal-safe and runs in the child between
+        // fork and exec. The shell then execs the hub without forking again.
         unsafe {
             command.pre_exec(|| {
                 if libc::setsid() == -1 {
@@ -387,10 +485,24 @@ fn start_with_output(
             });
         }
     }
+    let mut child = command.spawn().context("spawn detached cas hub launcher")?;
+    let launcher_pid = match read_published_pid(&launcher_pid_file) {
+        Ok(pid) => pid,
+        Err(error) => {
+            terminate_failed_launch(&mut child, None);
+            return Err(error);
+        }
+    };
+    let cgroup = factory_worker_session().and_then(|session| {
+        crate::ui::factory::cgroup::join_shared_scope(&session, "hub", launcher_pid)
+    });
     drop(launch_guard);
-    let mut child = command.spawn().context("spawn detached cas hub")?;
+    if let Err(error) = std::fs::write(&launch_file, b"go\n") {
+        terminate_failed_launch(&mut child, cgroup.as_deref());
+        return Err(error.into());
+    }
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + HUB_LAUNCH_TIMEOUT;
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
             if record_is_live(&record) {
@@ -422,17 +534,64 @@ fn start_with_output(
                     status
                 );
             }
-            anyhow::bail!(
+            let error = anyhow::anyhow!(
                 "cas hub replacement exited with {status} before becoming ready; inspect {}",
                 paths.log_path().display()
             );
+            terminate_failed_launch(&mut child, cgroup.as_deref());
+            return Err(error);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    anyhow::bail!(
+    let error = anyhow::anyhow!(
         "cas hub did not become ready; inspect {}",
         paths.log_path().display()
-    )
+    );
+    terminate_failed_launch(&mut child, cgroup.as_deref());
+    Err(error)
+}
+
+struct ScopedFile(std::path::PathBuf);
+
+impl ScopedFile {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self(path)
+    }
+}
+
+impl Drop for ScopedFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn read_published_pid(path: &std::path::Path) -> Result<u32> {
+    let deadline = Instant::now() + HUB_LAUNCH_TIMEOUT;
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+        {
+            return Ok(pid);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("hub launcher never published its pid");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn terminate_failed_launch(
+    child: &mut std::process::Child,
+    cgroup: Option<&std::path::Path>,
+) {
+    if let Some(cgroup) = cgroup {
+        let _ = crate::ui::factory::cgroup::kill_scope(cgroup);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Some(cgroup) = cgroup {
+        crate::ui::factory::cgroup::remove_scope(cgroup);
+    }
 }
 
 fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: u16) -> Result<()> {
@@ -456,6 +615,8 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    let launched_by = args.launched_by.clone();
+    let launched_at = args.launched_at.clone();
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let actual = listener.local_addr()?;
@@ -475,12 +636,18 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         } else {
             (None, None, None)
         };
+        let started_at = chrono::Utc::now().to_rfc3339();
         let record = HubProcessRecord {
             pid: std::process::id(),
+            sid: current_session_id(),
+            pgid: current_process_group_id(),
             bind: actual.ip().to_string(),
             port: actual.port(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            started_at: chrono::Utc::now().to_rfc3339(),
+            started_at: started_at.clone(),
+            cgroup: crate::ui::factory::cgroup::current_scope(),
+            launched_by: Some(launched_by),
+            launched_at: Some(launched_at.unwrap_or(started_at)),
             public_url: tailscale.as_ref().map(|receipt| receipt.public_url.clone()),
             tailscale_serve_port: tailscale.as_ref().map(|receipt| receipt.https_port),
             tailscale_cli: tailscale_serve.then(|| tailscale_manager.executable_display()),
@@ -821,6 +988,7 @@ fn stop(cli: &Cli) -> Result<()> {
 fn stop_with_output(cli: &Cli, emit_output: bool) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
+    let hub_cgroup = record.as_ref().and_then(|record| record.cgroup.clone());
     let tailscale_manager = TailscaleServeManager::new(paths.root());
     // Capture the exact mapping we own before asking the hub to exit. The
     // foreground process now always tears it down on SIGTERM, so stop must
@@ -842,6 +1010,16 @@ fn stop_with_output(cli: &Cli, emit_output: bool) -> Result<()> {
         // Record absence does not authorize stale cleanup: a shutting-down hub
         // may already have removed it while still holding the machine lock.
         drop(paths.wait_for_instance_lock(HUB_LIFECYCLE_TIMEOUT)?);
+    }
+    if let Some(cgroup) = hub_cgroup {
+        if let Err(error) = crate::ui::factory::cgroup::kill_scope(&cgroup) {
+            tracing::warn!(
+                cgroup = %cgroup.display(),
+                error = %error,
+                "cas-8716: failed to drain the detached hub cgroup"
+            );
+        }
+        crate::ui::factory::cgroup::remove_scope(&cgroup);
     }
     let tailscale_result = tailscale_manager.disable_owned();
     let tailscale_outcome = match tailscale_result {
@@ -912,13 +1090,15 @@ pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool>
     let args = HubServeArgs {
         bind: spec.bind,
         port: spec.port,
+        ..HubServeArgs::default()
     };
-    start_with_output(
+    start_with_output_from(
         &args,
         cli,
         spec.tailscale_serve,
         spec.tailscale_port,
         !cli.json,
+        HubLaunchOrigin::Update,
     )?;
     Ok(true)
 }
@@ -958,6 +1138,32 @@ fn process_is_running(pid: u32) -> bool {
     }
 }
 
+fn current_session_id() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: getsid(0) only reads the calling process's session id.
+        let sid = unsafe { libc::getsid(0) };
+        (sid >= 0).then_some(sid as u32)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn current_process_group_id() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: getpgrp only reads the calling process's process-group id.
+        let pgid = unsafe { libc::getpgrp() };
+        (pgid >= 0).then_some(pgid as u32)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 pub(super) fn record_is_live(record: &HubProcessRecord) -> bool {
     if !process_is_running(record.pid) {
         return false;
@@ -984,10 +1190,15 @@ mod tests {
     fn record(version: &str, port: u16, tailscale_serve_port: Option<u16>) -> HubProcessRecord {
         HubProcessRecord {
             pid: 42,
+            sid: None,
+            pgid: None,
             bind: "127.0.0.1".to_owned(),
             port,
             version: version.to_owned(),
             started_at: "2026-09-01T12:00:00Z".to_owned(),
+            cgroup: None,
+            launched_by: None,
+            launched_at: None,
             public_url: tailscale_serve_port.map(|port| format!("https://hub.example:{port}")),
             tailscale_serve_port,
             tailscale_cli: tailscale_serve_port.map(|_| "tailscale".to_owned()),
@@ -1075,6 +1286,22 @@ mod tests {
 
         assert!(rendered.contains("version 3.4.1"), "{rendered}");
         assert!(rendered.contains("binary: 3.7.7"), "{rendered}");
+    }
+
+    #[test]
+    fn stale_status_rendering_shows_launcher_metadata() {
+        let mut stale = record("3.4.1", DEFAULT_HUB_PORT, None);
+        stale.launched_by = Some("update".to_owned());
+        stale.launched_at = Some("2026-09-01T12:34:56Z".to_owned());
+
+        let rendered = render_status(&stale, false, "3.7.7");
+
+        assert!(
+            rendered.contains(
+                "not running (last pid 42 exited; started by update at 2026-09-01T12:34:56Z)"
+            ),
+            "{rendered}"
+        );
     }
 
     #[test]

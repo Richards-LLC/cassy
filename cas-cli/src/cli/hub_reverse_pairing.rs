@@ -1035,10 +1035,15 @@ mod tests {
         paths
             .write_process_record(&crate::hub::HubProcessRecord {
                 pid: std::process::id(),
+                sid: None,
+                pgid: None,
                 bind: "127.0.0.1".to_owned(),
                 port,
                 version: "test".to_owned(),
                 started_at: Utc::now().to_rfc3339(),
+                cgroup: None,
+                launched_by: None,
+                launched_at: None,
                 public_url: public_url.map(str::to_owned),
                 tailscale_serve_port: Some(443),
                 tailscale_cli: None,

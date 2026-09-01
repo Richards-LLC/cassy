@@ -446,8 +446,14 @@ fn start_with_output_from(
     // before it forks or execs anything, then execs the hub in the same fresh
     // session. Thus the recorded hub pid is also the session/process-group
     // leader and worker cgroup teardown cannot reach it.
+    #[cfg(unix)]
+    let launcher_script = r#"printf '%s' "$$" > "$1"; while [ ! -f "$2" ]; do /bin/sleep 0.01; done; cgroup=; IFS= read -r cgroup < "$2" || :; shift 2; if [ -n "$cgroup" ]; then set -- "$@" --cgroup "$cgroup"; fi; exec "$0" "$@""#;
+    #[cfg(not(unix))]
     let launcher_script = r#"printf '%s' "$$" > "$1"; while [ ! -f "$2" ]; do sleep 0.01; done; cgroup=; IFS= read -r cgroup < "$2" || :; shift 2; if [ -n "$cgroup" ]; then set -- "$@" --cgroup "$cgroup"; fi; exec "$0" "$@""#;
     let executable = std::env::current_exe()?;
+    #[cfg(unix)]
+    let mut command = Command::new("/bin/sh");
+    #[cfg(not(unix))]
     let mut command = Command::new("sh");
     command
         .arg("-c")

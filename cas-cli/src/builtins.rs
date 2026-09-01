@@ -4237,8 +4237,7 @@ This is the body content."#;
         // cas-39f5: the .claude and .codex copies of session-learn/SKILL.md
         // are sync-mirrored by `cas update`. Drift between them silently
         // produces a different classifier prompt on whichever harness
-        // reads the stale copy — exactly the failure mode cas-ec8f traced
-        // in cas-code-review. Pin content-identity at the source, modulo
+        // reads the stale copy. Pin content-identity at the source, modulo
         // the intentional per-harness tool prefix (cas-2c61: the codex
         // copy correctly uses mcp__cs__, not Claude's mcp__cas__).
         let claude = BUILTIN_SKILLS
@@ -5187,12 +5186,12 @@ This is the body content."#;
             .find(|b| b.path == "skills/cas-supervisor/references/code-review-queue.md")
             .expect("BUILTIN_SKILLS missing cas-supervisor code-review-queue.md");
         for required in [
-            "not the full-review trigger",
-            "Phase 3 uses a lightweight per-merge gate",
-            "single required full `/cas-code-review` run happens in Phase 4",
-            "create the task first",
-            "epic-level review fix rounds",
-            "messages are not durable task state",
+            "Awaiting-merge triage",
+            "visibility and handoff list",
+            "canonical review procedure",
+            "touched-module tests",
+            "verification action=add",
+            "final epic gate runs full nextest",
         ] {
             assert!(
                 code_review_queue.content.contains(required),
@@ -5223,15 +5222,15 @@ This is the body content."#;
             .find(|b| b.path == "skills/cas-supervisor/references/workflow.md")
             .expect("BUILTIN_SKILLS missing cas-supervisor workflow.md");
         for required in [
-            "Run the lightweight per-merge gate",
-            "Do **not** run the full multi-persona",
-            "Record the audit trail",
-            "exception, not the default cadence",
+            "Run the canonical merge-time diff review",
+            "worker's direct diff against the task spec",
+            "Re-run the tests for touched modules",
+            "Record the review receipt",
+            "verification_type=task",
             "Hold the main merge",
-            "single required full multi-persona review",
-            "git diff <base-branch>..HEAD > /tmp/<epic-id>-diff.patch",
+            "Run the final assembled-tree gate",
+            "cargo nextest run -p cas",
             "bounded epic-child fix-round task",
-            "cargo test --no-fail-fast > /tmp/<epic-id>-cargo-test.log 2>&1; echo $?",
             "Never pipe the test run to `tail`",
         ] {
             assert!(
@@ -5245,8 +5244,8 @@ This is the body content."#;
             .next()
             .expect("workflow.md must contain Phase 3 content before Phase 4");
         assert!(
-            !phase3.contains("/cas-code-review mode=interactive base_sha=<pre_cp>"),
-            "workflow.md Phase 3 must not mandate the old full review invocation"
+            !phase3.contains("multi-persona") && !phase3.contains("findings envelope"),
+            "workflow.md Phase 3 must not mention the retired review pipeline"
         );
 
         let planning = BUILTIN_SKILLS
@@ -5254,8 +5253,9 @@ This is the body content."#;
             .find(|b| b.path == "skills/cas-supervisor/references/planning.md")
             .expect("BUILTIN_SKILLS missing cas-supervisor planning.md");
         for required in [
-            "Supervisors run a lightweight per-merge gate",
-            "one full multi-persona `/cas-code-review` against the assembled EPIC diff",
+            "Every worker merge receives the canonical merge-time diff review",
+            "Phase 4 runs the full final-tree nextest gate",
+            "Do not dispatch a separate review workflow",
         ] {
             assert!(
                 planning.content.contains(required),

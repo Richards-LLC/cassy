@@ -384,10 +384,11 @@ fn is_own_or_ancestor_scope(dir: &Path, own: &Path) -> bool {
 /// delegated containment tree.
 ///
 /// Shared hub and worker scopes are direct children of the containment root.
-/// Private registered-server scopes are the one intentional nested case: they
-/// are direct children of a Cassy worker scope. Keeping the parent check here
-/// prevents an arbitrary directory merely named `cas-server-*` from becoming
-/// a kill target.
+/// Private registered-server scopes are direct children of the caller's own
+/// scope (for a plain shell) or the one intentional nested case below a Cassy
+/// worker scope. Keeping the parent checks here prevents an arbitrary
+/// directory merely named `cas-server-*` or `cas-private-server-*` from
+/// becoming a kill target.
 fn is_cassy_owned_scope(dir: &Path, own: &Path) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(dir) else {
         return false;
@@ -403,7 +404,9 @@ fn is_cassy_owned_scope(dir: &Path, own: &Path) -> bool {
     };
     let root = containment_root(own);
     if parent == root {
-        return name.starts_with("cas-server-") || name.starts_with("cas-worker-");
+        return name.starts_with("cas-server-")
+            || name.starts_with("cas-worker-")
+            || (name.starts_with("cas-private-server-") && parent == own);
     }
 
     name.starts_with("cas-private-server-")
@@ -827,10 +830,19 @@ mod tests {
         let own = root.join("cas-worker-session-own");
         let ancestor = root.clone();
         let sibling_host = root.join("terminal.scope");
+        let private_under_own = own.join("cas-private-server-session-own");
+        let private_under_unrelated_host = sibling_host.join("cas-private-server-session-dev");
         let server = root.join("cas-server-session-hub");
         let worker = root.join("cas-worker-session-peer");
         let missing = root.join("cas-server-session-missing");
-        for dir in [&own, &sibling_host, &server, &worker] {
+        for dir in [
+            &own,
+            &sibling_host,
+            &private_under_own,
+            &private_under_unrelated_host,
+            &server,
+            &worker,
+        ] {
             std::fs::create_dir_all(dir).unwrap();
         }
 
@@ -840,6 +852,16 @@ mod tests {
             ("sibling host scope", sibling_host.as_path(), false),
             ("cas-server leaf", server.as_path(), true),
             ("cas-worker leaf", worker.as_path(), true),
+            (
+                "private server under worker own scope",
+                private_under_own.as_path(),
+                true,
+            ),
+            (
+                "private server under unrelated host scope",
+                private_under_unrelated_host.as_path(),
+                false,
+            ),
             ("missing dir", missing.as_path(), false),
         ];
         for (label, dir, expected) in cases {
@@ -868,6 +890,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn private_server_scope_remains_owned_when_nested_under_plain_caller() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("delegated");
+        let own = root.join("terminal.scope");
+        let private = own.join("cas-private-server-session-dev");
+        std::fs::create_dir_all(&private).unwrap();
+
+        assert!(scope_is_safe(&private, &own));
+        assert!(!scope_is_safe(&own, &own));
     }
 
     #[test]

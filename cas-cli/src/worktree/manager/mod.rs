@@ -111,6 +111,11 @@ pub struct WorktreeManager {
 
     /// Factory worker worktrees (worker_name -> worktree)
     workers: HashMap<String, Worktree>,
+
+    /// Git roots for worker worktrees. Most workers use `repo_root`, but a
+    /// pre-assigned WorkTarget may place one in a sibling repository while the
+    /// task store remains in the factory session repository.
+    pub(crate) worker_repo_roots: HashMap<String, PathBuf>,
 }
 
 mod epic_ops;
@@ -210,8 +215,13 @@ impl WorktreeManager {
     /// the worktree directory (merge_and_cleanup with cleanup=true,
     /// abandon, remove_worker); pass `false` only when the worktree is
     /// merged but preserved (cleanup=false).
-    fn reject_or_warn_on_dirty(&self, path: &Path, will_remove: bool) -> WorktreeResult<()> {
-        let dirty = self.git.classify_dirty_status(path)?;
+    fn reject_or_warn_on_dirty(
+        &self,
+        git: &GitOperations,
+        path: &Path,
+        will_remove: bool,
+    ) -> WorktreeResult<()> {
+        let dirty = git.classify_dirty_status(path)?;
 
         if will_remove && !dirty.warnings.is_empty() {
             let mut message = dirty.describe_blocking();
@@ -263,6 +273,7 @@ impl WorktreeManager {
             repo_root,
             context,
             workers: HashMap::new(),
+            worker_repo_roots: HashMap::new(),
         })
     }
 
@@ -492,7 +503,7 @@ impl WorktreeManager {
         // must block too (removal destroys them outright); when the
         // worktree survives (cleanup=false) they only warn.
         if !force {
-            self.reject_or_warn_on_dirty(&worktree.path, will_cleanup)?;
+            self.reject_or_warn_on_dirty(&self.git, &worktree.path, will_cleanup)?;
         }
 
         let merge_commit = if self.config.auto_merge {
@@ -589,7 +600,7 @@ impl WorktreeManager {
         // abandon unconditionally deletes the worktree directory, so
         // untracked files must block exactly like tracked ones.
         if !force {
-            self.reject_or_warn_on_dirty(&worktree.path, true)?;
+            self.reject_or_warn_on_dirty(&self.git, &worktree.path, true)?;
         }
 
         // Remove the worktree. cas-006c: pass force=true unconditionally —

@@ -5224,7 +5224,7 @@ impl FactoryDaemon {
                             Some(&worker_name),
                             "provision",
                             "started",
-                            "Preparing worker filesystem and worktree.",
+                            &crate::ui::factory::app::render_and_ops::epic_workers::spawn_provision_receipt(&prep),
                         );
                         // cas-7587 (GH #122): record which branch this worker
                         // was cut from and why (task's epic / pinned focus /
@@ -5282,12 +5282,17 @@ impl FactoryDaemon {
                         );
                         self.app.set_error(format!("Failed to prepare spawn: {e}"));
                         let detail = e.to_string();
+                        let stage = if detail.starts_with("cross-repo spawn:") {
+                            "provision"
+                        } else {
+                            "prepare"
+                        };
                         append_spawn_audit(
                             self.app.cas_dir(),
                             &self.session_name,
                             request_id,
                             None,
-                            "prepare",
+                            stage,
                             "failed",
                             &detail,
                         );
@@ -5297,7 +5302,7 @@ impl FactoryDaemon {
                             &self.session_name,
                             request_id,
                             "unresolved",
-                            "prepare",
+                            stage,
                             false,
                             &detail,
                         );
@@ -5327,7 +5332,7 @@ impl FactoryDaemon {
                             Some(&worker_name),
                             "provision",
                             "started",
-                            "Preparing worker filesystem and worktree.",
+                            &crate::ui::factory::app::render_and_ops::epic_workers::spawn_provision_receipt(&prep),
                         );
                         // cas-7587 (GH #122): record which branch this worker
                         // was cut from and why (task's epic / pinned focus /
@@ -5381,12 +5386,17 @@ impl FactoryDaemon {
                         self.app
                             .set_error(format!("Failed to prepare spawn '{name}': {e}"));
                         let detail = e.to_string();
+                        let stage = if detail.starts_with("cross-repo spawn:") {
+                            "provision"
+                        } else {
+                            "prepare"
+                        };
                         append_spawn_audit(
                             self.app.cas_dir(),
                             &self.session_name,
                             request_id,
                             Some(&name),
-                            "prepare",
+                            stage,
                             "failed",
                             &detail,
                         );
@@ -5396,7 +5406,7 @@ impl FactoryDaemon {
                             &self.session_name,
                             request_id,
                             &name,
-                            "prepare",
+                            stage,
                             false,
                             &detail,
                         );

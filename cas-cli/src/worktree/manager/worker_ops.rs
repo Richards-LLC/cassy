@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::types::Worktree;
 use crate::worktree::external_symlinks::{
@@ -58,16 +58,49 @@ pub struct CleanupReport {
 }
 
 impl WorktreeManager {
+    fn worker_repo_root(&self, worker_name: &str) -> PathBuf {
+        self.worker_repo_roots
+            .get(worker_name)
+            .cloned()
+            .unwrap_or_else(|| self.repo_root.clone())
+    }
+
+    fn worker_git(&self, worker_name: &str) -> GitOperations {
+        GitOperations::new(self.worker_repo_root(worker_name))
+    }
+
     /// External-link guard shared by every manager-owned worktree deletion.
     /// `$HOME` links and primary-checkout `node_modules` links have different
     /// roots, so keep their scans separate and combine their named evidence.
-    fn inbound_symlinks(&self, worktree_path: &std::path::Path) -> Vec<ExternalSymlink> {
+    fn inbound_symlinks(
+        &self,
+        worktree_path: &std::path::Path,
+        repo_root: &std::path::Path,
+    ) -> Vec<ExternalSymlink> {
         let mut links = scan_external_symlinks_into(worktree_path);
         links.extend(scan_project_node_modules_symlinks_into(
             worktree_path,
-            &self.repo_root,
+            repo_root,
         ));
         links
+    }
+
+    fn repo_root_for_worktree(path: &std::path::Path) -> Option<PathBuf> {
+        let output = std::process::Command::new("git")
+            .args(["-C", path.to_str()?, "rev-parse", "--git-common-dir"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        let common = if common.is_absolute() {
+            common
+        } else {
+            path.join(common)
+        };
+        common
+            .canonicalize()
+            .ok()
+            .and_then(|common| common.parent().map(Path::to_path_buf))
     }
 
     /// Calculate the worktree path for a factory worker
@@ -119,6 +152,8 @@ impl WorktreeManager {
 
         self.workers
             .insert(worker_name.to_string(), worktree.clone());
+        self.worker_repo_roots
+            .insert(worker_name.to_string(), self.repo_root.clone());
 
         Ok(worktree)
     }
@@ -159,6 +194,8 @@ impl WorktreeManager {
 
         self.workers
             .insert(worker_name.to_string(), worktree.clone());
+        self.worker_repo_roots
+            .insert(worker_name.to_string(), self.repo_root.clone());
 
         Ok(worktree)
     }
@@ -189,6 +226,8 @@ impl WorktreeManager {
                 worktree_path,
             );
             self.workers.insert(worker_name.to_string(), worktree);
+            self.worker_repo_roots
+                .insert(worker_name.to_string(), self.repo_root.clone());
             return self.worker_ref(worker_name);
         }
 
@@ -221,6 +260,8 @@ impl WorktreeManager {
                 worktree_path,
             );
             self.workers.insert(worker_name.to_string(), worktree);
+            self.worker_repo_roots
+                .insert(worker_name.to_string(), self.repo_root.clone());
             return self.worker_ref(worker_name);
         }
 
@@ -244,7 +285,11 @@ impl WorktreeManager {
 
     /// Register a worktree that was created externally.
     pub fn register_worktree(&mut self, worker_name: &str, worktree: Worktree) {
+        let repo_root = Self::repo_root_for_worktree(&worktree.path)
+            .unwrap_or_else(|| self.repo_root.clone());
         self.workers.insert(worker_name.to_string(), worktree);
+        self.worker_repo_roots
+            .insert(worker_name.to_string(), repo_root);
     }
 
     /// Get a reference to the git operations wrapper
@@ -266,11 +311,13 @@ impl WorktreeManager {
 
         for name in worker_names {
             if let Some(mut worktree) = self.workers.remove(&name) {
+                let repo_root = self.worker_repo_root(&name);
+                let git = self.worker_git(&name);
                 // cas-df97: live external symlinks block regardless of
                 // `force` — force means "bypass git dirty-tree protection",
                 // not "I'm aware this will orphan $HOME symlinks".
                 if worktree.path.exists() {
-                    let links = self.inbound_symlinks(&worktree.path);
+                    let links = self.inbound_symlinks(&worktree.path, &repo_root);
                     if !links.is_empty() {
                         report
                             .external_symlinks_blocked
@@ -285,7 +332,7 @@ impl WorktreeManager {
                 }
 
                 if !force && worktree.path.exists() {
-                    let file_count = self.git.uncommitted_file_count(&worktree.path).unwrap_or(0);
+                    let file_count = git.uncommitted_file_count(&worktree.path).unwrap_or(0);
                     if file_count > 0 {
                         report.dirty_deferred.push(DirtyWorktreeWarning {
                             worker_name: name.clone(),
@@ -298,15 +345,16 @@ impl WorktreeManager {
                 }
 
                 if worktree.path.exists() {
-                    let _ = self.git.remove_worktree(&worktree.path, force);
+                    let _ = git.remove_worktree(&worktree.path, force);
                 }
 
-                let _ = self.git.delete_branch(&worktree.branch, true);
+                let _ = git.delete_branch(&worktree.branch, true);
 
                 worktree.mark_abandoned();
                 worktree.mark_removed();
 
-                report.cleaned.push(name);
+                report.cleaned.push(name.clone());
+                self.worker_repo_roots.remove(&name);
             }
         }
 
@@ -316,10 +364,12 @@ impl WorktreeManager {
     /// Remove a single worker's worktree
     pub fn remove_worker(&mut self, worker_name: &str, force: bool) -> WorktreeResult<()> {
         if let Some(mut worktree) = self.workers.remove(worker_name) {
+            let repo_root = self.worker_repo_root(worker_name);
+            let git = self.worker_git(worker_name);
             // cas-df97: live external symlinks block regardless of `force`
             // — see the identical guard in cleanup_workers.
             if worktree.path.exists() {
-                let links = self.inbound_symlinks(&worktree.path);
+                let links = self.inbound_symlinks(&worktree.path, &repo_root);
                 if !links.is_empty() {
                     let warning = ExternalSymlinkWarning {
                         worker_name: worker_name.to_string(),
@@ -339,7 +389,7 @@ impl WorktreeManager {
             // finding cas-006c — untracked-only debris is destroyed, not
             // preserved, by an actual removal).
             if !force && worktree.path.exists() {
-                if let Err(e) = self.reject_or_warn_on_dirty(&worktree.path, true) {
+                if let Err(e) = self.reject_or_warn_on_dirty(&git, &worktree.path, true) {
                     self.workers.insert(worker_name.to_string(), worktree);
                     return Err(e);
                 }
@@ -351,13 +401,14 @@ impl WorktreeManager {
             // the tree as safe to remove (blocking on untracked too, not
             // just tracked changes).
             if worktree.path.exists() {
-                self.git.remove_worktree(&worktree.path, true)?;
+                git.remove_worktree(&worktree.path, true)?;
             }
 
-            let _ = self.git.delete_branch(&worktree.branch, true);
+            let _ = git.delete_branch(&worktree.branch, true);
 
             worktree.mark_abandoned();
             worktree.mark_removed();
+            self.worker_repo_roots.remove(worker_name);
         }
 
         Ok(())
@@ -375,13 +426,15 @@ impl WorktreeManager {
             Some(wt) => wt,
             None => return Ok(RemoveOutcome::NotTracked),
         };
+        let repo_root = self.worker_repo_root(worker_name);
+        let git = self.worker_git(worker_name);
 
         if worktree.path.exists() {
             // cas-df97: live external symlinks block regardless of dirty
             // state — this is the actual production path
             // (finalize_worker_worktree) that the reported incident went
             // through.
-            let links = self.inbound_symlinks(&worktree.path);
+            let links = self.inbound_symlinks(&worktree.path, &repo_root);
             if !links.is_empty() {
                 let warning = ExternalSymlinkWarning {
                     worker_name: worker_name.to_string(),
@@ -392,7 +445,7 @@ impl WorktreeManager {
                 return Ok(RemoveOutcome::ExternalSymlinksBlocked(warning));
             }
 
-            let file_count = self.git.uncommitted_file_count(&worktree.path).unwrap_or(0);
+            let file_count = git.uncommitted_file_count(&worktree.path).unwrap_or(0);
             if file_count > 0 {
                 let warning = DirtyWorktreeWarning {
                     worker_name: worker_name.to_string(),
@@ -403,13 +456,14 @@ impl WorktreeManager {
                 return Ok(RemoveOutcome::DirtyDeferred(warning));
             }
 
-            self.git.remove_worktree(&worktree.path, false)?;
+            git.remove_worktree(&worktree.path, false)?;
         }
 
-        let _ = self.git.delete_branch(&worktree.branch, true);
+        let _ = git.delete_branch(&worktree.branch, true);
 
         worktree.mark_abandoned();
         worktree.mark_removed();
+        self.worker_repo_roots.remove(worker_name);
 
         Ok(RemoveOutcome::Removed)
     }

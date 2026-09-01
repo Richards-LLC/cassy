@@ -383,7 +383,13 @@ impl WorkerSpawnPrep {
             git.create_worktree(&wt.worktree_path, &wt.branch_name, Some(&checkout_from))?;
 
             if std::env::var("CAS_FACTORY_DISABLE_TARGET_SEED").as_deref() != Ok("1") {
-                match seed_worker_target_from_baseline(&wt.cas_dir, &wt.worktree_path) {
+                // A cross-repository worker keeps the session store as
+                // `CAS_ROOT`, but its Cargo target must come from the target
+                // repository's cache. Seeding the session cache here could
+                // copy artifacts built for an unrelated project into the
+                // target worktree.
+                let build_cache_cas_dir = wt.repo_root.join(".cas");
+                match seed_worker_target_from_baseline(&build_cache_cas_dir, &wt.worktree_path) {
                     Ok(Some(stats)) => tracing::info!(
                         worker = %self.worker_name,
                         files = stats.files,

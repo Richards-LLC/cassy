@@ -17,6 +17,7 @@ cas doctor
 [OK] embedding drain: no cloud embedding capability (not logged in); nothing is queued
 [WARN] code history index: cannot check code history index: not a git repository: [TEMP_PATH] ([GIT_NOT_REPOSITORY])
 [OK] configuration: Loaded (sync: enabled)
+[OK] MCP stdio upstreams: [N] registered command(s) resolve to executable files
 [OK] sync target: Will sync to .claude/rules/cas (not yet created)
 [OK] memory stats: [N] total () | tiers:  | compressed: [N] | helpful: [N] | harmful: [N]
 [OK] memory decay: Memory decay (last cycle): unavailable (no completed decay cycle recorded)

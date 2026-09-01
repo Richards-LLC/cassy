@@ -6739,7 +6739,7 @@ fn format_assigned_unstarted_status(
     threshold_secs: i64,
 ) -> String {
     format!(
-        "\n    ⚠ ASSIGNED BUT UNSTARTED: {task_id} was assigned {elapsed_secs}s ago and remains unstarted with no recent activity (threshold: {threshold_secs}s)"
+        "\n    ⚠ ASSIGNED BUT UNSTARTED: {task_id} was assigned {elapsed_secs}s ago and remains unstarted with no recent activity (threshold: {threshold_secs}s; possible missed wake — inspect the queued task message)"
     )
 }
 
@@ -10572,6 +10572,7 @@ effort = "high"
         assert!(rendered.contains("cas-unstarted was assigned 310s ago"));
         assert!(rendered.contains("remains unstarted with no recent activity"));
         assert!(rendered.contains("threshold: 300s"));
+        assert!(rendered.contains("possible missed wake"));
     }
 
     #[test]

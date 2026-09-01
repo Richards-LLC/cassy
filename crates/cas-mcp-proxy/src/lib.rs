@@ -1,6 +1,7 @@
 pub mod config;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -144,6 +145,21 @@ impl ExternalToolRoute {
         Some(Self::new(server, tool))
     }
 
+    /// Parse a proxy configuration allowlist entry into its canonical route.
+    /// The canonical spelling is `server.tool`; `server:tool`, `server/tool`,
+    /// MCP's `mcp__server__tool`, and a bare tool name remain accepted as
+    /// compatibility aliases.
+    pub fn parse_allowlist_entry(entry: &str) -> Result<Self> {
+        let route =
+            config::ExternalToolConfig::parse_allowlist_entry(entry).map_err(anyhow::Error::msg)?;
+        Ok(Self::new(route.server, route.tool))
+    }
+
+    /// Canonical configuration spelling for this route.
+    pub fn canonical_entry(&self) -> String {
+        format!("{}.{}", self.server, self.tool)
+    }
+
     /// Upstream server component.
     pub fn server(&self) -> &str {
         &self.server
@@ -162,6 +178,13 @@ impl ExternalToolRoute {
 /// can use this hook to deny a call before `ProxyEngine` forwards it.
 pub trait ProxyPolicy: Send + Sync {
     fn decide(&self, request: &ProxyPolicyRequest<'_>) -> ProxyPolicyDecision;
+
+    /// Return the policy's catalog visibility decision without inventing a
+    /// caller identity. Policies that do not filter discovery retain the
+    /// default, while the configured external allowlist marks denied tools.
+    fn catalog_decision(&self, _server: &str, _tool: &str) -> ProxyPolicyDecision {
+        ProxyPolicyDecision::Allow
+    }
 }
 
 /// Default policy for installations that have not opted into protected tools.
@@ -209,6 +232,20 @@ impl ExternalToolAllowlistPolicy {
     pub fn allows(&self, server: &str, tool: &str) -> bool {
         self.allowed_routes
             .contains(&ExternalToolRoute::new(server, tool))
+            || self
+                .allowed_routes
+                .contains(&ExternalToolRoute::new(server, "*"))
+            || self
+                .allowed_routes
+                .contains(&ExternalToolRoute::new("*", tool))
+    }
+
+    fn denial_reason(server: &str, tool: &str) -> String {
+        format!(
+            "external tool is not explicitly allowlisted; add \"{}.{}\" to [proxy].allowlist",
+            public_upstream_id(server),
+            public_tool_id(tool)
+        )
     }
 }
 
@@ -216,7 +253,7 @@ impl ProxyPolicy for ExternalToolAllowlistPolicy {
     fn decide(&self, request: &ProxyPolicyRequest<'_>) -> ProxyPolicyDecision {
         if !self.allows(request.server, request.tool) {
             return ProxyPolicyDecision::Deny {
-                reason: "external tool is not explicitly allowlisted".to_string(),
+                reason: Self::denial_reason(request.server, request.tool),
             };
         }
         let route = ExternalToolRoute::new(request.server, request.tool);
@@ -230,6 +267,16 @@ impl ProxyPolicy for ExternalToolAllowlistPolicy {
             };
         }
         ProxyPolicyDecision::Allow
+    }
+
+    fn catalog_decision(&self, server: &str, tool: &str) -> ProxyPolicyDecision {
+        if self.allows(server, tool) {
+            ProxyPolicyDecision::Allow
+        } else {
+            ProxyPolicyDecision::Deny {
+                reason: Self::denial_reason(server, tool),
+            }
+        }
     }
 }
 
@@ -267,6 +314,10 @@ pub struct UpstreamHealth {
     pub name: String,
     pub transport: String,
     pub state: UpstreamState,
+    /// The configured stdio executable, only populated when it is missing.
+    /// HTTP/SSE endpoints and working commands remain absent from health.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
     pub attempts: u32,
     pub consecutive_failures: u32,
     pub tool_count: usize,
@@ -282,6 +333,7 @@ pub enum UpstreamState {
     Healthy,
     Degraded,
     Backoff,
+    ExecutableMissing,
 }
 
 /// Per-engine (therefore per MCP session) health snapshot.
@@ -306,7 +358,14 @@ impl ProxyHealthSnapshot {
                 .get(&server.name)
                 .cloned()
                 .unwrap_or_else(|| public_upstream_id(&server.name));
+            let expose_executable =
+                server.state == UpstreamState::ExecutableMissing && server.transport == "stdio";
             server.transport = safe_transport(&server.transport).to_string();
+            server.executable = expose_executable
+                .then(|| server.executable.take())
+                .flatten()
+                .as_deref()
+                .map(safe_executable);
             server.last_error_code = server
                 .last_error_code
                 .as_deref()
@@ -509,9 +568,20 @@ impl ProxyEngine {
                     let record = health
                         .entry(name.to_string())
                         .or_insert_with(|| initial_health(name, config));
+                    if code == "executable_missing"
+                        && let ServerConfig::Stdio { command, .. } = config
+                    {
+                        record.executable = Some(command.trim().to_string());
+                    }
                     record_failure(record, code, now)
                 };
                 match visibility {
+                    FailureVisibility::Error if code == "executable_missing" => tracing::error!(
+                        upstream = %public_name,
+                        error_code = code,
+                        proxy_session = %self.session_id,
+                        "Optional MCP upstream executable is missing; CAS will continue without retry"
+                    ),
                     FailureVisibility::Error => tracing::error!(
                         upstream = %public_name,
                         error_code = code,
@@ -589,8 +659,13 @@ impl ProxyEngine {
 
             let public_tools =
                 public_tool_ids(connected.tools.iter().map(|tool| tool.name.as_ref()));
+            let policy = self.policy.read().await.clone();
             for tool in &connected.tools {
                 if matches_keywords(tool, &keywords) {
+                    let policy = match policy.catalog_decision(server_name, tool.name.as_ref()) {
+                        ProxyPolicyDecision::Allow => None,
+                        ProxyPolicyDecision::Deny { .. } => Some("denied by policy".to_string()),
+                    };
                     results.push(SearchResult {
                         server: public_server.clone(),
                         name: public_tools
@@ -599,6 +674,7 @@ impl ProxyEngine {
                             .unwrap_or_else(|| public_tool_id(tool.name.as_ref())),
                         description: tool.description.as_ref().map(|d| d.to_string()),
                         input_schema: serde_json::to_value(&*tool.input_schema).unwrap_or_default(),
+                        policy,
                     });
                 }
             }
@@ -1147,6 +1223,7 @@ fn initial_health(name: &str, config: &ServerConfig) -> UpstreamHealth {
         name: name.to_string(),
         transport: transport_name(config).to_string(),
         state: UpstreamState::Degraded,
+        executable: None,
         attempts: 0,
         consecutive_failures: 0,
         tool_count: 0,
@@ -1169,6 +1246,7 @@ fn record_success(record: &mut UpstreamHealth, tool_count: usize, now: u64) {
     record.consecutive_failures = 0;
     record.tool_count = tool_count;
     record.state = UpstreamState::Healthy;
+    record.executable = None;
     record.last_error_code = None;
     record.last_attempt_at_ms = Some(now);
     record.next_retry_at_ms = None;
@@ -1180,6 +1258,11 @@ fn record_failure(record: &mut UpstreamHealth, error_code: &str, now: u64) -> Fa
     record.tool_count = 0;
     record.last_error_code = Some(error_code.to_string());
     record.last_attempt_at_ms = Some(now);
+    if error_code == "executable_missing" {
+        record.state = UpstreamState::ExecutableMissing;
+        record.next_retry_at_ms = None;
+        return FailureVisibility::Error;
+    }
     let shift = record.consecutive_failures.saturating_sub(1).min(6);
     let delay_secs = RETRY_BASE_SECS
         .saturating_mul(1_u64 << shift)
@@ -1211,6 +1294,13 @@ fn classify_error(error: &anyhow::Error) -> &'static str {
         "invalid_url"
     } else if message.contains("timed out") || message.contains("timeout") {
         "timeout"
+    } else if message.contains("no such file or directory")
+        || message.contains("os error 2")
+        || message.contains("exit status: 127")
+        || message.contains("status 127")
+        || message.contains("code 127")
+    {
+        "executable_missing"
     } else {
         "connection_failed"
     }
@@ -1278,6 +1368,7 @@ fn safe_error_code(code: &str) -> &'static str {
         "invalid_url" => "invalid_url",
         "timeout" => "timeout",
         "connection_failed" => "connection_failed",
+        "executable_missing" => "executable_missing",
         _ => "unknown",
     }
 }
@@ -1289,6 +1380,93 @@ fn live_failure_applies(
     failure_completion: u64,
 ) -> bool {
     installed_generation == failed_generation && last_successful_call <= failure_completion
+}
+
+/// Resolve a stdio command using the same PATH semantics as process launch.
+/// Absolute and relative paths must point at executable files; bare commands
+/// are searched through the current process PATH.
+pub fn resolve_stdio_executable(command: &str) -> Option<PathBuf> {
+    resolve_stdio_executable_at_depth(command, 0)
+}
+
+fn resolve_stdio_executable_at_depth(command: &str, depth: u8) -> Option<PathBuf> {
+    if depth > 8 {
+        return None;
+    }
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    let path = Path::new(command);
+    let has_path = path.is_absolute()
+        || path
+            .parent()
+            .is_some_and(|parent| !parent.as_os_str().is_empty());
+    if has_path {
+        return is_executable(path, depth).then(|| path.to_path_buf());
+    }
+
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(command))
+        .find(|candidate| is_executable(candidate, depth))
+}
+
+fn is_executable(path: &Path, depth: u8) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+
+        // `Command::new` asks the kernel to resolve a script's `#!`
+        // interpreter. A script can therefore be executable while still
+        // failing with ENOENT when its interpreter was removed; validate that
+        // second hop so doctor reports the same stale-path failure.
+        let Ok(contents) = std::fs::read(path) else {
+            return true;
+        };
+        let Some(first_line) = contents.split(|byte| *byte == b'\n').next() else {
+            return true;
+        };
+        let Ok(first_line) = std::str::from_utf8(first_line) else {
+            return true;
+        };
+        let Some(shebang) = first_line.strip_prefix("#!") else {
+            return true;
+        };
+        let mut words = shebang.split_whitespace();
+        let Some(interpreter) = words.next() else {
+            return false;
+        };
+        let interpreter = if interpreter.ends_with("/env") {
+            words.find(|word| !word.starts_with('-'))
+        } else {
+            Some(interpreter)
+        };
+        interpreter.is_some_and(|interpreter| {
+            resolve_stdio_executable_at_depth(interpreter, depth + 1).is_some()
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = depth;
+        true
+    }
+}
+
+fn safe_executable(executable: &str) -> String {
+    if executable.len() <= 4096 && executable.chars().all(|character| !character.is_control()) {
+        executable.to_string()
+    } else {
+        "unknown".to_string()
+    }
 }
 
 /// Connect to a single upstream MCP server and discover its tools.
@@ -1402,6 +1580,8 @@ struct SearchResult {
     name: String,
     description: Option<String>,
     input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<String>,
 }
 
 /// Parse a search query into an optional server filter and keyword tokens.
@@ -1649,11 +1829,59 @@ mod tests {
             assert_eq!(
                 decision(server, tool),
                 ProxyPolicyDecision::Deny {
-                    reason: "external tool is not explicitly allowlisted".to_string()
+                    reason: ExternalToolAllowlistPolicy::denial_reason(server, tool)
                 },
                 "allowlist must compare parsed components exactly for {server}.{tool}"
             );
         }
+    }
+
+    #[test]
+    fn external_tool_allowlist_normalizes_aliases_and_supports_server_wildcards() {
+        let routes = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "github.*"]
+        .into_iter()
+        .map(ExternalToolRoute::parse_allowlist_entry)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        let policy = ExternalToolAllowlistPolicy::new(routes);
+
+        assert!(policy.allows("neon", "run_sql"));
+        assert!(policy.allows("neon", "write"));
+        assert!(policy.allows("neon", "read"));
+        assert!(policy.allows("other", "run_sql"));
+        assert!(policy.allows("github", "list_issues"));
+        assert!(!policy.allows("github-shadow", "list_issues"));
+        assert!(!policy.allows("neon", "run_sql_with_full_context"));
+    }
+
+    #[test]
+    fn external_tool_allowlist_denial_names_canonical_entry_to_add() {
+        let policy = ExternalToolAllowlistPolicy::default();
+        let caller = registered_worker_caller();
+        let arguments = None;
+        assert_eq!(
+            policy.decide(&ProxyPolicyRequest {
+                caller: &caller,
+                server: "neon",
+                tool: "run_sql",
+                arguments: &arguments,
+                dispatch_kind: ProxyDispatchKind::Direct,
+            }),
+            ProxyPolicyDecision::Deny {
+                reason: "external tool is not explicitly allowlisted; add \"neon.run_sql\" to [proxy].allowlist".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn external_tool_allowlist_catalog_decision_marks_denied_tools() {
+        let policy = ExternalToolAllowlistPolicy::default();
+        assert_eq!(
+            policy.catalog_decision("neon", "run_sql"),
+            ProxyPolicyDecision::Deny {
+                reason: "external tool is not explicitly allowlisted; add \"neon.run_sql\" to [proxy].allowlist".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1755,7 +1983,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "proxy policy denied tool 'ask_viktor' on 'viktor-shadow': external tool is not explicitly allowlisted"
+            "proxy policy denied tool 'ask_viktor' on 'viktor-shadow': external tool is not explicitly allowlisted; add \"viktor-shadow.ask_viktor\" to [proxy].allowlist"
         );
         let audit = engine.policy_audit();
         assert_eq!(audit.len(), 1);
@@ -2181,6 +2409,7 @@ mod tests {
                     name: first_raw.to_string(),
                     transport: "Bearer private".to_string(),
                     state: UpstreamState::Backoff,
+                    executable: None,
                     attempts: 1,
                     consecutive_failures: 1,
                     tool_count: 0,
@@ -2192,6 +2421,7 @@ mod tests {
                     name: second_raw.to_string(),
                     transport: "http".to_string(),
                     state: UpstreamState::Backoff,
+                    executable: None,
                     attempts: 1,
                     consecutive_failures: 1,
                     tool_count: 0,
@@ -2252,6 +2482,7 @@ mod tests {
                     name: name.to_string(),
                     transport: "http".to_string(),
                     state: UpstreamState::Healthy,
+                    executable: None,
                     attempts: 1,
                     consecutive_failures: 0,
                     tool_count: 1,
@@ -2297,7 +2528,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn retries_only_when_backoff_is_due_and_suppresses_repeated_error_visibility() {
+    async fn missing_stdio_executable_is_terminal_and_visible_without_retry() {
         let config = ServerConfig::Stdio {
             command: "cas-command-that-does-not-exist-for-proxy-test".to_string(),
             args: Vec::new(),
@@ -2310,25 +2541,104 @@ mod tests {
         let first = engine.health_snapshot().await.servers.remove(0);
         assert_eq!(first.attempts, 1);
         assert_eq!(first.consecutive_failures, 1);
-        let due = first
-            .next_retry_at_ms
-            .expect("failed upstream must back off");
+        assert_eq!(first.state, UpstreamState::ExecutableMissing);
+        assert_eq!(first.last_error_code.as_deref(), Some("executable_missing"));
+        assert_eq!(first.next_retry_at_ms, None);
+        assert_eq!(first.executable.as_deref(), Some("cas-command-that-does-not-exist-for-proxy-test"));
+        assert_eq!(engine.retry_unhealthy().await, 0);
+        assert_eq!(engine.health_snapshot().await.servers[0].attempts, 1);
+    }
 
-        assert_eq!(engine.retry_unhealthy_at(due - 1).await, 0);
+    #[test]
+    fn health_sanitization_only_exposes_missing_stdio_executables() {
+        let snapshot = ProxyHealthSnapshot {
+            session_id: "proxy-test".to_string(),
+            generated_at_ms: 1,
+            healthy: 1,
+            degraded: 2,
+            servers: vec![
+                UpstreamHealth {
+                    name: "missing-stdio".to_string(),
+                    transport: "stdio".to_string(),
+                    state: UpstreamState::ExecutableMissing,
+                    executable: Some("/opt/stale/mcp-server".to_string()),
+                    attempts: 1,
+                    consecutive_failures: 1,
+                    tool_count: 0,
+                    last_error_code: Some("executable_missing".to_string()),
+                    last_attempt_at_ms: Some(1),
+                    next_retry_at_ms: None,
+                },
+                UpstreamHealth {
+                    name: "forged-http".to_string(),
+                    transport: "http".to_string(),
+                    state: UpstreamState::ExecutableMissing,
+                    executable: Some("/should/not/escape".to_string()),
+                    attempts: 1,
+                    consecutive_failures: 1,
+                    tool_count: 0,
+                    last_error_code: Some("executable_missing".to_string()),
+                    last_attempt_at_ms: Some(1),
+                    next_retry_at_ms: None,
+                },
+                UpstreamHealth {
+                    name: "healthy-stdio".to_string(),
+                    transport: "stdio".to_string(),
+                    state: UpstreamState::Healthy,
+                    executable: Some("/should/not/escape".to_string()),
+                    attempts: 1,
+                    consecutive_failures: 0,
+                    tool_count: 1,
+                    last_error_code: None,
+                    last_attempt_at_ms: Some(1),
+                    next_retry_at_ms: None,
+                },
+            ],
+        }
+        .sanitized();
+
         assert_eq!(
-            engine.health_snapshot().await.servers[0].attempts,
-            1,
-            "retry before the deadline must be suppressed"
+            snapshot.servers[0].executable.as_deref(),
+            Some("/opt/stale/mcp-server")
+        );
+        assert_eq!(snapshot.servers[1].executable, None);
+        assert_eq!(snapshot.servers[2].executable, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_stdio_executable_checks_relative_paths_and_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("nested").join("stdio-server");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let path_with_parent = executable
+            .parent()
+            .unwrap()
+            .join("..")
+            .join("nested")
+            .join("stdio-server");
+        assert_eq!(
+            resolve_stdio_executable(&path_with_parent.to_string_lossy()),
+            Some(path_with_parent)
         );
 
-        assert_eq!(engine.retry_unhealthy_at(due).await, 1);
-        let repeated = engine.health_snapshot().await.servers.remove(0);
-        assert_eq!(repeated.attempts, 2);
-        assert_eq!(repeated.consecutive_failures, 2);
-        assert!(
-            repeated.next_retry_at_ms.unwrap() >= due + 10_000,
-            "the second production-path failure must advance exponential backoff"
-        );
+        let non_executable = temp.path().join("not-executable");
+        std::fs::write(&non_executable, "not executable").unwrap();
+        assert!(resolve_stdio_executable(&non_executable.to_string_lossy()).is_none());
+
+        let stale_interpreter = temp.path().join("stale-interpreter");
+        std::fs::write(&stale_interpreter, "#!/missing/interpreter\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(&stale_interpreter).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&stale_interpreter, permissions).unwrap();
+        assert!(resolve_stdio_executable(&stale_interpreter.to_string_lossy()).is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2399,6 +2709,7 @@ mod tests {
                 name: "github".to_string(),
                 transport: "http".to_string(),
                 state: UpstreamState::Backoff,
+                executable: None,
                 attempts: 1,
                 consecutive_failures: 1,
                 tool_count: 0,

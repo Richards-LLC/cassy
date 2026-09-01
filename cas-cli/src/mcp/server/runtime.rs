@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -1009,6 +1009,27 @@ pub fn proxy_config_fingerprint(config: &cmcp_core::config::Config) -> String {
             }
         }
     }
+    for route in config
+        .allowlist
+        .iter()
+        .map(|route| route.canonical_entry())
+        .collect::<BTreeSet<_>>()
+    {
+        field(&mut hasher, b"allowlist", route.as_bytes());
+    }
+    if let Some(gateway) = config.delegation.external_production_verification.as_ref() {
+        field(&mut hasher, b"delegation-server", gateway.server.as_bytes());
+        field(
+            &mut hasher,
+            b"delegation-start",
+            gateway.start_tool.as_bytes(),
+        );
+        field(
+            &mut hasher,
+            b"delegation-wait",
+            gateway.wait_tool.as_bytes(),
+        );
+    }
     format!("sha256:{:x}", hasher.finalize())
 }
 
@@ -1750,6 +1771,19 @@ mod tests {
         assert_eq!(first_fingerprint.len(), 71);
         assert!(first_fingerprint.starts_with("sha256:"));
         assert_ne!(first_fingerprint, super::proxy_config_fingerprint(&second));
+
+        let mut policy_changed = first.clone();
+        policy_changed
+            .allowlist
+            .push(cmcp_core::config::ExternalToolConfig {
+                server: "github".to_string(),
+                tool: "list_issues".to_string(),
+            });
+        assert_ne!(
+            first_fingerprint,
+            super::proxy_config_fingerprint(&policy_changed),
+            "policy-only config changes must invalidate cached proxy state"
+        );
         for forbidden in ["unsafe/name", "example.invalid", "first-secret"] {
             assert!(!first_fingerprint.contains(forbidden));
         }

@@ -582,6 +582,9 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    #[cfg(feature = "mcp-proxy")]
+    checks.push(proxy_stdio_commands_check(&cas_root));
+
     // Check 6: Sync target
     let config = Config::load(&cas_root).unwrap_or_default();
     if config.sync.enabled {
@@ -2101,6 +2104,62 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
     }
 }
 
+#[cfg(feature = "mcp-proxy")]
+fn proxy_stdio_commands_check(cas_root: &Path) -> Check {
+    let proxy_path = cas_root.join("proxy.toml");
+    let config = match cmcp_core::config::Config::load_merged(
+        proxy_path.exists().then_some(proxy_path.as_path()),
+    ) {
+        Ok(config) => config,
+        Err(error) => {
+            return Check {
+                name: "MCP stdio upstreams".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot validate registered stdio commands: {error}"),
+            };
+        }
+    };
+
+    let mut commands = config
+        .servers
+        .iter()
+        .filter_map(|(name, config)| match config {
+            cmcp_core::config::ServerConfig::Stdio { command, .. } => {
+                Some((name.as_str(), command.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    commands.sort_unstable_by_key(|(name, _)| *name);
+    let missing = commands
+        .iter()
+        .filter(|(_, command)| cmcp_core::resolve_stdio_executable(command).is_none())
+        .map(|(name, command)| format!("{name} = {command}"))
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        Check {
+            name: "MCP stdio upstreams".to_string(),
+            status: CheckStatus::Ok,
+            message: format!(
+                "{} registered command(s) resolve to executable files",
+                commands.len()
+            ),
+        }
+    } else {
+        Check {
+            name: "MCP stdio upstreams".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "{} of {} registered command(s) do not resolve: {}; repair proxy.toml before restarting cas serve",
+                missing.len(),
+                commands.len(),
+                missing.join(", ")
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2484,6 +2543,76 @@ mod tests {
             "{message}",
             message = check.message
         );
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn doctor_proxy_stdio_check_names_missing_commands_and_passes_resolved_commands() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|_| {
+            let temp = TempDir::new().unwrap();
+            let cas_root = temp.path().join(".cas");
+            fs::create_dir_all(&cas_root).unwrap();
+            let executable = temp.path().join("stdio-server");
+            fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+            let stale_interpreter = temp.path().join("stale-interpreter");
+            fs::write(&stale_interpreter, "#!/missing/interpreter\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = fs::metadata(&executable).unwrap().permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&executable, permissions).unwrap();
+                let mut permissions = fs::metadata(&stale_interpreter).unwrap().permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&stale_interpreter, permissions).unwrap();
+            }
+
+            let mut config = cmcp_core::config::Config::default();
+            config.add_server(
+                "working".to_string(),
+                cmcp_core::config::ServerConfig::Stdio {
+                    command: executable.to_string_lossy().into_owned(),
+                    args: Vec::new(),
+                    env: BTreeMap::new().into_iter().collect(),
+                },
+            );
+            config.add_server(
+                "missing".to_string(),
+                cmcp_core::config::ServerConfig::Stdio {
+                    command: temp
+                        .path()
+                        .join("removed-interpreter")
+                        .to_string_lossy()
+                        .into_owned(),
+                    args: Vec::new(),
+                    env: BTreeMap::new().into_iter().collect(),
+                },
+            );
+            config.add_server(
+                "stale-interpreter".to_string(),
+                cmcp_core::config::ServerConfig::Stdio {
+                    command: stale_interpreter.to_string_lossy().into_owned(),
+                    args: Vec::new(),
+                    env: BTreeMap::new().into_iter().collect(),
+                },
+            );
+            config.save_to(&cas_root.join("proxy.toml")).unwrap();
+
+            let check = proxy_stdio_commands_check(&cas_root);
+            assert!(matches!(check.status, CheckStatus::Warning));
+            assert!(check.message.contains("missing"), "{}", check.message);
+            assert!(
+                check.message.contains("removed-interpreter"),
+                "{}",
+                check.message
+            );
+            assert!(
+                check.message.contains("stale-interpreter"),
+                "{}",
+                check.message
+            );
+            assert!(!check.message.contains("working ="), "{}", check.message);
+        });
     }
 
     #[test]

@@ -112,6 +112,8 @@ pub struct OptionalUpstreamPreflight {
     pub name: String,
     pub transport: String,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
     pub attempts: u32,
     pub consecutive_failures: u32,
     pub tool_count: usize,
@@ -202,7 +204,13 @@ impl From<cmcp_core::ProxyHealthSnapshot> for ProxySnapshotInput {
                 .map(|server| OptionalUpstreamPreflight {
                     name: server.name,
                     transport: server.transport,
-                    state: format!("{:?}", server.state).to_ascii_lowercase(),
+                    state: match server.state {
+                        cmcp_core::UpstreamState::ExecutableMissing => {
+                            "executable_missing".to_string()
+                        }
+                        state => format!("{:?}", state).to_ascii_lowercase(),
+                    },
+                    executable: server.executable,
                     attempts: server.attempts,
                     consecutive_failures: server.consecutive_failures,
                     tool_count: server.tool_count,
@@ -1758,6 +1766,7 @@ mod tests {
                     name: "optional".to_string(),
                     transport: "http".to_string(),
                     state: "backoff".to_string(),
+                    executable: None,
                     attempts: 2,
                     consecutive_failures: 2,
                     tool_count: 0,
@@ -1805,6 +1814,7 @@ mod tests {
                     name: first_name.to_string(),
                     transport: "Bearer cache-secret".to_string(),
                     state: cmcp_core::UpstreamState::Backoff,
+                    executable: None,
                     attempts: 1,
                     consecutive_failures: 1,
                     tool_count: 0,
@@ -1816,6 +1826,7 @@ mod tests {
                     name: second_name.to_string(),
                     transport: "http".to_string(),
                     state: cmcp_core::UpstreamState::Backoff,
+                    executable: None,
                     attempts: 1,
                     consecutive_failures: 1,
                     tool_count: 0,

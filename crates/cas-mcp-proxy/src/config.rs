@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Canonical Viktor streamable-HTTP upstream. The credential is resolved at
 /// connection time so it is safe to place this managed default on disk.
@@ -38,10 +39,93 @@ pub struct Config {
     pub delegation: DelegationConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalToolConfig {
     pub server: String,
     pub tool: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ExternalToolConfigInput {
+    Structured { server: String, tool: String },
+    Entry(String),
+}
+
+impl ExternalToolConfig {
+    /// Parse the canonical `server.tool` spelling and the historical
+    /// separator aliases accepted in project proxy files. A bare tool is
+    /// retained as a tool-only route (`*.tool`) for compatibility; new files
+    /// should use an explicit server or `server.*` wildcard.
+    pub fn parse_allowlist_entry(entry: &str) -> Result<Self, String> {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return Err("allowlist entry must not be empty".to_string());
+        }
+
+        if let Some(encoded) = entry.strip_prefix("mcp__") {
+            let Some((server, tool)) = encoded.split_once("__") else {
+                return Err(format!("invalid allowlist entry {entry:?}"));
+            };
+            return Self::from_parts(server, tool, entry);
+        }
+
+        let Some(separator) = entry.find(|character| matches!(character, '.' | ':' | '/')) else {
+            return Self::from_parts("*", entry, entry);
+        };
+        let (server, tool) = entry.split_at(separator);
+        let tool = &tool[1..];
+        Self::from_parts(server, tool, entry)
+    }
+
+    fn from_parts(server: &str, tool: &str, original: &str) -> Result<Self, String> {
+        if server.is_empty()
+            || tool.is_empty()
+            || server
+                .chars()
+                .any(|character| matches!(character, '.' | ':' | '/'))
+            || tool
+                .chars()
+                .any(|character| matches!(character, '.' | ':' | '/'))
+            || (server == "*" && tool == "*")
+        {
+            return Err(format!("invalid allowlist entry {original:?}"));
+        }
+        Ok(Self {
+            server: server.to_string(),
+            tool: tool.to_string(),
+        })
+    }
+
+    pub fn canonical_entry(&self) -> String {
+        format!("{}.{}", self.server, self.tool)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExternalToolConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match ExternalToolConfigInput::deserialize(deserializer)? {
+            ExternalToolConfigInput::Structured { server, tool } => {
+                Self::from_parts(&server, &tool, &format!("{server}.{tool}"))
+                    .map_err(D::Error::custom)
+            }
+            ExternalToolConfigInput::Entry(entry) => {
+                Self::parse_allowlist_entry(&entry).map_err(D::Error::custom)
+            }
+        }
+    }
+}
+
+impl Serialize for ExternalToolConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.canonical_entry())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -402,6 +486,59 @@ tool = "ask_viktor"
             }]
         );
         assert!(merged.delegation.external_production_verification.is_none());
+    }
+
+    #[test]
+    fn allowlist_accepts_canonical_and_legacy_string_route_spellings() {
+        let config: Config = toml::from_str(
+            r#"
+allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.allowlist,
+            vec![
+                ExternalToolConfig {
+                    server: "neon".to_string(),
+                    tool: "run_sql".to_string(),
+                },
+                ExternalToolConfig {
+                    server: "neon".to_string(),
+                    tool: "write".to_string(),
+                },
+                ExternalToolConfig {
+                    server: "neon".to_string(),
+                    tool: "read".to_string(),
+                },
+                ExternalToolConfig {
+                    server: "*".to_string(),
+                    tool: "run_sql".to_string(),
+                },
+                ExternalToolConfig {
+                    server: "neon".to_string(),
+                    tool: "*".to_string(),
+                },
+            ]
+        );
+
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(serialized.contains("allowlist = ["));
+        assert!(serialized.contains("neon.run_sql"));
+    }
+
+    #[test]
+    fn allowlist_rejects_empty_or_malformed_string_route_spellings() {
+        for source in [
+            "allowlist = [\"\"]",
+            "allowlist = [\"neon.\"]",
+            "allowlist = [\"neon:*:run_sql\"]",
+            "allowlist = [\"*\"]",
+        ] {
+            let error = toml::from_str::<Config>(source).unwrap_err();
+            assert!(error.to_string().contains("allowlist entry"), "{source}: {error}");
+        }
     }
 
     #[test]

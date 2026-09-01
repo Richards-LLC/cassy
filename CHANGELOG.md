@@ -7,6 +7,27 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.9.1] - 2026-09-01
+
+### Fixed
+- Moving a task to another project now queues exactly one delete for the old
+  project key and one destination-keyed upsert, sent in that order in a single
+  push, so the old project no longer keeps a re-created copy; deleting a task
+  after a move targets its current owner key.
+- The hub launched by `cas hub start`, `cas hub restart` or `cas update` runs
+  outside any factory worker containment scope, so it survives the worker that
+  launched it; `cas hub` shows who launched it and reports a silent exit.
+- `cas hub stop`, stale-hub replacement and failed-launch cleanup now only tear
+  down a cgroup that Cassy itself created for the hub; a hub record that names
+  an inherited terminal or session scope is refused with a warning instead of
+  killing every process in it.
+
+### Added
+- `delivery_mode = local_merge` on epics/sessions: the close gate tells workers
+  to wait for the supervisor's local merge instead of pushing, the worker skill
+  documents both modes, and the worker guard refuses `git push` to origin in
+  that mode.
+
 ## [3.9.0] - 2026-09-01
 
 ### Added

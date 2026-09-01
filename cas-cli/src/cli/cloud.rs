@@ -228,9 +228,10 @@ pub struct CloudPurgeForeignArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Proceed even when the safety guard refuses (stale pull state, or local
-    /// rows that were never pushed to cloud). Destructive — the refusal reason
-    /// is still printed.
+    /// Proceed even when the recoverability guard refuses (stale pull state, or
+    /// local rows that were never pushed to cloud). Classifier hard stops for a
+    /// task majority or proven rule cannot be overridden. Destructive — the
+    /// refusal reason is still printed.
     #[arg(long)]
     pub force: bool,
 
@@ -4165,7 +4166,8 @@ pub struct PurgeDeleteSet {
     pub tasks: Vec<PurgeEntity>,
     pub rules: Vec<PurgeEntity>,
     pub skills: Vec<PurgeEntity>,
-    /// Dependency edges are deleted wholesale and have no user-facing title.
+    /// Dependency edges attached to deleted foreign tasks; they have no
+    /// user-facing title.
     pub dependencies: usize,
 }
 
@@ -4200,58 +4202,153 @@ impl PurgeDeleteSet {
     }
 }
 
+/// Canonical attribution fields that have existed in cloud payloads. The local
+/// content stores do not currently persist one for entries, rules, or skills,
+/// so an absent field means that kind is not an eligible purge candidate.
+const PURGE_PROJECT_COLUMNS: &[&str] = &[
+    "origin_project",
+    "project_canonical_id",
+    "origin_project_id",
+    "project_id",
+];
+
+fn first_existing_project_column(
+    conn: &rusqlite::Connection,
+    table: &str,
+    preferred: &[&'static str],
+) -> anyhow::Result<Option<&'static str>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let existing: BTreeSet<String> = columns.collect::<Result<_, _>>()?;
+    Ok(preferred
+        .iter()
+        .copied()
+        .find(|column| existing.contains(*column)))
+}
+
+/// Read ids + labels only when a row explicitly carries a project attribution
+/// different from the current canonical id. Missing tables or attribution
+/// columns are treated as empty: legacy rows are not safe to call foreign.
+fn attributed_rows(
+    conn: &rusqlite::Connection,
+    kind: &'static str,
+    table: &str,
+    label_sql: &str,
+    current_project: &str,
+) -> anyhow::Result<Vec<PurgeEntity>> {
+    let Some(project_column) = first_existing_project_column(
+        conn,
+        table,
+        if table == "tasks" {
+            &[
+                "origin_project",
+                "project_canonical_id",
+                "origin_project_id",
+                "project_id",
+            ]
+        } else {
+            PURGE_PROJECT_COLUMNS
+        },
+    )? else {
+        return Ok(Vec::new());
+    };
+
+    let sql = format!(
+        "SELECT id, {label_sql} FROM {table}
+         WHERE NULLIF(trim({project_column}), '') IS NOT NULL
+           AND trim({project_column}) <> ?1
+         ORDER BY id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mapped = stmt.query_map([current_project], |row| {
+        Ok(PurgeEntity {
+            kind,
+            id: row.get::<_, String>(0)?,
+            label: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        })
+    })?;
+    mapped.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn count_proven_attributed_rules(
+    conn: &rusqlite::Connection,
+    current_project: &str,
+) -> anyhow::Result<usize> {
+    let Some(project_column) =
+        first_existing_project_column(conn, "rules", PURGE_PROJECT_COLUMNS)?
+    else {
+        return Ok(0);
+    };
+    if first_existing_project_column(conn, "rules", &["status"])?.is_none() {
+        return Ok(0);
+    }
+    let sql = format!(
+        "SELECT COUNT(*) FROM rules
+         WHERE lower(status) = 'proven'
+           AND NULLIF(trim({project_column}), '') IS NOT NULL
+           AND trim({project_column}) <> ?1"
+    );
+    Ok(conn.query_row(&sql, [current_project], |row| row.get::<_, i64>(0))? as usize)
+}
+
+fn count_purge_dependencies(
+    conn: &rusqlite::Connection,
+    foreign_tasks: &[PurgeEntity],
+) -> anyhow::Result<usize> {
+    let foreign_ids: BTreeSet<&str> = foreign_tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect();
+    if foreign_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut stmt = match conn.prepare("SELECT from_id, to_id FROM dependencies") {
+        Ok(stmt) => stmt,
+        Err(error) if error.to_string().contains("no such table") => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut count = 0;
+    for row in rows {
+        let (from_id, to_id) = row?;
+        if foreign_ids.contains(from_id.as_str()) || foreign_ids.contains(to_id.as_str()) {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// Read the ids + labels of every row a purge would delete.
 ///
 /// Missing tables are treated as empty rather than fatal: a database that
-/// predates one of these stores must still be previewable.
-fn collect_purge_delete_set(conn: &rusqlite::Connection) -> anyhow::Result<PurgeDeleteSet> {
-    fn rows(
-        conn: &rusqlite::Connection,
-        kind: &'static str,
-        sql: &str,
-    ) -> anyhow::Result<Vec<PurgeEntity>> {
-        let mut stmt = match conn.prepare(sql) {
-            Ok(stmt) => stmt,
-            // Table absent (older database) — nothing of this kind to delete.
-            // Any other failure is real and must not be silently reported as
-            // "nothing would be deleted".
-            Err(e) if e.to_string().contains("no such table") => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        };
-        let mapped = stmt.query_map([], |row| {
-            Ok(PurgeEntity {
-                kind,
-                id: row.get::<_, String>(0)?,
-                label: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in mapped {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    let dependencies: usize = conn
-        .query_row("SELECT COUNT(*) FROM dependencies", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .unwrap_or(0) as usize;
-
+/// predates one of these stores must still be previewable. Rows without an
+/// explicit project attribution remain local legacy data and are retained.
+fn collect_purge_delete_set(
+    conn: &rusqlite::Connection,
+    current_project: &str,
+) -> anyhow::Result<PurgeDeleteSet> {
+    let tasks = attributed_rows(conn, "task", "tasks", "title", current_project)?;
     Ok(PurgeDeleteSet {
-        entries: rows(
+        entries: attributed_rows(
             conn,
             "entry",
-            "SELECT id, COALESCE(NULLIF(title, ''), substr(content, 1, 80)) FROM entries ORDER BY id",
+            "entries",
+            "COALESCE(NULLIF(title, ''), substr(content, 1, 80))",
+            current_project,
         )?,
-        tasks: rows(conn, "task", "SELECT id, title FROM tasks ORDER BY id")?,
-        rules: rows(
+        tasks: tasks.clone(),
+        rules: attributed_rows(
             conn,
             "rule",
-            "SELECT id, substr(content, 1, 80) FROM rules ORDER BY id",
+            "rules",
+            "substr(content, 1, 80)",
+            current_project,
         )?,
-        skills: rows(conn, "skill", "SELECT id, name FROM skills ORDER BY id")?,
-        dependencies,
+        skills: attributed_rows(conn, "skill", "skills", "name", current_project)?,
+        dependencies: count_purge_dependencies(conn, &tasks)?,
     })
 }
 
@@ -4272,6 +4369,11 @@ pub enum PurgeRefusal {
     /// Local rows are still queued for push: deleting them loses work the
     /// cloud has never seen, and the re-pull cannot restore it.
     UnpushedRows { pending: usize, sample: Vec<String> },
+    /// More than half of all local tasks would be removed. This is a hard
+    /// stop because a project-scoped classifier has likely lost attribution.
+    TooManyForeignTasks { foreign: usize, total: usize },
+    /// A proven rule would be removed. Proven rules are never force-deletable.
+    ProvenRule { count: usize },
 }
 
 impl PurgeRefusal {
@@ -4301,6 +4403,14 @@ unknown is not safe for a destructive purge"
 cloud (e.g. {}) — the purge would delete them and the re-pull cannot bring them back",
                 sample.join(", ")
             ),
+            PurgeRefusal::TooManyForeignTasks { foreign, total } => format!(
+                "refusing to purge foreign tasks: {foreign} of {total} local tasks exceed the 50% \
+safety limit — review project attribution before deleting anything"
+            ),
+            PurgeRefusal::ProvenRule { count } => format!(
+                "refusing to purge {count} proven rule{} — proven rules are protected even with --force",
+                if *count == 1 { "" } else { "s" }
+            ),
         }
     }
 
@@ -4311,8 +4421,90 @@ cloud (e.g. {}) — the purge would delete them and the re-pull cannot bring the
             PurgeRefusal::StalePull { .. } => "stale_pull",
             PurgeRefusal::UnreadablePullTimestamp { .. } => "unreadable_pull_timestamp",
             PurgeRefusal::UnpushedRows { .. } => "unpushed_rows",
+            PurgeRefusal::TooManyForeignTasks { .. } => "too_many_foreign_tasks",
+            PurgeRefusal::ProvenRule { .. } => "proven_rule",
         }
     }
+
+    fn is_hard(&self) -> bool {
+        matches!(
+            self,
+            PurgeRefusal::TooManyForeignTasks { .. } | PurgeRefusal::ProvenRule { .. }
+        )
+    }
+}
+
+/// Safety limits that are intrinsic to the classifier and cannot be bypassed
+/// by `--force`. `proven_rule_count` is computed from the same attribution
+/// predicate as the delete set, so a proven local rule never trips this guard.
+fn evaluate_purge_hard_guards(
+    delete_set: &PurgeDeleteSet,
+    total_tasks: usize,
+    proven_rule_count: usize,
+) -> Vec<PurgeRefusal> {
+    let mut refusals = Vec::new();
+    if total_tasks > 0 && delete_set.tasks.len().saturating_mul(2) > total_tasks {
+        refusals.push(PurgeRefusal::TooManyForeignTasks {
+            foreign: delete_set.tasks.len(),
+            total: total_tasks,
+        });
+    }
+    if proven_rule_count > 0 {
+        refusals.push(PurgeRefusal::ProvenRule {
+            count: proven_rule_count,
+        });
+    }
+    refusals
+}
+
+/// Apply a previously classified delete set atomically. This function accepts
+/// only concrete row ids from `PurgeDeleteSet`; it never re-runs an unscoped
+/// `DELETE FROM <table>` predicate.
+fn delete_purge_rows(
+    conn: &mut rusqlite::Connection,
+    delete_set: &PurgeDeleteSet,
+) -> anyhow::Result<()> {
+    let tx = conn.transaction()?;
+    for (table, rows) in [
+        ("entries", &delete_set.entries),
+        ("tasks", &delete_set.tasks),
+        ("rules", &delete_set.rules),
+        ("skills", &delete_set.skills),
+    ] {
+        for row in rows {
+            let sql = format!("DELETE FROM {table} WHERE id = ?1");
+            match tx.execute(&sql, [&row.id]) {
+                Ok(_) => {}
+                Err(error) if error.to_string().contains("no such table") => break,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    // Remove only dependency edges attached to a foreign task. Edges between
+    // retained local/legacy tasks must survive the purge.
+    for task in &delete_set.tasks {
+        match tx.execute(
+            "DELETE FROM dependencies WHERE from_id = ?1 OR to_id = ?1",
+            [&task.id],
+        ) {
+            Ok(_) => {}
+            Err(error) if error.to_string().contains("no such table") => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    // Reset last_pull_at only when rows were actually removed so a no-op
+    // cleanup does not force an unnecessary full pull.
+    if delete_set.total() > 0 {
+        match tx.execute("DELETE FROM sync_metadata WHERE key = 'last_pull_at'", []) {
+            Ok(_) => {}
+            Err(error) if error.to_string().contains("no such table") => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Parse a `last_pull_at` value. Accepts RFC3339 (what the syncer writes) and
@@ -4485,7 +4677,8 @@ fn execute_purge_foreign(
     // would be lost and a real run can refuse when losing it is unrecoverable.
     let (delete_set, refusals) = {
         let conn = rusqlite::Connection::open(&db_path)?;
-        let delete_set = collect_purge_delete_set(&conn)?;
+        let delete_set = collect_purge_delete_set(&conn, &project_id)?;
+        let proven_rule_count = count_proven_attributed_rules(&conn, &project_id)?;
         let last_pull_at: Option<String> = conn
             .query_row(
                 "SELECT value FROM sync_metadata WHERE key = 'last_pull_at'",
@@ -4494,12 +4687,17 @@ fn execute_purge_foreign(
             )
             .ok();
         let pending = pending_content_pushes(&conn)?;
-        let refusals = evaluate_purge_safety(
+        let mut refusals = evaluate_purge_safety(
             last_pull_at.as_deref(),
             &pending,
             chrono::Utc::now(),
             args.stale_days,
         );
+        refusals.extend(evaluate_purge_hard_guards(
+            &delete_set,
+            tasks_before,
+            proven_rule_count,
+        ));
         (delete_set, refusals)
     };
 
@@ -4521,7 +4719,9 @@ fn execute_purge_foreign(
                     "refusals": refusals.iter()
                         .map(|r| serde_json::json!({"code": r.code(), "reason": r.reason()}))
                         .collect::<Vec<_>>(),
-                    "would_refuse": !refusals.is_empty() && !args.force,
+                    "would_refuse": refusals.iter().any(|refusal| {
+                        refusal.is_hard() || !args.force
+                    }),
                 })
             );
             return Ok(());
@@ -4598,6 +4798,13 @@ fn execute_purge_foreign(
             .map(|r| format!("  - {}", r.reason()))
             .collect::<Vec<_>>()
             .join("\n");
+        if refusals.iter().any(PurgeRefusal::is_hard) {
+            anyhow::bail!(
+                "Refusing to purge {} local rows:\n{reasons}\n\
+These classifier safety limits cannot be overridden with --force.",
+                delete_set.total()
+            );
+        }
         if !args.force {
             anyhow::bail!(
                 "Refusing to purge {} local rows:\n{reasons}\n\
@@ -4615,20 +4822,14 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
         backup_database_crash_safe(&db_path, &backup_path)?;
     }
 
-    // Step 2: Delete all content entities via direct SQL
+    // Step 2: Delete only the classified foreign rows via direct SQL. The
+    // classifier is deliberately resolved before the backup, and this phase
+    // consumes its concrete ids rather than repeating a broader predicate.
     // (Preserves: sync_queue, sync_metadata, agents, sessions, verifications,
-    //  events, prompts, file_changes, commit_links, worktrees, dependencies, task_leases)
+    // events, prompts, file_changes, commit_links, worktrees and local rows.)
     {
-        let conn = rusqlite::Connection::open(&db_path)?;
-        conn.execute_batch(
-            "DELETE FROM entries;
-             DELETE FROM tasks;
-             DELETE FROM dependencies;
-             DELETE FROM rules;
-             DELETE FROM skills;",
-        )?;
-        // Reset last_pull_at so re-pull fetches everything
-        conn.execute("DELETE FROM sync_metadata WHERE key = 'last_pull_at'", [])?;
+        let mut conn = rusqlite::Connection::open(&db_path)?;
+        delete_purge_rows(&mut conn, &delete_set)?;
     }
 
     // Step 3: Re-pull from cloud with project-scoped filtering
@@ -5466,14 +5667,160 @@ mod purge_foreign_safety_tests {
     use rusqlite::Connection;
     use tempfile::TempDir;
 
+    fn seed_project_scoped_db(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE entries (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                content TEXT NOT NULL,
+                project_canonical_id TEXT
+            );
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                origin_project TEXT
+            );
+            CREATE TABLE rules (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL,
+                project_canonical_id TEXT
+            );
+            CREATE TABLE skills (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                project_canonical_id TEXT
+            );
+            CREATE TABLE dependencies (from_id TEXT, to_id TEXT);
+
+            INSERT INTO tasks (id, title, origin_project) VALUES
+                ('own-1', 'own task 1', 'cas-src'),
+                ('own-2', 'own task 2', 'cas-src'),
+                ('legacy', 'legacy local task', NULL),
+                ('foreign-1', 'foreign task 1', 'gabber-studio'),
+                ('foreign-2', 'foreign task 2', 'pulse-card');
+            INSERT INTO rules (id, content, status, project_canonical_id)
+                VALUES ('proven-own', 'keep me', 'proven', 'cas-src');
+            INSERT INTO dependencies (from_id, to_id) VALUES
+                ('foreign-1', 'own-1'), ('own-2', 'legacy');
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn project_scoped_classifier_only_lists_explicitly_foreign_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+
+        let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+
+        assert_eq!(
+            set.tasks.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+            vec!["foreign-1", "foreign-2"]
+        );
+        assert!(set.entries.is_empty());
+        assert!(set.rules.is_empty(), "the proven local rule is protected");
+        assert!(set.skills.is_empty());
+        assert_eq!(set.dependencies, 1);
+        assert!(set.tasks.len() <= 5, "delete count cannot exceed rows present");
+    }
+
+    #[test]
+    fn applying_the_delete_set_keeps_local_rows_and_edges() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+
+        delete_purge_rows(&mut conn, &set).unwrap();
+
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| {
+                row.get::<_, i64>(0)
+            })
+                .unwrap(),
+            3,
+            "the two foreign tasks are deleted; own and legacy rows remain"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM dependencies",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "the local-to-legacy edge remains"
+        );
+    }
+
+    #[test]
+    fn foreign_task_majority_is_a_hard_purge_refusal() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        conn.execute(
+            "UPDATE tasks SET origin_project = 'other-project' WHERE origin_project IS NULL OR origin_project = 'cas-src'",
+            [],
+        )
+        .unwrap();
+
+        let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+        let refusals = evaluate_purge_hard_guards(&set, 5, 0);
+
+        assert!(refusals.iter().any(|refusal| {
+            refusal.code() == "too_many_foreign_tasks"
+                && refusal.reason().contains("5 of 5")
+        }));
+    }
+
+    #[test]
+    fn proven_foreign_rule_is_a_hard_purge_refusal() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        conn.execute(
+            "INSERT INTO rules (id, content, status, project_canonical_id)
+             VALUES ('proven-foreign', 'do not delete', 'proven', 'other-project')",
+            [],
+        )
+        .unwrap();
+
+        let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+        assert_eq!(set.rules.len(), 1);
+        let refusals = evaluate_purge_hard_guards(&set, 5, 1);
+
+        assert!(refusals.iter().any(|refusal| {
+            refusal.code() == "proven_rule"
+                && refusal.reason().contains("1 proven rule")
+        }));
+    }
+
     /// Minimal shape of the tables purge-foreign touches.
     fn seed_db(conn: &Connection) {
         conn.execute_batch(
             r#"
-            CREATE TABLE entries (id TEXT PRIMARY KEY, title TEXT, content TEXT NOT NULL);
-            CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL);
-            CREATE TABLE rules (id TEXT PRIMARY KEY, content TEXT NOT NULL);
-            CREATE TABLE skills (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE entries (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                content TEXT NOT NULL,
+                project_canonical_id TEXT
+            );
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                origin_project TEXT
+            );
+            CREATE TABLE rules (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                project_canonical_id TEXT
+            );
+            CREATE TABLE skills (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                project_canonical_id TEXT
+            );
             CREATE TABLE dependencies (from_id TEXT, to_id TEXT);
             CREATE TABLE sync_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE sync_queue (
@@ -5483,12 +5830,15 @@ mod purge_foreign_safety_tests {
                 operation TEXT NOT NULL
             );
 
-            INSERT INTO entries (id, title, content) VALUES
-                ('e1', 'Local learning', 'body one'),
-                ('e2', NULL, 'untitled body falls back to content');
-            INSERT INTO tasks (id, title) VALUES ('cas-0001', 'Fix the purge guard');
-            INSERT INTO rules (id, content) VALUES ('r1', 'always verify');
-            INSERT INTO skills (id, name) VALUES ('s1', 'release-notes');
+            INSERT INTO entries (id, title, content, project_canonical_id) VALUES
+                ('e1', 'Local learning', 'body one', 'other-project'),
+                ('e2', NULL, 'untitled body falls back to content', 'other-project');
+            INSERT INTO tasks (id, title, origin_project)
+                VALUES ('cas-0001', 'Fix the purge guard', 'other-project');
+            INSERT INTO rules (id, content, project_canonical_id)
+                VALUES ('r1', 'always verify', 'other-project');
+            INSERT INTO skills (id, name, project_canonical_id)
+                VALUES ('s1', 'release-notes', 'other-project');
             INSERT INTO dependencies (from_id, to_id) VALUES ('cas-0001', 'cas-0002');
             "#,
         )
@@ -5508,7 +5858,7 @@ mod purge_foreign_safety_tests {
         let conn = Connection::open_in_memory().unwrap();
         seed_db(&conn);
 
-        let set = collect_purge_delete_set(&conn).unwrap();
+        let set = collect_purge_delete_set(&conn, "test-project").unwrap();
 
         assert_eq!(set.total(), 5, "2 entries + 1 task + 1 rule + 1 skill");
         assert_eq!(set.dependencies, 1);
@@ -5530,7 +5880,7 @@ mod purge_foreign_safety_tests {
         let conn = Connection::open_in_memory().unwrap();
         seed_db(&conn);
 
-        let json = collect_purge_delete_set(&conn).unwrap().to_json();
+        let json = collect_purge_delete_set(&conn, "test-project").unwrap().to_json();
 
         assert_eq!(json["total"], 5);
         assert_eq!(json["tasks"][0]["id"], "cas-0001");
@@ -5546,9 +5896,9 @@ mod purge_foreign_safety_tests {
         conn.execute("INSERT INTO tasks VALUES ('cas-1', 'only table')", [])
             .unwrap();
 
-        let set = collect_purge_delete_set(&conn).unwrap();
+        let set = collect_purge_delete_set(&conn, "test-project").unwrap();
 
-        assert_eq!(set.tasks.len(), 1);
+        assert!(set.tasks.is_empty(), "tasks without attribution are retained");
         assert!(set.entries.is_empty());
         assert_eq!(set.dependencies, 0);
     }
@@ -5793,7 +6143,7 @@ mod purge_foreign_safety_tests {
         backup_database_crash_safe(&db_path, &backup).unwrap();
 
         let restored = Connection::open(&backup).unwrap();
-        let set = collect_purge_delete_set(&restored).unwrap();
+        let set = collect_purge_delete_set(&restored, "test-project").unwrap();
         assert_eq!(
             set.total(),
             5,

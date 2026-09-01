@@ -1,6 +1,10 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::cloud::SyncQueue;
 use crate::cloud::syncer::*;
+use crate::store::TaskStore;
+use crate::types::{Task, TaskStatus};
 
 #[test]
 fn test_sync_result_totals() {
@@ -492,5 +496,190 @@ fn push_response_skipped_count_threshold_drives_warn_path() {
         resp.skipped_count_for("tasks"),
         Ok(0),
         "non-targeted entity types must not fire the warn-path"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-project team-task ownership (cas-2125).
+// ---------------------------------------------------------------------------
+
+fn team_task_fixture(
+    id: &str,
+    status: TaskStatus,
+    project_id: &str,
+    origin_project: &str,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    let mut task = Task::new(id.to_string(), format!("task {id}"));
+    task.status = status;
+    task.updated_at = updated_at;
+    if task.is_terminal() {
+        task.closed_at = Some(updated_at);
+        task.close_reason = Some("owner closed".to_string());
+    }
+    let mut raw = serde_json::to_value(task).unwrap();
+    raw["project_id"] = serde_json::json!(project_id);
+    raw["origin_project"] = serde_json::json!(origin_project);
+    raw
+}
+
+async fn pull_team_task_fixtures(
+    project_id: &str,
+    tasks: Vec<serde_json::Value>,
+    local_task: Option<Task>,
+) -> (
+    tempfile::TempDir,
+    SyncResult,
+    Arc<dyn TaskStore>,
+    Arc<SyncQueue>,
+) {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig};
+    use crate::store::{
+        open_rule_store_local, open_skill_store_local, open_store_local, open_task_store_local,
+    };
+    use tempfile::TempDir;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let team_id = "team-cas-2125";
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{team_id}/sync/pull")))
+        .and(query_param("project_id", project_id))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [],
+            "tasks": tasks,
+            "rules": [],
+            "skills": [],
+            "pulled_at": "2026-09-01T12:00:00Z",
+            "team_id": team_id,
+            "status": "ok",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let store = open_store_local(temp.path()).unwrap();
+    let task_store = open_task_store_local(temp.path()).unwrap();
+    if let Some(local_task) = local_task {
+        task_store.add(&local_task).unwrap();
+    }
+    let rule_store = open_rule_store_local(temp.path()).unwrap();
+    let skill_store = open_skill_store_local(temp.path()).unwrap();
+    let syncer = CloudSyncer::new(
+        Arc::clone(&queue),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+    );
+    let result = syncer
+        .pull_team(
+            team_id,
+            project_id,
+            store.as_ref(),
+            task_store.as_ref(),
+            rule_store.as_ref(),
+            skill_store.as_ref(),
+        )
+        .unwrap();
+    (temp, result, task_store, queue)
+}
+
+#[tokio::test]
+async fn team_pull_duplicate_task_id_prefers_owner_closed_row() {
+    let now = chrono::Utc::now();
+    let tasks = vec![
+        // The owner row is older and keyed by the owner project. The foreign
+        // replica row is newer and active; wire order must not decide status.
+        team_task_fixture(
+            "cas-2125-owner-closed",
+            TaskStatus::Closed,
+            "owner-project",
+            "owner-project",
+            now - chrono::Duration::hours(1),
+        ),
+        team_task_fixture(
+            "cas-2125-owner-closed",
+            TaskStatus::Open,
+            "replica-project",
+            "owner-project",
+            now,
+        ),
+    ];
+    let (_temp, result, task_store, queue) =
+        pull_team_task_fixtures("replica-project", tasks, None).await;
+
+    assert!(
+        result.errors.is_empty(),
+        "unexpected pull errors: {:?}",
+        result.errors
+    );
+    let task = task_store.get("cas-2125-owner-closed").unwrap();
+    assert_eq!(task.status, TaskStatus::Closed);
+    assert_eq!(task.origin_project.as_deref(), Some("owner-project"));
+    let conflicts = queue.list_conflicts(10).unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].strategy, "owner_wins");
+    assert!(conflicts[0].discarded_row_json.contains("replica-project"));
+}
+
+#[tokio::test]
+async fn team_pull_single_foreign_open_row_preserves_wire_origin_project() {
+    let task = team_task_fixture(
+        "cas-2125-foreign-absent",
+        TaskStatus::Open,
+        "foreign-project",
+        "foreign-project",
+        chrono::Utc::now(),
+    );
+    let (_temp, result, task_store, _queue) =
+        pull_team_task_fixtures("replica-project", vec![task], None).await;
+
+    assert!(
+        result.errors.is_empty(),
+        "unexpected pull errors: {:?}",
+        result.errors
+    );
+    let task = task_store.get("cas-2125-foreign-absent").unwrap();
+    assert_eq!(task.status, TaskStatus::Open);
+    assert_eq!(task.origin_project.as_deref(), Some("foreign-project"));
+}
+
+#[tokio::test]
+async fn team_pull_foreign_open_row_cannot_reopen_local_owner_close() {
+    let now = chrono::Utc::now();
+    let tasks = vec![team_task_fixture(
+        "cas-2125-local-closed",
+        TaskStatus::Open,
+        "foreign-project",
+        "foreign-project",
+        now,
+    )];
+    let mut local = Task::new(
+        "cas-2125-local-closed".to_string(),
+        "owner closed task".to_string(),
+    );
+    local.status = TaskStatus::Closed;
+    local.origin_project = Some("owner-project".to_string());
+    local.closed_at = Some(now - chrono::Duration::hours(1));
+    local.close_reason = Some("owner closed".to_string());
+    local.updated_at = now - chrono::Duration::hours(1);
+    let (_temp, result, task_store, _queue) =
+        pull_team_task_fixtures("replica-project", tasks, Some(local)).await;
+
+    assert!(
+        result.errors.is_empty(),
+        "unexpected pull errors: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        task_store.get("cas-2125-local-closed").unwrap().status,
+        TaskStatus::Closed
     );
 }

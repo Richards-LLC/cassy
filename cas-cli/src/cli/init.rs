@@ -351,6 +351,7 @@ impl WizardConfig {
             code_review: None,
             issues: None,
             memory: None,
+            hub: None,
             project: None,
         }
     }

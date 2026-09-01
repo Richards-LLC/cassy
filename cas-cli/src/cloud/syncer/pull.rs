@@ -2097,6 +2097,20 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn alias_project_row_is_owned_after_normalization() {
+        let entity = json!({
+            "id": "alias-row",
+            "project_canonical_id": "git@GitHub.com:Richards-LLC/gabber-studio.git"
+        });
+
+        assert!(entity_matches_project(
+            &entity,
+            "gabber-studio",
+            "task"
+        ));
+    }
+
     /// PROTOCOL INVARIANT — do not "fix" this test by making the comparison
     /// case-insensitive or otherwise normalizing.
     ///

@@ -754,7 +754,25 @@ mod tests {
         assert!(
             value
                 .get("origin_project")
-                .is_some_and(serde_json::Value::is_null)
+            .is_some_and(serde_json::Value::is_null)
+        );
+    }
+
+    #[test]
+    fn canonical_identity_team_push_stamps_remote_alias_as_canonical() {
+        let mut value = serde_json::json!({
+            "id": "cas-alias",
+            "scope": "project",
+        });
+
+        super::stamp_task_origin_project(
+            &mut value,
+            "git@GitHub.com:Richards-LLC/gabber-studio.git",
+        );
+
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("github.com/richards-llc/gabber-studio")
         );
     }
 }

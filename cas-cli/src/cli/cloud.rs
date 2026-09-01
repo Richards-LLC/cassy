@@ -5728,6 +5728,24 @@ mod purge_foreign_safety_tests {
     }
 
     #[test]
+    fn alias_rows_are_not_classified_as_foreign() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        conn.execute(
+            "UPDATE tasks SET origin_project = ?1 WHERE id = 'foreign-1'",
+            ["git@GitHub.com:Richards-LLC/gabber-studio.git"],
+        )
+        .unwrap();
+
+        let set = collect_purge_delete_set(&conn, "gabber-studio").unwrap();
+
+        assert_eq!(
+            set.tasks.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+            vec!["foreign-2"]
+        );
+    }
+
+    #[test]
     fn applying_the_delete_set_keeps_local_rows_and_edges() {
         let mut conn = Connection::open_in_memory().unwrap();
         seed_project_scoped_db(&conn);

@@ -136,6 +136,9 @@ pub struct QueuedSync {
     pub payload: Option<String>,
     /// Team ID for team-scoped sync (None for personal sync)
     pub team_id: Option<String>,
+    /// Project identity targeted by a project-scoped delete. `None` preserves
+    /// the normal behavior of using the project performing the push.
+    pub project_id: Option<String>,
     /// When the item was queued
     pub created_at: DateTime<Utc>,
     /// Number of sync attempts

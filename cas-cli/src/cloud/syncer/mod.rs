@@ -928,32 +928,3 @@ pub struct TeamMemoriesData {
     #[serde(default)]
     pub skills: Vec<Skill>,
 }
-
-/// Grouped queued items by entity type and operation
-#[derive(Default)]
-struct GroupedQueuedItems {
-    upsert_entries: Vec<serde_json::Value>,
-    upsert_tasks: Vec<serde_json::Value>,
-    upsert_rules: Vec<serde_json::Value>,
-    upsert_skills: Vec<serde_json::Value>,
-    upsert_sessions: Vec<serde_json::Value>,
-    upsert_verifications: Vec<serde_json::Value>,
-    upsert_events: Vec<serde_json::Value>,
-    upsert_prompts: Vec<serde_json::Value>,
-    upsert_file_changes: Vec<serde_json::Value>,
-    upsert_commit_links: Vec<serde_json::Value>,
-    upsert_agents: Vec<serde_json::Value>,
-    upsert_worktrees: Vec<serde_json::Value>,
-    delete_entries: Vec<String>,
-    delete_tasks: Vec<String>,
-    delete_rules: Vec<String>,
-    delete_skills: Vec<String>,
-    delete_sessions: Vec<String>,
-    delete_verifications: Vec<String>,
-    delete_events: Vec<String>,
-    delete_prompts: Vec<String>,
-    delete_file_changes: Vec<String>,
-    delete_commit_links: Vec<String>,
-    delete_agents: Vec<String>,
-    delete_worktrees: Vec<String>,
-}

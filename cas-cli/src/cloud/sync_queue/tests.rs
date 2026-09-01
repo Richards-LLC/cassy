@@ -621,6 +621,58 @@ fn test_null_team_id_normalized_to_empty_on_migration() {
 }
 
 #[test]
+fn project_id_migration_preserves_legacy_rows_and_allows_move_pair() {
+    use rusqlite::Connection;
+
+    let temp = TempDir::new().unwrap();
+    let db_path = temp.path().join("cas.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                UNIQUE(entity_type, entity_id, team_id)
+            );
+            INSERT INTO sync_queue
+                (entity_type, entity_id, operation, payload, team_id, created_at)
+            VALUES ('task', 'legacy-task', 'upsert', '{"id":"legacy-task"}', 'team-123', '2026-01-01T00:00:00Z');
+            "#,
+        )
+        .unwrap();
+    }
+
+    let queue = SyncQueue::open(temp.path()).unwrap();
+    queue.init().unwrap();
+    let legacy = queue.pending_for_team("team-123", 10, 5).unwrap();
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(legacy[0].project_id, None);
+
+    queue
+        .enqueue_team_move(
+            EntityType::Task,
+            "move-after-migration",
+            "project-a",
+            r#"{"id":"move-after-migration","origin_project":"project-b"}"#,
+            "team-123",
+        )
+        .unwrap();
+    let moved = queue.pending_for_team("team-123", 10, 5).unwrap();
+    assert_eq!(moved.len(), 3);
+    assert_eq!(moved[1].operation, SyncOperation::Delete);
+    assert_eq!(moved[1].project_id.as_deref(), Some("project-a"));
+    assert_eq!(moved[2].operation, SyncOperation::Upsert);
+}
+
+#[test]
 fn test_team_coalesce_updates() {
     let (_temp, queue) = create_test_queue();
 

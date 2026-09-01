@@ -66,6 +66,164 @@ fn decode_gzip_json(body: &[u8]) -> serde_json::Value {
     serde_json::from_slice(&decoded).expect("request body should decode to JSON")
 }
 
+fn seed_team_task_move(queue: &SyncQueue, task_id: &str) {
+    queue
+        .enqueue_team_move(
+            EntityType::Task,
+            task_id,
+            "project-a",
+            &format!(
+                r#"{{"id":"{task_id}","title":"moved","scope":"project","origin_project":"project-b"}}"#
+            ),
+            TEST_TEAM,
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn team_task_move_deletes_old_project_before_upserting_new_owner() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "/api/teams/{TEST_TEAM}/sync/task/move-order-task"
+        )))
+        .and(query_param("project_id", "project-a"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "synced": { "tasks": { "inserted": 1, "updated": 0, "skipped": 0 } }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
+    queue.init().unwrap();
+    seed_team_task_move(&queue, "move-order-task");
+    let syncer = CloudSyncer::new(
+        queue.clone(),
+        make_cloud_config(server.uri()),
+        CloudSyncerConfig::default(),
+    );
+
+    tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
+        .await
+        .unwrap()
+        .expect("move push should succeed");
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method.as_str(), "DELETE");
+    assert_eq!(requests[1].method.as_str(), "POST");
+    assert!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn team_task_move_delete_failure_blocks_upsert_and_retains_both_rows() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "/api/teams/{TEST_TEAM}/sync/task/move-delete-failure"
+        )))
+        .and(query_param("project_id", "project-a"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("delete failed"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
+    queue.init().unwrap();
+    seed_team_task_move(&queue, "move-delete-failure");
+    let syncer = CloudSyncer::new(
+        queue.clone(),
+        make_cloud_config(server.uri()),
+        CloudSyncerConfig::default(),
+    );
+
+    let result = tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
+        .await
+        .unwrap()
+        .expect("push returns a result for an HTTP delete failure");
+
+    assert!(!result.errors.is_empty());
+    let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+    assert_eq!(pending.len(), 2, "both move rows must remain retryable");
+    assert!(pending.iter().all(|item| item.retry_count > 0));
+    assert!(pending.iter().all(|item| item.last_error.is_some()));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| { request.method.as_str() == "DELETE" })
+    );
+}
+
+#[tokio::test]
+async fn team_task_move_upsert_failure_retains_only_upsert_for_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "/api/teams/{TEST_TEAM}/sync/task/move-upsert-failure"
+        )))
+        .and(query_param("project_id", "project-a"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
+        .respond_with(ResponseTemplate::new(500).set_body_string("upsert failed"))
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
+    queue.init().unwrap();
+    seed_team_task_move(&queue, "move-upsert-failure");
+    let syncer = CloudSyncer::new(
+        queue.clone(),
+        make_cloud_config(server.uri()),
+        CloudSyncerConfig::default(),
+    );
+
+    let result = tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
+        .await
+        .unwrap()
+        .expect("push returns a result for an HTTP upsert failure");
+
+    assert!(!result.errors.is_empty());
+    let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "successful old-key delete must be settled"
+    );
+    assert_eq!(pending[0].operation, SyncOperation::Upsert);
+    assert!(pending[0].retry_count > 0);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].method.as_str(), "DELETE");
+    assert!(
+        requests[1..]
+            .iter()
+            .all(|request| request.method.as_str() == "POST")
+    );
+}
+
 /// Happy path: team configured + queued items → POST fires against
 /// `/api/teams/{uuid}/sync/push`, queue is drained.
 ///

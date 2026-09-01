@@ -6,10 +6,10 @@ cas doctor
 ──────────────────────────────────────────────────
 [OK] cas directory: Found at [TEMP_PATH]
 [OK] database: SQLite database found
-[OK] schema: v246 (up to date)
+[OK] schema: v247 (up to date)
 [OK] supervisor relay: no undelivered lifecycle relays
 [OK] delivery retries: no pending message has spent 3+ attempts
-[OK] tables: [N] tables, 788 columns, 209 rows total
+[OK] tables: [N] tables, 789 columns, 210 rows total
 [OK] entry store: [N] entries accessible
 [OK] legacy search index: no stray Tantivy root below `.cas/index/`
 [WARN] search index: Index not found at [CAS_PATH] Will be created on first search.

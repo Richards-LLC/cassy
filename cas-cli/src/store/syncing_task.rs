@@ -398,6 +398,54 @@ mod tests {
         assert_eq!(pending[0].operation, SyncOperation::Delete);
     }
 
+    #[test]
+    fn dependency_add_queues_task_dependency_upsert() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let from = Task::new("task-dep-from".to_string(), "from".to_string());
+        let to = Task::new("task-dep-to".to_string(), "to".to_string());
+        store.add(&from).unwrap();
+        store.add(&to).unwrap();
+        queue.clear().unwrap();
+
+        let dep = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+        store.add_dependency(&dep).unwrap();
+
+        let pending = queue.pending_for_entity_type(Some(EntityType::TaskDependency), 10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].entity_id, "task-dep-from:task-dep-to:blocks");
+        assert_eq!(pending[0].operation, SyncOperation::Upsert);
+        let payload: serde_json::Value = serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["from_id"], "task-dep-from");
+        assert_eq!(payload["to_id"], "task-dep-to");
+        assert_eq!(payload["dep_type"], "blocks");
+        assert!(payload["created_at"].is_string());
+        assert!(payload.get("origin_project").is_some());
+    }
+
+    #[test]
+    fn dependency_remove_queues_task_dependency_delete() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let from = Task::new("task-remove-from".to_string(), "from".to_string());
+        let to = Task::new("task-remove-to".to_string(), "to".to_string());
+        store.add(&from).unwrap();
+        store.add(&to).unwrap();
+        let dep = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Related);
+        store.add_dependency(&dep).unwrap();
+        queue.clear().unwrap();
+
+        assert!(store
+            .remove_dependency_of_type(&from.id, &to.id, DependencyType::Related)
+            .unwrap());
+
+        let pending = queue.pending_for_entity_type(Some(EntityType::TaskDependency), 10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].entity_id, "task-remove-from:task-remove-to:related");
+        assert_eq!(pending[0].operation, SyncOperation::Delete);
+        assert!(pending[0].payload.is_none());
+    }
+
     // ── Dual-enqueue behaviour (cas-82a1) ────────────────────────────────
 
     use cas_types::Scope;

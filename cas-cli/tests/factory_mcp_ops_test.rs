@@ -5555,8 +5555,8 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
             stranded_branch_override: None,
             id: task_id.clone(),
             reason: Some("already merged before the urgent status check".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -6686,8 +6686,8 @@ async fn test_062d_lifecycle_close_pushes_closed() {
             stranded_branch_override: None,
             id: "cas-062d-close".to_string(),
             reason: Some("lifecycle close proof".to_string()),
-            code_review_findings: None,
-            bypass_code_review: Some(true),
+            supervisor_override: Some(true),
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))

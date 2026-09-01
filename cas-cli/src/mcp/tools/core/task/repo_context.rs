@@ -797,10 +797,9 @@ pub(crate) fn resolve_repo_context(
     let mut observed = Vec::new();
     for candidate in candidate_paths(cas_root) {
         let identities = repo_identities(&candidate);
-        if identities
-            .iter()
-            .any(|identity| canonical_selector(identity) == canonical_selector(&target.repo_selector))
-            && let Ok((repo_root, git_common_dir)) = git_layout(&candidate)
+        if identities.iter().any(|identity| {
+            canonical_selector(identity) == canonical_selector(&target.repo_selector)
+        }) && let Ok((repo_root, git_common_dir)) = git_layout(&candidate)
         {
             matches.push((repo_root, git_common_dir));
         }
@@ -1641,7 +1640,12 @@ mod tests {
             git(&repo, &["init", "-q", "-b", "main"]);
             git(
                 &repo,
-                &["remote", "add", "origin", "git@github.com:someone/other.git"],
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@github.com:someone/other.git",
+                ],
             );
             std::fs::create_dir(repo.join(".cas")).unwrap();
             std::fs::write(
@@ -1926,8 +1930,8 @@ mod tests {
                 stranded_branch_override: None,
                 id: task.id.clone(),
                 reason: None,
-                bypass_code_review: Some(true),
-                code_review_findings: None,
+                supervisor_override: Some(true),
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             };

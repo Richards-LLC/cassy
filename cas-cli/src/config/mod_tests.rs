@@ -38,9 +38,12 @@ fn test_config_defaults() {
         .get("hooks.stop.rule_review_enabled")
         .expect("rule review config metadata");
     assert_eq!(rule_review.default, "true");
-    assert!(rule_review.description.contains("Factory workers are exempt"));
+    assert!(
+        rule_review
+            .description
+            .contains("Factory workers are exempt")
+    );
 }
-
 #[test]
 fn memory_decay_policy_is_configurable_and_round_trips() {
     let temp = TempDir::new().unwrap();
@@ -55,8 +58,16 @@ fn memory_decay_policy_is_configurable_and_round_trips() {
 
     assert_eq!(config.memory().decay.curated_importance_floor, 0.95);
     assert!(!config.memory().decay.promote_on_access);
-    assert!(config.set("memory.decay.curated_importance_floor", "1.1").is_err());
-    assert!(config.set("memory.decay.curated_importance_floor", "nan").is_err());
+    assert!(
+        config
+            .set("memory.decay.curated_importance_floor", "1.1")
+            .is_err()
+    );
+    assert!(
+        config
+            .set("memory.decay.curated_importance_floor", "nan")
+            .is_err()
+    );
 
     config.save(temp.path()).unwrap();
     let loaded = Config::load(temp.path()).unwrap();
@@ -120,9 +131,11 @@ fn daemon_relevance_sampling_is_configurable_and_has_weekly_defaults() {
     assert!(config.daemon().relevance_sampling_enabled);
     assert_eq!(config.daemon().relevance_sampling_interval_secs, 604_800);
     assert_eq!(config.daemon().relevance_sampling_sample_size, 20);
-    assert!(meta::registry()
-        .get("daemon.relevance_sampling_enabled")
-        .is_some());
+    assert!(
+        meta::registry()
+            .get("daemon.relevance_sampling_enabled")
+            .is_some()
+    );
 
     config
         .set("daemon.relevance_sampling_enabled", "false")
@@ -136,12 +149,16 @@ fn daemon_relevance_sampling_is_configurable_and_has_weekly_defaults() {
     assert!(!config.daemon().relevance_sampling_enabled);
     assert_eq!(config.daemon().relevance_sampling_interval_secs, 3600);
     assert_eq!(config.daemon().relevance_sampling_sample_size, 7);
-    assert!(config
-        .set("daemon.relevance_sampling_interval_secs", "0")
-        .is_err());
-    assert!(config
-        .set("daemon.relevance_sampling_sample_size", "0")
-        .is_err());
+    assert!(
+        config
+            .set("daemon.relevance_sampling_interval_secs", "0")
+            .is_err()
+    );
+    assert!(
+        config
+            .set("daemon.relevance_sampling_sample_size", "0")
+            .is_err()
+    );
 }
 
 #[test]

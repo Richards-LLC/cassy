@@ -78,8 +78,6 @@ mod viktor_inbound_store;
 mod viktor_watch_store;
 mod worktree_store;
 
-pub mod code_review;
-
 // Mock stores for testing
 #[cfg(test)]
 pub mod mock;
@@ -249,10 +247,10 @@ pub use reminder_store::{
 
 // Retrieval provenance and explicit outcome feedback
 pub use retrieval_store::{
-    DEFAULT_RETRIEVAL_POLICY, RETRIEVAL_ATTRIBUTION_AUTOMATIC,
-    RETRIEVAL_ATTRIBUTION_EXPLICIT, RETRIEVAL_ATTRIBUTION_JUDGE, RETRIEVAL_SCHEMA,
-    RETRIEVAL_SCHEMA_STATEMENTS, RelevanceSamplingReport, RetrievalAggregate, RetrievalHitIdentity,
-    RetrievalOutcome, RetrievalOutcomeEvent, RetrievalQuery, RetrievalSample, RetrievalStore,
+    DEFAULT_RETRIEVAL_POLICY, RETRIEVAL_ATTRIBUTION_AUTOMATIC, RETRIEVAL_ATTRIBUTION_EXPLICIT,
+    RETRIEVAL_ATTRIBUTION_JUDGE, RETRIEVAL_SCHEMA, RETRIEVAL_SCHEMA_STATEMENTS,
+    RelevanceSamplingReport, RetrievalAggregate, RetrievalHitIdentity, RetrievalOutcome,
+    RetrievalOutcomeEvent, RetrievalQuery, RetrievalSample, RetrievalStore,
     RollingInjectedPrecision, SqliteRetrievalStore,
 };
 

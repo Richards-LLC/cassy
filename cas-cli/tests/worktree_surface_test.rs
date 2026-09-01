@@ -1713,8 +1713,8 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
             stranded_branch_override: None,
             id: task.id.clone(),
             reason: Some("task A complete".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))

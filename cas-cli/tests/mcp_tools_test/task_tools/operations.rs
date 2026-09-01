@@ -1,8 +1,8 @@
 use crate::support::*;
-use cas::mcp::CasCore;
+use cas::mcp::{CasCore, CasService};
 use cas::mcp::tools::*;
-use cas::store::{open_agent_store, open_event_store, open_task_store};
-use cas::types::EventType;
+use cas::store::{open_agent_store, open_event_store, open_task_store, SqliteTaskStore, TaskStore};
+use cas::types::{EventType, Task};
 use rmcp::handler::server::wrapper::Parameters;
 use rusqlite::Connection;
 
@@ -1150,6 +1150,108 @@ async fn test_task_ready_excludes_foreign_origin_project_and_show_exposes_it() {
     assert!(
         extract_text(shown).contains("Origin project: acme/other"),
         "show must expose foreign origin for diagnosis"
+    );
+}
+
+#[tokio::test]
+async fn test_task_board_hides_foreign_rows_by_default_and_supports_include_foreign() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[project]\ncanonical_id = \"cas-src\"\n",
+    )
+    .expect("project identity config should be writable");
+
+    // Use a store opened without a default origin to retain the null-origin
+    // fixture row. The MCP core resolves the current project from config.toml.
+    let fixture_store = SqliteTaskStore::open(&cas_dir).expect("fixture task store");
+    fixture_store.init().expect("fixture task store init");
+    let mut null_origin = Task::new(
+        "cas-null1".to_string(),
+        "Own null-origin task".to_string(),
+    );
+    null_origin.origin_project = None;
+    fixture_store.add(&null_origin).expect("add null-origin task");
+
+    let mut own = Task::new("cas-own1".to_string(), "Own explicit task".to_string());
+    own.origin_project = Some("cas-src".to_string());
+    fixture_store.add(&own).expect("add own task");
+
+    for (id, title) in [
+        ("cas-for1", "Foreign ready task one"),
+        ("cas-for2", "Foreign ready task two"),
+    ] {
+        let mut foreign = Task::new(id.to_string(), title.to_string());
+        foreign.origin_project = Some("gabber-studio".to_string());
+        fixture_store.add(&foreign).expect("add foreign task");
+    }
+
+    let service = CasService::new(core, None);
+    let default_ready: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "ready",
+        "limit": 20,
+    }))
+    .expect("default ready request");
+    let default_ready_text = extract_text(
+        service
+            .task(Parameters(default_ready))
+            .await
+            .expect("default ready should succeed"),
+    );
+    assert!(default_ready_text.contains("cas-null1"), "null-origin own row hidden: {default_ready_text}");
+    assert!(default_ready_text.contains("cas-own1"), "own row hidden: {default_ready_text}");
+    assert!(!default_ready_text.contains("cas-for1"), "foreign row leaked: {default_ready_text}");
+    assert!(!default_ready_text.contains("cas-for2"), "foreign row leaked: {default_ready_text}");
+    assert!(
+        default_ready_text.contains("2 foreign-origin tasks hidden (include_foreign=true to show)"),
+        "hidden count footer missing: {default_ready_text}"
+    );
+
+    let all_ready: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "ready",
+        "limit": 20,
+        "include_foreign": true,
+    }))
+    .expect("include_foreign ready request");
+    let all_ready_text = extract_text(
+        service
+            .task(Parameters(all_ready))
+            .await
+            .expect("include_foreign ready should succeed"),
+    );
+    for id in ["cas-null1", "cas-own1", "cas-for1", "cas-for2"] {
+        assert!(all_ready_text.contains(id), "include_foreign omitted {id}: {all_ready_text}");
+    }
+    assert!(!all_ready_text.contains("foreign-origin tasks hidden"), "opt-in still reports hidden rows: {all_ready_text}");
+
+    let default_list: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "list",
+        "limit": 20,
+    }))
+    .expect("default list request");
+    let default_list_text = extract_text(
+        service
+            .task(Parameters(default_list))
+            .await
+            .expect("default list should succeed"),
+    );
+    assert!(!default_list_text.contains("cas-for1"), "foreign list row leaked: {default_list_text}");
+    assert!(default_list_text.contains("2 foreign-origin tasks hidden"), "list hidden footer missing: {default_list_text}");
+
+    let show_foreign: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "show",
+        "id": "cas-for1",
+        "with_deps": false,
+    }))
+    .expect("show foreign request");
+    let shown = service
+        .task(Parameters(show_foreign))
+        .await
+        .expect("show foreign task");
+    assert!(
+        extract_text(shown).contains("Origin project: gabber-studio — this task is owned elsewhere"),
+        "foreign ownership banner missing"
     );
 }
 

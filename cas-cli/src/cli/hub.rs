@@ -790,3 +790,122 @@ pub(super) fn record_is_live(record: &HubProcessRecord) -> bool {
                 && health.get("ready").and_then(|value| value.as_bool()) == Some(true)
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(version: &str, port: u16, tailscale_serve_port: Option<u16>) -> HubProcessRecord {
+        HubProcessRecord {
+            pid: 42,
+            bind: "127.0.0.1".to_owned(),
+            port,
+            version: version.to_owned(),
+            started_at: "2026-09-01T12:00:00Z".to_owned(),
+            public_url: tailscale_serve_port.map(|port| format!("https://hub.example:{port}")),
+            tailscale_serve_port,
+            tailscale_cli: tailscale_serve_port.map(|_| "tailscale".to_owned()),
+            transport_warning: None,
+        }
+    }
+
+    #[test]
+    fn bare_hub_defaults_to_status() {
+        assert!(matches!(default_hub_command(), HubCommands::Status));
+    }
+
+    #[test]
+    fn live_start_decision_table_covers_version_and_flag_drift() {
+        let same_args = HubServeArgs::default();
+        let cases = [
+            (
+                "same version and flags",
+                record(env!("CARGO_PKG_VERSION"), DEFAULT_HUB_PORT, None),
+                same_args.clone(),
+                false,
+                443,
+                HubStartDecision::Keep,
+            ),
+            (
+                "different version",
+                record("3.4.1", DEFAULT_HUB_PORT, None),
+                same_args.clone(),
+                false,
+                443,
+                HubStartDecision::Restart {
+                    version_drift: true,
+                    flags_differ: false,
+                },
+            ),
+            (
+                "different listener port",
+                record(env!("CARGO_PKG_VERSION"), DEFAULT_HUB_PORT, None),
+                HubServeArgs {
+                    port: DEFAULT_HUB_PORT + 1,
+                    ..same_args.clone()
+                },
+                false,
+                443,
+                HubStartDecision::Restart {
+                    version_drift: false,
+                    flags_differ: true,
+                },
+            ),
+            (
+                "different tailscale flag",
+                record(env!("CARGO_PKG_VERSION"), DEFAULT_HUB_PORT, None),
+                same_args,
+                true,
+                443,
+                HubStartDecision::Restart {
+                    version_drift: false,
+                    flags_differ: true,
+                },
+            ),
+        ];
+
+        for (name, live, args, tailscale_serve, tailscale_port, expected) in cases {
+            assert_eq!(
+                decide_live_start(
+                    &live,
+                    &args,
+                    tailscale_serve,
+                    tailscale_port,
+                    env!("CARGO_PKG_VERSION"),
+                ),
+                expected,
+                "case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_rendering_shows_record_and_binary_versions() {
+        let rendered = render_status(
+            &record("3.4.1", DEFAULT_HUB_PORT, None),
+            true,
+            "3.7.7",
+        );
+
+        assert!(rendered.contains("version 3.4.1"), "{rendered}");
+        assert!(rendered.contains("binary: 3.7.7"), "{rendered}");
+    }
+
+    #[test]
+    fn update_restart_spec_is_present_only_for_a_stale_live_record() {
+        let stale = restart_spec_for_record(&record("3.4.1", 4310, Some(8443)), "3.7.7")
+            .unwrap()
+            .expect("stale hub must be restarted");
+        assert_eq!(stale.bind, "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(stale.port, 4310);
+        assert!(stale.tailscale_serve);
+        assert_eq!(stale.tailscale_port, 8443);
+
+        assert!(
+            restart_spec_for_record(&record("3.7.7", 4310, Some(8443)), "3.7.7")
+                .unwrap()
+                .is_none(),
+            "matching hub version must not trigger update restart"
+        );
+    }
+}

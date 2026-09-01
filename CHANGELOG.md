@@ -7,6 +7,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.10.0] - 2026-09-01
+
+### Removed
+- The multi-persona code-review pipeline: the `cas-code-review` skill and
+  workflow, its persona references, the deprecated code-reviewer agents, the
+  worker review-dispatch gate, and the `[code_review]` config section.
+- The `code_review_findings` close field and its envelope validation; the
+  `pending_supervisor_review` task status (existing rows and incoming legacy
+  cloud rows map to `awaiting_merge`).
+
+### Changed
+- Task review is now the supervisor's merge-time diff review: the worker's
+  branch diff is read against the task spec with scoped test receipts, and the
+  supervisor records a verification row as the review receipt; the supervisor
+  skill documents this as the canonical procedure.
+- `bypass_code_review` is replaced by `supervisor_override` (reason required,
+  supervisor-only, logged); the old flag remains a deprecated alias for one
+  release.
+
+
 ## [3.9.1] - 2026-09-01
 
 ### Fixed

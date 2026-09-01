@@ -379,27 +379,6 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }
-            // Code-review section (cas-62b0, GH #152).
-            //
-            // Validated against the two owners the runtime actually
-            // distinguishes (`CodeReviewConfig::supervisor_owned`). A typo
-            // like `owner = "supervisors"` would otherwise persist silently
-            // and read as worker-owned at every gate, which is the failure
-            // direction that costs ~500k subagent tokens per close.
-            "code_review.owner" => {
-                let code_review = self
-                    .code_review
-                    .get_or_insert_with(CodeReviewConfig::default);
-                code_review.owner = match value.trim().to_lowercase().as_str() {
-                    "supervisor" => "supervisor".to_string(),
-                    "worker" => "worker".to_string(),
-                    _ => {
-                        return Err(MemError::Parse(format!(
-                            "Invalid code_review owner: {value} (expected 'supervisor' or 'worker')"
-                        )));
-                    }
-                };
-            }
             // Issues section
             "issues.repo" => {
                 let issues = self.issues.get_or_insert_with(IssuesConfig::default);

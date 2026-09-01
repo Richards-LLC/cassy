@@ -117,7 +117,7 @@ Supervisor has rejection authority. Work is sent back with specific, actionable 
 - **Flag obvious SOLID violations** — with specifics; don't rubber-stamp "SOLID compliance verified"
 - **Verify, don't trust** — Read the actual diff or run tests yourself before accepting. Worker self-reports are inputs, not verdicts.
 - **Rejection format** — Every rejection names: (1) which gate failed, (2) the specific code/file, (3) what needs to change. "SRP violation" alone is not actionable; "SRP violation: `handle_request()` in `router.rs` handles both auth and routing — split into two functions" is.
-- **Review cadence** — Workers do not run `/cas-code-review` at close. Supervisors run a lightweight per-merge gate at cherry-pick time, then one full multi-persona `/cas-code-review` against the assembled EPIC diff in Phase 4. Do not dispatch workers with "run `/cas-code-review` on the diff" instructions; that's the legacy `owner = "worker"` path and only applies if a project has opted in via `.cas/config.toml`. Your manual per-merge review should focus on architectural fit, scope compliance, obvious defects, and domain knowledge.
+- **Review cadence** — Every worker merge receives the canonical merge-time diff review in `workflow.md` Phase 3: read the diff against the task spec and acceptance criteria, check ownership boundaries, tests, and receipts, re-run touched modules on the merged tree, and record a verification receipt. Phase 4 runs the full final-tree nextest gate for cross-task integration. Do not dispatch a separate review workflow or require worker-supplied review output.
 
 ## Ongoing Discipline
 

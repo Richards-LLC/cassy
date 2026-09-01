@@ -61,15 +61,6 @@ pub const BUILTIN_AGENTS: &[BuiltinFile] = &[
         path: "agents/session-summarizer.md",
         content: include_str!("builtins/agents/session-summarizer.md"),
     },
-    // DEPRECATED (Phase 1 subsystem A, EPIC cas-0750): the legacy
-    // `code-reviewer` agent is replaced by the `cas-code-review` multi-persona
-    // skill. The entry is kept in BUILTIN_AGENTS only so `cas sync` overwrites
-    // any downstream `.claude/agents/code-reviewer.md` with the deprecation
-    // stub checked into the repo. Remove after downstream caches expire.
-    BuiltinFile {
-        path: "agents/code-reviewer.md",
-        content: include_str!("builtins/agents/code-reviewer.md"),
-    },
     BuiltinFile {
         path: "agents/git-history-analyzer.md",
         content: include_str!("builtins/agents/git-history-analyzer.md"),
@@ -101,13 +92,6 @@ pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "agents/session-summarizer.md",
         content: include_str!("builtins/codex/agents/session-summarizer.md"),
-    },
-    // DEPRECATED (Phase 1 subsystem A, EPIC cas-0750): see the note on the
-    // claude-mirror entry above. Kept only so `cas sync` overwrites stale
-    // downstream copies with the deprecation stub.
-    BuiltinFile {
-        path: "agents/code-reviewer.md",
-        content: include_str!("builtins/codex/agents/code-reviewer.md"),
     },
     BuiltinFile {
         path: "agents/factory-supervisor.md",
@@ -279,57 +263,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-ideate/references/post-ideation-workflow.md",
         content: include_str!("builtins/skills/cas-ideate/references/post-ideation-workflow.md"),
-    },
-    // cas-code-review (Phase 1 subsystem A, EPIC cas-0750).
-    // Multi-persona code-review skill that replaces the legacy `code-reviewer`
-    // agent. The old agent entry below is kept only to propagate a deprecation
-    // stub via `cas sync`; all real functionality lives in this skill.
-    BuiltinFile {
-        path: "skills/cas-code-review/SKILL.md",
-        content: include_str!("builtins/skills/cas-code-review/SKILL.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/findings-schema.md",
-        content: include_str!("builtins/skills/cas-code-review/references/findings-schema.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/correctness.md",
-        content: include_str!("builtins/skills/cas-code-review/references/personas/correctness.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/testing.md",
-        content: include_str!("builtins/skills/cas-code-review/references/personas/testing.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/maintainability.md",
-        content: include_str!(
-            "builtins/skills/cas-code-review/references/personas/maintainability.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/project-standards.md",
-        content: include_str!(
-            "builtins/skills/cas-code-review/references/personas/project-standards.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/security.md",
-        content: include_str!("builtins/skills/cas-code-review/references/personas/security.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/performance.md",
-        content: include_str!("builtins/skills/cas-code-review/references/personas/performance.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/adversarial.md",
-        content: include_str!("builtins/skills/cas-code-review/references/personas/adversarial.md"),
-    },
-    // fallow persona — deterministic CLI adapter routed through the shared
-    // Codex reviewer transport. It translates `fallow audit` findings into
-    // ReviewerOutput and self-skips on non-JS/TS repos / diffs.
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/fallow.md",
-        content: include_str!("builtins/skills/cas-code-review/references/personas/fallow.md"),
     },
     // project-overview skill (EPIC cas-19a2b): generates
     // docs/PRODUCT_OVERVIEW.md for any project and writes a thin memory
@@ -533,12 +466,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
 /// Only Claude-harness workflows are shipped here. Codex does not use the
 /// Claude Code Workflow tool.
 pub const BUILTIN_WORKFLOWS: &[BuiltinFile] = &[
-    // cas-code-review Steps 3-4: parallel persona dispatch + deterministic merge
-    // (Phase B of EPIC cas-b667). Invoked by the cas-code-review skill wrapper.
-    BuiltinFile {
-        path: "workflows/cas-code-review.js",
-        content: include_str!("builtins/workflows/cas-code-review.js"),
-    },
 ];
 
 /// All built-in skills managed by Cassy for Codex
@@ -698,66 +625,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-ideate/references/post-ideation-workflow.md",
         content: include_str!(
             "builtins/codex/skills/cas-ideate/references/post-ideation-workflow.md"
-        ),
-    },
-    // cas-code-review (Phase 1 subsystem A, EPIC cas-0750) — codex mirror.
-    BuiltinFile {
-        path: "skills/cas-code-review/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-code-review/SKILL.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/findings-schema.md",
-        content: include_str!(
-            "builtins/codex/skills/cas-code-review/references/findings-schema.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/correctness.md",
-        content: include_str!(
-            "builtins/codex/skills/cas-code-review/references/personas/correctness.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/testing.md",
-        content: include_str!(
-            "builtins/codex/skills/cas-code-review/references/personas/testing.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/maintainability.md",
-        content: include_str!(
-            "builtins/codex/skills/cas-code-review/references/personas/maintainability.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/project-standards.md",
-        content: include_str!(
-            "builtins/codex/skills/cas-code-review/references/personas/project-standards.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/security.md",
-        content: include_str!(
-            "builtins/codex/skills/cas-code-review/references/personas/security.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/performance.md",
-        content: include_str!(
-            "builtins/codex/skills/cas-code-review/references/personas/performance.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/adversarial.md",
-        content: include_str!(
-            "builtins/codex/skills/cas-code-review/references/personas/adversarial.md"
-        ),
-    },
-    // fallow persona — codex mirror. See claude-side entry above.
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/fallow.md",
-        content: include_str!(
-            "builtins/codex/skills/cas-code-review/references/personas/fallow.md"
         ),
     },
     // project-overview skill (EPIC cas-19a2b) — codex mirror.
@@ -958,13 +825,6 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
         path: "agents/session-summarizer.md",
         content: include_str!("builtins/grok/agents/session-summarizer.md"),
     },
-    // DEPRECATED (Phase 1 subsystem A, EPIC cas-0750): see the note on the
-    // claude-mirror entry in BUILTIN_AGENTS. Kept only so `cas sync`
-    // overwrites stale downstream copies with the deprecation stub.
-    BuiltinFile {
-        path: "agents/code-reviewer.md",
-        content: include_str!("builtins/grok/agents/code-reviewer.md"),
-    },
     BuiltinFile {
         path: "agents/git-history-analyzer.md",
         content: include_str!("builtins/grok/agents/git-history-analyzer.md"),
@@ -1102,64 +962,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
         content: include_str!(
             "builtins/grok/skills/cas-memory-management/references/lifecycle-and-storage.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-code-review/SKILL.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/findings-schema.md",
-        content: include_str!("builtins/grok/skills/cas-code-review/references/findings-schema.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/fixer.md",
-        content: include_str!("builtins/grok/skills/cas-code-review/references/fixer.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/adversarial.md",
-        content: include_str!(
-            "builtins/grok/skills/cas-code-review/references/personas/adversarial.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/correctness.md",
-        content: include_str!(
-            "builtins/grok/skills/cas-code-review/references/personas/correctness.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/fallow.md",
-        content: include_str!("builtins/grok/skills/cas-code-review/references/personas/fallow.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/maintainability.md",
-        content: include_str!(
-            "builtins/grok/skills/cas-code-review/references/personas/maintainability.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/performance.md",
-        content: include_str!(
-            "builtins/grok/skills/cas-code-review/references/personas/performance.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/project-standards.md",
-        content: include_str!(
-            "builtins/grok/skills/cas-code-review/references/personas/project-standards.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/security.md",
-        content: include_str!(
-            "builtins/grok/skills/cas-code-review/references/personas/security.md"
-        ),
-    },
-    BuiltinFile {
-        path: "skills/cas-code-review/references/personas/testing.md",
-        content: include_str!(
-            "builtins/grok/skills/cas-code-review/references/personas/testing.md"
         ),
     },
     // cas-cc8c: required-capability parity — a Grok factory session must resolve
@@ -1482,13 +1284,6 @@ pub const REQUIRED_FACTORY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/cas-memory-management"),
         codex: Some("skills/cas-memory-management"),
         grok: Some("skills/cas-memory-management"),
-        note: "",
-    },
-    RequiredCapability {
-        id: "review",
-        claude: Some("skills/cas-code-review"),
-        codex: Some("skills/cas-code-review"),
-        grok: Some("skills/cas-code-review"),
         note: "",
     },
     RequiredCapability {
@@ -2781,7 +2576,6 @@ mod tests {
         assert!(content.contains(BUILTIN_GITIGNORE_BEGIN));
         assert!(content.contains("/.claude/agents/task-verifier.md"));
         assert!(content.contains("/.claude/skills/cas-worker/SKILL.md"));
-        assert!(content.contains("/.claude/workflows/cas-code-review.js"));
         assert!(content.contains(BUILTIN_GITIGNORE_END));
         assert_eq!(content.matches(BUILTIN_GITIGNORE_BEGIN).count(), 1);
         assert_eq!(content.matches(BUILTIN_GITIGNORE_END).count(), 1);
@@ -2890,32 +2684,6 @@ mod tests {
 
     fn clear_history_override() {
         HISTORY_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
-    }
-
-    fn extract_js_function(source: &str, name: &str) -> String {
-        let needle = format!("function {name}(");
-        let start = source
-            .find(&needle)
-            .unwrap_or_else(|| panic!("missing JS function {name}"));
-        let after_name = &source[start..];
-        let open_rel = after_name
-            .find('{')
-            .unwrap_or_else(|| panic!("missing opening brace for JS function {name}"));
-        let open = start + open_rel;
-        let mut depth = 0usize;
-        for (offset, ch) in source[open..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return source[start..=open + offset].to_string();
-                    }
-                }
-                _ => {}
-            }
-        }
-        panic!("missing closing brace for JS function {name}");
     }
 
     #[test]
@@ -3659,16 +3427,11 @@ This is the body content."#;
     }
 
     #[test]
-    fn test_cas_worker_skill_documents_code_review_gate() {
-        // Phase 1 Subsystem A Unit 10 (EPIC cas-0750): the cas-worker
-        // skill must document the new close-time code-review gate so
-        // workers know how to read the block message, what happens to
-        // residual findings, and which tools they must NOT fall back
-        // to. After the cas-61af split, SKILL.md keeps the high-signal
-        // references (cas-code-review and the close-gate pointer) and
-        // the detailed P0/bypass/legacy-tool guidance lives in
-        // references/close-gate.md. Pin both layers structurally so
-        // drift through cas sync cannot silently delete them.
+    fn test_cas_worker_skill_documents_close_gate() {
+        // The cas-worker skill must retain its close-gate pointer and
+        // self-verification contract after the retired review pipeline is
+        // removed from the builtin catalogs. Pin both layers structurally so
+        // drift through cas sync cannot silently delete the worker gate.
         for (label, skill_content, ref_content) in [
             (
                 "claude",
@@ -3683,43 +3446,14 @@ This is the body content."#;
         ] {
             // SKILL.md points workers at the gate (via close-gate.md).
             //
-            // Historical note (cas-ec8f amendment): this loop previously also
-            // asserted the literal substring "cas-code-review" was present in
-            // cas-worker.md, but commit 8b82273 / cas-8962 deliberately
-            // removed that mention when `[code_review] owner = "supervisor"`
-            // became the default (v2.13.0+). Workers must NOT invoke
-            // cas-code-review pre-close under the default ownership model —
-            // the supervisor owns review timing, with a lightweight
-            // per-merge gate and one full review at EPIC code-complete.
-            // The assertion was silently failing on main from that commit
-            // forward; cas-ec8f drops it here so the test reflects the
-            // current ownership contract. The `close-gate.md` pointer is
-            // still required — that doc is where the detailed gate content
-            // lives and workers do need to know about it.
             for required in ["close-gate.md"] {
                 assert!(
                     skill_content.contains(required),
                     "{label} cas-worker SKILL.md missing required marker: {required:?}"
                 );
             }
-            // close-gate.md carries the detailed gate content.
-            //
-            // Historical note (cas-ec8f amendment): this list previously
-            // pinned five markers that documented the legacy worker-inline
-            // code-review path: "Close-time Code Review Gate" (old section
-            // title), "If close is blocked on P0" (legacy P0 hard-block
-            // behavior), "bypass_code_review" (legacy worker bypass), plus
-            // "cas-code-review" and "code-reviewer". Commit 167c57e
-            // ("docs(skills): finish cas-5815 supervisor-default flip —
-            // purge stale worker-runs-review prompts") deliberately rewrote
-            // close-gate.md when `[code_review] owner = "supervisor"` became
-            // the default — the inline-block markers no longer apply.
-            // The assertions were silently failing on main from that point
-            // forward. The new pin set encodes the *current* ownership
-            // contract: close-gate.md documents the close gate, points
-            // workers at cas-code-review with a "don't invoke pre-close"
-            // caveat, and names the supervisor-owned default ownership flag.
-            for required in ["Close Gate", "cas-code-review", "owner = \"supervisor\""] {
+            // close-gate.md carries the durable self-verification contract.
+            for required in ["# Close Gate", "Clean-tree receipt", "git status --porcelain"] {
                 assert!(
                     ref_content.contains(required),
                     "{label} cas-worker close-gate.md missing required marker: {required:?}"
@@ -4366,34 +4100,6 @@ This is the body content."#;
     }
 
     #[test]
-    fn test_builtin_skills_contains_cas_code_review() {
-        // Phase 1 subsystem A (EPIC cas-0750): 9 files per mirror; the
-        // `fallow` persona added later brings the count to 10.
-        let expected = [
-            "skills/cas-code-review/SKILL.md",
-            "skills/cas-code-review/references/findings-schema.md",
-            "skills/cas-code-review/references/personas/correctness.md",
-            "skills/cas-code-review/references/personas/testing.md",
-            "skills/cas-code-review/references/personas/maintainability.md",
-            "skills/cas-code-review/references/personas/project-standards.md",
-            "skills/cas-code-review/references/personas/fallow.md",
-            "skills/cas-code-review/references/personas/security.md",
-            "skills/cas-code-review/references/personas/performance.md",
-            "skills/cas-code-review/references/personas/adversarial.md",
-        ];
-        for p in expected {
-            assert!(
-                BUILTIN_SKILLS.iter().any(|b| b.path == p),
-                "{p} missing from BUILTIN_SKILLS"
-            );
-            assert!(
-                CODEX_BUILTIN_SKILLS.iter().any(|b| b.path == p),
-                "{p} missing from CODEX_BUILTIN_SKILLS"
-            );
-        }
-    }
-
-    #[test]
     fn test_builtin_skills_contains_cas_codex_exec() {
         let claude = BUILTIN_SKILLS
             .iter()
@@ -4456,90 +4162,6 @@ This is the body content."#;
             assert!(
                 !skill.content.contains("daniel@petrastella.io"),
                 "{label} cli-routing SKILL.md retains the stale Daniel-only account gate"
-            );
-        }
-    }
-
-    /// Extract the `description:` value from a SKILL.md frontmatter block.
-    /// Cassy skill descriptions are single-line YAML scalars (long, but a
-    /// single physical line terminated by `\n`). Panics if the field is
-    /// missing — every builtin SKILL.md is required to have one.
-    #[cfg(test)]
-    fn skill_description(content: &str) -> &str {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("description:") {
-                return rest.trim_start();
-            }
-        }
-        panic!("SKILL.md frontmatter missing required `description:` field");
-    }
-
-    #[test]
-    fn test_cas_code_review_description_reflects_supervisor_owned_default() {
-        // Regression for cas-ec8f. The skill's frontmatter description is
-        // the FIRST thing the LLM sees when listing skills — when it
-        // disagrees with the body, the description wins in practice. The
-        // prior framing said "the pre-close quality gate for Cassy factory
-        // workers" and called `autofix` at `task.close` "the primary
-        // path", which caused workers to self-dispatch personas at close
-        // even under the v2.13.0+ default `[code_review] owner =
-        // "supervisor"` (~100K input tokens burned per close, observed on
-        // solid-cobra-88 cas-219d session log + reproduced on
-        // daring-swan-93 cas-f645 in the same session this test was
-        // added in).
-        //
-        // The new framing must: (a) not call autofix "the primary path";
-        // (b) not describe this as a worker pre-close gate without the
-        // supervisor-owned caveat; (c) explicitly name the supervisor as
-        // the owner under the default model. Both BUILTIN_SKILLS (.claude
-        // surface) and CODEX_BUILTIN_SKILLS (.codex surface) must agree
-        // — the two are sync-mirrored by `cas update` and any drift
-        // resurfaces the original bug on whichever harness reads stale
-        // copy.
-        for (label, skills) in [
-            ("BUILTIN_SKILLS", BUILTIN_SKILLS),
-            ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
-        ] {
-            let entry = skills
-                .iter()
-                .find(|b| b.path == "skills/cas-code-review/SKILL.md")
-                .unwrap_or_else(|| panic!("{label}: skills/cas-code-review/SKILL.md missing"));
-            let description = skill_description(entry.content);
-
-            // (a) `autofix` must not be framed as "the primary path".
-            // The prior phrasing was literally "in `autofix` mode (the
-            // primary path)" — we forbid the co-occurrence of those two
-            // substrings, which is tight enough that any reasonable
-            // phrasing that still framed autofix as primary would fail.
-            assert!(
-                !(description.contains("autofix") && description.contains("primary path")),
-                "{label}: cas-code-review description still frames `autofix` as 'the primary path'. \
-                 Under owner=\"supervisor\" (default since v2.13.0) the primary path is supervisor-driven \
-                 review cadence, not worker close-time autofix. Description: {description:?}",
-            );
-
-            // (b) "pre-close quality gate" is the other stale framing.
-            // Allow the substring only if the description also names
-            // the supervisor — i.e. only with proper context.
-            let mentions_pre_close = description.contains("pre-close quality gate");
-            let mentions_supervisor = description.contains("supervisor");
-            assert!(
-                !mentions_pre_close || mentions_supervisor,
-                "{label}: cas-code-review description says 'pre-close quality gate' without naming \
-                 the supervisor — workers will read it as a directive to self-dispatch personas at \
-                 task.close. Description: {description:?}",
-            );
-
-            // (c) The description must affirmatively name supervisor
-            // ownership. Without this, the absence of (a) and (b) is
-            // not enough — a stripped-down description that just says
-            // "code review orchestrator" still leaves workers free to
-            // invoke it pre-close by default.
-            assert!(
-                mentions_supervisor,
-                "{label}: cas-code-review description must explicitly name the supervisor as the \
-                 default invoker so workers do not self-dispatch personas at task.close. \
-                 Description: {description:?}",
             );
         }
     }
@@ -4615,8 +4237,7 @@ This is the body content."#;
         // cas-39f5: the .claude and .codex copies of session-learn/SKILL.md
         // are sync-mirrored by `cas update`. Drift between them silently
         // produces a different classifier prompt on whichever harness
-        // reads the stale copy — exactly the failure mode cas-ec8f traced
-        // in cas-code-review. Pin content-identity at the source, modulo
+        // reads the stale copy. Pin content-identity at the source, modulo
         // the intentional per-harness tool prefix (cas-2c61: the codex
         // copy correctly uses mcp__cs__, not Claude's mcp__cas__).
         let claude = BUILTIN_SKILLS
@@ -4633,304 +4254,6 @@ This is the body content."#;
             "session-learn SKILL.md .claude and .codex copies must be identical apart from \
              the mcp__cas__/mcp__cs__ tool prefix; drift here produces a divergent \
              classifier prompt across harnesses",
-        );
-    }
-
-    #[test]
-    fn test_cas_code_review_skill_md_mirrors_are_identical() {
-        // The .claude and .codex builtin copies of cas-code-review/SKILL.md
-        // are sync-mirrored by `cas update`. Drift between them
-        // re-introduces the cas-ec8f regression on whichever harness reads
-        // the stale copy — guard against that at the source, modulo the
-        // intentional per-harness tool prefix (cas-2c61: the codex copy
-        // correctly uses mcp__cs__, not Claude's mcp__cas__).
-        let claude = BUILTIN_SKILLS
-            .iter()
-            .find(|b| b.path == "skills/cas-code-review/SKILL.md")
-            .expect("BUILTIN_SKILLS missing cas-code-review SKILL.md");
-        let codex = CODEX_BUILTIN_SKILLS
-            .iter()
-            .find(|b| b.path == "skills/cas-code-review/SKILL.md")
-            .expect("CODEX_BUILTIN_SKILLS missing cas-code-review SKILL.md");
-        assert_eq!(
-            claude.content.replace("mcp__cas__", "mcp__cs__"),
-            codex.content,
-            "cas-code-review SKILL.md .claude and .codex copies must be identical apart \
-             from the mcp__cas__/mcp__cs__ tool prefix; drift here re-opens cas-ec8f on \
-             the harness reading the stale copy",
-        );
-    }
-
-    #[test]
-    fn test_cas_code_review_documents_codex_transport_and_independent_persona() {
-        for (label, skills) in [("claude", BUILTIN_SKILLS), ("codex", CODEX_BUILTIN_SKILLS)] {
-            let entry = skills
-                .iter()
-                .find(|b| b.path == "skills/cas-code-review/SKILL.md")
-                .unwrap_or_else(|| panic!("{label}: skills/cas-code-review/SKILL.md missing"));
-            for required in [
-                "gpt-5.6-sol:independent",
-                "one shared schema shim",
-                "codex exec -s read-only -m gpt-5.6-sol -c model_reasoning_effort=high",
-                "`--output-schema`",
-                "two bounded schema-mismatch retries",
-                "one separately-budgeted timeout retry",
-                "600 seconds",
-                "Security deliberately stays on Claude Opus",
-                "5+ changed files",
-                "300+ changed lines",
-                "gpt56_independent: true",
-                "legacy `gpt55_independent: true` remains accepted",
-                "skipped_reason",
-                "distinct from a successful zero-finding review",
-            ] {
-                assert!(
-                    entry.content.contains(required),
-                    "{label}: cas-code-review SKILL.md missing Codex transport/independent persona marker: {required:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_cas_code_review_documents_dropped_findings_contract() {
-        for (label, skills) in [
-            ("claude", BUILTIN_SKILLS),
-            ("codex", CODEX_BUILTIN_SKILLS),
-            ("grok", GROK_BUILTIN_SKILLS),
-        ] {
-            let entry = skills
-                .iter()
-                .find(|b| b.path == "skills/cas-code-review/SKILL.md")
-                .unwrap_or_else(|| panic!("{label}: skills/cas-code-review/SKILL.md missing"));
-            for required in [
-                "\"dropped\": DroppedFinding[]",
-                "schema_validation_failed",
-                "validation_errors",
-                "confidence_below_threshold",
-                "stats.dropped_findings",
-                "exactly `dropped.length`",
-            ] {
-                assert!(
-                    entry.content.contains(required),
-                    "{label}: cas-code-review SKILL.md missing dropped-finding contract marker: {required:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_code_reviewer_agent_is_deprecation_stub() {
-        // EPIC cas-0750: the legacy code-reviewer agent is replaced by the
-        // cas-code-review skill. The file is kept in BUILTIN_AGENTS only to
-        // propagate a deprecation stub via `cas sync`.
-        for agents in [BUILTIN_AGENTS, CODEX_BUILTIN_AGENTS] {
-            let entry = agents
-                .iter()
-                .find(|b| b.path == "agents/code-reviewer.md")
-                .expect("code-reviewer.md must remain in the builtins list so sync overwrites downstream copies");
-            assert!(
-                entry.content.contains("deprecated: true"),
-                "code-reviewer.md must carry `deprecated: true` in frontmatter"
-            );
-            assert!(
-                entry.content.contains("replaced_by: cas-code-review"),
-                "code-reviewer.md must name its replacement"
-            );
-            assert!(
-                entry.content.contains("managed_by: cas"),
-                "code-reviewer.md must keep `managed_by: cas` so sync overwrites stale copies"
-            );
-            assert!(
-                entry.content.contains("DEPRECATED"),
-                "code-reviewer.md must prominently mark itself as deprecated"
-            );
-        }
-    }
-
-    /// cas-0e5b3 (GH #112): the checked-in rendered copy must equal the builtin
-    /// it is generated from.
-    ///
-    /// `.claude/workflows/cas-code-review.js` is not a second source — it is
-    /// output that [`sync_workflows`] force-writes from [`BUILTIN_WORKFLOWS`].
-    /// A one-line divergence (`CODEX_PERSONA_EFFORT`) sat in the tree for a
-    /// week because the only guard for it lived in the Node test suite, which
-    /// `cargo test` never runs: every worker and every CI pass was green while
-    /// this repo reviewed its own code at a different reasoning effort than the
-    /// one it ships. This test is deliberately standalone and named for what it
-    /// checks, rather than riding along inside a sync test, because the whole
-    /// failure mode was drift going unnoticed.
-    #[test]
-    fn test_rendered_workflow_matches_builtin() {
-        // Coupled to the single BUILTIN_WORKFLOWS entry: `include_str!` needs a
-        // literal path, so this cannot iterate the slice. The length assert
-        // below turns "someone added a second workflow" into a loud failure
-        // here instead of a silently unguarded file.
-        assert_eq!(
-            BUILTIN_WORKFLOWS.len(),
-            1,
-            "a new builtin workflow was added but this parity guard still checks only \
-             cas-code-review.js — extend it with an include_str! for the new file, or \
-             the new rendered copy can drift undetected (cas-0e5b3)"
-        );
-
-        let rendered_copy = include_str!("../../.claude/workflows/cas-code-review.js");
-        let builtin_source = BUILTIN_WORKFLOWS
-            .iter()
-            .find(|f| f.path == "workflows/cas-code-review.js")
-            .expect("cas-code-review workflow must be a builtin")
-            .content;
-        if rendered_copy != builtin_source {
-            // Name the first divergent line: the previous guard dumped both
-            // whole files, which is how a 1-in-1100-line difference stayed
-            // invisible even after the test went red.
-            let first_diff = rendered_copy
-                .lines()
-                .zip(builtin_source.lines())
-                .position(|(a, b)| a != b);
-            let detail = match first_diff {
-                Some(i) => format!(
-                    "line {}:\n  builtin (source of truth): {}\n  rendered copy (stale):     {}",
-                    i + 1,
-                    builtin_source.lines().nth(i).unwrap_or("<absent>"),
-                    rendered_copy.lines().nth(i).unwrap_or("<absent>"),
-                ),
-                None => "one file is a prefix of the other (trailing content differs)".to_string(),
-            };
-            panic!(
-                ".claude/workflows/cas-code-review.js is STALE relative to its builtin \
-                 source.\nThat file is generated — do NOT edit it to fix this.\n{detail}\n\
-                 Repair: edit cas-cli/src/builtins/workflows/cas-code-review.js, then \
-                 regenerate with `cas update --sync` (or copy builtin -> .claude/workflows/)."
-            );
-        }
-    }
-
-    #[test]
-    fn test_sync_installs_cas_code_review_and_overwrites_code_reviewer() {
-        use tempfile::tempdir;
-        let temp = tempdir().unwrap();
-        let claude_dir = temp.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-
-        // Pre-seed a stale copy of the old agent to prove sync overwrites it.
-        let stale_agent = claude_dir.join("agents/code-reviewer.md");
-        std::fs::create_dir_all(stale_agent.parent().unwrap()).unwrap();
-        std::fs::write(
-            &stale_agent,
-            "---\nname: code-reviewer\nmanaged_by: cas\n---\nold content",
-        )
-        .unwrap();
-
-        sync_all_builtins(&claude_dir).unwrap();
-
-        for p in [
-            "skills/cas-code-review/SKILL.md",
-            "skills/cas-code-review/references/findings-schema.md",
-            "skills/cas-code-review/references/personas/correctness.md",
-            "skills/cas-code-review/references/personas/testing.md",
-            "skills/cas-code-review/references/personas/maintainability.md",
-            "skills/cas-code-review/references/personas/project-standards.md",
-            "skills/cas-code-review/references/personas/security.md",
-            "skills/cas-code-review/references/personas/performance.md",
-            "skills/cas-code-review/references/personas/adversarial.md",
-            // Phase B (cas-b667): production Workflow shipped via BUILTIN_WORKFLOWS
-            "workflows/cas-code-review.js",
-        ] {
-            let f = claude_dir.join(p);
-            assert!(f.exists(), "{p} not synced");
-        }
-
-        // Phase B: verify the workflow content is the production script
-        let workflow_content =
-            std::fs::read_to_string(claude_dir.join("workflows/cas-code-review.js"))
-                .expect("workflow script must be synced");
-        assert!(
-            workflow_content.contains("cas-code-review"),
-            "workflow script must reference cas-code-review"
-        );
-        assert!(
-            workflow_content.contains("mergeFindings"),
-            "workflow script must contain the mergeFindings() pipeline"
-        );
-        assert!(
-            workflow_content.contains("REVIEWER_OUTPUT_SCHEMA"),
-            "workflow script must define the reviewer output schema"
-        );
-        for required in [
-            "gpt-5.6-sol:independent",
-            "gpt56_independent",
-            "gpt55_independent",
-            "gpt55ShouldRun",
-            "function buildCodexReviewerShimPrompt",
-            "async function dispatchReviewPersona",
-            "codex exec -s read-only -m ${CODEX_PERSONA_MODEL} -c model_reasoning_effort=${CODEX_PERSONA_EFFORT}",
-            "--output-schema",
-            "CODEX_PERSONA_TIMEOUT_SECONDS = 600",
-            "CODEX_SCHEMA_RETRIES = 2",
-            "CODEX_TIMEOUT_RETRIES = 1",
-            "CODEX_MAX_CONCURRENCY = 4",
-            "Schema mismatch retries do not consume the timeout retry budget",
-            "required: ['reviewer', 'findings', 'residual_risks', 'testing_gaps', 'skipped_reason']",
-            "required: ['title','severity','file','line','why_it_matters','autofix_class','owner','confidence','evidence','pre_existing','suggested_fix','requires_verification']",
-            "function stripNullValues",
-            "function skippedPersonaResults",
-            "function incompleteAlwaysOnPersonas",
-            "async function pipelineWithConcurrency",
-            "command -v sleep",
-            "TIMEOUT_MARKER",
-            "CLAUDE_DIVERSITY_PERSONA = 'security'",
-            "model: 'opus'",
-            "skipped_reason",
-            "gpt55_independent_skipped",
-            "skipped_personas",
-            "status: reviewStatus",
-            "degraded: incompletePersonas.length > 0",
-        ] {
-            assert!(
-                workflow_content.contains(required),
-                "workflow script missing shared Codex transport marker: {required:?}"
-            );
-        }
-        assert_eq!(
-            workflow_content
-                .matches("codex exec -s read-only -m ${CODEX_PERSONA_MODEL} -c model_reasoning_effort=${CODEX_PERSONA_EFFORT}")
-                .count(),
-            1,
-            "the Codex command must live once in the shared reviewer shim"
-        );
-        assert!(
-            !workflow_content.contains("/usr/bin/timeout"),
-            "cas-code-review must use the portable shell watchdog, not GNU timeout"
-        );
-        assert!(
-            !workflow_content.contains("model: 'sonnet'"),
-            "retired Sonnet model dispatch must not remain in cas-code-review"
-        );
-        let constants_content =
-            include_str!("../../.claude/workflows/cas-code-review-constants.js");
-        for helper in [
-            "gpt55ShouldRun",
-            "stripNullValues",
-            "skippedPersonaResults",
-            "personasRunCount",
-            "incompleteAlwaysOnPersonas",
-        ] {
-            assert_eq!(
-                extract_js_function(&workflow_content, helper),
-                extract_js_function(constants_content, helper),
-                "workflow inline helper {helper} must match cas-code-review-constants.js"
-            );
-        }
-
-        let overwritten = std::fs::read_to_string(&stale_agent).unwrap();
-        assert!(
-            overwritten.contains("DEPRECATED"),
-            "sync must overwrite the stale code-reviewer.md with the deprecation stub"
-        );
-        assert!(
-            overwritten.contains("replaced_by: cas-code-review"),
-            "deprecation stub must name the replacement"
         );
     }
 
@@ -5863,12 +5186,12 @@ This is the body content."#;
             .find(|b| b.path == "skills/cas-supervisor/references/code-review-queue.md")
             .expect("BUILTIN_SKILLS missing cas-supervisor code-review-queue.md");
         for required in [
-            "not the full-review trigger",
-            "Phase 3 uses a lightweight per-merge gate",
-            "single required full `/cas-code-review` run happens in Phase 4",
-            "create the task first",
-            "epic-level review fix rounds",
-            "messages are not durable task state",
+            "Awaiting-merge triage",
+            "visibility and handoff list",
+            "canonical review procedure",
+            "touched-module tests",
+            "verification action=add",
+            "final epic gate runs full nextest",
         ] {
             assert!(
                 code_review_queue.content.contains(required),
@@ -5899,15 +5222,15 @@ This is the body content."#;
             .find(|b| b.path == "skills/cas-supervisor/references/workflow.md")
             .expect("BUILTIN_SKILLS missing cas-supervisor workflow.md");
         for required in [
-            "Run the lightweight per-merge gate",
-            "Do **not** run the full multi-persona",
-            "Record the audit trail",
-            "exception, not the default cadence",
+            "Run the canonical merge-time diff review",
+            "worker's direct diff against the task spec",
+            "Re-run the tests for touched modules",
+            "Record the review receipt",
+            "verification_type=task",
             "Hold the main merge",
-            "single required full multi-persona review",
-            "git diff <base-branch>..HEAD > /tmp/<epic-id>-diff.patch",
+            "Run the final assembled-tree gate",
+            "cargo nextest run -p cas",
             "bounded epic-child fix-round task",
-            "cargo test --no-fail-fast > /tmp/<epic-id>-cargo-test.log 2>&1; echo $?",
             "Never pipe the test run to `tail`",
         ] {
             assert!(
@@ -5921,8 +5244,8 @@ This is the body content."#;
             .next()
             .expect("workflow.md must contain Phase 3 content before Phase 4");
         assert!(
-            !phase3.contains("/cas-code-review mode=interactive base_sha=<pre_cp>"),
-            "workflow.md Phase 3 must not mandate the old full review invocation"
+            !phase3.contains("multi-persona") && !phase3.contains("findings envelope"),
+            "workflow.md Phase 3 must not mention the retired review pipeline"
         );
 
         let planning = BUILTIN_SKILLS
@@ -5930,8 +5253,9 @@ This is the body content."#;
             .find(|b| b.path == "skills/cas-supervisor/references/planning.md")
             .expect("BUILTIN_SKILLS missing cas-supervisor planning.md");
         for required in [
-            "Supervisors run a lightweight per-merge gate",
-            "one full multi-persona `/cas-code-review` against the assembled EPIC diff",
+            "Every worker merge receives the canonical merge-time diff review",
+            "Phase 4 runs the full final-tree nextest gate",
+            "Do not dispatch a separate review workflow",
         ] {
             assert!(
                 planning.content.contains(required),

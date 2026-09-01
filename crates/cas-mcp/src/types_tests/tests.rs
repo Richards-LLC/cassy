@@ -45,6 +45,24 @@ fn test_task_request_with_options() {
 }
 
 #[test]
+fn close_request_rejects_removed_findings_field() {
+    let error = serde_json::from_str::<TaskRequest>(
+        r#"{"action":"close","id":"cas-close","code_review_findings":"{}"}"#,
+    )
+    .expect_err("removed review envelope must be a request-schema error");
+    assert!(error.to_string().contains("code_review_findings"));
+}
+
+#[test]
+fn close_request_maps_deprecated_bypass_alias_to_supervisor_override() {
+    let request: TaskRequest =
+        serde_json::from_str(r#"{"action":"close","id":"cas-close","bypass_code_review":true}"#)
+            .unwrap();
+    assert_eq!(request.effective_supervisor_override(), Some(true));
+    assert!(request.used_deprecated_supervisor_override_alias());
+}
+
+#[test]
 fn test_system_request_reindex() {
     let req: SystemRequest = serde_json::from_str(
         r#"{

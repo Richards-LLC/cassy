@@ -95,7 +95,7 @@
             "type": "command"
           }
         ],
-        "matcher": "Read|Glob|Grep|Write|Edit|Bash|WebFetch|WebSearch|Task|SendMessage|AskUserQuestion|Skill|Workflow|Agent"
+        "matcher": "Read|Glob|Grep|Write|Edit|Bash|WebFetch|WebSearch|Task|SendMessage|AskUserQuestion|Agent"
       }
     ],
     "SessionEnd": [

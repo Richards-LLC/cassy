@@ -1646,7 +1646,7 @@ async fn update_to_closed_failed_hook_leaves_status_and_evidence_unchanged() {
 }
 
 #[tokio::test]
-async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_worktree() {
+async fn normal_close_uses_task_anchor_not_newer_same_worker_or_unrelated_worktree() {
     let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
     env.set("HOME", home.path());
@@ -1664,6 +1664,11 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
     );
     let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init repo A CAS");
     let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init repo B CAS");
+    std::fs::write(
+        cas_root_a.join("config.toml"),
+        "[verification]\nenabled = false\n",
+    )
+    .expect("disable verification for the ancestry-gate fixture");
 
     let own_path = cas_root_b.join("worktrees").join("frontend");
     repo_b.add_worktree(&own_path, "factory/frontend");
@@ -1713,8 +1718,8 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
             stranded_branch_override: None,
             id: task.id.clone(),
             reason: Some("task A complete".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -1722,14 +1727,14 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
         .expect("normal close call");
     let text = get_text(&result);
     assert!(
-        text.contains("MERGE REQUIRED") && text.contains("current factory branch tip"),
-        "#588 must reject the later unmerged task-B tip before review queueing: {text}"
+        text.contains("Closed task: normal-close"),
+        "the task-owned anchor must allow A to close without queueing a review for unrelated B: {text}"
     );
     let persisted = task_store.get(&task.id).expect("persisted task");
     assert_eq!(
         persisted.status,
-        cas::types::TaskStatus::AwaitingMerge,
-        "the ancestry rejection must leave task A available for merge recovery"
+        cas::types::TaskStatus::Closed,
+        "the task-owned anchor must leave task A closed after its delivery is integrated"
     );
 }
 
@@ -3106,7 +3111,7 @@ async fn submit_and_verify_delivery(
         .expect("task store")
         .get(task_id)
         .expect("task after receipt rejection");
-    pending.status = TaskStatus::PendingSupervisorReview;
+    pending.status = TaskStatus::AwaitingMerge;
     pending.pending_verification = true;
     pending.close_reason = Some("worker handoff".to_string());
     pending.deliverables.factory_branch_anchor = Some(receipt.commit_sha.clone());
@@ -3474,7 +3479,7 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
         "successful reconciliation releases the exact lease"
     );
     let recovered_task = task_store.get(&release_failure_task.id).unwrap();
-    assert_eq!(recovered_task.status, TaskStatus::PendingSupervisorReview);
+    assert_eq!(recovered_task.status, TaskStatus::InProgress);
     assert!(recovered_task.pending_verification);
     let unrelated_after_recovery = agent_store
         .get_lease(&task.id)
@@ -4117,7 +4122,7 @@ async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
         "cas-scope-locked".to_string(),
         "Immutable review scope".to_string(),
     );
-    task.status = TaskStatus::PendingSupervisorReview;
+    task.status = TaskStatus::AwaitingMerge;
     task.pending_verification = true;
     task.assignee = Some("alice".to_string());
     task.deliverables.work_target = Some(WorkTarget {
@@ -4238,7 +4243,7 @@ async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
     assert!(get_text(&note).contains("notes"));
     let after_note = task_store.get(&task.id).unwrap();
     assert!(after_note.notes.contains("harmless progress"));
-    assert_eq!(after_note.status, TaskStatus::PendingSupervisorReview);
+    assert_eq!(after_note.status, TaskStatus::AwaitingMerge);
     assert_eq!(
         cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
             .unwrap()
@@ -4273,7 +4278,7 @@ async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
             .notes
             .contains("dedicated progress action remains available")
     );
-    assert_eq!(after_progress.status, TaskStatus::PendingSupervisorReview);
+    assert_eq!(after_progress.status, TaskStatus::AwaitingMerge);
     assert_eq!(
         cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
             .unwrap()

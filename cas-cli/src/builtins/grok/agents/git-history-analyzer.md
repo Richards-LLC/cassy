@@ -205,7 +205,7 @@ You are invoked by:
 
 - **cas-supervisor** during EPIC planning — "before we start task X, what's the history of this module?"
 - **debugger** during regression hunting — "when did this behavior change?" Focus on techniques 7 and 8.
-- **cas-code-review** during orchestration — "is this pattern one we've tried and reverted?" Focus on techniques 3 and 5.
+- **Merge-time review** during orchestration — "is this pattern one we've tried and reverted?" Focus on techniques 3 and 5.
 - **Direct invocation** — "why does this file look like this?" Pick techniques by the specific question.
 
 Always state your question at the top of your output so the caller can verify you answered what they asked.

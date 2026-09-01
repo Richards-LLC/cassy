@@ -78,7 +78,6 @@ impl ExternalTaskDependencyProjection {
                     | "in_progress"
                     | "blocked"
                     | "cancelled"
-                    | "pending_supervisor_review"
                     | "awaiting_merge",
                 ) => unresolved,
                 _ => false,
@@ -117,6 +116,13 @@ impl ExternalTaskDependencyStore {
     }
 
     pub fn upsert(&self, dependency: &ExternalTaskDependencyProjection) -> Result<()> {
+        let mut dependency = dependency.clone();
+        if matches!(
+            dependency.target_task_status.as_deref(),
+            Some("pending_supervisor_review" | "pending-supervisor-review")
+        ) {
+            dependency.target_task_status = Some("awaiting_merge".to_string());
+        }
         dependency.validate_state_matrix()?;
         self.conn
             .lock()
@@ -302,6 +308,27 @@ mod tests {
             store.cursor("origin").unwrap().as_deref(),
             Some("opaque:cursor/value")
         );
+    }
+
+    #[test]
+    fn legacy_pending_supervisor_review_status_is_stored_as_awaiting_merge() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ExternalTaskDependencyStore::open(temp.path()).unwrap();
+        let dependency = ExternalTaskDependencyProjection {
+            origin_task_id: "cas-origin".into(),
+            proposal_id: "proposal-legacy".into(),
+            target_project_canonical_id: "target".into(),
+            target_task_id: "cas-0123456789abcdef".into(),
+            proposal_state: "accepted".into(),
+            target_task_status: Some("pending_supervisor_review".into()),
+            resolution_state: "unresolved".into(),
+            resolved_at: None,
+        };
+
+        store.upsert(&dependency).unwrap();
+        let rows = store.list_blocking_for_task("cas-origin").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target_task_status.as_deref(), Some("awaiting_merge"));
     }
 
     /// Cloud contract: closing an accepted target task resolves the edge;

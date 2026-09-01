@@ -348,11 +348,13 @@ impl WizardConfig {
             logging: None,
             llm: None,
             integrations: None,
-            code_review: None,
             issues: None,
             memory: None,
             hub: None,
             project: None,
+            // `code_review` remains an internal compatibility field until
+            // cas-6027 removes the close-gate readers; init does not seed it.
+            ..Default::default()
         }
     }
 }

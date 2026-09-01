@@ -169,6 +169,7 @@ pub struct TaskCreateRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TaskCloseRequest {
     /// Task ID
     #[schemars(description = "Task ID to close")]
@@ -179,20 +180,21 @@ pub struct TaskCloseRequest {
     #[serde(default)]
     pub reason: Option<String>,
 
-    /// Supervisor override for the cas-code-review P0 close gate (cas-b39f).
+    /// Supervisor override for close gates.
     ///
-    /// When `true`, the close path skips the multi-persona code-review
-    /// gate that would otherwise hard-block on P0 findings. Only honored
-    /// when the caller runs under a supervisor role
-    /// (`CAS_AGENT_ROLE=supervisor`); non-supervisor callers that set
-    /// this flag get an explicit rejection. The override is logged as a
-    /// decision note on the task so the audit trail captures who
-    /// downgraded a P0 block and why.
-    #[schemars(description = "Supervisor override for the code-review P0 gate. \
-                       Only honored when the caller is a supervisor; other \
-                       roles are rejected. Logs a decision note on the task.")]
+    /// The close handler accepts this only from a registered supervisor and
+    /// requires a non-empty close reason. The accepted decision is logged on
+    /// the task.
+    #[schemars(
+        description = "Supervisor override for close gates. Only honored when the caller is a registered supervisor and a non-empty reason is supplied; logs the accepted decision on the task."
+    )]
     #[serde(default)]
-    pub bypass_code_review: Option<bool>,
+    pub supervisor_override: Option<bool>,
+
+    /// One-release compatibility alias for `supervisor_override`.
+    #[schemars(skip)]
+    #[serde(default, rename = "bypass_code_review", skip_serializing)]
+    pub legacy_bypass_code_review: Option<bool>,
 
     /// Supervisor override for the epic close stranded-branch gate (cas-b192).
     ///
@@ -221,48 +223,6 @@ pub struct TaskCloseRequest {
                        measurements are logged as a decision note.")]
     #[serde(default)]
     pub stranded_branch_override: Option<String>,
-
-    /// Structured cas-code-review results passed in by the worker
-    /// before it retries close (cas-b39f, option (a)). The worker
-    /// invokes the cas-code-review skill, collects the merged
-    /// ReviewOutcome envelope, serializes it to JSON, and sends it
-    /// here as a string. The close gate parses it via
-    /// `serde_json::from_str::<ReviewOutcome>` and runs validation
-    /// before deciding the P0 block verdict.
-    ///
-    /// A string (instead of a typed struct) is used at the MCP
-    /// boundary because `ReviewOutcome` lives in `cas-types`, which
-    /// intentionally has no `schemars` dependency — taking a JSON
-    /// blob keeps the schema surface narrow. When this field is
-    /// `None` and the task has reviewable code changes (and no
-    /// supervisor override), the gate returns `CODE_REVIEW_REQUIRED`.
-    #[schemars(description = "LEGACY `[code_review] owner = \"worker\"` MODE ONLY. \
-                       Serialized ReviewOutcome JSON envelope from a \
-                       cas-code-review run. Under the DEFAULT \
-                       owner = \"supervisor\" configuration a factory worker \
-                       must NOT run cas-code-review (skill, workflow, or \
-                       hand-spawned personas) and must NOT pass this \
-                       field — attempt the close without it; the close \
-                       transitions the task to PendingSupervisorReview and \
-                       the supervisor runs the review on their own schedule \
-                       (cas-4fef). Check with \
-                       `cas config get code_review.owner`. \
-                       Under owner = \"worker\" it is \
-                       required whenever the task has reviewable code \
-                       changes unless bypass_code_review=true or the \
-                       task is additive-only. Shape: \
-                       {residual: Finding[], pre_existing: Finding[], mode: string, \
-                       execution: {personas_run: int, personas_failed: string[], \
-                       required_personas_missing: string[], skipped_reason: string|null}}. \
-                       `execution` is required and must be copied from the review \
-                       result, not hand-written: without it an empty residual[] is \
-                       indistinguishable from a review that never ran (cas-acf83). \
-                       Each Finding requires: title, severity, file, line, \
-                       why_it_matters, autofix_class, owner, confidence, \
-                       evidence, pre_existing (optional: suggested_fix, \
-                       requires_verification).")]
-    #[serde(default)]
-    pub code_review_findings: Option<String>,
 
     /// Search manifest for investigation-task (`Spike`) closes (cas-49f1).
     /// This is the per-action mirror of the unified `TaskRequest` field of

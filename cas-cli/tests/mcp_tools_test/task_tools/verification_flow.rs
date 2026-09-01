@@ -110,8 +110,8 @@ async fn legacy_repository_proof_rejects_drift(isolated: bool) {
         stranded_branch_override: None,
         id: task_id.clone(),
         reason: Some(reason.to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -1326,8 +1326,8 @@ async fn test_task_close_blocked_without_verification() {
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -1429,8 +1429,8 @@ require_merge_on_epic_close = true
         stranded_branch_override: None,
         id: task.id.clone(),
         reason: Some("Done".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -1600,8 +1600,8 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("implementation complete".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -1651,6 +1651,7 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
 async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipts_cas_6c50() {
     let (temp, service, supervisor_id) = setup_cas_with_supervisor_session();
     let _env_lock = env_test_lock();
+    let _supervisor_env = ScopedSupervisorEnv::new();
     let cas_dir = temp.path().join(".cas");
     let artifacts_root = temp.path().join("durable-artifacts");
     std::fs::create_dir_all(&artifacts_root).unwrap();
@@ -1713,8 +1714,8 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     stranded_branch_override: None,
                     id: task_id.to_string(),
                     reason: Some("worker tries to discard its own delivery".to_string()),
-                    bypass_code_review: None,
-                    code_review_findings: None,
+                    supervisor_override: None,
+                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }),
@@ -1742,8 +1743,8 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                 stranded_branch_override: None,
                 id: task_id.to_string(),
                 reason: Some("measurement complete".to_string()),
-                bypass_code_review: Some(true),
-                code_review_findings: None,
+                supervisor_override: Some(true),
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -1765,8 +1766,8 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     stranded_branch_override: None,
                     id: task_id.to_string(),
                     reason: None,
-                    bypass_code_review: None,
-                    code_review_findings: None,
+                    supervisor_override: None,
+                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }),
@@ -1804,8 +1805,8 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     stranded_branch_override: None,
                     id: task_id.to_string(),
                     reason: Some("experiment regressed the dominant path; do not ship".to_string()),
-                    bypass_code_review: None,
-                    code_review_findings: None,
+                    supervisor_override: None,
+                    legacy_bypass_code_review: None,
                     search_manifest: None,
                     commit_receipt: None,
                 }),
@@ -1946,8 +1947,8 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -2060,8 +2061,8 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -2197,8 +2198,8 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -2364,8 +2365,8 @@ async fn test_a844_clean_divergence_not_flagged_as_conflict() {
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -2500,8 +2501,8 @@ async fn test_repeated_merge_required_close_does_not_duplicate_park_audit_cas_62
         stranded_branch_override: None,
         id: id_a.clone(),
         reason: Some("ready for merge".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -2759,8 +2760,8 @@ async fn test_merge_before_first_close_uses_commit_hook_anchor_cas_3d37() {
                 stranded_branch_override: None,
                 id: task_id.clone(),
                 reason: Some("work was merged before first close".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -2900,8 +2901,8 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -2971,8 +2972,8 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3151,8 +3152,8 @@ async fn test_stale_local_epic_ref_falls_back_to_origin_cas_38e2() {
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("merged and pushed to origin".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3292,8 +3293,8 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3330,8 +3331,8 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("merged, closing".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3394,8 +3395,8 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("reworked, claiming done".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -3504,8 +3505,8 @@ async fn test_nonepic_task_resolves_default_branch_and_proceeds_when_merged_cas_
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("done, merged onto main".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -3609,8 +3610,8 @@ async fn test_nonepic_task_with_unmerged_code_is_rejected_not_skipped_cas_cf64()
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("claiming done but never merged".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -3716,8 +3717,8 @@ async fn test_chore_type_task_with_unmerged_code_is_no_longer_exempt_cas_cf64() 
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("claiming done but never merged".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -3794,8 +3795,8 @@ async fn test_chore_type_task_with_zero_commits_still_closes_on_notes_cas_cf64()
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("resolved via notes, no code needed".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -3928,8 +3929,8 @@ enabled = false
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("claims to be done".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -3962,8 +3963,8 @@ enabled = false
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("claims to be done".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -3989,8 +3990,8 @@ enabled = false
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("Committed and ready".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -4118,8 +4119,8 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("done".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -4153,8 +4154,8 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("actually done now".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -4319,8 +4320,8 @@ enabled = false
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("committed and additive".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4366,8 +4367,8 @@ enabled = false
                 stranded_branch_override: None,
                 id: id_b.clone(),
                 reason: Some("claims to be additive".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -4389,9 +4390,8 @@ enabled = false
     );
 
     // --- Scenario C: value-only is the accurate posture for a copy/i18n
-    //     change to an existing file. It must reach ordinary supervisor
-    //     review, without a worker-supplied envelope or weakening
-    //     additive-only.
+    //     change to an existing file. It follows the ordinary close path;
+    //     no worker-supplied review envelope or queue transition is needed.
     git(&["checkout", "-q", "main"]);
     git(&["checkout", "-q", "-b", "factory/value-only"]);
     std::fs::write(worktree_path.join("existing.txt"), "localized value\n").unwrap();
@@ -4414,8 +4414,8 @@ enabled = false
         t.worktree_id = Some(worktree_id.clone());
         task_store.update(&t).expect("update task");
     }
-    // Customer-visible value changes are reviewable under the default
-    // owner=supervisor policy. Make the fixture a factory worker explicitly:
+    // Customer-visible value changes remain reviewable by the normal
+    // verification/merge gates. Make the fixture a factory worker explicitly:
     // setup_cas clears ambient factory env so the test cannot accidentally
     // exercise a solo caller's close behavior.
     let _worker = FactoryWorkerEnv::enter();
@@ -4425,22 +4425,19 @@ enabled = false
                 stranded_branch_override: None,
                 id: id_c.clone(),
                 reason: Some("localized existing value".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
             .await
             .expect("close returns"),
     );
-    assert!(
-        resp_c.contains("supervisor review") || resp_c.contains("pending_supervisor_review"),
-        "value-only modification must queue ordinary supervisor review: {resp_c}"
-    );
+    assert!(resp_c.contains("Closed task:"), "value-only close should complete: {resp_c}");
     assert_eq!(
         task_store.get(&id_c).expect("task").status,
-        cas::types::TaskStatus::PendingSupervisorReview,
-        "value-only must not bypass supervisor-owned review"
+        cas::types::TaskStatus::Closed,
+        "value-only must not enter the retired review queue"
     );
 }
 
@@ -4569,8 +4566,8 @@ enabled = false
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("non-isolated direct CLI flow".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -4638,8 +4635,8 @@ enabled = false
         stranded_branch_override: None,
         id: additive_id.clone(),
         reason: Some("additive-only non-isolated".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -4718,8 +4715,8 @@ enabled = false
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("done, no files touched".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -4821,8 +4818,8 @@ enabled = false
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("done, no files touched".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -4844,11 +4841,9 @@ enabled = false
 }
 
 /// cas-a699: an unrelated urgent halt must not strand a worker after its own
-/// supervisor-review queue entry has received an approved, current-cycle
-/// verdict. `task start` intentionally refuses PendingSupervisorReview, so
-/// re-close is the only legitimate lifecycle exit from this completed state.
+/// completed delivery has received an approved, current-cycle verdict.
 #[tokio::test]
-async fn test_a699_halted_approved_pending_supervisor_review_recloses() {
+async fn test_a699_halted_approved_delivery_recloses() {
     let (temp, service) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
@@ -4873,13 +4868,15 @@ async fn test_a699_halted_approved_pending_supervisor_review_recloses() {
         .await
         .expect("start task");
 
-    // Model the durable queue projection after the worker's first close. The
-    // exact supervisor verdict below resolves the same current review cycle.
+    // Model the durable delivery projection after the worker's first close.
+    // The exact supervisor verdict below resolves the same current cycle.
     let task_store = open_task_store(&cas_dir).expect("task store");
     let mut task = task_store.get(&id).expect("task exists");
-    task.status = TaskStatus::PendingSupervisorReview;
+    task.status = TaskStatus::AwaitingMerge;
     task.pending_verification = true;
-    task_store.update(&task).expect("park for supervisor review");
+    task_store
+        .update(&task)
+        .expect("park for delivery verification");
     add_exact_supervisor_fixture_verdict(
         &cas_dir,
         Verification::approved(
@@ -4900,7 +4897,9 @@ async fn test_a699_halted_approved_pending_supervisor_review_recloses() {
     agent
         .metadata
         .insert("halt_task_work".to_string(), "1".to_string());
-    agent_store.update(&agent).expect("arm unrelated urgent halt");
+    agent_store
+        .update(&agent)
+        .expect("arm unrelated urgent halt");
 
     let response = extract_text(
         service
@@ -4908,8 +4907,8 @@ async fn test_a699_halted_approved_pending_supervisor_review_recloses() {
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("approved review re-close".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -5055,8 +5054,8 @@ async fn test_0447_halted_inprogress_with_merged_receipt_closes_without_restart(
                 stranded_branch_override: None,
                 id: task_id.clone(),
                 reason: Some("finished and merged".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: Some(receipt),
             }))
@@ -5113,8 +5112,8 @@ enabled = false
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("trying to close someone else's task".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5177,8 +5176,8 @@ async fn test_epic_close_requires_epic_verification_type() {
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5207,8 +5206,8 @@ async fn test_epic_close_requires_epic_verification_type() {
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5239,8 +5238,8 @@ async fn test_epic_close_requires_epic_verification_type() {
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5311,8 +5310,8 @@ async fn test_task_lifecycle_with_verification() {
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed successfully".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5393,8 +5392,8 @@ async fn test_task_close_blocked_with_rejected_verification() {
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5465,8 +5464,8 @@ async fn test_task_close_runs_verifier_or_skips_cleanly() {
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("Completed all acceptance criteria. Deployed to prod.".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5657,8 +5656,8 @@ async fn test_close_supervisor_owned_epic_uses_owner_closed_wording() {
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("all child tasks complete".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -5754,8 +5753,8 @@ async fn test_close_supervisor_bypass_orphaned_task() {
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("verification skipped — assignee inactive".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5867,8 +5866,8 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("verification skipped — assignee inactive (ghost agent)".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -5987,8 +5986,8 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("worker finished, asking supervisor to close".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6022,8 +6021,8 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("supervisor forced close after alignment".to_string()),
-        bypass_code_review: Some(true),
-        code_review_findings: None,
+        supervisor_override: Some(true),
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6115,8 +6114,8 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
         // the bypass is structural (assignee state), not reason-driven. Even
         // with this phrase, an alive assignee must keep the jail engaged.
         reason: Some("verification skipped — assignee inactive".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -6404,35 +6403,21 @@ owner = "worker"
 }
 
 // =============================================================================
-// cas-8edb: clean worker closes under `[code_review] owner = "supervisor"`
-// must NOT hit VERIFICATION_JAIL_BLOCKED.
+// Retired supervisor-owned review mode: workers use the standard exact
+// verification dispatch regardless of the old `[code_review]` setting.
 //
-// Background: cas-865b (v2.13.0, May 4) flipped the default code-review
-// owner from "worker" to "supervisor". Under the new default, workers do
-// not run cas-code-review at close — review happens at supervisor
-// cherry-pick. But the verification jail + the close_ops verification gate
-// were both still gated on a worker-supplied ReviewOutcome envelope (which
-// workers no longer submit), so every clean worker close re-stranded.
-//
-// These tests pin the post-fix behavior: under owner=supervisor (default),
-// workers can close cleanly without supervisor intervention for the two
-// shapes that were broken in production:
-//   1. Diagnostic / zero-diff close (no reviewable changes).
-//   2. Additive-only close (one or more new commits, additive-only marker).
-//
-// We also keep a regression for the third shape — a normal reviewable
-// close that hits the `PendingSupervisorReview` transition — to ensure the
-// supervisor_review_mode block at close_ops.rs:1084 still runs after the
-// gate is bypassed.
+// These tests pin the post-migration behavior for diagnostic and
+// additive-only worker closes: neither shape invokes the deleted review
+// queue, and both still receive the normal exact verification gate.
 // =============================================================================
 
 #[tokio::test]
-async fn test_worker_close_zero_diff_passes_jail_under_supervisor_owned_review_cas_8edb() {
+async fn test_worker_close_zero_diff_uses_standard_verification_cas_8387() {
     let (_temp, core) = setup_cas();
     let _env_lock = env_test_lock();
 
-    // No config.toml written ⇒ load_config falls back to default, and the
-    // default code_review owner is "supervisor" (cas-865b).
+    // No config.toml written: the removed code-review owner setting has no
+    // bearing on the standard verification gate.
     let service = CasService::new(core, None);
     let _env = FactoryWorkerEnv::enter();
 
@@ -6456,13 +6441,8 @@ async fn test_worker_close_zero_diff_passes_jail_under_supervisor_owned_review_c
         .await
         .expect("start");
 
-    // Close. Pre-fix this hit VERIFICATION_JAIL_BLOCKED because the worker
-    // held an InProgress leased task with no Approved/Skipped verification
-    // row and the auth gate fired. With cas-8edb the jail is bypassed for
-    // workers under owner=supervisor, and the close completes because
-    // `has_reviewable_changes` returns false on the test's non-git temp dir
-    // (supervisor_review_mode block falls through; run_code_review_gate
-    // proceeds; task closes normally).
+    // Close: the MCP action is admitted, then close_ops creates the exact
+    // verification dispatch required by the current contract.
     let result = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "close",
@@ -6470,28 +6450,24 @@ async fn test_worker_close_zero_diff_passes_jail_under_supervisor_owned_review_c
             "reason": "Diagnostic only — no code changes.",
         }))))
         .await
-        .expect("worker close must not hit jail under owner=supervisor");
+        .expect("worker close must return verification guidance");
     let text = extract_text(result);
     assert!(
         !text.contains("VERIFICATION_JAIL_BLOCKED"),
         "owner=supervisor worker close must bypass MCP jail, got: {text}"
     );
     assert!(
-        !text.contains("VERIFICATION REQUIRED"),
-        "owner=supervisor worker close must bypass close_ops gate, got: {text}"
-    );
-    assert!(
-        text.contains("Closed"),
-        "close response should indicate the task is closed, got: {text}"
+        text.contains("VERIFICATION REQUIRED"),
+        "worker close must use the standard close_ops verification gate, got: {text}"
     );
 }
 
 #[tokio::test]
-async fn test_worker_close_additive_only_passes_jail_under_supervisor_owned_review_cas_8edb() {
+async fn test_worker_close_additive_only_uses_standard_verification_cas_8387() {
     let (_temp, core) = setup_cas();
     let _env_lock = env_test_lock();
 
-    // Default config ⇒ owner=supervisor.
+    // Default config: the removed code-review owner setting is irrelevant.
     let service = CasService::new(core, None);
     let _env = FactoryWorkerEnv::enter();
 
@@ -6516,9 +6492,7 @@ async fn test_worker_close_additive_only_passes_jail_under_supervisor_owned_revi
         .await
         .expect("start");
 
-    // Additive-only tasks have an explicit gate skip in run_code_review_gate
-    // (line ~2361). Combined with the cas-8edb verification-jail bypass,
-    // the close completes without any envelope or supervisor intervention.
+    // Additive-only is a data-state declaration, not a verification bypass.
     let result = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "close",
@@ -6526,19 +6500,15 @@ async fn test_worker_close_additive_only_passes_jail_under_supervisor_owned_revi
             "reason": "Additive-only docs change — no existing files modified.",
         }))))
         .await
-        .expect("worker close must not hit jail under owner=supervisor (additive-only)");
+        .expect("worker close must return verification guidance");
     let text = extract_text(result);
     assert!(
         !text.contains("VERIFICATION_JAIL_BLOCKED"),
         "owner=supervisor additive-only worker close must bypass MCP jail, got: {text}"
     );
     assert!(
-        !text.contains("VERIFICATION REQUIRED"),
-        "owner=supervisor additive-only worker close must bypass close_ops gate, got: {text}"
-    );
-    assert!(
-        text.contains("Closed"),
-        "close response should indicate the task is closed, got: {text}"
+        text.contains("VERIFICATION REQUIRED"),
+        "additive-only worker close must use standard verification, got: {text}"
     );
 }
 
@@ -6869,8 +6839,8 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Completed".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -6925,8 +6895,8 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Completed".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -6968,181 +6938,6 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
         cas::types::VerificationDispatchState::Pending,
         "timing out A must not mutate B's dispatch"
     );
-}
-
-/// cas-3086: end-to-end. A worker runs cas-code-review, passes the clean
-/// ReviewOutcome envelope into `task.close`, and the close is rejected on
-/// the verification jail. The envelope must be persisted on the task's
-/// deliverables. A follow-up supervisor close — verification already
-/// approved, **no** `bypass_code_review=true`, **no** `code_review_findings`
-/// replayed — must succeed because the persisted receipt is forwarded
-/// into the gate.
-///
-/// This is the expensive-bypass cycle Report §7 is killing: before this
-/// fix, supervisor-close had to either set `bypass_code_review=true`
-/// (wrong-shape audit) or re-invoke the multi-persona reviewer ($0.30–0.50
-/// per retry) even though the worker had already run the review.
-#[tokio::test]
-async fn test_close_forwards_persisted_review_envelope_after_jail() {
-    use std::process::Command;
-
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
-    let cas_dir = temp.path().join(".cas");
-    let task_store = open_task_store(&cas_dir).unwrap();
-    // Make the project root (cas_root.parent()) a real git repo with
-    // staged code changes so the cas-code-review gate actually fires —
-    // otherwise `has_reviewable_changes` returns false and the gate
-    // silently skips, which would mask the forwarded-envelope logic.
-    let project_root = temp.path();
-    let git = |args: &[&str]| {
-        let ok = Command::new("git")
-            .args(args)
-            .current_dir(project_root)
-            .env("GIT_AUTHOR_NAME", "t")
-            .env("GIT_AUTHOR_EMAIL", "t@t")
-            .env("GIT_COMMITTER_NAME", "t")
-            .env("GIT_COMMITTER_EMAIL", "t@t")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .status()
-            .expect("git")
-            .success();
-        assert!(ok, "git {args:?} failed");
-    };
-    git(&["init", "-q", "-b", "main"]);
-    std::fs::write(project_root.join("seed.txt"), "seed\n").unwrap();
-    git(&["add", "seed.txt"]);
-    git(&["commit", "-q", "-m", "seed"]);
-    // Stage a real code change so is_reviewable_path returns true.
-    std::fs::create_dir_all(project_root.join("src")).unwrap();
-    std::fs::write(project_root.join("src/lib.rs"), "fn f() {}\n").unwrap();
-    git(&["add", "src/lib.rs"]);
-
-    let req = TaskCreateRequest {
-        depth: None,
-        title: "cas-3086: persisted-envelope forwarding".to_string(),
-        description: None,
-        priority: 2,
-        task_type: "task".to_string(),
-        labels: None,
-        notes: None,
-        blocked_by: None,
-        design: None,
-        acceptance_criteria: None,
-        external_ref: None,
-        assignee: None,
-        demo_statement: None,
-        execution_note: None,
-        epic: None,
-    };
-    let id = extract_task_id(&extract_text(
-        service
-            .cas_task_create(Parameters(req))
-            .await
-            .expect("task_create"),
-    ))
-    .expect("task id")
-    .to_string();
-
-    {
-        let mut t = task_store.get(&id).expect("task exists");
-        t.status = cas::types::TaskStatus::InProgress;
-        task_store.update(&t).expect("update");
-    }
-
-    // Worker builds a clean envelope (zero residual findings) and hands
-    // it in on the first close attempt.
-    let clean_envelope = serde_json::json!({
-        "residual": [],
-        "pre_existing": [],
-        "mode": "autofix",
-        // cas-acf83: a clean review must show it ran; without this the gate
-        // (correctly) cannot tell it from a review that never happened.
-        "execution": {
-            "personas_run": 4,
-            "personas_failed": [],
-            "required_personas_missing": [],
-        },
-    })
-    .to_string();
-
-    let first_close_text = extract_text(
-        service
-            .cas_task_close(Parameters(TaskCloseRequest {
-                stranded_branch_override: None,
-                id: id.clone(),
-                reason: Some("worker ran review, retrying close".to_string()),
-                bypass_code_review: None,
-                code_review_findings: Some(clean_envelope.clone()),
-                search_manifest: None,
-                commit_receipt: None,
-            }))
-            .await
-            .expect("close returns"),
-    );
-    assert!(
-        first_close_text.contains("VERIFICATION REQUIRED"),
-        "first close must hit verification jail: {first_close_text}"
-    );
-
-    // The envelope must have been persisted on the task BEFORE the jail
-    // rejection ran. This is the cas-3086 invariant: worker's review
-    // receipt survives unrelated close-gate rejections.
-    let after_jail = task_store.get(&id).expect("task exists");
-    assert_eq!(
-        after_jail.deliverables.review_envelope.as_deref(),
-        Some(clean_envelope.as_str()),
-        "envelope must be persisted even when close is rejected on the verification jail"
-    );
-
-    // Simulate an exact verdict for the dispatch created by the first close.
-    // A task-wide legacy row must not clear this current cycle.
-    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &id)
-        .unwrap()
-        .unwrap();
-    let ver = Verification::approved(
-        "ver-cas-3086".to_string(),
-        id.clone(),
-        "verified".to_string(),
-    );
-    add_exact_supervisor_fixture_verdict(&cas_dir, ver, Some(&dispatch.id));
-
-    // Supervisor closes — no bypass_code_review, no code_review_findings.
-    // Pre-fix: gate would return CODE_REVIEW_REQUIRED because the
-    // request has no envelope and nothing was persisted. Post-fix: the
-    // persisted envelope is forwarded, the gate proceeds.
-    let _guard = ScopedSupervisorEnv::new();
-    let supervisor_close_text = extract_text(
-        service
-            .cas_task_close(Parameters(TaskCloseRequest {
-                stranded_branch_override: None,
-                id: id.clone(),
-                reason: Some("closing on worker's behalf; review already passed".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
-                search_manifest: None,
-                commit_receipt: None,
-            }))
-            .await
-            .expect("supervisor close returns"),
-    );
-
-    assert!(
-        supervisor_close_text.contains("Closed"),
-        "supervisor close must succeed via forwarded envelope: {supervisor_close_text}"
-    );
-    assert!(
-        !supervisor_close_text.contains("CODE_REVIEW_REQUIRED"),
-        "supervisor close must NOT demand a fresh envelope: {supervisor_close_text}"
-    );
-    assert!(
-        !supervisor_close_text.contains("bypass_code_review"),
-        "supervisor close should not have needed the bypass path: {supervisor_close_text}"
-    );
-
-    let closed = task_store.get(&id).expect("task exists");
-    assert_eq!(closed.status, cas::types::TaskStatus::Closed);
 }
 
 // =============================================================================
@@ -7316,769 +7111,6 @@ async fn test_registered_supervisor_can_verify_live_worker_task() {
     assert!(
         !task_store.get(&id).expect("task").pending_verification,
         "supervisor verdict must atomically clear only the named task transition"
-    );
-}
-
-// =============================================================================
-// cas-778a: Worker-owned verification via clean ReviewOutcome envelope
-//
-// Factory workers call cas-code-review (mode=autofix) before closing. The
-// resulting ReviewOutcome envelope is the worker's verification step. When the
-// envelope is structurally valid and has no P0 in residual or pre_existing,
-// close_ops should short-circuit the verification gate and write a Skipped row
-// instead of arming the jail (pending_verification=true). Tests go through
-// service.cas_task_close directly (bypassing the MCP jail) to isolate close_ops
-// behavior.
-// =============================================================================
-
-/// A valid ReviewOutcome JSON with empty residual — what a clean cas-code-review
-/// run returns after the autofix loop resolves every finding.
-///
-/// cas-acf83 (GH #108): carries the `execution` block the gate now requires.
-/// Without it an empty residual[] is indistinguishable from a review that never
-/// ran, which is the whole point of that change — so a fixture that omits it is
-/// no longer modelling a clean review, it is modelling the bug.
-const CLEAN_ENVELOPE: &str = r#"{"residual":[],"pre_existing":[],"mode":"autofix","execution":{"personas_run":4,"personas_failed":[],"required_personas_missing":[]}}"#;
-
-/// A ReviewOutcome JSON with a P0 finding in residual — the autofix loop could
-/// not resolve a blocker. The verification gate must still arm the jail.
-const P0_RESIDUAL_ENVELOPE: &str = r#"{
-    "residual": [{
-        "title": "Critical security vulnerability",
-        "severity": "P0",
-        "file": "src/foo.rs",
-        "line": 1,
-        "why_it_matters": "Allows authentication bypass on the close path",
-        "autofix_class": "manual",
-        "owner": "human",
-        "confidence": 0.95,
-        "evidence": ["unsafe { std::mem::transmute(user_id) }"],
-        "pre_existing": false
-    }],
-    "pre_existing": [],
-    "mode": "autofix"
-}"#;
-
-/// A ReviewOutcome JSON with a P0 finding in residual but with the per-finding
-/// `pre_existing: true` flag set — the forgery vector fixed by cas-778a.
-///
-/// `evaluate_gate()` skips findings with `pre_existing: true`, so without the
-/// additional explicit P0 check added to `worker_review_envelope_is_clean`,
-/// this envelope would pass both the gate call AND the `pre_existing`-array
-/// check and bypass the verification jail. After the fix, it must block.
-const P0_RESIDUAL_PRE_EXISTING_TRUE_ENVELOPE: &str = r#"{
-    "residual": [{
-        "title": "Auth bypass via privilege escalation",
-        "severity": "P0",
-        "file": "src/auth.rs",
-        "line": 42,
-        "why_it_matters": "Allows unauthenticated access to admin endpoints",
-        "autofix_class": "manual",
-        "owner": "human",
-        "confidence": 0.95,
-        "evidence": ["src/auth.rs:42 — missing role check"],
-        "pre_existing": true
-    }],
-    "pre_existing": [],
-    "mode": "autofix"
-}"#;
-
-/// cas-778a AC1: factory worker calling cas_task_close with a structurally
-/// valid, empty-residual envelope closes successfully without the verification
-/// jail being armed.
-///
-/// Specifically:
-/// - The close returns "Closed task:" (not "VERIFICATION REQUIRED")
-/// - task.pending_verification is false (jail NOT armed)
-/// - A Verification row with status=Skipped and the expected summary is written
-/// - The task status is Closed
-#[tokio::test]
-async fn test_worker_close_with_clean_review_envelope_proceeds() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
-    let cas_dir = temp.path().join(".cas");
-    // cas-8edb: this test pins the legacy `owner = "worker"` self-cert path.
-    // Under the new default `owner = "supervisor"`, the verification gate is
-    // bypassed entirely and no Skipped row is written — see the cas-8edb
-    // tests below for the new default behavior.
-    std::fs::write(
-        cas_dir.join("config.toml"),
-        r#"[code_review]
-owner = "worker"
-"#,
-    )
-    .expect("legacy code_review config");
-    let task_store = open_task_store(&cas_dir).unwrap();
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-    let _env = FactoryWorkerEnv::enter();
-
-    // Create a task.
-    let req = TaskCreateRequest {
-        depth: None,
-        title: "cas-778a: worker-owned verification happy path".to_string(),
-        description: None,
-        priority: 2,
-        task_type: "task".to_string(),
-        labels: None,
-        notes: None,
-        blocked_by: None,
-        design: None,
-        acceptance_criteria: None,
-        external_ref: None,
-        assignee: None,
-        demo_statement: None,
-        execution_note: None,
-        epic: None,
-    };
-    let create_text = extract_text(
-        service
-            .cas_task_create(Parameters(req))
-            .await
-            .expect("task_create should succeed"),
-    );
-    let id = extract_task_id(&create_text)
-        .expect("should have task ID")
-        .to_string();
-
-    // Start the task (sets InProgress + active lease).
-    service
-        .cas_task_start(Parameters(IdRequest { id: id.clone() }))
-        .await
-        .expect("task_start should succeed");
-
-    // Close with a clean ReviewOutcome envelope. The verification gate
-    // should short-circuit, write a Skipped row, and proceed with close.
-    let close_req = TaskCloseRequest {
-        stranded_branch_override: None,
-        id: id.clone(),
-        reason: Some(
-            "All acceptance criteria met. cas-code-review autofix returned clean envelope."
-                .to_string(),
-        ),
-        bypass_code_review: None,
-        code_review_findings: Some(CLEAN_ENVELOPE.to_string()),
-        search_manifest: None,
-        commit_receipt: None,
-    };
-    let result = service
-        .cas_task_close(Parameters(close_req))
-        .await
-        .expect("task_close should return a result");
-    let text = extract_text(result);
-
-    assert!(
-        text.contains("Closed task:"),
-        "close with clean envelope must succeed: {text}"
-    );
-    assert!(
-        !text.contains("VERIFICATION REQUIRED"),
-        "clean envelope must not trigger VERIFICATION REQUIRED: {text}"
-    );
-
-    // Jail must NOT have been armed.
-    let task = task_store.get(&id).expect("task should exist");
-    assert!(
-        !task.pending_verification,
-        "pending_verification must be false — jail must not be armed for clean envelope"
-    );
-    assert_eq!(
-        task.status,
-        cas::types::TaskStatus::Closed,
-        "task must be Closed after worker-owned verification close"
-    );
-
-    // A Skipped verification row must have been written for the audit trail.
-    let ver = verification_store
-        .get_latest_for_task(&id)
-        .expect("verification store lookup should succeed")
-        .expect("a Skipped verification row must exist after worker-owned verification close");
-    assert_eq!(
-        ver.status,
-        cas::types::VerificationStatus::Skipped,
-        "verification row status must be Skipped, got: {:?}",
-        ver.status
-    );
-    assert!(
-        ver.summary.contains("Worker-owned verification"),
-        "Skipped row summary must mention 'Worker-owned verification': {}",
-        ver.summary
-    );
-
-    // The envelope must be persisted to task deliverables for the downstream
-    // code_review_gate's second-pass re-validation.
-    let refreshed_task = task_store.get(&id).expect("task should exist after close");
-    assert_eq!(
-        refreshed_task.deliverables.review_envelope.as_deref(),
-        Some(CLEAN_ENVELOPE),
-        "review_envelope must be persisted to task deliverables for downstream gate re-validation"
-    );
-}
-
-/// cas-778a P0 forgery-fix: factory worker close with a P0 in residual[] that
-/// carries `pre_existing: true` on the *per-finding* field must NOT short-
-/// circuit. Before the fix, `evaluate_gate()` would skip such a finding
-/// (treating it as baseline noise), making the residual appear clean.
-/// After the fix, `worker_review_envelope_is_clean` explicitly rejects any P0
-/// in residual regardless of the per-finding flag.
-#[tokio::test]
-async fn test_worker_close_with_p0_residual_pre_existing_true_still_blocked() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
-    let cas_dir = temp.path().join(".cas");
-    // cas-8edb: legacy `owner = "worker"` envelope path. See note above.
-    std::fs::write(
-        cas_dir.join("config.toml"),
-        r#"[code_review]
-owner = "worker"
-"#,
-    )
-    .expect("legacy code_review config");
-    let task_store = open_task_store(&cas_dir).unwrap();
-    let _env = FactoryWorkerEnv::enter();
-
-    let req = TaskCreateRequest {
-        depth: None,
-        title: "cas-778a: P0-in-residual with pre_existing=true must block".to_string(),
-        description: None,
-        priority: 2,
-        task_type: "task".to_string(),
-        labels: None,
-        notes: None,
-        blocked_by: None,
-        design: None,
-        acceptance_criteria: None,
-        external_ref: None,
-        assignee: None,
-        demo_statement: None,
-        execution_note: None,
-        epic: None,
-    };
-    let create_text = extract_text(
-        service
-            .cas_task_create(Parameters(req))
-            .await
-            .expect("task_create should succeed"),
-    );
-    let id = extract_task_id(&create_text)
-        .expect("should have task ID")
-        .to_string();
-
-    service
-        .cas_task_start(Parameters(IdRequest { id: id.clone() }))
-        .await
-        .expect("task_start should succeed");
-
-    // Close with the forgery envelope: P0 in residual[] with pre_existing=true.
-    // The bypass must be blocked — a P0 is a P0 regardless of per-finding flag.
-    let close_req = TaskCloseRequest {
-        stranded_branch_override: None,
-        id: id.clone(),
-        reason: Some("Done (hiding P0 via pre_existing=true forgery)".to_string()),
-        bypass_code_review: None,
-        code_review_findings: Some(P0_RESIDUAL_PRE_EXISTING_TRUE_ENVELOPE.to_string()),
-        search_manifest: None,
-        commit_receipt: None,
-    };
-    let result = service
-        .cas_task_close(Parameters(close_req))
-        .await
-        .expect("task_close should return a result");
-    let text = extract_text(result);
-
-    assert!(
-        text.contains("VERIFICATION REQUIRED"),
-        "P0-in-residual with pre_existing=true must still require verification: {text}"
-    );
-    assert!(
-        !text.contains("Closed task:"),
-        "forgery envelope must NOT allow close to succeed: {text}"
-    );
-
-    // Jail must be armed.
-    let task = task_store.get(&id).expect("task should exist");
-    assert!(
-        task.pending_verification,
-        "pending_verification must be true — jail must be armed for forgery envelope"
-    );
-    assert_ne!(
-        task.status,
-        cas::types::TaskStatus::Closed,
-        "task must NOT be Closed when the forgery envelope is rejected"
-    );
-}
-
-/// cas-778a AC2: factory worker close with a P0 in residual is NOT short-
-/// circuited — the verification gate must still arm the jail and return
-/// VERIFICATION REQUIRED, just as before the fix.
-#[tokio::test]
-async fn test_worker_close_with_p0_residual_still_blocked() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
-    let cas_dir = temp.path().join(".cas");
-    // cas-8edb: legacy `owner = "worker"` envelope path.
-    std::fs::write(
-        cas_dir.join("config.toml"),
-        r#"[code_review]
-owner = "worker"
-"#,
-    )
-    .expect("legacy code_review config");
-    let task_store = open_task_store(&cas_dir).unwrap();
-    let _env = FactoryWorkerEnv::enter();
-
-    let req = TaskCreateRequest {
-        depth: None,
-        title: "cas-778a: worker P0 residual must still block".to_string(),
-        description: None,
-        priority: 2,
-        task_type: "task".to_string(),
-        labels: None,
-        notes: None,
-        blocked_by: None,
-        design: None,
-        acceptance_criteria: None,
-        external_ref: None,
-        assignee: None,
-        demo_statement: None,
-        execution_note: None,
-        epic: None,
-    };
-    let create_text = extract_text(
-        service
-            .cas_task_create(Parameters(req))
-            .await
-            .expect("task_create should succeed"),
-    );
-    let id = extract_task_id(&create_text)
-        .expect("should have task ID")
-        .to_string();
-
-    service
-        .cas_task_start(Parameters(IdRequest { id: id.clone() }))
-        .await
-        .expect("task_start should succeed");
-
-    // Close with an envelope that has a P0 in residual. The gate must
-    // NOT short-circuit — verification is required.
-    let close_req = TaskCloseRequest {
-        stranded_branch_override: None,
-        id: id.clone(),
-        reason: Some("Done (but has P0 issue)".to_string()),
-        bypass_code_review: None,
-        code_review_findings: Some(P0_RESIDUAL_ENVELOPE.to_string()),
-        search_manifest: None,
-        commit_receipt: None,
-    };
-    let result = service
-        .cas_task_close(Parameters(close_req))
-        .await
-        .expect("task_close should return a result");
-    let text = extract_text(result);
-
-    assert!(
-        text.contains("VERIFICATION REQUIRED"),
-        "P0-in-residual envelope must still require verification: {text}"
-    );
-    assert!(
-        !text.contains("Closed task:"),
-        "close with P0 envelope must NOT succeed: {text}"
-    );
-
-    // Jail must be armed (pending_verification=true).
-    let task = task_store.get(&id).expect("task should exist");
-    assert!(
-        task.pending_verification,
-        "pending_verification must be true — jail must be armed for P0 envelope"
-    );
-    assert_ne!(
-        task.status,
-        cas::types::TaskStatus::Closed,
-        "task must NOT be Closed when verification is required"
-    );
-}
-
-/// cas-778a AC3: factory worker close with a malformed (non-JSON) envelope is
-/// NOT short-circuited — the verification gate must still arm the jail.
-#[tokio::test]
-async fn test_worker_close_with_malformed_envelope_still_blocked() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
-    let cas_dir = temp.path().join(".cas");
-    // cas-8edb: legacy `owner = "worker"` envelope path.
-    std::fs::write(
-        cas_dir.join("config.toml"),
-        r#"[code_review]
-owner = "worker"
-"#,
-    )
-    .expect("legacy code_review config");
-    let task_store = open_task_store(&cas_dir).unwrap();
-    let _env = FactoryWorkerEnv::enter();
-
-    let req = TaskCreateRequest {
-        depth: None,
-        title: "cas-778a: worker malformed envelope must still block".to_string(),
-        description: None,
-        priority: 2,
-        task_type: "task".to_string(),
-        labels: None,
-        notes: None,
-        blocked_by: None,
-        design: None,
-        acceptance_criteria: None,
-        external_ref: None,
-        assignee: None,
-        demo_statement: None,
-        execution_note: None,
-        epic: None,
-    };
-    let create_text = extract_text(
-        service
-            .cas_task_create(Parameters(req))
-            .await
-            .expect("task_create should succeed"),
-    );
-    let id = extract_task_id(&create_text)
-        .expect("should have task ID")
-        .to_string();
-
-    service
-        .cas_task_start(Parameters(IdRequest { id: id.clone() }))
-        .await
-        .expect("task_start should succeed");
-
-    // Close with malformed JSON. The gate must NOT short-circuit.
-    let close_req = TaskCloseRequest {
-        stranded_branch_override: None,
-        id: id.clone(),
-        reason: Some("Done (but envelope is garbage)".to_string()),
-        bypass_code_review: None,
-        code_review_findings: Some("{not valid json at all".to_string()),
-        search_manifest: None,
-        commit_receipt: None,
-    };
-    let result = service
-        .cas_task_close(Parameters(close_req))
-        .await
-        .expect("task_close should return a result");
-    let text = extract_text(result);
-
-    assert!(
-        text.contains("VERIFICATION REQUIRED"),
-        "malformed envelope must still require verification: {text}"
-    );
-    assert!(
-        !text.contains("Closed task:"),
-        "close with malformed envelope must NOT succeed: {text}"
-    );
-
-    // Jail must be armed.
-    let task = task_store.get(&id).expect("task should exist");
-    assert!(
-        task.pending_verification,
-        "pending_verification must be true — jail must be armed for malformed envelope"
-    );
-    assert_ne!(
-        task.status,
-        cas::types::TaskStatus::Closed,
-        "task must NOT be Closed when verification is required"
-    );
-}
-
-/// cas-164c AC1: factory worker close with a clean envelope MUST be blocked
-/// when a FRESH task-verifier dispatch row (status=Error, summary starts with
-/// "Dispatch requested", age ≤ VERIFICATION_JAIL_TIMEOUT_SECS) already exists.
-///
-/// Scenario:
-///   1. First close (no envelope) → verification jail arms, dispatch row written.
-///   2. Dispatch row is confirmed fresh (< 10 min old — it was just written).
-///   3. Second close WITH a clean CLEAN_ENVELOPE → must NOT short-circuit via
-///      worker-owned self-cert; the in-flight verifier's verdict must be awaited.
-///
-/// Before the fix (cas-164c), step 3 would write a Skipped row and close the
-/// task, orphaning the running task-verifier subagent.
-#[tokio::test]
-async fn test_worker_self_cert_blocked_when_fresh_dispatch_row_exists() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
-    let cas_dir = temp.path().join(".cas");
-    // cas-8edb: legacy `owner = "worker"` self-cert path.
-    std::fs::write(
-        cas_dir.join("config.toml"),
-        r#"[code_review]
-owner = "worker"
-"#,
-    )
-    .expect("legacy code_review config");
-    let task_store = open_task_store(&cas_dir).unwrap();
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-    let _env = FactoryWorkerEnv::enter();
-
-    // Create + start task.
-    let req = TaskCreateRequest {
-        depth: None,
-        title: "cas-164c: self-cert blocked by fresh dispatch row".to_string(),
-        description: None,
-        priority: 2,
-        task_type: "task".to_string(),
-        labels: None,
-        notes: None,
-        blocked_by: None,
-        design: None,
-        acceptance_criteria: None,
-        external_ref: None,
-        assignee: None,
-        demo_statement: None,
-        execution_note: None,
-        epic: None,
-    };
-    let create_text = extract_text(
-        service
-            .cas_task_create(Parameters(req))
-            .await
-            .expect("task_create should succeed"),
-    );
-    let id = extract_task_id(&create_text)
-        .expect("should have task ID")
-        .to_string();
-
-    service
-        .cas_task_start(Parameters(IdRequest { id: id.clone() }))
-        .await
-        .expect("task_start should succeed");
-
-    // First close — no envelope. The verification jail arms and a fresh
-    // dispatch-request row (status=Error, summary="Dispatch requested…") is
-    // written.
-    let _ = service
-        .cas_task_close(Parameters(TaskCloseRequest {
-            stranded_branch_override: None,
-            id: id.clone(),
-            reason: Some("Done".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,
-        }))
-        .await
-        .expect("first close should return a result");
-
-    let task_after_first = task_store.get(&id).expect("task should exist");
-    assert!(
-        task_after_first.pending_verification,
-        "first close must arm the verification jail"
-    );
-
-    // Confirm the dispatch row is fresh (just written — well within the
-    // VERIFICATION_JAIL_TIMEOUT_SECS window).
-    let dispatch = verification_store
-        .get_latest_for_task(&id)
-        .expect("verification store should be readable")
-        .expect("dispatch row must exist after first close");
-    assert_eq!(
-        dispatch.status,
-        cas::types::VerificationStatus::Error,
-        "dispatch row status must be Error"
-    );
-    assert!(
-        dispatch.summary.starts_with("Dispatch requested"),
-        "dispatch row summary must start with 'Dispatch requested', got: {}",
-        dispatch.summary
-    );
-    let age_secs = (chrono::Utc::now() - dispatch.created_at).num_seconds();
-    assert!(
-        age_secs < 600,
-        "dispatch row must be fresh (age={age_secs}s < 600s)"
-    );
-
-    // Second close WITH a clean envelope. The in-flight dispatch row is fresh,
-    // so worker-owned self-cert (cas-778a) must be SUPPRESSED. The task must
-    // remain jailed and the dispatch row must NOT be replaced by a Skipped row.
-    let result = service
-        .cas_task_close(Parameters(TaskCloseRequest {
-            stranded_branch_override: None,
-            id: id.clone(),
-            reason: Some("All criteria met — clean review envelope.".to_string()),
-            bypass_code_review: None,
-            code_review_findings: Some(CLEAN_ENVELOPE.to_string()),
-            search_manifest: None,
-            commit_receipt: None,
-        }))
-        .await
-        .expect("second close should return a result");
-    let text = extract_text(result);
-
-    assert!(
-        text.contains("VERIFICATION REQUIRED"),
-        "second close with clean envelope must still require verification when fresh dispatch row exists: {text}"
-    );
-    assert!(
-        !text.contains("Closed task:"),
-        "second close must NOT succeed while fresh dispatch row exists: {text}"
-    );
-
-    // Task must remain jailed — pending_verification still true.
-    let task_after_second = task_store.get(&id).expect("task should exist");
-    assert!(
-        task_after_second.pending_verification,
-        "pending_verification must remain true — jail must NOT be cleared by self-cert while dispatch is in-flight"
-    );
-    assert_ne!(
-        task_after_second.status,
-        cas::types::TaskStatus::Closed,
-        "task must NOT be Closed while fresh dispatch row is in-flight"
-    );
-
-    // The dispatch row must NOT have been replaced with a Skipped row.
-    let row_after = verification_store
-        .get_latest_for_task(&id)
-        .expect("verification store should be readable")
-        .expect("verification row must still exist");
-    assert_eq!(
-        row_after.status,
-        cas::types::VerificationStatus::Error,
-        "dispatch row must remain Error — self-cert must NOT have overwritten it with Skipped: {:?}",
-        row_after.status
-    );
-    assert!(
-        row_after.summary.starts_with("Dispatch requested"),
-        "dispatch row summary must still start with 'Dispatch requested' — must not have been overwritten: {}",
-        row_after.summary
-    );
-
-    // Exactly one verification row must exist — the original dispatch row.
-    // A second Skipped row would indicate the self-cert path ran before being
-    // blocked, which is the exact bug cas-164c was fixing.
-    let all_rows = verification_store
-        .get_for_task(&id)
-        .expect("get_for_task should succeed");
-    assert_eq!(
-        all_rows.len(),
-        1,
-        "exactly one verification row (the dispatch row) must exist after blocked second close — a Skipped row would indicate self-cert ran despite in_flight_dispatch=true"
-    );
-}
-
-/// cas-c97e AC1+AC2 (Option B): if the Skipped verification row write fails, the
-/// close must still SUCCEED (fall-through, not abort). The audit gap must be
-/// visible via a DaemonEvent but must not block the worker.
-///
-/// Test strategy: use a raw SQLite BEFORE INSERT trigger on the verifications table
-/// to force `verification_store.add()` to fail with SQLITE_ABORT. The close path
-/// must return "Closed task:" and the verifications table must remain empty
-/// (confirming the insert was blocked and the error was handled gracefully).
-///
-/// Coverage scope: this test exercises the `add()` failure path (the `Err(e)` branch
-/// inside the `Ok(ver_id)` arm). The `generate_id()` failure path (the outer
-/// `Err(e)` arm) is NOT covered here because the BEFORE INSERT trigger cannot
-/// affect `generate_id()` — that function performs no DB call. Tracking open
-/// in cas-eeab.
-///
-/// Note: DaemonEvent emission via `send_event` is fire-and-forget over a Unix
-/// socket; no daemon is running in unit tests so the event is silently discarded.
-/// The observable invariant (close succeeds, no row written) covers the fall-through
-/// behaviour; event-emission fidelity requires an in-process event sink (out of
-/// scope, tracked in cas-eeab).
-#[tokio::test]
-async fn test_worker_close_succeeds_when_skipped_row_write_fails_option_b() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
-    let cas_dir = temp.path().join(".cas");
-    let task_store = open_task_store(&cas_dir).unwrap();
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-    let _env = FactoryWorkerEnv::enter();
-
-    // Create + start task.
-    let req = TaskCreateRequest {
-        depth: None,
-        title: "cas-c97e: close succeeds when Skipped row write fails".to_string(),
-        description: None,
-        priority: 2,
-        task_type: "task".to_string(),
-        labels: None,
-        notes: None,
-        blocked_by: None,
-        design: None,
-        acceptance_criteria: None,
-        external_ref: None,
-        assignee: None,
-        demo_statement: None,
-        execution_note: None,
-        epic: None,
-    };
-    let create_text = extract_text(
-        service
-            .cas_task_create(Parameters(req))
-            .await
-            .expect("task_create should succeed"),
-    );
-    let id = extract_task_id(&create_text)
-        .expect("should have task ID")
-        .to_string();
-
-    service
-        .cas_task_start(Parameters(IdRequest { id: id.clone() }))
-        .await
-        .expect("task_start should succeed");
-
-    // Install a BEFORE INSERT trigger that makes every INSERT into verifications
-    // raise SQLITE_ABORT — simulating a transient store failure.
-    {
-        let db_path = cas_dir.join("cas.db");
-        let conn = rusqlite::Connection::open(&db_path)
-            .expect("should open cas.db for trigger installation");
-        conn.execute_batch(
-            "CREATE TRIGGER block_verification_insert \
-             BEFORE INSERT ON verifications \
-             BEGIN SELECT RAISE(ABORT, 'simulated-store-failure'); END;",
-        )
-        .expect("trigger creation should succeed");
-    }
-
-    // Attempt close with a clean envelope. The Skipped row write will fail
-    // (SQLITE_ABORT from the trigger) but Option B must fall through — close
-    // must succeed.
-    let result = service
-        .cas_task_close(Parameters(TaskCloseRequest {
-            stranded_branch_override: None,
-            id: id.clone(),
-            reason: Some("All criteria met — clean review envelope.".to_string()),
-            bypass_code_review: None,
-            code_review_findings: Some(CLEAN_ENVELOPE.to_string()),
-            search_manifest: None,
-            commit_receipt: None,
-        }))
-        .await
-        .expect("task_close should return a result");
-    let text = extract_text(result);
-
-    // Option B: close must succeed despite the audit write failure.
-    assert!(
-        text.contains("Closed task:"),
-        "close must succeed (Option B fall-through) even when Skipped row write fails: {text}"
-    );
-    assert!(
-        !text.contains("VERIFICATION REQUIRED"),
-        "close must NOT be blocked by the store failure: {text}"
-    );
-
-    // Task must be Closed in the DB.
-    let task_after = task_store.get(&id).expect("task should exist");
-    assert_eq!(
-        task_after.status,
-        cas::types::TaskStatus::Closed,
-        "task must be Closed after Option B fall-through"
-    );
-
-    // The verifications table must be empty — the trigger blocked the insert,
-    // confirming the error-handling path was exercised (not the happy path).
-    let all_rows = verification_store
-        .get_for_task(&id)
-        .expect("get_for_task should succeed even with trigger present");
-    assert_eq!(
-        all_rows.len(),
-        0,
-        "verifications table must be empty — the trigger must have blocked the Skipped row insert"
     );
 }
 
@@ -8674,8 +7706,8 @@ async fn test_pending_dispatch_close_gate_prints_supervisor_recovery_cas_9fd4() 
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("Ready for supervisor verification".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -9008,8 +8040,8 @@ async fn supervisor_self_assignee_close_guidance(supervisor_cli: Option<&str>) -
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("Self-implemented; ready to self-verify".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -9102,8 +8134,8 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Completed".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -9130,8 +8162,8 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("Completed".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -9212,8 +8244,8 @@ async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("062d close proof".to_string()),
-                bypass_code_review: Some(true),
-                code_review_findings: None,
+                supervisor_override: Some(true),
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -9360,8 +8392,8 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -9415,8 +8447,8 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -9554,8 +8586,8 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -9585,8 +8617,8 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("retry before merge".to_string()),
-                bypass_code_review: None,
-                code_review_findings: None,
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
                 search_manifest: None,
                 commit_receipt: None,
             }))
@@ -9693,8 +8725,8 @@ async fn test_3894_halt_no_longer_blocks_close_of_own_inprogress_task() {
             stranded_branch_override: None,
             id: id_b.clone(),
             reason: Some("done".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))

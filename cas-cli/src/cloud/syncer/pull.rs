@@ -699,15 +699,6 @@ fn reconcile_web_close(
                 // Already closed locally — nothing to do.
                 return Ok(UpsertResult::Skipped);
             }
-            if local.status == TaskStatus::PendingSupervisorReview {
-                // An explicit teammate web close overrides the pending-review
-                // gate. Surface it so the bypassed supervisor review is auditable.
-                tracing::warn!(
-                    task_id = %task.id,
-                    "cas-fc52: web close applied to a PendingSupervisorReview task — \
-                     supervisor review gate bypassed by explicit teammate close"
-                );
-            }
             // Merge ONLY the close signal onto the local row. A full overwrite
             // with the remote tombstone would clobber locally-authored,
             // not-yet-pushed content (notes / description / acceptance_criteria):

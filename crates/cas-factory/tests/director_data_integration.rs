@@ -594,7 +594,7 @@ fn data_from_tasks(tasks: Vec<TaskSummary>) -> DirectorData {
     for t in tasks {
         match (t.task_type, t.status) {
             (TaskType::Epic, _) => epic_tasks.push(t),
-            (_, TaskStatus::InProgress | TaskStatus::PendingSupervisorReview) => {
+            (_, TaskStatus::InProgress) => {
                 in_progress_tasks.push(t)
             }
             _ => ready_tasks.push(t),

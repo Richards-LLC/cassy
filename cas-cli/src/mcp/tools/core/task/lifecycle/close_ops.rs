@@ -366,6 +366,35 @@ fn request_changes_role_gate(
     }
 }
 
+pub(crate) fn validate_supervisor_override(
+    requested: bool,
+    reason: Option<&str>,
+    is_supervisor: bool,
+) -> Result<(), String> {
+    if !requested {
+        return Ok(());
+    }
+    if !is_supervisor {
+        return Err(
+            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true is only available to a registered supervisor."
+                .to_string(),
+        );
+    }
+    if reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        return Err(
+            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty close reason."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+const DEPRECATED_BYPASS_WARNING: &str = "⚠️ DEPRECATED: bypass_code_review is accepted as a one-release alias; use supervisor_override=true instead.";
+
 #[cfg(test)]
 mod delivery_audit_text_tests {
     use super::{
@@ -535,8 +564,8 @@ mod delivery_audit_text_tests {
             stranded_branch_override: None,
             id: "cas-negative".to_string(),
             reason: None,
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         };
@@ -560,6 +589,25 @@ mod delivery_audit_text_tests {
         validate_negative_result_reference("branch:factory/test-agent").unwrap();
         validate_negative_result_reference("factory/test-agent").unwrap();
         assert!(validate_negative_result_reference("not a delivery reference").is_err());
+    }
+}
+
+#[cfg(test)]
+mod supervisor_override_tests {
+    use super::validate_supervisor_override;
+
+    #[test]
+    fn supervisor_override_requires_a_non_empty_reason() {
+        let error = validate_supervisor_override(true, Some("   "), true)
+            .expect_err("supervisor override without a reason must be rejected");
+        assert!(error.contains("reason"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn supervisor_override_is_supervisor_only() {
+        let error = validate_supervisor_override(true, Some("reviewed"), false)
+            .expect_err("workers must not issue supervisor overrides");
+        assert!(error.contains("supervisor"), "unexpected error: {error}");
     }
 }
 
@@ -613,7 +661,7 @@ pub(crate) enum VerificationSkipReason {
     AssigneeUnknown,
     /// Supervisor is closing a task whose assignee is still alive and
     /// has explicitly requested a verification skip via
-    /// `bypass_code_review=true`. Separate from `AssigneeInactive` so
+    /// `supervisor_override=true`. Separate from `AssigneeInactive` so
     /// the audit note reflects supervisor intent, not worker state.
     SupervisorBypass,
     /// A live registered supervisor accepted a measured negative result with
@@ -623,12 +671,6 @@ pub(crate) enum VerificationSkipReason {
     /// A live registered supervisor closed a Gate after recording the
     /// decision in the task timeline. No code delivery is being approved.
     SupervisorDecision,
-    /// cas-1932 (GH #62, minor): an assignee-lookup failure would have
-    /// reported "verification skipped", but a current-cycle APPROVED
-    /// verification for this task already exists. The close is authorized
-    /// by that verdict, so name it instead of claiming nothing verified
-    /// the work.
-    ExistingApprovedVerification { verification_id: String },
 }
 
 impl VerificationSkipReason {
@@ -667,7 +709,7 @@ impl VerificationSkipReason {
                 " (verification skipped — assignee unknown)".to_string()
             }
             VerificationSkipReason::SupervisorBypass => {
-                " (verification skipped — supervisor bypass via bypass_code_review=true)"
+                " (verification skipped — supervisor override via supervisor_override=true)"
                     .to_string()
             }
             VerificationSkipReason::SupervisorNegativeResult => {
@@ -676,9 +718,6 @@ impl VerificationSkipReason {
             }
             VerificationSkipReason::SupervisorDecision => {
                 " (decision recorded — supervisor-authorized gate)".to_string()
-            }
-            VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
-                format!(" (verified — approved verification {verification_id} on record)")
             }
         }
     }
@@ -711,7 +750,7 @@ impl VerificationSkipReason {
                     .to_string()
             }
             VerificationSkipReason::SupervisorBypass => {
-                "Closed via supervisor bypass — bypass_code_review=true explicitly set by \
+                "Closed via supervisor override — supervisor_override=true explicitly set by \
                  supervisor while assignee was still active."
                     .to_string()
             }
@@ -726,72 +765,7 @@ impl VerificationSkipReason {
                  was recorded; no code delivery was required or approved."
                     .to_string()
             }
-            VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
-                format!(
-                    "Closed on the approved verification {verification_id} already recorded for \
-                     this task's current work cycle; the assignee lookup could not resolve a live \
-                     verifier, but the verdict exists and authorizes the close."
-                )
-            }
         }
-    }
-}
-
-/// cas-1932 (GH #62 symptom 1): does an existing verification row authorize
-/// the close that would otherwise be re-queued for supervisor review?
-///
-/// Accepted only when the verdict is `Approved`, matches the verification
-/// type the task requires, and was recorded inside the task's current work
-/// cycle (same `TaskCommitReceiptWindow` used to attribute commits, with the
-/// same clock-skew allowance). A verdict from an earlier cycle — for example
-/// one that predates a reopen and its rework — can never authorize a fresh
-/// close.
-pub(crate) fn approved_verification_satisfies_review_queue(
-    verification: &Verification,
-    window: Option<&TaskCommitReceiptWindow>,
-    required_type: VerificationType,
-) -> bool {
-    if verification.status != VerificationStatus::Approved {
-        return false;
-    }
-    if verification.verification_type != required_type {
-        return false;
-    }
-    match window {
-        Some(window) => {
-            verification.created_at.timestamp()
-                >= window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
-        }
-        None => true,
-    }
-}
-
-/// cas-1932 (GH #62, minor): the close path reported
-/// "verification skipped — assignee unknown" while verification
-/// `ver-fd59de6ef422` existed for the task. An assignee-resolution failure is
-/// not evidence that nothing verified the work — when a current-cycle
-/// approved verdict is on record, cite it instead.
-///
-/// Only *lookup-failure* reasons are replaced. `SupervisorBypass` and
-/// `EpicOwnerClosed` are deliberate decisions and keep their own audit text;
-/// `None` is not a skip at all.
-pub(crate) fn skip_reason_with_existing_verification(
-    reason: VerificationSkipReason,
-    approved: Option<&Verification>,
-) -> VerificationSkipReason {
-    let is_lookup_failure = matches!(
-        reason,
-        VerificationSkipReason::NoAssignee
-            | VerificationSkipReason::AssigneeUnknown
-            | VerificationSkipReason::AssigneeInactive { .. }
-    );
-    match approved {
-        Some(verification) if is_lookup_failure => {
-            VerificationSkipReason::ExistingApprovedVerification {
-                verification_id: verification.id.clone(),
-            }
-        }
-        _ => reason,
     }
 }
 
@@ -1211,7 +1185,7 @@ impl CasCore {
         };
 
         // cas-2b667 / GH #588: the receipt path must not project an
-        // unmerged current source tip into PendingSupervisorReview. The
+        // unmerged current source tip into the merged-delivery states. The
         // receipt's commit/target fields are a snapshot supplied by the
         // worker; re-fetch and inspect the live branch immediately before
         // creating the immutable delivery boundary so a straggler commit
@@ -1222,7 +1196,7 @@ impl CasCore {
             &input.target_branch,
         ) {
             return Ok(Self::tool_error(format!(
-                "DELIVERY RECEIPT REJECTED: task {} cannot enter pending_supervisor_review until the current source tip is merged.\n\n{message}",
+                "DELIVERY RECEIPT REJECTED: task {} cannot accept a completion receipt until the current source tip is merged.\n\n{message}",
                 task.id
             )));
         }
@@ -1288,7 +1262,7 @@ impl CasCore {
                 )),
                 data: None,
             })?;
-            (TaskStatus::PendingSupervisorReview, true)
+            (TaskStatus::InProgress, true)
         } else if transaction.state == cas_types::WorkerDeliveryState::AwaitingMerge {
             (TaskStatus::AwaitingMerge, false)
         } else {
@@ -1714,8 +1688,8 @@ impl CasCore {
             stranded_branch_override: None,
             id: task.id.clone(),
             reason: None,
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         };
@@ -1754,6 +1728,22 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        let supervisor_override = req
+            .supervisor_override
+            .or(req.legacy_bypass_code_review)
+            .unwrap_or(false);
+        let used_deprecated_override_alias = req.legacy_bypass_code_review.is_some();
+        if let Err(message) = validate_supervisor_override(
+            supervisor_override,
+            req.reason.as_deref(),
+            is_supervisor_from_env(),
+        ) {
+            return Ok(Self::tool_error(message));
+        }
+        if used_deprecated_override_alias {
+            tracing::warn!(task_id = %req.id, "{DEPRECATED_BYPASS_WARNING}");
+        }
 
         // cas-6c50 / GH #243: a measured negative result is a completed
         // outcome, not a delivery waiting to merge and not a changes request.
@@ -1825,12 +1815,12 @@ impl CasCore {
             )));
         }
 
-        if !(req.bypass_code_review.unwrap_or(false) && is_supervisor_from_env())
+        if !(supervisor_override && is_supervisor_from_env())
             && let Some(reason) = req.reason.as_deref()
             && let Some(path) = tmpfs_receipt_path_in_close_reason(reason)
         {
             return Ok(Self::tool_error(format!(
-                "TMPFS PROOF RECEIPT REJECTED: close reason cites `{path}`. Durable proof must not live on tmpfs. Store it under the configured [factory] artifacts_root/<task-id>/ (or another sanctioned durable artifacts root) and retry; harness scratchpads under /tmp are ephemeral and cannot be close evidence. A supervisor may use bypass_code_review=true only for a legitimate historical reference."
+                "TMPFS PROOF RECEIPT REJECTED: close reason cites `{path}`. Durable proof must not live on tmpfs. Store it under the configured [factory] artifacts_root/<task-id>/ (or another sanctioned durable artifacts root) and retry; harness scratchpads under /tmp are ephemeral and cannot be close evidence. A supervisor may use supervisor_override=true only for a legitimate historical reference."
             )));
         }
 
@@ -1911,8 +1901,8 @@ impl CasCore {
 
         // cas-e74c: resolve the work-cycle identity before the urgent-halt
         // gate as well as the later delivery/review gates. cas-a699 needs the
-        // same current-cycle boundary before it can safely recognize the one
-        // completed PendingSupervisorReview exit below.
+        // same current-cycle boundary used by the delivery and verification
+        // gates below.
         let task_commit_identity = task_commit_identity(
             &task,
             cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
@@ -1956,16 +1946,6 @@ impl CasCore {
                         task.status,
                         task.assignee.as_deref(),
                         Some(agent.name.as_str()),
-                    ) || super::stale_close_guard::halt_exempt_for_owned_approved_supervisor_review(
-                        task.status,
-                        task.assignee.as_deref(),
-                        Some(agent.name.as_str()),
-                        self.current_cycle_approved_verification(
-                            &req.id,
-                            required_verification_type(task.task_type),
-                            commit_receipt_window.as_ref(),
-                        )
-                        .is_some(),
                     );
                     if super::stale_close_guard::agent_task_work_halted(&agent.metadata)
                         && !halt_exempt
@@ -2019,10 +1999,8 @@ impl CasCore {
 
         // cas-6538 (EPIC cas-1255 — per-task depth speed mode): a `depth=light`
         // task is the feel-driven, fast-iteration path. The close gate skips
-        // the two *rigor* gates — the verification jail (no `task-verifier`
-        // dispatch / `pending_verification` arming) and the P0 code-review gate
-        // (treated as satisfied, including the supervisor-review queue hop that
-        // *is* the P0 gate under `owner = "supervisor"`). The skip is recorded
+        // the verification jail (no `task-verifier` dispatch /
+        // `pending_verification` arming). The skip is recorded
         // as a decision note on the task (see `light_skip_decision_note`) so
         // the bypass is auditable.
         //
@@ -2033,11 +2011,11 @@ impl CasCore {
         //
         // SCOPE: the light skip deliberately does NOT touch the data-state
         // guards (merge-state cas-95ce/cas-762e, uncommitted-work cas-895d,
-        // additive-only cas-bc1b, commit-claim). Those verify the work
+        // additive-only cas-bc1b). Those verify the work
         // physically exists / is merged — orthogonal to review rigor — and a
         // light task must still satisfy them. It also does not interact with
-        // the supervisor `bypass_code_review` override, which stays exactly as
-        // before for `Deep` and is simply redundant for `Light`.
+        // supervisor_override, which is reserved for the documented
+        // verification and tmpfs-proof exceptions.
         let depth_light = task.depth == crate::types::TaskDepth::Light;
 
         // cas-ede8: every factory merge-enforcement gate must bind to the same
@@ -2239,8 +2217,8 @@ impl CasCore {
         // worker scope: when a non-epic task with an assignee is being
         // closed, reject if `factory/<assignee>` carries commits that
         // haven't landed on the real integration target. Runs BEFORE the
-        // verification policy and the cas-code-review bypass —
-        // `bypass_code_review=true` cannot skip this guard because it is a
+        // verification policy and the supervisor override —
+        // `supervisor_override=true` cannot skip this guard because it is a
         // data-state check, not a review gate. See
         // `run_factory_branch_merge_gate` for the full skip matrix and EPIC
         // cas-754b for context.
@@ -2495,33 +2473,6 @@ impl CasCore {
                 policy.task_required()
             };
 
-        // cas-8edb: under `[code_review] owner = "supervisor"` (default
-        // since cas-865b / v2.13.0), a worker close is a pure transition
-        // operation — for reviewable diffs the `supervisor_review_mode`
-        // block further down transitions the task to
-        // `PendingSupervisorReview`; for additive-only / docs-only /
-        // zero-diff shapes the rest of the close pipeline handles the
-        // close normally. Either way, the verification-jail path (which
-        // arms `pending_verification=true` and dispatches `task-verifier`)
-        // is the legacy `owner=worker` mechanism and must not fire for a
-        // worker under supervisor-owned review — workers don't submit a
-        // `ReviewOutcome` envelope in this mode, so the self-cert
-        // short-circuit cannot fire either, leaving every clean close
-        // deadlocked. Skip the gate here; the supervisor review queue
-        // replaces it.
-        //
-        // Supervisor-driven close paths are unaffected: `is_factory_worker`
-        // is false for supervisors, so `worker_under_supervisor_review`
-        // is false and the existing gate runs (with supervisor exemptions
-        // already in place).
-        let worker_under_supervisor_review = is_factory_worker
-            && task.task_type != TaskType::Epic
-            && config
-                .code_review
-                .as_ref()
-                .map(|cr| cr.supervisor_owned())
-                .unwrap_or_else(|| crate::config::CodeReviewConfig::default().supervisor_owned());
-
         // Skip verification for orphaned tasks: if caller is supervisor and the
         // task's assignee is inactive (heartbeat expired or lease gone), allow
         // close without verification. cas-3bd4: compute the reason as a typed
@@ -2539,21 +2490,7 @@ impl CasCore {
                 // would mislabel a healthy owner-close as orphan recovery.
                 VerificationSkipReason::EpicOwnerClosed
             } else {
-                // cas-1932 (GH #62, minor): an assignee that cannot be
-                // resolved is not evidence that nothing verified the work.
-                // The incident close reported "verification skipped —
-                // assignee unknown" while verification ver-fd59de6ef422 was
-                // on record for the task, losing the audit linkage. When a
-                // current-cycle approved verdict exists, cite it instead.
-                skip_reason_with_existing_verification(
-                    self.compute_verification_skip_reason(&task, &req),
-                    self.current_cycle_approved_verification(
-                        &req.id,
-                        required_verification_type(task.task_type),
-                        commit_receipt_window.as_ref(),
-                    )
-                    .as_ref(),
-                )
+                self.compute_verification_skip_reason(&task, &req)
             }
         } else {
             VerificationSkipReason::None
@@ -2589,7 +2526,6 @@ impl CasCore {
         // as today.
         if verification_enabled
             && !skip_verification
-            && !worker_under_supervisor_review
             && !depth_light
         {
             let is_worker_without_subagents = is_worker_without_subagents_from_env();
@@ -2679,18 +2615,6 @@ impl CasCore {
                 // Error row remains a readable fallback for pre-m211 databases,
                 // but cannot grant authority.
                 let now = chrono::Utc::now();
-                let in_flight_dispatch = typed_dispatch.as_ref().is_some_and(|dispatch| {
-                    matches!(
-                        dispatch.state,
-                        cas_types::VerificationDispatchState::Pending
-                            | cas_types::VerificationDispatchState::Claimed
-                    ) && dispatch.deadline_at > now
-                }) || (typed_dispatch.is_none()
-                    && matches!(&task_wide_latest, Ok(Some(v))
-                        if v.status == VerificationStatus::Error
-                            && v.summary.starts_with(DISPATCH_SUMMARY_PREFIX)
-                            && (now - v.created_at).num_seconds()
-                                <= VERIFICATION_DISPATCH_TIMEOUT_SECS));
 
                 if let Some(dispatch) = typed_dispatch.as_ref()
                     && matches!(
@@ -2922,169 +2846,22 @@ impl CasCore {
                     Ok(None) | Ok(Some(_)) => {
                         // No verification or pending/error status.
                         //
-                        // cas-778a: factory-worker-owned verification short-circuit.
-                        // If the factory worker provides a structurally valid
-                        // ReviewOutcome envelope with no P0 in residual or
-                        // pre_existing, the cas-code-review autofix pipeline IS the
-                        // worker's verification step. Skip task-verifier dispatch —
-                        // write a Skipped row for the audit trail and fall through
-                        // to let the close proceed. Workers without a clean
-                        // envelope (or without any envelope) continue to the
-                        // existing jail-arming path below.
-                        //
-                        // Note: the downstream code_review_gate (below) also
-                        // applies the full forgery defence (cas-4c64): Check A
-                        // blocks any P0 in residual[] regardless of the
-                        // per-finding pre_existing flag, and Check B blocks any
-                        // P0 in pre_existing[]. Both this predicate and
-                        // run_code_review_gate enforce the defence symmetrically.
-                        // If you tighten either, tighten both.
-                        let envelope_str = req
-                            .code_review_findings
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty());
-                        // cas-164c: suppress self-cert when a fresh task-verifier
-                        // dispatch row is already in-flight.  The running subagent's
-                        // verdict must be allowed to land before the close can
-                        // short-circuit.  Stale dispatch rows (age >
-                        // VERIFICATION_JAIL_TIMEOUT_SECS) are handled by the
-                        // timeout-escalation arm above and do NOT set
-                        // `in_flight_dispatch`, so self-cert still works once the
-                        // timeout window expires.
-                        let worker_owns_verification = is_factory_worker
-                            && envelope_str.is_some_and(worker_review_envelope_is_clean)
-                            && !in_flight_dispatch;
-
-                        if worker_owns_verification {
-                            // Eagerly persist the envelope and clear any stale
-                            // pending_verification=true via a clone so the intermediate
-                            // DB state is consistent even if the close fails later.
-                            // The in-memory `task` variable is re-applied at line 1022
-                            // (after `let mut task = task`) so the final close update
-                            // also carries these fields. Both paths are needed: the
-                            // intermediate persist catches early returns; the in-memory
-                            // update ensures the final task_store.update(&task) wins.
-                            if let Some(envelope) = envelope_str {
-                                let mut task_to_persist = task.clone();
-                                task_to_persist.deliverables.review_envelope =
-                                    Some(envelope.to_string());
-                                // Clear any stale pending_verification flag left by a
-                                // prior jail-arming close attempt.
-                                task_to_persist.pending_verification = false;
-                                task_to_persist.updated_at = chrono::Utc::now();
-                                if let Err(e) = task_store.update(&task_to_persist) {
-                                    tracing::warn!(
-                                        task_id = %req.id,
-                                        error = %e,
-                                        "failed to persist review envelope on worker self-verify"
-                                    );
-                                }
-                            }
-                            // Write a Skipped verification row for the audit trail
-                            // so the bypass reason is permanently recorded and the
-                            // exact-task close gate sees a satisfying row on retry.
-                            //
-                            // cas-c97e (Option B): if the write fails, fall through
-                            // rather than abort the close — audit completeness is less
-                            // critical than close-path correctness. But the failure must
-                            // NOT be silent: emit a DaemonEvent::WorkerActivity with
-                            // event_type="audit_trail_gap" so the supervisor TUI surfaces
-                            // the missing record without halting the worker.
-                            match verification_store.generate_id() {
-                                Ok(ver_id) => {
-                                    let mut skipped_row = Verification::skipped(
-                                        ver_id,
-                                        req.id.clone(),
-                                        "Worker-owned verification: cas-code-review autofix \
-                                             returned clean ReviewOutcome envelope"
-                                            .to_string(),
-                                    );
-                                    skipped_row.verification_type = verification_type;
-                                    skipped_row.provenance =
-                                        cas_types::VerificationProvenance::System;
-                                    // cas-eeab (Item 6): cache get_agent_id() once to avoid
-                                    // the double-call that existed between the row assignment
-                                    // and the gap-event emission on the add() failure path.
-                                    let maybe_agent_id = self.get_agent_id().ok();
-                                    if let Some(ref aid) = maybe_agent_id {
-                                        skipped_row.agent_id = Some(aid.clone());
-                                    }
-                                    if let Err(e) = cas_store::add_system_verification(
-                                        &self.cas_root,
-                                        &skipped_row,
-                                    ) {
-                                        tracing::warn!(
-                                            task_id = %req.id,
-                                            error = %e,
-                                            "failed to persist worker-owned verification Skipped row"
-                                        );
-                                        // cas-eeab (Item 4+5): delegate to helper; sentinel
-                                        // fallback ensures the event fires even when the
-                                        // agent ID is unavailable.
-                                        self.emit_audit_gap_event(
-                                            &req.id,
-                                            format!(
-                                                "Skipped verification row write failed \
-                                                 for task {}: {e}",
-                                                req.id
-                                            ),
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        task_id = %req.id,
-                                        error = %e,
-                                        "failed to generate ID for worker-owned verification Skipped row"
-                                    );
-                                    // cas-c97e: ID-generation failure also surfaces as an
-                                    // audit-gap event — it is indistinguishable from a write
-                                    // failure from the supervisor's perspective.
-                                    // cas-eeab (Item 4+5): delegate to helper.
-                                    self.emit_audit_gap_event(
-                                        &req.id,
-                                        format!(
-                                            "Skipped verification row ID generation failed \
-                                             for task {}: {e}",
-                                            req.id
-                                        ),
-                                    );
-                                }
-                            }
-                            // Emit activity event for supervisor visibility.
-                            if let Ok(agent_id) = self.get_agent_id() {
-                                let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
-                                    session_id: agent_id,
-                                    event_type: "worker_verification_self_certified".to_string(),
-                                    description: format!(
-                                        "Worker-owned verification passed: {}",
-                                        req.id
-                                    ),
-                                    entity_id: Some(req.id.clone()),
-                                };
-                                let _ = crate::mcp::socket::send_event(&self.cas_root, &event);
-                            }
-                            // Fall through — do NOT arm jail, do NOT return error.
-                        } else {
-                            // No clean envelope from a factory worker: proceed with
-                            // the standard verification-jail path.
-
-                            // Capture the repository boundary before mutating the task
-                            // or its lease. If Git inspection fails, the close remains
-                            // failure-atomic instead of leaving a pending task without a
-                            // dispatch.
-                            let proof_worktree = self
-                                .resolve_worker_worktree_path(&task, declared_repo_context.as_ref())
-                                .map_err(|error| McpError {
-                                    code: ErrorCode::INVALID_PARAMS,
-                                    message: Cow::from(format!(
-                                        "Failed to resolve verification worktree: {error}"
-                                    )),
-                                    data: None,
-                                })?
-                                .unwrap_or_else(|| close_project_root.clone());
-                            let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
+                        // No worker-supplied review envelope is accepted; use the standard verification jail.
+                        // Capture the repository boundary before mutating the task
+                        // or its lease. If Git inspection fails, the close remains
+                        // failure-atomic instead of leaving a pending task without a
+                        // dispatch.
+                        let proof_worktree = self
+                            .resolve_worker_worktree_path(&task, declared_repo_context.as_ref())
+                            .map_err(|error| McpError {
+                                code: ErrorCode::INVALID_PARAMS,
+                                message: Cow::from(format!(
+                                    "Failed to resolve verification worktree: {error}"
+                                )),
+                                data: None,
+                            })?
+                            .unwrap_or_else(|| close_project_root.clone());
+                        let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
                                 &proof_worktree,
                             ) {
                                 let repository_proof = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof(
@@ -3105,157 +2882,136 @@ impl CasCore {
                                 cas_types::VerificationProofBoundary::task()
                             };
 
-                            // Only auto-claim if the closing agent is the task's assignee.
-                            // If a supervisor closes a worker's task, skip the lease to avoid
-                            // locking the task to the supervisor.
-                            let is_assignee = self
-                                .get_agent_id()
-                                .ok()
-                                .map(|aid| task.assignee.as_deref() == Some(aid.as_str()))
-                                .unwrap_or(false);
-                            if is_assignee {
-                                self.auto_claim_for_verification(&req.id, task_store.as_ref())?;
-                            }
+                        // Only auto-claim if the closing agent is the task's assignee.
+                        // If a supervisor closes a worker's task, skip the lease to avoid
+                        // locking the task to the supervisor.
+                        let is_assignee = self
+                            .get_agent_id()
+                            .ok()
+                            .map(|aid| task.assignee.as_deref() == Some(aid.as_str()))
+                            .unwrap_or(false);
+                        if is_assignee {
+                            self.auto_claim_for_verification(&req.id, task_store.as_ref())?;
+                        }
 
-                            // Mark only this task's close transition pending.
-                            let mut task_to_update = task.clone();
-                            task_to_update.pending_verification = true;
-                            if task_to_update.assignee.is_none() {
-                                if let Ok(agent_id) = self.get_agent_id() {
-                                    task_to_update.assignee = Some(agent_id);
-                                }
+                        // Mark only this task's close transition pending.
+                        let mut task_to_update = task.clone();
+                        task_to_update.pending_verification = true;
+                        if task_to_update.assignee.is_none() {
+                            if let Ok(agent_id) = self.get_agent_id() {
+                                task_to_update.assignee = Some(agent_id);
                             }
-                            // cas-3086: persist the worker's ReviewOutcome envelope on
-                            // the task deliverables so a subsequent supervisor close
-                            // (once verification approves) can forward the prior review
-                            // receipt into the P0 gate instead of re-running the
-                            // multi-persona reviewer or requiring `bypass_code_review`.
-                            // We persist only non-empty envelopes; validation happens
-                            // later in `run_code_review_gate`, which rejects malformed
-                            // persisted envelopes so bad input cannot silently bypass
-                            // the gate.
-                            if let Some(envelope) = req
-                                .code_review_findings
-                                .as_deref()
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                            {
-                                task_to_update.deliverables.review_envelope =
-                                    Some(envelope.to_string());
-                            }
-                            task_to_update.updated_at = chrono::Utc::now();
-                            if let Err(e) = task_store.update(&task_to_update) {
-                                tracing::warn!(task_id = %req.id, error = %e, "failed to set pending_verification on task");
-                            }
+                        }
+                        task_to_update.updated_at = chrono::Utc::now();
+                        if let Err(e) = task_store.update(&task_to_update) {
+                            tracing::warn!(task_id = %req.id, error = %e, "failed to set pending_verification on task");
+                        }
 
-                            // Include close reason in the message so verifier can check it
-                            let close_reason_section = if let Some(ref reason) = req.reason {
-                                format!(
-                                    "\n\n## Proposed Close Reason\n\
+                        // Include close reason in the message so verifier can check it
+                        let close_reason_section = if let Some(ref reason) = req.reason {
+                            format!(
+                                "\n\n## Proposed Close Reason\n\
                                     ```\n{reason}\n```\n\n\
                                     IMPORTANT: The {verifier_agent} MUST validate this close reason.\n\
                                     Reject if it admits incomplete work (e.g., 'remaining items', 'beyond scope', 'will need to')."
-                                )
-                            } else {
-                                String::new()
-                            };
+                            )
+                        } else {
+                            String::new()
+                        };
 
-                            let verification_desc = if is_epic {
-                                "Epic verification runs on master to verify the complete merged implementation.\n\
+                        let verification_desc = if is_epic {
+                            "Epic verification runs on master to verify the complete merged implementation.\n\
                                 The agent will check that all subtask implementations integrate correctly.\n\
                                 The verifier MUST record verification_type=epic."
-                            } else {
-                                "The agent will check for TODO comments, stubs, incomplete implementations,\n\
+                        } else {
+                            "The agent will check for TODO comments, stubs, incomplete implementations,\n\
                                 AND validate the close reason doesn't admit incomplete work."
+                        };
+
+                        // Send verification blocked activity event (for supervisor visibility)
+                        if let Ok(agent_id) = self.get_agent_id() {
+                            let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
+                                session_id: agent_id,
+                                event_type: "worker_verification_blocked".to_string(),
+                                description: format!("Awaiting verification: {}", req.id),
+                                entity_id: Some(req.id.clone()),
                             };
+                            let _ = crate::mcp::socket::send_event(&self.cas_root, &event);
+                        }
 
-                            // Send verification blocked activity event (for supervisor visibility)
-                            if let Ok(agent_id) = self.get_agent_id() {
-                                let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
-                                    session_id: agent_id,
-                                    event_type: "worker_verification_blocked".to_string(),
-                                    description: format!("Awaiting verification: {}", req.id),
-                                    entity_id: Some(req.id.clone()),
-                                };
-                                let _ = crate::mcp::socket::send_event(&self.cas_root, &event);
-                            }
+                        let requester_id = self.get_agent_id()?;
+                        let owner_id = self.verification_dispatch_owner(&requester_id)?;
+                        let supervisor_direct_recovery = self
+                            .open_agent_store()?
+                            .get(&requester_id)
+                            .is_ok_and(|agent| {
+                                agent.role == cas_types::AgentRole::Supervisor && agent.is_alive()
+                            });
+                        let dispatch = cas_store::create_verification_dispatch_bound(
+                            &self.cas_root,
+                            &req.id,
+                            &requester_id,
+                            &owner_id,
+                            &proof_boundary,
+                            chrono::Utc::now()
+                                + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
+                            supervisor_direct_recovery,
+                        )
+                        .map_err(|error| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!(
+                                "Failed to persist verification dispatch: {error}"
+                            )),
+                            data: None,
+                        })?;
 
-                            let requester_id = self.get_agent_id()?;
-                            let owner_id = self.verification_dispatch_owner(&requester_id)?;
-                            let supervisor_direct_recovery = self
-                                .open_agent_store()?
-                                .get(&requester_id)
-                                .is_ok_and(|agent| {
-                                    agent.role == cas_types::AgentRole::Supervisor
-                                        && agent.is_alive()
-                                });
-                            let dispatch = cas_store::create_verification_dispatch_bound(
-                                &self.cas_root,
-                                &req.id,
-                                &requester_id,
-                                &owner_id,
-                                &proof_boundary,
-                                chrono::Utc::now()
-                                    + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
-                                supervisor_direct_recovery,
-                            )
-                            .map_err(|error| McpError {
-                                code: ErrorCode::INTERNAL_ERROR,
-                                message: Cow::from(format!(
-                                    "Failed to persist verification dispatch: {error}"
-                                )),
-                                data: None,
-                            })?;
-
-                            // Keep the legacy Error row for old clients and
-                            // audit views. It is descriptive only: typed dispatch
-                            // state and server-derived authority control new adds.
-                            if !had_prior_verification {
-                                if let Ok(ver_id) = verification_store.generate_id() {
-                                    let mut dispatch_row =
-                                        Verification::new(ver_id, req.id.clone());
-                                    dispatch_row.verification_type = verification_type;
-                                    dispatch_row.status = VerificationStatus::Error;
-                                    dispatch_row.agent_id = Some(owner_id.clone());
-                                    dispatch_row.provenance =
-                                        cas_types::VerificationProvenance::System;
-                                    dispatch_row.issuer_agent_id = Some(requester_id);
-                                    dispatch_row.summary = format!(
-                                        "Dispatch requested ({}) — task-verifier subagent must be spawned via \
+                        // Keep the legacy Error row for old clients and
+                        // audit views. It is descriptive only: typed dispatch
+                        // state and server-derived authority control new adds.
+                        if !had_prior_verification {
+                            if let Ok(ver_id) = verification_store.generate_id() {
+                                let mut dispatch_row = Verification::new(ver_id, req.id.clone());
+                                dispatch_row.verification_type = verification_type;
+                                dispatch_row.status = VerificationStatus::Error;
+                                dispatch_row.agent_id = Some(owner_id.clone());
+                                dispatch_row.provenance = cas_types::VerificationProvenance::System;
+                                dispatch_row.issuer_agent_id = Some(requester_id);
+                                dispatch_row.summary = format!(
+                                    "Dispatch requested ({}) — task-verifier subagent must be spawned via \
                                          Task(subagent_type=\"task-verifier\", prompt=\"Verify task {}\"). \
                                          This row will be superseded by the subagent's verdict.",
-                                        dispatch.id, req.id
-                                    );
-                                    if let Err(e) = cas_store::add_system_verification(
-                                        &self.cas_root,
-                                        &dispatch_row,
-                                    ) {
-                                        tracing::warn!(task_id = %req.id, error = %e, "failed to persist verification dispatch row");
-                                    }
+                                    dispatch.id, req.id
+                                );
+                                if let Err(e) = cas_store::add_system_verification(
+                                    &self.cas_root,
+                                    &dispatch_row,
+                                ) {
+                                    tracing::warn!(task_id = %req.id, error = %e, "failed to persist verification dispatch row");
                                 }
                             }
+                        }
 
-                            let verification_gate = if is_factory_worker {
-                                // cas-8aaf: use harness-appropriate coordination tool alias.
-                                // Claude workers use mcp__cas__coordination, Codex workers
-                                // use mcp__cs__coordination (CAS_FACTORY_WORKER_CLI drives
-                                // the selection via worker_coordination_tool()).
-                                let coord = worker_coordination_tool();
-                                // cas-7998: escape the free-text reason so a
-                                // quote/newline can't break the quoted
-                                // `message="..."` argument below.
-                                let close_reason_hint = req
-                                    .reason
-                                    .as_deref()
-                                    .map(|r| {
-                                        format!(
-                                            " Close reason: {}.",
-                                            escape_close_reason_for_quoted_command(r)
-                                        )
-                                    })
-                                    .unwrap_or_default();
-                                format!(
-                                    "Factory worker verification gate: task {id} close is pending \
+                        let verification_gate = if is_factory_worker {
+                            // cas-8aaf: use harness-appropriate coordination tool alias.
+                            // Claude workers use mcp__cas__coordination, Codex workers
+                            // use mcp__cs__coordination (CAS_FACTORY_WORKER_CLI drives
+                            // the selection via worker_coordination_tool()).
+                            let coord = worker_coordination_tool();
+                            // cas-7998: escape the free-text reason so a
+                            // quote/newline can't break the quoted
+                            // `message="..."` argument below.
+                            let close_reason_hint = req
+                                .reason
+                                .as_deref()
+                                .map(|r| {
+                                    format!(
+                                        " Close reason: {}.",
+                                        escape_close_reason_for_quoted_command(r)
+                                    )
+                                })
+                                .unwrap_or_default();
+                            format!(
+                                "Factory worker verification gate: task {id} close is pending \
                                      dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. \
                                      This close will only succeed after a legitimate verifier records a verdict.\n\n\
                                      Forward to supervisor (workers cannot spawn task-verifier directly):\n\n\
@@ -3263,86 +3019,84 @@ impl CasCore {
                                      summary=\"Ready to close {id}\" \
                                      message=\"Task {id} is ready to close.{close_reason_hint} \
                                      Please run task-verifier for task {id} and close on my behalf if approved.\"",
-                                    id = req.id,
-                                    dispatch_id = dispatch.id,
-                                    owner = dispatch.owner_agent_id,
-                                    deadline = dispatch.deadline_at,
-                                )
-                            } else if supervisor_is_assignee {
-                                // cas-7998: the supervisor self-verifies in their
-                                // own harness, so the direct verification alias
-                                // must match the supervisor CLI (mcp__cs__ for a
-                                // Codex supervisor, mcp__cas__ for Claude).
-                                let sup_ver = supervisor_verification_tool();
-                                format!(
-                                    "You implemented this task yourself. Spawn a task-verifier to review your work:\n\n\
+                                id = req.id,
+                                dispatch_id = dispatch.id,
+                                owner = dispatch.owner_agent_id,
+                                deadline = dispatch.deadline_at,
+                            )
+                        } else if supervisor_is_assignee {
+                            // cas-7998: the supervisor self-verifies in their
+                            // own harness, so the direct verification alias
+                            // must match the supervisor CLI (mcp__cs__ for a
+                            // Codex supervisor, mcp__cas__ for Claude).
+                            let sup_ver = supervisor_verification_tool();
+                            format!(
+                                "You implemented this task yourself. Spawn a task-verifier to review your work:\n\n\
                                      Task(subagent_type=\"{}\", prompt=\"Verify task {}\")\n\n\
                                      Or record verification directly:\n\
                                      {sup_ver} action=add task_id={} \
                                      status=approved summary=\"Self-verified: <reason>\"",
-                                    verifier_agent, req.id, req.id
-                                )
-                            } else {
-                                format!(
-                                    "Task {} close is pending verification dispatch {} owned by {} \
+                                verifier_agent, req.id, req.id
+                            )
+                        } else {
+                            format!(
+                                "Task {} close is pending verification dispatch {} owned by {} \
                                      until {}.\n\n\
                                      Use the Task tool to spawn a task-verifier subagent: \
                                      Task(subagent_type=\"{}\", prompt=\"Verify task {}\")",
-                                    req.id,
-                                    dispatch.id,
-                                    dispatch.owner_agent_id,
-                                    dispatch.deadline_at,
-                                    verifier_agent,
-                                    req.id
-                                )
-                            };
-                            let sup_ver = supervisor_verification_tool();
-                            let supervisor_recovery_hint = format!(
-                                "If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
-                                req.id, dispatch.id
-                            );
+                                req.id,
+                                dispatch.id,
+                                dispatch.owner_agent_id,
+                                dispatch.deadline_at,
+                                verifier_agent,
+                                req.id
+                            )
+                        };
+                        let sup_ver = supervisor_verification_tool();
+                        let supervisor_recovery_hint = format!(
+                            "If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
+                            req.id, dispatch.id
+                        );
 
-                            return Ok(Self::tool_error(format!(
-                                "⚠️ VERIFICATION REQUIRED\n\n\
+                        return Ok(Self::tool_error(format!(
+                            "⚠️ VERIFICATION REQUIRED\n\n\
                                 Task {} requires verification before closing.\n\n\
                                 {}{}\n\n\
                                 {}\n\n\
                                 {}{}\n\n\
                                 {}",
-                                req.id,
-                                verification_gate,
-                                verification_desc,
-                                supervisor_recovery_hint,
-                                close_reason_section.as_str(),
-                                if is_worker_without_subagents {
-                                    // cas-8aaf: harness-appropriate supervisor verification tool.
-                                    let sup_ver = supervisor_verification_tool();
-                                    format!(
-                                        "Ask supervisor to run verification \
+                            req.id,
+                            verification_gate,
+                            verification_desc,
+                            supervisor_recovery_hint,
+                            close_reason_section.as_str(),
+                            if is_worker_without_subagents {
+                                // cas-8aaf: harness-appropriate supervisor verification tool.
+                                let sup_ver = supervisor_verification_tool();
+                                format!(
+                                    "Ask supervisor to run verification \
                                          (task-verifier or direct {sup_ver}) \
                                          and close task {} on your behalf.",
-                                        req.id
-                                    )
-                                } else {
-                                    String::new()
-                                },
-                                if is_worker_without_subagents {
-                                    // cas-8aaf: harness-appropriate coordination tool.
-                                    let coord = worker_coordination_tool();
-                                    let sup_ver = supervisor_verification_tool();
-                                    format!(
-                                        "Suggested message: {coord} action=message \
+                                    req.id
+                                )
+                            } else {
+                                String::new()
+                            },
+                            if is_worker_without_subagents {
+                                // cas-8aaf: harness-appropriate coordination tool.
+                                let coord = worker_coordination_tool();
+                                let sup_ver = supervisor_verification_tool();
+                                format!(
+                                    "Suggested message: {coord} action=message \
                                          target=supervisor message=\"Please verify task {id} \
                                          (task-verifier or direct {sup_ver}) \
                                          and close it if approved.\"",
-                                        id = req.id
-                                    )
-                                } else {
-                                    "After verification passes, call cas_task_close again."
-                                        .to_string()
-                                }
-                            )));
-                        }
+                                    id = req.id
+                                )
+                            } else {
+                                "After verification passes, call cas_task_close again.".to_string()
+                            }
+                        )));
                     }
                     Err(_) => {
                         // Verification store error, proceed anyway
@@ -3425,12 +3179,13 @@ impl CasCore {
         // `resolve_worker_worktree_path` returns `None` for non-isolated
         // tasks, and both gates below key off that Option to decide
         // whether to fire at all. For non-isolated tasks the close
-        // path relies on cas-code-review (cas-b39f) + verification
-        // (task-verifier) as the quality bar — those gates operate on
-        // commits / review envelopes, not on working-tree state, so
-        // they're safe to run in a shared worktree.
-        let bypass_close_gates = !close_disposition.requires_delivery_gates()
-            || (req.bypass_code_review.unwrap_or(false) && is_supervisor_from_env());
+        // path relies on structural lint and verification (task-verifier) as
+        // the quality bar — those gates operate on commits and repository
+        // state, not on an envelope supplied by the worker.
+        // Supervisor overrides affect only the explicitly documented
+        // verification and tmpfs-proof exceptions. Delivery-state gates
+        // remain mandatory for every delivered close.
+        let bypass_close_gates = !close_disposition.requires_delivery_gates();
         let worker_worktree_path =
             match self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()) {
                 Ok(path) => path,
@@ -3479,10 +3234,9 @@ impl CasCore {
         // Scope: tasks with a resolved worker worktree only. Non-
         // isolated tasks skip this gate entirely per the comment above.
         //
-        // Supervisors can bypass this gate with `bypass_code_review=true`,
-        // matching the same "trust me" pattern used by the cas-b39f
-        // code-review gate. Non-supervisors get a hard reject pointing
-        // them at the dirty files.
+        // Supervisors can explicitly override this gate with
+        // `supervisor_override=true`, while non-supervisors get a hard reject
+        // pointing them at the dirty files.
         //
         // Graceful degradation: if the worktree path is not a git repo
         // or git fails, the check silently no-ops. The gate is advisory
@@ -3520,7 +3274,7 @@ impl CasCore {
                         1. Review the diff: `git status`\n\
                         2. Stage and commit your changes with a meaningful message.\n\
                         3. Re-run `mcp__cas__task action=close id={}`.\n\n\
-                        Supervisors may bypass this gate with bypass_code_review=true \
+                        Supervisors may override this gate with supervisor_override=true \
                         (logged as a decision note) when the worker is stuck and the \
                         work on disk is genuinely disposable.",
                         worker_wt.display(),
@@ -3558,55 +3312,6 @@ impl CasCore {
                     .discrepancy_note_with_provenance(req.commit_receipt.as_deref(), &provenance)
                 {
                     append_close_decision_note(task_store.as_ref(), &mut task, &note);
-                }
-            }
-        }
-
-        // cas-490f: commit-claim integrity gate.
-        //
-        // The cas-ba91 incident: a factory worker fabricated a commit SHA
-        // and code_review_findings against a branch with 0 actual commits.
-        // The supervisor lost ~10 min before detecting the fabrication.
-        //
-        // Gate logic: when a worker provides non-empty `code_review_findings`
-        // they are asserting "I wrote code and had it reviewed." This gate
-        // verifies that assertion by counting commits on the worker branch
-        // beyond its parent. 0 commits + findings = fabrication → hard reject.
-        //
-        // Firing conditions (all required):
-        //   1. Task has a resolved worker worktree (non-isolated tasks skip).
-        //   2. `code_review_findings` is non-empty (fabrication claim present).
-        //   3. commit count on HEAD vs parent_branch == 0.
-        //
-        // Supervisors can bypass with `bypass_code_review=true` (same pattern
-        // as other gates — logged, escape-hatched for genuine edge cases).
-        if !bypass_close_gates {
-            if let Some(worker_wt) = worker_worktree_path.as_ref() {
-                let has_findings = req
-                    .code_review_findings
-                    .as_deref()
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false);
-                if has_findings {
-                    // cas-7efe: use the single close-time resolver instead
-                    // of an independent worktree-only lookup that fell
-                    // back to a bare "main".
-                    match check_commit_claim_integrity(
-                        worker_wt,
-                        &resolved_parent_branch,
-                        true,
-                        task.deliverables.factory_branch_anchor.as_deref(),
-                        req.commit_receipt.as_deref(),
-                        commit_receipt_window.as_ref(),
-                    ) {
-                        CommitClaimGateOutcome::Reject(msg) => {
-                            return Ok(Self::tool_error(msg));
-                        }
-                        CommitClaimGateOutcome::Proceed => {}
-                        CommitClaimGateOutcome::ProceedWithReceipt(note) => {
-                            append_close_decision_note(task_store.as_ref(), &mut task, &note);
-                        }
-                    }
                 }
             }
         }
@@ -3710,37 +3415,14 @@ impl CasCore {
             }
         }
 
-        // cas-b39f: cas-code-review P0 close gate (Unit 9).
+        // Resolve the effective committed-change signal used by the remaining
+        // structural and delivery checks. The multi-persona review envelope is
+        // no longer part of the close request or close gate.
         //
-        // This is the integration point for the multi-persona code review
-        // pipeline. The *dispatch* of the review skill itself happens via
-        // the worker's harness (the skill must be invoked through the
-        // Task tool by an LLM, not from Rust), so the Phase 1 gate works
-        // in three cooperating layers:
-        //
-        //   1. Skip conditions (here) — additive-only tasks, non-code
-        //      diffs, and supervisor overrides bypass the gate before
-        //      any review is attempted.
-        //   2. The pure-Rust decision helper at
-        //      `cas_store::code_review::close_gate::evaluate_gate` —
-        //      given a residual finding set, returns Allow or
-        //      BlockOnP0. Exhaustively unit-tested there.
-        //   3. Graceful degradation — if the review pipeline is
-        //      unavailable (skill not installed, orchestrator crash,
-        //      no findings-cache entry), log a warning and allow the
-        //      close. The task description is explicit: code review
-        //      must not become a SPOF for closes.
-        //
-        // Supervisor override flow:
-        //   * Caller sets `bypass_code_review=true` on the close
-        //     request.
-        //   * If `CAS_AGENT_ROLE=supervisor`, the gate is skipped and
-        //     a decision note is appended to the task capturing who
-        //     overrode and the close reason.
-        //   * Any other caller setting the flag gets an explicit
-        //     rejection — we do not silently ignore unauthorized
-        //     overrides because that would mask a misconfigured
-        //     harness.
+        // Delivery-state checks remain mandatory regardless of review
+        // ownership or supervisor override. Supervisor overrides are
+        // validated near the start of this method and apply only to the
+        // documented verification/tmpfs paths.
         // cas-ee2b: resolve the effective "has reviewable changes" signal and
         // the parent branch for worker git operations.
         //
@@ -3832,10 +3514,10 @@ impl CasCore {
         // beyond the parent branch, AND was never pushed to origin (no remote
         // tracking ref), the close is refused.
         //
-        // Bypass conditions mirror the supervisor-review block below:
+        // Skip conditions mirror the ordinary close gate:
         //   * Epic tasks — not a per-worker task.
         //   * `execution_note = "additive-only"` — no commit expected by spec.
-        //   * `bypass_close_gates` — supervisor emergency bypass.
+        //   * `bypass_close_gates` — this close disposition has no delivery.
         //   * `!effective_has_reviewable` — zero diff; no commits needed.
         //   * `task.assignee.is_none()` — orphaned task; nothing to check.
         //   * Non-factory caller (`!is_factory_worker`) — supervisors are
@@ -3861,310 +3543,32 @@ impl CasCore {
             }
         }
 
-        // cas-b51a: supervisor-owned review mode.
-        //
-        // When `[code_review] owner = "supervisor"` AND the caller is a
-        // factory worker AND the task has reviewable code changes, skip the
-        // full 14-min multi-persona dispatch and instead:
-        //   1. Run the lightweight structural lint (<1s).
-        //   2. On lint pass, flip the task to `PendingSupervisorReview` and
-        //      return success. The supervisor picks up the review queue at
-        //      their own pace.
-        //   3. On lint fail, return an error so the worker fixes the basics
-        //      before the branch reaches the review queue.
-        //
-        // Bypass conditions (fall through to normal close):
-        //   * `bypass_code_review=true` by a supervisor — they can always
-        //     force-close regardless of mode.
-        //   * Epic tasks — the subtask-receipts gate handles epics; the
-        //     supervisor-owned path is for individual worker tasks.
-        //   * Additive-only tasks — already skipped by the gate below.
-        //   * `has_reviewable_changes` returns false — docs-only or empty
-        //     diff; normal close path is appropriate.
-        //   * `owner=worker` — legacy opt-out path, unchanged.
-        //
-        // When the `[code_review]` section is absent entirely, fall through to
-        // `CodeReviewConfig::default().supervisor_owned()` so the runtime gate
-        // tracks the same default as the config layer (cas-865b: default is
-        // "supervisor").  The old `.unwrap_or(false)` hard-coded worker mode
-        // for absent sections, making the config-layer default ineffective.
-        let supervisor_review_mode = config
-            .code_review
-            .as_ref()
-            .map(|cr| cr.supervisor_owned())
-            .unwrap_or_else(|| crate::config::CodeReviewConfig::default().supervisor_owned());
-
-        // cas-6538: under `owner = "supervisor"` the worker close normally
-        // transitions to `PendingSupervisorReview` — that queue hop IS the P0
-        // code-review gate for this mode (the supervisor runs cas-code-review
-        // off the queue). For `depth_light` we treat the P0 gate as satisfied,
-        // so skip the pend-transition and let the close complete immediately
-        // (AC: "close succeeds", demo: "closes immediately"). `Deep`/unset is
-        // unaffected — `!depth_light` keeps the transition firing as today.
-        // cas-1932 (GH #62 symptom 1): the queue hop is the review gate for
-        // this mode — but once the supervisor has recorded an APPROVED verdict
-        // for this work cycle, that gate is satisfied. Before this fix the
-        // worker's re-close re-queued the task to `PendingSupervisorReview`
-        // forever: the approved verification on record was never consulted
-        // here, so no close by the worker could ever complete and the
-        // supervisor had to close on their behalf.
-        //
-        // Deliberately scoped to the supervisor-owned review path: there the
-        // supervisor's verdict IS the code review. Under `owner = "worker"`
-        // the verification jail and the cas-code-review envelope remain two
-        // independent gates and neither may stand in for the other.
-        let review_queue_verdict = if supervisor_review_mode
-            && is_factory_worker
-            && task.task_type != TaskType::Epic
+        // cas-ee2b: zero-reviewable-changes closes still need the
+        // ambiguity guard, but no review envelope or finding claim is
+        // accepted or validated at this boundary.
+        if close_disposition.requires_delivery_gates()
+            && !effective_has_reviewable
             && !bypass_close_gates
+            && let Some(worker_wt) = worker_worktree_path.as_ref()
         {
-            self.current_cycle_approved_verification(
+            match check_zero_commit_close(
+                worker_wt,
+                &resolved_parent_branch,
                 &req.id,
-                required_verification_type(task.task_type),
+                &task.task_type,
+                task.execution_note.as_deref(),
+                false,
+                task.deliverables.factory_branch_anchor.as_deref(),
+                req.commit_receipt.as_deref(),
                 commit_receipt_window.as_ref(),
-            )
-        } else {
-            None
-        };
-        if supervisor_review_mode
-            && is_factory_worker
-            && task.task_type != TaskType::Epic
-            && task.execution_note.as_deref() != Some("additive-only")
-            && !bypass_close_gates
-            && effective_has_reviewable
-            && !depth_light
-            && review_queue_verdict.is_none()
-        {
-            // cas-dc5d: scope lightweight lint to the closing worker's
-            // worktree + committed task range (merge-base..HEAD), never
-            // the shared main checkout's working-tree WIP. Sibling gates
-            // (cas-ee2b / cas-bc1b) already use this authority; lint was
-            // the remaining caller of bare `close_project_root`.
-            let lint_outcome = if declared_hook_evidence.is_some() {
-                LightweightLintOutcome::Pass
-            } else if let Some(worker_wt) = worker_worktree_path.as_ref() {
-                // cas-7efe: single close-time resolver, not a bare "main".
-                run_lightweight_structural_lint_with_scope(
-                    worker_wt,
-                    Some(resolved_parent_branch.as_str()),
-                )
-            } else {
-                run_lightweight_structural_lint(&close_project_root)
-            };
-            match lint_outcome {
-                LightweightLintOutcome::Fail(msg) => {
-                    return Ok(Self::tool_error(format!(
-                        "⚠️ LIGHTWEIGHT LINT FAILED\n\n\
-                        Worker close (supervisor-review mode) rejected by structural lint.\n\n\
-                        {msg}\n\n\
-                        Fix the violations above and retry close."
-                    )));
+            ) {
+                ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) => {
+                    return Ok(Self::tool_error(msg));
                 }
-                LightweightLintOutcome::Pass => {
-                    // cas-2b667 / GH #588: this is the final decision point
-                    // before the task becomes PendingSupervisorReview. The
-                    // earlier merge gate may have used a parked task anchor
-                    // (which is correct for final-close/content accounting),
-                    // but that cached anchor cannot authorize this queue hop
-                    // while the current factory branch has a straggler tip.
-                    if is_factory_worker && let Some(assignee) = task.assignee.as_deref() {
-                        let factory_branch = format!("factory/{assignee}");
-                        if let Err(message) = validate_current_factory_branch_tip_ancestry(
-                            &close_project_root,
-                            &factory_branch,
-                            &resolved_parent_branch,
-                        ) {
-                            return Ok(Self::tool_error(format!(
-                                "⚠️ MERGE REQUIRED\n\nTask {} cannot enter pending_supervisor_review until its current factory branch tip is merged.\n\n{message}",
-                                req.id
-                            )));
-                        }
-                    }
-
-                    // Transition to PendingSupervisorReview.
-                    let mut task_to_pend = task.clone();
-                    let now = chrono::Utc::now();
-                    task_to_pend.status = TaskStatus::PendingSupervisorReview;
-                    task_to_pend.pending_verification = true;
-                    task_to_pend.updated_at = now;
-                    task_to_pend.deliverables.pre_close_hook = declared_hook_evidence.clone();
-                    // Persist the close reason so the supervisor can see it.
-                    if let Some(ref reason) = req.reason {
-                        task_to_pend.close_reason = Some(reason.clone());
-                        let timestamp = now.format("%Y-%m-%d %H:%M");
-                        let note = format!(
-                            "[{timestamp}] Pending supervisor review — close reason: {reason}"
-                        );
-                        if task_to_pend.notes.is_empty() {
-                            task_to_pend.notes = note;
-                        } else {
-                            task_to_pend.notes = format!("{}\n\n{}", task_to_pend.notes, note);
-                        }
-                    }
-                    let requester_id = self.get_agent_id()?;
-                    let owner_id = self.verification_dispatch_owner(&requester_id)?;
-                    let dispatch = match cas_store::pend_task_for_supervisor_review_with_dispatch(
-                        &self.cas_root,
-                        &task_to_pend,
-                        task.status,
-                        &requester_id,
-                        &owner_id,
-                        chrono::Utc::now()
-                            + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
-                    ) {
-                        Ok(dispatch) => dispatch,
-                        Err(e) => {
-                            tracing::warn!(
-                                task_id = %req.id,
-                                error = %e,
-                                "failed to atomically bind supervisor-review dispatch"
-                            );
-                            return Ok(Self::tool_error(format!(
-                                "Internal error: failed to create the exact supervisor-review dispatch and pending task transition: {e}"
-                            )));
-                        }
-                    };
-
-                    // Emit activity event so the supervisor TUI shows the
-                    // new review item immediately.
-                    if let Ok(agent_id) = self.get_agent_id() {
-                        let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
-                            session_id: agent_id,
-                            event_type: "worker_pending_supervisor_review".to_string(),
-                            description: format!("Task ready for supervisor review: {}", req.id),
-                            entity_id: Some(req.id.clone()),
-                        };
-                        let _ = crate::mcp::socket::send_event(&self.cas_root, &event);
-                    }
-
-                    // cas-7fe9: release the worker's lease so the supervisor
-                    // can claim the task immediately for review. Without this,
-                    // the worker holds a phantom lease for ~10 min and
-                    // `task action=claim` by the supervisor is blocked.
-                    if let Ok(agent_store) = self.open_agent_store() {
-                        let _ = agent_store
-                            .release_lease_for_task(&req.id, "Queued for supervisor review");
-                    }
-
-                    return Ok(Self::success(format!(
-                        "Task {} queued for supervisor review\n\n\
-                        Lightweight structural lint passed (<1s). The full \
-                        cas-code-review skill will be dispatched by the supervisor.\n\n\
-                        Status: pending_supervisor_review\n\
-                        Dispatch: {}\n\n\
-                        After reviewing, the registered supervisor records the exact verdict with:\n\
-                        `mcp__cas__verification action=add task_id={} dispatch_id={} status=approved summary=\"...\"`\n\n\
-                        You can now pick up the next task immediately. \
-                        The supervisor will either:\n\
-                        - Approve → closes + merges your branch\n\
-                        - Reject → sends P0 findings back via coordination message",
-                        req.id, dispatch.id, req.id, dispatch.id
-                    )));
+                ZeroCommitCloseOutcome::Proceed => {}
+                ZeroCommitCloseOutcome::ProceedWithReceipt(note) => {
+                    append_close_decision_note(task_store.as_ref(), &mut task, &note);
                 }
-            }
-        }
-
-        // cas-3086: Epic-close should not re-gate on the union diff
-        // when every subtask already carries a valid ReviewOutcome
-        // receipt (persisted on deliverables.review_envelope). The
-        // subtasks were each individually reviewed before their own
-        // close; running the multi-persona reviewer on the unioned
-        // diff is redundant cost and wrong-shape signal.
-        let epic_subtask_receipts_cover = if task.task_type == TaskType::Epic {
-            match task_store.get_subtasks(&req.id) {
-                Ok(subtasks) => epic_subtask_receipts_are_clean(&subtasks),
-                Err(_) => false,
-            }
-        } else {
-            false
-        };
-
-        // cas-ee2b: three-case routing for zero-reviewable-changes closes.
-        // See `check_zero_commit_close` for the full decision tree.
-        //
-        // Case 2 (fabrication: findings provided + 0 commits) is already
-        // handled by the cas-490f gate above; never reaches here.
-        //
-        // Cases 1/3/4 are handled here: docs-only, ambiguous zero-commit,
-        // and deliberate no-code respectively.
-        let gate_outcome = if !close_disposition.requires_delivery_gates() {
-            CodeReviewGateOutcome::Proceed
-        } else if depth_light {
-            // cas-6538: light tasks treat the P0 code-review gate as satisfied.
-            // This is the non-factory / solo close path (the factory worker
-            // supervisor-review hop is already skipped above for light); a
-            // direct close that reaches the gate must not be blocked by a
-            // missing review envelope. `Deep`/unset falls through to the
-            // existing routing, so the gate enforces exactly as today.
-            CodeReviewGateOutcome::Proceed
-        } else if review_queue_verdict.is_some() {
-            // cas-1932: in supervisor-owned mode the recorded approval IS the
-            // completed review, so it satisfies this gate too — otherwise the
-            // close would clear the queue hop only to be refused for a missing
-            // review envelope the supervisor already replaced. The audit note
-            // naming the verdict is written further below, on the same task
-            // the final store write uses.
-            CodeReviewGateOutcome::Proceed
-        } else if epic_subtask_receipts_cover {
-            CodeReviewGateOutcome::Proceed
-        } else if !effective_has_reviewable {
-            let has_review_findings = req
-                .code_review_findings
-                .as_deref()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            // Only run the case-3 gate for isolated-worker tasks that
-            // are not supervisor-bypassed.
-            if !bypass_close_gates {
-                if let Some(worker_wt) = worker_worktree_path.as_ref() {
-                    // cas-7efe: single close-time resolver, not the
-                    // independently-derived `worker_review_parent_branch`
-                    // that used to fall back to a bare "main".
-                    match check_zero_commit_close(
-                        worker_wt,
-                        &resolved_parent_branch,
-                        &req.id,
-                        &task.task_type,
-                        task.execution_note.as_deref(),
-                        has_review_findings,
-                        // cas-127f: parked tip from MERGE REQUIRED — proves
-                        // real work even when merge-base..HEAD is now empty.
-                        task.deliverables.factory_branch_anchor.as_deref(),
-                        req.commit_receipt.as_deref(),
-                        commit_receipt_window.as_ref(),
-                    ) {
-                        ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) => {
-                            return Ok(Self::tool_error(msg));
-                        }
-                        ZeroCommitCloseOutcome::Proceed => {}
-                        ZeroCommitCloseOutcome::ProceedWithReceipt(note) => {
-                            append_close_decision_note(task_store.as_ref(), &mut task, &note);
-                        }
-                    }
-                }
-            }
-            // Cases 1 and 4: allow close — docs-only commits or deliberate
-            // no-code (spike, chore, execution_note set, bypass).
-            CodeReviewGateOutcome::Proceed
-        } else {
-            run_code_review_gate(&task, &req, &close_project_root, supervisor_review_mode)
-        };
-        match gate_outcome {
-            CodeReviewGateOutcome::Proceed => {}
-            CodeReviewGateOutcome::AppendDecisionNote(note) => {
-                let mut t = task.clone();
-                if t.notes.is_empty() {
-                    t.notes = note;
-                } else {
-                    t.notes = format!("{}\n\n{}", t.notes, note);
-                }
-                t.updated_at = chrono::Utc::now();
-                if let Err(e) = task_store.update(&t) {
-                    tracing::warn!(task_id = %req.id, error = %e, "failed to append code review decision note");
-                }
-            }
-            CodeReviewGateOutcome::Reject(msg) => {
-                return Ok(Self::tool_error(msg));
             }
         }
 
@@ -4208,23 +3612,6 @@ impl CasCore {
         // update boundary clears the anchor on every Closed -> non-Closed
         // transition before rework starts, preserving cas-cf64's stale-anchor
         // protection even when callers bypass the dedicated reopen action.
-
-        // cas-778a: apply worker-owned verification fields to the now-mutable
-        // `task` so the final task_store.update(&task) below carries them.
-        // The intermediate clone-persist above writes the DB eagerly; this
-        // ensures the in-memory value used for `deliverables` capture below
-        // and the final write are consistent with the intermediate state.
-        if let Some(envelope) = req
-            .code_review_findings
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if is_factory_worker && worker_review_envelope_is_clean(envelope) {
-                task.deliverables.review_envelope = Some(envelope.to_string());
-                task.pending_verification = false;
-            }
-        }
 
         // Capture deliverables on close
         let mut deliverables = task.deliverables.clone();
@@ -4311,6 +3698,19 @@ impl CasCore {
             }
         }
 
+        if supervisor_override {
+            let timestamp = now.format("%Y-%m-%d %H:%M");
+            let reason = req.reason.as_deref().unwrap_or_default().trim();
+            let decision_note = format!(
+                "[{timestamp}] DECISION: supervisor_override=true accepted. Reason: {reason}"
+            );
+            if task.notes.is_empty() {
+                task.notes = decision_note;
+            } else {
+                task.notes = format!("{}\n\n{}", task.notes, decision_note);
+            }
+        }
+
         // cas-6c50: persist the supervisor decision on the same in-memory
         // task as the final close write. The structured deliverables receipt
         // above supports machine checks; this note keeps the exceptional
@@ -4329,26 +3729,6 @@ impl CasCore {
                 task.notes = decision_note;
             } else {
                 task.notes = format!("{}\n\n{}", task.notes, decision_note);
-            }
-        }
-
-        // cas-1932: record which supervisor verdict authorized this close on
-        // the same in-memory task the final write uses. The code-review gate's
-        // eager clone-persist above is overwritten by that write, and this
-        // audit linkage — the thing GH #62's "verification skipped" minor was
-        // about — has to survive the close.
-        if let Some(verdict) = review_queue_verdict.as_ref() {
-            let timestamp = now.format("%Y-%m-%d %H:%M");
-            let note = format!(
-                "[{timestamp}] DECISION: close authorized by approved verification {} \
-                 recorded {} — supervisor review already complete, task not re-queued.",
-                verdict.id,
-                verdict.created_at.to_rfc3339(),
-            );
-            if task.notes.is_empty() {
-                task.notes = note;
-            } else {
-                task.notes = format!("{}\n\n{}", task.notes, note);
             }
         }
 
@@ -4794,6 +4174,10 @@ impl CasCore {
                 "\n\nReceipt: epic close committed. The full stranded-branch override narrative is queued as a durable decision note.",
             );
         }
+        if used_deprecated_override_alias {
+            receipt.push_str("\n\n");
+            receipt.push_str(DEPRECATED_BYPASS_WARNING);
+        }
         Ok(Self::success(receipt))
     }
 
@@ -4916,27 +4300,6 @@ impl CasCore {
         Ok(system_b)
     }
 
-    /// cas-1932 (GH #62): the APPROVED verification for this task's current
-    /// work cycle, if one is on record.
-    ///
-    /// Two close-path questions share this lookup: whether the supervisor's
-    /// verdict already satisfies the review queue (so the worker's re-close
-    /// completes instead of re-queuing), and whether a "verification skipped"
-    /// message would be lying about a verdict that exists. Store failures are
-    /// treated as "no verdict" — this only ever *grants* an exit, so an
-    /// unreadable store must never manufacture one.
-    pub(crate) fn current_cycle_approved_verification(
-        &self,
-        task_id: &str,
-        required_type: VerificationType,
-        window: Option<&TaskCommitReceiptWindow>,
-    ) -> Option<Verification> {
-        let store = self.open_verification_store().ok()?;
-        let latest = store.get_latest_for_task(task_id).ok()??;
-        approved_verification_satisfies_review_queue(&latest, window, required_type)
-            .then_some(latest)
-    }
-
     /// Compute why (if at all) the task-verifier step should be skipped
     /// for this close attempt.
     ///
@@ -4953,7 +4316,7 @@ impl CasCore {
     ///    `task.assignee` stores a display name, so this is the most
     ///    reliable liveness source. If the lease is valid and the
     ///    referenced agent is alive+fresh → not a skip (unless the
-    ///    supervisor passed `bypass_code_review=true`, in which case
+    ///    supervisor passed `supervisor_override=true`, in which case
     ///    we honor it as `SupervisorBypass`). If the lease is stale or
     ///    the referenced agent is dead → `AssigneeInactive`.
     /// 3. No lease — try a direct `agent_store.get(task.assignee)` for
@@ -4976,7 +4339,10 @@ impl CasCore {
             return VerificationSkipReason::None;
         };
 
-        let bypass_requested = req.bypass_code_review.unwrap_or(false);
+        let bypass_requested = req
+            .supervisor_override
+            .or(req.legacy_bypass_code_review)
+            .unwrap_or(false);
         let alive_result = |agent: &cas_types::Agent| {
             agent.is_alive() && !agent.is_heartbeat_expired(ASSIGNEE_STALE_SECS)
         };
@@ -5556,17 +4922,16 @@ impl CasCore {
     }
 }
 
-/// cas-6538: audit text recorded on a `depth=light` task at close time,
-/// stating exactly which rigor gates were skipped and why. Kept as a
+/// Audit text recorded on a `depth=light` task at close time, stating exactly
+/// which rigor gates were skipped and why. Kept as a
 /// self-contained `pub(crate)` fn (not an inline literal) so the wording
 /// is unit-testable and stays in one place. The caller prepends a
 /// `[timestamp]` and appends it to the task notes timeline.
 pub(crate) fn light_skip_decision_note() -> String {
-    "decision: depth=light close (EPIC cas-1255 speed mode) — skipped the \
-     verification jail (no task-verifier dispatch; pending_verification left \
-     false) and the P0 code-review gate (treated as satisfied; supervisor \
-     review queue hop bypassed). Reason: task depth=light. Data-state guards \
-     (merge-state, uncommitted-work, additive-only, commit-claim) still ran."
+    "decision: depth=light close (speed mode) — skipped the verification jail \
+     (no task-verifier dispatch; pending_verification left false). Reason: task \
+     depth=light. Data-state guards (merge-state, uncommitted-work, \
+     additive-only) still ran."
         .to_string()
 }
 
@@ -5837,8 +5202,8 @@ pub(crate) fn check_uncommitted_work(project_root: &std::path::Path) -> Vec<Unco
 /// cas-f102 incident is exactly the failure mode that ambiguity hides — a
 /// worker's tree diverged from the reviewed tip (an `Edit` reported REJECTED
 /// but the write landed on disk) and nothing at close said so. Same anti-
-/// pattern Cassy already fixed for review envelopes in cas-acf83: an empty
-/// findings list must not be indistinguishable from a review that never ran.
+/// pattern Cassy already fixed for review evidence in cas-acf83: an empty
+/// receipt must not be indistinguishable from a check that never ran.
 ///
 /// So the receipt carries all four facts and the close path NAMES whichever
 /// one it got. `unavailable` is `Some(reason)` only when the check could not
@@ -6352,10 +5717,8 @@ fn check_branch_violations(
 
 /// Outcome of the cas-95ce factory-branch merge-state close gate.
 ///
-/// Mirrors [`CodeReviewGateOutcome`] in shape so the call site is a
-/// uniform pattern-match. The gate exposes only `Proceed` / `Reject`
-/// because, unlike the cas-code-review gate, this one has no
-/// supervisor override path — bypass cannot skip a data-state guard.
+/// Exposes only `Proceed` / `Reject` because supervisor overrides cannot skip
+/// this data-state guard.
 #[derive(Debug)]
 pub(crate) enum MergeStateGateOutcome {
     /// Close may proceed — factory branch is merged into the parent
@@ -6397,8 +5760,8 @@ pub(crate) struct TaskCommitAttribution<'a> {
 /// `factory/<assignee>` branch carries commits not present on the
 /// parent epic branch.
 ///
-/// Runs BEFORE [`run_code_review_gate`]; consequently
-/// `bypass_code_review=true` cannot skip it. This is a data-state
+/// Runs before the close review policy; consequently
+/// `supervisor_override=true` cannot skip it. This is a data-state
 /// guard, not a review gate — a reviewed-but-unmerged branch is
 /// still stranded work, and the entire point of the cas-95ce/cas-754b
 /// scoping decision is that there is no escape hatch (an escape
@@ -6419,10 +5782,9 @@ pub(crate) struct TaskCommitAttribution<'a> {
 /// the factory branch name, the parent branch name, and explicit
 /// remediation steps.
 ///
-/// `_req` is intentionally unused — the bypass flag does not affect
-/// this guard. It is carried through so the call signature mirrors
-/// [`run_code_review_gate`] and the structural placement (this gate
-/// sits upstream of any bypass evaluation) is self-documenting.
+/// `_req` is intentionally unused — supervisor_override does not affect
+/// this guard. It is carried through so the call signature remains stable
+/// for close-path callers and the structural placement is self-documenting.
 ///
 /// ## cas-4b3f: anchored to the task's own commits, not branch HEAD
 ///
@@ -6618,20 +5980,20 @@ fn delivery_content_anchor_at_close<'a>(
 }
 
 /// Re-fetch the integration target and verify the *live* factory branch tip
-/// before a close path enters `PendingSupervisorReview`.
+/// before accepting a completion receipt.
 ///
 /// The ordinary merge gate may intentionally use a parked anchor for an
 /// `AwaitingMerge` task: that anchor keeps a recycled worker lane's later,
 /// unrelated commits from re-stranding an already-delivered task. That
-/// historical proof is not sufficient for the supervisor-review queue,
-/// however. Queueing review advertises the current branch as ready, so the
-/// current branch tip must itself be reachable from the current target.
+/// historical proof is not sufficient for a completion receipt, however. A
+/// receipt advertises the current branch as ready for delivery, so the current
+/// branch tip must itself be reachable from the current target.
 ///
 /// `fetch_parent_branch_best_effort` refreshes `origin/<parent_branch>` before
 /// the target ref is selected. When that remote-tracking ref exists it is the
 /// authoritative target view; local-only repositories retain their local
 /// target behavior. Missing or unresolvable Git state fails closed because a
-/// review-pending transition must never be based on a cached anchor alone.
+/// delivery transition must never be based on a cached anchor alone.
 pub(crate) fn validate_current_factory_branch_tip_ancestry(
     repo_path: &std::path::Path,
     factory_branch: &str,
@@ -7193,7 +6555,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
          task close rejected: {factory_branch} has {stranded} commit(s) from this task \
          not on {parent_branch}.\n{diagnostic_receipt}\n{receipt_note}\n\
          The branch must be merged into {parent_branch} before closing. This \
-         guard cannot be bypassed (use of bypass_code_review=true does not \
+         guard cannot be bypassed (use of supervisor_override=true does not \
          skip merge-state checks — it is a data-state guard, not a review \
          gate).\n\n\
          {remediation}",
@@ -7910,7 +7272,7 @@ pub(crate) enum MergeRealityOutcome {
 /// - `is_factory_worker` — supervisor closes are not affected
 /// - `task.task_type != Epic` — epic close is handled elsewhere
 /// - `execution_note != "additive-only"` — no commit expected
-/// - `!bypass_close_gates` — supervisor emergency bypass
+/// - `!bypass_close_gates` — delivered closes retain the merge-state guard
 /// - `effective_has_reviewable` — zero-diff tasks don't need commits
 pub(crate) fn check_factory_branch_merge_reality(
     repo_path: &std::path::Path,
@@ -7958,8 +7320,8 @@ pub(crate) fn check_factory_branch_merge_reality(
             `git push origin {factory_branch}`\n\
          4. Open a PR targeting {parent_branch} and merge it.\n\
          5. Retry: `mcp__cas__task action=close`\n\n\
-         If this task intentionally has no code commits, the Supervisor can \
-         bypass with `bypass_code_review=true`.",
+         If this task intentionally has no code commits, record an \
+         execution_note or ask the supervisor to audit and close it.",
     ))
 }
 
@@ -8595,8 +7957,7 @@ fn system_b_worktree_base_for_repo(
 /// Count commits reachable from `HEAD` but not from `parent_branch`,
 /// running `git` inside `worker_worktree_path`.
 ///
-/// Used by [`check_commit_claim_integrity`] to detect workers that submit
-/// `code_review_findings` (claiming code was written) when their branch
+/// Used by the zero-commit close gate to distinguish a worker branch that
 /// carries no commits beyond the parent. The key difference from
 /// [`count_unmerged_factory_commits`] is that this function operates on
 /// `HEAD` — it is meant to be called from inside the worker's own
@@ -8944,104 +8305,6 @@ fn parse_files_changed(summary_line: &str) -> Option<usize> {
     summary_line.trim().split_whitespace().next()?.parse().ok()
 }
 
-/// Outcome of the cas-490f commit-claim integrity gate.
-#[derive(Debug)]
-pub(crate) enum CommitClaimGateOutcome {
-    /// Close may proceed — either no `code_review_findings` was provided,
-    /// or the worker branch has at least one commit to back up the claim.
-    Proceed,
-    /// Close may proceed because a worker-supplied receipt was validated
-    /// against the current task work cycle. Carries the audit-note body.
-    ProceedWithReceipt(String),
-    /// Close must be rejected — worker provided `code_review_findings`
-    /// (claiming code was written and reviewed) but the branch has 0
-    /// commits beyond the parent (fabrication signal).
-    Reject(String),
-}
-
-/// cas-490f: verify that a worker who claims code changes actually produced
-/// commits.
-///
-/// When `has_review_findings` is true, calls
-/// [`count_worker_branch_commits`] inside `worker_worktree_path`. If the
-/// count is 0, an integrated automatic anchor or validated task commit
-/// receipt satisfies the claim; otherwise returns `Reject` with an explicit
-/// "FABRICATION DETECTED" or invalid-receipt message. A positive branch count
-/// returns `Proceed`.
-///
-/// Graceful degradation: `count_worker_branch_commits` returns 0 on git
-/// failures. Callers must only invoke this gate when a resolved worktree
-/// path is available (`resolve_worker_worktree_path` returned `Some`), so
-/// the path is always a real git worktree in production. Test helpers
-/// supply a minimal in-memory repo.
-pub(crate) fn check_commit_claim_integrity(
-    worker_worktree_path: &std::path::Path,
-    parent_branch: &str,
-    has_review_findings: bool,
-    factory_branch_anchor: Option<&str>,
-    commit_receipt: Option<&str>,
-    commit_receipt_window: Option<&TaskCommitReceiptWindow>,
-) -> CommitClaimGateOutcome {
-    if !has_review_findings {
-        return CommitClaimGateOutcome::Proceed;
-    }
-    let commit_count = count_worker_branch_commits(worker_worktree_path, parent_branch);
-    if commit_count == 0 {
-        // cas-127f: after MERGE REQUIRED + supervisor merge, merge-base..HEAD
-        // is empty even though real work (the parked anchor) landed on parent.
-        // That is not fabrication — it is merge-satisfied.
-        if let Some(anchor) = factory_branch_anchor {
-            if delivery_is_proven_on_parent(worker_worktree_path, anchor, parent_branch) {
-                return CommitClaimGateOutcome::Proceed;
-            }
-        }
-        if let Some(receipt) = commit_receipt {
-            let Some(window) = commit_receipt_window else {
-                return CommitClaimGateOutcome::Reject(commit_receipt_rejection(
-                    worker_worktree_path,
-                    receipt,
-                    parent_branch,
-                    "task attribution window is unavailable; ask the supervisor for an audited bypass",
-                ));
-            };
-            return match validate_task_commit_receipt(
-                worker_worktree_path,
-                receipt,
-                parent_branch,
-                window,
-            ) {
-                Ok(note) => CommitClaimGateOutcome::ProceedWithReceipt(note),
-                Err(reason) => CommitClaimGateOutcome::Reject(commit_receipt_rejection(
-                    worker_worktree_path,
-                    receipt,
-                    parent_branch,
-                    &reason,
-                )),
-            };
-        }
-        CommitClaimGateOutcome::Reject(format!(
-            "⚠️ FABRICATION DETECTED\n\n\
-            task close rejected: code_review_findings was provided (indicating \
-            code was written and reviewed) but the worker branch has 0 commits \
-            beyond {parent_branch}.\n\n\
-            📂 Worker worktree: {}\n\
-            🌿 Parent branch: {parent_branch}\n\
-            📊 Commits beyond base: 0 commits\n\n\
-            Do not submit fabricated code review findings. If no code was written, \
-            close without code_review_findings.\n\n\
-            To resolve:\n\
-            1. If you wrote code but forgot to commit: stage and commit your \
-               changes, then retry close.\n\
-            2. If no code was needed for this task: retry close without the \
-               code_review_findings field (documentation/spike tasks don't \
-               need a review envelope).",
-            worker_worktree_path.display()
-        ))
-    } else {
-        CommitClaimGateOutcome::Proceed
-    }
-}
-
 // ---------------------------------------------------------------------------
 // cas-8f8f: epic-close per-child merge-state gate + diagnostic
 // ---------------------------------------------------------------------------
@@ -9057,8 +8320,7 @@ pub(crate) fn check_commit_claim_integrity(
 pub(crate) enum ZeroCommitCloseOutcome {
     /// Close may proceed — either the task is not a code-expecting type,
     /// has an execution_note signalling intentional no-code work, has
-    /// committed docs-only changes (count > 0), or the review findings
-    /// claim is present (handled by the cas-490f gate instead).
+    /// committed docs-only changes (count > 0).
     Proceed,
     /// Close may proceed because a worker-supplied receipt was validated
     /// against the current task work cycle. Carries the audit-note body.
@@ -9815,8 +9077,8 @@ fn commit_receipt_rejection(
         })
         .unwrap_or_else(|| {
             "4. If no commit from this task's current work cycle is available, \
-             ask the supervisor to audit the merge and close with \
-             `bypass_code_review=true`."
+             ask the supervisor to audit the merge and record the close \
+             decision."
                 .to_string()
         });
     format!(
@@ -9903,8 +9165,7 @@ fn resolve_merge_evidence(
 ///    → `Proceed`. This function sees `count > 0` and returns `Proceed`.
 ///
 /// 2. **Deliberate no-code** (`execution_note` is set, OR task type is
-///    Spike/Chore/Epic, OR `has_review_findings` is true — the cas-490f
-///    gate handles that case):
+///    Spike/Chore/Epic):
 ///    → `Proceed`. No ambiguity.
 ///
 /// 3. **Merge-satisfied** (cas-127f/cas-3d37): `factory_branch_anchor` is set
@@ -9922,14 +9183,10 @@ fn resolve_merge_evidence(
 ///    evidence is consulted before the no-diff heuristic on both shapes.
 ///
 /// 4. **Ambiguous zero-commit** (`count == 0`, no anchor / anchor not
-///    integrated, no `execution_note`, task type is Bug/Feature/Task, no
-///    review findings):
-///    → `AmbiguousCodeTask(msg)`. Ask worker to commit, set `execution_note`,
-///    or have the supervisor bypass.
-///
-/// `has_review_findings`: true when `code_review_findings` was non-empty.
-/// When true, the cas-490f gate fires upstream; this function returns `Proceed`
-/// so the two gates don't double-reject.
+///    integrated, no `execution_note`, task type is Bug/Feature/Task):
+///    → `AmbiguousCodeTask(msg)`. Ask the worker to commit or set
+///    `execution_note`; a supervisor must record an explicit audited decision
+///    if the task is intentionally being closed without delivery evidence.
 ///
 /// `factory_branch_anchor`: optional full tip SHA recorded after a successful
 /// worker commit, with `park_task_awaiting_merge` as a legacy/fallback capture.
@@ -9949,7 +9206,7 @@ pub(crate) fn check_zero_commit_close(
     task_id: &str,
     task_type: &TaskType,
     execution_note: Option<&str>,
-    has_review_findings: bool,
+    _legacy_claim: bool,
     factory_branch_anchor: Option<&str>,
     commit_receipt: Option<&str>,
     commit_receipt_window: Option<&TaskCommitReceiptWindow>,
@@ -9963,10 +9220,6 @@ pub(crate) fn check_zero_commit_close(
     }
     // execution_note is set → worker explicitly signalled the no-code intent.
     if execution_note.is_some() {
-        return ZeroCommitCloseOutcome::Proceed;
-    }
-    // Findings present → cas-490f gate handles; don't double-reject here.
-    if has_review_findings {
         return ZeroCommitCloseOutcome::Proceed;
     }
     // Count commits: if > 0, this MAY be case 1 (docs-only) — but it can
@@ -10007,7 +9260,7 @@ pub(crate) fn check_zero_commit_close(
         return ZeroCommitCloseOutcome::AmbiguousCodeTask(format!(
             "⚠️ NO-DIFF CLOSE ON CODE TASK\n\n\
             task close rejected: this is a {task_type_str} task with no \
-            code_review_findings, no execution_note, no merge evidence, and \
+            no execution_note, no merge evidence, and \
             {commit_count} commit(s) on the worker branch that produce an \
             EMPTY diff vs {parent_branch} (a sync/merge-only commit, e.g. \
             `git merge --no-ff` with no unique work, not task work). That \
@@ -10031,8 +9284,9 @@ pub(crate) fn check_zero_commit_close(
                docs-only, characterization-only): update the task with an \
                execution_note to signal intentional no-code work:\n\
                `mcp__cas__task action=update id={task_id} execution_note=additive-only`\n\
-            4. Supervisors may bypass this gate with bypass_code_review=true \
-               (logged as a decision note)."
+            4. Ask the supervisor to audit the merge. Only a supervisor may \
+               close with `supervisor_override=true` and a reason recording \
+               that audit if the work was intentionally resolved without code."
         ));
     }
     if let Some(outcome) = resolve_merge_evidence(
@@ -10050,7 +9304,7 @@ pub(crate) fn check_zero_commit_close(
     ZeroCommitCloseOutcome::AmbiguousCodeTask(format!(
         "⚠️ ZERO-COMMIT CLOSE ON CODE TASK\n\n\
         task close rejected: this is a {task_type_str} task with no \
-        code_review_findings, no execution_note, and 0 commits on the \
+        no execution_note and 0 commits on the \
         worker branch. That combination is ambiguous — either the work \
         wasn't committed yet, or this task was resolved without code.\n\n\
         📂 Worker worktree: {wt_display}\n\
@@ -10069,9 +9323,9 @@ pub(crate) fn check_zero_commit_close(
            historical commit), verify it is an ancestor of \
            {parent_branch}, then retry close with \
            `commit_receipt=<sha>` (full or an unambiguous abbreviation).\n\
-        4. If no task commit receipt is available, ask the supervisor to \
-           audit the merge and close with `bypass_code_review=true`. Only a \
-           supervisor can perform that bypass."
+        4. If no task commit receipt is available, ask the supervisor to audit \
+           the merge. Only a supervisor may close with \
+           `supervisor_override=true` and a reason recording that audit."
     ))
 }
 
@@ -11449,7 +10703,7 @@ pub(crate) fn run_epic_close_merge_gate(
          Epic {epic_id} cannot close — {n} child task(s) have factory branches \
          whose delivery is not accounted for on {parent}:\n{detail}\n\
          {closing_instruction}\n\
-         bypass_code_review=true does not skip this check — it is a data-state \
+         supervisor_override=true does not skip this check — it is a data-state \
          guard, not a review gate.\n\n\
          If you have inspected these lanes and they are genuinely stale — content \
          shipped by another route and since refactored — a live registered \
@@ -11478,121 +10732,13 @@ pub(crate) fn run_epic_close_merge_gate(
 }
 
 // ---------------------------------------------------------------------------
-// cas-778a + cas-3086 + cas-fef4: clean-envelope predicate and epic bypass
-// ---------------------------------------------------------------------------
-
-/// Returns `true` iff `envelope` is a structurally valid, semantically-
-/// validated [`cas_types::ReviewOutcome`] with:
-///   * no PR-introduced P0 in `residual` (cas-3086), and
-///   * no P0 reclassified into `pre_existing` (cas-fef4 forgery defence).
-///
-/// Used in two call sites:
-///   1. The factory-worker-owned verification short-circuit in
-///      `cas_task_close` (cas-778a): before arming the verification jail,
-///      check whether the worker supplied a clean envelope; if so, write a
-///      `Skipped` row and let the close proceed without task-verifier
-///      dispatch.
-///   2. [`epic_subtask_receipts_are_clean`]: the epic-level bypass that
-///      skips the union-diff multi-persona gate when every subtask already
-///      holds a clean per-task receipt.
-///
-/// Keeping both call sites on the same predicate ensures they evolve
-/// together — a tightening here (e.g., adding a SHA-anchor staleness
-/// check) automatically applies to both.
-pub(crate) fn worker_review_envelope_is_clean(envelope: &str) -> bool {
-    use cas_store::code_review::close_gate::{GateDecision, evaluate_gate};
-    use cas_types::FindingSeverity;
-
-    let Ok(outcome) = serde_json::from_str::<cas_types::ReviewOutcome>(envelope) else {
-        return false;
-    };
-    if outcome.validate().is_err() {
-        return false;
-    }
-    // cas-3086: no PR-introduced P0 in residual.
-    // ALSO explicitly reject any P0 in residual regardless of per-finding
-    // `pre_existing` flag: `evaluate_gate` skips findings with
-    // `pre_existing: true` (they are treated as baseline noise, not
-    // PR-introduced), so a forged envelope with a P0 in `residual` that
-    // carries `pre_existing: true` would otherwise pass both the gate call
-    // and the `pre_existing`-array check below. Genuine pre-existing P0s
-    // belong in `outcome.pre_existing[]`, not in `residual[]`.
-    // cas-acf83 (GH #108): self-certification requires evidence the review
-    // actually ran. Symmetric with run_code_review_gate — a zero-persona
-    // envelope must not buy a verification bypass either.
-    if !outcome.execution_status().is_executed() {
-        return false;
-    }
-    let residual_clean = matches!(evaluate_gate(&outcome.residual), GateDecision::Allow)
-        && !outcome
-            .residual
-            .iter()
-            .any(|f| f.severity == FindingSeverity::P0);
-    // cas-fef4: no P0 smuggled through the top-level pre_existing array.
-    let pre_existing_clean = outcome
-        .pre_existing
-        .iter()
-        .all(|f| f.severity != FindingSeverity::P0);
-    residual_clean && pre_existing_clean
-}
-
-/// Decide whether an epic's subtasks collectively carry clean review
-/// receipts that justify skipping the multi-persona close gate on the
-/// union diff.
-///
-/// Returns `true` iff every subtask:
-///   * has a non-empty `deliverables.review_envelope`,
-///   * that passes [`worker_review_envelope_is_clean`] (deserialises,
-///     validates, no P0 in residual, no P0 in pre_existing).
-///
-/// Returns `false` when the subtask list is empty — there is nothing to
-/// "cover" the union diff, so fall through to the normal gate.
-///
-/// ## Why both residual- and pre_existing-P0 disqualify the bypass
-///
-/// The bypass treats "every subtask has a clean receipt" as a proof
-/// stand-in that the union diff was already reviewed piece-by-piece. A
-/// worker supplying an envelope of shape `{ residual: [], pre_existing:
-/// [<real_p0>] }` would satisfy the old `evaluate_gate(residual) ==
-/// Allow` check but smuggle a real P0 past the epic-close gate — the
-/// `pre_existing` channel was designed to classify *findings that
-/// predate the change*, not as a free downgrade slot for workers to
-/// drop P0s into. Per cas-fef4, we tighten the clean-receipt semantics
-/// to reject any receipt where a P0 appears anywhere — residual OR
-/// pre_existing. Legitimate pre-existing P0s on a change's diff are
-/// extraordinarily rare; if one genuinely appears post-hoc, re-running
-/// the gate is cheap insurance compared with a silent bypass.
-///
-/// ## Staleness note
-///
-/// This helper still treats the persisted envelopes structurally — it
-/// cannot detect whether the epic branch has commits *not* covered by
-/// any subtask's reviewed diff (supervisor fixups, merge-resolution
-/// commits). That is tracked separately (cas-cc1d staleness follow-up)
-/// and needs a diff-SHA anchor in the envelope schema to close cleanly.
-pub(crate) fn epic_subtask_receipts_are_clean(subtasks: &[Task]) -> bool {
-    if subtasks.is_empty() {
-        return false;
-    }
-
-    subtasks.iter().all(|t| {
-        !t.has_delivery_to_integrate()
-            || t.deliverables
-                .review_envelope
-                .as_deref()
-                .map(worker_review_envelope_is_clean)
-                .unwrap_or(false)
-    })
-}
-
-// ---------------------------------------------------------------------------
 // cas-49f1: zero-hit search-manifest guardrail for investigation (Spike)
 // task closes
 // ---------------------------------------------------------------------------
 
 /// Outcome of the investigation-task (`Spike`) search-manifest gate
-/// (cas-49f1). Unlike [`CodeReviewGateOutcome`] this gate never rejects a
-/// close — it is a guardrail, not a framework: the loudest it gets is a
+/// (cas-49f1). This gate never rejects a close — it is a guardrail, not a
+/// framework: the loudest it gets is a
 /// warning note appended to the task's audit trail.
 #[derive(Debug)]
 pub(crate) enum SearchManifestGateOutcome {
@@ -11667,409 +10813,6 @@ pub(crate) fn run_search_manifest_gate(
         manifest.len(),
     );
     SearchManifestGateOutcome::AppendWarningNote(note)
-}
-
-// ---------------------------------------------------------------------------
-// cas-b39f (Unit 9): cas-code-review P0 close gate
-// ---------------------------------------------------------------------------
-
-/// Outcome of the cas-code-review close gate, as seen by `cas_task_close`.
-///
-/// This enum is deliberately tiny: the hard work (P0 residual evaluation)
-/// lives in `cas_store::code_review::close_gate::evaluate_gate`, and the
-/// soft conditions (supervisor override, additive-only skip, non-code
-/// diff, graceful degradation) are resolved by [`run_code_review_gate`]
-/// below. The call site in `cas_task_close` just pattern-matches on the
-/// three outcomes.
-#[derive(Debug)]
-pub(crate) enum CodeReviewGateOutcome {
-    /// Close may proceed. No note to write, no error to return.
-    Proceed,
-    /// Close may proceed, but the caller should append this decision
-    /// note to the task before the main close transaction. Used for
-    /// the supervisor override path so the audit trail captures who
-    /// downgraded a P0 block and why.
-    AppendDecisionNote(String),
-    /// Close must be rejected with this user-facing error message.
-    /// Used for (a) P0 residual blocks, and (b) unauthorized override
-    /// attempts.
-    Reject(String),
-}
-
-/// Decide whether the cas-code-review P0 close gate fires for this
-/// close request.
-///
-/// Per brainstorm Outstanding Question #1 option (a): the worker runs
-/// the cas-code-review skill *before* calling `task.close` and passes
-/// the structured findings envelope in via
-/// [`TaskCloseRequest::code_review_findings`]. This Rust helper only
-/// enforces the gate on what the worker sends — it does not (and
-/// cannot) invoke the skill itself.
-///
-/// Contract:
-///
-/// - `execution_note == "additive-only"` → [`Proceed`]. Pure-addition
-///   closes are new-files-only by definition and already covered by
-///   the cas-e235 gate above.
-/// - `bypass_code_review == Some(true)` and caller is a supervisor →
-///   [`AppendDecisionNote`] with the override reason. Gate skipped.
-/// - `bypass_code_review == Some(true)` and caller is **not** a
-///   supervisor → [`Reject`] with an unauthorized-override message.
-///   Silently ignoring the flag would mask a misconfigured harness.
-/// - `has_reviewable_changes(project_root) == false` → [`Proceed`].
-///   Pure docs-only diffs (`*.md` / `docs/**`) and pure test-only
-///   diffs do not require a code review pass.
-/// - `code_review_findings == None` at this point → [`Reject`] with
-///   `CODE_REVIEW_REQUIRED`, pointing the worker at the skill.
-/// - `code_review_findings == Some(envelope)` that fails
-///   [`ReviewOutcome::validate`] → [`Reject`] as a malformed envelope.
-/// - Otherwise → run the full forgery defence (cas-4c64): Check A
-///   rejects any P0 in `residual[]` regardless of the per-finding
-///   `pre_existing` flag; Check B rejects any P0 in `pre_existing[]`.
-///   Then [`evaluate_gate`] is called as a safety net. Any rejection
-///   returns a formatted block message; all checks pass → [`Proceed`].
-/// Build the `CODE_REVIEW_REQUIRED` rejection message with mode guidance
-/// that matches the configured `[code_review] owner` (cas-297e).
-///
-/// - `supervisor_owned = true` (default since v2.13.0): recommend
-///   `mode=interactive` / `mode=headless`.
-/// - `supervisor_owned = false` (`owner = "worker"`): recommend the
-///   legacy `mode=autofix` path.
-/// cas-acf83 (GH #108): the review reported that it did not run.
-///
-/// Names the reason (and any persona launch failures the producer recorded)
-/// so the worker can tell "the transport is down" from "the diff was empty"
-/// without digging through a workflow transcript.
-fn format_review_did_not_execute(task_id: &str, reason: &str, supervisor_owned: bool) -> String {
-    let rerun = if supervisor_owned {
-        "mode=interactive (or mode=headless for skill-to-skill)"
-    } else {
-        "mode=autofix"
-    };
-    format!(
-        "⚠️ REVIEW DID NOT EXECUTE\n\n         task close rejected for {task_id}: the code_review_findings envelope \
-         reports that no persona produced a verdict, so its empty residual[] is \
-         an ABSENT verdict, not a passing one.\n\n         Reported reason: {reason}\n\n         To resolve:\n\
-         1. Fix what stopped the personas from running (a down or \
-            out-of-credit review transport is the usual cause; the reason \
-            above names it when the producer knew).\n\
-         2. Re-run cas-code-review with {rerun} and confirm the returned \
-            envelope reports execution.personas_run > 0.\n\
-         3. Re-call task.close with that envelope.\n\n         If the review transport is genuinely unavailable, review the diff by \
-         another means and have a supervisor issue bypass_code_review=true — \
-         that is a recorded decision, which a silently-empty review is not."
-    )
-}
-
-/// cas-acf83 (GH #108): personas ran, but a mandatory lane did not.
-///
-/// The all-or-nothing check is not enough on its own: every always-on persona
-/// runs on the same transport, so the outage that motivated this task takes all
-/// four out at once while leaving the one Claude-hosted persona to report a
-/// "successful" run.
-fn format_review_incomplete(
-    task_id: &str,
-    required_missing: &[String],
-    personas_failed: &[String],
-    supervisor_owned: bool,
-) -> String {
-    let rerun = if supervisor_owned {
-        "mode=interactive (or mode=headless for skill-to-skill)"
-    } else {
-        "mode=autofix"
-    };
-    let failures = if personas_failed.is_empty() {
-        "(the producer recorded no per-persona reason)".to_string()
-    } else {
-        personas_failed.join("\n  - ")
-    };
-    format!(
-        "⚠️ REVIEW INCOMPLETE\n\n         task close rejected for {task_id}: the review ran, but these mandatory \
-         reviewers produced no verdict, so whole classes of defect went \
-         unexamined:\n  - {}\n\n         Recorded failures:\n  - {failures}\n\n         An empty residual[] from a partial review is not a clean bill of \
-         health — it is silence from the reviewers that did not run.\n\n         To resolve: fix the transport (a shared outage takes out every \
-         same-transport persona at once), re-run cas-code-review with {rerun}, \
-         and confirm execution.required_personas_missing is empty. If the \
-         transport cannot be restored, review those lanes by another means and \
-         have a supervisor record bypass_code_review=true.",
-        required_missing.join("\n  - "),
-    )
-}
-
-/// cas-acf83 (GH #108): the envelope says nothing about whether it ran.
-fn format_review_execution_unreported(task_id: &str, supervisor_owned: bool) -> String {
-    let rerun = if supervisor_owned {
-        "mode=interactive (or mode=headless for skill-to-skill)"
-    } else {
-        "mode=autofix"
-    };
-    format!(
-        "⚠️ REVIEW EXECUTION UNREPORTED\n\n         task close rejected for {task_id}: the code_review_findings envelope \
-         carries no `execution` block, so there is no evidence a review ran. \
-         An envelope without it is indistinguishable from hand-written JSON, \
-         and an empty residual[] then proves nothing.\n\n         To resolve: re-run cas-code-review with {rerun} and pass the envelope \
-         it returns verbatim — it now reports execution.personas_run, \
-         execution.personas_failed, and execution.skipped_reason.\n\n         {}\n\n         Supervisors may bypass with bypass_code_review=true (logged).",
-        cas_types::review_outcome_shape_hint(),
-    )
-}
-
-fn format_code_review_required(supervisor_owned: bool) -> String {
-    // cas-62b0 (GH #152): a factory worker under supervisor-owned review must
-    // never be told to produce this envelope.
-    //
-    // Before this fix, `supervisor_owned` only swapped the *mode* argument in
-    // step 1 — autofix became interactive — while steps 1-3 still instructed
-    // the worker to run the persona pipeline and return the envelope. That is
-    // the trap the incident reporter named in one line: "a worker who follows
-    // your rule exactly cannot close this task without coming to you." The
-    // gate demanded from the worker precisely the artifact the mode says the
-    // supervisor produces, and it demanded it at the exact moment the rule
-    // applied. Instruction beats memory every time; three memory entries
-    // across three days lost to this text, ~500k subagent tokens per loss.
-    //
-    // The caller's role decides the guidance, not just the owner setting.
-    // A solo (non-factory) close under the supervisor-owned default has no
-    // supervisor to defer to — that caller IS the review owner and keeps the
-    // original instructions. Only a factory worker is redirected.
-    if supervisor_owned && crate::code_review_dispatch::is_factory_worker_from_env() {
-        return "⚠️ SUPERVISOR-OWNED REVIEW — DO NOT RUN cas-code-review\n\n\
-             task close rejected: this task has reviewable code changes and no \
-             review has been recorded for them.\n\n\
-             You are a factory worker and this project sets \
-             `[code_review] owner = \"supervisor\"` (verify with \
-             `cas config get code_review.owner`). You must NOT dispatch the \
-             cas-code-review skill, its workflow, or its personas as \
-             subagents — the supervisor runs the pipeline once, off their \
-             review queue.\n\n\
-             Do this instead:\n\
-             1. Do NOT pass `code_review_findings`. There is no envelope for \
-                you to produce in this mode.\n\
-             2. Push your branch and tell your supervisor it is ready for \
-                review; they own the dispatch and the close from here.\n\
-             3. If this close reached this gate on an epic or another shape \
-                the review queue does not cover, say so in that message — the \
-                supervisor closes it (optionally with \
-                bypass_code_review=true, which is supervisor-only).\n\n\
-             To opt this project back into worker-run review, set \
-             `cas config set code_review.owner worker`."
-            .to_string();
-    }
-    let step1 = if supervisor_owned {
-        "1. Invoke the cas-code-review skill via the Skill or Task tool with \
-         mode=interactive (or mode=headless for skill-to-skill) and the \
-         current diff.\n\
-         Note: mode=autofix is the legacy path for projects that pin \
-         [code_review] owner = \"worker\"."
-    } else {
-        "1. Invoke the cas-code-review skill via the Skill or Task tool with \
-         mode=autofix and the current diff."
-    };
-    format!(
-        "⚠️ CODE_REVIEW_REQUIRED\n\n\
-         task close rejected: this task has reviewable code changes \
-         and no code_review_findings envelope was provided.\n\n\
-         To resolve:\n\
-         {step1}\n\
-         2. Collect the returned ReviewOutcome envelope (residual, \
-            pre_existing, mode).\n\
-         3. Re-call task.close with the envelope JSON-stringified \
-            in code_review_findings.\n\n\
-         {}\n\n\
-         Supervisors may bypass this gate with \
-         bypass_code_review=true (logged as a decision note).",
-        cas_types::review_outcome_shape_hint(),
-    )
-}
-
-/// Run the cas-code-review P0 close gate.
-///
-/// `supervisor_owned` selects owner-aware mode guidance in
-/// `CODE_REVIEW_REQUIRED` (interactive/headless vs legacy autofix).
-pub(crate) fn run_code_review_gate(
-    task: &Task,
-    req: &TaskCloseRequest,
-    project_root: &std::path::Path,
-    supervisor_owned: bool,
-) -> CodeReviewGateOutcome {
-    // Skip 1: additive-only tasks bypass the gate entirely.
-    if task.execution_note.as_deref() == Some("additive-only") {
-        return CodeReviewGateOutcome::Proceed;
-    }
-
-    // Skip 2: supervisor override.
-    if req.bypass_code_review.unwrap_or(false) {
-        if is_supervisor_from_env() {
-            let reason = req
-                .reason
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("(no reason provided)");
-            let note = format!(
-                "[{}] DECISION: cas-code-review P0 gate overridden by supervisor. \
-                 Reason: {}",
-                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-                reason
-            );
-            return CodeReviewGateOutcome::AppendDecisionNote(note);
-        } else {
-            return CodeReviewGateOutcome::Reject(
-                "⚠️ UNAUTHORIZED OVERRIDE\n\n\
-                 task close rejected: bypass_code_review=true is only honored \
-                 when the caller runs as a supervisor (CAS_AGENT_ROLE=supervisor). \
-                 Non-supervisor callers must either fix the P0 findings and retry \
-                 close, or ask a supervisor to issue the override."
-                    .to_string(),
-            );
-        }
-    }
-
-    // Skip 3: docs-only / test-only / empty diffs. A value-only declaration
-    // is the explicit exception: it represents a customer-visible existing
-    // value edit and must follow the ordinary review route even when the file
-    // classifier cannot distinguish it from a docs-only asset.
-    if task.execution_note.as_deref() != Some("value-only") && !has_reviewable_changes(project_root)
-    {
-        return CodeReviewGateOutcome::Proceed;
-    }
-
-    // From here on, we require a findings envelope. The request's
-    // `code_review_findings` always wins; if it is absent or empty we
-    // fall back to any envelope persisted on the task deliverables
-    // from a prior jailed close (cas-3086). The persisted fallback is
-    // *not* a merge — an explicit request envelope wholly replaces
-    // what the gate sees.
-    let persisted_envelope = task
-        .deliverables
-        .review_envelope
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let envelope_json = match req.code_review_findings.as_deref() {
-        Some(s) if !s.trim().is_empty() => s,
-        _ => match persisted_envelope {
-            Some(s) => s,
-            None => {
-                return CodeReviewGateOutcome::Reject(format_code_review_required(
-                    supervisor_owned,
-                ));
-            }
-        },
-    };
-
-    // cas-297e: multi-field parse via parse_review_outcome so a single
-    // bad envelope lists every missing Finding field (and documents the
-    // full Finding schema in the reject text).
-    let envelope: cas_types::ReviewOutcome = match cas_types::parse_review_outcome(envelope_json) {
-        Ok(e) => e,
-        Err(e) => {
-            return CodeReviewGateOutcome::Reject(format!(
-                "⚠️ MALFORMED REVIEW ENVELOPE\n\n\
-                     task close rejected: code_review_findings failed to parse \
-                     as ReviewOutcome JSON:\n{}\n\n\
-                     {}\n\n\
-                     Fix every listed field (or re-run cas-code-review) and retry close.",
-                e.message,
-                cas_types::review_outcome_shape_hint(),
-            ));
-        }
-    };
-
-    // cas-acf83 (GH #108): a review that never ran is not a clean review.
-    //
-    // The checks below only look for P0 findings, so `residual: []` passes
-    // them trivially — and that is exactly what the workflow returns when
-    // every persona fails to launch. When the Codex transport ran out of
-    // credits, envelopes with `personas_run: 0` sailed through this gate; the
-    // voluntary re-reviews that caught it found a workspace-build break and a
-    // P0 regression. An absent verdict must never read as a passing verdict.
-    match envelope.execution_status() {
-        cas_types::ReviewExecutionStatus::Executed { .. } => {}
-        cas_types::ReviewExecutionStatus::Incomplete {
-            required_missing,
-            personas_failed,
-            ..
-        } => {
-            return CodeReviewGateOutcome::Reject(format_review_incomplete(
-                &task.id,
-                &required_missing,
-                &personas_failed,
-                supervisor_owned,
-            ));
-        }
-        cas_types::ReviewExecutionStatus::DidNotExecute { reason } => {
-            return CodeReviewGateOutcome::Reject(format_review_did_not_execute(
-                &task.id,
-                &reason,
-                supervisor_owned,
-            ));
-        }
-        cas_types::ReviewExecutionStatus::Unreported => {
-            return CodeReviewGateOutcome::Reject(format_review_execution_unreported(
-                &task.id,
-                supervisor_owned,
-            ));
-        }
-    }
-
-    use cas_store::code_review::close_gate::{GateDecision, evaluate_gate, format_block_message};
-    use cas_types::FindingSeverity;
-
-    // cas-4c64: apply the full forgery defence — symmetric with
-    // worker_review_envelope_is_clean — so the gate is equally strict
-    // whether the envelope came from `req.code_review_findings` or was
-    // read back from the persisted `task.deliverables.review_envelope`
-    // (the cas-3086 retry-after-jail path). Before this fix, only
-    // `evaluate_gate` was called here; that function filters on
-    // `!f.pre_existing && f.severity == P0`, so a forged envelope with a
-    // P0 carrying `pre_existing: true` in `residual[]` would pass the
-    // gate even though `worker_review_envelope_is_clean` had rejected it
-    // on the original close attempt and the envelope was persisted by the
-    // jail-arming branch.
-
-    // Check A: no P0 in residual[], regardless of per-finding pre_existing
-    // flag. This catches the forgery vector where a P0 is marked
-    // pre_existing=true to evade evaluate_gate's filter. Genuine
-    // pre-existing P0s belong in `outcome.pre_existing[]`, not residual[].
-    let residual_p0s: Vec<_> = envelope
-        .residual
-        .iter()
-        .filter(|f| f.severity == FindingSeverity::P0)
-        .cloned()
-        .collect();
-    if !residual_p0s.is_empty() {
-        return CodeReviewGateOutcome::Reject(format_block_message(&task.id, &residual_p0s));
-    }
-
-    // Check B: no P0 in pre_existing[] bucket (cas-fef4 forgery defence).
-    // Workers cannot reclassify a P0 as pre-existing to bypass the gate.
-    if envelope
-        .pre_existing
-        .iter()
-        .any(|f| f.severity == FindingSeverity::P0)
-    {
-        return CodeReviewGateOutcome::Reject(
-            "⚠️ BLOCKED: P0 in pre_existing[]\n\n\
-             task close rejected: code_review_findings pre_existing[] contains \
-             a P0-severity finding. Pre-existing P0s are not a downgrade slot — \
-             they block the close gate regardless of classification. \
-             Fix the P0, re-run cas-code-review, and retry close. \
-             (cas-fef4 + cas-4c64 forgery defence)"
-                .to_string(),
-        );
-    }
-
-    // Final check: evaluate_gate for PR-introduced P0s (pre_existing=false).
-    // After Checks A and B above, this is redundant for P0 detection, but
-    // retained for the format_block_message formatting it provides and as a
-    // safety net in case evaluate_gate's semantics are extended in future.
-    match evaluate_gate(&envelope.residual) {
-        GateDecision::Allow => CodeReviewGateOutcome::Proceed,
-        GateDecision::BlockOnP0(blocking) => {
-            CodeReviewGateOutcome::Reject(format_block_message(&task.id, &blocking))
-        }
-    }
 }
 
 /// Return `true` if `project_root` has any staged, unstaged, or
@@ -13212,20 +11955,13 @@ mod additive_only_tests {
 }
 
 // ---------------------------------------------------------------------------
-// cas-b51a: Lightweight structural lint (supervisor-owned review mode)
+// Lightweight structural lint used by the declared pre-close hook.
 // ---------------------------------------------------------------------------
 
-/// Outcome of the lightweight structural lint run at worker close-time when
-/// `[code_review] owner = "supervisor"`.
-///
-/// The full multi-persona `cas-code-review` skill is deferred to the
-/// supervisor; this gate only catches the most egregious anti-patterns
-/// (leftover debug statements, `unimplemented!`, large commented-out
-/// blocks) that should never leave a worker branch regardless of who
-/// reviews.
+/// Outcome of the lightweight structural lint run used by the pre-close hook.
 #[derive(Debug)]
 pub(crate) enum LightweightLintOutcome {
-    /// Lint passed — proceed to `PendingSupervisorReview` transition.
+    /// Lint passed — the pre-close hook may continue.
     Pass,
     /// Lint found violations — worker must fix before close.
     Fail(String),
@@ -15697,1354 +14433,6 @@ pub fn retry() {}
 }
 
 #[cfg(test)]
-mod code_review_gate_tests {
-    //! Unit tests for the cas-b39f close gate helper. Covers the full
-    //! decision matrix in [`run_code_review_gate`] under the option-(a)
-    //! architecture where the worker passes findings in via
-    //! `TaskCloseRequest.code_review_findings` before retrying close.
-    //!
-    //! The pure-Rust decision helper at
-    //! `cas_store::code_review::close_gate::evaluate_gate` is already
-    //! tested exhaustively in that module; these tests focus on the
-    //! close-side glue — env role check, envelope plumbing, override
-    //! path, docs-only skip, CODE_REVIEW_REQUIRED rejection.
-    use super::*;
-
-    /// cas-6538: the light-skip decision note must name both rigor gates it
-    /// bypasses and the reason, so the bypass is auditable. The integration
-    /// tests assert on substrings of this text; lock the wording here.
-    #[test]
-    fn light_skip_decision_note_names_both_gates_and_reason() {
-        let note = light_skip_decision_note();
-        assert!(note.contains("depth=light"), "must cite the reason: {note}");
-        assert!(
-            note.to_lowercase().contains("decision"),
-            "must be a decision note: {note}"
-        );
-        assert!(
-            note.contains("verification jail"),
-            "must name the verification jail skip: {note}"
-        );
-        assert!(
-            note.contains("code-review gate"),
-            "must name the P0 code-review gate skip: {note}"
-        );
-    }
-
-    /// cas-7998: a close reason containing a double quote must be escaped so it
-    /// can't terminate the surrounding `message="..."` argument early. Embedding
-    /// the escaped reason in a representative quoted command must leave the
-    /// double quotes balanced (every `"` is either the argument delimiter or a
-    /// backslash-escaped literal).
-    #[test]
-    fn escape_close_reason_neutralizes_embedded_quotes() {
-        let raw = "fixed the \"flaky\" test";
-        let escaped = escape_close_reason_for_quoted_command(raw);
-        assert!(
-            !escaped.contains('\u{0022}') || escaped.contains("\\\""),
-            "raw double quotes must be backslash-escaped: {escaped}"
-        );
-        // No unescaped quote survives.
-        assert!(
-            !escaped.replace("\\\"", "").contains('"'),
-            "every embedded quote must be escaped: {escaped}"
-        );
-        let command = format!("message=\"Task X is ready to close. Close reason: {escaped}.\"");
-        // Count unescaped quotes: strip escaped ones first, then the remaining
-        // quotes are only the two argument delimiters → even count.
-        let unescaped_quotes = command.replace("\\\"", "").matches('"').count();
-        assert_eq!(
-            unescaped_quotes, 2,
-            "exactly the two delimiter quotes may remain unescaped: {command}"
-        );
-    }
-
-    /// cas-7998: newlines/tabs/CRs in a close reason must collapse to single
-    /// spaces so the suggested single-line coordination command can't be split.
-    #[test]
-    fn escape_close_reason_collapses_newlines_and_whitespace() {
-        let raw = "line one\nline two\r\n\tindented   spaced";
-        let escaped = escape_close_reason_for_quoted_command(raw);
-        assert!(
-            !escaped.contains('\n') && !escaped.contains('\r') && !escaped.contains('\t'),
-            "no raw line/tab control chars may survive: {escaped:?}"
-        );
-        assert_eq!(
-            escaped, "line one line two indented spaced",
-            "whitespace runs must collapse to single spaces: {escaped:?}"
-        );
-    }
-
-    /// cas-7998: a backslash already present in the reason is escaped before the
-    /// quote-escape, so a trailing `\` followed by a quote can't combine into a
-    /// stray escape that re-opens the argument.
-    #[test]
-    fn escape_close_reason_escapes_backslash_before_quote() {
-        let raw = "path C:\\dir then \"q\"";
-        let escaped = escape_close_reason_for_quoted_command(raw);
-        assert!(
-            escaped.contains("C:\\\\dir"),
-            "backslashes must be doubled: {escaped}"
-        );
-        // The quote after the escaped backslash is itself escaped, so stripping
-        // escaped backslashes then escaped quotes leaves no bare quote.
-        let no_esc_backslash = escaped.replace("\\\\", "");
-        assert!(
-            !no_esc_backslash.replace("\\\"", "").contains('"'),
-            "quote must remain escaped even adjacent to a backslash: {escaped}"
-        );
-    }
-
-    use cas_types::{AutofixClass, Finding, FindingSeverity, Owner, ReviewOutcome};
-    use tempfile::TempDir;
-
-    fn base_task() -> Task {
-        Task {
-            id: "cas-test1".to_string(),
-            title: "test".to_string(),
-            status: TaskStatus::InProgress,
-            ..Default::default()
-        }
-    }
-
-    fn base_req(id: &str) -> TaskCloseRequest {
-        TaskCloseRequest {
-            stranded_branch_override: None,
-            id: id.to_string(),
-            reason: None,
-            bypass_code_review: None,
-            code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,
-        }
-    }
-
-    /// GH #515: a large epic override must commit its compact close outcome
-    /// without waiting for a note that contains every child verdict. This is
-    /// the isolated persistence half of the incident shape: 31 child rows,
-    /// each with a deliberately large verdict, are rendered as one audit note
-    /// and written only after the caller-facing path has returned.
-    #[tokio::test]
-    async fn large_epic_override_narrative_is_detached_and_lands_durably_gh_515() {
-        let cas_root = tempfile::tempdir().expect("temporary Cassy root");
-        let task_store = crate::store::open_task_store(cas_root.path()).expect("task store");
-        task_store.init().expect("initialize task store");
-
-        let mut epic = Task::new("cas-gh-515".to_string(), "large override epic".to_string());
-        epic.task_type = TaskType::Epic;
-        epic.status = TaskStatus::Closed;
-        task_store.add(&epic).expect("add closed epic");
-
-        let verdicts = (0..31)
-            .map(|child| {
-                format!(
-                    "| cas-child-{child:02} | factory/worker-{child:02} | verdict: {} |",
-                    "content evolved after integration; ".repeat(256)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let note = format!(
-            "decision: supervisor `test` overrode the epic stranded-branch gate for `cas-gh-515`.\n\
-             Inspection narrative: compared all 31 branches with their landed target paths.\n\
-             Waived gate output follows verbatim, including every measured branch verdict:\n{verdicts}"
-        );
-        assert!(
-            note.len() > 200_000,
-            "fixture must retain the incident's large-note shape"
-        );
-
-        let started = std::time::Instant::now();
-        append_close_decision_note_detached(task_store.clone(), epic.id.clone(), note.clone());
-        let schedule_elapsed = started.elapsed();
-        assert!(
-            schedule_elapsed < std::time::Duration::from_millis(100),
-            "the committed close path must only schedule the large note, took {schedule_elapsed:?}"
-        );
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let persisted = task_store.get(&epic.id).expect("read epic");
-            if persisted.notes.contains(&verdicts) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "deferred override narrative did not land within the bounded regression window"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }
-
-    fn p0_finding() -> Finding {
-        Finding {
-            title: "SQL injection".to_string(),
-            severity: FindingSeverity::P0,
-            file: "src/auth.rs".to_string(),
-            line: 42,
-            why_it_matters: "allows login bypass".to_string(),
-            autofix_class: AutofixClass::Manual,
-            owner: Owner::Human,
-            confidence: 0.95,
-            evidence: vec!["format!(\"... {}\", user_input)".to_string()],
-            pre_existing: false,
-            suggested_fix: None,
-            requires_verification: false,
-        }
-    }
-
-    fn p2_finding() -> Finding {
-        Finding {
-            title: "dead import".to_string(),
-            severity: FindingSeverity::P2,
-            file: "src/lib.rs".to_string(),
-            line: 3,
-            why_it_matters: "minor".to_string(),
-            autofix_class: AutofixClass::Manual,
-            owner: Owner::ReviewFixer,
-            confidence: 0.9,
-            evidence: vec!["use foo::bar;".to_string()],
-            pre_existing: false,
-            suggested_fix: None,
-            requires_verification: false,
-        }
-    }
-
-    /// An envelope from a review that actually ran (cas-acf83): the default
-    /// shape for gate tests, since a review that did not run is now rejected
-    /// before any finding is inspected.
-    fn autofix_envelope(residual: Vec<Finding>) -> String {
-        let env = ReviewOutcome {
-            residual,
-            pre_existing: Vec::new(),
-            mode: "autofix".to_string(),
-            execution: Some(cas_types::ReviewExecution {
-                personas_run: 4,
-                personas_failed: Vec::new(),
-                skipped_reason: None,
-                required_personas_missing: Vec::new(),
-            }),
-        };
-        serde_json::to_string(&env).expect("serialize ReviewOutcome")
-    }
-
-    /// cas-acf83: the envelope shape the workflow returns when every persona
-    /// failed to launch — structurally identical to a clean review except for
-    /// the execution block.
-    fn envelope_that_did_not_execute(personas_failed: Vec<&str>, skipped_reason: &str) -> String {
-        let env = ReviewOutcome {
-            residual: Vec::new(),
-            pre_existing: Vec::new(),
-            mode: "headless".to_string(),
-            execution: Some(cas_types::ReviewExecution {
-                personas_run: 0,
-                personas_failed: personas_failed.into_iter().map(String::from).collect(),
-                skipped_reason: Some(skipped_reason.to_string()),
-                required_personas_missing: Vec::new(),
-            }),
-        };
-        serde_json::to_string(&env).expect("serialize ReviewOutcome")
-    }
-
-    /// cas-acf83: an envelope with no execution block at all — what a
-    /// hand-written one looks like, and what producers emitted before #108.
-    fn envelope_without_execution_block() -> String {
-        let env = ReviewOutcome {
-            residual: Vec::new(),
-            pre_existing: Vec::new(),
-            mode: "autofix".to_string(),
-            execution: None,
-        };
-        serde_json::to_string(&env).expect("serialize ReviewOutcome")
-    }
-
-    /// Build a throwaway git repo with one committed file, then stage
-    /// whatever paths the caller names so `git diff --cached` sees
-    /// them. Returns the tempdir so the caller controls its lifetime.
-    fn repo_with_staged(paths: &[(&str, &str)]) -> TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path();
-        use std::process::Command;
-        let git = |args: &[&str]| {
-            let ok = Command::new("git")
-                .args(args)
-                .current_dir(p)
-                .env("GIT_AUTHOR_NAME", "t")
-                .env("GIT_AUTHOR_EMAIL", "t@t")
-                .env("GIT_COMMITTER_NAME", "t")
-                .env("GIT_COMMITTER_EMAIL", "t@t")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .status()
-                .expect("git")
-                .success();
-            assert!(ok, "git {args:?} failed");
-        };
-        git(&["init", "-q", "-b", "main"]);
-        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
-        git(&["add", "seed.txt"]);
-        git(&["commit", "-q", "-m", "seed"]);
-        for (path, contents) in paths {
-            let full = p.join(path);
-            if let Some(parent) = full.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&full, contents).unwrap();
-            git(&["add", path]);
-        }
-        dir
-    }
-
-    /// Serialize env-mutating tests so `CAS_AGENT_ROLE` changes don't
-    /// leak between them — delegated to the process-wide poison-tolerant lock
-    /// in `crate::hooks` so all CAS_*-mutating test modules share ONE lock.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::hooks::test_env_lock()
-    }
-
-    // --- Path classification ------------------------------------------------
-
-    #[test]
-    fn docs_and_tests_are_not_reviewable() {
-        assert!(!is_reviewable_path("README.md"));
-        assert!(!is_reviewable_path("docs/foo.txt"));
-        assert!(!is_reviewable_path("crates/cas-store/tests/foo.rs"));
-        assert!(!is_reviewable_path("src/foo_test.rs"));
-        assert!(!is_reviewable_path("app/bar.test.tsx"));
-        assert!(!is_reviewable_path("tests/integration.py"));
-    }
-
-    #[test]
-    fn code_files_are_reviewable() {
-        assert!(is_reviewable_path("src/main.rs"));
-        assert!(is_reviewable_path("app/login.ts"));
-        assert!(is_reviewable_path("pkg/server/handler.go"));
-    }
-
-    // --- run_code_review_gate branches --------------------------------------
-
-    #[test]
-    fn additive_only_task_bypasses_gate() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/evil.rs", "bad\n")]);
-        let mut t = base_task();
-        t.execution_note = Some("additive-only".to_string());
-        let mut req = base_req(&t.id);
-        req.code_review_findings = Some(autofix_envelope(vec![p0_finding()]));
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        assert!(matches!(out, CodeReviewGateOutcome::Proceed));
-    }
-
-    /// cas-8ad8: value-only may modify existing source values, so it must not
-    /// inherit additive-only's review bypass.
-    #[test]
-    fn value_only_task_still_requires_code_review() {
-        let _g = env_lock();
-        // Value-only worker closes must follow the supervisor-owned route,
-        // not the legacy solo caller path that asks for an envelope.
-        let _role = CallerRoleEnv::factory_worker();
-        let dir = repo_with_staged(&[("src/locales.rs", "localized value\n")]);
-        let mut t = base_task();
-        t.execution_note = Some("value-only".to_string());
-        let req = base_req(&t.id);
-        match run_code_review_gate(&t, &req, dir.path(), true) {
-            CodeReviewGateOutcome::Reject(message) => {
-                assert!(message.contains("SUPERVISOR-OWNED REVIEW"), "{message}");
-            }
-            other => panic!("value-only must follow the normal review gate, got {other:?}"),
-        }
-    }
-
-    /// cas-acf83 (GH #108): the reported incident. Every persona failed to
-    /// launch (Codex out of credits), the workflow returned `residual: []`
-    /// with `personas_run: 0`, and the gate — which only looks for P0s —
-    /// accepted it as a clean review. The empty findings list is an ABSENT
-    /// verdict, not a passing one.
-    #[test]
-    fn a_review_that_never_ran_cannot_pass_the_gate() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn shipped_unreviewed() {}\n")]);
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        req.code_review_findings = Some(envelope_that_did_not_execute(
-            vec!["correctness: transport unavailable (402 insufficient credits)"],
-            "all personas failed to launch",
-        ));
-
-        match run_code_review_gate(&t, &req, dir.path(), true) {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(
-                    msg.contains("REVIEW DID NOT EXECUTE"),
-                    "must name the failure mode, not look like a findings block: {msg}"
-                );
-                assert!(
-                    msg.contains("all personas failed to launch"),
-                    "must quote the producer's reason: {msg}"
-                );
-                assert!(
-                    msg.contains("insufficient credits"),
-                    "must surface the named persona launch failure: {msg}"
-                );
-                assert!(
-                    msg.contains("bypass_code_review"),
-                    "must name the recorded escape hatch: {msg}"
-                );
-            }
-            other => panic!("a zero-persona review must be rejected, got {other:?}"),
-        }
-    }
-
-    /// cas-acf83: an envelope that says nothing about execution proves
-    /// nothing. This is also what every hand-written envelope looks like.
-    #[test]
-    fn an_envelope_without_execution_evidence_cannot_pass_the_gate() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn f() {}\n")]);
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        req.code_review_findings = Some(envelope_without_execution_block());
-
-        match run_code_review_gate(&t, &req, dir.path(), true) {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(msg.contains("REVIEW EXECUTION UNREPORTED"), "{msg}");
-                assert!(msg.contains("execution.personas_run"), "{msg}");
-            }
-            other => panic!("an unreported-execution envelope must be rejected, got {other:?}"),
-        }
-    }
-
-    /// cas-acf83 (GH #108): the reported outage, one lane short of total.
-    /// Every always-on persona runs on the Codex transport; only `security` is
-    /// Claude-hosted. So the same outage that produced `personas_run: 0` in the
-    /// filed incident produces `personas_run: 1` whenever `security` is
-    /// activated — and a check that only asked "did anything run" would wave
-    /// that through with correctness, testing, maintainability and
-    /// project-standards having never looked at the diff.
-    #[test]
-    fn a_partial_review_missing_mandatory_lanes_cannot_pass_the_gate() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn only_security_looked() {}\n")]);
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        let env = ReviewOutcome {
-            residual: Vec::new(),
-            pre_existing: Vec::new(),
-            mode: "headless".to_string(),
-            execution: Some(cas_types::ReviewExecution {
-                personas_run: 1,
-                personas_failed: vec![
-                    "correctness: transport unavailable".to_string(),
-                    "testing: transport unavailable".to_string(),
-                    "maintainability: transport unavailable".to_string(),
-                    "project-standards: transport unavailable".to_string(),
-                ],
-                skipped_reason: None,
-                required_personas_missing: vec![
-                    "correctness".to_string(),
-                    "testing".to_string(),
-                    "maintainability".to_string(),
-                    "project-standards".to_string(),
-                ],
-            }),
-        };
-        req.code_review_findings = Some(serde_json::to_string(&env).unwrap());
-
-        match run_code_review_gate(&t, &req, dir.path(), true) {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(msg.contains("REVIEW INCOMPLETE"), "{msg}");
-                assert!(
-                    msg.contains("correctness") && msg.contains("project-standards"),
-                    "must name every mandatory lane that produced no verdict: {msg}"
-                );
-                assert!(
-                    msg.contains("transport unavailable"),
-                    "must surface the recorded failures: {msg}"
-                );
-            }
-            other => panic!("a partial review must be rejected, got {other:?}"),
-        }
-    }
-
-    /// cas-acf83: self-cert is symmetric for the partial case too.
-    #[test]
-    fn a_partial_review_cannot_self_certify_verification() {
-        let env = ReviewOutcome {
-            residual: Vec::new(),
-            pre_existing: Vec::new(),
-            mode: "headless".to_string(),
-            execution: Some(cas_types::ReviewExecution {
-                personas_run: 1,
-                personas_failed: vec!["correctness: transport unavailable".to_string()],
-                skipped_reason: None,
-                required_personas_missing: vec!["correctness".to_string()],
-            }),
-        };
-        assert!(!worker_review_envelope_is_clean(
-            &serde_json::to_string(&env).unwrap()
-        ));
-    }
-
-    /// cas-acf83: a review that DID run with no findings still passes — the
-    /// gate must reject absent verdicts, not clean ones.
-    #[test]
-    fn a_review_that_ran_clean_still_passes_the_gate() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn f() {}\n")]);
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        req.code_review_findings = Some(autofix_envelope(vec![]));
-        assert!(matches!(
-            run_code_review_gate(&t, &req, dir.path(), true),
-            CodeReviewGateOutcome::Proceed
-        ));
-    }
-
-    /// cas-acf83: self-certification (the verification-jail bypass) must be
-    /// symmetric with the gate — a zero-persona envelope cannot buy it either.
-    #[test]
-    fn a_review_that_never_ran_cannot_self_certify_verification() {
-        assert!(
-            !worker_review_envelope_is_clean(&envelope_that_did_not_execute(
-                vec!["security: launch failed"],
-                "all personas failed to launch",
-            )),
-            "a non-executed review must not satisfy worker-owned verification"
-        );
-        assert!(
-            !worker_review_envelope_is_clean(&envelope_without_execution_block()),
-            "an envelope with no execution evidence must not satisfy it either"
-        );
-        assert!(
-            worker_review_envelope_is_clean(&autofix_envelope(vec![])),
-            "a genuine clean review must still self-certify"
-        );
-    }
-
-    #[test]
-    fn docs_only_diff_skips_gate_without_findings() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("README.md", "new content\n"), ("docs/x.md", "x\n")]);
-        let t = base_task();
-        let req = base_req(&t.id); // no findings
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        assert!(
-            matches!(out, CodeReviewGateOutcome::Proceed),
-            "pure-docs diff must skip the review gate"
-        );
-    }
-
-    #[test]
-    fn code_change_without_findings_is_rejected_as_required() {
-        let _g = env_lock();
-        // cas-62b0: this test asserts the SOLO-caller guidance (mode=interactive
-        // / mode=headless), which since cas-62b0 is only one of two shapes
-        // `format_code_review_required` can produce — a factory worker now gets
-        // the "do not run it, go to your supervisor" redirect instead. The role
-        // must therefore be pinned rather than inherited: this suite is run by
-        // Cassy factory workers, whose sessions export CAS_AGENT_ROLE=worker, and
-        // left ambient this test passes on CI and fails inside the factory.
-        let _role = CallerRoleEnv::solo();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let t = base_task();
-        let req = base_req(&t.id);
-        // supervisor_owned=true is the config default (cas-865b).
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(msg.contains("CODE_REVIEW_REQUIRED"));
-                assert!(msg.contains("cas-code-review"));
-                assert!(msg.contains("code_review_findings"));
-                // cas-297e: supervisor-owned mode recommends interactive/headless.
-                assert!(
-                    msg.contains("mode=interactive"),
-                    "supervisor-owned guidance must recommend interactive: {msg}"
-                );
-                assert!(
-                    msg.contains("mode=headless"),
-                    "supervisor-owned guidance must mention headless: {msg}"
-                );
-                assert!(
-                    !msg.contains("mode=autofix and the current diff"),
-                    "supervisor-owned guidance must not primary-recommend autofix: {msg}"
-                );
-                // Finding schema documented at the point of failure.
-                assert!(
-                    msg.contains("why_it_matters"),
-                    "CODE_REVIEW_REQUIRED must document Finding fields: {msg}"
-                );
-            }
-            other => panic!("expected CODE_REVIEW_REQUIRED reject, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn code_review_required_worker_owned_recommends_autofix() {
-        // cas-297e AC3: owner=worker keeps the legacy autofix guidance.
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let t = base_task();
-        let req = base_req(&t.id);
-        let out = run_code_review_gate(&t, &req, dir.path(), false);
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(msg.contains("CODE_REVIEW_REQUIRED"));
-                assert!(
-                    msg.contains("mode=autofix"),
-                    "worker-owned guidance must recommend autofix: {msg}"
-                );
-                assert!(
-                    !msg.contains("mode=interactive"),
-                    "worker-owned guidance must not recommend interactive: {msg}"
-                );
-            }
-            other => panic!("expected CODE_REVIEW_REQUIRED reject, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn partial_finding_envelope_lists_all_missing_fields_once() {
-        // cas-297e AC1+AC2: one response lists every missing Finding field
-        // and documents the Finding schema.
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        req.code_review_findings = Some(
-            r#"{
-                "mode": "interactive",
-                "residual": [{
-                    "title": "partial finding",
-                    "severity": "P2",
-                    "file": "src/foo.rs",
-                    "line": 1
-                }],
-                "pre_existing": []
-            }"#
-            .to_string(),
-        );
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(msg.contains("MALFORMED REVIEW ENVELOPE"), "{msg}");
-                for field in [
-                    "why_it_matters",
-                    "autofix_class",
-                    "owner",
-                    "confidence",
-                    "evidence",
-                    "pre_existing",
-                ] {
-                    assert!(
-                        msg.contains(&format!("missing field `{field}`")),
-                        "expected all-fields list to include `{field}`:\n{msg}"
-                    );
-                }
-                // Schema hint documents required Finding keys.
-                assert!(
-                    msg.contains("Each Finding requires:"),
-                    "error must document Finding required fields:\n{msg}"
-                );
-                assert!(msg.contains("residual[0]"), "{msg}");
-            }
-            other => panic!("expected MALFORMED reject, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn p0_residual_blocks_close() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        req.code_review_findings = Some(autofix_envelope(vec![p0_finding()]));
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(msg.contains("P0 BLOCK"));
-                assert!(msg.contains("SQL injection"));
-                assert!(msg.contains("bypass_code_review=true"));
-            }
-            other => panic!("expected P0 block, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn p2_residual_does_not_block_close() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        req.code_review_findings = Some(autofix_envelope(vec![p2_finding()]));
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        assert!(
-            matches!(out, CodeReviewGateOutcome::Proceed),
-            "P2 residual must route to Unit 8, not block close"
-        );
-    }
-
-    #[test]
-    fn empty_residual_with_envelope_allows_close() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn ok() {}\n")]);
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        req.code_review_findings = Some(autofix_envelope(Vec::new()));
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        assert!(matches!(out, CodeReviewGateOutcome::Proceed));
-    }
-
-    #[test]
-    fn malformed_envelope_validation_failure_is_rejected() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn ok() {}\n")]);
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        // Whitespace-only mode passes serde but fails validate().
-        req.code_review_findings =
-            Some(r#"{"residual":[],"pre_existing":[],"mode":"   "}"#.to_string());
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(msg.contains("MALFORMED REVIEW ENVELOPE"));
-            }
-            other => panic!("expected malformed-envelope reject, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn unparseable_envelope_json_is_rejected() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn ok() {}\n")]);
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        req.code_review_findings = Some("not json at all".to_string());
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(msg.contains("MALFORMED REVIEW ENVELOPE"));
-                assert!(msg.contains("failed to parse"));
-                // cas-297e AC2: even parse failures document the Finding schema.
-                assert!(
-                    msg.contains("Each Finding requires:"),
-                    "parse error must document Finding schema:\n{msg}"
-                );
-            }
-            other => panic!("expected parse reject, got {other:?}"),
-        }
-    }
-
-    /// Pins the caller-role env `format_code_review_required` keys on
-    /// (`code_review_dispatch::is_factory_worker_from_env`) and restores it on
-    /// drop — including on panic, which a plain restore-at-the-end helper does
-    /// not do. A leaked `CAS_AGENT_ROLE` would silently change the branch every
-    /// later test in this module takes.
-    ///
-    /// Every test that asserts on this gate's TEXT must hold one. cas-62b0 made
-    /// the guidance caller-aware, so the ambient environment now decides which
-    /// message is produced — and this suite is routinely run by a Cassy factory
-    /// worker, whose own session exports `CAS_AGENT_ROLE=worker` and
-    /// `CAS_FACTORY_MODE=1`. Left implicit, these tests pass on CI and fail on
-    /// the machine of anyone who runs them from inside the factory (which is
-    /// exactly how the first cut of this change was caught).
-    struct CallerRoleEnv {
-        prev_role: Option<String>,
-        prev_mode: Option<String>,
-    }
-
-    impl CallerRoleEnv {
-        /// A registered factory worker: the caller the supervisor-owned
-        /// redirect is FOR.
-        fn factory_worker() -> Self {
-            Self::set(Some("worker"), Some("1"))
-        }
-
-        /// A solo `claude`/CLI session with no factory around it: owns its own
-        /// review even under the supervisor-owned default.
-        fn solo() -> Self {
-            Self::set(None, None)
-        }
-
-        fn set(role: Option<&str>, mode: Option<&str>) -> Self {
-            let guard = Self {
-                prev_role: std::env::var("CAS_AGENT_ROLE").ok(),
-                prev_mode: std::env::var("CAS_FACTORY_MODE").ok(),
-            };
-            unsafe {
-                match role {
-                    Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-                    None => std::env::remove_var("CAS_AGENT_ROLE"),
-                }
-                match mode {
-                    Some(v) => std::env::set_var("CAS_FACTORY_MODE", v),
-                    None => std::env::remove_var("CAS_FACTORY_MODE"),
-                }
-            }
-            guard
-        }
-    }
-
-    impl Drop for CallerRoleEnv {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prev_role {
-                    Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-                    None => std::env::remove_var("CAS_AGENT_ROLE"),
-                }
-                match &self.prev_mode {
-                    Some(v) => std::env::set_var("CAS_FACTORY_MODE", v),
-                    None => std::env::remove_var("CAS_FACTORY_MODE"),
-                }
-            }
-        }
-    }
-
-    /// cas-62b0 / GH #152 — the rocketship shape, pinned.
-    ///
-    /// A factory worker closes a task with reviewable code changes in a
-    /// project that sets `[code_review] owner = "supervisor"`. Before this
-    /// fix the gate answered CODE_REVIEW_REQUIRED and step 1 read "Invoke
-    /// the cas-code-review skill via the Skill or Task tool" — so the close
-    /// path itself was the thing dispatching the ~500k-token persona run,
-    /// eleven-plus times in one downstream session, against an explicit
-    /// project policy. The rejection must now contain NO instruction to run
-    /// the pipeline and must route the worker to the supervisor instead.
-    #[test]
-    fn supervisor_owned_close_never_tells_a_worker_to_run_the_review_cas_62b0() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn shipped() {}\n")]);
-        let _role = CallerRoleEnv::factory_worker();
-
-        let t = base_task();
-        let req = base_req(&t.id);
-        // No envelope — the worker is forbidden from producing one here.
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                // The refusal must not be a review dispatch in disguise.
-                assert!(
-                    msg.contains("DO NOT RUN cas-code-review"),
-                    "worker must be told not to run it, got:\n{msg}"
-                );
-                for instruction in ["Invoke the cas-code-review skill", "mode=autofix"] {
-                    assert!(
-                        !msg.contains(instruction),
-                        "supervisor-owned worker refusal must not carry {instruction:?}:\n{msg}"
-                    );
-                }
-                assert!(
-                    !msg.contains("Re-call task.close with the envelope"),
-                    "worker must not be told to produce an envelope:\n{msg}"
-                );
-                // It must name the mechanism, and the readback command that
-                // GH #152 reported as "Unknown config key".
-                assert!(
-                    msg.contains("[code_review] owner = \"supervisor\""),
-                    "refusal must name the config that causes it:\n{msg}"
-                );
-                assert!(
-                    msg.contains("cas config get code_review.owner"),
-                    "refusal must name how to verify the setting:\n{msg}"
-                );
-                // A refusal with no legal next move is what got rationalized
-                // away last time.
-                assert!(
-                    msg.contains("supervisor") && msg.contains("ready for"),
-                    "refusal must name the legal next move:\n{msg}"
-                );
-                // Personas hand-spawned as subagents are the same violation.
-                assert!(
-                    msg.contains("subagents"),
-                    "refusal must close the hand-spawned-persona route:\n{msg}"
-                );
-            }
-            other => panic!("expected Reject, got {other:?}"),
-        }
-    }
-
-    /// AC4 regression: `owner = "worker"` is untouched.
-    ///
-    /// The legacy inline flow is a documented escape hatch. A worker under
-    /// `owner = "worker"` must still get the original instructions — the fix
-    /// keys on ownership, not on "is a worker".
-    #[test]
-    fn worker_owned_review_still_instructs_the_worker_cas_62b0() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn shipped() {}\n")]);
-        let _role = CallerRoleEnv::factory_worker();
-
-        let t = base_task();
-        let req = base_req(&t.id);
-        let out = run_code_review_gate(&t, &req, dir.path(), false);
-
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(
-                    msg.contains("CODE_REVIEW_REQUIRED"),
-                    "owner=worker must keep the legacy gate:\n{msg}"
-                );
-                assert!(
-                    msg.contains("mode=autofix"),
-                    "owner=worker must keep the legacy autofix instruction:\n{msg}"
-                );
-            }
-            other => panic!("expected Reject, got {other:?}"),
-        }
-    }
-
-    /// A solo (non-factory) close under the supervisor-owned DEFAULT must
-    /// keep its instructions.
-    ///
-    /// This is the trap the fix must not spring in the other direction:
-    /// `owner = "supervisor"` is the default for every project, including
-    /// ones with no factory and no supervisor to defer to. Redirecting that
-    /// caller to a supervisor who does not exist would turn a working close
-    /// into an unclearable one.
-    #[test]
-    fn solo_close_under_the_supervisor_owned_default_is_not_redirected_cas_62b0() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn shipped() {}\n")]);
-        let _role = CallerRoleEnv::solo();
-
-        let t = base_task();
-        let req = base_req(&t.id);
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(
-                    msg.contains("CODE_REVIEW_REQUIRED")
-                        && msg.contains("Invoke the cas-code-review skill"),
-                    "a non-factory caller owns the review itself:\n{msg}"
-                );
-            }
-            other => panic!("expected Reject, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn supervisor_override_appends_decision_note() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let prev = std::env::var("CAS_AGENT_ROLE").ok();
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
-
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        req.bypass_code_review = Some(true);
-        req.reason = Some("P0 is a false positive, tracked in cas-xyz".to_string());
-
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-                None => std::env::remove_var("CAS_AGENT_ROLE"),
-            }
-        }
-
-        match out {
-            CodeReviewGateOutcome::AppendDecisionNote(note) => {
-                assert!(note.contains("DECISION"));
-                assert!(note.contains("supervisor"));
-                assert!(note.contains("false positive"));
-            }
-            other => panic!("expected AppendDecisionNote, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn non_supervisor_override_is_rejected() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let prev = std::env::var("CAS_AGENT_ROLE").ok();
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "worker");
-        }
-
-        let t = base_task();
-        let mut req = base_req(&t.id);
-        req.bypass_code_review = Some(true);
-
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-                None => std::env::remove_var("CAS_AGENT_ROLE"),
-            }
-        }
-
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(msg.contains("UNAUTHORIZED OVERRIDE"));
-            }
-            other => panic!("expected Reject, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn additive_only_plus_missing_findings_still_proceeds() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/evil.rs", "bad\n")]);
-        let mut t = base_task();
-        t.execution_note = Some("additive-only".to_string());
-        let req = base_req(&t.id); // no findings, no override
-        // additive-only short-circuits before the findings check.
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        assert!(matches!(out, CodeReviewGateOutcome::Proceed));
-    }
-
-    #[test]
-    fn non_git_project_root_skips_gate() {
-        let _g = env_lock();
-        let dir = tempfile::tempdir().unwrap();
-        let t = base_task();
-        let req = base_req(&t.id);
-        // Non-git dir → has_reviewable_changes returns false → skip.
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        assert!(matches!(out, CodeReviewGateOutcome::Proceed));
-    }
-
-    // --- cas-3086: persisted-envelope fallback ------------------------------
-
-    #[test]
-    fn persisted_envelope_satisfies_gate_when_req_missing() {
-        // Simulates supervisor-close: the worker persisted a clean
-        // envelope on a prior (jailed) close attempt; supervisor
-        // calls close without re-running review and without
-        // bypass_code_review=true.
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let mut t = base_task();
-        t.deliverables.review_envelope = Some(autofix_envelope(Vec::new()));
-        let req = base_req(&t.id); // no findings in request
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        assert!(
-            matches!(out, CodeReviewGateOutcome::Proceed),
-            "persisted clean envelope must let supervisor-close proceed without bypass"
-        );
-    }
-
-    #[test]
-    fn persisted_envelope_with_p0_still_blocks() {
-        // Forwarding a receipt does not weaken the P0 gate.
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let mut t = base_task();
-        t.deliverables.review_envelope = Some(autofix_envelope(vec![p0_finding()]));
-        let req = base_req(&t.id);
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(msg.contains("P0 BLOCK"), "P0 must still block: {msg}");
-            }
-            other => panic!("expected P0 block on persisted envelope, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn request_envelope_takes_precedence_over_persisted() {
-        // If the caller sends a fresh envelope, that's what the gate
-        // sees — the persisted one is a fallback, not a merge.
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let mut t = base_task();
-        // Persisted envelope has a P0 — would block if chosen.
-        t.deliverables.review_envelope = Some(autofix_envelope(vec![p0_finding()]));
-        let mut req = base_req(&t.id);
-        // Request envelope is clean — should let the close proceed.
-        req.code_review_findings = Some(autofix_envelope(Vec::new()));
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        assert!(
-            matches!(out, CodeReviewGateOutcome::Proceed),
-            "explicit request envelope must win over persisted fallback"
-        );
-    }
-
-    #[test]
-    fn persisted_malformed_envelope_is_rejected() {
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let mut t = base_task();
-        t.deliverables.review_envelope = Some("not-json".to_string());
-        let req = base_req(&t.id);
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        assert!(
-            matches!(out, CodeReviewGateOutcome::Reject(_)),
-            "malformed persisted envelope must be rejected, not silently bypassed"
-        );
-    }
-
-    // --- cas-fef4 + cas-3086: epic_subtask_receipts_are_clean ----------------
-
-    /// Build a subtask carrying a specific review envelope (JSON string).
-    fn subtask_with_envelope(id: &str, envelope: Option<String>) -> Task {
-        let mut t = Task {
-            id: id.to_string(),
-            title: format!("subtask {id}"),
-            status: TaskStatus::Closed,
-            ..Default::default()
-        };
-        t.deliverables.review_envelope = envelope;
-        t
-    }
-
-    /// cas-acf83: like [`autofix_envelope`], these fixtures represent reviews
-    /// that ran — the forgery under test is the finding classification, not a
-    /// missing execution claim, so the P0 defences are proven on their own
-    /// merits rather than being masked by the execution check.
-    fn envelope_with_pre_existing(residual: Vec<Finding>, pre_existing: Vec<Finding>) -> String {
-        let env = ReviewOutcome {
-            residual,
-            pre_existing,
-            mode: "autofix".to_string(),
-            execution: Some(cas_types::ReviewExecution {
-                personas_run: 4,
-                personas_failed: Vec::new(),
-                skipped_reason: None,
-                required_personas_missing: Vec::new(),
-            }),
-        };
-        serde_json::to_string(&env).expect("serialize ReviewOutcome")
-    }
-
-    #[test]
-    fn epic_receipts_clean_when_all_subtasks_have_empty_envelopes() {
-        let subtasks = vec![
-            subtask_with_envelope("s1", Some(autofix_envelope(Vec::new()))),
-            subtask_with_envelope("s2", Some(autofix_envelope(Vec::new()))),
-        ];
-        assert!(
-            epic_subtask_receipts_are_clean(&subtasks),
-            "two clean subtask envelopes must cover the epic"
-        );
-    }
-
-    #[test]
-    fn epic_receipts_not_clean_when_no_subtasks() {
-        // cas-3086: `_ => false` arm — an epic with zero subtasks has
-        // nothing "covering" the union diff, so fall through to the
-        // normal gate.
-        assert!(!epic_subtask_receipts_are_clean(&[]));
-    }
-
-    #[test]
-    fn epic_receipts_not_clean_when_subtask_has_residual_p0() {
-        // cas-3086 defense-in-depth: a subtask envelope that somehow
-        // leaked a residual P0 past its own close must NOT let the
-        // epic bypass the gate.
-        let subtasks = vec![
-            subtask_with_envelope("s1", Some(autofix_envelope(Vec::new()))),
-            subtask_with_envelope("s2", Some(autofix_envelope(vec![p0_finding()]))),
-        ];
-        assert!(
-            !epic_subtask_receipts_are_clean(&subtasks),
-            "residual-P0 on any subtask must disqualify the bypass"
-        );
-    }
-
-    #[test]
-    fn epic_receipts_not_clean_when_subtask_has_pre_existing_p0() {
-        // cas-fef4 (this task): a worker supplying an envelope of shape
-        // `{ residual: [], pre_existing: [<real_p0>] }` satisfies the
-        // old cas-3086 check (residual is clean) but smuggles a real
-        // P0 past the epic-close gate by reclassifying it as
-        // "pre-existing". The tightened clean-receipt semantics must
-        // reject this forgery and fall through to run_code_review_gate
-        // on the union diff.
-        let forged = envelope_with_pre_existing(Vec::new(), vec![p0_finding()]);
-        let subtasks = vec![
-            subtask_with_envelope("s1", Some(autofix_envelope(Vec::new()))),
-            subtask_with_envelope("s2", Some(forged)),
-        ];
-        assert!(
-            !epic_subtask_receipts_are_clean(&subtasks),
-            "pre_existing-P0 smuggling must disqualify the bypass"
-        );
-    }
-
-    #[test]
-    fn epic_receipts_clean_when_pre_existing_is_only_subp0() {
-        // Sanity check on the tightened check: non-P0 severities in
-        // pre_existing (the normal case — legitimate low-severity
-        // debt classified by the reviewer) must not block the bypass.
-        let clean_with_low_pre = envelope_with_pre_existing(Vec::new(), vec![p2_finding()]);
-        let subtasks = vec![subtask_with_envelope("s1", Some(clean_with_low_pre))];
-        assert!(
-            epic_subtask_receipts_are_clean(&subtasks),
-            "pre_existing with only sub-P0 severities is legitimate and must not block bypass"
-        );
-    }
-
-    #[test]
-    fn epic_receipts_not_clean_when_subtask_envelope_missing_or_malformed() {
-        // Missing envelope on any subtask → no structural proof → bypass declined.
-        let subtasks = vec![
-            subtask_with_envelope("s1", Some(autofix_envelope(Vec::new()))),
-            subtask_with_envelope("s2", None),
-        ];
-        assert!(
-            !epic_subtask_receipts_are_clean(&subtasks),
-            "missing envelope on any subtask must disqualify the bypass"
-        );
-
-        let subtasks = vec![
-            subtask_with_envelope("s1", Some(autofix_envelope(Vec::new()))),
-            subtask_with_envelope("s2", Some("not-json".to_string())),
-        ];
-        assert!(
-            !epic_subtask_receipts_are_clean(&subtasks),
-            "malformed envelope on any subtask must disqualify the bypass"
-        );
-    }
-
-    // --- cas-4c64: run_code_review_gate forgery defence (persisted path) ------
-    //
-    // These tests cover the two-step attack surface fixed in cas-4c64:
-    //
-    //   Step 1: Worker submits a forged envelope (P0 marked pre_existing=true in
-    //           residual[], or P0 in pre_existing[]). `worker_review_envelope_is_clean`
-    //           rejects it, so the short-circuit does NOT fire. The jail-arming
-    //           `else` branch persists the envelope unconditionally to
-    //           `task.deliverables.review_envelope`.
-    //
-    //   Step 2: Supervisor's task-verifier clears the jail.
-    //
-    //   Step 3: Worker retries close WITHOUT code_review_findings. The gate reads
-    //           the persisted forged envelope. Before cas-4c64, `evaluate_gate`
-    //           filtered `!f.pre_existing`, so the P0 was silently skipped →
-    //           Allow → bypass. After cas-4c64, Check A/B fire unconditionally →
-    //           Reject.
-    //
-    // Step 1 integration is covered by `test_worker_close_with_p0_residual_pre_existing_true_still_blocked`
-    // in verification_flow.rs. Step 3 (the close-gate layer) is here.
-
-    /// P0 finding with `pre_existing: true` — the per-finding flag that
-    /// `evaluate_gate` filters on (`!f.pre_existing && f.severity == P0`),
-    /// making it the attack vector before cas-4c64 Check A.
-    fn p0_finding_pre_existing_true() -> Finding {
-        Finding {
-            pre_existing: true,
-            ..p0_finding()
-        }
-    }
-
-    #[test]
-    fn persisted_envelope_with_p0_pre_existing_true_in_residual_is_blocked() {
-        // Regression for cas-4c64 Check A: a persisted envelope whose
-        // residual[] contains a P0 marked `pre_existing:true` must be
-        // rejected even though `evaluate_gate` would have allowed it
-        // (it filters `!f.pre_existing`). Check A catches all P0s in
-        // residual[], regardless of the per-finding flag.
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let mut t = base_task();
-        // Forged envelope: P0 in residual[] with pre_existing=true.
-        let forged = envelope_with_pre_existing(vec![p0_finding_pre_existing_true()], Vec::new());
-        t.deliverables.review_envelope = Some(forged);
-        let req = base_req(&t.id); // no findings in request — reads persisted
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(
-                    msg.contains("P0 BLOCK"),
-                    "must block on P0 even with pre_existing=true in residual[]: {msg}"
-                );
-            }
-            other => panic!(
-                "expected Reject for persisted forged P0-in-residual envelope, got {other:?}"
-            ),
-        }
-    }
-
-    #[test]
-    fn persisted_envelope_with_p0_in_pre_existing_array_is_blocked() {
-        // Regression for cas-4c64 Check B: a persisted envelope whose
-        // pre_existing[] bucket contains a P0 must be rejected. Before
-        // cas-4c64, `evaluate_gate` did not inspect this bucket at all —
-        // only `residual[]` was checked. Check B closes that gap.
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
-        let mut t = base_task();
-        // Envelope with P0 reclassified as pre-existing (the fef4 forgery).
-        let forged = envelope_with_pre_existing(Vec::new(), vec![p0_finding()]);
-        t.deliverables.review_envelope = Some(forged);
-        let req = base_req(&t.id);
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                assert!(
-                    msg.contains("P0 in pre_existing"),
-                    "must block on P0 in pre_existing[]: {msg}"
-                );
-            }
-            other => {
-                panic!("expected Reject for persisted P0-in-pre_existing[] envelope, got {other:?}")
-            }
-        }
-    }
-
-    #[test]
-    fn two_step_forged_envelope_rejected_on_retry() {
-        // Full two-step attack regression (cas-4c64 supervisor spec):
-        //
-        //   (1) Worker sends {residual:[{P0, pre_existing:true}]}.
-        //       worker_review_envelope_is_clean → false (no short-circuit).
-        //       Jail-arming branch persists the envelope unconditionally.
-        //   (2) Supervisor verifies + clears jail (simulated here by
-        //       setting t.deliverables.review_envelope directly).
-        //   (3) Worker retries close without code_review_findings.
-        //       Before cas-4c64: evaluate_gate skips pre_existing=true → Allow
-        //       (bypass succeeds — the bug).
-        //       After cas-4c64: Check A blocks on any P0 in residual[] → Reject
-        //       (the fix).
-        //
-        // This test exercises step 3 only (the close-gate function boundary).
-        // Step 1 integration is in verification_flow.rs
-        // `test_worker_close_with_p0_residual_pre_existing_true_still_blocked`.
-        let _g = env_lock();
-        let dir = repo_with_staged(&[("src/auth.rs", "fn login() {}\n")]);
-        let mut t = base_task();
-        // Simulate the persisted forged envelope from step 1.
-        let forged = serde_json::to_string(&ReviewOutcome {
-            residual: vec![p0_finding_pre_existing_true()],
-            pre_existing: Vec::new(),
-            mode: "autofix".to_string(),
-            // cas-acf83: a real review ran and produced this P0 — the forgery
-            // is the pre_existing reclassification, not the execution claim.
-            // Keeping it executed proves the P0 defence still fires on its own
-            // merits rather than being masked by the new execution check.
-            execution: Some(cas_types::ReviewExecution {
-                personas_run: 4,
-                personas_failed: Vec::new(),
-                skipped_reason: None,
-                required_personas_missing: Vec::new(),
-            }),
-        })
-        .expect("serialize forged envelope");
-        t.deliverables.review_envelope = Some(forged);
-        // Step 3: worker retries without providing code_review_findings.
-        let req = base_req(&t.id);
-        let out = run_code_review_gate(&t, &req, dir.path(), true);
-        match out {
-            CodeReviewGateOutcome::Reject(msg) => {
-                // Must block with P0 — not CODE_REVIEW_REQUIRED (which would
-                // mislead the worker into thinking they just forgot to attach
-                // findings).
-                assert!(
-                    msg.contains("P0 BLOCK"),
-                    "two-step forged close must produce P0 BLOCK, not CODE_REVIEW_REQUIRED: {msg}"
-                );
-            }
-            other => panic!("two-step forged close must be rejected, got {other:?}"),
-        }
-    }
-}
-
-#[cfg(test)]
 mod search_manifest_gate_tests {
     //! Unit tests for the cas-49f1 zero-hit search-manifest guardrail
     //! ([`run_search_manifest_gate`]). Covers the cas-94a3 regression
@@ -17078,8 +14466,8 @@ mod search_manifest_gate_tests {
             stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: manifest_json.map(str::to_string),
             commit_receipt: None,
         }
@@ -17175,7 +14563,7 @@ mod merge_state_gate_tests {
     //! gate ([`run_factory_branch_merge_gate`]). The gate sits at
     //! `cas_task_close` line ~183, immediately after the existing
     //! [`check_unmerged_epic_branches`] guard for epic-type tasks, and
-    //! BEFORE the cas-code-review gate / `bypass_code_review` plumbing.
+    //! BEFORE the close review policy / `supervisor_override` plumbing.
     //!
     //! Why these tests are pure-helper instead of end-to-end
     //! `cas_task_close` calls:
@@ -17186,12 +14574,11 @@ mod merge_state_gate_tests {
     //! - Bypass-immunity is enforced **structurally**: the gate
     //!   function does not consume the bypass flag, and it runs at
     //!   the merge-state insertion (currently `cas_task_close`
-    //!   ~line 184) — strictly upstream of the `bypass_code_review`
-    //!   evaluation inside `run_code_review_gate`. The test sets
-    //!   `req.bypass_code_review = Some(true)` and confirms the gate
+    //!   ~line 184) — strictly upstream of the supervisor override
+    //!   evaluation. The test sets `req.supervisor_override = Some(true)` and confirms the gate
     //!   still rejects, demonstrating bypass cannot reach this layer.
     //!
-    //! Test layout mirrors `code_review_gate_tests` above.
+    //! Test layout mirrors the merge-state gate tests above.
     use super::*;
     use crate::test_support::TestEnvGuard;
     use std::process::Command;
@@ -17417,8 +14804,8 @@ mod merge_state_gate_tests {
             stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }
@@ -17475,7 +14862,7 @@ mod merge_state_gate_tests {
                          and whether a fetch was attempted: {msg}"
                     );
                     assert!(
-                        msg.contains("bypass_code_review=true"),
+                        msg.contains("supervisor_override=true"),
                         "remediation must call out bypass-immunity: {msg}"
                     );
                     assert!(
@@ -17554,7 +14941,7 @@ mod merge_state_gate_tests {
                     );
                     assert!(msg.contains(parent), "missing parent branch name: {msg}");
                     assert!(
-                        msg.contains("bypass_code_review=true"),
+                        msg.contains("supervisor_override=true"),
                         "remediation must still call out bypass-immunity: {msg}"
                     );
                     assert!(
@@ -17785,7 +15172,7 @@ mod merge_state_gate_tests {
 
     #[test]
     fn worker_task_close_with_bypass_still_rejects_on_unmerged() {
-        // Confirms `bypass_code_review=true` does NOT skip the
+        // Confirms `supervisor_override=true` does NOT skip the
         // merge-state guard. Demonstrated at the type level — the
         // gate function does not consume the bypass flag — and at
         // the behavioral level by setting bypass=Some(true) on the
@@ -17797,18 +15184,18 @@ mod merge_state_gate_tests {
 
         let task = worker_task("worker");
         let mut req = base_req(&task.id);
-        req.bypass_code_review = Some(true);
+        req.supervisor_override = Some(true);
         req.reason = Some("supervisor wants to skip review".to_string());
 
         let out = run_factory_branch_merge_gate(&task, &req, "main", dir.path());
         match out {
             MergeStateGateOutcome::Reject(msg) => {
                 assert!(
-                    msg.contains("bypass_code_review=true"),
+                    msg.contains("supervisor_override=true"),
                     "rejection message must spell out bypass-immunity policy: {msg}"
                 );
             }
-            other => panic!("bypass_code_review must NOT skip merge-state guard, got {other:?}"),
+            other => panic!("supervisor_override must NOT skip merge-state guard, got {other:?}"),
         }
     }
 
@@ -21212,10 +18599,9 @@ mod epic_status_gate_tests {
     //! rendering is a pure function of `Vec<EpicChildBranchStatus>`,
     //! and the gate is a thin filter on top of `collect_epic_branch_statuses`
     //! that rejects when any child has stranded factory commits.
-    //! Bypass-immunity is structural (gate signature does not consume
-    //! the bypass flag), and `run_epic_close_merge_gate` is also
-    //! upstream of the cas-code-review bypass evaluation in
-    //! [`run_code_review_gate`] — same shape as cas-95ce.
+    //! Bypass-immunity is structural (the gate signature does not consume
+    //! supervisor_override), and this gate runs before the review queue
+    //! transition — same shape as cas-95ce.
     use super::*;
     use std::process::Command;
     use tempfile::TempDir;
@@ -21301,8 +18687,8 @@ mod epic_status_gate_tests {
             stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }
@@ -22318,7 +19704,7 @@ mod epic_status_gate_tests {
                     "the refusal must name the designed override: {message}"
                 );
                 assert!(
-                    message.contains("bypass_code_review=true does not skip this check"),
+                    message.contains("supervisor_override=true does not skip this check"),
                     "the review-gate bypass must stay powerless here: {message}"
                 );
                 assert!(
@@ -22576,7 +19962,7 @@ mod epic_status_gate_tests {
                     "must not list clean children in the rejection: {msg}"
                 );
                 assert!(
-                    msg.contains("bypass_code_review=true"),
+                    msg.contains("supervisor_override=true"),
                     "rejection must call out bypass-immunity: {msg}"
                 );
                 assert!(
@@ -23145,18 +20531,18 @@ mod epic_status_gate_tests {
         let subtasks = vec![child("cas-c1", TaskStatus::InProgress, Some("alpha"))];
         let task = epic("cas-epic-bypass");
         let mut req = base_req(&task.id);
-        req.bypass_code_review = Some(true);
+        req.supervisor_override = Some(true);
         req.reason = Some("supervisor wants to skip review".to_string());
 
         let out = run_epic_close_merge_gate(&task, &req, "main", dir.path(), &subtasks);
         match out {
             EpicCloseGateOutcome::Reject(msg) => {
                 assert!(
-                    msg.contains("bypass_code_review=true"),
+                    msg.contains("supervisor_override=true"),
                     "rejection must spell out bypass-immunity policy: {msg}"
                 );
             }
-            other => panic!("bypass_code_review must NOT skip the epic merge gate, got {other:?}"),
+            other => panic!("supervisor_override must NOT skip the epic merge gate, got {other:?}"),
         }
     }
 
@@ -23286,685 +20672,6 @@ Epic close will be hard-blocked until they are merged.\n";
         let ts = last_commit_unix(dir.path(), "factory/alpha");
         assert!(ts.is_some(), "branch with commits must yield Some(ts)");
         assert!(ts.unwrap() > 0);
-    }
-}
-
-#[cfg(test)]
-mod commit_claim_integrity_tests {
-    //! cas-490f: regression tests for the commit-claim integrity gate.
-    //!
-    //! The cas-ba91 incident: a factory worker fabricated a commit SHA and
-    //! non-empty code_review_findings while their branch carried 0 commits
-    //! beyond the base. The supervisor lost ~10 min before detection.
-    //!
-    //! This module tests:
-    //!   - `count_worker_branch_commits` — counts HEAD commits vs parent
-    //!   - `get_worker_diff_stat` — returns `git diff --stat` summary
-    //!   - `check_commit_claim_integrity` — the gate helper that ties them
-    //!     together (returns Proceed/Reject based on findings + commit count)
-    use super::*;
-    use std::path::Path;
-    use std::process::Command;
-    use tempfile::TempDir;
-
-    fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@test")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@test")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .status()
-            .expect("git");
-        assert!(status.success(), "git {args:?} failed");
-    }
-
-    fn git_at(dir: &Path, args: &[&str], committer_epoch: i64) {
-        let date = chrono::DateTime::from_timestamp(committer_epoch, 0)
-            .unwrap()
-            .to_rfc3339();
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@test")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@test")
-            .env("GIT_AUTHOR_DATE", &date)
-            .env("GIT_COMMITTER_DATE", &date)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .status()
-            .expect("git");
-        assert!(status.success(), "git {args:?} failed");
-    }
-
-    /// Minimal worker repo: `main` with one seed commit, then branch off
-    /// to `factory/test-worker`. Caller can add commits on top.
-    fn init_worker_repo() -> TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
-        git(p, &["add", "seed.txt"]);
-        git(p, &["commit", "-q", "-m", "seed"]);
-        git(p, &["checkout", "-q", "-b", "factory/test-worker"]);
-        dir
-    }
-
-    // ── count_worker_branch_commits ──────────────────────────────────────────
-
-    #[test]
-    fn count_worker_returns_zero_with_no_commits_beyond_base() {
-        // Worker branched off main but made no commits — this is the
-        // fabrication scenario (0 commits on the branch).
-        let dir = init_worker_repo();
-        assert_eq!(
-            count_worker_branch_commits(dir.path(), "main"),
-            0,
-            "fresh worker branch with no commits beyond base must count 0"
-        );
-    }
-
-    #[test]
-    fn count_worker_returns_correct_count_for_multiple_commits() {
-        let dir = init_worker_repo();
-        for name in ["a.rs", "b.rs", "c.rs"] {
-            std::fs::write(dir.path().join(name), format!("// {name}\n")).unwrap();
-            git(dir.path(), &["add", name]);
-            git(dir.path(), &["commit", "-q", "-m", &format!("add {name}")]);
-        }
-        assert_eq!(
-            count_worker_branch_commits(dir.path(), "main"),
-            3,
-            "3 commits on worker branch beyond base must count 3"
-        );
-    }
-
-    #[test]
-    fn count_worker_returns_zero_for_non_git_dir() {
-        // Graceful degradation: non-git directory must not panic or error;
-        // it returns 0 so the gate does not false-reject.
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            count_worker_branch_commits(dir.path(), "main"),
-            0,
-            "non-git dir must degrade to 0"
-        );
-    }
-
-    // ── get_worker_diff_stat ─────────────────────────────────────────────────
-
-    #[test]
-    fn get_diff_stat_returns_non_empty_for_committed_files() {
-        let dir = init_worker_repo();
-        std::fs::write(dir.path().join("work.rs"), "fn foo() {}\n").unwrap();
-        git(dir.path(), &["add", "work.rs"]);
-        git(dir.path(), &["commit", "-q", "-m", "add work"]);
-
-        let stat = get_worker_diff_stat(dir.path(), "main");
-        assert!(
-            !stat.is_empty(),
-            "diff stat must be non-empty when commits exist"
-        );
-        assert!(
-            stat.contains("work.rs"),
-            "diff stat must mention the committed file; got: {stat}"
-        );
-    }
-
-    #[test]
-    fn get_diff_stat_returns_empty_for_no_commits() {
-        let dir = init_worker_repo();
-        // No commits beyond main — diff stat must be empty.
-        let stat = get_worker_diff_stat(dir.path(), "main");
-        assert!(
-            stat.is_empty(),
-            "diff stat must be empty when no commits exist beyond base; got: {stat}"
-        );
-    }
-
-    #[test]
-    fn task_commit_receipt_since_omits_non_positive_epoch_cas_653f() {
-        let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
-        assert_eq!(task_commit_receipt_since(epoch), None);
-
-        let positive_floor = chrono::DateTime::from_timestamp(10, 0).unwrap();
-        assert_eq!(
-            task_commit_receipt_since(positive_floor),
-            Some("@5".to_string())
-        );
-    }
-
-    #[test]
-    fn task_attributed_diff_includes_backdated_commit_cas_653f() {
-        let dir = init_worker_repo();
-        std::fs::write(dir.path().join("backdated.rs"), "fn backdated() {}\n").unwrap();
-        // This commit is several seconds behind any test invocation. The
-        // pre-fix `@-5` expression is parsed by Git as "now" and drops it;
-        // the omitted filter for the non-positive floor must retain it
-        // deterministically.
-        git(dir.path(), &["add", "backdated.rs"]);
-        git_at(
-            dir.path(),
-            &["commit", "-q", "-m", "fix(cas-653f): backdated fixture"],
-            2,
-        );
-
-        let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
-        let window = TaskCommitReceiptWindow {
-            not_before: epoch,
-            basis: "task creation time (test)",
-            task_floor: epoch,
-            identity: TaskCommitIdentity {
-                task_id: Some("cas-653f".to_string()),
-                known_commits: Vec::new(),
-            },
-        };
-        let measurement = get_task_attributable_diff_stat(dir.path(), "main", &window)
-            .expect("backdated task commit must produce an attributable measurement");
-        assert!(
-            measurement.stat.contains("backdated.rs"),
-            "backdated task commit must be included in the diff stat: {}",
-            measurement.stat
-        );
-    }
-
-    // ── cas-e093: bounded diff stat ──────────────────────────────────────────
-
-    #[test]
-    fn stale_local_target_diff_stat_excludes_inherited_remote_commits_cas_203e() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
-        git(p, &["add", "seed.txt"]);
-        git(p, &["commit", "-q", "-m", "seed"]);
-
-        // The local target stays at seed while origin/main advances with a
-        // different task. The worker is cut from that fresher remote tip.
-        git(p, &["checkout", "-q", "-b", "upstream"]);
-        std::fs::write(p.join("inherited.rs"), "pub fn inherited() {}\n").unwrap();
-        git(p, &["add", "inherited.rs"]);
-        git(p, &["commit", "-q", "-m", "other task"]);
-        git(p, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        git(p, &["checkout", "-q", "-b", "factory/test-worker"]);
-        std::fs::write(p.join("task.rs"), "pub fn task_work() {}\n").unwrap();
-        git(p, &["add", "task.rs"]);
-        git(p, &["commit", "-q", "-m", "fix: task work (cas-203e)"]);
-
-        let fallback = render_close_diff_stat(p, "main", None, None);
-        assert!(
-            fallback.contains("Branch-wide committed context")
-                && fallback.contains("vs origin/main")
-                && fallback.contains("task.rs")
-                && !fallback.contains("inherited.rs"),
-            "unattributed fallback must name and use the fresher remote target: {fallback}"
-        );
-
-        // Simulate the successful re-close after the task tip landed remotely;
-        // local main remains stale, exactly as in the field report.
-        git(p, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        let branch_wide = get_worker_diff_stat(p, "main");
-        assert!(
-            branch_wide.contains("inherited.rs"),
-            "precondition: stale-local branch-wide stat sees inherited work: {branch_wide}"
-        );
-        let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
-        let window = TaskCommitReceiptWindow {
-            not_before: epoch,
-            basis: "task creation time (test)",
-            task_floor: epoch,
-            identity: TaskCommitIdentity {
-                task_id: Some("cas-203e".to_string()),
-                known_commits: Vec::new(),
-            },
-        };
-        let rendered = render_close_diff_stat(p, "main", Some(&window), None);
-        assert!(
-            rendered.contains("Task-attributed committed diff stat")
-                && rendered.contains("target origin/main")
-                && rendered.contains("task.rs"),
-            "must show this task's file: {}",
-            rendered
-        );
-        assert!(
-            !rendered.contains("inherited.rs"),
-            "must not attribute the inherited remote-target commit: {}",
-            rendered
-        );
-    }
-
-    /// cas-0908: regression test for the contaminated-anchor bug. When two tasks
-    /// share one worker branch and the sibling's commit is pushed before this
-    /// task closes with an explicit commit_receipt, the diff stat must show
-    /// ONLY the receipt's changes, not the sibling's.
-    ///
-    /// EXACT BUG SHAPE: Worker delivers cas-069d (commit A) then cas-66ee (commit B)
-    /// from one factory/noble-crane-27 branch. Closing cas-069d with commit_receipt=A
-    /// printed commit B's diff because the identity's known_commits included B (via
-    /// a contaminated MERGE REQUIRED anchor) and B passed the --since filter while
-    /// A was outside the window due to clock skew.
-    #[test]
-    fn explicit_receipt_excludes_sibling_task_commit_cas_0908() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
-        git(p, &["add", "seed.txt"]);
-        git(p, &["commit", "-q", "-m", "seed"]);
-
-        // Create origin/main for the target ref resolution.
-        git(p, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-
-        // Start the worker branch and create commit A for cas-069d.
-        git(p, &["checkout", "-q", "-b", "factory/noble-crane-27"]);
-        std::fs::write(p.join("task_a.rs"), "// cas-069d work\n").unwrap();
-        git(p, &["add", "task_a.rs"]);
-        git(
-            p,
-            &["commit", "-q", "-m", "fix(cas-069d): release preflight"],
-        );
-        let commit_a = git_rev_parse(p, "HEAD");
-
-        // Create commit B for cas-66ee ON TOP of A.
-        std::fs::write(p.join("task_b.rs"), "// cas-66ee work\n").unwrap();
-        git(p, &["add", "task_b.rs"]);
-        git(p, &["commit", "-q", "-m", "fix(cas-66ee): ci wiring"]);
-        let commit_b = git_rev_parse(p, "HEAD");
-
-        // Merge both into origin/main so the receipt validation passes.
-        git(p, &["update-ref", "refs/remotes/origin/main", &commit_b]);
-
-        // Build an identity window that simulates the contaminated-anchor case:
-        // known_commits contains commit B (the sibling's) via a MERGE REQUIRED
-        // park that captured HEAD at the wrong moment.
-        let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
-        let contaminated_window = TaskCommitReceiptWindow {
-            not_before: epoch,
-            basis: "task creation time (test)",
-            task_floor: epoch,
-            identity: TaskCommitIdentity {
-                task_id: Some("cas-069d".to_string()),
-                // This is the contamination: sibling's commit is in known_commits.
-                known_commits: vec![commit_b.clone()],
-            },
-        };
-
-        // WITHOUT explicit receipt: the contaminated identity attributes commit B.
-        let without_receipt = render_close_diff_stat(p, "main", Some(&contaminated_window), None);
-        assert!(
-            without_receipt.contains("task_b.rs"),
-            "precondition: contaminated identity must include sibling's file: {without_receipt}"
-        );
-
-        // WITH explicit receipt: only commit A's diff should appear.
-        // The receipt filters out commit B (the sibling's) from known_commits
-        // because B is not an ancestor of A — it was pushed AFTER A.
-        let with_receipt =
-            render_close_diff_stat(p, "main", Some(&contaminated_window), Some(&commit_a));
-        assert!(
-            with_receipt.contains("task_a.rs"),
-            "explicit receipt must include this task's file: {with_receipt}"
-        );
-        assert!(
-            !with_receipt.contains("task_b.rs"),
-            "explicit receipt must EXCLUDE sibling task's file: {with_receipt}"
-        );
-        assert!(
-            with_receipt.contains("Task-attributed committed diff stat"),
-            "must use task-attributed stat: {with_receipt}"
-        );
-    }
-
-    /// cas-0908: regression test for multi-commit tasks. When a task has three
-    /// commits and closes with the tip as receipt, the diff stat must show ALL
-    /// three commits' changes, not just the tip.
-    ///
-    /// This tests the exact shape of cas-b192 (PR #414): a task with three
-    /// commits where the tip alone is 9% of the total work.
-    #[test]
-    fn multicommit_task_receipt_shows_all_commits_cas_0908() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
-        git(p, &["add", "seed.txt"]);
-        git(p, &["commit", "-q", "-m", "seed"]);
-
-        // Create origin/main for the target ref resolution.
-        git(p, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-
-        // Create three commits for the same task (cas-b192).
-        git(p, &["checkout", "-q", "-b", "factory/noble-crane-27"]);
-
-        // Commit 1: the bulk of the work (512 insertions in the real case).
-        std::fs::write(p.join("damage_stopper.rs"), "// The critical fix\n").unwrap();
-        git(p, &["add", "damage_stopper.rs"]);
-        git(p, &["commit", "-q", "-m", "fix(cas-b192): damage stopper"]);
-        let _commit_1 = git_rev_parse(p, "HEAD");
-
-        // Commit 2: secondary changes.
-        std::fs::write(p.join("secondary.rs"), "// More fixes\n").unwrap();
-        git(p, &["add", "secondary.rs"]);
-        git(p, &["commit", "-q", "-m", "fix(cas-b192): secondary"]);
-        let _commit_2 = git_rev_parse(p, "HEAD");
-
-        // Commit 3: the tip, which is small (67 insertions in the real case).
-        std::fs::write(p.join("tip.rs"), "// Tip\n").unwrap();
-        git(p, &["add", "tip.rs"]);
-        git(p, &["commit", "-q", "-m", "fix(cas-b192): tip"]);
-        let commit_tip = git_rev_parse(p, "HEAD");
-
-        // Merge all into origin/main so receipt validation passes.
-        git(p, &["update-ref", "refs/remotes/origin/main", &commit_tip]);
-
-        // Build an identity window with the task_id (commits are attributed via message).
-        let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
-        let window = TaskCommitReceiptWindow {
-            not_before: epoch,
-            basis: "task creation time (test)",
-            task_floor: epoch,
-            identity: TaskCommitIdentity {
-                task_id: Some("cas-b192".to_string()),
-                known_commits: Vec::new(),
-            },
-        };
-
-        // Close with the tip as receipt — must show ALL THREE files.
-        let stat = render_close_diff_stat(p, "main", Some(&window), Some(&commit_tip));
-        assert!(
-            stat.contains("damage_stopper.rs"),
-            "must include the first commit's file (the critical fix): {stat}"
-        );
-        assert!(
-            stat.contains("secondary.rs"),
-            "must include the second commit's file: {stat}"
-        );
-        assert!(
-            stat.contains("tip.rs"),
-            "must include the tip commit's file: {stat}"
-        );
-        assert!(
-            stat.contains("3 files changed"),
-            "must show all 3 files in summary: {stat}"
-        );
-    }
-
-    /// Helper: resolve HEAD to a full SHA (used by the cas-0908 test).
-    fn git_rev_parse(repo_path: &std::path::Path, rev: &str) -> String {
-        let output = std::process::Command::new("git")
-            .args(["rev-parse", rev])
-            .current_dir(repo_path)
-            .output()
-            .expect("git rev-parse failed");
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
-
-    /// Pure-logic test for the truncation/annotation policy, independent of
-    /// git: below-cap input passes through unchanged.
-    #[test]
-    fn cap_diff_stat_output_below_cap_is_unchanged() {
-        let raw = " a.txt | 1 +\n 1 file changed, 1 insertion(+)";
-        assert_eq!(cap_diff_stat_output(raw, 40), raw);
-    }
-
-    /// Pure-logic test: above-cap input gets an explicit "… and M more
-    /// files" line derived from git's own trailing summary, and git's bare
-    /// "..." marker (if present) is dropped rather than left in.
-    #[test]
-    fn cap_diff_stat_output_truncates_and_annotates() {
-        let raw = " a.txt | 1 +\n b.txt | 1 +\n ...\n 3 files changed, 3 insertions(+)";
-        let capped = cap_diff_stat_output(raw, 2);
-        assert!(
-            capped.contains("and 1 more files"),
-            "must state exactly how many files were hidden; got: {capped}"
-        );
-        assert!(capped.contains("a.txt") && capped.contains("b.txt"));
-        assert!(
-            !capped.contains("..."),
-            "git's bare truncation marker must be replaced, not left in: {capped}"
-        );
-        assert!(
-            capped.ends_with("3 files changed, 3 insertions(+)"),
-            "summary line must be preserved verbatim: {capped}"
-        );
-    }
-
-    #[test]
-    fn parse_files_changed_handles_singular_and_plural_and_junk() {
-        assert_eq!(
-            parse_files_changed(" 1 file changed, 1 insertion(+)"),
-            Some(1)
-        );
-        assert_eq!(
-            parse_files_changed(" 50 files changed, 50 insertions(+)"),
-            Some(50)
-        );
-        assert_eq!(parse_files_changed("not a summary line"), None);
-    }
-
-    /// End-to-end (real git): a diff far wider than `DIFF_STAT_MAX_FILES`
-    /// must produce a small, bounded result with an explicit remainder
-    /// count — directly reproducing the bug doc's evidence shape (a
-    /// long-lived branch differing across ~1700 files used to spill
-    /// ~110KB and overflow the MCP tool-result token limit).
-    #[test]
-    fn get_diff_stat_synthetic_1700_file_diff_stays_small() {
-        let dir = init_worker_repo();
-        for i in 0..1700 {
-            std::fs::write(dir.path().join(format!("wide{i}.txt")), "x\n").unwrap();
-        }
-        git(dir.path(), &["add", "."]);
-        git(dir.path(), &["commit", "-q", "-m", "wide diff"]);
-
-        let stat = get_worker_diff_stat(dir.path(), "main");
-        assert!(
-            stat.len() < 4096,
-            "a 1700-file diff must produce a small, bounded result \
-             (bug doc evidence: unbounded == ~110,000 bytes); got {} bytes",
-            stat.len()
-        );
-        assert!(
-            stat.contains("more files"),
-            "must indicate truncation for a diff this wide; got: {stat}"
-        );
-    }
-
-    /// Sanity: a diff below the cap must NOT be annotated as truncated —
-    /// the common small-task case is unaffected by the cas-e093 cap.
-    #[test]
-    fn get_diff_stat_below_cap_lists_every_file_untruncated() {
-        let dir = init_worker_repo();
-        for name in ["a.rs", "b.rs", "c.rs"] {
-            std::fs::write(dir.path().join(name), format!("// {name}\n")).unwrap();
-            git(dir.path(), &["add", name]);
-        }
-        git(dir.path(), &["commit", "-q", "-m", "add three files"]);
-
-        let stat = get_worker_diff_stat(dir.path(), "main");
-        assert!(
-            !stat.contains("more files"),
-            "small diff must not be flagged as truncated; got: {stat}"
-        );
-        for name in ["a.rs", "b.rs", "c.rs"] {
-            assert!(stat.contains(name), "must list {name}; got: {stat}");
-        }
-    }
-
-    /// cas-7efe (AC3): the close-time diff stat must be computed against
-    /// the task's real parent (the epic branch), not a divergent trunk —
-    /// otherwise it lists the trunk's entire unrelated history instead of
-    /// the task's own contribution
-    /// (BUG-task-close-returns-110kb-diffstat-overflowing-token-limit.md).
-    #[test]
-    fn get_diff_stat_against_epic_excludes_unrelated_trunk_divergence() {
-        // `get_worker_diff_stat` diffs `merge-base(HEAD, parent_branch)..HEAD`
-        // — so the bug only reproduces when the merge-base against the
-        // WRONG branch ("main") is genuinely older/different than the
-        // merge-base against the real parent (the epic). Mirror the bug
-        // doc's actual shape: `staging` (the real trunk) has drifted far
-        // from `main` with unrelated history, and the epic branches from
-        // staging's current tip — so diffing the worker branch against
-        // `main` walks all the way back through staging's entire
-        // unrelated drift.
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        std::fs::write(p.join("root.txt"), "root\n").unwrap();
-        git(p, &["add", "root.txt"]);
-        git(p, &["commit", "-q", "-m", "root"]);
-
-        // `staging` diverges from `main` with a lot of unrelated history —
-        // `main` itself never advances past `root`.
-        git(p, &["checkout", "-q", "-b", "staging"]);
-        for i in 0..30 {
-            std::fs::write(p.join(format!("unrelated{i}.txt")), "noise\n").unwrap();
-        }
-        git(p, &["add", "."]);
-        git(p, &["commit", "-q", "-m", "staging drift"]);
-
-        // The epic branches from staging's current (drifted) tip.
-        git(p, &["checkout", "-q", "-b", "epic/foo"]);
-
-        // Worker branches off the epic and touches exactly one file.
-        git(p, &["checkout", "-q", "-b", "factory/worker"]);
-        std::fs::write(p.join("task_file.rs"), "fn work() {}\n").unwrap();
-        git(p, &["add", "task_file.rs"]);
-        git(p, &["commit", "-q", "-m", "feat: task work"]);
-
-        let stat_vs_epic = get_worker_diff_stat(p, "epic/foo");
-        assert!(
-            stat_vs_epic.contains("task_file.rs"),
-            "must list the task's own file; got: {stat_vs_epic}"
-        );
-        assert!(
-            !stat_vs_epic.contains("unrelated0.txt"),
-            "must NOT include trunk-only divergence when diffed against \
-             the real epic parent; got: {stat_vs_epic}"
-        );
-
-        // Sanity: proves what the bug looked like when the wrong base
-        // (main) was used instead of the epic branch — this pulls in
-        // staging's entire unrelated drift, exactly the 110KB overflow.
-        let stat_vs_main = get_worker_diff_stat(p, "main");
-        assert!(
-            stat_vs_main.contains("unrelated0.txt"),
-            "sanity: diffing vs the wrong base pulls in the unrelated \
-             trunk divergence — exactly the 110KB overflow bug; got: {stat_vs_main}"
-        );
-    }
-
-    // ── check_commit_claim_integrity ─────────────────────────────────────────
-
-    /// Reproduces the cas-ba91 incident: worker provides non-empty
-    /// code_review_findings but the branch has 0 commits beyond the base.
-    #[test]
-    fn fabrication_detected_when_zero_commits_with_review_findings() {
-        let dir = init_worker_repo();
-        // No commits beyond base — fabrication scenario.
-        let outcome = check_commit_claim_integrity(dir.path(), "main", true, None, None, None);
-        match outcome {
-            CommitClaimGateOutcome::Reject(msg) => {
-                assert!(
-                    msg.contains("FABRICATION DETECTED"),
-                    "rejection must name the gate; got: {msg}"
-                );
-                assert!(
-                    msg.contains("code_review_findings"),
-                    "rejection must identify the fabrication signal; got: {msg}"
-                );
-                assert!(
-                    msg.contains("0 commit"),
-                    "rejection must show the 0-commit count; got: {msg}"
-                );
-            }
-            CommitClaimGateOutcome::Proceed => {
-                panic!("gate must reject zero-commit + findings = fabrication scenario (cas-ba91)");
-            }
-            CommitClaimGateOutcome::ProceedWithReceipt(_) => {
-                panic!("gate must not accept an absent receipt")
-            }
-        }
-    }
-
-    #[test]
-    fn zero_commits_without_review_findings_proceeds() {
-        // Worker did documentation-only work and did not supply
-        // code_review_findings. Empty branch is fine in that case.
-        let dir = init_worker_repo();
-        let outcome = check_commit_claim_integrity(dir.path(), "main", false, None, None, None);
-        assert!(
-            matches!(outcome, CommitClaimGateOutcome::Proceed),
-            "no-findings close on empty branch must proceed (no fabrication claim)"
-        );
-    }
-
-    #[test]
-    fn commits_present_with_review_findings_proceeds() {
-        // Worker did real work: commits on branch + findings provided.
-        let dir = init_worker_repo();
-        std::fs::write(dir.path().join("real.rs"), "fn real() {}\n").unwrap();
-        git(dir.path(), &["add", "real.rs"]);
-        git(dir.path(), &["commit", "-q", "-m", "real work"]);
-
-        let outcome = check_commit_claim_integrity(dir.path(), "main", true, None, None, None);
-        assert!(
-            matches!(outcome, CommitClaimGateOutcome::Proceed),
-            "commits + findings must proceed (worker did real work)"
-        );
-    }
-
-    /// cas-127f: findings + empty merge-base..HEAD after supervisor merge is
-    /// not fabrication when the parked factory tip is an ancestor of parent.
-    #[test]
-    fn findings_after_merge_satisfied_anchor_proceeds() {
-        let dir = init_worker_repo();
-        std::fs::write(dir.path().join("real.rs"), "fn real() {}\n").unwrap();
-        git(dir.path(), &["add", "real.rs"]);
-        git(dir.path(), &["commit", "-q", "-m", "real work"]);
-        let anchor = String::from_utf8(
-            std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(dir.path())
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-        // Supervisor merges factory tip into main (no-ff).
-        git(dir.path(), &["checkout", "-q", "main"]);
-        git(
-            dir.path(),
-            &[
-                "merge",
-                "--no-ff",
-                "-m",
-                "merge worker",
-                "factory/test-worker",
-            ],
-        );
-        // Worker tip is now even with parent (or still at anchor which is
-        // ancestor) — count beyond parent is 0 either way after checkout.
-        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
-        git(dir.path(), &["reset", "--hard", "main"]);
-
-        assert_eq!(
-            count_worker_branch_commits(dir.path(), "main"),
-            0,
-            "post-merge worker tip must not be ahead of parent"
-        );
-        let outcome =
-            check_commit_claim_integrity(dir.path(), "main", true, Some(&anchor), None, None);
-        assert!(
-            matches!(outcome, CommitClaimGateOutcome::Proceed),
-            "merge-satisfied anchor must not look like fabrication"
-        );
     }
 }
 
@@ -24368,7 +21075,7 @@ mod zero_change_close_tests {
                 assert!(
                     msg.contains("commit_receipt=<sha>")
                         && msg.contains("ask the supervisor")
-                        && msg.contains("bypass_code_review=true")
+                        && msg.contains("supervisor_override=true")
                         && msg.contains("Only a supervisor"),
                     "rejection must name both the worker receipt path and the \
                      audited supervisor fallback: {msg}"
@@ -24488,28 +21195,6 @@ mod zero_change_close_tests {
                 "{task_type:?} task type must not be flagged as ambiguous"
             );
         }
-    }
-
-    /// Case 4c: review findings present → cas-490f handles that; this gate
-    /// should Proceed and not double-reject.
-    #[test]
-    fn case4_review_findings_present_defers_to_490f_gate() {
-        let dir = init_worker_repo();
-        let outcome = check_zero_commit_close(
-            dir.path(),
-            "main",
-            "cas-test1",
-            &TaskType::Bug,
-            None,
-            true, // has_review_findings = true (cas-490f rejects, not this gate)
-            None, // factory_branch_anchor
-            None, // commit_receipt
-            None, // commit_receipt_window
-        );
-        assert!(
-            matches!(outcome, ZeroCommitCloseOutcome::Proceed),
-            "when review findings are present, the cas-490f gate owns the rejection"
-        );
     }
 
     /// cas-9eae ("sync ≠ work"): a worker who merely syncs their branch to
@@ -25428,42 +22113,6 @@ mod zero_change_close_tests {
     }
 
     #[test]
-    fn cas26bb_valid_receipt_also_satisfies_commit_claim_gate() {
-        let dir = init_worker_repo();
-        std::fs::write(dir.path().join("reviewed.rs"), "pub fn reviewed() {}\n").unwrap();
-        git(dir.path(), &["add", "reviewed.rs"]);
-        git(dir.path(), &["commit", "-q", "-m", "fix: reviewed work"]);
-        let receipt = head_sha(dir.path());
-        git(dir.path(), &["checkout", "-q", "main"]);
-        git(
-            dir.path(),
-            &[
-                "merge",
-                "--no-ff",
-                "-m",
-                "merge reviewed work",
-                "factory/test-worker",
-            ],
-        );
-        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
-        git(dir.path(), &["reset", "--hard", "main"]);
-        let receipt_window = test_receipt_window();
-
-        let outcome = check_commit_claim_integrity(
-            dir.path(),
-            "main",
-            true,
-            None,
-            Some(&receipt),
-            Some(&receipt_window),
-        );
-        assert!(
-            matches!(outcome, CommitClaimGateOutcome::ProceedWithReceipt(_)),
-            "a validated receipt must also prevent a false fabrication rejection"
-        );
-    }
-
-    #[test]
     fn cas5626_historical_receipt_is_rejected_by_both_close_gates() {
         let dir = init_worker_repo();
         let historical = String::from_utf8(
@@ -25508,25 +22157,6 @@ mod zero_change_close_tests {
                 assert!(message.contains("ask the supervisor"), "{message}");
             }
             other => panic!("historical receipt must fail zero-commit gate: {other:?}"),
-        }
-
-        let claim_outcome = check_commit_claim_integrity(
-            dir.path(),
-            "main",
-            true,
-            None,
-            Some(&historical),
-            Some(&window),
-        );
-        match claim_outcome {
-            CommitClaimGateOutcome::Reject(message) => {
-                assert!(
-                    message.contains("predates this task work cycle"),
-                    "{message}"
-                );
-                assert!(message.contains("INVALID TASK COMMIT RECEIPT"), "{message}");
-            }
-            other => panic!("historical receipt must fail fabrication gate: {other:?}"),
         }
     }
 
@@ -26155,18 +22785,12 @@ mod epic_close_owner_gate_tests {
 
 #[cfg(test)]
 mod zero_diff_spike_close_tests {
-    //! cas-1932 (GH #62 symptoms 1-2 + minor): a zero-diff spike closed in a
-    //! dirty shared checkout was a two-stage trap.
-    //!
-    //! - Symptom 1: after the supervisor recorded an APPROVED verification,
-    //!   the worker's re-close re-queued to `PendingSupervisorReview` forever.
-    //!   The review-queue hop now consumes a current-cycle approved verdict.
+    //! cas-1932 (GH #62 symptom 2): a zero-diff spike closed in a dirty shared
+    //! checkout could read inherited WIP as the task's diff.
     //! - Symptom 2: `CODE_REVIEW_REQUIRED` fired because reviewable-change
     //!   detection read the shared checkout's pre-existing WIP as the task's
     //!   diff. Detection is now scoped to commits attributable to this task's
     //!   work cycle for tasks whose own spec declares no-code work.
-    //! - Minor: close reported "verification skipped — assignee unknown"
-    //!   although a verification row existed; the lookup now finds it.
     use super::*;
     use std::process::Command;
     use tempfile::TempDir;
@@ -26397,126 +23021,4 @@ mod zero_diff_spike_close_tests {
         );
     }
 
-    // --- symptom 1: approved verification satisfies the review queue ---------
-
-    fn approved_row(created_epoch: i64) -> Verification {
-        let mut row = Verification::new("ver-fd59de6ef422".to_string(), "cas-208b".to_string());
-        row.status = VerificationStatus::Approved;
-        row.verification_type = VerificationType::Task;
-        row.created_at = chrono::DateTime::from_timestamp(created_epoch, 0).unwrap();
-        row
-    }
-
-    #[test]
-    fn approved_verdict_from_this_cycle_satisfies_the_review_queue() {
-        let row = approved_row(CYCLE_START_EPOCH + 600);
-        assert!(
-            approved_verification_satisfies_review_queue(
-                &row,
-                Some(&window()),
-                VerificationType::Task
-            ),
-            "the supervisor's approval must let the worker's re-close complete"
-        );
-    }
-
-    #[test]
-    fn unapproved_or_stale_or_mistyped_verdicts_do_not_satisfy_the_queue() {
-        let mut rejected = approved_row(CYCLE_START_EPOCH + 600);
-        rejected.status = VerificationStatus::Rejected;
-        assert!(
-            !approved_verification_satisfies_review_queue(
-                &rejected,
-                Some(&window()),
-                VerificationType::Task
-            ),
-            "a rejected verdict must never satisfy the review queue"
-        );
-
-        let stale = approved_row(CYCLE_START_EPOCH - 86_400);
-        assert!(
-            !approved_verification_satisfies_review_queue(
-                &stale,
-                Some(&window()),
-                VerificationType::Task
-            ),
-            "an approval from a previous work cycle cannot authorize this close"
-        );
-
-        let mistyped = approved_row(CYCLE_START_EPOCH + 600);
-        assert!(
-            !approved_verification_satisfies_review_queue(
-                &mistyped,
-                Some(&window()),
-                VerificationType::Epic
-            ),
-            "a task verdict cannot stand in for the required epic verdict"
-        );
-    }
-
-    #[test]
-    fn approval_within_clock_skew_of_the_cycle_start_is_accepted() {
-        let row = approved_row(CYCLE_START_EPOCH - 1);
-        assert!(
-            approved_verification_satisfies_review_queue(
-                &row,
-                Some(&window()),
-                VerificationType::Task
-            ),
-            "a verdict recorded a second before the lease timestamp is the same cycle"
-        );
-    }
-
-    // --- minor: close must find an existing verification --------------------
-
-    #[test]
-    fn existing_approved_verification_replaces_a_lookup_failure_skip_reason() {
-        let row = approved_row(CYCLE_START_EPOCH + 600);
-        let resolved = skip_reason_with_existing_verification(
-            VerificationSkipReason::AssigneeUnknown,
-            Some(&row),
-        );
-        assert_eq!(
-            resolved,
-            VerificationSkipReason::ExistingApprovedVerification {
-                verification_id: "ver-fd59de6ef422".to_string()
-            },
-            "an existing approved verdict must be cited instead of an assignee-lookup failure"
-        );
-        let suffix = resolved.response_suffix(true);
-        assert!(
-            suffix.contains("ver-fd59de6ef422"),
-            "the close response must name the verification it found: {suffix}"
-        );
-        assert!(
-            !suffix.contains("assignee unknown"),
-            "the close response must stop claiming the verification was skipped: {suffix}"
-        );
-        assert!(
-            resolved.audit_reason().contains("ver-fd59de6ef422"),
-            "the audit row must record which verdict authorized the close"
-        );
-    }
-
-    #[test]
-    fn skip_reason_is_untouched_without_an_approved_verification() {
-        assert_eq!(
-            skip_reason_with_existing_verification(VerificationSkipReason::AssigneeUnknown, None),
-            VerificationSkipReason::AssigneeUnknown,
-            "with no verdict on record the real skip reason must survive"
-        );
-        assert_eq!(
-            skip_reason_with_existing_verification(
-                VerificationSkipReason::SupervisorBypass,
-                Some(&approved_row(CYCLE_START_EPOCH + 600)),
-            ),
-            VerificationSkipReason::SupervisorBypass,
-            "an explicit supervisor bypass is intent, not a lookup failure — keep it"
-        );
-        assert_eq!(
-            skip_reason_with_existing_verification(VerificationSkipReason::None, None),
-            VerificationSkipReason::None,
-            "the non-skip path is unaffected"
-        );
-    }
 }

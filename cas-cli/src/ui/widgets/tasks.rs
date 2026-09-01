@@ -162,8 +162,6 @@ pub fn build_task_item(
         TaskStatus::Blocked => Icons::CIRCLE_X,
         TaskStatus::Closed => Icons::CHECK,
         TaskStatus::Cancelled => Icons::CIRCLE_X,
-        // cas-b51a: awaiting supervisor code-review
-        TaskStatus::PendingSupervisorReview => Icons::CLOCK,
         TaskStatus::AwaitingMerge => Icons::CLOCK,
     };
 
@@ -173,8 +171,6 @@ pub fn build_task_item(
         TaskStatus::Closed => palette.task_closed,
         TaskStatus::Cancelled => palette.task_closed,
         TaskStatus::Open => palette.task_open,
-        // cas-b51a: reuse warning color — task is "waiting" for supervisor
-        TaskStatus::PendingSupervisorReview => palette.task_blocked,
         TaskStatus::AwaitingMerge => palette.task_blocked,
     };
 

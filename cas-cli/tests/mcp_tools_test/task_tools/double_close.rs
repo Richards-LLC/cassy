@@ -8,8 +8,8 @@
 //! result, no mutation, no review-gate demand.
 
 use crate::support::*;
-use cas::mcp::tools::*;
 use cas::mcp::CasService;
+use cas::mcp::tools::*;
 use cas::store::open_task_store;
 use cas::types::TaskStatus;
 use rmcp::handler::server::wrapper::Parameters;
@@ -123,10 +123,11 @@ async fn test_close_on_already_closed_is_non_destructive() {
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("First closer wins.".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("first close should return a result"),
     );
@@ -154,10 +155,11 @@ async fn test_close_on_already_closed_is_non_destructive() {
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Second closer races.".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("second close should return a result"),
     );
@@ -224,10 +226,11 @@ async fn test_close_on_already_closed_skips_code_review_gate() {
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Initial close.".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("first close should return a result"),
     );

@@ -273,8 +273,8 @@ async fn test_start_allowed_with_other_task_pending_verification() {
         stranded_branch_override: None,
         id: first_id.to_string(),
         reason: Some("Completed".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -378,8 +378,8 @@ async fn test_claim_allowed_with_other_task_pending_verification() {
         stranded_branch_override: None,
         id: first_id.to_string(),
         reason: Some("Completed".to_string()),
-        bypass_code_review: None,
-        code_review_findings: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
         search_manifest: None,
         commit_receipt: None,
     };
@@ -587,10 +587,11 @@ async fn test_start_same_task_allowed_when_pending() {
         stranded_branch_override: None,
         id: task_id.to_string(),
         reason: Some("Completed".to_string()),
-        bypass_code_review: None,
-code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await

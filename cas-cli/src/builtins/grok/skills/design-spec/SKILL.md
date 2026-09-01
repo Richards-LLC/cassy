@@ -138,7 +138,6 @@ Print two things to the user:
 
 ## Consumed by other skills and agents
 
-- **`cas-code-review` design persona / design reviewer:** read `DESIGN.md` *first*. Cite token names and Do's & Don'ts from it instead of re-deriving intent from `.vue`/`.tsx` and locale files.
 - **Front-end worker dispatch:** point workers at `DESIGN.md` so generated UI uses the right tokens, states, and breakpoints by default.
 
 ## When to run

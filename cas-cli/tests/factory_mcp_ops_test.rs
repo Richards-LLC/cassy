@@ -1303,11 +1303,6 @@ async fn test_spawn_workers_undispatchable_task_id_is_rejected_without_epic() {
             None,
             "not work a newly spawned worker",
         ),
-        (
-            TaskStatus::PendingSupervisorReview,
-            None,
-            "not work a newly spawned worker",
-        ),
         (TaskStatus::Blocked, None, "not work a newly spawned worker"),
         (
             TaskStatus::Open,
@@ -2416,10 +2411,6 @@ async fn test_worker_status_names_finished_awaiting_merge_as_waiting_on_supervis
     let task_store = env.task_store();
     for (status, expected) in [
         (TaskStatus::AwaitingMerge, "awaiting merge"),
-        (
-            TaskStatus::PendingSupervisorReview,
-            "awaiting supervisor review",
-        ),
     ] {
         let id = task_store.generate_id().expect("id");
         let mut task = Task::new(id.clone(), "Finished work".to_string());
@@ -3363,9 +3354,9 @@ async fn test_2e81_agent_cleanup_parks_orphan_and_emits_worker_died() {
     );
 }
 
-/// PSR tasks must not be reset to Open by orphan recovery (cas-6e4c invariant).
+/// AwaitingMerge tasks must not be reset to Open by orphan recovery.
 #[tokio::test]
-async fn test_2e81_orphan_recovery_skips_psr_tasks() {
+async fn test_2e81_orphan_recovery_skips_awaiting_merge_tasks() {
     let _guard = EnvGuard::set(&[]);
     let env = FactoryTestEnv::new();
     env.register_supervisor("sup-psr");
@@ -3373,18 +3364,18 @@ async fn test_2e81_orphan_recovery_skips_psr_tasks() {
     let worker_id =
         env.register_stale_worker_with_clone_path("psr-worker", "/tmp/cas-worktrees/psr", 40);
     let task_store = env.task_store();
-    let mut task = Task::new("cas-psr1".to_string(), "PSR task".to_string());
-    task.status = TaskStatus::PendingSupervisorReview;
-    task.assignee = Some("psr-worker".to_string());
+    let mut task = Task::new("cas-awaiting-merge1".to_string(), "Awaiting merge task".to_string());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("awaiting-merge-worker".to_string());
     task_store.add(&task).expect("add");
     // Still hold a lease so mark_stale revokes something — recovery must skip status flip.
     env.agent_store()
-        .try_claim("cas-psr1", &worker_id, 600, None)
+        .try_claim("cas-awaiting-merge1", &worker_id, 600, None)
         .expect("claim")
         .is_success();
-    // Force PSR again in case claim path rewrote status.
-    let mut t = task_store.get("cas-psr1").unwrap();
-    t.status = TaskStatus::PendingSupervisorReview;
+    // Force AwaitingMerge again in case claim path rewrote status.
+    let mut t = task_store.get("cas-awaiting-merge1").unwrap();
+    t.status = TaskStatus::AwaitingMerge;
     task_store.update(&t).unwrap();
 
     let _ = env
@@ -3393,11 +3384,11 @@ async fn test_2e81_orphan_recovery_skips_psr_tasks() {
         .await
         .expect("worker_status");
 
-    let after = task_store.get("cas-psr1").unwrap();
+    let after = task_store.get("cas-awaiting-merge1").unwrap();
     assert_eq!(
         after.status,
-        TaskStatus::PendingSupervisorReview,
-        "PSR must not be auto-reset to Open by orphan recovery"
+        TaskStatus::AwaitingMerge,
+        "AwaitingMerge must not be auto-reset to Open by orphan recovery"
     );
 }
 
@@ -5555,8 +5546,8 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
             stranded_branch_override: None,
             id: task_id.clone(),
             reason: Some("already merged before the urgent status check".to_string()),
-            bypass_code_review: None,
-            code_review_findings: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))
@@ -6686,8 +6677,8 @@ async fn test_062d_lifecycle_close_pushes_closed() {
             stranded_branch_override: None,
             id: "cas-062d-close".to_string(),
             reason: Some("lifecycle close proof".to_string()),
-            code_review_findings: None,
-            bypass_code_review: Some(true),
+            supervisor_override: Some(true),
+            legacy_bypass_code_review: None,
             search_manifest: None,
             commit_receipt: None,
         }))

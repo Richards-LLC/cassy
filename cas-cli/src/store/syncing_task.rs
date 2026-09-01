@@ -710,6 +710,30 @@ mod tests {
                 .as_deref()
                 .is_some_and(|payload| payload.contains("\"origin_project\":\"project-b\""))
         );
+        assert_eq!(pending[1].project_id.as_deref(), Some("project-b"));
+    }
+
+    #[test]
+    fn task_origin_project_move_later_edit_stays_on_new_owner_key() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+
+        let mut task = Task::new("p-task-move-002".to_string(), "move me".to_string());
+        task.origin_project = Some("project-a".to_string());
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+
+        task.origin_project = Some("project-b".to_string());
+        store.update(&task).unwrap();
+        queue.clear().unwrap();
+
+        task.title = "edited after move".to_string();
+        store.update(&task).unwrap();
+
+        let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].operation, SyncOperation::Upsert);
+        assert_eq!(pending[0].project_id.as_deref(), Some("project-b"));
     }
 
     #[test]

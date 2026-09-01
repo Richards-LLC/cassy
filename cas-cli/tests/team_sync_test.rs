@@ -72,6 +72,7 @@ fn seed_team_task_move(queue: &SyncQueue, task_id: &str) {
             EntityType::Task,
             task_id,
             "project-a",
+            "project-b",
             &format!(
                 r#"{{"id":"{task_id}","title":"moved","scope":"project","origin_project":"project-b"}}"#
             ),
@@ -120,6 +121,9 @@ async fn team_task_move_deletes_old_project_before_upserting_new_owner() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].method.as_str(), "DELETE");
     assert_eq!(requests[1].method.as_str(), "POST");
+    let payload = decode_gzip_json(&requests[1].body);
+    assert_eq!(payload["project_canonical_id"], "project-b");
+    assert_eq!(payload["tasks"][0]["origin_project"], "project-b");
     assert!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().is_empty());
 }
 

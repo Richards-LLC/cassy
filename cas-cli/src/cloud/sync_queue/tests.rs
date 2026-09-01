@@ -670,6 +670,7 @@ fn project_id_migration_preserves_legacy_rows_and_allows_move_pair() {
             EntityType::Task,
             "move-after-migration",
             "project-a",
+            "project-b",
             r#"{"id":"move-after-migration","origin_project":"project-b"}"#,
             "team-123",
         )
@@ -679,6 +680,27 @@ fn project_id_migration_preserves_legacy_rows_and_allows_move_pair() {
     assert_eq!(moved[1].operation, SyncOperation::Delete);
     assert_eq!(moved[1].project_id.as_deref(), Some("project-a"));
     assert_eq!(moved[2].operation, SyncOperation::Upsert);
+    assert_eq!(moved[2].project_id.as_deref(), Some("project-b"));
+}
+
+#[test]
+fn enqueue_for_team_project_targets_a_foreign_owner() {
+    let (_temp, queue) = create_test_queue();
+
+    queue
+        .enqueue_for_team_project(
+            EntityType::Task,
+            "foreign-task",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"foreign-task"}"#),
+            "team-123",
+            Some("destination-project"),
+        )
+        .unwrap();
+
+    let pending = queue.pending_for_team("team-123", 10, 5).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].project_id.as_deref(), Some("destination-project"));
 }
 
 #[test]

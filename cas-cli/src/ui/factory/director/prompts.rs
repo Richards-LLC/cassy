@@ -486,7 +486,7 @@ pub fn revalidate_event_for_delivery_with_context(
                         .filter(|task| task.status == TaskStatus::Open),
                 )
                 // cas-ef0a3: `in_progress_tasks` is a visibility bucket that
-                // also contains PendingSupervisorReview and AwaitingMerge.
+                // also contains AwaitingMerge.
                 // Neither state is worker-actionable, so a stale stall event
                 // must not survive a detect→park race and re-nudge the worker.
                 .filter(|task| matches!(task.status, TaskStatus::Open | TaskStatus::InProgress))
@@ -553,7 +553,7 @@ pub fn revalidate_event_for_delivery_with_context(
                     .filter(|task| task.status == TaskStatus::Open),
             )
             // cas-ef0a3: this bucket also carries supervisor-owned
-            // PendingSupervisorReview/AwaitingMerge tasks. Re-check the actual
+            // AwaitingMerge tasks. Re-check the actual
             // status so a stale assignment event cannot redispatch completed
             // worker work after the merge gate parks it.
             .filter(|task| matches!(task.status, TaskStatus::Open | TaskStatus::InProgress))
@@ -2387,39 +2387,6 @@ mod tests {
         assert!(
             revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None).is_none(),
             "AwaitingMerge must never receive a worker-directed rescue nudge"
-        );
-    }
-
-    /// PendingSupervisorReview shares the same visibility bucket as
-    /// AwaitingMerge and is likewise supervisor-owned, not worker-actionable.
-    #[test]
-    fn test_delivery_recheck_drops_worker_dispatch_for_pending_supervisor_review() {
-        let mut data = make_data(0);
-        data.in_progress_tasks = vec![task_with_status(
-            "cas-review",
-            Some("swift-fox"),
-            TaskStatus::PendingSupervisorReview,
-        )];
-        let assignment = DirectorEvent::TaskAssigned {
-            task_id: "cas-review".to_string(),
-            task_title: "Waiting for review".to_string(),
-            worker: "swift-fox".to_string(),
-        };
-        let stalled = DirectorEvent::WorkerStalled {
-            worker: "swift-fox".to_string(),
-            task_id: "cas-review".to_string(),
-            elapsed_secs: 600,
-            escalate: false,
-        };
-
-        assert!(
-            revalidate_event_for_delivery_with_focus(&assignment, &data, "supervisor", None)
-                .is_none(),
-            "PendingSupervisorReview must not receive a TaskAssigned prompt"
-        );
-        assert!(
-            revalidate_event_for_delivery_with_focus(&stalled, &data, "supervisor", None).is_none(),
-            "PendingSupervisorReview must not receive a WorkerStalled rescue nudge"
         );
     }
 
@@ -5615,7 +5582,7 @@ mod tests {
     /// Distinct from the reopened-subtask case above: these children never
     /// existed when the occurrence was detected, and they arrive in every
     /// non-closed status. `DirectorData` files Open/Blocked into
-    /// `ready_tasks` and InProgress/PendingSupervisorReview/AwaitingMerge into
+    /// `ready_tasks` and InProgress/AwaitingMerge into
     /// `in_progress_tasks`, so the last-mile check has to see all five — a
     /// status landing in neither bucket would read as "no children left" and
     /// let the prompt through.
@@ -5648,7 +5615,6 @@ mod tests {
             TaskStatus::Open,
             TaskStatus::Blocked,
             TaskStatus::InProgress,
-            TaskStatus::PendingSupervisorReview,
             TaskStatus::AwaitingMerge,
         ] {
             let mut with_new_child = current.clone();

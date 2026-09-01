@@ -30,14 +30,11 @@ pub enum TaskStatus {
     /// preserved; `terminal_outcome` records whether this was a cancellation
     /// or a supersession and carries the optional superseding pointer.
     Cancelled,
-    /// Worker close ran the lightweight gate successfully; awaiting
-    /// supervisor code-review dispatch. Only reachable when
-    /// `[code_review] owner = "supervisor"` is set (cas-b51a).
-    PendingSupervisorReview,
     /// Worker close reached the merge-state guard and the worker's factory
     /// branch is not on the target branch yet. The worker has no further
     /// action until the supervisor merges the branch, but the task is still
     /// open and closeable once the merge guard passes.
+    #[serde(alias = "pending_supervisor_review")]
     AwaitingMerge,
 }
 
@@ -52,7 +49,7 @@ impl TaskStatus {
     pub fn is_parked_awaiting_supervisor(self) -> bool {
         matches!(
             self,
-            TaskStatus::AwaitingMerge | TaskStatus::PendingSupervisorReview | TaskStatus::Blocked
+            TaskStatus::AwaitingMerge | TaskStatus::Blocked
         )
     }
 }
@@ -65,7 +62,6 @@ impl fmt::Display for TaskStatus {
             TaskStatus::Blocked => write!(f, "blocked"),
             TaskStatus::Closed => write!(f, "closed"),
             TaskStatus::Cancelled => write!(f, "cancelled"),
-            TaskStatus::PendingSupervisorReview => write!(f, "pending_supervisor_review"),
             TaskStatus::AwaitingMerge => write!(f, "awaiting_merge"),
         }
     }
@@ -91,7 +87,9 @@ impl FromStr for TaskStatus {
         } else if s.eq_ignore_ascii_case("pending_supervisor_review")
             || s.eq_ignore_ascii_case("pending-supervisor-review")
         {
-            Ok(TaskStatus::PendingSupervisorReview)
+            // Legacy cloud/database rows are retained for compatibility but
+            // are materialized into the surviving merge-waiting state.
+            Ok(TaskStatus::AwaitingMerge)
         } else if s.eq_ignore_ascii_case("awaiting_merge")
             || s.eq_ignore_ascii_case("awaiting-merge")
         {
@@ -894,7 +892,7 @@ impl Task {
     }
 
     /// Check if the task is ready to work on. Waiting states like
-    /// PendingSupervisorReview and AwaitingMerge are intentionally excluded:
+    /// AwaitingMerge are intentionally excluded:
     /// the task cannot be picked up again by a worker until the supervisor
     /// resolves the waiting condition.
     pub fn is_ready(&self) -> bool {
@@ -1014,11 +1012,11 @@ mod tests {
         assert_eq!(TaskStatus::from_str("closed").unwrap(), TaskStatus::Closed);
         assert_eq!(
             TaskStatus::from_str("pending_supervisor_review").unwrap(),
-            TaskStatus::PendingSupervisorReview
+            TaskStatus::AwaitingMerge
         );
         assert_eq!(
             TaskStatus::from_str("pending-supervisor-review").unwrap(),
-            TaskStatus::PendingSupervisorReview
+            TaskStatus::AwaitingMerge
         );
         assert_eq!(
             TaskStatus::from_str("awaiting_merge").unwrap(),
@@ -1032,23 +1030,12 @@ mod tests {
     }
 
     #[test]
-    fn test_pending_supervisor_review_display_roundtrip() {
-        let s = TaskStatus::PendingSupervisorReview.to_string();
-        assert_eq!(s, "pending_supervisor_review");
+    fn test_pending_supervisor_review_legacy_deserializes_to_awaiting_merge() {
+        let s = "pending_supervisor_review";
         assert_eq!(
-            TaskStatus::from_str(&s).unwrap(),
-            TaskStatus::PendingSupervisorReview
+            serde_json::from_str::<TaskStatus>(&format!("\"{s}\"")).unwrap(),
+            TaskStatus::AwaitingMerge
         );
-    }
-
-    #[test]
-    fn test_pending_supervisor_review_is_open_not_ready() {
-        let mut task = Task::new("cas-test".to_string(), "Test".to_string());
-        task.status = TaskStatus::PendingSupervisorReview;
-        // Still "open" (not closed) so dependents remain unblocked logic is sensible
-        assert!(task.is_open());
-        // But NOT ready — worker should not pick it up again until supervisor decides
-        assert!(!task.is_ready());
     }
 
     #[test]

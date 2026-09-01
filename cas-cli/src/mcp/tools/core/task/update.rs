@@ -1228,7 +1228,7 @@ impl CasCore {
                 cas_types::TaskStatus::from_str(&status_str).map_err(|_| McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
-                        "Invalid status: {status_str}. Valid: open, in_progress, closed, blocked, pending_supervisor_review, awaiting_merge"
+                        "Invalid status: {status_str}. Valid: open, in_progress, closed, blocked, awaiting_merge"
                     )),
                     data: None,
                 })?;

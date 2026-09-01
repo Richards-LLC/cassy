@@ -323,12 +323,6 @@ impl DirectorData {
                         // Terminal but intentionally not delivered. Keep it out
                         // of both active queues and delivered child counts.
                     }
-                    // cas-b51a: show tasks awaiting supervisor review as a
-                    // separate in-progress bucket so the TUI surfaces them
-                    // for the supervisor to act on.
-                    TaskStatus::PendingSupervisorReview => {
-                        in_progress_tasks.push(to_summary(task));
-                    }
                     // cas-8d5b: worker work is done, but the factory branch
                     // is waiting on supervisor merge. Keep it visible in the
                     // waiting/active panel without treating it as worker-

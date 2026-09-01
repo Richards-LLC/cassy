@@ -374,10 +374,9 @@ impl CasCore {
                         // The work is already complete — only supervisor review is
                         // pending. Resetting a PSR task to Open would silently erase
                         // the worker's completed close and remove it from the
-                        // supervisor review queue.
+                        // parked merge queue.
                         if !task.is_terminal()
                             && task.status != TaskStatus::Open
-                            && task.status != TaskStatus::PendingSupervisorReview
                             && task.status != TaskStatus::AwaitingMerge
                         {
                             let prior_status = task.status;

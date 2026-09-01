@@ -12,8 +12,8 @@
 //!   3. A *different* CasCore + CasService (session 2 — modelling a separate
 //!      worker process) starts and closes the task, and we assert the reloaded
 //!      depth still drives the close gate: light closes immediately (no jail, no
-//!      P0/supervisor-review hop) with an auditable decision note; deep/unset
-//!      pend for supervisor review exactly as today.
+//!      retired supervisor-review hop) with an auditable decision note; deep/unset
+//!      use the standard verification path.
 //!
 //! If the data layer and the close gate ever disagree about a task's depth
 //! after persistence (e.g. a serialize regression that drops Light to NULL→Deep
@@ -33,8 +33,7 @@ fn task_req(value: serde_json::Value) -> cas_mcp::TaskRequest {
     serde_json::from_value(value).expect("TaskRequest should deserialize from test JSON")
 }
 
-/// RAII guard that installs factory-worker env vars and clears them on drop, so
-/// the close gate runs its worker-under-supervisor-review branch.
+/// RAII guard that installs factory-worker env vars and clears them on drop.
 struct FactoryWorkerGuard;
 
 impl FactoryWorkerGuard {
@@ -56,8 +55,8 @@ impl Drop for FactoryWorkerGuard {
     }
 }
 
-/// Verification disabled + supervisor-owned review, so a factory-worker close
-/// reaches the supervisor-review (P0) transition rather than the jail.
+/// Legacy review configuration is retained here to prove it no longer changes
+/// the ordinary verification-disabled factory-worker lifecycle.
 fn write_supervisor_review_config(cas_dir: &std::path::Path) {
     let toml = r#"
 [verification]
@@ -70,7 +69,7 @@ owner = "supervisor"
 }
 
 /// Init a git repo with one staged Rust change so `has_reviewable_changes()`
-/// returns true and the close actually reaches the P0 code-review gate.
+/// returns true so the close exercises its reviewable-change path.
 fn init_git_repo_with_staged_changes(project_root: &std::path::Path) {
     let git = |args: &[&str]| {
         Command::new("git")
@@ -86,7 +85,7 @@ fn init_git_repo_with_staged_changes(project_root: &std::path::Path) {
     git(&["add", "base.rs"]);
     git(&["commit", "-m", "init"]);
     // The close gate re-validates the current factory/test-agent tip before
-    // entering PendingSupervisorReview. Keep the worker branch at the
+    // entering AwaitingMerge. Keep the worker branch at the
     // integration base and add remote-tracking evidence that it was already
     // published; this shared-checkout fixture exercises the review gate's
     // staged change without modeling an unmerged worker branch.
@@ -180,22 +179,25 @@ async fn test_e2e_light_depth_persists_then_closes_without_gates() {
     // Session 2 — a separate worker process closes it.
     let _worker = FactoryWorkerGuard::enter();
     let close_text = start_and_close(&cas_dir, &id).await;
+    assert!(
+        close_text.contains("Closed task"),
+        "deep task close should report a terminal close: {close_text}"
+    );
 
     assert!(
         !close_text.contains("CODE_REVIEW_REQUIRED"),
         "light close must not trip the code-review gate: {close_text}"
     );
     assert!(
-        !close_text.contains("pending_supervisor_review")
-            && !close_text.contains("supervisor review"),
-        "light close must NOT pend for supervisor review — it closes immediately: {close_text}"
+        !close_text.contains("pending_supervisor_review"),
+        "light close must not emit the retired status: {close_text}"
     );
 
     let task = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
     assert_eq!(
         task.status,
         TaskStatus::Closed,
-        "light task must end Closed, not PendingSupervisorReview; got {:?}",
+        "light task must end Closed, not AwaitingMerge; got {:?}",
         task.status
     );
     assert_eq!(
@@ -204,16 +206,16 @@ async fn test_e2e_light_depth_persists_then_closes_without_gates() {
         "depth must remain Light through the close"
     );
     assert!(
-        task.notes.contains("depth=light") && task.notes.contains("code-review gate"),
+        task.notes.contains("depth=light"),
         "light close must record the auditable decision note: {}",
         task.notes
     );
 }
 
 /// E2E (deep): depth=deep round-trips and, read back by a separate session,
-/// still enforces the P0 gate — the task pends for supervisor review.
+/// closes without the retired supervisor-review queue.
 #[tokio::test]
-async fn test_e2e_deep_depth_persists_then_pends_supervisor_review() {
+async fn test_e2e_deep_depth_persists_then_closes() {
     let (temp, _core) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
@@ -232,18 +234,16 @@ async fn test_e2e_deep_depth_persists_then_pends_supervisor_review() {
 
     let _worker = FactoryWorkerGuard::enter();
     let close_text = start_and_close(&cas_dir, &id).await;
-
     assert!(
-        close_text.contains("supervisor review")
-            || close_text.contains("pending_supervisor_review"),
-        "deep close must still pend for supervisor review: {close_text}"
+        close_text.contains("Closed task"),
+        "deep task close should report a terminal close: {close_text}"
     );
 
     let task = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
     assert_eq!(
         task.status,
-        TaskStatus::PendingSupervisorReview,
-        "deep task must pend for supervisor review, not close: {:?}",
+        TaskStatus::Closed,
+        "deep task must close without the retired supervisor-review queue: {:?}",
         task.status
     );
     assert!(
@@ -254,10 +254,9 @@ async fn test_e2e_deep_depth_persists_then_pends_supervisor_review() {
 }
 
 /// E2E (unset / legacy): a task created with no depth reads back as Deep
-/// (NULL→Deep) across the persistence boundary and is enforced like deep — the
-/// default composes with the gate exactly as an explicit deep does.
+/// (NULL→Deep) across the persistence boundary and still closes normally.
 #[tokio::test]
-async fn test_e2e_unset_depth_reads_as_deep_then_pends_supervisor_review() {
+async fn test_e2e_unset_depth_reads_as_deep_then_closes() {
     let (temp, _core) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
@@ -276,15 +275,14 @@ async fn test_e2e_unset_depth_reads_as_deep_then_pends_supervisor_review() {
 
     let _worker = FactoryWorkerGuard::enter();
     let close_text = start_and_close(&cas_dir, &id).await;
-
     assert!(
-        close_text.contains("supervisor review")
-            || close_text.contains("pending_supervisor_review"),
-        "unset-depth close must enforce the P0 gate like deep: {close_text}"
+        close_text.contains("Closed task"),
+        "unset-depth task close should report a terminal close: {close_text}"
     );
+
     assert_eq!(
         open_task_store(&cas_dir).unwrap().get(&id).unwrap().status,
-        TaskStatus::PendingSupervisorReview,
-        "unset-depth task must pend for supervisor review"
+        TaskStatus::Closed,
+        "unset-depth task must close without the retired supervisor-review queue"
     );
 }

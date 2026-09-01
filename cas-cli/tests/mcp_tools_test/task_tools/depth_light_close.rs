@@ -187,9 +187,9 @@ async fn test_light_depth_solo_close_skips_verification_jail() {
         task.notes.contains("depth=light")
             && task.notes.to_lowercase().contains("decision")
             && task.notes.contains("verification jail")
-            && task.notes.contains("code-review gate"),
-        "light close must record an auditable decision note naming both skipped \
-         gates: {}",
+            && !task.notes.contains("supervisor-review queue"),
+        "light close must record an auditable decision note without the retired \
+         review queue: {}",
         task.notes
     );
 }
@@ -366,16 +366,14 @@ async fn test_unset_depth_solo_close_still_arms_verification_jail() {
 }
 
 // ---------------------------------------------------------------------------
-// Factory-worker close under supervisor-owned review — P0 gate branch.
+// Factory-worker close with depth policy.
 //
-// Under `owner = "supervisor"` a worker close with reviewable changes pends
-// to PendingSupervisorReview (the queue hop IS the P0 gate). depth=light must
-// instead close immediately; depth=deep must still pend.
+// Depth controls verification rigor; it does not select a separate review
+// queue. The merge gate remains the supervisor handoff for unmerged work.
 // ---------------------------------------------------------------------------
 
-/// AC: a `depth=light` factory-worker close with reviewable changes treats the
-/// P0 code-review gate as satisfied — the task closes immediately rather than
-/// pending for supervisor review, with the decision note recorded.
+/// AC: a `depth=light` factory-worker close with reviewable changes skips the
+/// verification jail and closes immediately, with the decision note recorded.
 #[tokio::test]
 async fn test_light_depth_factory_close_skips_p0_gate_and_closes() {
     let (temp, _core) = setup_cas();
@@ -420,7 +418,11 @@ async fn test_light_depth_factory_close_skips_p0_gate_and_closes() {
                 "reason": "All acceptance criteria met.",
             }))))
             .await
-            .expect("task.close should return a result"),
+        .expect("task.close should return a result"),
+    );
+    assert!(
+        close_text.contains("Closed task"),
+        "deep factory close should report a terminal close: {close_text}"
     );
 
     assert!(
@@ -430,7 +432,7 @@ async fn test_light_depth_factory_close_skips_p0_gate_and_closes() {
     assert!(
         !close_text.contains("pending_supervisor_review")
             && !close_text.contains("supervisor review"),
-        "light close must NOT pend for supervisor review — it closes immediately: {close_text}"
+        "light close must not use a supervisor review queue: {close_text}"
     );
 
     let task = task_store.get(&id).expect("task should exist");
@@ -438,21 +440,20 @@ async fn test_light_depth_factory_close_skips_p0_gate_and_closes() {
         task.status,
         TaskStatus::Closed,
         "light factory close must transition straight to Closed, not \
-         PendingSupervisorReview; got {:?}",
+         AwaitingMerge; got {:?}",
         task.status
     );
     assert!(
-        task.notes.contains("depth=light") && task.notes.contains("code-review gate"),
+        task.notes.contains("depth=light"),
         "light factory close must record the decision note: {}",
         task.notes
     );
 }
 
 /// Regression guard: a `depth=deep` factory-worker close with reviewable
-/// changes still pends for supervisor review. Fails if the P0-gate skip leaks
-/// to deep.
+/// changes does not use the retired supervisor review queue.
 #[tokio::test]
-async fn test_deep_depth_factory_close_still_pends_supervisor_review() {
+async fn test_deep_depth_factory_close_does_not_use_review_queue() {
     let (temp, _core) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
@@ -494,21 +495,19 @@ async fn test_deep_depth_factory_close_still_pends_supervisor_review() {
                 "id": id,
                 "reason": "All acceptance criteria met.",
             }))))
-            .await
-            .expect("task.close should return a result"),
+        .await
+        .expect("task.close should return a result"),
     );
-
     assert!(
-        close_text.contains("supervisor review")
-            || close_text.contains("pending_supervisor_review"),
-        "deep close must still pend for supervisor review: {close_text}"
+        close_text.contains("Closed task"),
+        "deep factory close should report a terminal close: {close_text}"
     );
 
     let task = task_store.get(&id).expect("task should exist");
     assert_eq!(
         task.status,
-        TaskStatus::PendingSupervisorReview,
-        "deep factory close must pend for supervisor review, not close: {:?}",
+        TaskStatus::Closed,
+        "deep factory close must close without the retired review queue: {:?}",
         task.status
     );
     assert!(

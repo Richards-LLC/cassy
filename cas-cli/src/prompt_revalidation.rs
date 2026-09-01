@@ -69,7 +69,6 @@ pub(crate) fn assignment_targets_started_task(
         status,
         TaskStatus::InProgress
             | TaskStatus::Blocked
-            | TaskStatus::PendingSupervisorReview
             | TaskStatus::AwaitingMerge
     )
     .then(|| assignment_solicited_task_id(prompt))
@@ -1375,7 +1374,6 @@ mod tests {
             TaskStatus::Closed,
             TaskStatus::InProgress,
             TaskStatus::Open,
-            TaskStatus::PendingSupervisorReview,
         ] {
             let task = merge_task(status, Some("worker-tip"));
             assert_eq!(

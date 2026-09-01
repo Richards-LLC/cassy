@@ -293,8 +293,7 @@ async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
         artifact_path: Some(artifact.display().to_string()),
     };
 
-    // cas-2b667 / GH #588: a worker receipt now projects the task into
-    // PendingSupervisorReview, so the public path must reject this unmerged
+    // cas-2b667 / GH #588: a worker receipt must reject this unmerged
     // source tip before persisting any delivery state. Keep that regression
     // assertion here, then seed the post-acceptance boundary directly so the
     // tests below can continue exercising worktree_merge's target CAS and
@@ -340,7 +339,7 @@ async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
         .expect("task store")
         .get(&task.id)
         .expect("task after receipt rejection");
-    pending.status = TaskStatus::PendingSupervisorReview;
+    pending.status = TaskStatus::AwaitingMerge;
     pending.pending_verification = true;
     pending.close_reason = Some("worker handoff".to_string());
     pending.deliverables.factory_branch_anchor = Some(receipt.commit_sha.clone());

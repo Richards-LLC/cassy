@@ -5466,6 +5466,101 @@ mod purge_foreign_safety_tests {
     use rusqlite::Connection;
     use tempfile::TempDir;
 
+    fn seed_project_scoped_db(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE entries (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                content TEXT NOT NULL,
+                project_canonical_id TEXT
+            );
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                origin_project TEXT
+            );
+            CREATE TABLE rules (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL,
+                project_canonical_id TEXT
+            );
+            CREATE TABLE skills (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                project_canonical_id TEXT
+            );
+            CREATE TABLE dependencies (from_id TEXT, to_id TEXT);
+
+            INSERT INTO tasks (id, title, origin_project) VALUES
+                ('own-1', 'own task 1', 'cas-src'),
+                ('own-2', 'own task 2', 'cas-src'),
+                ('legacy', 'legacy local task', NULL),
+                ('foreign-1', 'foreign task 1', 'gabber-studio'),
+                ('foreign-2', 'foreign task 2', 'pulse-card');
+            INSERT INTO rules (id, content, status, project_canonical_id)
+                VALUES ('proven-own', 'keep me', 'proven', 'cas-src');
+            INSERT INTO dependencies (from_id, to_id) VALUES
+                ('foreign-1', 'own-1'), ('own-2', 'legacy');
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn project_scoped_classifier_only_lists_explicitly_foreign_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+
+        let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+
+        assert_eq!(
+            set.tasks.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+            vec!["foreign-1", "foreign-2"]
+        );
+        assert!(set.entries.is_empty());
+        assert!(set.rules.is_empty(), "the proven local rule is protected");
+        assert!(set.skills.is_empty());
+        assert_eq!(set.dependencies, 1);
+        assert!(set.tasks.len() <= 5, "delete count cannot exceed rows present");
+    }
+
+    #[test]
+    fn foreign_task_majority_is_a_hard_purge_refusal() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+
+        let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+        let refusals = evaluate_purge_hard_guards(&set, 5, 0);
+
+        assert!(refusals.iter().any(|refusal| {
+            refusal.code() == "too_many_foreign_tasks"
+                && refusal.reason().contains("2 of 5")
+        }));
+    }
+
+    #[test]
+    fn proven_foreign_rule_is_a_hard_purge_refusal() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        conn.execute(
+            "INSERT INTO rules (id, content, status, project_canonical_id)
+             VALUES ('proven-foreign', 'do not delete', 'proven', 'other-project')",
+            [],
+        )
+        .unwrap();
+
+        let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+        assert_eq!(set.rules.len(), 1);
+        let refusals = evaluate_purge_hard_guards(&set, 5, 1);
+
+        assert!(refusals.iter().any(|refusal| {
+            refusal.code() == "proven_rule"
+                && refusal.reason().contains("1 proven rule")
+        }));
+    }
+
     /// Minimal shape of the tables purge-foreign touches.
     fn seed_db(conn: &Connection) {
         conn.execute_batch(

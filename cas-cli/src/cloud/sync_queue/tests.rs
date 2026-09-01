@@ -613,7 +613,9 @@ fn retry_failed_by_reason_requeues_only_matching_terminal_rows() {
         queue
             .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
             .unwrap();
-        let row_id = queue.pending(10, MAX_RETRIES).unwrap()
+        let row_id = queue
+            .pending(10, MAX_RETRIES)
+            .unwrap()
             .iter()
             .find(|row| row.entity_id == id)
             .unwrap()
@@ -634,7 +636,13 @@ fn retry_failed_by_reason_requeues_only_matching_terminal_rows() {
     let pending = queue.pending(10, MAX_RETRIES).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].entity_id, "project-mismatch");
-    assert_eq!(queue.failed_for_entity_type(None, MAX_RETRIES, 10).unwrap().len(), 1);
+    assert_eq!(
+        queue
+            .failed_for_entity_type(None, MAX_RETRIES, 10)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// AC4: A row with team_id=NULL (inserted by an older code path that did not

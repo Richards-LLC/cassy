@@ -2385,8 +2385,15 @@ mod tests {
         assert!(check.message.contains("task: 1"));
         let retry = check.message.find("cas cloud queue --retry").unwrap();
         let push = check.message.find("cas cloud push").unwrap();
-        let purge = check.message.find("cas cloud purge-foreign --dry-run").unwrap();
-        assert!(retry < push && push < purge, "{message}", message = check.message);
+        let purge = check
+            .message
+            .find("cas cloud purge-foreign --dry-run")
+            .unwrap();
+        assert!(
+            retry < push && push < purge,
+            "{message}",
+            message = check.message
+        );
     }
 
     #[test]

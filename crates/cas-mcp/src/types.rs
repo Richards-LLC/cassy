@@ -529,6 +529,15 @@ pub struct TaskRequest {
     #[serde(default)]
     pub depth: Option<String>,
 
+    /// Factory branch delivery route (for create/update). `push_branch` is
+    /// the normal remote-branch flow; `local_merge` keeps worker branches
+    /// local for supervisor integration.
+    #[schemars(
+        description = "Factory delivery mode: 'push_branch' (default) or 'local_merge' (supervisor merges the local worker branch)"
+    )]
+    #[serde(default)]
+    pub delivery_mode: Option<String>,
+
     /// Explicit acknowledgement of a planning-race or duplicate-task warning on create.
     #[schemars(
         description = "For action=create, confirm creation after CAS reports a recent competing epic plan or a high-similarity open task."

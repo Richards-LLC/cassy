@@ -239,7 +239,7 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskCreateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.cas_task_create_with_target(req, None, None, false)
+        self.cas_task_create_with_delivery_mode(req, None, None, false, None)
             .await
     }
 
@@ -249,6 +249,24 @@ impl CasCore {
         target_repo: Option<&str>,
         target_branch: Option<&str>,
         confirm_warning: bool,
+    ) -> Result<CallToolResult, McpError> {
+        self.cas_task_create_with_delivery_mode(
+            req,
+            target_repo,
+            target_branch,
+            confirm_warning,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn cas_task_create_with_delivery_mode(
+        &self,
+        req: TaskCreateRequest,
+        target_repo: Option<&str>,
+        target_branch: Option<&str>,
+        confirm_warning: bool,
+        delivery_mode: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
@@ -371,6 +389,14 @@ impl CasCore {
                 data: None,
             })?
             .unwrap_or_default();
+        let requested_delivery_mode =
+            crate::mcp::tools::types::validate_delivery_mode(delivery_mode).map_err(|msg| {
+                McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(msg),
+                    data: None,
+                }
+            })?;
         let declared_work_target =
             super::repo_context::declare_work_target(&self.cas_root, target_repo, target_branch)
                 .map_err(|message| McpError {
@@ -387,6 +413,7 @@ impl CasCore {
         // WorkTarget as the implicit default too; a distinct target remains
         // task-owned authority.
         let mut inherited_default_note = None;
+        let mut inherited_delivery_mode = None;
         let work_target = epic_id
             .as_deref()
             .map(|epic_id| {
@@ -399,6 +426,7 @@ impl CasCore {
             .transpose()?
             .filter(|epic| epic.task_type == TaskType::Epic)
             .and_then(|epic| {
+                inherited_delivery_mode = Some(epic.delivery_mode);
                 let inherited = super::repo_context::inherited_work_target_from_epic(&epic)?;
                 let matches_epic_default = declared_work_target.as_ref().is_some_and(|target| {
                     epic.deliverables
@@ -425,6 +453,9 @@ impl CasCore {
                 }
             })
             .or(declared_work_target);
+        let delivery_mode = requested_delivery_mode
+            .or(inherited_delivery_mode)
+            .unwrap_or_default();
 
         let mut task_notes = req.notes.unwrap_or_default();
         if let Some(note) = inherited_default_note {
@@ -496,6 +527,7 @@ impl CasCore {
             epic_verification_owner,
             share: None,
             depth,
+            delivery_mode,
         };
 
         // Associate the creation event and dependency metadata with the
@@ -1352,7 +1384,8 @@ impl CasCore {
         // A worker has acted on the supervisor's recovery choice; remove the
         // structured rejection-reopen marker so a later unrelated Open state
         // cannot be rendered as waiting on the supervisor.
-        task.labels.retain(|label| label != VERIFICATION_REJECTED_REOPEN_LABEL);
+        task.labels
+            .retain(|label| label != VERIFICATION_REJECTED_REOPEN_LABEL);
         task.status = TaskStatus::InProgress;
         task.updated_at = chrono::Utc::now();
 
@@ -1480,9 +1513,10 @@ impl CasCore {
                 )
             };
             let response = format!(
-                "Started task: {} - {}{}{}{}{}{}{}",
+                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}",
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
+                task.delivery_mode,
                 claim_info.unwrap_or_default(),
                 crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
                 execution_state.unwrap_or_default(),
@@ -1498,9 +1532,10 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "Started task: {} - {}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
+            task.delivery_mode,
             claim_info.unwrap_or_default(),
             // cas-156b: placed directly after the claim line so the nativity
             // warning cannot be pushed out of view by long sibling-note or
@@ -1818,8 +1853,7 @@ mod related_recall_response_tests {
             "epic/live-target"
         );
         assert!(
-            child.notes.contains("matched parent epic")
-                && child.notes.contains("epic/live-target"),
+            child.notes.contains("matched parent epic") && child.notes.contains("epic/live-target"),
             "normalization must be durable and visible: {}",
             child.notes
         );

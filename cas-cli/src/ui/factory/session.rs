@@ -416,16 +416,22 @@ pub fn create_metadata(
     // shutdown removes the metadata file, which clears the entire set.
     let known_workers: std::collections::HashSet<&str> =
         worker_names.iter().map(String::as_str).collect();
-    let mut held_workers = fs::read_to_string(metadata_path(session_name))
+    let previous_metadata = fs::read_to_string(metadata_path(session_name))
         .ok()
-        .and_then(|json| serde_json::from_str::<SessionMetadata>(&json).ok())
+        .and_then(|json| serde_json::from_str::<SessionMetadata>(&json).ok());
+    let mut held_workers = previous_metadata
+        .as_ref()
         .map(|metadata| {
             metadata
                 .held_workers
+                .clone()
                 .into_iter()
                 .filter(|name| known_workers.contains(name.as_str()))
                 .collect::<Vec<_>>()
         })
+        .unwrap_or_default();
+    let delivery_mode = previous_metadata
+        .map(|metadata| metadata.delivery_mode)
         .unwrap_or_default();
     held_workers.sort();
     held_workers.dedup();
@@ -467,6 +473,7 @@ pub fn create_metadata(
             .collect(),
         epic_id: epic_id.map(|s| s.to_string()),
         pinned_epic_id: None,
+        delivery_mode,
         held_workers,
         project_dir: project_dir.map(|s| s.to_string()),
         team_name: None,

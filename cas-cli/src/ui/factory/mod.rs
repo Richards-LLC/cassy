@@ -61,22 +61,22 @@ mod client;
 pub(crate) mod daemon;
 mod director;
 pub(crate) use director::effective_stall_threshold_secs;
+pub(crate) mod cgroup;
 mod input;
 mod layout;
 mod notification;
-pub(crate) mod cgroup;
 pub(crate) mod orphan_gc;
-pub(crate) mod process_groups;
-/// cas-7c93 (GH #87): sanctioned lifecycle for servers that outlive a task.
-pub(crate) mod server_registry;
 pub(crate) mod phoenix;
+pub(crate) mod process_groups;
 mod protocol;
 pub mod renderer;
+/// cas-7c93 (GH #87): sanctioned lifecycle for servers that outlive a task.
+pub(crate) mod server_registry;
 mod session;
 mod status_bar;
 pub(crate) use app::{
-    persist_session_metadata_pinned_epic_id_at, persist_session_metadata_worker_hold_at,
-    worker_holds_from_session_metadata_named,
+    persist_session_metadata_delivery_mode_at, persist_session_metadata_pinned_epic_id_at,
+    persist_session_metadata_worker_hold_at, worker_holds_from_session_metadata_named,
 };
 
 /// The pinned/default epic is shared session state, not only a TUI concern.
@@ -86,9 +86,9 @@ pub(crate) fn preferred_epic_id_from_session_metadata() -> Option<String> {
     app::preferred_epic_focus_from_session_metadata().epic_id
 }
 // cas-bd9d: the parity conformance gate drives these launch intro-prompt paths.
+pub use app::{FactoryApp, FactoryConfig};
 #[cfg(test)]
 pub(crate) use app::{queue_codex_worker_intro_prompt, queue_supervisor_intro_prompt};
-pub use app::{FactoryApp, FactoryConfig};
 pub use boot::{BootConfig, run_boot_screen_client};
 pub use client::{
     attach, find_session_for_project, list_session_summaries, list_session_summaries_for_project,

@@ -474,6 +474,9 @@ pub struct SessionMetadata {
     /// Explicit supervisor-pinned epic ID for display focus
     #[serde(default)]
     pub pinned_epic_id: Option<String>,
+    /// Branch delivery route selected for this factory session.
+    #[serde(default)]
+    pub delivery_mode: cas_types::DeliveryMode,
     /// Workers deliberately parked by the supervisor for this factory session.
     ///
     /// The director reconciles this durable set into its in-memory hold gate.

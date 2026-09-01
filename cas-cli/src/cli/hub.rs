@@ -142,11 +142,102 @@ impl Default for HubServeArgs {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HubStartDecision {
+    Keep,
+    Restart {
+        version_drift: bool,
+        flags_differ: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HubRestartSpec {
+    bind: IpAddr,
+    port: u16,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+}
+
+fn default_hub_command() -> HubCommands {
+    HubCommands::Status
+}
+
+fn tailscale_enabled(record: &HubProcessRecord) -> bool {
+    record.tailscale_cli.is_some()
+        || record.tailscale_serve_port.is_some()
+        || record.public_url.is_some()
+}
+
+fn decide_live_start(
+    record: &HubProcessRecord,
+    args: &HubServeArgs,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+    binary_version: &str,
+) -> HubStartDecision {
+    let version_drift = record.version != binary_version;
+    let tailscale_flags_differ = tailscale_enabled(record) != tailscale_serve
+        || (tailscale_serve
+            && record
+                .tailscale_serve_port
+                .is_some_and(|port| port != tailscale_port));
+    let flags_differ = record.bind != args.bind.to_string()
+        || record.port != args.port
+        || tailscale_flags_differ;
+
+    if version_drift || flags_differ {
+        HubStartDecision::Restart {
+            version_drift,
+            flags_differ,
+        }
+    } else {
+        HubStartDecision::Keep
+    }
+}
+
+fn restart_spec_for_record(
+    record: &HubProcessRecord,
+    binary_version: &str,
+) -> Result<Option<HubRestartSpec>> {
+    if record.version == binary_version {
+        return Ok(None);
+    }
+    Ok(Some(HubRestartSpec {
+        bind: record
+            .bind
+            .parse()
+            .with_context(|| format!("invalid bind address in hub record: {}", record.bind))?,
+        port: record.port,
+        tailscale_serve: tailscale_enabled(record),
+        tailscale_port: record.tailscale_serve_port.unwrap_or(443),
+    }))
+}
+
+fn render_status(record: &HubProcessRecord, live: bool, binary_version: &str) -> String {
+    if live {
+        let endpoint = record
+            .public_url
+            .as_deref()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
+        format!(
+            "Cassy hub is running at {endpoint} (pid {}, version {}, binary: {binary_version})",
+            record.pid, record.version
+        )
+    } else {
+        format!(
+            "Cassy hub is not running; stale record for pid {} remains (version {}, binary: {binary_version})",
+            record.pid, record.version
+        )
+    }
+}
+
 pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
     match args
         .command
         .clone()
-        .unwrap_or(HubCommands::Start(HubServeArgs::default()))
+        .unwrap_or_else(default_hub_command)
     {
         HubCommands::Start(serve) => {
             start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
@@ -173,6 +264,16 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
 }
 
 fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: u16) -> Result<()> {
+    start_with_output(args, cli, tailscale_serve, tailscale_port, true)
+}
+
+fn start_with_output(
+    args: &HubServeArgs,
+    cli: &Cli,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+    emit_output: bool,
+) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
     validate_control_bind(
         SocketAddr::new(args.bind, args.port),
@@ -181,16 +282,64 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
     crate::hub::ensure_private_dir(paths.root())?;
     match paths.read_process_record() {
         Ok(record) if record_is_live(&record) => {
-            let endpoint = record
-                .public_url
-                .clone()
-                .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
-            anyhow::bail!(
-                "cas hub is already running at {} (pid {}, version {})",
-                endpoint,
-                record.pid,
-                record.version
-            );
+            match decide_live_start(
+                &record,
+                args,
+                tailscale_serve,
+                tailscale_port,
+                env!("CARGO_PKG_VERSION"),
+            ) {
+                HubStartDecision::Keep => {
+                    if emit_output {
+                        if cli.json {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "running": true,
+                                    "record": record,
+                                    "binary": env!("CARGO_PKG_VERSION"),
+                                })
+                            );
+                        } else {
+                            println!(
+                                "{}",
+                                render_status(&record, true, env!("CARGO_PKG_VERSION"))
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
+                HubStartDecision::Restart {
+                    version_drift,
+                    flags_differ,
+                } => {
+                    if emit_output && !cli.json {
+                        let detail = match (version_drift, flags_differ) {
+                            (true, true) => format!(
+                                "binary is {} / flags differ",
+                                env!("CARGO_PKG_VERSION")
+                            ),
+                            (true, false) => {
+                                format!("binary is {}", env!("CARGO_PKG_VERSION"))
+                            }
+                            (false, true) => "flags differ".to_owned(),
+                            (false, false) => unreachable!("restart requires drift"),
+                        };
+                        println!(
+                            "hub running (pid {}, version {}) — {detail}; restarting…",
+                            record.pid, record.version
+                        );
+                    }
+                    stop_with_output(cli, emit_output)?;
+                    return start_with_output(
+                        args,
+                        cli,
+                        tailscale_serve,
+                        tailscale_port,
+                        emit_output,
+                    );
+                }
+            }
         }
         Ok(_) | Err(_) => {}
     }
@@ -245,9 +394,9 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
             if record_is_live(&record) {
-                if cli.json {
+                if emit_output && cli.json {
                     println!("{}", serde_json::to_string(&record)?);
-                } else {
+                } else if emit_output {
                     let endpoint = record
                         .public_url
                         .as_deref()
@@ -647,21 +796,18 @@ fn status(cli: &Cli) -> Result<()> {
     let record = paths.read_process_record()?;
     let live = record_is_live(&record);
     if cli.json {
-        println!("{}", serde_json::json!({"running":live,"record":record}));
-    } else if live {
-        let endpoint = record
-            .public_url
-            .as_deref()
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
         println!(
-            "Cassy hub is running at {} (pid {}, version {})",
-            endpoint, record.pid, record.version
+            "{}",
+            serde_json::json!({
+                "running": live,
+                "record": record,
+                "binary": env!("CARGO_PKG_VERSION"),
+            })
         );
     } else {
         println!(
-            "Cassy hub is not running; stale record for pid {} remains",
-            record.pid
+            "{}",
+            render_status(&record, live, env!("CARGO_PKG_VERSION"))
         );
     }
     anyhow::ensure!(live, "cas hub is not running");
@@ -669,6 +815,10 @@ fn status(cli: &Cli) -> Result<()> {
 }
 
 fn stop(cli: &Cli) -> Result<()> {
+    stop_with_output(cli, true)
+}
+
+fn stop_with_output(cli: &Cli, emit_output: bool) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
     let tailscale_manager = TailscaleServeManager::new(paths.root());
@@ -706,7 +856,7 @@ fn stop(cli: &Cli) -> Result<()> {
         Err(error) => Err(error),
     };
     paths.remove_process_record()?;
-    if cli.json {
+    if emit_output && cli.json {
         println!(
             "{}",
             serde_json::json!({
@@ -716,7 +866,7 @@ fn stop(cli: &Cli) -> Result<()> {
                 "tailscale_warning":tailscale_outcome.as_ref().err().map(ToString::to_string),
             })
         );
-    } else {
+    } else if emit_output {
         if let Some(record) = &record {
             println!("Cassy hub stopped (pid {})", record.pid);
         } else {
@@ -735,6 +885,42 @@ fn stop(cli: &Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Restart a live hub left behind by an older Cassy binary. This is called by
+/// `cas update` after the replacement version is known; a missing, dead, or
+/// already-current hub is intentionally a no-op.
+pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool> {
+    let paths = HubRuntimePaths::default_for_user()?;
+    let Ok(record) = paths.read_process_record() else {
+        return Ok(false);
+    };
+    if !record_is_live(&record) {
+        return Ok(false);
+    }
+    let Some(spec) = restart_spec_for_record(&record, binary_version)? else {
+        return Ok(false);
+    };
+
+    if !cli.json {
+        println!(
+            "cas update: restarting stale hub (pid {}, version {} -> {})",
+            record.pid, record.version, binary_version
+        );
+    }
+    stop_with_output(cli, !cli.json)?;
+    let args = HubServeArgs {
+        bind: spec.bind,
+        port: spec.port,
+    };
+    start_with_output(
+        &args,
+        cli,
+        spec.tailscale_serve,
+        spec.tailscale_port,
+        !cli.json,
+    )?;
+    Ok(true)
 }
 
 fn wait_for_process_and_lock_release(
@@ -789,4 +975,123 @@ pub(super) fn record_is_live(record: &HubProcessRecord) -> bool {
                 == Some(1)
                 && health.get("ready").and_then(|value| value.as_bool()) == Some(true)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(version: &str, port: u16, tailscale_serve_port: Option<u16>) -> HubProcessRecord {
+        HubProcessRecord {
+            pid: 42,
+            bind: "127.0.0.1".to_owned(),
+            port,
+            version: version.to_owned(),
+            started_at: "2026-09-01T12:00:00Z".to_owned(),
+            public_url: tailscale_serve_port.map(|port| format!("https://hub.example:{port}")),
+            tailscale_serve_port,
+            tailscale_cli: tailscale_serve_port.map(|_| "tailscale".to_owned()),
+            transport_warning: None,
+        }
+    }
+
+    #[test]
+    fn bare_hub_defaults_to_status() {
+        assert!(matches!(default_hub_command(), HubCommands::Status));
+    }
+
+    #[test]
+    fn live_start_decision_table_covers_version_and_flag_drift() {
+        let same_args = HubServeArgs::default();
+        let cases = [
+            (
+                "same version and flags",
+                record(env!("CARGO_PKG_VERSION"), DEFAULT_HUB_PORT, None),
+                same_args.clone(),
+                false,
+                443,
+                HubStartDecision::Keep,
+            ),
+            (
+                "different version",
+                record("3.4.1", DEFAULT_HUB_PORT, None),
+                same_args.clone(),
+                false,
+                443,
+                HubStartDecision::Restart {
+                    version_drift: true,
+                    flags_differ: false,
+                },
+            ),
+            (
+                "different listener port",
+                record(env!("CARGO_PKG_VERSION"), DEFAULT_HUB_PORT, None),
+                HubServeArgs {
+                    port: DEFAULT_HUB_PORT + 1,
+                    ..same_args.clone()
+                },
+                false,
+                443,
+                HubStartDecision::Restart {
+                    version_drift: false,
+                    flags_differ: true,
+                },
+            ),
+            (
+                "different tailscale flag",
+                record(env!("CARGO_PKG_VERSION"), DEFAULT_HUB_PORT, None),
+                same_args,
+                true,
+                443,
+                HubStartDecision::Restart {
+                    version_drift: false,
+                    flags_differ: true,
+                },
+            ),
+        ];
+
+        for (name, live, args, tailscale_serve, tailscale_port, expected) in cases {
+            assert_eq!(
+                decide_live_start(
+                    &live,
+                    &args,
+                    tailscale_serve,
+                    tailscale_port,
+                    env!("CARGO_PKG_VERSION"),
+                ),
+                expected,
+                "case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_rendering_shows_record_and_binary_versions() {
+        let rendered = render_status(
+            &record("3.4.1", DEFAULT_HUB_PORT, None),
+            true,
+            "3.7.7",
+        );
+
+        assert!(rendered.contains("version 3.4.1"), "{rendered}");
+        assert!(rendered.contains("binary: 3.7.7"), "{rendered}");
+    }
+
+    #[test]
+    fn update_restart_spec_is_present_only_for_a_stale_live_record() {
+        let stale = restart_spec_for_record(&record("3.4.1", 4310, Some(8443)), "3.7.7")
+            .unwrap()
+            .expect("stale hub must be restarted");
+        assert_eq!(stale.bind, "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(stale.port, 4310);
+        assert!(stale.tailscale_serve);
+        assert_eq!(stale.tailscale_port, 8443);
+
+        assert!(
+            restart_spec_for_record(&record("3.7.7", 4310, Some(8443)), "3.7.7")
+                .unwrap()
+                .is_none(),
+            "matching hub version must not trigger update restart"
+        );
+    }
 }

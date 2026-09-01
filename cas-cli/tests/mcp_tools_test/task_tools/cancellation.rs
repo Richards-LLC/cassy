@@ -64,6 +64,7 @@ async fn cancel_without_commits_persists_pointer_and_lists_as_no_delivery() {
             epic: None,
             sort: None,
             sort_order: None,
+            include_foreign: false,
         }))
         .await
         .unwrap(),

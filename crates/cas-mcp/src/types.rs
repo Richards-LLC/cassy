@@ -433,6 +433,14 @@ pub struct TaskRequest {
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
 
+    /// Include rows whose origin belongs to another project. Task list
+    /// surfaces hide foreign replicas by default.
+    #[schemars(
+        description = "For list, ready, blocked, and available: include foreign-origin task rows (default: false)"
+    )]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub include_foreign: Option<bool>,
+
     /// Scope filter
     #[schemars(description = "Scope: 'global', 'project', or 'all'")]
     #[serde(default)]

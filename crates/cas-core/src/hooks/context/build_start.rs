@@ -213,7 +213,7 @@ pub fn build_context_with_stores(
 
     // Check for blocked in-progress tasks (important alert - always show full)
     if let Some(ts) = stores.task_store {
-        if let Ok(blocked) = ts.list_blocked() {
+        if let Ok(blocked) = ts.list_blocked_scoped(ts.project_id(), false) {
             let blocked_in_progress: Vec<_> = blocked
                 .iter()
                 .filter(|(task, _)| task.status == TaskStatus::InProgress)
@@ -393,7 +393,7 @@ pub fn build_context_with_stores(
     // Add ready tasks (progressive disclosure - summaries only)
     // Skip in minimal mode but track availability
     if let Some(ts) = stores.task_store {
-        if let Ok(ready_tasks) = ts.list_ready() {
+        if let Ok(ready_tasks) = ts.list_ready_scoped(ts.project_id(), false) {
             let all_tasks: Vec<_> = ready_tasks
                 .iter()
                 .filter(|t| t.status != TaskStatus::InProgress)

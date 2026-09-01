@@ -86,6 +86,7 @@ async fn test_dep_add_blocks_confirmation_states_blocked_by_in_plain_words() {
                 sort: None,
                 sort_order: None,
                 epic: None,
+                include_foreign: false,
             }))
             .await
             .expect("blocked should succeed"),

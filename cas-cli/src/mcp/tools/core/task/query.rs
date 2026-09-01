@@ -20,6 +20,21 @@ impl CasCore {
             .map(|target| format!("{} @ {}", target.repo_selector, target.target_branch))
             .unwrap_or_else(|| "(none — trunk fallback)".to_string());
 
+        let project_id = super::current_project_id(&self.cas_root);
+        let origin = task
+            .origin_project
+            .as_deref()
+            .unwrap_or("unassigned legacy row");
+        let origin = if project_id
+            .as_deref()
+            .is_some_and(|project_id| task.origin_project.as_deref() != Some(project_id))
+            && task.origin_project.is_some()
+        {
+            format!("{origin} — this task is owned elsewhere")
+        } else {
+            origin.to_string()
+        };
+
         let mut output = format!(
             "Task: {}\n{}\n\nTitle: {}\nStatus: {:?}\nPriority: P{}\nType: {}\nDepth: {}\nOrigin project: {}\nTarget: {}\n",
             task.id,
@@ -29,9 +44,7 @@ impl CasCore {
             task.priority.0,
             task.task_type,
             task.depth,
-            task.origin_project
-                .as_deref()
-                .unwrap_or("unassigned legacy row"),
+            origin,
             target
         );
 
@@ -441,7 +454,17 @@ impl CasCore {
         };
 
         let project_id = super::current_project_id(&self.cas_root);
-        blocked.retain(|(task, _)| super::task_belongs_to_project(task, project_id.as_deref()));
+        let hidden_foreign = if req.include_foreign {
+            0
+        } else {
+            blocked
+                .iter()
+                .filter(|(task, _)| !super::task_visible_in_project(task, project_id.as_deref()))
+                .count()
+        };
+        if !req.include_foreign {
+            blocked.retain(|(task, _)| super::task_visible_in_project(task, project_id.as_deref()));
+        }
 
         // Apply sorting to the task field of each tuple. cas-06f9 (GH #104):
         // same defaulting as `ready` — this is the same triage surface, and it
@@ -458,7 +481,12 @@ impl CasCore {
             } else {
                 "No blocked tasks"
             };
-            return Ok(Self::success(msg));
+            let mut output = msg.to_string();
+            if let Some(footer) = super::foreign_tasks_hidden_footer(hidden_foreign) {
+                output.push_str("\n");
+                output.push_str(&footer);
+            }
+            return Ok(Self::success(output));
         }
 
         let limit = req.limit.unwrap_or(10);
@@ -491,6 +519,10 @@ impl CasCore {
             ));
         }
         output.push_str(&crate::mcp::tools::truncated_list_footer(total, shown));
+        if let Some(footer) = super::foreign_tasks_hidden_footer(hidden_foreign) {
+            output.push_str("\n");
+            output.push_str(&footer);
+        }
 
         Ok(Self::success(output))
     }
@@ -534,10 +566,10 @@ impl CasCore {
             })?
         };
 
-        // Apply filters
+        // Apply filters. Count foreign rows after the user-supplied filters so
+        // the footer describes rows hidden by this exact query.
         let mut filtered: Vec<_> = tasks
             .into_iter()
-            .filter(|task| super::task_belongs_to_project(task, project_id.as_deref()))
             .filter(|task| {
                 // Status filter — use Display (snake_case) for matching so
                 // "pending_supervisor_review", "in_progress", etc. all round-trip
@@ -576,6 +608,17 @@ impl CasCore {
                 true
             })
             .collect();
+        let hidden_foreign = if req.include_foreign {
+            0
+        } else {
+            filtered
+                .iter()
+                .filter(|task| !super::task_visible_in_project(task, project_id.as_deref()))
+                .count()
+        };
+        if !req.include_foreign {
+            filtered.retain(|task| super::task_visible_in_project(task, project_id.as_deref()));
+        }
 
         // Apply sorting
         let sort_opts =
@@ -598,9 +641,12 @@ impl CasCore {
             )
         };
         if filtered.is_empty() {
-            return Ok(Self::success(format!(
-                "No tasks found matching filters.\n{scope_note}."
-            )));
+            let mut output = format!("No tasks found matching filters.\n{scope_note}.");
+            if let Some(footer) = super::foreign_tasks_hidden_footer(hidden_foreign) {
+                output.push_str("\n");
+                output.push_str(&footer);
+            }
+            return Ok(Self::success(output));
         }
 
         let limit = req.limit.unwrap_or(20);
@@ -638,6 +684,10 @@ impl CasCore {
 
         if filtered.len() > limit {
             output.push_str(&format!("\n... and {} more", filtered.len() - limit));
+        }
+        if let Some(footer) = super::foreign_tasks_hidden_footer(hidden_foreign) {
+            output.push_str("\n");
+            output.push_str(&footer);
         }
 
         Ok(Self::success(output))

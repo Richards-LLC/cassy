@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.7.7] - 2026-09-01
+
+### Changed
+- Factory delivery monitoring now flags a failed required check while
+  auto-merge is armed, or an auto-merge arm that disappears after green checks,
+  with duplicate notifications suppressed per pull request and head commit
+  and new heads re-armed for notification.
+- `branch_contained_in` reminders now refresh the exact `origin/<target_branch>`
+  ref before checking containment, keep the reminder pending when that refresh
+  fails instead of trusting stale state, and show the compared ref and commit.
+
 ## [3.7.6] - 2026-08-31
 
 ### Changed

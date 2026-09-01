@@ -47,6 +47,21 @@ fn test_sync_result_has_errors() {
 }
 
 #[test]
+fn heal_summary_is_quiet_for_noop_and_exact_when_edges_change() {
+    assert_eq!(SyncResult::default().dependency_heal_summary(), None);
+
+    let result = SyncResult {
+        healed_task_dependencies_to_cloud: 2,
+        healed_task_dependencies_from_cloud: 3,
+        ..Default::default()
+    };
+    assert_eq!(
+        result.dependency_heal_summary().as_deref(),
+        Some("healed 2 edge(s) to cloud, 3 from cloud")
+    );
+}
+
+#[test]
 fn concise_errors_groups_parked_rejections_without_server_json() {
     let result = SyncResult {
         errors: vec![
@@ -962,6 +977,30 @@ async fn pull_team_task_and_dependency_fixtures(
     Arc<dyn TaskStore>,
     Arc<SyncQueue>,
 ) {
+    pull_team_task_and_dependency_fixtures_with_pull_count(
+        project_id,
+        tasks,
+        local_tasks,
+        local_dependencies,
+        task_dependencies,
+        1,
+    )
+    .await
+}
+
+async fn pull_team_task_and_dependency_fixtures_with_pull_count(
+    project_id: &str,
+    tasks: Vec<serde_json::Value>,
+    local_tasks: Vec<Task>,
+    local_dependencies: Vec<crate::types::Dependency>,
+    task_dependencies: Vec<serde_json::Value>,
+    pull_count: usize,
+) -> (
+    tempfile::TempDir,
+    SyncResult,
+    Arc<dyn TaskStore>,
+    Arc<SyncQueue>,
+) {
     use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig};
     use crate::store::{
         open_rule_store_local, open_skill_store_local, open_store_local, open_task_store_local,
@@ -985,7 +1024,7 @@ async fn pull_team_task_and_dependency_fixtures(
             "team_id": team_id,
             "status": "ok",
         })))
-        .expect(1)
+        .expect(pull_count as u64)
         .mount(&server)
         .await;
 
@@ -1011,16 +1050,19 @@ async fn pull_team_task_and_dependency_fixtures(
         },
         CloudSyncerConfig::default(),
     );
-    let result = syncer
-        .pull_team(
-            team_id,
-            project_id,
-            store.as_ref(),
-            task_store.as_ref(),
-            rule_store.as_ref(),
-            skill_store.as_ref(),
-        )
-        .unwrap();
+    let mut result = SyncResult::default();
+    for _ in 0..pull_count {
+        result = syncer
+            .pull_team(
+                team_id,
+                project_id,
+                store.as_ref(),
+                task_store.as_ref(),
+                rule_store.as_ref(),
+                skill_store.as_ref(),
+            )
+            .unwrap();
+    }
     (temp, result, task_store, queue)
 }
 
@@ -1089,6 +1131,152 @@ async fn team_pull_parks_dangling_task_dependency_without_error() {
     );
     assert_eq!(result.pulled_task_dependencies, 0);
     assert!(task_store.get_dependencies(&from.id).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn heal_local_task_dependency_enqueues_team_upsert() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "dependency-heal-project";
+    let from = Task::new("cas-heal-local-from".to_string(), "from".to_string());
+    let to = Task::new("cas-heal-local-to".to_string(), "to".to_string());
+    let local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+
+    let (_temp, result, _task_store, queue) = pull_team_task_and_dependency_fixtures(
+        project_id,
+        Vec::new(),
+        vec![from, to],
+        vec![local],
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(result.healed_task_dependencies_to_cloud, 1);
+    assert_eq!(result.healed_task_dependencies_from_cloud, 0);
+    let pending = queue
+        .pending_for_team("team-cas-2125", 10, 5)
+        .unwrap();
+    assert_eq!(pending.len(), 1, "a local-only edge must be queued for team push");
+    assert_eq!(pending[0].entity_id, "cas-heal-local-from:cas-heal-local-to:blocks");
+    assert_eq!(pending[0].operation, crate::cloud::SyncOperation::Upsert);
+}
+
+#[tokio::test]
+async fn heal_cloud_task_dependency_materializes_local_edge() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "dependency-heal-project";
+    let from = Task::new("cas-heal-cloud-from".to_string(), "from".to_string());
+    let to = Task::new("cas-heal-cloud-to".to_string(), "to".to_string());
+    let remote = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Related);
+    let remote_wire = team_dependency_fixture(&remote, project_id, None);
+
+    let (_temp, result, task_store, queue) = pull_team_task_and_dependency_fixtures(
+        project_id,
+        Vec::new(),
+        vec![from, to],
+        Vec::new(),
+        vec![remote_wire],
+    )
+    .await;
+
+    assert_eq!(result.healed_task_dependencies_to_cloud, 0);
+    assert_eq!(result.healed_task_dependencies_from_cloud, 1);
+    let dependencies = task_store
+        .get_dependencies("cas-heal-cloud-from")
+        .unwrap();
+    assert_eq!(dependencies.len(), 1);
+    assert_eq!(dependencies[0].from_id, remote.from_id);
+    assert_eq!(dependencies[0].to_id, remote.to_id);
+    assert_eq!(dependencies[0].dep_type, remote.dep_type);
+    assert!(queue.pending_for_team("team-cas-2125", 10, 5).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn heal_task_dependencies_with_matching_sets_is_quiet() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "dependency-heal-project";
+    let from = Task::new("cas-heal-match-from".to_string(), "from".to_string());
+    let to = Task::new("cas-heal-match-to".to_string(), "to".to_string());
+    let matching = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::ParentChild);
+    let remote_wire = team_dependency_fixture(&matching, project_id, None);
+
+    let (_temp, result, task_store, queue) = pull_team_task_and_dependency_fixtures(
+        project_id,
+        Vec::new(),
+        vec![from, to],
+        vec![matching.clone()],
+        vec![remote_wire],
+    )
+    .await;
+
+    assert_eq!(result.healed_task_dependencies_to_cloud, 0);
+    assert_eq!(result.healed_task_dependencies_from_cloud, 0);
+    let dependencies = task_store
+        .get_dependencies("cas-heal-match-from")
+        .unwrap();
+    assert_eq!(dependencies.len(), 1);
+    assert_eq!(dependencies[0].from_id, matching.from_id);
+    assert_eq!(dependencies[0].to_id, matching.to_id);
+    assert_eq!(dependencies[0].dep_type, matching.dep_type);
+    assert!(queue.pending_for_team("team-cas-2125", 10, 5).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn heal_deleted_task_dependency_does_not_requeue_edge() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "dependency-heal-project";
+    let from = Task::new("cas-heal-delete-from".to_string(), "from".to_string());
+    let to = Task::new("cas-heal-delete-to".to_string(), "to".to_string());
+    let local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+    let mut delete_wire = team_dependency_fixture(&local, project_id, Some("delete"));
+    delete_wire
+        .as_object_mut()
+        .expect("dependency fixture is an object")
+        .remove("created_at");
+    let stale_upsert = team_dependency_fixture(&local, project_id, None);
+
+    let (_temp, result, task_store, queue) = pull_team_task_and_dependency_fixtures(
+        project_id,
+        Vec::new(),
+        vec![from, to],
+        vec![local],
+        vec![delete_wire, stale_upsert],
+    )
+    .await;
+
+    assert_eq!(result.healed_task_dependencies_to_cloud, 0);
+    assert_eq!(result.healed_task_dependencies_from_cloud, 0);
+    assert!(task_store.get_dependencies("cas-heal-delete-from").unwrap().is_empty());
+    assert!(queue.pending_for_team("team-cas-2125", 10, 5).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn heal_local_task_dependency_is_idempotent_across_pulls() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "dependency-heal-project";
+    let from = Task::new("cas-heal-repeat-from".to_string(), "from".to_string());
+    let to = Task::new("cas-heal-repeat-to".to_string(), "to".to_string());
+    let local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+
+    let (_temp, result, _task_store, queue) =
+        pull_team_task_and_dependency_fixtures_with_pull_count(
+            project_id,
+            Vec::new(),
+            vec![from, to],
+            vec![local],
+            Vec::new(),
+            2,
+        )
+        .await;
+
+    assert_eq!(result.healed_task_dependencies_to_cloud, 0);
+    assert_eq!(result.healed_task_dependencies_from_cloud, 0);
+    let pending = queue.pending_for_team("team-cas-2125", 10, 5).unwrap();
+    assert_eq!(pending.len(), 1, "repeated pulls must not duplicate the queue row");
 }
 
 #[tokio::test]

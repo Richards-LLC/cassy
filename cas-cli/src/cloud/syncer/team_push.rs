@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::cloud::syncer::{
-    CloudSyncer, PushItemizedFailure, SyncResult, TeamPushResponse, itemized_failures_for,
+    CloudSyncer, PushItemizedFailure, PushRowResult, SyncResult, TeamPushResponse,
+    itemized_failures_for, row_results_for,
 };
 use crate::cloud::{EntityType, QueuedSync, SyncOperation, get_project_canonical_id};
 use crate::error::CasError;
@@ -46,6 +47,8 @@ impl CloudSyncer {
     pub fn push_team(&self, team_id: &str) -> Result<SyncResult, CasError> {
         let mut result = SyncResult::default();
         let start = Instant::now();
+
+        self.requeue_version_gated_items()?;
 
         if !self.is_available() {
             return Ok(result);
@@ -276,6 +279,39 @@ impl CloudSyncer {
                     }
 
                     let raw_response = response.as_ref().map_or("", |body| body.raw_body.as_str());
+                    match response.as_ref() {
+                        Some(body) => match Self::team_row_results_for(
+                            body,
+                            entity_key,
+                            batch_items.iter().map(|item| item.entity_id.clone()),
+                        ) {
+                            Ok(Some(rows)) => {
+                                self.settle_team_row_results(
+                                    &batch_items,
+                                    entity_key,
+                                    raw_response,
+                                    rows,
+                                    &mut synced,
+                                    &mut errors,
+                                );
+                                continue;
+                            }
+                            Err(error) => {
+                                let diagnostic = format!(
+                                    "team {entity_key} push returned invalid per-row results: {error}; marking {} row(s) failed; server response: {raw_response}",
+                                    batch_items.len()
+                                );
+                                for item in &batch_items {
+                                    let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                }
+                                errors.push(diagnostic);
+                                continue;
+                            }
+                            Ok(None) => {}
+                        },
+                        None => {}
+                    }
+
                     let (accepted, skipped) = match response.as_ref() {
                         Some(body) => match Self::team_counts_for(body, entity_key) {
                             Ok(Some(counts)) => counts,
@@ -296,6 +332,17 @@ impl CloudSyncer {
                         None => (sent_count, 0),
                     };
                     if skipped > 0 {
+                        if skipped > batch_items.len() {
+                            let diagnostic = format!(
+                                "cloud reported {skipped} skipped team {entity_key} row(s) for a {}-row sub-batch; marking sub-batch failed; server response: {raw_response}",
+                                batch_items.len()
+                            );
+                            for item in &batch_items {
+                                let _ = self.queue.mark_failed(item.id, &diagnostic);
+                            }
+                            errors.push(diagnostic);
+                            continue;
+                        }
                         let itemized = Self::team_itemized_failures_for(
                             response
                                 .as_ref()
@@ -308,14 +355,19 @@ impl CloudSyncer {
                             Ok(Some(rejections)) => rejections,
                             Ok(None) => {
                                 let diagnostic = format!(
-                                    "cloud skipped {skipped} of {} team {entity_key} row(s); marking the indistinguishable sub-batch failed; server response: {}",
+                                    "cloud skipped {skipped} of {} team {entity_key} row(s); treating skips as LWW acknowledgements",
                                     batch_items.len(),
-                                    raw_response
+                                );
+                                tracing::warn!(
+                                    entity_type = entity_key,
+                                    skipped,
+                                    batch_size = batch_items.len(),
+                                    "{diagnostic}"
                                 );
                                 for item in &batch_items {
-                                    let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                    let _ = self.queue.mark_synced(item.id);
                                 }
-                                errors.push(diagnostic);
+                                synced += batch_items.len();
                                 continue;
                             }
                             Err(error) => {
@@ -332,8 +384,21 @@ impl CloudSyncer {
                             }
                         };
 
+                        let mut failure_details = Vec::new();
                         for item in &batch_items {
                             if let Some(failure) = itemized.get(&item.entity_id) {
+                                let reason = match failure {
+                                    PushItemizedFailure::Rejection(rejection) => {
+                                        rejection.reason.as_str().to_string()
+                                    }
+                                    PushItemizedFailure::Invalid(invalid) => {
+                                        format!(
+                                            "{}: {}",
+                                            invalid.reason.as_str(),
+                                            invalid.detail
+                                        )
+                                    }
+                                };
                                 let diagnostic = match failure {
                                     PushItemizedFailure::Rejection(rejection) => format!(
                                         "permanent cloud rejection: reason={}; entity={entity_key}; id={}; existing_project={}",
@@ -359,11 +424,19 @@ impl CloudSyncer {
                                 } else {
                                     let _ = self.queue.mark_failed(item.id, &diagnostic);
                                 }
-                                errors.push(diagnostic);
+                                failure_details.push(format!("{} ({reason})", item.entity_id));
                             } else {
                                 let _ = self.queue.mark_synced(item.id);
                                 synced += 1;
                             }
+                        }
+                        if !failure_details.is_empty() {
+                            errors.push(format!(
+                                "cloud rejected {} of {} team {entity_key} row(s): {}",
+                                failure_details.len(),
+                                batch_items.len(),
+                                failure_details.join(", ")
+                            ));
                         }
                         continue;
                     }
@@ -383,6 +456,51 @@ impl CloudSyncer {
         }
 
         (synced, errors)
+    }
+
+    fn settle_team_row_results(
+        &self,
+        batch_items: &[&QueuedSync],
+        entity_key: &str,
+        raw_response: &str,
+        rows: HashMap<String, PushRowResult>,
+        synced: &mut usize,
+        errors: &mut Vec<String>,
+    ) {
+        let mut rejected = Vec::new();
+        for item in batch_items {
+            let row = rows
+                .get(&item.entity_id)
+                .expect("row_results_for validates every queue identity");
+            if row.acknowledges() {
+                let _ = self.queue.mark_synced(item.id);
+                *synced += 1;
+                continue;
+            }
+
+            let reason = row.reason.as_deref().unwrap_or("unspecified");
+            let diagnostic = format!(
+                "cloud rejected team {entity_key} {}: reason={reason}; server response: {raw_response}",
+                item.entity_id
+            );
+            if row.rejection_is_retryable() {
+                let _ = self.queue.mark_failed(item.id, &diagnostic);
+            } else {
+                let _ = self
+                    .queue
+                    .park_failed(item.id, &diagnostic, self.config.max_retries);
+            }
+            rejected.push(format!("{} ({reason})", item.entity_id));
+        }
+
+        if !rejected.is_empty() {
+            errors.push(format!(
+                "cloud rejected {} of {} team {entity_key} row(s): {}",
+                rejected.len(),
+                batch_items.len(),
+                rejected.join(", ")
+            ));
+        }
     }
 
     fn push_team_sub_batch(
@@ -524,6 +642,30 @@ impl CloudSyncer {
         }
 
         Ok(Some((inserted.saturating_add(updated), skipped)))
+    }
+
+    fn team_row_results_for(
+        response: &TeamPushResponse,
+        entity_key: &str,
+        queued_ids: impl Iterator<Item = String>,
+    ) -> Result<Option<HashMap<String, PushRowResult>>, String> {
+        let queued_ids = queued_ids.collect::<Vec<_>>();
+        if let Some(rows) = response.rows.as_ref() {
+            let wrapped = serde_json::json!({"rows": rows});
+            return row_results_for(&wrapped, "rows", queued_ids.into_iter());
+        }
+
+        let Some(synced) = response.synced.as_object() else {
+            return Ok(None);
+        };
+        let Some(entity) = synced.get(entity_key) else {
+            return Ok(None);
+        };
+        row_results_for(
+            entity,
+            &format!("synced.{entity_key}"),
+            queued_ids.into_iter(),
+        )
     }
 
     fn team_itemized_failures_for(

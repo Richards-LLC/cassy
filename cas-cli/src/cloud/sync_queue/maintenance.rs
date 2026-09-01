@@ -4,6 +4,31 @@ use rusqlite::params;
 use crate::cloud::sync_queue::SyncQueue;
 use crate::error::CasError;
 
+fn parse_numeric_version(value: &str) -> Option<(u64, u64, u64)> {
+    let core = value.trim().strip_prefix('v').unwrap_or(value.trim());
+    let core = core.split(['-', '+']).next()?;
+    let mut components = core.split('.');
+    let major = components.next()?.parse().ok()?;
+    let minor = components.next()?.parse().ok()?;
+    let patch = components.next()?.parse().ok()?;
+    if components.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+fn minimum_version_from_gate_error(error: &str) -> Option<(u64, u64, u64)> {
+    let after_client = error.strip_prefix("Client version ").or_else(|| {
+        error
+            .find("Client version ")
+            .map(|index| &error[index..])
+            .and_then(|value| value.strip_prefix("Client version "))
+    })?;
+    let (client, minimum) = after_client.split_once(" is below minimum ")?;
+    parse_numeric_version(client)?;
+    parse_numeric_version(minimum.split_whitespace().next()?)
+}
+
 impl SyncQueue {
     /// Mark an item as successfully synced (removes from queue).
     pub fn mark_synced(&self, id: i64) -> Result<(), CasError> {
@@ -172,6 +197,53 @@ impl SyncQueue {
             params![max_retries],
         )?;
         Ok(reset)
+    }
+
+    /// Requeue terminal failures caused by an older client once this build
+    /// meets the server's recorded minimum version. The diagnostic is cleared
+    /// with the retry counter so the operation is idempotent: a second push
+    /// sees no matching gate error after the first reset.
+    pub fn requeue_version_gated_failures(
+        &self,
+        current_version: &str,
+        max_retries: i32,
+    ) -> Result<usize, CasError> {
+        let Some(current) = parse_numeric_version(current_version) else {
+            return Ok(0);
+        };
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let candidates = {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT id, last_error
+                FROM sync_queue
+                WHERE retry_count >= ?1
+                  AND last_error LIKE '%Client version % is below minimum %'
+                "#,
+            )?;
+            stmt.query_map(params![max_retries], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let mut requeued = 0;
+        for (id, error) in candidates {
+            let Some(minimum) = minimum_version_from_gate_error(&error) else {
+                continue;
+            };
+            if current < minimum {
+                continue;
+            }
+            requeued += tx.execute(
+                "UPDATE sync_queue SET retry_count = 0, last_error = NULL WHERE id = ?1 AND last_error = ?2",
+                params![id, error],
+            )?;
+        }
+        tx.commit()?;
+        Ok(requeued)
     }
 
     /// Clear all items from the queue.

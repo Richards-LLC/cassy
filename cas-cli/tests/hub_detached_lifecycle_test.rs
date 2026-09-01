@@ -53,6 +53,10 @@ fn hub_record_proves_its_own_session_and_cli_launcher() {
     assert_eq!(sid, pid, "hub must be its own session leader");
     assert_eq!(pgid, pid, "hub must be its own process-group leader");
     assert_eq!(record["launched_by"], "cli");
+    assert!(
+        record["cgroup"].is_null(),
+        "a plain-shell hub must not record its inherited cgroup: {record}"
+    );
 
     let stop = cas_command(home.path(), &path)
         .args(["--json", "hub", "stop"])

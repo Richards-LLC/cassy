@@ -601,6 +601,7 @@ fn strip_repeated_warning_lines(
     warnings: &mut RepeatedWarningCollector,
     project: &str,
     verbose: bool,
+    preserve_phase_summaries: bool,
 ) -> String {
     warnings.collect_output(project, output);
     if verbose {
@@ -625,6 +626,13 @@ fn strip_repeated_warning_lines(
             || normalized.starts_with("remaining error: ")
         {
             builtin_warning = normalized.contains("Cassy-managed builtin");
+            if preserve_phase_summaries
+                && (normalized.starts_with("Push incomplete")
+                    || normalized.starts_with("remaining error: "))
+            {
+                kept.push_str(line);
+                kept.push('\n');
+            }
             continue;
         }
         if builtin_warning && (line.trim_start().starts_with('!') || line.trim().is_empty()) {
@@ -672,7 +680,7 @@ fn render_project_phase_details(
             }
         }
     }
-    strip_repeated_warning_lines(&selected, warnings, project, verbose)
+    strip_repeated_warning_lines(&selected, warnings, project, verbose, true)
 }
 
 fn print_update_banner_with_formatter(
@@ -1175,7 +1183,7 @@ fn print_project_refresh_summary(
     if !user_details.is_empty() {
         let project = "user-level";
         let detail =
-            strip_repeated_warning_lines(user_details, &mut warnings, project, cli.verbose);
+            strip_repeated_warning_lines(user_details, &mut warnings, project, cli.verbose, false);
         if cli.verbose && !detail.trim().is_empty() {
             details.push((project.to_owned(), Some(detail)));
         }

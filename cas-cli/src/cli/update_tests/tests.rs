@@ -110,6 +110,34 @@ fn non_ok_phase_details_include_phase_summary_when_capture_is_empty() {
 }
 
 #[test]
+fn cloud_warning_summary_stays_under_the_non_ok_project_row() {
+    let receipt = ProjectRefreshReceipt {
+        project: PathBuf::from("/home/alice/projects/demo"),
+        migration: ProjectPhase::Ok("v248".to_owned()),
+        search_index: ProjectPhase::Ok("up to date".to_owned()),
+        skills: ProjectPhase::Ok("up to date".to_owned()),
+        membership: ProjectPhase::Ok("up to date".to_owned()),
+        cloud: ProjectPhase::Warning("4 queued".to_owned()),
+        details: String::new(),
+        phase_details: vec![
+            (true, String::new()),
+            (true, String::new()),
+            (true, String::new()),
+            (true, String::new()),
+            (false, "[WARN] Push incomplete · 4 pending\n".to_owned()),
+        ],
+    };
+    let mut warnings = RepeatedWarningCollector::default();
+
+    let detail = render_project_phase_details(&receipt, false, &mut warnings, "projects/demo");
+
+    assert!(
+        detail.contains("[WARN] Push incomplete · 4 pending"),
+        "cloud warning summary missing from detail output: {detail:?}"
+    );
+}
+
+#[test]
 fn repeated_warnings_render_once_with_affected_project_count() {
     let mut warnings = RepeatedWarningCollector::default();
     warnings.record_builtin_paths("projects/one", [".claude/skills/cas-worker/SKILL.md"]);

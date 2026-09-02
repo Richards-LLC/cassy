@@ -8,14 +8,25 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-fn repo_root() -> PathBuf {
-    cas::test_paths::workspace_root()
+#[path = "support/builtin_catalog.rs"]
+mod builtin_catalog;
+
+fn load(relative: &str) -> &'static str {
+    builtin_catalog::find_source_path(relative)
 }
 
-fn load(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+fn materialized_script() -> (TempDir, PathBuf) {
+    let directory = TempDir::new().expect("temporary image helper directory");
+    let script = directory.path().join("generate-image.sh");
+    fs::write(
+        &script,
+        builtin_catalog::find(
+            builtin_catalog::Flavor::Claude,
+            "skills/cas-image-generate/scripts/generate-image.sh",
+        ),
+    )
+    .expect("write embedded image helper");
+    (directory, script)
 }
 
 fn skill_paths() -> [&'static str; 3] {
@@ -227,7 +238,7 @@ fn references_document_research_and_unwired_provider_boundaries() {
 
 #[test]
 fn builtin_catalog_registers_all_mirror_entries() {
-    let builtins = load("cas-cli/src/builtins.rs");
+    let builtins = include_str!("../src/builtins.rs");
     for include_path in [
         "builtins/skills/cas-image-generate/SKILL.md",
         "builtins/codex/skills/cas-image-generate/SKILL.md",
@@ -297,8 +308,7 @@ fn cas_update_syncs_the_skill_to_all_enabled_harnesses() {
 
 #[test]
 fn generation_helper_reports_missing_key_without_network_access() {
-    let script = repo_root()
-        .join("cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh");
+    let (_directory, script) = materialized_script();
     Command::new("bash")
         .arg(&script)
         .args(["--prompt", "test", "--output", "out.png"])
@@ -312,8 +322,7 @@ fn generation_helper_reports_missing_key_without_network_access() {
 
 #[test]
 fn generation_helper_dry_run_validates_present_key_without_calling_api() {
-    let script = repo_root()
-        .join("cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh");
+    let (_directory, script) = materialized_script();
     Command::new("bash")
         .arg(&script)
         .args([

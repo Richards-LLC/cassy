@@ -14,19 +14,15 @@
 //!
 //! Everything here is a repo-local filesystem read; no network, no builds.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-
-fn repo_root() -> PathBuf {
-    cas::test_paths::workspace_root()
-}
-
-fn builtins_root() -> PathBuf {
-    repo_root().join("cas-cli/src/builtins")
-}
+#[path = "support/builtin_catalog.rs"]
+mod builtin_catalog;
 
 /// Flavor subdirectories under `cas-cli/src/builtins` ("" = claude baseline).
-const FLAVORS: [(&str, &str); 3] = [("claude", ""), ("codex", "codex"), ("grok", "grok")];
+const FLAVORS: [(&str, builtin_catalog::Flavor); 3] = [
+    ("claude", builtin_catalog::Flavor::Claude),
+    ("codex", builtin_catalog::Flavor::Codex),
+    ("grok", builtin_catalog::Flavor::Grok),
+];
 
 /// Skills whose description, frontmatter and portability this task owns.
 const OWNED_SKILLS: [&str; 9] = [
@@ -45,47 +41,6 @@ const OWNED_SKILLS: [&str; 9] = [
 /// description silently loses its trigger clause.
 const DESCRIPTION_MAX_CHARS: usize = 1024;
 
-fn flavor_dir(subdir: &str) -> PathBuf {
-    if subdir.is_empty() {
-        builtins_root()
-    } else {
-        builtins_root().join(subdir)
-    }
-}
-
-/// Every `SKILL.md` under a flavor's `skills/` tree, relative to that tree.
-fn skill_files(flavor_subdir: &str) -> Vec<PathBuf> {
-    let root = flavor_dir(flavor_subdir).join("skills");
-    let mut found = Vec::new();
-    let mut stack = vec![root.clone()];
-    while let Some(current) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&current) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                // Twin trees live under the claude root; do not walk into them.
-                if flavor_subdir.is_empty()
-                    && path.file_name().is_some_and(|n| n == "codex" || n == "grok")
-                {
-                    continue;
-                }
-                stack.push(path);
-                continue;
-            }
-            if path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md")
-                || path.extension().and_then(|e| e.to_str()) == Some("md")
-                    && path.parent() == Some(root.as_path())
-            {
-                found.push(path);
-            }
-        }
-    }
-    found.sort();
-    found
-}
-
 /// Extract the YAML frontmatter block of a markdown file, if present.
 fn frontmatter(content: &str) -> Option<&str> {
     let rest = content.strip_prefix("---\n")?;
@@ -103,24 +58,16 @@ fn field<'a>(content: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-/// Every markdown file (skill body or reference) under one owned skill.
-fn owned_skill_files() -> Vec<PathBuf> {
+/// Every file (skill body or reference) under one owned skill, from the
+/// embedded catalog rather than the absent archive checkout.
+fn owned_skill_files() -> Vec<(String, &'static str)> {
     let mut found = Vec::new();
-    for (_, subdir) in FLAVORS {
+    for (label, flavor) in FLAVORS {
         for skill in OWNED_SKILLS {
-            let dir = flavor_dir(subdir).join("skills").join(skill);
-            let mut stack = vec![dir];
-            while let Some(current) = stack.pop() {
-                let Ok(entries) = fs::read_dir(&current) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        stack.push(path);
-                    } else {
-                        found.push(path);
-                    }
+            let prefix = format!("skills/{skill}/");
+            for builtin in builtin_catalog::skills(flavor) {
+                if builtin.path.starts_with(&prefix) {
+                    found.push((format!("{label}/{}", builtin.path), builtin.content));
                 }
             }
         }
@@ -129,11 +76,19 @@ fn owned_skill_files() -> Vec<PathBuf> {
     found
 }
 
-fn rel(path: &Path) -> String {
-    path.strip_prefix(builtins_root())
-        .unwrap_or(path)
-        .display()
-        .to_string()
+/// Every shipped skill body or top-level legacy flat skill path for one flavor.
+fn skill_files(flavor: builtin_catalog::Flavor, label: &str) -> Vec<(String, &'static str)> {
+    let mut found = Vec::new();
+    for builtin in builtin_catalog::skills(flavor) {
+        let Some(relative) = builtin.path.strip_prefix("skills/") else {
+            continue;
+        };
+        if relative.ends_with("/SKILL.md") || !relative.contains('/') {
+            found.push((format!("{label}/{}", builtin.path), builtin.content));
+        }
+    }
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    found
 }
 
 // ---------------------------------------------------------------------------
@@ -145,18 +100,16 @@ fn rel(path: &Path) -> String {
 #[test]
 fn every_builtin_skill_description_is_present_and_within_the_harness_limit() {
     let mut problems = Vec::new();
-    for (label, subdir) in FLAVORS {
-        for path in skill_files(subdir) {
-            let content = fs::read_to_string(&path).expect("skill body");
+    for (label, flavor) in FLAVORS {
+        for (path, content) in skill_files(flavor, label) {
             match field(&content, "description") {
-                None => problems.push(format!("{label} {}: no description field", rel(&path))),
+                None => problems.push(format!("{path}: no description field")),
                 Some(description) if description.is_empty() => {
-                    problems.push(format!("{label} {}: empty description", rel(&path)))
+                    problems.push(format!("{path}: empty description"))
                 }
                 Some(description) if description.chars().count() > DESCRIPTION_MAX_CHARS => {
                     problems.push(format!(
-                        "{label} {}: description is {} chars, over the {DESCRIPTION_MAX_CHARS} limit",
-                        rel(&path),
+                        "{path}: description is {} chars, over the {DESCRIPTION_MAX_CHARS} limit",
                         description.chars().count()
                     ))
                 }
@@ -172,13 +125,9 @@ fn every_builtin_skill_description_is_present_and_within_the_harness_limit() {
 #[test]
 fn owned_skill_descriptions_lead_with_a_use_when_trigger() {
     let mut problems = Vec::new();
-    for (label, subdir) in FLAVORS {
+    for (label, flavor) in FLAVORS {
         for skill in OWNED_SKILLS {
-            let path = flavor_dir(subdir)
-                .join("skills")
-                .join(skill)
-                .join("SKILL.md");
-            let content = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{skill}: {e}"));
+            let content = builtin_catalog::find(flavor, &format!("skills/{skill}/SKILL.md"));
             let description = field(&content, "description")
                 .unwrap_or_else(|| panic!("{label} {skill} has no description"));
             if !description.starts_with("Use when ") {
@@ -195,11 +144,8 @@ fn owned_skill_descriptions_lead_with_a_use_when_trigger() {
 /// word for word, so both skills matched the same prompts.
 #[test]
 fn cas_dataviz_description_names_its_boundary_with_the_bundled_skill() {
-    for (label, subdir) in FLAVORS {
-        let path = flavor_dir(subdir)
-            .join("skills/cas-dataviz/SKILL.md")
-            .to_path_buf();
-        let content = fs::read_to_string(&path).expect("cas-dataviz body");
+    for (label, flavor) in FLAVORS {
+        let content = builtin_catalog::find(flavor, "skills/cas-dataviz/SKILL.md");
         let description = field(&content, "description").expect("cas-dataviz description");
         for required in ["static", "SVG", "bundled"] {
             assert!(
@@ -238,18 +184,11 @@ fn owned_skills_carry_no_operator_or_source_tree_specific_text() {
     ];
 
     let mut problems = Vec::new();
-    for path in owned_skill_files() {
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
+    for (path, content) in owned_skill_files() {
         for (needle, why) in BANNED {
             for (index, line) in content.lines().enumerate() {
                 if line.contains(needle) {
-                    problems.push(format!(
-                        "{}:{}: {needle:?} ({why})",
-                        rel(&path),
-                        index + 1
-                    ));
+                    problems.push(format!("{}:{}: {needle:?} ({why})", path, index + 1));
                 }
             }
         }
@@ -265,13 +204,12 @@ fn owned_skills_carry_no_operator_or_source_tree_specific_text() {
 /// that a project sets, not in the shipped skill text.
 #[test]
 fn cli_routing_expresses_the_account_gate_as_a_config_key() {
-    for (label, subdir) in FLAVORS {
+    for (label, flavor) in FLAVORS {
         for rel_path in [
             "skills/cli-routing/SKILL.md",
             "skills/cli-routing/references/routing.md",
         ] {
-            let path = flavor_dir(subdir).join(rel_path);
-            let content = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{rel_path}: {e}"));
+            let content = builtin_catalog::find(flavor, rel_path);
             assert!(
                 content.contains("release.claude_account_allowlist"),
                 "{label} {rel_path} must name the release.claude_account_allowlist config key"
@@ -296,13 +234,9 @@ fn cli_routing_expresses_the_account_gate_as_a_config_key() {
 /// `disallowed-tools: Write, Edit` made that phase impossible.
 #[test]
 fn artifact_writing_skills_do_not_disallow_write_and_edit() {
-    for (label, subdir) in FLAVORS {
+    for (label, flavor) in FLAVORS {
         for skill in ["cas-brainstorm", "cas-ideate"] {
-            let path = flavor_dir(subdir)
-                .join("skills")
-                .join(skill)
-                .join("SKILL.md");
-            let content = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{skill}: {e}"));
+            let content = builtin_catalog::find(flavor, &format!("skills/{skill}/SKILL.md"));
             let block = frontmatter(&content).expect("frontmatter");
             assert!(
                 !block.contains("disallowed-tools"),
@@ -316,9 +250,8 @@ fn artifact_writing_skills_do_not_disallow_write_and_edit() {
 /// by shouting the opt-in inside the description.
 #[test]
 fn cas_nuxt_playwright_opts_out_through_frontmatter() {
-    for (label, subdir) in FLAVORS {
-        let path = flavor_dir(subdir).join("skills/cas-nuxt-playwright/SKILL.md");
-        let content = fs::read_to_string(&path).expect("cas-nuxt-playwright body");
+    for (label, flavor) in FLAVORS {
+        let content = builtin_catalog::find(flavor, "skills/cas-nuxt-playwright/SKILL.md");
         let block = frontmatter(&content).expect("frontmatter");
         assert!(
             block.contains("disable-model-invocation: true"),
@@ -345,10 +278,7 @@ fn cas_nuxt_playwright_opts_out_through_frontmatter() {
 #[test]
 fn brainstorm_hands_off_to_cas_supervisor_not_a_nonexistent_plan_command() {
     let mut problems = Vec::new();
-    for path in owned_skill_files() {
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
+    for (path, content) in owned_skill_files() {
         for (index, line) in content.lines().enumerate() {
             // `/plan` as a command, not as part of `supervisor/planner`.
             if line.match_indices("/plan").any(|(at, _)| {
@@ -357,7 +287,7 @@ fn brainstorm_hands_off_to_cas_supervisor_not_a_nonexistent_plan_command() {
                 before.is_none_or(|c| !c.is_ascii_alphanumeric())
                     && after.is_none_or(|c| !c.is_ascii_alphabetic())
             }) {
-                problems.push(format!("{}:{}: {}", rel(&path), index + 1, line.trim()));
+                problems.push(format!("{path}:{}: {}", index + 1, line.trim()));
             }
         }
     }
@@ -374,31 +304,24 @@ fn brainstorm_hands_off_to_cas_supervisor_not_a_nonexistent_plan_command() {
 fn askuserquestion_fallback_is_stated_at_most_once_per_skill() {
     const NEEDLE: &str = "AskUserQuestion is blocked";
     let mut problems = Vec::new();
-    for (_, subdir) in FLAVORS {
+    for (_, flavor) in FLAVORS {
         for skill in ["cas-brainstorm", "cas-ideate"] {
-            let dir = flavor_dir(subdir).join("skills").join(skill);
-            let mut count = 0usize;
-            let mut stack = vec![dir];
-            while let Some(current) = stack.pop() {
-                let Ok(entries) = fs::read_dir(&current) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        stack.push(path);
-                        continue;
-                    }
-                    let Ok(content) = fs::read_to_string(&path) else {
-                        continue;
-                    };
-                    count += content.matches(NEEDLE).count();
-                }
-            }
+            let prefix = format!("skills/{skill}/");
+            let count = builtin_catalog::skills(flavor)
+                .iter()
+                .filter(|builtin| builtin.path.starts_with(&prefix))
+                .map(|builtin| builtin.content.matches(NEEDLE).count())
+                .sum::<usize>();
             if count > 1 {
                 problems.push(format!(
                     "{}/{skill}: {NEEDLE:?} stated {count}x",
-                    if subdir.is_empty() { "claude" } else { subdir },
+                    if flavor == builtin_catalog::Flavor::Claude {
+                        "claude"
+                    } else if flavor == builtin_catalog::Flavor::Codex {
+                        "codex"
+                    } else {
+                        "grok"
+                    },
                 ));
             }
         }
@@ -430,7 +353,10 @@ fn claude_account_allowlist_defaults_to_denying_every_account() {
 fn claude_account_allowlist_is_an_exact_membership_test() {
     let mut config = cas::config::Config::default();
     config
-        .set("release.claude_account_allowlist", "ops@example.com, Release@Example.com")
+        .set(
+            "release.claude_account_allowlist",
+            "ops@example.com, Release@Example.com",
+        )
         .expect("set the allowlist");
 
     assert!(config.claude_account_allowed("ops@example.com"));

@@ -1,7 +1,7 @@
 //! Access to the compile-time builtin catalogs from integration tests.
 
 use cas::builtins::{
-    BuiltinFile, BUILTIN_AGENTS, BUILTIN_SKILLS, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS,
+    BUILTIN_AGENTS, BUILTIN_SKILLS, BuiltinFile, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS,
     GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS,
 };
 
@@ -35,12 +35,28 @@ pub fn agents(flavor: Flavor) -> &'static [BuiltinFile] {
 }
 
 pub fn find(flavor: Flavor, relative: &str) -> &'static str {
+    try_find(flavor, relative)
+        .unwrap_or_else(|| panic!("builtin catalog is missing {relative} for {flavor:?}"))
+}
+
+pub fn try_find(flavor: Flavor, relative: &str) -> Option<&'static str> {
+    let catalog_relative = flat_skill_destination(relative);
     skills(flavor)
         .iter()
         .chain(agents(flavor))
-        .find(|builtin| builtin.path == relative)
-        .unwrap_or_else(|| panic!("builtin catalog is missing {relative} for {flavor:?}"))
-        .content
+        .find(|builtin| builtin.path == catalog_relative)
+        .map(|builtin| builtin.content)
+}
+
+fn flat_skill_destination(relative: &str) -> String {
+    let Some(skill) = relative.strip_prefix("skills/") else {
+        return relative.to_string();
+    };
+    if skill.contains('/') || !skill.ends_with(".md") {
+        return relative.to_string();
+    }
+    let skill = skill.trim_end_matches(".md");
+    format!("skills/{skill}/SKILL.md")
 }
 
 /// Resolve a source-tree-shaped path such as

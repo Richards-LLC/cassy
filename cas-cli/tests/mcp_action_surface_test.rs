@@ -5,8 +5,8 @@
 //! while the expected arrays pin the public contract against accidental
 //! removal or reordering.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+#[path = "support/builtin_catalog.rs"]
+mod builtin_catalog;
 
 const TASK_ACTIONS: &[&str] = &[
     "create",
@@ -99,40 +99,30 @@ const MEMORY_FIELDS: &[&str] = &[
 #[derive(Clone, Copy)]
 struct Flavor {
     name: &'static str,
-    subdir: &'static str,
+    catalog: builtin_catalog::Flavor,
 }
 
 const FLAVORS: &[Flavor] = &[
     Flavor {
         name: "claude",
-        subdir: "",
+        catalog: builtin_catalog::Flavor::Claude,
     },
     Flavor {
         name: "codex",
-        subdir: "codex",
+        catalog: builtin_catalog::Flavor::Codex,
     },
     Flavor {
         name: "grok",
-        subdir: "grok",
+        catalog: builtin_catalog::Flavor::Grok,
     },
 ];
 
-fn builtins_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/builtins")
+fn service_source() -> &'static str {
+    include_str!("../src/mcp/tools/service/mod.rs")
 }
 
-fn flavor_path(flavor: Flavor, relative: &str) -> PathBuf {
-    builtins_root().join(flavor.subdir).join(relative)
-}
-
-fn service_source() -> String {
-    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mcp/tools/service/mod.rs"))
-        .expect("service dispatch source")
-}
-
-fn memory_request_source() -> String {
-    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/cas-mcp/src/types.rs"))
-        .expect("MemoryRequest source")
+fn memory_request_source() -> &'static str {
+    include_str!("../../crates/cas-mcp/src/types.rs")
 }
 
 fn function_section<'a>(source: &'a str, function: &str, next_marker: &str) -> &'a str {
@@ -250,8 +240,7 @@ fn dispatch_actions_are_pinned_and_documented_in_dispatch_order() {
         assert_eq!(actual, expected, "{tool} dispatch order changed");
 
         for flavor in FLAVORS {
-            let content = fs::read_to_string(flavor_path(*flavor, relative))
-                .unwrap_or_else(|e| panic!("{} {relative}: {e}", flavor.name));
+            let content = builtin_catalog::find(flavor.catalog, relative);
             assert_eq!(
                 documented_actions(&content),
                 expected,
@@ -268,11 +257,8 @@ fn memory_request_fields_are_documented_in_source_order() {
     assert_eq!(memory_request_fields(&source), MEMORY_FIELDS);
 
     for flavor in FLAVORS {
-        let content = fs::read_to_string(flavor_path(
-            *flavor,
-            "skills/cas-memory-management/SKILL.md",
-        ))
-        .unwrap_or_else(|e| panic!("{} memory skill: {e}", flavor.name));
+        let content =
+            builtin_catalog::find(flavor.catalog, "skills/cas-memory-management/SKILL.md");
         assert_eq!(
             documented_memory_fields(&content),
             MEMORY_FIELDS,
@@ -285,11 +271,7 @@ fn memory_request_fields_are_documented_in_source_order() {
 #[test]
 fn memory_guidance_uses_content_frontmatter_and_live_names() {
     for flavor in FLAVORS {
-        let skill = fs::read_to_string(flavor_path(
-            *flavor,
-            "skills/cas-memory-management/SKILL.md",
-        ))
-        .unwrap_or_else(|e| panic!("{} memory skill: {e}", flavor.name));
+        let skill = builtin_catalog::find(flavor.catalog, "skills/cas-memory-management/SKILL.md");
         let normalized_skill = skill.to_ascii_lowercase();
         assert!(
             normalized_skill.contains("frontmatter is embedded in the")
@@ -307,8 +289,7 @@ fn memory_guidance_uses_content_frontmatter_and_live_names() {
             "skills/cas-memory-management/references/lifecycle-and-storage.md",
             "skills/cas-memory-management/references/response-shapes.md",
         ] {
-            let content = fs::read_to_string(flavor_path(*flavor, relative))
-                .unwrap_or_else(|e| panic!("{} {relative}: {e}", flavor.name));
+            let content = builtin_catalog::find(flavor.catalog, relative);
             for stale in [
                 "cas memory refresh",
                 "cas memory migrate",

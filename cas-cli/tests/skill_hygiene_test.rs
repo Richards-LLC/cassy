@@ -1,26 +1,22 @@
 //! Contracts for the built-in skill hygiene wave (cas-6cba).
 
 use std::fs;
-use std::path::Path;
 
 use cas::builtins::sync_all_builtins_for_project;
 use cas_mux::SupervisorCli;
 use tempfile::TempDir;
 
-fn source_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/builtins")
-        .leak()
-}
+#[path = "support/builtin_catalog.rs"]
+mod builtin_catalog;
 
-fn source(flavor: &str, relative: &str) -> String {
-    let root = source_root();
-    let path = if flavor.is_empty() {
-        root.join(relative)
-    } else {
-        root.join(flavor).join(relative)
+fn source(flavor: &str, relative: &str) -> &'static str {
+    let flavor = match flavor {
+        "" => builtin_catalog::Flavor::Claude,
+        "codex" => builtin_catalog::Flavor::Codex,
+        "grok" => builtin_catalog::Flavor::Grok,
+        other => panic!("unknown builtin flavor {other}"),
     };
-    fs::read_to_string(path).expect("builtin source must exist")
+    builtin_catalog::find(flavor, relative)
 }
 
 #[test]
@@ -112,10 +108,7 @@ fn release_notes_are_generic_procedure_and_rubric_driven() {
     let rubric = source("", "skills/release-notes/references/RUBRIC-template.md");
     assert!(rubric.contains("Default: one threaded reply per thread"));
 
-    let init = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/init/docs_and_skill.rs"),
-    )
-    .expect("init source must exist");
+    let init = include_str!("../src/cli/init/docs_and_skill.rs");
     assert!(init.contains("follow docs/release-notes/RUBRIC.md"));
     assert!(!init.contains("Slack per docs/release-notes/RUBRIC.md"));
 }

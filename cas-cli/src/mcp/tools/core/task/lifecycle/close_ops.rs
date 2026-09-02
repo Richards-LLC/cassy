@@ -11958,6 +11958,11 @@ mod additive_only_tests {
 // Lightweight structural lint used by the declared pre-close hook.
 // ---------------------------------------------------------------------------
 
+const LIGHTWEIGHT_LINT_REJECTION_GUIDANCE: &str = concat!(
+    "Fix these before retrying close. The supervisor will run the canonical ",
+    "merge-time diff review once these basics are clean."
+);
+
 /// Outcome of the lightweight structural lint run used by the pre-close hook.
 #[derive(Debug)]
 pub(crate) enum LightweightLintOutcome {
@@ -13312,11 +13317,10 @@ fn run_lightweight_structural_lint_at_tip(
             .collect::<Vec<_>>()
             .join("\n");
         LightweightLintOutcome::Fail(format!(
-            "Lightweight structural lint found {} violation(s):\n\n{}\n\n\
-             Fix these before retrying close. The full cas-code-review skill \
-             will be run by the supervisor once these basics are clean.",
+            "Lightweight structural lint found {} violation(s):\n\n{}\n\n{}",
             violations.len(),
-            vlist
+            vlist,
+            LIGHTWEIGHT_LINT_REJECTION_GUIDANCE,
         ))
     }
 }
@@ -13479,6 +13483,11 @@ mod lightweight_lint_tests {
                 assert!(
                     msg.contains("changed.rs line +1"),
                     "unimplemented!() finding must identify the file-local line: {msg}"
+                );
+                assert!(
+                    msg.contains("canonical merge-time diff review")
+                        && !msg.contains("full cas-code-review skill"),
+                    "lint rejection must describe merge-time review ownership: {msg}"
                 );
             }
             other => panic!("unimplemented!() should fail lint, got {other:?}"),

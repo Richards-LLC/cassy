@@ -17,6 +17,20 @@ in the same change.
 The HTML must render correctly with **no network, no build step, and no external files**. Double-click
 it from a checkout on a plane and it looks right.
 
+## The workflow
+
+1. **Write the markdown first.** `docs/<area>/YYYY-MM-DD-<topic>.md`. Get the analysis right in plain text
+   before any presentation decision. If the markdown is weak, the HTML is decoration on nothing.
+2. **Pick your cell**: report type × audience. See `references/report-types.md`. The cell tells you the
+   required sections, their order, and which visuals are mandatory.
+3. **Render the HTML** beside it: same directory, same basename, `.html`. Follow
+   `references/technical-contract.md` (structure, dependencies, accessibility, print, provenance) and
+   `references/presentation-rules.md` (charts, tables, numbers, variance).
+4. **Check it** against `references/review-checklist.md` before committing. Open it in a browser; print
+   preview it; disable JavaScript and reload.
+5. **Commit both files together**, in one change. An HTML artifact without its markdown source is a
+   provenance failure; a markdown report whose HTML is stale is worse than no HTML at all.
+
 ## What counts as a report
 
 A deliverable is a report when **all three** hold:
@@ -47,20 +61,6 @@ artifact for these is an anti-pattern — it buries a two-sentence answer under 
 Rule of thumb: if the report has **no table, no comparison, no time series, no more than five findings,
 and no numbers a reader must scan**, the markdown is sufficient. If you are unsure, ask whether a
 reader would want to *scan* it (HTML) or *read* it top to bottom (markdown).
-
-## The workflow
-
-1. **Write the markdown first.** `docs/<area>/YYYY-MM-DD-<topic>.md`. Get the analysis right in plain text
-   before any presentation decision. If the markdown is weak, the HTML is decoration on nothing.
-2. **Pick your cell**: report type × audience. See `references/report-types.md`. The cell tells you the
-   required sections, their order, and which visuals are mandatory.
-3. **Render the HTML** beside it: same directory, same basename, `.html`. Follow
-   `references/technical-contract.md` (structure, dependencies, accessibility, print, provenance) and
-   `references/presentation-rules.md` (charts, tables, numbers, variance).
-4. **Check it** against `references/review-checklist.md` before committing. Open it in a browser; print
-   preview it; disable JavaScript and reload.
-5. **Commit both files together**, in one change. An HTML artifact without its markdown source is a
-   provenance failure; a markdown report whose HTML is stale is worse than no HTML at all.
 
 ## Pick your contract
 
@@ -115,8 +115,9 @@ their source:
   practitioner audience (hero verdict, evidence tables, timeline, inline SVG chart, provenance footer).
 - `references/examples/financial-quarterly-brief.html` — a financial report for an executive audience
   (KPI cards with variance, plan/actual/forecast encodings, variance-first bars, methodology last).
-- `references/report-types.md` — a compact, reusable semantic HTML/SVG system-flow pattern with a
-  visible text alternative and print treatment for explanatory reports.
+
+`references/report-types.md` is not an example: it is the type × audience matrix step 2 sends you to,
+and it also carries the reusable semantic HTML/SVG system-flow pattern for explanatory reports.
 
 ## Sources
 

@@ -343,9 +343,17 @@ fn builtins_root() -> PathBuf {
     repo_root().join("cas-cli/src/builtins")
 }
 
-/// All `.md` files under `dir`, returned as paths relative to `dir`.
-/// `skip_top_level` names immediate subdirectories to exclude (the twin trees).
-fn markdown_files(dir: &Path, skip_top_level: &[&str]) -> Vec<String> {
+/// Non-markdown builtin payloads that ship alongside the skill bodies. These
+/// are mirrored per flavor exactly like the `.md` files, but until cas-ef87a
+/// the walk below hard-filtered `extension == "md"`, so
+/// `skills/cas-wizard/template.sh` sat six lines short in both twins
+/// (the whole `# Example:` block was missing) without the guard noticing.
+const ASSET_EXTENSIONS: &[&str] = &["sh", "js", "yaml", "yml"];
+
+/// All files under `dir` whose extension is in `extensions`, returned as paths
+/// relative to `dir`. `skip_top_level` names immediate subdirectories to
+/// exclude (the twin trees).
+fn files_with_extensions(dir: &Path, skip_top_level: &[&str], extensions: &[&str]) -> Vec<String> {
     let mut found = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
@@ -365,7 +373,11 @@ fn markdown_files(dir: &Path, skip_top_level: &[&str]) -> Vec<String> {
                 }
                 continue;
             }
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            let matches = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| extensions.contains(&ext));
+            if !matches {
                 continue;
             }
             if let Ok(rel) = path.strip_prefix(dir) {
@@ -377,6 +389,12 @@ fn markdown_files(dir: &Path, skip_top_level: &[&str]) -> Vec<String> {
     }
     found.sort();
     found
+}
+
+/// All `.md` files under `dir`, returned as paths relative to `dir`.
+/// `skip_top_level` names immediate subdirectories to exclude (the twin trees).
+fn markdown_files(dir: &Path, skip_top_level: &[&str]) -> Vec<String> {
+    files_with_extensions(dir, skip_top_level, &["md"])
 }
 
 fn flavor_path(rel: &str, flavor: &Flavor) -> PathBuf {
@@ -705,6 +723,118 @@ fn builtin_flavors_stay_content_identical_after_normalization() {
         failures.len(),
         compared,
         failures.join("\n\n")
+    );
+}
+
+/// The same guard for the non-markdown payloads (`.sh`, `.js`, `.yaml`).
+///
+/// These have no markdown section structure, so the comparison is whole-file
+/// after the same canonicalization the markdown guard uses — `schema.yaml`
+/// legitimately spells the tool prefix per harness (`mcp__cas__` / `mcp__cs__`
+/// / `cas__`), and nothing else in these files may differ.
+#[test]
+fn non_markdown_builtin_twins_stay_identical_after_normalization() {
+    let root = builtins_root();
+    let claude_files = files_with_extensions(&root, &[CODEX.subdir, GROK.subdir], ASSET_EXTENSIONS);
+
+    assert!(
+        !claude_files.is_empty(),
+        "expected the claude builtin corpus to contain non-markdown payloads; \
+         the walk or the builtins path is wrong"
+    );
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut compared = 0usize;
+
+    for rel in &claude_files {
+        let claude_raw = fs::read_to_string(flavor_path(rel, &CLAUDE))
+            .unwrap_or_else(|e| panic!("failed to read claude {rel}: {e}"));
+        let claude_body = canonicalize(&claude_raw);
+
+        for twin in TWINS {
+            let twin_path = flavor_path(rel, twin);
+
+            if !twin_path.exists() {
+                let exempt = ALLOWED_MISSING_TWIN
+                    .iter()
+                    .any(|(p, f, _)| *p == rel && *f == twin.name);
+                if !exempt {
+                    failures.push(format!(
+                        "MISSING TWIN: {rel} exists for claude but not for {}.\n    \
+                         Port it, or add an ALLOWED_MISSING_TWIN entry with a rationale.",
+                        twin.name
+                    ));
+                }
+                continue;
+            }
+
+            let twin_raw = fs::read_to_string(&twin_path)
+                .unwrap_or_else(|e| panic!("failed to read {} {rel}: {e}", twin.name));
+            let twin_body = canonicalize(&twin_raw);
+            compared += 1;
+
+            if claude_body != twin_body {
+                let claude_lines: Vec<String> =
+                    claude_body.lines().map(str::to_string).collect();
+                let twin_lines: Vec<String> = twin_body.lines().map(str::to_string).collect();
+                failures.push(format!(
+                    "CONTENT DRIFT: {rel} (claude vs {}){}",
+                    twin.name,
+                    render_diff(&claude_lines, &twin_lines, "claude", twin.name)
+                ));
+            }
+        }
+    }
+
+    assert!(
+        compared >= 2 * claude_files.len(),
+        "expected to compare both twins for every non-markdown payload \
+         ({} files), only compared {compared} pairs",
+        claude_files.len()
+    );
+
+    assert!(
+        failures.is_empty(),
+        "\n\nBuiltin non-markdown flavor drift detected ({} issue(s)) across {} compared \
+         pairs.\nScripts, palettes and schemas shipped with a skill are mirrored exactly \
+         like its prose; only the per-harness tool prefix may differ.\n\n{}\n",
+        failures.len(),
+        compared,
+        failures.join("\n\n")
+    );
+}
+
+/// Flavor-only non-markdown payloads must be sanctioned too, for the same
+/// reason as their markdown counterparts: an extra twin-only script is drift
+/// the claude-rooted walk would otherwise never visit.
+#[test]
+fn flavor_only_non_markdown_builtin_files_are_explicitly_sanctioned() {
+    let root = builtins_root();
+    let claude_files = files_with_extensions(&root, &[CODEX.subdir, GROK.subdir], ASSET_EXTENSIONS);
+
+    let mut unexpected = Vec::new();
+    for twin in TWINS {
+        let twin_root = root.join(twin.subdir);
+        for rel in files_with_extensions(&twin_root, &[], ASSET_EXTENSIONS) {
+            if claude_files.contains(&rel) {
+                continue;
+            }
+            let sanctioned = ALLOWED_FLAVOR_ONLY
+                .iter()
+                .any(|(f, p, _)| *f == twin.name && *p == rel);
+            if !sanctioned {
+                unexpected.push(format!("{}/{rel}", twin.name));
+            }
+        }
+    }
+
+    assert!(
+        unexpected.is_empty(),
+        "\n\nFlavor-only non-markdown builtin file(s) with no claude counterpart and no \
+         exemption:\n  {}\n\nEither add the claude (and other-flavor) twin, or add an \
+         ALLOWED_FLAVOR_ONLY entry explaining why this file is intentionally \
+         single-flavor.\n",
+        unexpected.join("\n  ")
     );
 }
 

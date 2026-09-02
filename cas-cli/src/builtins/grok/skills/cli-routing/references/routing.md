@@ -11,24 +11,16 @@ blocker.
 
 ## Codex first
 
-For read-only investigations, use [cas-codex-exec](../../cas-codex-exec/SKILL.md)
-instead of duplicating its prompt and backgrounding guidance. For a bounded
-one-shot, close stdin and redirect long output to a file; never pipe a long run
-through `tail`:
+[cas-codex-exec](../../cas-codex-exec/SKILL.md) owns the canonical `codex exec`
+recipe — the invocation, the sandbox flag, the model default, closing stdin, and
+redirecting long output to a file. Use it as written; do not restate it here.
 
-```bash
-codex exec --skip-git-repo-check --sandbox read-only \
-  -c model_reasoning_effort="low" \
-  "Inspect only the named files and return the requested summary." \
-  < /dev/null > /tmp/codex-one-shot.out 2>&1
-status=$?
-```
-
-Use `model_reasoning_effort="low"` for mechanical/transcription work. Reads
-can stay sandboxed. Writes (including a Slack post) require a narrowly scoped
-prompt and `--dangerously-bypass-approvals-and-sandbox` in an externally
-sandboxed session. Read output from `/tmp/codex-one-shot.out`; retain it with
-the `status` if routing falls through.
+What routing adds on top of that recipe: reads can stay sandboxed, but a write
+(including a Slack post) needs a narrowly scoped prompt and
+`--dangerously-bypass-approvals-and-sandbox` in an externally sandboxed
+session. Prefer `-c model_reasoning_effort="low"` for mechanical or
+transcription work. Keep the captured output file and its exit status; they are
+the only admissible evidence if routing falls through to Claude.
 
 Plugin-backed tools are not necessarily in Codex's own tool list. Discover
 them through `list_mcp_resources` and look for the `codex_apps` resource (for

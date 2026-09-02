@@ -89,7 +89,7 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
         .success();
     let synced_out = String::from_utf8_lossy(&synced.get_output().stdout);
     assert!(
-        synced_out.contains("Cassy 3.10.1 · 2 projects refreshed · 0 failed"),
+        synced_out.contains(&format!("Cassy {} · 2 projects refreshed · 0 failed", env!("CARGO_PKG_VERSION"))),
         "output was:\n{synced_out}"
     );
     assert!(

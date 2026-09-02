@@ -140,8 +140,7 @@ If the store is not initialized in this project, the command says so and there i
 - Drifting into product/domain content (personas, journeys, business concepts). That's `project-overview`'s job.
 - Generic one-liners that just restate the path (`tests/ — tests`). Cut the line or write a real one.
 - Skipping the keep-block check on regeneration. Destroying hand-edits is a trust breaker.
-- Forgetting to commit `.claude/CODEMAP.md`. Freshness is computed from git history — committing resets the staleness signal for the next session.
-- Forgetting to write the memory pointer.
+- Forgetting to commit `.claude/CODEMAP.md`, or to write the memory pointer.
 - Regenerating from scratch without checking `cas knowledge search` first. A current page is a draft you should be reconciling, not discarding.
 - Forgetting `cas knowledge build` after writing the doc. The store then keeps serving a stale page to every agent that queries it.
 - Including `target/`, `node_modules/`, `dist/`, `vendor/` as if they were source. They aren't — skip them.

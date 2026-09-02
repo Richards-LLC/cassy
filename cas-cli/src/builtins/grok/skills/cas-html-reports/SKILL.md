@@ -115,8 +115,9 @@ their source:
   practitioner audience (hero verdict, evidence tables, timeline, inline SVG chart, provenance footer).
 - `references/examples/financial-quarterly-brief.html` — a financial report for an executive audience
   (KPI cards with variance, plan/actual/forecast encodings, variance-first bars, methodology last).
-- `references/report-types.md` — a compact, reusable semantic HTML/SVG system-flow pattern with a
-  visible text alternative and print treatment for explanatory reports.
+
+`references/report-types.md` is not an example: it is the type × audience matrix step 2 sends you to,
+and it also carries the reusable semantic HTML/SVG system-flow pattern for explanatory reports.
 
 ## Sources
 

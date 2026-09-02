@@ -43,7 +43,7 @@ Read only what's needed to extract domain meaning. Stop once the picture is clea
    - Any `types/`, `schemas/`, or DTO directories with named domain nouns
 4. **Routes / pages / top-level components** — confirms user-facing journeys
    - `apps/*/src/pages/**`, `app/**`, `src/routes/**`
-5. **Planning docs** — `docs/brainstorms/`, `docs/requests/`, `docs/plans/` — to pick up in-flight direction
+5. **Planning docs** — `docs/brainstorms/`, `docs/requests/` — to pick up in-flight direction
 6. **package.json / Cargo.toml / pyproject.toml** — name, description, deps hint at stack + category
 
 **Skip** framework chrome: lockfiles, `node_modules`, `target/`, generated clients, migration up/down boilerplate, ESLint/Prettier configs, CI YAML, test fixtures.
@@ -120,7 +120,7 @@ Follow [../codemap/references/doc-hygiene.md](../codemap/references/doc-hygiene.
 cas knowledge build --max-sources 5
 ```
 
-Nothing else in the repo changed, so the ledger short-circuits every other source and this costs at most one model call. Confirm it landed:
+Nothing else in the repo changed, so the ledger short-circuits every other source and this costs at most one model call. Rust bounds the build to 90 seconds and cleans up after itself, so this is one invocation observed once — do not detach it, background it, or poll. A non-zero exit is non-blocking: note the command and status and carry on, because the doc on disk is still the artifact. Confirm it landed:
 
 ```bash
 cas knowledge search "product overview"

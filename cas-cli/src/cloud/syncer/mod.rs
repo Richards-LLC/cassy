@@ -354,7 +354,7 @@ pub enum ConflictAction {
 }
 
 /// A sync conflict that was resolved
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SyncConflict {
     /// Type of entity (entry, task, rule, skill)
     pub entity_type: String,

@@ -2761,11 +2761,6 @@ impl SyncSummary {
         self.team_configured = true;
     }
 
-    fn merge_team_push(&mut self, result: &crate::cloud::SyncResult) {
-        let team = Self::push(result, crate::cloud::PushScope::All, None);
-        self.merge_team_summary(&team);
-    }
-
     fn merge_team_pull(&mut self, result: &crate::cloud::SyncResult) {
         let team = Self::pull(result, true);
         self.merge_team_summary(&team);
@@ -2977,6 +2972,14 @@ pub(crate) fn render_sync_summary(
                 }
                 if let Some(transition) = &summary.task_transition {
                     fmt.write_raw(transition)?;
+                    fmt.newline()?;
+                }
+                let conflict_count =
+                    summary.conflicts.len() + summary.team_conflicts.len();
+                if conflict_count > 0 {
+                    fmt.write_raw(&format!(
+                        "    {conflict_count} conflict(s) resolved"
+                    ))?;
                     fmt.newline()?;
                 }
                 for conflict in summary.conflicts.iter().chain(summary.team_conflicts.iter()) {

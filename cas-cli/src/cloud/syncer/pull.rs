@@ -1918,6 +1918,7 @@ impl CloudSyncer {
         rule_store: &dyn RuleStore,
         skill_store: &dyn SkillStore,
     ) -> Result<SyncResult, CasError> {
+        self.clear_conflict_log();
         let mut result = SyncResult::default();
         let start = Instant::now();
 

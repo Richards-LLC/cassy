@@ -214,12 +214,12 @@ check_archive_mode() {
         printf 'archive-mode: root Cargo.toml is missing\n'
         return 1
     }
-    cp Cargo.toml "$remap/Cargo.toml"
-    while IFS= read -r manifest; do
-        [[ -n "$manifest" ]] || continue
-        package_dir="${manifest%/Cargo.toml}"
-        mkdir -p "$remap/$package_dir"
-    done < <(git ls-files '*/Cargo.toml')
+    # Mirror the merge-queue shard runner exactly: it HAS a checkout of the
+    # tree, but at a different path than the build host, so compile-time
+    # CARGO_MANIFEST_DIR reads fail while cwd-relative reads still work.
+    # Empty package directories were stricter than CI and rejected a
+    # pre-existing cwd-relative source inspection.
+    git archive --format=tar HEAD | tar -x -C "$remap"
     archive_path="$(make_archive_path)"
     if "$cargo_bin" nextest archive -p cas --archive-file "$archive"; then
         :

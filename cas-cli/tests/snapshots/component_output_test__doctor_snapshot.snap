@@ -2,32 +2,29 @@
 source: cas-cli/tests/component_output_test.rs
 expression: redacted
 ---
-cas doctor
-──────────────────────────────────────────────────
-[OK] cas directory: Found at [TEMP_PATH]
-[OK] database: SQLite database found
-[OK] schema: v248 (up to date)
-[OK] supervisor relay: no undelivered lifecycle relays
-[OK] delivery retries: no pending message has spent 3+ attempts
-[OK] tables: [N] tables, 789 columns, 211 rows total
-[OK] entry store: [N] entries accessible
-[OK] legacy search index: no stray Tantivy root below `.cas/index/`
-[WARN] search index: Index not found at [CAS_PATH] Will be created on first search.
-[WARN] symbol index: nothing indexed for this project (0 symbol(s) in the store across all repositories); the code search index is missing. The daemon only indexes while idle — run `cas index code` to catch up now.
-[OK] embedding drain: no cloud embedding capability (not logged in); nothing is queued
-[WARN] code history index: cannot check code history index: not a git repository: [TEMP_PATH] ([GIT_NOT_REPOSITORY])
-[OK] configuration: Loaded (sync: enabled)
-[OK] MCP stdio upstreams: [N] registered command(s) resolve to executable files
-[OK] sync target: Will sync to .claude/rules/cas (not yet created)
-[OK] memory stats: [N] total () | tiers:  | compressed: [N] | helpful: [N] | harmful: [N]
-[OK] memory decay: Memory decay (last cycle): unavailable (no completed decay cycle recorded)
-[OK] rules: [N] rules ()
-[OK] tasks: [N] tasks () | 0 open, 0 blocked
-[OK] embeddings: No local vector embeddings (semantic search uses cloud).
-[OK] mcp config: MCP configured in .mcp.json
-[OK] integrations: no integrations configured
-[OK] canonical id: Cloud bucket `[BUCKET]` (from folder name)
-[OK] cloud sync queue: [N] queued content change(s) block purge-foreign; Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.
-[OK] cross-project rows: [N] project DB(s) compared (0 local task row(s), 0 DB(s) unreadable) — task replication was not checked; 0 foreign knowledge page(s): [N] attributed page(s) checked. foreign evidence: [N] task row(s); purge delete set: [N] task row(s) — counts agree
+cas doctor · [PROJECT] · [VERSION]
+────────────────────────────────────────────────────────────────────────────────
+Store         [OK] cas directory  [OK] database  [OK] schema  [OK] tables
+              [OK] entry store  [OK] memory stats  [OK] memory decay  [OK] rules
+              [OK] tasks
+Indexes       [OK] legacy search index  [OK] embedding drain  [OK] embeddings
+  [WARN] search index        Index not found at
+                             [CAS_PATH] Will be
+                             created on first search; Run a search to build it
+  [WARN] symbol index        nothing indexed for this project (0 symbol(s) in
+                             the store across all repositories); the code search
+                             index is missing. The daemon only indexes while
+                             idle
+  → run `cas index code` to catch up now.
+  [WARN] code history index  cannot check code history index: not a git
+                             repository: [TEMP_PATH] (fatal: not a git
+                             repository (or any parent up to mount point /)
+                             Stopping at filesystem boundary
+                             (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).)
+Cloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id
+              [OK] cloud sync queue  [OK] cross-project rows
+Config        [OK] configuration  [OK] MCP stdio upstreams  [OK] sync target
+              [OK] mcp config
+Integrations  [OK] integrations
 
-[WARN] All critical checks passed with some warnings.
+22 ok · 3 warnings · 0 errors · [DURATION]

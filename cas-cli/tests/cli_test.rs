@@ -810,6 +810,28 @@ fn test_doctor_json() {
 }
 
 #[test]
+fn test_doctor_verbose_appends_full_check_messages() {
+    let temp = TempDir::new().unwrap();
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    let output = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["doctor", "--verbose"])
+        .output()
+        .expect("failed to run verbose doctor");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let verbose = stdout.find("verbose").expect("verbose section");
+    assert!(stdout[..verbose].contains("Store"));
+    assert!(stdout[verbose..].contains("cas directory: Found at"));
+}
+
+#[test]
 fn test_doctor_mcp_configured() {
     let temp = TempDir::new().unwrap();
     let cas_root = temp.path().join(".cas");
@@ -828,8 +850,8 @@ fn test_doctor_mcp_configured() {
         .arg("doctor")
         .assert()
         .success()
-        .stdout(predicate::str::contains("mcp config"))
-        .stdout(predicate::str::contains("MCP configured"));
+        .stdout(predicate::str::contains("Config"))
+        .stdout(predicate::str::contains("[OK] mcp config"));
 }
 
 #[test]
@@ -868,8 +890,8 @@ fn test_doctor_fix_initializes_project() {
         .args(["doctor", "--fix"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("auto-fix"))
-        .stdout(predicate::str::contains("Initialized Cassy at"));
+        .stdout(predicate::str::contains("Store"))
+        .stdout(predicate::str::contains("[OK] auto-fix"));
 }
 
 #[test]

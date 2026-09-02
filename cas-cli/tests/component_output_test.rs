@@ -290,7 +290,7 @@ fn pty_doctor_has_expected_sections() {
 
     // Wait for the output to stabilize
     runner
-        .wait_for_text_timeout("checks", Duration::from_secs(10))
+        .wait_for_text_timeout("Store", Duration::from_secs(10))
         .unwrap();
 
     let output = runner.get_output().as_str();
@@ -357,6 +357,14 @@ fn redact_dynamic_values(s: &str) -> String {
     let bucket_re = regex::Regex::new(r"Cloud bucket `[^`]*`").unwrap();
     result = bucket_re
         .replace_all(&result, "Cloud bucket `[BUCKET]`")
+        .to_string();
+
+    // The header includes the canonical project id. Temp fixtures have a
+    // generated folder id, so normalize that value independently of the cloud
+    // bucket row.
+    let project_re = regex::Regex::new(r"cas doctor · [^·\n]+ ·").unwrap();
+    result = project_re
+        .replace_all(&result, "cas doctor · [PROJECT] ·")
         .to_string();
 
     // Redact counts that follow "entries:", "tasks:", etc.

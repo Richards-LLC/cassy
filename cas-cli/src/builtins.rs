@@ -2977,8 +2977,15 @@ This is the body content."#;
                 );
             }
         }
+        let worker_common = [
+            "## Context budgeting",
+            "Immutable Core",
+            "Task Context",
+            "Ephemeral",
+            "project_session_start_truncation.md",
+        ];
         for (label, content) in worker_files {
-            for required in common.iter().chain(["8 KB", "9 KB"].iter()) {
+            for required in worker_common.iter().chain(["8 KB", "9 KB"].iter()) {
                 assert!(
                     content.contains(required),
                     "{label} missing required Context-budgeting marker: {required:?}"
@@ -3237,11 +3244,9 @@ This is the body content."#;
             // the SessionStart body and the on-demand reference. They have one
             // source: the PTY spawn prompt above.
             for forbidden in [
-                "Never block the pane",
                 "~2 minutes",
                 "gh run watch",
                 "action=remind",
-                "Checkpoint, never compact",
                 "last_token_usage",
                 "model_context_window",
                 "total_token_usage",

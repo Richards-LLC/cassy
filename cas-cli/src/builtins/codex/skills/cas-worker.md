@@ -42,15 +42,15 @@ task before starting any newly assigned task.
 
 Tool loading is two steps, not one: if `mcp__cs__task` is unavailable, use
 `ToolSearch(query="select:mcp__cs__task")` once, then call the resolved tool;
-the lookup does **not** execute it, so do not run another ToolSearch.
+  the lookup does **not** execute the tool; use the resolved tool, not another ToolSearch.
 
 ## Task types and depth
 
 - **Spike:** record the decision with `note_type=decision`; its criteria are
   question-based. **Demo:** produce the stated observable outcome.
-- **Report/evidence:** use MCP task/search/coordination surfaces, `.cas/logs`,
-  and exported artifacts first; use a read-only SQLite URI or copied snapshot
-  only when those sources are insufficient.
+- **Report / evidence tasks:** use MCP task/search/coordination surfaces,
+  `.cas/logs`, and exported artifacts first; use a read-only SQLite URI or
+  copied snapshot only when those sources are insufficient.
 - Read `depth` from `task show`: `light` ships the minimal diff; `deep` (or
   unset) uses the full close discipline. Neither relaxes integrity or scope.
 - Honor `execution_note`: `test-first` commits a failing test before code;
@@ -60,10 +60,14 @@ the lookup does **not** execute it, so do not run another ToolSearch.
 
 ## Task ownership
 
-- Start only tasks assigned by `action=mine` or explicitly by the supervisor;
-  `ready` and `available` are visibility, never authorization to start.
-- Complete one task before taking another. Keep scope and layer boundaries
-  frozen; match existing patterns and do not add unrequested configuration.
+- Never self-dispatch. This is no self-dispatch. Start only tasks assigned by
+  `action=mine` or explicitly by the supervisor; `ready` and `available` are
+  backlog *visibility*, never authorization to `start` a task yourself.
+  Do not pull the next ready task yourself.
+  This applies every time you go idle, not just at session start.
+- One task at a time. Scope is frozen. Honor non-goals and layer boundaries;
+  complete the current task before taking another, match existing patterns, and
+  do not add unrequested configuration.
 - Cassy-system bugs stay in this repository: create or update an assigned task
   and fix them here. For an anonymized diagnostic receipt, use
   `mcp__cs__system action=report_cas_bug`; do not treat cas-src as an external
@@ -72,14 +76,17 @@ the lookup does **not** execute it, so do not run another ToolSearch.
 - Record non-obvious decisions with `mcp__cs__task action=notes
   note_type=decision`; save durable discoveries with
   `mcp__cs__memory action=remember`.
-- Coordination messages target the literal `supervisor` and include both
-  `summary` and `message`; put detailed evidence in task notes.
+- Coordination messages use `mcp__cs__coordination action=message`, target the
+  literal string `supervisor`, and include both `summary` and `message`; put
+  detailed evidence in task notes.
+- Never block the pane. Checkpoint, never compact: commit, push, note, and
+  request a respawn if context is low.
 
 ## cas-src surface checklist — required before close
 
 For every applicable item, record the proving file, command, or test in the
-pre-close note. For every `not applicable` item, state why. This is a
-requirement, not a suggestion; bare assertions are not evidence.
+pre-close note. For every `not applicable` item, state why.
+This is a requirement, not a suggestion; bare assertions are not evidence.
 
 - **Builtin skill/agent:** update Claude, Codex, and Grok mirrors and run the
   flavor-drift test.

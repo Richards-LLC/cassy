@@ -143,6 +143,14 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-supervisor.md"),
     },
     BuiltinFile {
+        path: "skills/cas-cut-release/SKILL.md",
+        content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cut-release/references/failure-log.md",
+        content: include_str!("builtins/skills/cas-cut-release/references/failure-log.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-supervisor/references/preflight.md",
         content: include_str!("builtins/skills/cas-supervisor/references/preflight.md"),
     },
@@ -495,6 +503,14 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-supervisor.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cut-release/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-cut-release/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cut-release/references/failure-log.md",
+        content: include_str!("builtins/codex/skills/cas-cut-release/references/failure-log.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/preflight.md",
@@ -882,6 +898,14 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
         content: include_str!("builtins/grok/skills/cas-supervisor/references/filing-cas-bugs.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cut-release/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-cut-release/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cut-release/references/failure-log.md",
+        content: include_str!("builtins/grok/skills/cas-cut-release/references/failure-log.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor-checklist/SKILL.md",
@@ -6390,6 +6414,34 @@ This is the body content."#;
             assert!(
                 file.content.contains(needle),
                 "grok {path} must reference {needle} (cas__ prefix)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_builtin_skills_contains_cas_cut_release() {
+        for (label, catalog, prefix) in [
+            ("claude", BUILTIN_SKILLS, "mcp__cas__"),
+            ("codex", CODEX_BUILTIN_SKILLS, "mcp__cs__"),
+            ("grok", GROK_BUILTIN_SKILLS, "cas__"),
+        ] {
+            let skill = catalog
+                .iter()
+                .find(|b| b.path == "skills/cas-cut-release/SKILL.md")
+                .unwrap_or_else(|| panic!("{label} cas-cut-release skill is not registered"));
+            assert!(is_managed_by_cas(skill.content));
+            assert!(skill.content.contains("description: Use when"));
+            assert!(skill.content.contains("references/failure-log.md in full"));
+            assert!(skill.content.contains("release-gate.sh --learn"));
+            assert!(skill.content.contains(&format!("{prefix}memory")));
+            let failure_log = catalog
+                .iter()
+                .find(|b| b.path == "skills/cas-cut-release/references/failure-log.md")
+                .unwrap_or_else(|| panic!("{label} cas-cut-release failure log is not registered"));
+            assert_eq!(
+                failure_log.content.lines().filter(|line| line.starts_with("- ")).count(),
+                22,
+                "{label} failure log must seed every known release failure"
             );
         }
     }

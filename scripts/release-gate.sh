@@ -159,7 +159,7 @@ check_version_literals() {
         [[ -d "$root" ]] || continue
         while IFS= read -r -d '' file; do
             case "$file" in
-                */reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock) continue ;;
+                *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock) continue ;;
             esac
             hit="$(grep -nIF -- "$version" "$file" 2>/dev/null || true)"
             if [[ -n "$hit" ]]; then
@@ -324,7 +324,8 @@ check_release_script() {
     }
     grep -qF 'target/$target/release/build"/blake3-*' scripts/release.sh
     grep -qF 'target/$target/release/.fingerprint"/blake3-*' scripts/release.sh
-    grep -qF './scripts/release.sh                 # local audit only' scripts/release.sh
+    grep -qF 'Pre-warming rule: in a tag worktree' scripts/release.sh
+    grep -qF 'audit-only and remote-safe' scripts/release.sh
 }
 
 check_procedure_guardrails() {

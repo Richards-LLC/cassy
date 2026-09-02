@@ -1,0 +1,22 @@
+- 2026-09-02 — **version-literals** — Symptom: a release test asserted a literal crate version. Root cause: the test did not use env!("CARGO_PKG_VERSION"). Release: v3.11.0.
+- 2026-09-02 — **workspace-tests** — Symptom: the workspace test graph was not proven before release. Root cause: the local train stopped at a narrower compile check. Release: v3.11.0.
+- 2026-09-02 — **nextest** — Symptom: a full nextest run failed on refresh and LWW tests. Root cause: cross-lane behavior changed without an assembled-tree run. Release: v3.11.0.
+- 2026-09-02 — **doctests** — Symptom: doctests were omitted from an otherwise green test train. Root cause: nextest does not run doctests. Release: v3.11.0.
+- 2026-09-02 — **archive-mode** — Symptom: archive extraction exhausted a 32-GB /tmp tmpfs. Root cause: the suite archive and TMPDIR were placed on tmpfs. Release: v3.12.0.
+- 2026-09-02 — **archive-mode** — Symptom: archive execution rejected the workspace remap because Cargo.toml and package directories were absent. Root cause: the remap was only an empty directory. Release: v3.12.0.
+- 2026-09-02 — **archive-mode** — Symptom: seven archived tests read source via CARGO_MANIFEST_DIR or invoked rg. Root cause: the queue has no checkout and no rg; snapshot tests need source-tree .snap files. Release: v3.12.0.
+- 2026-09-02 — **snapshot-portability** — Symptom: wrapped output snapshots differed by host git wording, continuation layout, or temp-path width. Root cause: redaction and joining were host-sensitive. Release: v3.11.0.
+- 2026-09-02 — **builtin-projections** — Symptom: root projections stayed stale after a builtin source edit. Root cause: the scoped cas update --sync resync step was skipped. Release: v3.12.0.
+- 2026-09-02 — **nextest** — Symptom: marker tests from one lane contradicted trimmed guidance from another. Root cause: sibling lanes were not reconciled on the assembled tree before prep. Release: v3.12.0.
+- 2026-09-02 — **nextest** — Symptom: conflicts_resolved assertions passed with the wrong meaning. Root cause: a counted field changed semantics without grepping its tests or asserting direction. Release: v3.12.0.
+- 2026-09-02 — **changelog-and-versions** — Symptom: release metadata did not describe all six crates and the dated bullet section. Root cause: version bump validation was not run as a gate. Release: v3.11.0.
+- 2026-09-02 — **working-tree** — Symptom: generated or scratch files were present at release close. Root cause: the final tree-clean check was treated as a manual memory item. Release: v3.12.0.
+- 2026-09-02 — **release-script** — Symptom: ISA audit found duplicate BLAKE3 build outputs after a prior prewarm. Root cause: a mismatched release build left stale build and fingerprint directories. Release: v3.11.0.
+- 2026-09-02 — **release-script** — Symptom: a fresh tag worktree lacked the Zig toolchain and failed preflight. Root cause: .context/zig is gitignored and was not hardlinked into the worktree. Release: v3.12.0.
+- 2026-09-02 — **procedure-guardrails** — Symptom: publishing stopped with the caller after pkill -f matched its own command line. Root cause: process cleanup used a pattern instead of a recorded PID. Release: v3.12.0.
+- 2026-09-02 — **manual:epic-close** — Symptom: an epic close found sibling lanes had rewritten delivered files. Root cause: the stranded-branch inspection narrative was omitted. Release: v3.12.0.
+- 2026-09-02 — **manual:merge-queue** — Symptom: PR admission checks were mistaken for merge_group validation. Root cause: the synthetic queue host and pr-<n> headBranch were not watched. Release: v3.12.0.
+- 2026-09-02 — **manual:slack-route** — Symptom: the documented release Slack account was unavailable or wrong. Root cause: the route was assumed rather than read-only preflighted from the supervisor session. Release: v3.12.0.
+- 2026-09-02 — **manual:operator-reporting** — Symptom: manual gate fiddling obscured green-to-tag latency. Root cause: the timeline did not name the blocking step or publish moment. Release: v3.12.0.
+- 2026-09-02 — **manual:host-verify** — Symptom: the host was not verified from the published receipt before the next release. Root cause: cas update, version, and hub checks were not carried into POSTED evidence. Release: v3.12.0.
+- 2026-09-02 — **builtin-projections** — Symptom: root managed projections and reference history were stale after builtin edits. Root cause: the source tree changed without resync and ledger regeneration. Release: v3.12.0.

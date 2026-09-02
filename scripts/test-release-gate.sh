@@ -44,7 +44,7 @@ EOF
         "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" \
         "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"; do
         mkdir -p "$(dirname "$mirror")"
-        printf '%s\n' '- 2026-09-02 — **version-literals** — Symptom: fixture source literal. Root cause: fixture. Release: v3.12.0.' >"$mirror"
+        printf '%s\n' '- 2026-09-02 — **version-literals** — Symptom: fixture source literal. Root cause: fixture. Release: fixture.' >"$mirror"
     done
     cat >"$repo/cas-cli/src/builtins/skills/cas-cut-release/SKILL.md" <<'EOF'
 Use when cutting a release.
@@ -54,6 +54,8 @@ EOF
     cat >"$repo/scripts/release.sh" <<'EOF'
 #!/usr/bin/env bash
 ./scripts/release.sh                 # local audit only
+# Pre-warming rule: in a tag worktree, use only the bare ./scripts/release.sh;
+# it is audit-only and remote-safe.
 target/$target/release/build"/blake3-*
 target/$target/release/.fingerprint"/blake3-*
 EOF
@@ -187,6 +189,21 @@ repo="$(new_fixture dirty-tree)"
 printf 'untracked\n' >"$repo/untracked.txt"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
 assert_named_failure working-tree "$output"
+
+repo="$(new_fixture invalid-failure-log)"
+printf '%s\n' '- 2026-09-02 — **not-a-gate-check** — Symptom: unparseable. Root cause: fixture. Release: fixture.' >>"$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+assert_named_failure failure-log "$output"
+
+repo="$(new_fixture learn-mode)"
+learn_output="$(cd "$repo" && "$repo/scripts/release-gate.sh" --learn 'new release symptom' 'new release cause' 'procedure-guardrails' 2>&1)"
+grep -qF 'Learned release failure in all three mirrors' <<<"$learn_output"
+grep -qF 'new release symptom' "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md"
+cmp "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+    "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md"
+cmp "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+    "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"
+ok '--learn appends and mirrors a dated failure entry'
 
 repo="$(new_fixture passing)"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1)"

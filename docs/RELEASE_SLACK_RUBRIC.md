@@ -7,6 +7,10 @@ mandatory #cas-internal publication workflow. They are separate duties.**
 > supervisor-owned route, and the designed handoff used when a worker has no
 > Slack connection of its own, see
 > [docs/SLACK_POSTING_RUNBOOK.md](SLACK_POSTING_RUNBOOK.md).
+>
+> The mechanical source-branch release train that precedes this rubric is
+> [cas-cut-release](../cas-cli/src/builtins/skills/cas-cut-release/SKILL.md);
+> use it for the gate, merge queue, published receipt, and host verification.
 
 ## Transport ownership and worker handoff
 

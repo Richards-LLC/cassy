@@ -343,12 +343,21 @@ fn redact_dynamic_values(s: &str) -> String {
     // that this check could not inspect a non-repository temp fixture, so keep
     // the snapshot independent of the installed Git wording (cas-58be).
     let git_not_repo_re = regex::Regex::new(
-        r"fatal: not a git repository \(or any of the parent directories\): \.git|fatal: not a git repository \(or any parent up to mount point /\)\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.",
+        r"fatal:\s+not\s+a\s+git\s+repository\s+\((?:or\s+any\s+of\s+the\s+parent\s+directories\):\s+\.git|or\s+any\s+parent\s+up\s+to\s+mount\s+point\s+/\)\s+Stopping\s+at\s+filesystem\s+boundary\s+\(GIT_DISCOVERY_ACROSS_FILESYSTEM\s+not\s+set\)\.)",
     )
     .unwrap();
+    // The grouped doctor renderer wraps non-OK messages at terminal width
+    // with a hanging indent, so the git wording may span lines; the pattern
+    // above is whitespace-tolerant for that reason.
     result = git_not_repo_re
         .replace_all(&result, "[GIT_NOT_REPOSITORY]")
         .to_string();
+
+    // Wrap positions of non-OK message continuation lines depend on the
+    // redacted values' original lengths (temp paths differ per host), so join
+    // hanging-indent continuations back onto their row before comparing.
+    let continuation_re = regex::Regex::new(r"\n {20,}").unwrap();
+    result = continuation_re.replace_all(&result, " ").to_string();
 
     // Redact the cloud canonical-id bucket name. When a project has no git
     // remote, `cas doctor` derives the bucket from the folder name — under test

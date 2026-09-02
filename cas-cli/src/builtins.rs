@@ -5501,11 +5501,11 @@ This is the body content."#;
         }
     }
 
-    // cas-e0d1: the user-level prune must drop legacy non-managed cas-* orphans
-    // (e.g. cas-playwright-debug) while preserving managed builtins and any
-    // non-cas user skill. Covers all three guard branches plus idempotency.
+    // cas-1532: the user-level prune must drop removed managed cas-* builtins
+    // while preserving unmanaged user skills and current builtins. Covers all
+    // three guard branches plus idempotency.
     #[test]
-    fn test_prune_stale_cas_skill_dirs_orphan_removed_managed_and_non_cas_kept() {
+    fn test_prune_stale_cas_skill_dirs_removed_managed_and_unmanaged_kept() {
         use std::collections::HashSet;
         use tempfile::tempdir;
 
@@ -5519,19 +5519,17 @@ This is the body content."#;
             p
         };
 
-        // 1. Legacy non-managed cas-* orphan (no marker, not a builtin) — REMOVED.
-        let orphan = write_skill(
+        // 1. Removed managed builtin — REMOVED.
+        let removed_managed = write_skill(
+            "cas-retired-review",
+            "---\nname: cas-retired-review\nmanaged_by: cas\n---\n# retired\n",
+        );
+        // 2. Unmanaged cas-* user skill — PRESERVED by the marker guard.
+        let unmanaged = write_skill(
             "cas-playwright-debug",
-            "---\nname: cas-playwright-debug\nuser-invocable: true\n---\n# legacy\n",
+            "---\nname: cas-playwright-debug\nuser-invocable: true\n---\n# user\n",
         );
-        // 2. Managed builtin carrying the marker but NOT in `keep` — preserved by
-        //    the managed_by: cas marker guard.
-        let managed = write_skill(
-            "cas-nuxt-playwright",
-            "---\nname: cas-nuxt-playwright\nmanaged_by: cas\n---\n# keep\n",
-        );
-        // 3. Builtin present in `keep` but missing the marker — preserved by the
-        //    builtin-name guard.
+        // 3. Current builtin, even without a marker — PRESERVED by `keep`.
         let kept_by_name = write_skill("cas-codemap", "---\nname: cas-codemap\n---\n# no marker\n");
         // 4. Non-cas user-authored skill — never touched.
         let non_cas = write_skill("my-skill", "---\nname: my-skill\n---\n# user\n");
@@ -5541,14 +5539,14 @@ This is the body content."#;
 
         let removed = prune_stale_cas_skill_dirs(&skills_dir, &keep).unwrap();
 
-        assert_eq!(removed, vec!["cas-playwright-debug".to_string()]);
+        assert_eq!(removed, vec!["cas-retired-review".to_string()]);
         assert!(
-            !orphan.exists(),
-            "non-managed cas-* orphan should be removed"
+            !removed_managed.exists(),
+            "removed managed builtin should be pruned"
         );
         assert!(
-            managed.exists(),
-            "managed_by: cas builtin should be preserved via marker guard"
+            unmanaged.exists(),
+            "unmanaged cas-* skill should be preserved via marker guard"
         );
         assert!(
             kept_by_name.exists(),
@@ -5559,6 +5557,29 @@ This is the body content."#;
         // Idempotent: a second pass with nothing stale removes nothing.
         let removed2 = prune_stale_cas_skill_dirs(&skills_dir, &keep).unwrap();
         assert!(removed2.is_empty(), "second prune should be a no-op");
+    }
+
+    #[test]
+    fn test_sync_all_builtins_prunes_removed_managed_workflows() {
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
+        let claude_dir = temp.path().join(".claude");
+        let workflows_dir = claude_dir.join("workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+
+        let removed = workflows_dir.join("cas-code-review-retired.js");
+        std::fs::write(&removed, "// managed_by: cas\nexport const meta = {};\n").unwrap();
+        let unmanaged = workflows_dir.join("local-workflow.js");
+        std::fs::write(&unmanaged, "export const meta = {};\n").unwrap();
+
+        sync_all_builtins(&claude_dir).unwrap();
+
+        assert!(!removed.exists(), "removed managed workflow should be pruned");
+        assert!(
+            unmanaged.exists(),
+            "unmanaged workflow should never be touched by pruning"
+        );
     }
 
     // cas-e0d1: builtin_skill_dir_names extracts `<dir>` from `skills/<dir>/...`
@@ -5714,12 +5735,17 @@ This is the body content."#;
         // Sync first so the real builtin dirs exist and are correctly kept...
         sync_all_grok_builtins(&grok_dir).unwrap();
 
-        // ...then plant a stale, unmanaged cas-* orphan that isn't part of
-        // GROK_BUILTIN_SKILLS and confirm it gets pruned, while a real
+        // ...then plant a stale, managed cas-* orphan that isn't part of
+        // GROK_BUILTIN_SKILLS and confirm it gets pruned, while an unmanaged
+        // user skill and a real
         // builtin dir (cas-worker) survives.
         let orphan_dir = grok_dir.join("skills").join("cas-orphan-skill");
         std::fs::create_dir_all(&orphan_dir).unwrap();
-        std::fs::write(orphan_dir.join("SKILL.md"), "not managed by cas").unwrap();
+        std::fs::write(
+            orphan_dir.join("SKILL.md"),
+            "---\nname: cas-orphan-skill\nmanaged_by: cas\n---\n# retired\n",
+        )
+        .unwrap();
 
         let removed = prune_stale_user_skills_for_harness(SupervisorCli::Grok, &grok_dir).unwrap();
 

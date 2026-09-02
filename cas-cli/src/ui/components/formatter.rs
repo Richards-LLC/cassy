@@ -404,6 +404,15 @@ impl<'w> Formatter<'w> {
 
 /// Query terminal width, defaulting to 80 columns.
 pub fn terminal_width() -> u16 {
+    // An explicit COLUMNS override wins so non-TTY consumers (tests, CI
+    // captures) can pin the wrap width deterministically.
+    if let Some(cols) = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|cols| *cols >= 40)
+    {
+        return cols;
+    }
     crossterm::terminal::size()
         .map(|(cols, _)| cols)
         .unwrap_or(80)

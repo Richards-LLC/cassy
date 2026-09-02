@@ -262,8 +262,14 @@ check_snapshot_portability() {
     mkdir -p "$deep_tmp"
     # COLUMNS must be absent, rather than merely empty: terminal-width probes
     # commonly distinguish the two states.
-    env -u COLUMNS TMPDIR="$deep_tmp" \
+    local status
+    env -u COLUMNS INSTA_UPDATE=no TMPDIR="$deep_tmp" \
         "$cargo_bin" nextest run -p cas --test component_output_test
+    status=$?
+    # Never leave insta's pending-snapshot artifacts behind: they would fail
+    # the working-tree row of this same gate.
+    find . -path ./target -prune -o -name '*.snap.new' -print0 2>/dev/null | xargs -0 rm -f --
+    return "$status"
 }
 
 check_builtin_projections() {

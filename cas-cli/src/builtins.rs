@@ -6438,10 +6438,9 @@ This is the body content."#;
                 .iter()
                 .find(|b| b.path == "skills/cas-cut-release/references/failure-log.md")
                 .unwrap_or_else(|| panic!("{label} cas-cut-release failure log is not registered"));
-            assert_eq!(
-                failure_log.content.lines().filter(|line| line.starts_with("- ")).count(),
-                22,
-                "{label} failure log must seed every known release failure"
+            assert!(
+                failure_log.content.lines().filter(|line| line.starts_with("- ")).count() >= 22,
+                "{label} failure log must seed every known release failure (the log only grows via release-gate.sh --learn)"
             );
         }
     }

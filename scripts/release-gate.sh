@@ -241,7 +241,7 @@ check_archive_mode() {
             PATH="$archive_bin${archive_path:+:$archive_path}" \
             "$cargo_bin" nextest run --archive-file "$archive" \
             --workspace-remap "$remap" \
-            --filterset 'not binary_id(component_output_test)'
+            --filterset 'not binary_id(~component_output_test)'
     ); then
         status=0
     else

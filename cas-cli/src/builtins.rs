@@ -57,14 +57,6 @@ pub const BUILTIN_AGENTS: &[BuiltinFile] = &[
         path: "agents/session-summarizer.md",
         content: include_str!("builtins/agents/session-summarizer.md"),
     },
-    BuiltinFile {
-        path: "agents/git-history-analyzer.md",
-        content: include_str!("builtins/agents/git-history-analyzer.md"),
-    },
-    BuiltinFile {
-        path: "agents/issue-intelligence-analyst.md",
-        content: include_str!("builtins/agents/issue-intelligence-analyst.md"),
-    },
 ];
 
 /// All built-in agents managed by Cassy for Codex
@@ -92,14 +84,6 @@ pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "agents/factory-supervisor.md",
         content: include_str!("builtins/codex/agents/factory-supervisor.md"),
-    },
-    BuiltinFile {
-        path: "agents/git-history-analyzer.md",
-        content: include_str!("builtins/codex/agents/git-history-analyzer.md"),
-    },
-    BuiltinFile {
-        path: "agents/issue-intelligence-analyst.md",
-        content: include_str!("builtins/codex/agents/issue-intelligence-analyst.md"),
     },
 ];
 
@@ -280,6 +264,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/codemap/SKILL.md",
         content: include_str!("builtins/skills/codemap/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/codemap/references/doc-hygiene.md",
+        content: include_str!("builtins/skills/codemap/references/doc-hygiene.md"),
+    },
     // cas-servers skill (cas-7c93, GH #87): the sanctioned lifecycle for
     // long-running servers. Registered servers are the only ones that survive
     // worker containment teardown, so the guidance has to reach agents before
@@ -427,20 +415,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
-        content: include_str!("builtins/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
-    },
-    BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
-    BuiltinFile {
-        path: "skills/cas-domain-modeling/SKILL.md",
-        content: include_str!("builtins/skills/cas-domain-modeling/SKILL.md"),
-    },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/skills/cas-codebase-design/DEEPENING.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
     BuiltinFile { path: "skills/cas-tdd/tests.md", content: include_str!("builtins/skills/cas-tdd/tests.md") },
     BuiltinFile { path: "skills/cas-tdd/mocking.md", content: include_str!("builtins/skills/cas-tdd/mocking.md") },
@@ -645,6 +623,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/codemap/SKILL.md",
         content: include_str!("builtins/codex/skills/codemap/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/codemap/references/doc-hygiene.md",
+        content: include_str!("builtins/codex/skills/codemap/references/doc-hygiene.md"),
+    },
     // cas-servers skill (cas-7c93, GH #87) — codex mirror. Kept byte-identical
     // to the .claude copy by `test_builtin_skills_contains_cas_servers`.
     BuiltinFile {
@@ -775,20 +757,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/codex/skills/cas-writing-for-agents/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
-        content: include_str!("builtins/codex/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
-    },
-    BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-diagnosing-bugs/SKILL.md"),
     },
-    BuiltinFile {
-        path: "skills/cas-domain-modeling/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-domain-modeling/SKILL.md"),
-    },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/codex/skills/cas-codebase-design/SKILL.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/codex/skills/cas-codebase-design/DEEPENING.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/codex/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/codex/skills/cas-tdd/SKILL.md") },
     BuiltinFile { path: "skills/cas-tdd/tests.md", content: include_str!("builtins/codex/skills/cas-tdd/tests.md") },
     BuiltinFile { path: "skills/cas-tdd/mocking.md", content: include_str!("builtins/codex/skills/cas-tdd/mocking.md") },
@@ -832,14 +804,6 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "agents/session-summarizer.md",
         content: include_str!("builtins/grok/agents/session-summarizer.md"),
-    },
-    BuiltinFile {
-        path: "agents/git-history-analyzer.md",
-        content: include_str!("builtins/grok/agents/git-history-analyzer.md"),
-    },
-    BuiltinFile {
-        path: "agents/issue-intelligence-analyst.md",
-        content: include_str!("builtins/grok/agents/issue-intelligence-analyst.md"),
     },
 ];
 
@@ -1027,6 +991,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/grok/skills/codemap/SKILL.md"),
     },
     BuiltinFile {
+        path: "skills/codemap/references/doc-hygiene.md",
+        content: include_str!("builtins/grok/skills/codemap/references/doc-hygiene.md"),
+    },
+    BuiltinFile {
         path: "skills/project-overview/SKILL.md",
         content: include_str!("builtins/grok/skills/project-overview/SKILL.md"),
     },
@@ -1167,20 +1135,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/grok/skills/cas-writing-for-agents/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
-        content: include_str!("builtins/grok/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
-    },
-    BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-diagnosing-bugs/SKILL.md"),
     },
-    BuiltinFile {
-        path: "skills/cas-domain-modeling/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-domain-modeling/SKILL.md"),
-    },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/grok/skills/cas-codebase-design/SKILL.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/grok/skills/cas-codebase-design/DEEPENING.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/grok/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/grok/skills/cas-tdd/SKILL.md") },
     BuiltinFile { path: "skills/cas-tdd/tests.md", content: include_str!("builtins/grok/skills/cas-tdd/tests.md") },
     BuiltinFile { path: "skills/cas-tdd/mocking.md", content: include_str!("builtins/grok/skills/cas-tdd/mocking.md") },
@@ -1472,8 +1430,6 @@ pub const REQUIRED_FACTORY_AGENTS: &[&str] = &[
     "agents/rule-reviewer.md",
     "agents/duplicate-detector.md",
     "agents/session-summarizer.md",
-    "agents/git-history-analyzer.md",
-    "agents/issue-intelligence-analyst.md",
 ];
 
 /// The skill catalog for a harness (cas-cc8c parity helpers).
@@ -3225,32 +3181,33 @@ This is the body content."#;
         assert!(!is_managed_by_cas(no_frontmatter));
     }
 
+    /// `git-history-analyzer` and `issue-intelligence-analyst` were retired from
+    /// the universal set (cas-ef87a): nothing ever spawned them, and their
+    /// bodies instructed tools their own `tools:` list excluded. Re-adding an
+    /// agent nothing dispatches costs every session a menu entry, so the
+    /// marker test is inverted rather than deleted.
     #[test]
-    fn test_builtin_agents_contains_git_history_analyzer() {
-        assert!(
-            BUILTIN_AGENTS
-                .iter()
-                .any(|b| b.path == "agents/git-history-analyzer.md")
-        );
-        assert!(
-            CODEX_BUILTIN_AGENTS
-                .iter()
-                .any(|b| b.path == "agents/git-history-analyzer.md")
-        );
-    }
-
-    #[test]
-    fn test_builtin_agents_contains_issue_intelligence_analyst() {
-        assert!(
-            BUILTIN_AGENTS
-                .iter()
-                .any(|b| b.path == "agents/issue-intelligence-analyst.md")
-        );
-        assert!(
-            CODEX_BUILTIN_AGENTS
-                .iter()
-                .any(|b| b.path == "agents/issue-intelligence-analyst.md")
-        );
+    fn test_retired_agents_stay_out_of_every_catalog() {
+        for retired in [
+            "agents/git-history-analyzer.md",
+            "agents/issue-intelligence-analyst.md",
+        ] {
+            for (name, catalog) in [
+                ("BUILTIN_AGENTS", BUILTIN_AGENTS),
+                ("CODEX_BUILTIN_AGENTS", CODEX_BUILTIN_AGENTS),
+                ("GROK_BUILTIN_AGENTS", GROK_BUILTIN_AGENTS),
+            ] {
+                assert!(
+                    !catalog.iter().any(|b| b.path == retired),
+                    "{name} re-registered the retired agent {retired}; wire a real \
+                     caller first or leave it out"
+                );
+            }
+            assert!(
+                !REQUIRED_FACTORY_AGENTS.contains(&retired),
+                "REQUIRED_FACTORY_AGENTS re-required the retired agent {retired}"
+            );
+        }
     }
 
     #[test]
@@ -4031,8 +3988,9 @@ This is the body content."#;
                 "## Shapes",
                 "## Components",
                 "## Do's & Don'ts",
-                // Regeneration must not destroy hand edits.
-                "<!-- keep -->",
+                // Regeneration hygiene (keep blocks, pointer memory, commit)
+                // is shared with codemap/project-overview, not restated here.
+                "doc-hygiene.md",
                 // Thin pointer so Cassy search surfaces the doc.
                 "project_<slug>_designmd",
             ] {
@@ -4135,8 +4093,8 @@ This is the body content."#;
             "name: project-overview",
             "managed_by: cas",
             "docs/PRODUCT_OVERVIEW.md",
-            "<!-- keep -->",
-            "mcp__cas__memory",
+            "doc-hygiene.md",
+            "git add docs/PRODUCT_OVERVIEW.md",
             "cas project-overview clear",
         ] {
             assert!(
@@ -4207,7 +4165,7 @@ This is the body content."#;
             "name: cas-codex-exec",
             "managed_by: cas",
             "token-heavy READ-ONLY investigation",
-            "codex exec -s read-only -m gpt-5.5",
+            "codex exec -s read-only -C",
             "If you find nothing, say so explicitly and name what you inspected.",
             "If `codex` is not installed",
         ] {
@@ -4875,8 +4833,6 @@ This is the body content."#;
         std::fs::create_dir_all(&claude_dir).unwrap();
         sync_all_builtins(&claude_dir).unwrap();
         for p in [
-            "agents/git-history-analyzer.md",
-            "agents/issue-intelligence-analyst.md",
             "skills/cas-brainstorm/SKILL.md",
             "skills/cas-brainstorm/references/handoff.md",
             "skills/cas-brainstorm/references/requirements-capture.md",

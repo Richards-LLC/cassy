@@ -96,47 +96,16 @@ If yes, keep it. If it just restates the directory name, cut it.
 
 When in doubt, **name a concrete module or filename** that lives there.
 
-## Preserving hand-edited sections
-
-If `.claude/CODEMAP.md` already exists:
-
-1. **Read it first.**
-2. **Preserve any `<!-- keep -->` … `<!-- /keep -->` blocks verbatim.** These are user-owned; do not rewrite, reflow, or even re-whitespace them. Place them back in the same section they appeared in.
-3. Everything outside keep-blocks is regenerated.
-4. If a section header has `<!-- keep -->` on the line directly below it, preserve that entire section including the header.
-
-Example:
-
-```markdown
-## Cross-cutting
-<!-- keep -->
-- **Hot paths:** request handling lives entirely under `src/server/middleware/` — touch with care
-- **Migration gotcha:** `prisma/seed.ts` runs in CI; never put dev-only fixtures there
-<!-- /keep -->
-- **Tests:** ...
-```
-
-The two bulleted lines and the `keep` markers survive re-runs.
-
 ## After writing the doc
 
-### 1. Write a thin memory pointer
+Follow [references/doc-hygiene.md](references/doc-hygiene.md) for the three steps this skill shares with `project-overview` and `design-spec`: keep-block preservation on re-runs, the thin pointer memory, and the commit. This skill's specifics:
 
-Invoke `mcp__cas__memory` with `action=remember` to create/update a pointer memory.
+- **Keep-blocks** most often wrap `## Cross-cutting` notes (hot paths, migration gotchas). Put them back in the section they came from.
+- **Pointer memory title:** `project_<slug>_codemap.md` (slug = lowercase kebab-case of project name). Body example: `See [.claude/CODEMAP.md](.claude/CODEMAP.md) — Rust workspace + TS frontend; CLI lives in `cas-cli/`, hooks in `crates/cas-core/`.`
+- **Commit** `.claude/CODEMAP.md`. The freshness gate (SessionStart hook + `cas codemap status`) uses **git history** as the sole authority, so the commit is what resets the signal. Verify with `cas codemap status` → `Status: up to date`. No manual `cas codemap clear` is required.
+- **Report back:** (a) total line count, (b) how many top-level subsystems are mapped, (c) anything notable about the layout (workspace? monorepo? polyglot?).
 
-- **Name / title:** `project_<slug>_codemap.md` (slug = lowercase kebab-case of project name)
-- **Body:** ONE line only. A repo-relative link to the doc plus a single-sentence hook.
-- **No content duplication.** Do not inline the layout. The whole point is that search surfaces the pointer and the reader opens the doc.
-
-Example:
-
-```
-See [.claude/CODEMAP.md](.claude/CODEMAP.md) — Rust workspace + TS frontend; CLI lives in `cas-cli/`, hooks in `crates/cas-core/`.
-```
-
-If a pointer already exists with the same name, update it. Do not create duplicates.
-
-### 2. Seed the knowledge store
+### Seed the knowledge store
 
 `.claude/CODEMAP.md` is a distillable source, so one build turns the doc you just wrote into a knowledge page plus a source-ledger entry:
 
@@ -158,34 +127,10 @@ cas knowledge search "codemap"
 
 If the store is not initialized in this project, the command says so and there is nothing to fix — the doc on disk is still the artifact of record.
 
-### 3. Commit CODEMAP.md to reset the staleness signal
-
-The freshness gate (SessionStart hook + `cas codemap status`) uses **git history** as the sole authority. Once you commit `.claude/CODEMAP.md`, its git timestamp advances past all prior structural changes and both signals automatically report "up to date" in the next session.
-
-```bash
-git add .claude/CODEMAP.md
-git commit -m "docs: regenerate CODEMAP.md"
-```
-
-Then verify:
-
-```bash
-cas codemap status
-```
-
-Should report `Status: up to date`. No manual `cas codemap clear` is required.
-
-### 4. Report back
-
-Print two things to the user:
-
-1. The file path that was written.
-2. A 3-bullet summary: (a) total line count, (b) how many top-level subsystems are mapped, (c) anything notable about the layout (workspace? monorepo? polyglot?).
-
 ## When to run
 
-- **Missing:** `.claude/CODEMAP.md` does not exist → SessionStart fires a `severity="high"` banner, PreToolUse blocks worker dispatch. Generate from scratch.
-- **Stale:** SessionStart/PreToolUse banner reports structural changes since CODEMAP.md was last updated → regenerate, keep-blocks survive.
+- **Missing:** `.claude/CODEMAP.md` does not exist → SessionStart fires a `severity="high"` banner. Nothing is blocked. Generate from scratch.
+- **Stale:** SessionStart reports structural changes since CODEMAP.md was last updated → regenerate, keep-blocks survive. Only once staleness reaches `SignificantlyStale` does PreToolUse gate a supervisor's `task create` / `spawn_workers`; a missing CODEMAP never does.
 - **Manual:** user invokes `/codemap` or asks to refresh the codemap.
 - **After refactors:** modules were added, removed, or renamed across more than a handful of files.
 

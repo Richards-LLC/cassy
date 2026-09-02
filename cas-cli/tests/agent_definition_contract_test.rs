@@ -42,14 +42,35 @@ const DUPLICATE_DETECTOR_PATHS: [&str; 3] = [
     "cas-cli/src/builtins/grok/agents/duplicate-detector.md",
 ];
 
-const DATE_AWARE_AGENT_PATHS: [&str; 6] = [
-    "cas-cli/src/builtins/agents/git-history-analyzer.md",
-    "cas-cli/src/builtins/codex/agents/git-history-analyzer.md",
-    "cas-cli/src/builtins/grok/agents/git-history-analyzer.md",
-    "cas-cli/src/builtins/agents/issue-intelligence-analyst.md",
-    "cas-cli/src/builtins/codex/agents/issue-intelligence-analyst.md",
-    "cas-cli/src/builtins/grok/agents/issue-intelligence-analyst.md",
-];
+/// Every shipped agent definition, in all three flavors.
+///
+/// cas-ef87a retired `git-history-analyzer` and `issue-intelligence-analyst`,
+/// which were the only two agents that carried date guidance at all. The
+/// positive half of the original contract (they must defer to the host date)
+/// therefore has nothing left to assert; the durable half — no agent may
+/// hard-code a calendar year — now sweeps the whole catalog instead, so it
+/// still catches the next agent that tries.
+fn every_agent_definition_path() -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for flavor in ["agents", "codex/agents", "grok/agents"] {
+        let dir = repo_root().join("cas-cli/src/builtins").join(flavor);
+        let entries = fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("failed to list {}: {error}", dir.display()));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    assert!(
+        found.len() >= 15,
+        "expected the three agent catalogs to be discovered, found {}",
+        found.len()
+    );
+    found
+}
 
 #[test]
 fn verifier_mirrors_document_the_current_close_contract() {
@@ -141,15 +162,13 @@ fn agent_hygiene_instructions_match_available_actions_and_runtime_context() {
         );
     }
 
-    for path in DATE_AWARE_AGENT_PATHS {
-        let body = load(path);
+    for path in every_agent_definition_path() {
+        let body = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         assert!(
             !body.contains("Current year: 2026"),
-            "{path} must not hard-code a calendar year"
-        );
-        assert!(
-            body.contains("current date supplied by the host"),
-            "{path} must defer date context to the runtime host"
+            "{} must not hard-code a calendar year",
+            path.display()
         );
     }
 }

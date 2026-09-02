@@ -39,8 +39,9 @@ time until every remaining element is load-bearing.
 ## Phase 3 — Rank falsifiable hypotheses
 
 Produce 3–5 ranked hypotheses. Each must predict what changing one variable
-would do. Record them in the task note and invite domain correction without
-blocking on it; discard a hypothesis that cannot make a testable prediction.
+would do. Record them with `cas__task action=notes note_type=discovery` and
+invite domain correction without blocking on it; discard a hypothesis that
+cannot make a testable prediction.
 
 ## Phase 4 — Instrument one prediction at a time
 
@@ -59,4 +60,5 @@ the original loop.
 
 Before claiming done, rerun the original loop, confirm regression coverage (or
 the documented missing seam), remove tagged instrumentation and marked
-throwaways, and record the validated hypothesis in the commit or task note.
+throwaways, and record the validated hypothesis in the commit message and with
+`cas__task action=notes note_type=discovery`.

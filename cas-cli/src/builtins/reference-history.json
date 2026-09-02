@@ -79,10 +79,16 @@
       "c1e8fac243aebbc7df4025eb9a938f84875396dc5c3d70f115385f87ab801755"
     ],
     "skills/cas-memory-management/references/body-templates.md": [
+      "1f4e4f8739271932bf6e89400ffde8d38b63da093571b39df1e3bc0e5a76f8a8",
+      "3fe2d2947926bc1987a0052d20a21317c72219844f6357c8a32685cb9c4b1bcf",
+      "9906be0fa531919dc9601f0c05ae302a11d2ddc2b1355ded7b4d04829ee47b8f",
       "dd425f5b4518bf4622661de5c377e74285bcb8f6d4a473acf0153266d20c9e20",
       "e3d58410bad40b38d0d0521ceb9107576cadde5bc44f75b27c2cb6d86b45a4ac"
     ],
     "skills/cas-memory-management/references/lifecycle-and-storage.md": [
+      "0ab4004541f685b2b1a0dfb7939ed72d7eef5a1a555ed9167ccc266a252d6282",
+      "6d13ebef24158d829b92e4cc34f40e776ccdc6d9db3f1e78500fb487940f1bb1",
+      "d4d584a54f6839c6f41d6d5f549e1303241d3723abf4d0fced6c0b985a0ac415",
       "dbc172f804c52f98f0dd88443590f4afbcf321e06ed84a64e1fa60496aa800bb"
     ],
     "skills/cas-memory-management/references/overlap-detection.md": [
@@ -90,12 +96,23 @@
       "1c9a2bd0f35fe6d318670e89d41a7baf3e1bf8987c87cb4378bdb814f66406f2",
       "249335385c4f9de2d96b4426ddb3d7ff1f71bbd5f72a415ccad64a07130defdb",
       "3d103aa1e7ad9f4d3d69caf88bfcab9e6dd386a8af0cb23d45049b9c6bce52d4",
+      "6c2fdf7bbfb93d4998abda33c1c19ba1bd816b8e0cf5ef9579eeeb51be28cc66",
+      "76461c44e404e0336eaf41d96a0e4831c673c43162bb3f88582baa17f19fc716",
       "7ba718c4157c2d325b508cfc7b7eb65f1d5db9dbee058705d55643963f0987f9",
+      "9cdd6a0a68bdbd7e893621754b5c28fa915532c254bd7d1b11e9bcfbf3c74fed",
       "c995ccf3f92a8e2fdfc1a80f1b761b17f927c4eb7e4c035b7899743431a54cb7"
     ],
+    "skills/cas-memory-management/references/response-shapes.md": [
+      "4cdd5fd2764ed047e28aeeca81f24ca2d9b3f2a01208b3432f88087e29844acb",
+      "4fbd25d048b432d3a58e8256ea1e34b001bc5217ae4bf22b98c8ba76672b7875",
+      "e3a892592116994be39e36429830e2f30e59cafd2b64f644bae60392d7902094"
+    ],
     "skills/cas-memory-management/references/schema.yaml": [
+      "33a2e8c448a6f39e52b44effd3db0e89ab6da15314eb4c48444088375e5985a5",
       "3724bbce65536273116893c0bab5da01adf5decee919a698ac8414c9801dd919",
+      "610abd6312234f516df895499ed3829ef6a9d043e82ca47d4acbd0f2fc1811b1",
       "8ab27882077070c3be99071e5f811dccda8ada0db867e180ba1ec9b20d04989e",
+      "8db797ad0e9f81c3594fe282246b03b762080a1de8b5c00f25b516f4559896d7",
       "ddcd665359b281748111ab2e6f599d2d7ae9387301fc3dd8a46898ce88c008cc"
     ],
     "skills/cas-nuxt-playwright/references/auth-fixture-template.md": [

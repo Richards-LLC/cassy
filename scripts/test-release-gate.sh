@@ -18,9 +18,14 @@ ok() { printf 'ok   %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf 'FAIL %s\n' "$1"; fail=$((fail + 1)); }
 
 new_fixture() {
-    local name="$1" repo="$tmp/$name"
+    local name="$1" repo
+    repo="$tmp/$name"
     mkdir -p "$repo/scripts" "$repo/cas-cli/src" "$repo/cas-cli/tests" "$repo/crates"
     cp "$gate" "$repo/scripts/release-gate.sh"
+    cat >"$repo/Cargo.toml" <<'EOF'
+[workspace]
+members = ["cas-cli", "crates/cas-types", "crates/cas-search", "crates/cas-store", "crates/cas-core", "crates/cas-mcp"]
+EOF
     cat >"$repo/scripts/gen-builtin-reference-history.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -34,6 +39,24 @@ EOF
     chmod +x "$repo/scripts"/*.sh
     mkdir -p "$repo/cas-cli/src/builtins"
     : >"$repo/cas-cli/src/builtins/reference-history.json"
+    for mirror in \
+        "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"; do
+        mkdir -p "$(dirname "$mirror")"
+        printf '%s\n' '- 2026-09-02 — **version-literals** — Symptom: fixture source literal. Root cause: fixture. Release: v3.12.0.' >"$mirror"
+    done
+    cat >"$repo/cas-cli/src/builtins/skills/cas-cut-release/SKILL.md" <<'EOF'
+Use when cutting a release.
+Run the full suite on the assembled tree. Use nohup, kill -0, stranded_branch_override,
+release-published-receipt.sh --write-draft, and cas --version.
+EOF
+    cat >"$repo/scripts/release.sh" <<'EOF'
+#!/usr/bin/env bash
+./scripts/release.sh                 # local audit only
+target/$target/release/build"/blake3-*
+target/$target/release/.fingerprint"/blake3-*
+EOF
     cat >"$repo/cas-cli/src/version.rs" <<'EOF'
 // fixture source
 EOF
@@ -47,6 +70,8 @@ EOF
         printf '[package]\nname = "%s"\nversion = "9.8.7"\n' "$crate" >"$file"
     done
     cat >"$repo/CHANGELOG.md" <<'EOF'
+## [Unreleased]
+
 ## [9.8.7] - 2026-09-02
 
 - Fixture release.
@@ -59,14 +84,18 @@ EOF
 set -euo pipefail
 printf '%s\n' "$*" >>"${GATE_FIXTURE_CARGO_LOG:?}"
 if [[ "$*" == 'check --workspace --tests' && "${GATE_FIXTURE_CHECK_FAIL:-}" == 1 ]]; then exit 1; fi
-if [[ "$*" == 'nextest run -p cas' && "${GATE_FIXTURE_NEXTEST_FAIL:-}" == 1 ]]; then exit 1; fi
+if [[ "$*" == 'nextest run -p cas'* && "${GATE_FIXTURE_NEXTEST_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'test -p cas --doc' && "${GATE_FIXTURE_DOCTEST_FAIL:-}" == 1 ]]; then exit 1; fi
-if [[ "$*" == 'nextest run -p cas --test component_output_test' && "${GATE_FIXTURE_SNAPSHOT_FAIL:-}" == 1 ]]; then exit 1; fi
-if [[ "$*" == 'nextest run -p cas --test builtin_flavor_drift_test' && "${GATE_FIXTURE_DRIFT_FAIL:-}" == 1 ]]; then exit 1; fi
+if [[ "${GATE_FIXTURE_SNAPSHOT_FAIL:-}" == 1 ]]; then
+  case "$*" in *component_output_test*) exit 1;; esac
+fi
+if [[ "${GATE_FIXTURE_DRIFT_FAIL:-}" == 1 ]]; then
+  case "$*" in *builtin_flavor_drift_test*) exit 1;; esac
+fi
 if [[ "$*" == 'nextest archive -p cas'* ]]; then
   archive_file=''
   for arg in "$@"; do [[ "$arg" == *.tar.zst ]] && archive_file="$arg"; done
-  [[ -n "$archive_file" ]] && : >"$archive_file"
+  [[ -n "$archive_file" ]] && printf archive >"$archive_file"
   exit 0
 fi
 if [[ "$*" == 'nextest run --archive-file '* && "${GATE_FIXTURE_ARCHIVE_FAIL:-}" == 1 ]]; then exit 1; fi
@@ -81,13 +110,22 @@ EOF
 }
 
 run_gate() {
-    local repo="$1"
-    shift
-    (cd "$repo" && \
-      GATE_FIXTURE_CARGO_LOG="$repo/cargo.log" \
-      CARGO="$repo/scripts/cargo-stub" \
-      RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
-      "$@")
+    local repo="$1" failure_variable="${2:-}"
+    shift 2
+    if [[ -n "$failure_variable" ]]; then
+        (cd "$repo" && \
+          env "$failure_variable=1" \
+          GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+          CARGO="$repo/scripts/cargo-stub" \
+          RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
+          "$@")
+    else
+        (cd "$repo" && \
+          GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+          CARGO="$repo/scripts/cargo-stub" \
+          RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
+          "$@")
+    fi
 }
 
 assert_named_failure() {
@@ -101,8 +139,9 @@ assert_named_failure() {
 
 assert_all_pass() {
     local output="$1"
-    for name in version-literals workspace-tests nextest doctests archive-mode \
-        snapshot-portability builtin-projections changelog-and-versions working-tree; do
+    for name in failure-log version-literals workspace-tests nextest doctests archive-mode \
+        snapshot-portability builtin-projections changelog-and-versions release-script \
+        procedure-guardrails working-tree; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
             return
@@ -118,16 +157,15 @@ assert_all_pass() {
 run_scenario() {
     local name="$1" variable="$2" repo output
     repo="$(new_fixture "$name")"
-    : >"$repo/cargo.log"
-    output="$( (export "$variable=1"; run_gate "$repo" "$repo/scripts/release-gate.sh" 9.8.7) 2>&1 || true)"
+    output="$(run_gate "$repo" "$variable" "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
     assert_named_failure "$3" "$output"
 }
 
 # 1-7. Each mechanical or command-backed failure is isolated in its own repo.
 repo="$(new_fixture version-literal)"
 printf 'const VERSION: &str = "9.8.7";\n' >"$repo/cas-cli/src/version.rs"
-output="$(run_gate "$repo" "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
-assert_named_failure version-literal "$output"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+assert_named_failure version-literals "$output"
 
 run_scenario workspace-check GATE_FIXTURE_CHECK_FAIL workspace-tests
 run_scenario nextest-run GATE_FIXTURE_NEXTEST_FAIL nextest
@@ -142,16 +180,16 @@ run_scenario reference-ledger GATE_FIXTURE_REFERENCE_FAIL builtin-projections
 # 9. Changelog/version contract and clean-tree contract are independent.
 repo="$(new_fixture changelog-failure)"
 sed -i '/Fixture release/d' "$repo/CHANGELOG.md"
-output="$(run_gate "$repo" "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
 assert_named_failure changelog-and-versions "$output"
 
 repo="$(new_fixture dirty-tree)"
 printf 'untracked\n' >"$repo/untracked.txt"
-output="$(run_gate "$repo" "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
 assert_named_failure working-tree "$output"
 
 repo="$(new_fixture passing)"
-output="$(run_gate "$repo" "$repo/scripts/release-gate.sh" 9.8.7 2>&1)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1)"
 assert_all_pass "$output"
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

@@ -2496,6 +2496,97 @@ mod tests {
     }
 
     #[test]
+    fn mixed_sections_pack_ok_checks_on_the_section_line() {
+        let checks = vec![
+            Check::new("legacy search index", CheckStatus::Ok, "available"),
+            Check::new(
+                "search index",
+                CheckStatus::Warning,
+                "index is stale; Run `cas index`",
+            ),
+            Check::new("symbol index", CheckStatus::Ok, "available"),
+        ];
+
+        let report = render_report_plain(
+            &checks,
+            "example/project",
+            "3.10.1",
+            Duration::from_millis(1),
+            false,
+            100,
+        );
+
+        let indexes_line = report
+            .lines()
+            .find(|line| line.starts_with("Indexes"))
+            .expect("mixed section line");
+        assert!(indexes_line.contains("[OK] legacy search index"));
+        assert!(indexes_line.contains("[OK] symbol index"));
+        assert!(!indexes_line.contains("[WARN]"));
+        assert!(report.lines().any(|line| {
+            line.starts_with("  [WARN] search index") && line.contains("index is stale")
+        }));
+    }
+
+    #[test]
+    fn non_ok_messages_wrap_without_truncation() {
+        let message = "573 foreign task row(s) from 9 other project(s) (Accounting, Penguinz, Woodworking, abundant details that operators need)";
+        let checks = vec![Check::new(
+            "cross-project rows",
+            CheckStatus::Warning,
+            message,
+        )];
+
+        let report = render_report_plain(
+            &checks,
+            "example/project",
+            "3.10.1",
+            Duration::from_millis(1),
+            false,
+            60,
+        );
+        let compact_report: String = report.split_whitespace().collect();
+        let compact_message: String = message.split_whitespace().collect();
+
+        assert!(
+            compact_report.contains(&compact_message),
+            "full diagnostic should survive wrapping:\n{report}"
+        );
+        assert!(!report.contains('…'), "diagnostic was truncated:\n{report}");
+    }
+
+    #[test]
+    fn narrow_or_unknown_width_uses_eighty_column_layout() {
+        let checks = vec![
+            Check::new("database", CheckStatus::Ok, "SQLite database found"),
+            Check::new("entries", CheckStatus::Ok, "1234567 entries accessible"),
+        ];
+
+        let expected = render_report_plain(
+            &checks,
+            "example/project",
+            "3.10.1",
+            Duration::from_millis(1),
+            false,
+            80,
+        );
+        for width in [0, 1, 39] {
+            assert_eq!(
+                render_report_plain(
+                    &checks,
+                    "example/project",
+                    "3.10.1",
+                    Duration::from_millis(1),
+                    false,
+                    width,
+                ),
+                expected,
+                "width {width} should use the 80-column fallback"
+            );
+        }
+    }
+
+    #[test]
     fn doctor_json_is_a_superset_with_group_and_remediation() {
         let checks = vec![Check::new(
             "symbol index",
@@ -4205,6 +4296,42 @@ fn duration_label(duration: Duration) -> String {
     }
 }
 
+fn wrap_report_text(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if !current.is_empty() && current.chars().count() + 1 + word_len <= width {
+            current.push(' ');
+            current.push_str(word);
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        for ch in word.chars() {
+            if current.chars().count() >= width {
+                lines.push(std::mem::take(&mut current));
+            }
+            current.push(ch);
+        }
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 fn write_report_line(
     fmt: &mut Formatter<'_>,
     status: Option<&CheckStatus>,
@@ -4227,6 +4354,32 @@ fn write_report_line(
     fmt.newline()
 }
 
+fn write_ok_section_line(
+    fmt: &mut Formatter<'_>,
+    group: CheckGroup,
+    checks: &[&Check],
+    width: usize,
+) -> std::io::Result<()> {
+    let label = format!("{:<14}", group.label());
+    let marker = status_label(&CheckStatus::Ok, fmt.is_styled());
+    let mut line = label.clone();
+    let indent = " ".repeat(14);
+    for check in checks {
+        let pair = format!("{marker} {}", check.name);
+        let prefix = if line == label { "" } else { "  " };
+        if line.chars().count() + prefix.chars().count() + pair.chars().count() > width
+            && line != label
+        {
+            write_report_line(fmt, Some(&CheckStatus::Ok), &line)?;
+            line = format!("{indent}{pair}");
+        } else {
+            line.push_str(prefix);
+            line.push_str(&pair);
+        }
+    }
+    write_report_line(fmt, Some(&CheckStatus::Ok), &line)
+}
+
 fn render_report(
     fmt: &mut Formatter<'_>,
     checks: &[Check],
@@ -4237,7 +4390,11 @@ fn render_report(
 ) -> std::io::Result<()> {
     fmt.write_bold(&format!("cas doctor · {canonical_id} · {version}"))?;
     fmt.newline()?;
-    fmt.write_muted(&Icons::SEPARATOR.repeat(fmt.width().min(80) as usize))?;
+    let width = match fmt.width() as usize {
+        width if width < 40 => 80,
+        width => width,
+    };
+    fmt.write_muted(&Icons::SEPARATOR.repeat(width.min(80)))?;
     fmt.newline()?;
 
     let groups = [
@@ -4247,7 +4404,6 @@ fn render_report(
         CheckGroup::Config,
         CheckGroup::Integrations,
     ];
-    let width = fmt.width() as usize;
     for group in groups {
         let section: Vec<&Check> = checks
             .iter()
@@ -4259,30 +4415,22 @@ fn render_report(
         let all_ok = section
             .iter()
             .all(|check| matches!(check.status, CheckStatus::Ok));
+        let ok_checks: Vec<&Check> = section
+            .iter()
+            .copied()
+            .filter(|check| matches!(check.status, CheckStatus::Ok))
+            .collect();
         if all_ok {
-            let label = format!("{:<14}", group.label());
-            let marker = status_label(&CheckStatus::Ok, fmt.is_styled());
-            let mut line = label.clone();
-            let indent = " ".repeat(14);
-            for check in section {
-                let pair = format!("{marker} {}", check.name);
-                let prefix = if line == label { "" } else { "  " };
-                if line.chars().count() + prefix.chars().count() + pair.chars().count() > width
-                    && line != label
-                {
-                    write_report_line(fmt, Some(&CheckStatus::Ok), &line)?;
-                    line = format!("{indent}{pair}");
-                } else {
-                    line.push_str(prefix);
-                    line.push_str(&pair);
-                }
-            }
-            write_report_line(fmt, Some(&CheckStatus::Ok), &line)?;
+            write_ok_section_line(fmt, group, &ok_checks, width)?;
             continue;
         }
 
-        fmt.write_bold(group.label())?;
-        fmt.newline()?;
+        if ok_checks.is_empty() {
+            fmt.write_bold(group.label())?;
+            fmt.newline()?;
+        } else {
+            write_ok_section_line(fmt, group, &ok_checks, width)?;
+        }
         let name_width = section
             .iter()
             .map(|check| check.name.chars().count())
@@ -4290,15 +4438,6 @@ fn render_report(
             .unwrap_or(0);
         for check in section {
             if matches!(check.status, CheckStatus::Ok) {
-                write_report_line(
-                    fmt,
-                    Some(&check.status),
-                    &format!(
-                        "  {} {}",
-                        status_label(&check.status, fmt.is_styled()),
-                        check.name
-                    ),
-                )?;
                 continue;
             }
             let prefix = format!(
@@ -4307,10 +4446,18 @@ fn render_report(
                 check.name,
                 name_width = name_width
             );
-            let available = width.saturating_sub(prefix.chars().count()).max(20);
+            let available = width.saturating_sub(prefix.chars().count()).max(1);
             let (message, remediation) = check.parts();
-            let message = truncate(&format_counted_text(&message), available);
-            write_report_line(fmt, Some(&check.status), &format!("{prefix}{message}"))?;
+            let message_lines = wrap_report_text(&format_counted_text(&message), available);
+            let hanging_indent = " ".repeat(prefix.chars().count());
+            for (line_index, message_line) in message_lines.iter().enumerate() {
+                let line = if line_index == 0 {
+                    format!("{prefix}{message_line}")
+                } else {
+                    format!("{hanging_indent}{message_line}")
+                };
+                write_report_line(fmt, Some(&check.status), &line)?;
+            }
             if let Some(remediation) = remediation {
                 fmt.write_muted(&format!(
                     "  {} {}",

@@ -263,6 +263,10 @@ impl CloudSyncer {
         target.pushed_agents += source.pushed_agents;
         target.pushed_worktrees += source.pushed_worktrees;
         target.pushed_task_dependencies += source.pushed_task_dependencies;
+        target.conflicts_resolved += source.conflicts_resolved;
+        target.conflicts_resolved_local += source.conflicts_resolved_local;
+        target.conflicts_resolved_remote += source.conflicts_resolved_remote;
+        target.conflicts.extend(source.conflicts);
         target.errors.extend(source.errors);
     }
 
@@ -700,7 +704,7 @@ impl CloudSyncer {
                     let body = resp.into_string().unwrap_or_default();
                     let error = format!("Delete failed with status {status}: {body}");
                     let _ = self.queue.mark_failed(item.id, &error);
-                    eprintln!("Delete {cas_id} failed with status {status}: {body}");
+                    tracing::warn!("Delete {cas_id} failed with status {status}: {body}");
                 }
                 Err(ureq::Error::Status(404, _)) => {
                     // Already absent remotely is the desired final state.
@@ -711,12 +715,12 @@ impl CloudSyncer {
                     let body = resp.into_string().unwrap_or_default();
                     let error = format!("Delete failed with status {status}: {body}");
                     let _ = self.queue.mark_failed(item.id, &error);
-                    eprintln!("Delete {cas_id} failed with status {status}: {body}");
+                    tracing::warn!("Delete {cas_id} failed with status {status}: {body}");
                 }
                 Err(ureq::Error::Transport(e)) => {
                     let error = format!("Delete failed: {e}");
                     let _ = self.queue.mark_failed(item.id, &error);
-                    eprintln!("Delete {cas_id} failed: {e}");
+                    tracing::warn!("Delete {cas_id} failed: {e}");
                 }
             }
         }

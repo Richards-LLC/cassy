@@ -18,7 +18,9 @@ use crate::builtins::{
     prune_stale_user_skills_for_harness, sync_all_builtins_for_harness,
 };
 use crate::cli::Cli;
-use crate::cli::cloud::{CloudSyncArgs, SyncSummary, execute_sync_with_summaries};
+use crate::cli::cloud::{
+    CloudSyncArgs, SyncSummary, execute_sync_with_summaries, render_sync_summary,
+};
 use crate::cli::factory_tooling;
 use crate::cli::hook::{
     configure_claude_hooks, configure_mcp_server, provision_codex_project,
@@ -31,7 +33,8 @@ use crate::hybrid_search::{LegacyRepairLimits, LegacyRepairOutcome, repair_legac
 use crate::migration::{check_migrations, run_migrations};
 use crate::store::{open_rule_store, open_skill_store, open_store};
 use crate::sync::{SkillSyncer, Syncer};
-use crate::ui::components::{Border, Formatter, Renderable, Table};
+use crate::ui::components::table::Column as TableColumn;
+use crate::ui::components::{Border, Formatter, OutputMode, Renderable, Table, Width};
 use crate::ui::theme::ActiveTheme;
 
 mod preview;
@@ -332,6 +335,25 @@ impl ProjectPhase {
             | Self::Failed(detail) => detail,
         }
     }
+
+    fn severity(&self) -> u8 {
+        match self {
+            Self::Failed(_) => 3,
+            Self::Warning(_) => 2,
+            Self::Skipped(_) | Self::Planned(_) => 1,
+            Self::Ok(_) => 0,
+        }
+    }
+
+    fn status_label(&self) -> &'static str {
+        match self {
+            Self::Ok(_) => "[OK]",
+            Self::Skipped(_) => "[SKIP]",
+            Self::Planned(_) => "[DRY]",
+            Self::Warning(_) => "[WARN]",
+            Self::Failed(_) => "[ERROR]",
+        }
+    }
 }
 
 struct ProjectRefreshReceipt {
@@ -465,29 +487,46 @@ fn project_display_name(path: &Path, verbose: bool) -> String {
 
 fn project_note(receipt: &ProjectRefreshReceipt) -> String {
     let phases = [
-        &receipt.migration,
-        &receipt.search_index,
-        &receipt.skills,
-        &receipt.membership,
-        &receipt.cloud,
+        ("migration", &receipt.migration),
+        ("index", &receipt.search_index),
+        ("skills", &receipt.skills),
+        ("member", &receipt.membership),
+        ("cloud", &receipt.cloud),
     ];
-    let phase = phases
+    let non_ok =
+        phases
+            .iter()
+            .filter(|(_, phase)| !phase.is_ok())
+            .fold(None, |most_severe, candidate| match most_severe {
+                None => Some(candidate),
+                Some(current) if candidate.1.severity() > current.1.severity() => Some(candidate),
+                Some(current) => Some(current),
+            });
+    if let Some((label, phase)) = non_ok {
+        let detail = phase.detail().trim();
+        let reason = if detail.is_empty() {
+            format!("{label} {}", phase.status_label().trim_matches(['[', ']']))
+        } else {
+            detail.to_owned()
+        };
+        return shorten_project_note(&reason);
+    }
+
+    let detail = phases
         .iter()
-        .find(|phase| !phase.is_ok())
-        .map(|phase| phase.detail())
-        .or_else(|| {
-            phases
-                .iter()
-                .find(|phase| !phase.detail().is_empty())
-                .map(|phase| phase.detail())
-        });
-    let detail = phase.unwrap_or_default();
+        .find(|(_, phase)| !phase.detail().is_empty())
+        .map(|(_, phase)| phase.detail())
+        .unwrap_or_default();
     if detail.contains("not cloud-linked") {
         return "not cloud-linked".to_owned();
     }
     if let Some(version) = version_token(detail).or_else(|| version_token(&receipt.details)) {
         return version;
     }
+    shorten_project_note(detail)
+}
+
+fn shorten_project_note(detail: &str) -> String {
     if detail.chars().count() > 28 {
         let short = detail.chars().take(28).collect::<String>();
         format!("{short}…")
@@ -508,7 +547,7 @@ fn version_token(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn render_project_table_plain(receipts: &[ProjectRefreshReceipt], verbose: bool) -> String {
+fn project_table(receipts: &[ProjectRefreshReceipt], verbose: bool) -> Table {
     let rows = receipts
         .iter()
         .map(|receipt| {
@@ -523,27 +562,38 @@ fn render_project_table_plain(receipts: &[ProjectRefreshReceipt], verbose: bool)
             ]
         })
         .collect::<Vec<_>>();
-    let table = Table::new()
-        .columns(&[
-            "project",
-            "migration",
-            "index",
-            "skills",
-            "membership",
-            "cloud",
-            "note",
+    Table::new()
+        .columns_detailed(vec![
+            TableColumn::new("project"),
+            TableColumn::new("migr").width(Width::Min(4)),
+            TableColumn::new("index").width(Width::Min(5)),
+            TableColumn::new("skills").width(Width::Min(6)),
+            TableColumn::new("member").width(Width::Min(6)),
+            TableColumn::new("cloud").width(Width::Min(5)),
+            TableColumn::new("note"),
         ])
         .rows(rows)
         .border(Border::None)
-        .indent(2);
+        .indent(2)
+}
+
+fn render_project_table_at_width(
+    receipts: &[ProjectRefreshReceipt],
+    verbose: bool,
+    mode: OutputMode,
+    width: u16,
+) -> String {
+    let table = project_table(receipts, verbose);
     let mut bytes = Vec::new();
     {
-        let mut fmt = Formatter::plain(&mut bytes);
-        table
-            .render(&mut fmt)
-            .expect("plain project table cannot fail");
+        let mut fmt = Formatter::new(&mut bytes, mode, ActiveTheme::default(), width);
+        table.render(&mut fmt).expect("project table cannot fail");
     }
-    String::from_utf8(bytes).expect("plain project table is UTF-8")
+    String::from_utf8(bytes).expect("project table is UTF-8")
+}
+
+fn render_project_table_plain(receipts: &[ProjectRefreshReceipt], verbose: bool) -> String {
+    render_project_table_at_width(receipts, verbose, OutputMode::Plain, 80)
 }
 
 fn strip_repeated_warning_lines(
@@ -588,6 +638,41 @@ fn strip_repeated_warning_lines(
         kept.push('\n');
     }
     kept
+}
+
+fn render_project_phase_details(
+    receipt: &ProjectRefreshReceipt,
+    verbose: bool,
+    warnings: &mut RepeatedWarningCollector,
+    project: &str,
+) -> String {
+    let phases = [
+        ("migration", &receipt.migration),
+        ("index", &receipt.search_index),
+        ("skills", &receipt.skills),
+        ("member", &receipt.membership),
+        ("cloud", &receipt.cloud),
+    ];
+    let mut selected = String::new();
+    for (index, (label, phase)) in phases.into_iter().enumerate() {
+        let (captured_ok, output) = receipt
+            .phase_details
+            .get(index)
+            .map(|(is_ok, output)| (*is_ok, output.as_str()))
+            .unwrap_or((phase.is_ok(), ""));
+        if verbose || !captured_ok {
+            if output.trim().is_empty() && !phase.is_ok() {
+                selected.push_str(&format!(
+                    "{} {label}: {}\n",
+                    phase.status_label(),
+                    phase.detail()
+                ));
+            } else {
+                selected.push_str(output);
+            }
+        }
+    }
+    strip_repeated_warning_lines(&selected, warnings, project, verbose)
 }
 
 fn print_update_banner_with_formatter(
@@ -971,6 +1056,17 @@ fn sync_project_cloud(
     ) {
         Ok(summaries) => {
             let phase = cloud_phase_from_summaries(&summaries);
+            let mut out = io::stdout();
+            let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+            if let Err(error) = summaries
+                .iter()
+                .try_for_each(|summary| render_sync_summary(&mut fmt, summary, cli.verbose))
+            {
+                return (
+                    ProjectPhase::Failed(format!("could not render cloud summary: {error}")),
+                    summaries,
+                );
+            }
             (phase, summaries)
         }
         Err(error) => (
@@ -1063,13 +1159,7 @@ fn print_project_refresh_summary(
         // Collect warnings from every phase, including successful phases whose
         // output is intentionally omitted from the compact transcript.
         warnings.collect_output(&project, &receipt.details);
-        let selected = receipt
-            .phase_details
-            .iter()
-            .filter(|(is_ok, _)| cli.verbose || !*is_ok)
-            .map(|(_, output)| output.as_str())
-            .collect::<String>();
-        let detail = strip_repeated_warning_lines(&selected, &mut warnings, &project, cli.verbose);
+        let detail = render_project_phase_details(receipt, cli.verbose, &mut warnings, &project);
         let show_detail = cli.verbose
             || [
                 &receipt.migration,

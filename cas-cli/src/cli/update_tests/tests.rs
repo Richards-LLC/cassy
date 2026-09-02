@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::cli::Cli;
+use crate::ui::components::OutputMode;
 
 #[test]
 fn test_is_newer() {
@@ -38,6 +39,74 @@ fn project_table_plain_uses_phase_glyphs_and_compact_project_names() {
     assert!(output.contains("✗"), "output was:\n{output}");
     assert!(output.contains("–"), "output was:\n{output}");
     assert!(!output.contains("/home/alice"), "output was:\n{output}");
+    let row = output.lines().nth(1).expect("project table row");
+    assert!(
+        row.contains("timeout"),
+        "most severe phase reason missing:\n{output}"
+    );
+}
+
+#[test]
+fn project_table_phase_headers_are_not_truncated_at_supported_widths() {
+    let receipts = vec![ProjectRefreshReceipt {
+        project: PathBuf::from(
+            "/home/alice/projects/a-project-with-a-deliberately-long-name/another-project",
+        ),
+        migration: ProjectPhase::Ok("v248".to_owned()),
+        search_index: ProjectPhase::Ok("up to date".to_owned()),
+        skills: ProjectPhase::Ok("up to date".to_owned()),
+        membership: ProjectPhase::Ok("up to date".to_owned()),
+        cloud: ProjectPhase::Ok("up to date".to_owned()),
+        details: String::new(),
+        phase_details: Vec::new(),
+    }];
+
+    for mode in [OutputMode::Plain, OutputMode::Styled] {
+        for width in [80, 120] {
+            let output = render_project_table_at_width(&receipts, false, mode, width);
+            let header = output.lines().next().expect("project table header");
+            for truncated in ["migra…", "inde…", "skill…", "membe…", "clou…"] {
+                assert!(
+                    !header.contains(truncated),
+                    "phase header truncated at {width} columns in {mode:?}: {header:?}"
+                );
+            }
+            for label in ["project", "migr", "index", "skills", "member", "cloud"] {
+                assert!(
+                    header.contains(label),
+                    "missing {label:?} header at {width} columns in {mode:?}: {header:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn non_ok_phase_details_include_phase_summary_when_capture_is_empty() {
+    let receipt = ProjectRefreshReceipt {
+        project: PathBuf::from("/home/alice/projects/demo"),
+        migration: ProjectPhase::Ok("v248".to_owned()),
+        search_index: ProjectPhase::Ok("up to date".to_owned()),
+        skills: ProjectPhase::Ok("up to date".to_owned()),
+        membership: ProjectPhase::Ok("up to date".to_owned()),
+        cloud: ProjectPhase::Warning("12 queued".to_owned()),
+        details: String::new(),
+        phase_details: vec![
+            (true, String::new()),
+            (true, String::new()),
+            (true, String::new()),
+            (true, String::new()),
+            (false, String::new()),
+        ],
+    };
+    let mut warnings = RepeatedWarningCollector::default();
+
+    let detail = render_project_phase_details(&receipt, false, &mut warnings, "projects/demo");
+
+    assert!(
+        detail.contains("[WARN] cloud: 12 queued"),
+        "cloud phase summary missing from detail output: {detail:?}"
+    );
 }
 
 #[test]

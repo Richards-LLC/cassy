@@ -3,8 +3,10 @@
 use clap::Args;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
+use crate::hybrid_search::SearchIndex;
 use crate::migration::{
     check_migrations,
     detector::{SchemaSummary, get_schema_summary},
@@ -15,8 +17,7 @@ use crate::store::{
 };
 use crate::types::RuleStatus;
 use crate::ui::components::Formatter;
-use crate::ui::theme::ActiveTheme;
-use crate::hybrid_search::SearchIndex;
+use crate::ui::theme::{ActiveTheme, Icons};
 
 use crate::cli::Cli;
 
@@ -39,6 +40,106 @@ struct Check {
     name: String,
     status: CheckStatus,
     message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckGroup {
+    Store,
+    Indexes,
+    Cloud,
+    Config,
+    Integrations,
+}
+
+impl CheckGroup {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Store => "Store",
+            Self::Indexes => "Indexes",
+            Self::Cloud => "Cloud",
+            Self::Config => "Config",
+            Self::Integrations => "Integrations",
+        }
+    }
+
+    fn json_name(self) -> &'static str {
+        match self {
+            Self::Store => "store",
+            Self::Indexes => "indexes",
+            Self::Cloud => "cloud",
+            Self::Config => "config",
+            Self::Integrations => "integrations",
+        }
+    }
+
+    fn for_name(name: &str) -> Self {
+        match name.to_ascii_lowercase().as_str() {
+            "legacy search index"
+            | "pre-versioned search index"
+            | "search index"
+            | "symbol index"
+            | "embedding drain"
+            | "embeddings"
+            | "code history index" => Self::Indexes,
+            "canonical id"
+            | "canonical id collision"
+            | "project aliases"
+            | "cloud sync queue"
+            | "cross-project rows"
+            | "foreign knowledge pages"
+            | "supervisor relay"
+            | "delivery retries" => Self::Cloud,
+            "configuration" | "mcp config" | "mcp stdio upstreams" | "sync target" | "models" => {
+                Self::Config
+            }
+            "integrations" => Self::Integrations,
+            name if name.starts_with("integration") => Self::Integrations,
+            _ => Self::Store,
+        }
+    }
+}
+
+impl Check {
+    fn new(name: impl Into<String>, status: CheckStatus, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status,
+            message: message.into(),
+        }
+    }
+
+    fn group(&self) -> CheckGroup {
+        CheckGroup::for_name(&self.name)
+    }
+
+    /// Split operator guidance from the short diagnostic while retaining the
+    /// original message for verbose output. Existing checks historically
+    /// embedded their actionable command in `message`; keeping that source
+    /// shape here lets every producer migrate without changing its verdict.
+    fn parts(&self) -> (String, Option<String>) {
+        const REMEDIATION_MARKERS: &[&str] = &[
+            "; Run `",
+            ". Run `",
+            ". Review ",
+            ". Do not treat ",
+            "; repair ",
+            "; run `",
+            ". run `",
+            "— run `",
+        ];
+        let Some((index, _marker)) = REMEDIATION_MARKERS
+            .iter()
+            .filter_map(|marker| self.message.find(marker).map(|index| (index, *marker)))
+            .min_by_key(|(index, _)| *index)
+        else {
+            return (self.message.clone(), None);
+        };
+        let message = self.message[..index].trim_end().to_string();
+        let remediation = self.message[index..]
+            .trim_start_matches([';', '.', ' ', '—'])
+            .to_string();
+        (message, (!remediation.is_empty()).then_some(remediation))
+    }
 }
 
 enum CheckStatus {
@@ -83,24 +184,22 @@ fn schema_tables_check(summary: &SchemaSummary) -> Check {
         .collect();
 
     if missing_tables.is_empty() {
-        Check {
-            name: "tables".to_string(),
-            status: CheckStatus::Ok,
-            message: format!(
-                "{table_count} tables, {total_columns} columns, {total_rows} rows total"
-            ),
-        }
+        Check::new(
+            "tables",
+            CheckStatus::Ok,
+            format!("{table_count} tables, {total_columns} columns, {total_rows} rows total"),
+        )
     } else {
-        Check {
-            name: "tables".to_string(),
-            status: CheckStatus::Warning,
-            message: format!(
+        Check::new(
+            "tables",
+            CheckStatus::Warning,
+            format!(
                 "{} tables ({} missing: {})",
                 table_count,
                 missing_tables.len(),
                 missing_tables.join(", ")
             ),
-        }
+        )
     }
 }
 
@@ -117,11 +216,7 @@ fn memory_decay_check(cas_root: &Path) -> Check {
         .unwrap_or_else(|_| {
             "Memory decay (last cycle): unavailable (no completed decay cycle recorded)".to_string()
         });
-    Check {
-        name: "memory decay".to_string(),
-        status: CheckStatus::Ok,
-        message,
-    }
+    Check::new("memory decay", CheckStatus::Ok, message)
 }
 
 /// Report the routable supervisor population for every factory session that
@@ -163,16 +258,17 @@ fn factory_supervisor_checks(agents: &[crate::types::Agent]) -> Vec<Check> {
                         .join(", ")
                 ),
             };
-            Check {
-                name: format!("factory session {session}"),
+            Check::new(
+                format!("factory session {session}"),
                 status,
-                message: format!("supervisors: {count}; {detail}"),
-            }
+                format!("supervisors: {count}; {detail}"),
+            )
         })
         .collect()
 }
 
 pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
+    let started = Instant::now();
     let mut checks = Vec::new();
     let mut resolved_cas_root = cas_root.map(Path::to_path_buf);
 
@@ -216,7 +312,12 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                         status: CheckStatus::Error,
                         message: format!("Failed to initialize Cassy: {e}"),
                     });
-                    return output_checks(&checks, cli);
+                    return output_checks(
+                        &checks,
+                        cli,
+                        started.elapsed(),
+                        resolved_cas_root.as_deref(),
+                    );
                 }
             }
         }
@@ -269,7 +370,12 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 message: "Not found. Run 'cas init' (or 'cas doctor --fix').".to_string(),
             });
 
-            return output_checks(&checks, cli);
+            return output_checks(
+                &checks,
+                cli,
+                started.elapsed(),
+                resolved_cas_root.as_deref(),
+            );
         }
     };
 
@@ -512,7 +618,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 checks.push(Check {
                     name: "search index".to_string(),
                     status: CheckStatus::Warning,
-                    message: format!("Index may need rebuild: {e}"),
+                    message: format!("Index may need rebuild: {e}; Run a search to rebuild it"),
                 });
             }
         }
@@ -521,7 +627,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             name: "search index".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "Index not found at {}. Will be created on first search.",
+                "Index not found at {}. Will be created on first search; Run a search to build it",
                 index_dir.display()
             ),
         });
@@ -835,7 +941,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // rows against every other known project database on the host, keyed on
     // `(id, title)`.
     if cas_root.join("cas.db").is_file() {
-        let report = crate::cli::foreign_rows::scan(&cas_root);
+        let (report, sync_warnings) =
+            crate::cloud::collect_sync_warnings(|| crate::cli::foreign_rows::scan(&cas_root));
         let (purge_analysis, purge_analysis_error) = match (
             report.as_ref(),
             crate::cloud::resolve_canonical_id(&cas_root),
@@ -865,6 +972,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             );
         }
         checks.push(cloud_queue_check(&cas_root));
+        checks.extend(sync_warning_checks(&sync_warnings));
         let foreign_check = match purge_analysis_error.as_deref() {
             Some(error) => foreign_rows_check_with_classifier_error(
                 report.as_ref(),
@@ -882,7 +990,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         );
     }
 
-    output_checks(&checks, cli)
+    output_checks(&checks, cli, started.elapsed(), Some(&cas_root))
 }
 
 /// The `cas doctor --fix` legacy-index repair step, as one renderable Check.
@@ -967,8 +1075,7 @@ fn legacy_search_index_check(cas_root: &Path) -> Check {
             status: CheckStatus::Warning,
             message: format!(
                 "{} document(s), including {} memory entry id(s), are stranded in `.cas/index/` and invisible to search; run `cas doctor --fix`",
-                state.documents,
-                state.entry_documents
+                state.documents, state.entry_documents
             ),
         },
         Ok(None) => Check {
@@ -2197,6 +2304,24 @@ fn integration_checks(project_root: &Path) -> Vec<crate::cli::integrate::doctor:
     crate::cli::integrate::doctor::render_for_doctor(&reports)
 }
 
+fn sync_warning_checks(warnings: &[crate::cloud::SyncWarningSummary]) -> Vec<Check> {
+    warnings
+        .iter()
+        .map(|warning| {
+            let name = if warning.entity_kind.contains("knowledge") {
+                "foreign knowledge pages"
+            } else {
+                "foreign project rows"
+            };
+            Check::new(
+                name,
+                CheckStatus::Warning,
+                format!("{} skipped ({})", warning.count, warning.project),
+            )
+        })
+        .collect()
+}
+
 /// Surface the exact content queue rows that keep `purge-foreign` fail-closed.
 /// The remediation is intentionally executable in order: reset terminal rows,
 /// push them, then preview the purge again. A count from the generic queue
@@ -2339,6 +2464,144 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[test]
+    fn grouped_report_uses_sections_remediation_and_counted_summary() {
+        let checks = vec![
+            Check::new("database", CheckStatus::Ok, "SQLite database found"),
+            Check::new("entries", CheckStatus::Ok, "1234567 entries accessible"),
+            Check::new(
+                "search index",
+                CheckStatus::Warning,
+                "index is stale; Run `cas index`",
+            ),
+        ];
+
+        let report = render_report_plain(
+            &checks,
+            "example/project",
+            "3.10.1",
+            std::time::Duration::from_millis(123),
+            true,
+            80,
+        );
+
+        assert!(report.contains("cas doctor · example/project · 3.10.1"));
+        assert!(report.contains("Store"));
+        assert!(report.contains("[OK] database"));
+        assert!(report.contains("[OK] entries"));
+        assert!(report.contains("[WARN] search index"));
+        assert!(report.contains("  → Run `cas index`"));
+        assert!(report.contains("1,234,567 entries accessible"));
+        assert!(report.contains("2 ok · 1 warnings · 0 errors · 123ms"));
+    }
+
+    #[test]
+    fn mixed_sections_pack_ok_checks_on_the_section_line() {
+        let checks = vec![
+            Check::new("legacy search index", CheckStatus::Ok, "available"),
+            Check::new(
+                "search index",
+                CheckStatus::Warning,
+                "index is stale; Run `cas index`",
+            ),
+            Check::new("symbol index", CheckStatus::Ok, "available"),
+        ];
+
+        let report = render_report_plain(
+            &checks,
+            "example/project",
+            "3.10.1",
+            Duration::from_millis(1),
+            false,
+            100,
+        );
+
+        let indexes_line = report
+            .lines()
+            .find(|line| line.starts_with("Indexes"))
+            .expect("mixed section line");
+        assert!(indexes_line.contains("[OK] legacy search index"));
+        assert!(indexes_line.contains("[OK] symbol index"));
+        assert!(!indexes_line.contains("[WARN]"));
+        assert!(report.lines().any(|line| {
+            line.starts_with("  [WARN] search index") && line.contains("index is stale")
+        }));
+    }
+
+    #[test]
+    fn non_ok_messages_wrap_without_truncation() {
+        let message = "573 foreign task row(s) from 9 other project(s) (Accounting, Penguinz, Woodworking, abundant details that operators need)";
+        let checks = vec![Check::new(
+            "cross-project rows",
+            CheckStatus::Warning,
+            message,
+        )];
+
+        let report = render_report_plain(
+            &checks,
+            "example/project",
+            "3.10.1",
+            Duration::from_millis(1),
+            false,
+            60,
+        );
+        let compact_report: String = report.split_whitespace().collect();
+        let compact_message: String = message.split_whitespace().collect();
+
+        assert!(
+            compact_report.contains(&compact_message),
+            "full diagnostic should survive wrapping:\n{report}"
+        );
+        assert!(!report.contains('…'), "diagnostic was truncated:\n{report}");
+    }
+
+    #[test]
+    fn narrow_or_unknown_width_uses_eighty_column_layout() {
+        let checks = vec![
+            Check::new("database", CheckStatus::Ok, "SQLite database found"),
+            Check::new("entries", CheckStatus::Ok, "1234567 entries accessible"),
+        ];
+
+        let expected = render_report_plain(
+            &checks,
+            "example/project",
+            "3.10.1",
+            Duration::from_millis(1),
+            false,
+            80,
+        );
+        for width in [0, 1, 39] {
+            assert_eq!(
+                render_report_plain(
+                    &checks,
+                    "example/project",
+                    "3.10.1",
+                    Duration::from_millis(1),
+                    false,
+                    width,
+                ),
+                expected,
+                "width {width} should use the 80-column fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_json_is_a_superset_with_group_and_remediation() {
+        let checks = vec![Check::new(
+            "symbol index",
+            CheckStatus::Warning,
+            "coverage incomplete; Run `cas index code`",
+        )];
+
+        let json = serialize_checks(&checks);
+        assert_eq!(json[0]["name"], "symbol index");
+        assert_eq!(json[0]["status"], "warning");
+        assert_eq!(json[0]["message"], "coverage incomplete");
+        assert_eq!(json[0]["group"], "indexes");
+        assert_eq!(json[0]["remediation"], "Run `cas index code`");
+    }
+
     /// cas-25a9 AC1, behaviourally: `cas doctor --fix` against a held lock must
     /// return BOUNDED with a Warning, not hang.
     ///
@@ -2367,8 +2630,7 @@ mod tests {
 
         // Another process (a pre-fix `cas serve`) is holding the legacy root.
         use tantivy::directory::Directory;
-        let holder =
-            tantivy::Index::open_in_dir(cas_root.join("index")).expect("open legacy root");
+        let holder = tantivy::Index::open_in_dir(cas_root.join("index")).expect("open legacy root");
         let _held = holder
             .directory()
             .acquire_lock(&tantivy::directory::META_LOCK)
@@ -2667,10 +2929,26 @@ mod tests {
 
         let check = foreign_rows_check(Ok(&report), Some(&analysis));
 
-        assert!(check.message.contains("foreign evidence: 2"), "{}", check.message);
-        assert!(check.message.contains("purge delete set: 1"), "{}", check.message);
-        assert!(check.message.contains("cannot reach 1"), "{}", check.message);
-        assert!(check.message.contains("accepted proposal"), "{}", check.message);
+        assert!(
+            check.message.contains("foreign evidence: 2"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("purge delete set: 1"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cannot reach 1"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("accepted proposal"),
+            "{}",
+            check.message
+        );
     }
 
     #[test]
@@ -3292,7 +3570,11 @@ mod tests {
             "3 failed",
             "one parser failure",
         ] {
-            assert!(check.message.contains(expected), "missing {expected}: {}", check.message);
+            assert!(
+                check.message.contains(expected),
+                "missing {expected}: {}",
+                check.message
+            );
         }
     }
 
@@ -3613,7 +3895,10 @@ mod tests {
         let state = gather_history_index_state_at(&cas_root, now);
         assert_eq!(state.lag_commits, Some(1));
         assert!(state.lag_seconds.unwrap() >= 2 * 24 * 60 * 60 - 5);
-        assert!(matches!(history_index_check(state).status, CheckStatus::Warning));
+        assert!(matches!(
+            history_index_check(state).status,
+            CheckStatus::Warning
+        ));
 
         rusqlite::Connection::open(cas_root.join("cas.db"))
             .expect("history db")
@@ -3629,7 +3914,11 @@ mod tests {
         assert_eq!(unknown.lag_seconds, None);
         let check = history_index_check(unknown);
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("unknown rather than fresh"), "{}", check.message);
+        assert!(
+            check.message.contains("unknown rather than fresh"),
+            "{}",
+            check.message
+        );
     }
 
     /// §10.2 row 3, surfaced. `lag_commits: None` means the watermark left
@@ -3926,62 +4215,344 @@ fn check_claude_code_mcp(project_root: &Path) -> Check {
     }
 }
 
-fn output_checks(checks: &[Check], cli: &Cli) -> anyhow::Result<()> {
-    if cli.json {
-        let results: Vec<_> = checks
-            .iter()
-            .map(|c| {
-                serde_json::json!({
-                    "name": c.name,
-                    "status": match c.status {
-                        CheckStatus::Ok => "ok",
-                        CheckStatus::Warning => "warning",
-                        CheckStatus::Error => "error",
-                    },
-                    "message": c.message
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string(&results)?);
-    } else {
-        let theme = ActiveTheme::default();
-        let mut out = std::io::stdout();
-        let mut fmt = Formatter::stdout(&mut out, theme);
-
-        fmt.subheading("cas doctor")?;
-        fmt.write_muted(&"─".repeat(50))?;
-        fmt.newline()?;
-
-        for check in checks {
-            match check.status {
-                CheckStatus::Ok => {
-                    fmt.success(&format!("{}: {}", check.name, check.message))?;
+fn format_counted_text(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut digits = String::new();
+    let flush = |result: &mut String, digits: &mut String| {
+        if digits.len() > 3 {
+            for (index, digit) in digits.chars().enumerate() {
+                if index > 0 && (digits.len() - index) % 3 == 0 {
+                    result.push(',');
                 }
-                CheckStatus::Warning => {
-                    fmt.warning(&format!("{}: {}", check.name, check.message))?;
-                }
-                CheckStatus::Error => {
-                    fmt.error(&format!("{}: {}", check.name, check.message))?;
-                }
+                result.push(digit);
             }
-        }
-
-        let has_errors = checks
-            .iter()
-            .any(|c| matches!(c.status, CheckStatus::Error));
-        let has_warnings = checks
-            .iter()
-            .any(|c| matches!(c.status, CheckStatus::Warning));
-
-        fmt.newline()?;
-        if has_errors {
-            fmt.error("Some checks failed. Please address the errors above.")?;
-        } else if has_warnings {
-            fmt.warning("All critical checks passed with some warnings.")?;
         } else {
-            fmt.success("All checks passed!")?;
+            result.push_str(digits);
+        }
+        digits.clear();
+    };
+
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else {
+            flush(&mut result, &mut digits);
+            result.push(ch);
+        }
+    }
+    flush(&mut result, &mut digits);
+    result
+}
+
+fn status_label(status: &CheckStatus, styled: bool) -> &'static str {
+    if styled {
+        match status {
+            CheckStatus::Ok => Icons::CHECK,
+            CheckStatus::Warning => Icons::WARNING,
+            CheckStatus::Error => Icons::CROSS,
+        }
+    } else {
+        match status {
+            CheckStatus::Ok => "[OK]",
+            CheckStatus::Warning => "[WARN]",
+            CheckStatus::Error => "[ERROR]",
+        }
+    }
+}
+
+fn status_name(status: &CheckStatus) -> &'static str {
+    match status {
+        CheckStatus::Ok => "ok",
+        CheckStatus::Warning => "warning",
+        CheckStatus::Error => "error",
+    }
+}
+
+fn full_message(check: &Check) -> String {
+    format_counted_text(&check.message)
+}
+
+fn serialize_checks(checks: &[Check]) -> Vec<serde_json::Value> {
+    checks
+        .iter()
+        .map(|check| {
+            let (message, remediation) = check.parts();
+            serde_json::json!({
+                "name": check.name,
+                "status": status_name(&check.status),
+                "message": format_counted_text(&message),
+                "group": check.group().json_name(),
+                "remediation": remediation.map(|text| format_counted_text(&text)),
+            })
+        })
+        .collect()
+}
+
+fn duration_label(duration: Duration) -> String {
+    if duration.as_secs() == 0 {
+        format!("{}ms", duration.as_millis())
+    } else {
+        format!("{:.1}s", duration.as_secs_f64())
+    }
+}
+
+fn wrap_report_text(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if !current.is_empty() && current.chars().count() + 1 + word_len <= width {
+            current.push(' ');
+            current.push_str(word);
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        for ch in word.chars() {
+            if current.chars().count() >= width {
+                lines.push(std::mem::take(&mut current));
+            }
+            current.push(ch);
         }
     }
 
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn write_report_line(
+    fmt: &mut Formatter<'_>,
+    status: Option<&CheckStatus>,
+    text: &str,
+) -> std::io::Result<()> {
+    if fmt.is_styled() {
+        let color = status.map(|status| match status {
+            CheckStatus::Ok => fmt.theme().palette.status_success,
+            CheckStatus::Warning => fmt.theme().palette.status_warning,
+            CheckStatus::Error => fmt.theme().palette.status_error,
+        });
+        if let Some(color) = color {
+            fmt.write_colored(text, color)?;
+        } else {
+            fmt.write_primary(text)?;
+        }
+    } else {
+        fmt.write_raw(text)?;
+    }
+    fmt.newline()
+}
+
+fn write_ok_section_line(
+    fmt: &mut Formatter<'_>,
+    group: CheckGroup,
+    checks: &[&Check],
+    width: usize,
+) -> std::io::Result<()> {
+    let label = format!("{:<14}", group.label());
+    let marker = status_label(&CheckStatus::Ok, fmt.is_styled());
+    let mut line = label.clone();
+    let indent = " ".repeat(14);
+    for check in checks {
+        let pair = format!("{marker} {}", check.name);
+        let prefix = if line == label { "" } else { "  " };
+        if line.chars().count() + prefix.chars().count() + pair.chars().count() > width
+            && line != label
+        {
+            write_report_line(fmt, Some(&CheckStatus::Ok), &line)?;
+            line = format!("{indent}{pair}");
+        } else {
+            line.push_str(prefix);
+            line.push_str(&pair);
+        }
+    }
+    write_report_line(fmt, Some(&CheckStatus::Ok), &line)
+}
+
+fn render_report(
+    fmt: &mut Formatter<'_>,
+    checks: &[Check],
+    canonical_id: &str,
+    version: &str,
+    elapsed: Duration,
+    verbose: bool,
+) -> std::io::Result<()> {
+    fmt.write_bold(&format!("cas doctor · {canonical_id} · {version}"))?;
+    fmt.newline()?;
+    let width = match fmt.width() as usize {
+        width if width < 40 => 80,
+        width => width,
+    };
+    fmt.write_muted(&Icons::SEPARATOR.repeat(width.min(80)))?;
+    fmt.newline()?;
+
+    let groups = [
+        CheckGroup::Store,
+        CheckGroup::Indexes,
+        CheckGroup::Cloud,
+        CheckGroup::Config,
+        CheckGroup::Integrations,
+    ];
+    for group in groups {
+        let section: Vec<&Check> = checks
+            .iter()
+            .filter(|check| check.group() == group)
+            .collect();
+        if section.is_empty() {
+            continue;
+        }
+        let all_ok = section
+            .iter()
+            .all(|check| matches!(check.status, CheckStatus::Ok));
+        let ok_checks: Vec<&Check> = section
+            .iter()
+            .copied()
+            .filter(|check| matches!(check.status, CheckStatus::Ok))
+            .collect();
+        if all_ok {
+            write_ok_section_line(fmt, group, &ok_checks, width)?;
+            continue;
+        }
+
+        if ok_checks.is_empty() {
+            fmt.write_bold(group.label())?;
+            fmt.newline()?;
+        } else {
+            write_ok_section_line(fmt, group, &ok_checks, width)?;
+        }
+        let name_width = section
+            .iter()
+            .map(|check| check.name.chars().count())
+            .max()
+            .unwrap_or(0);
+        for check in section {
+            if matches!(check.status, CheckStatus::Ok) {
+                continue;
+            }
+            let prefix = format!(
+                "  {} {:<name_width$} ",
+                status_label(&check.status, fmt.is_styled()),
+                check.name,
+                name_width = name_width
+            );
+            let available = width.saturating_sub(prefix.chars().count()).max(1);
+            let (message, remediation) = check.parts();
+            let message_lines = wrap_report_text(&format_counted_text(&message), available);
+            let hanging_indent = " ".repeat(prefix.chars().count());
+            for (line_index, message_line) in message_lines.iter().enumerate() {
+                let line = if line_index == 0 {
+                    format!("{prefix}{message_line}")
+                } else {
+                    format!("{hanging_indent}{message_line}")
+                };
+                write_report_line(fmt, Some(&check.status), &line)?;
+            }
+            if let Some(remediation) = remediation {
+                fmt.write_muted(&format!(
+                    "  {} {}",
+                    Icons::ARROW_RIGHT,
+                    format_counted_text(&remediation)
+                ))?;
+                fmt.newline()?;
+            }
+        }
+    }
+
+    if verbose {
+        fmt.newline()?;
+        fmt.write_bold("verbose")?;
+        fmt.newline()?;
+        for check in checks {
+            let line = format!(
+                "{} {}: {}",
+                status_label(&check.status, fmt.is_styled()),
+                check.name,
+                full_message(check)
+            );
+            write_report_line(fmt, Some(&check.status), &line)?;
+        }
+    }
+
+    let ok = checks
+        .iter()
+        .filter(|check| matches!(check.status, CheckStatus::Ok))
+        .count();
+    let warnings = checks
+        .iter()
+        .filter(|check| matches!(check.status, CheckStatus::Warning))
+        .count();
+    let errors = checks
+        .iter()
+        .filter(|check| matches!(check.status, CheckStatus::Error))
+        .count();
+    fmt.newline()?;
+    write_report_line(
+        fmt,
+        None,
+        &format!(
+            "{ok} ok · {warnings} warnings · {errors} errors · {}",
+            duration_label(elapsed)
+        ),
+    )
+}
+
+#[cfg(test)]
+fn render_report_plain(
+    checks: &[Check],
+    canonical_id: &str,
+    version: &str,
+    elapsed: Duration,
+    verbose: bool,
+    width: u16,
+) -> String {
+    let mut output = Vec::new();
+    {
+        let mut fmt = Formatter::new(
+            &mut output,
+            crate::ui::components::OutputMode::Plain,
+            ActiveTheme::default(),
+            width,
+        );
+        render_report(&mut fmt, checks, canonical_id, version, elapsed, verbose).unwrap();
+    }
+    String::from_utf8(output).expect("doctor report is UTF-8")
+}
+
+fn output_checks(
+    checks: &[Check],
+    cli: &Cli,
+    elapsed: Duration,
+    cas_root: Option<&Path>,
+) -> anyhow::Result<()> {
+    if cli.json {
+        println!("{}", serde_json::to_string(&serialize_checks(checks))?);
+        return Ok(());
+    }
+
+    let canonical_id = cas_root
+        .and_then(crate::cloud::resolve_canonical_id)
+        .unwrap_or_else(|| "<uninitialized>".to_string());
+    let mut out = std::io::stdout();
+    let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+    render_report(
+        &mut fmt,
+        checks,
+        &canonical_id,
+        env!("CARGO_PKG_VERSION"),
+        elapsed,
+        cli.verbose,
+    )?;
+    fmt.flush()?;
     Ok(())
 }

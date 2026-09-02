@@ -17,7 +17,7 @@ pub use knowledge::{
     KNOWLEDGE_ENTITY, KnowledgePageRecord, KnowledgePullReport, knowledge_share_scope,
 };
 mod pull;
-pub(crate) use pull::entity_matches_project;
+pub(crate) use pull::{SyncWarningSummary, collect_sync_warnings, entity_matches_project};
 mod push;
 mod team_push;
 
@@ -225,8 +225,7 @@ impl SyncResult {
     /// Render the one-line dependency healing receipt when reconciliation did
     /// work. A quiet no-op is intentional for steady-state pulls.
     pub fn dependency_heal_summary(&self) -> Option<String> {
-        (self.healed_task_dependencies_to_cloud > 0
-            || self.healed_task_dependencies_from_cloud > 0)
+        (self.healed_task_dependencies_to_cloud > 0 || self.healed_task_dependencies_from_cloud > 0)
             .then(|| {
                 format!(
                     "healed {} edge(s) to cloud, {} from cloud",
@@ -506,10 +505,9 @@ impl CloudSyncer {
     /// Requeue terminal cloud failures whose version gate is satisfied by the
     /// current client before either personal or team push reads the queue.
     pub(crate) fn requeue_version_gated_items(&self) -> Result<usize, CasError> {
-        let requeued = self.queue.requeue_version_gated_failures(
-            env!("CARGO_PKG_VERSION"),
-            self.config.max_retries,
-        )?;
+        let requeued = self
+            .queue
+            .requeue_version_gated_failures(env!("CARGO_PKG_VERSION"), self.config.max_retries)?;
         if requeued > 0 {
             tracing::debug!("requeued {requeued} version-gated item(s)");
         }
@@ -1100,11 +1098,7 @@ impl PushResponse {
     ) -> Result<Option<HashMap<String, PushRowResult>>, String> {
         let queued_ids = queued_ids.collect::<Vec<_>>();
         if let Some(entity) = self.fields.get(entity_type) {
-            if let Some(rows) = row_results_for(
-                entity,
-                entity_type,
-                queued_ids.iter().cloned(),
-            )? {
+            if let Some(rows) = row_results_for(entity, entity_type, queued_ids.iter().cloned())? {
                 return Ok(Some(rows));
             }
         }

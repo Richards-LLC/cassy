@@ -370,3 +370,100 @@ fn worker_failure_recovery_guidance_is_pinned_cas_62a9() {
         }
     }
 }
+
+#[test]
+fn supervisor_reference_tree_uses_current_lifecycle_contract() {
+    let root = repo_root();
+    let valid_actions = "create, proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show, update, start, close, cancel, reopen, request_changes, delete, list, ready, blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine";
+    let flavors = [("", "mcp__cas__"), ("codex/", "mcp__cs__"), ("grok/", "cas__")];
+
+    for (flavor, tool_prefix) in flavors {
+        let base = root.join(format!("cas-cli/src/builtins/{flavor}skills"));
+        let supervisor = load(&base.join("cas-supervisor.md"));
+        let checklist = load(&base.join("cas-supervisor-checklist.md"));
+        let reference = load(&base.join("cas-supervisor/references/reference.md"));
+        let workflow = load(&base.join("cas-supervisor/references/workflow.md"));
+        let close_gate = load(&base.join("cas-worker/references/close-gate.md"));
+        let recovery = load(&base.join("cas-worker/references/recovery.md"));
+        let details = load(&base.join("cas-worker/references/details.md"));
+        let github = load(&base.join("cas-github-issues/SKILL.md"));
+
+        for (label, content) in [
+            ("supervisor", &supervisor),
+            ("checklist", &checklist),
+            ("reference", &reference),
+            ("workflow", &workflow),
+            ("close-gate", &close_gate),
+            ("recovery", &recovery),
+            ("details", &details),
+            ("github issues", &github),
+        ] {
+            for retired in [
+                "pending_supervisor_review",
+                "bypass_code_review",
+                "/epic-spec",
+                "/epic-breakdown",
+                "code-review-queue",
+            ] {
+                assert!(
+                    !content.contains(retired),
+                    "{flavor}{label} still teaches retired contract {retired:?}"
+                );
+            }
+        }
+
+        assert!(
+            reference.contains(&format!(
+                "**Valid `{tool_prefix}task` actions** (do not invent others): {valid_actions}."
+            )),
+            "{flavor} reference.md does not match the task dispatch action list"
+        );
+        assert_eq!(
+            reference.matches("## Supervisor override").count(),
+            1,
+            "{flavor} reference.md must document supervisor_override once"
+        );
+        for required in ["registered supervisor", "non-empty reason", "decision note"] {
+            assert!(
+                reference.contains(required),
+                "{flavor} supervisor override documentation missing {required:?}"
+            );
+        }
+        assert!(
+            supervisor.contains("cas-supervisor/references/reference.md#supervisor-override"),
+            "{flavor} supervisor guide must link supervisor_override reference"
+        );
+        assert!(
+            checklist.contains("cas-supervisor/references/reference.md#supervisor-override"),
+            "{flavor} checklist must link supervisor_override reference"
+        );
+        assert!(
+            workflow.contains(&format!("{tool_prefix}coordination action=worktree_merge")),
+            "{flavor} workflow must use worktree_merge"
+        );
+        assert!(
+            !workflow.contains("git cherry-pick"),
+            "{flavor} workflow must not teach the retired cherry-pick merge procedure"
+        );
+    }
+
+    let builtins = load(&root.join("cas-cli/src/builtins.rs"));
+    assert!(
+        !builtins.contains("code-review-queue"),
+        "builtins.rs must not register deleted code-review-queue.md"
+    );
+
+    let factory_supervisor = load(
+        &root.join("cas-cli/src/builtins/codex/agents/factory-supervisor.md"),
+    );
+    assert!(
+        factory_supervisor.lines().count() < 60,
+        "Codex factory-supervisor.md exceeds the 60-line prompt budget"
+    );
+    for required in ["Codex Constraints", "cli=codex", "cas-supervisor"] {
+        assert!(
+            factory_supervisor.contains(required),
+            "factory-supervisor.md missing {required:?}"
+        );
+    }
+}

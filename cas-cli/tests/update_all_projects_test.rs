@@ -185,8 +185,12 @@ fn all_projects_warns_on_a_held_legacy_lock_but_still_succeeds() {
         output.contains("[WARN] search index: busy"),
         "busy repair receipt missing from output:\n{output}"
     );
+    let banner = format!(
+        "Cassy {} · 1 projects refreshed · 0 failed",
+        env!("CARGO_PKG_VERSION")
+    );
     assert!(
-        output.contains("Cassy 3.10.1 · 1 projects refreshed · 0 failed"),
+        output.contains(&banner),
         "busy repair must not fail the project refresh:\n{output}"
     );
 }

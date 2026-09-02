@@ -5941,6 +5941,76 @@ mod purge_foreign_safety_tests {
     }
 
     #[test]
+    fn backfilled_current_origin_rows_use_doctor_peer_evidence_and_label_the_source() {
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
+
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 5,
+            peers_compared: vec!["accounting".to_string()],
+            foreign: vec![ForeignRow {
+                id: "own-1".to_string(),
+                title: "own task 1".to_string(),
+                closed: false,
+                origin_project: Some("cas-src".to_string()),
+                home_project: "accounting".to_string(),
+                also_present_in: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        let analysis = collect_purge_delete_set_with_report(&conn, "cas-src", &report).unwrap();
+        let row = analysis
+            .delete_set
+            .tasks
+            .iter()
+            .find(|row| row.id == "own-1")
+            .expect("doctor peer evidence must add the backfilled row");
+        assert_eq!(row.evidence.source, "peer-evidence");
+        assert_eq!(row.evidence.project, "accounting");
+        assert_eq!(
+            analysis.delete_set.to_json()["tasks"][0]["evidence"]["source"],
+            "origin_project"
+        );
+        assert_eq!(
+            row_to_json(&analysis.delete_set, "own-1")["evidence"]["project"],
+            "accounting"
+        );
+    }
+
+    #[test]
+    fn accepted_proposal_tasks_with_foreign_origin_are_never_purge_candidates() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        conn.execute("ALTER TABLE tasks ADD COLUMN notes TEXT", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE tasks SET notes = ?1 WHERE id = 'foreign-1'",
+            ["--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---\n  target_project_canonical_id: cas-src\n--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---"],
+        )
+        .unwrap();
+
+        let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+
+        assert!(
+            set.tasks.iter().all(|task| task.id != "foreign-1"),
+            "an accepted proposal materialized in this project must be retained"
+        );
+    }
+
+    fn row_to_json(set: &PurgeDeleteSet, id: &str) -> serde_json::Value {
+        set.to_json()["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
     fn alias_rows_are_not_classified_as_foreign() {
         let conn = Connection::open_in_memory().unwrap();
         seed_project_scoped_db(&conn);

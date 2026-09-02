@@ -2441,6 +2441,62 @@ mod tests {
     }
 
     #[test]
+    fn foreign_rows_check_explains_when_purge_cannot_reach_evidence_rows() {
+        use crate::cli::cloud::{PurgeDeleteSet, PurgeEntity, PurgeForeignAnalysis};
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 3,
+            peers_compared: vec!["accounting".to_string()],
+            foreign: vec![
+                ForeignRow {
+                    id: "cas-0001".to_string(),
+                    title: "Backfilled foreign task".to_string(),
+                    closed: false,
+                    origin_project: Some("cas-src".to_string()),
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+                ForeignRow {
+                    id: "cas-0002".to_string(),
+                    title: "Accepted proposal".to_string(),
+                    closed: false,
+                    origin_project: Some("accounting".to_string()),
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        let analysis = PurgeForeignAnalysis {
+            delete_set: PurgeDeleteSet {
+                tasks: vec![PurgeEntity::with_evidence(
+                    "task",
+                    "cas-0001",
+                    "Backfilled foreign task",
+                    "peer-evidence",
+                    "accounting",
+                )],
+                ..Default::default()
+            },
+            foreign_task_count: 2,
+            retained_foreign_tasks: vec![crate::cli::cloud::PurgeRetainedTask {
+                id: "cas-0002".to_string(),
+                title: "Accepted proposal".to_string(),
+                reason: "accepted proposal materialized for this project".to_string(),
+            }],
+        };
+
+        let check = foreign_rows_check(Ok(&report), Some(&analysis));
+
+        assert!(check.message.contains("foreign evidence: 2"), "{}", check.message);
+        assert!(check.message.contains("purge delete set: 1"), "{}", check.message);
+        assert!(check.message.contains("cannot reach 1"), "{}", check.message);
+        assert!(check.message.contains("accepted proposal"), "{}", check.message);
+    }
+
+    #[test]
     fn foreign_rows_check_zero_states_its_coverage_never_a_bare_clean_cas_fc6fa() {
         use crate::cli::foreign_rows::ForeignRowReport;
 

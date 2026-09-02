@@ -69,6 +69,7 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
 
     let dry = cas_cmd(root)
         .current_dir(root)
+        .env("CAS_ROOT", first.join(".cas"))
         .env("CAS_PROJECT_ROOTS", &projects)
         .args(["update", "--all-projects", "--dry-run"])
         .assert()
@@ -83,6 +84,7 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
 
     let synced = cas_cmd(root)
         .current_dir(root)
+        .env("CAS_ROOT", first.join(".cas"))
         .env("CAS_PROJECT_ROOTS", &projects)
         .args(["update", "--all-projects"])
         .assert()
@@ -121,6 +123,7 @@ fn all_projects_repairs_stray_search_roots_and_reports_clean_projects() {
 
     let update = cas_cmd(root)
         .current_dir(root)
+        .env("CAS_ROOT", stranded.join(".cas"))
         .env("CAS_PROJECT_ROOTS", &projects)
         .args(["update", "--all-projects"])
         .assert()
@@ -176,6 +179,9 @@ fn all_projects_warns_on_a_held_legacy_lock_but_still_succeeds() {
         .expect("hold legacy metadata lock");
     let update = cas_cmd(root)
         .current_dir(root)
+        // Pin the current project to the fixture so discovery never walks up
+        // from a TMPDIR under $HOME into the real user-level ~/.cas.
+        .env("CAS_ROOT", project.join(".cas"))
         .env("CAS_PROJECT_ROOTS", &projects)
         .args(["update", "--all-projects"])
         .assert()

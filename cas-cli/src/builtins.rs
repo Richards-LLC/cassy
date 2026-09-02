@@ -4291,6 +4291,43 @@ This is the body content."#;
         );
     }
 
+    #[test]
+    fn test_verifier_and_learning_reviewer_markers_stay_in_all_harness_catalogs() {
+        for (label, agents) in [
+            ("BUILTIN_AGENTS", BUILTIN_AGENTS),
+            ("CODEX_BUILTIN_AGENTS", CODEX_BUILTIN_AGENTS),
+            ("GROK_BUILTIN_AGENTS", GROK_BUILTIN_AGENTS),
+        ] {
+            let verifier = agents
+                .iter()
+                .find(|builtin| builtin.path == "agents/task-verifier.md")
+                .unwrap_or_else(|| panic!("{label}: task-verifier agent is not registered"));
+            for marker in [
+                "model:",
+                "files_reviewed=",
+                "Close-Path Error Detection",
+                "Stranded-branch gate",
+                "Epic verification owner gate",
+            ] {
+                assert!(
+                    verifier.content.contains(marker),
+                    "{label} task-verifier missing marker {marker:?}"
+                );
+            }
+
+            let reviewer = agents
+                .iter()
+                .find(|builtin| builtin.path == "agents/learning-reviewer.md")
+                .unwrap_or_else(|| panic!("{label}: learning-reviewer agent is not registered"));
+            for marker in ["model: sonnet", "complete list of unreviewed learning IDs"] {
+                assert!(
+                    reviewer.content.contains(marker),
+                    "{label} learning-reviewer missing marker {marker:?}"
+                );
+            }
+        }
+    }
+
     /// cas-4900 regression: `sync_all_builtins` was reported to silently
     /// skip reference files (anything under `<skill>/references/*.md`)
     /// when invoked against a project-style target_dir, even though the

@@ -19,7 +19,7 @@ Review draft rules: promote, merge, or retire. Keep the rule set lean and high-s
    - **Promote** if clear, specific, actionable, marked helpful, no conflicts with proven rules
    - **Merge** if two rules say the same thing or overlap significantly — keep the more specific one, incorporate unique details from the other
    - **Rewrite** if the rule has a good idea but bad phrasing — update content to be specific and actionable before promoting
-   - **Archive** if too vague, unused 30+ days, conflicts with proven rules, or project is done
+   - **Retire (tombstone)** if too vague, unused 30+ days, conflicts with proven rules, or project is done
 5. **Check for conflicts** — contradictory rules ("Always X" vs "Never X"), overlapping scope with different guidance.
 6. **Execute**:
    - Promote: `cas__rule action=helpful id=<id>`
@@ -47,7 +47,7 @@ A rule deserves proven status when it:
 - Be conservative with promotion — rules should earn proven status
 - One clear rule > two similar ones
 - **Rewrite vague rules before promoting** — don't promote bad phrasing just because the idea is good
-- Archive aggressively — unused rules add noise, and they cost context tokens
+- Retire stale rules aggressively — unused rules add noise, and they cost context tokens
 - Flag conflicts for human review, don't auto-resolve
 - Check `helpful_count` — helpful rules deserve promotion
 - Compare `surface_count` (actual context injections) with `helpful_count` and `harmful_count` (feedback outcomes). High surfacing with little positive feedback is a reason to archive or rewrite rather than promote. Skill `usage_count` is self-reported action usage and is a separate metric.

@@ -30,11 +30,35 @@ const REVIEWER_PATHS: [&str; 3] = [
     "cas-cli/src/builtins/grok/agents/learning-reviewer.md",
 ];
 
+const RULE_REVIEWER_PATHS: [&str; 3] = [
+    "cas-cli/src/builtins/agents/rule-reviewer.md",
+    "cas-cli/src/builtins/codex/agents/rule-reviewer.md",
+    "cas-cli/src/builtins/grok/agents/rule-reviewer.md",
+];
+
+const DUPLICATE_DETECTOR_PATHS: [&str; 3] = [
+    "cas-cli/src/builtins/agents/duplicate-detector.md",
+    "cas-cli/src/builtins/codex/agents/duplicate-detector.md",
+    "cas-cli/src/builtins/grok/agents/duplicate-detector.md",
+];
+
+const DATE_AWARE_AGENT_PATHS: [&str; 6] = [
+    "cas-cli/src/builtins/agents/git-history-analyzer.md",
+    "cas-cli/src/builtins/codex/agents/git-history-analyzer.md",
+    "cas-cli/src/builtins/grok/agents/git-history-analyzer.md",
+    "cas-cli/src/builtins/agents/issue-intelligence-analyst.md",
+    "cas-cli/src/builtins/codex/agents/issue-intelligence-analyst.md",
+    "cas-cli/src/builtins/grok/agents/issue-intelligence-analyst.md",
+];
+
 #[test]
 fn verifier_mirrors_document_the_current_close_contract() {
     for path in VERIFIER_PATHS {
         let body = load(path);
-        assert!(body.contains("model: inherit"), "{path} must inherit the caller model");
+        assert!(
+            body.contains("model: inherit"),
+            "{path} must inherit the caller model"
+        );
         assert!(
             body.contains("files_reviewed=\"file1,file2\""),
             "{path} must record files_reviewed in every verdict template"
@@ -47,8 +71,14 @@ fn verifier_mirrors_document_the_current_close_contract() {
             body.contains("git diff --name-status HEAD~10 | rg -e "),
             "{path} must use ripgrep's regexp option in its test-first check"
         );
-        assert!(!body.contains("| rg -E "), "{path} retains invalid rg -E syntax");
-        assert!(!body.contains("VERIFICATION JAIL"), "{path} retains stale jail wording");
+        assert!(
+            !body.contains("| rg -E "),
+            "{path} retains invalid rg -E syntax"
+        );
+        assert!(
+            !body.contains("VERIFICATION JAIL"),
+            "{path} retains stale jail wording"
+        );
         for marker in [
             "⚠️ VERIFICATION REQUIRED",
             "⚠️ VERIFICATION FAILED",
@@ -56,7 +86,10 @@ fn verifier_mirrors_document_the_current_close_contract() {
             "stranded_branch_override",
             "epic_verification_owner",
         ] {
-            assert!(body.contains(marker), "{path} is missing close-gate marker {marker:?}");
+            assert!(
+                body.contains(marker),
+                "{path} is missing close-gate marker {marker:?}"
+            );
         }
     }
 }
@@ -78,6 +111,45 @@ fn learning_reviewer_receives_and_consumes_explicit_ids() {
         assert!(
             body.contains("learning ID from the parent prompt"),
             "{path} must consume IDs supplied by the parent prompt"
+        );
+    }
+}
+
+#[test]
+fn agent_hygiene_instructions_match_available_actions_and_runtime_context() {
+    for path in RULE_REVIEWER_PATHS {
+        let body = load(path);
+        assert!(
+            body.contains("Retire (tombstone)"),
+            "{path} must describe rule deletion as a tombstone retirement"
+        );
+        assert!(
+            body.contains("rule action=delete"),
+            "{path} must use the available rule delete action"
+        );
+        assert!(
+            !body.contains("**Archive**"),
+            "{path} must not describe an unavailable rule archive action"
+        );
+    }
+
+    for path in DUPLICATE_DETECTOR_PATHS {
+        let body = load(path);
+        assert!(
+            body.contains("task action=notes id=<task-id> note_type=question"),
+            "{path} must name the task-note channel for uncertain cases"
+        );
+    }
+
+    for path in DATE_AWARE_AGENT_PATHS {
+        let body = load(path);
+        assert!(
+            !body.contains("Current year: 2026"),
+            "{path} must not hard-code a calendar year"
+        );
+        assert!(
+            body.contains("current date supplied by the host"),
+            "{path} must defer date context to the runtime host"
         );
     }
 }
@@ -107,7 +179,16 @@ fn verifier_test_first_command_runs_on_a_fixture_repo() {
     run_git(repo, ["add", "seed.txt"]);
     run_git(repo, ["commit", "--quiet", "-m", "seed"]);
     for index in 0..9 {
-        run_git(repo, ["commit", "--quiet", "--allow-empty", "-m", &format!("history-{index}")]);
+        run_git(
+            repo,
+            [
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                &format!("history-{index}"),
+            ],
+        );
     }
     fs::write(repo.join("contract_test.rs"), "#[test] fn contract() {}\n").unwrap();
     run_git(repo, ["add", "contract_test.rs"]);

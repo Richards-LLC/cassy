@@ -369,6 +369,12 @@ fn test_build_learning_review_context_at_threshold() {
     let context = result.unwrap();
     assert!(context.contains("learning-review required=\"true\""));
     assert!(context.contains("learning-reviewer"));
+    for i in 0..5 {
+        assert!(
+            context.contains(&format!("entry-{i}")),
+            "learning-reviewer prompt must include every unreviewed learning ID: {context}"
+        );
+    }
 }
 
 #[test]

@@ -222,11 +222,19 @@ pub fn build_learning_review_context(store: &dyn Store, config: &Config) -> Opti
         ));
     }
 
+    let unreviewed_ids = unreviewed
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
     context.push_str("\n**Instructions:**\n");
     context.push_str(
         "1. Use the Task tool to spawn a `learning-reviewer` subagent with this prompt:\n",
     );
-    context.push_str("   \"Review the unreviewed learnings in Cassy. For each:\n");
+    context.push_str(&format!(
+        "   \"Review these unreviewed learning IDs: {unreviewed_ids}. For each:\n"
+    ));
     context.push_str("   - If it describes a pattern/convention → create a draft rule\n");
     context.push_str("   - If it describes a workflow/procedure → create a draft skill\n");
     context.push_str("   - If it's project-specific context → leave as learning\n");

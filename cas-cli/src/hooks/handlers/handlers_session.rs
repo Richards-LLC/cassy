@@ -1576,6 +1576,14 @@ If no clear learnings found, respond with: []"#
 
 // ─── session-learn: 7-signal memory classifier (cas-6156 / EPIC cas-ebea) ─────
 
+const SESSION_LEARN_SKILL_BODY: &str = include_str!("../../builtins/skills/session-learn/SKILL.md");
+
+fn build_session_learn_prompt(transcript_excerpt: &str, file_context: &str) -> String {
+    format!(
+        "{SESSION_LEARN_SKILL_BODY}\n\n## Transcript\n{transcript_excerpt}{file_context}\n\nReturn only the JSON array, no prose, no markdown wrapper."
+    )
+}
+
 /// Run the session-learn 7-signal classifier against the transcript.
 ///
 /// Synchronous wrapper — creates a `tokio::Runtime`, calls `session_learn_async`
@@ -1646,57 +1654,7 @@ async fn session_learn_async(
         )
     };
 
-    let prompt_text = format!(
-        r#"You are analyzing a Claude Code session transcript to extract structured memory entries using a 7-signal taxonomy.
-
-## 7-Signal Classification
-
-For each finding, assign exactly one signal:
-1. concept  — a new domain term or abstraction the agent learned
-2. entity   — a person, project, tool, repo, or library worth remembering for future recall
-3. correction — the user pushed back on the agent; this should bind future behavior
-4. pattern  — a recurring pitfall, gotcha, or "I always forget X" moment
-5. idea     — a proposal that was floated but not acted on (worth saving)
-6. decision — an architectural/process/scope decision with a rationale that should outlive the session
-7. gap      — something the agent didn't know but should have
-
-## Output Schema
-
-Return a JSON array of draft objects (possibly empty):
-[{{
-  "signal": "correction",
-  "entry_type": "preference",
-  "scope": "global",
-  "tags": ["correction", "topic"],
-  "content": "<imperative-form memory, e.g. 'Always X' or 'Never Y'>",
-  "confidence": 0.85,
-  "dedup_hits": [],
-  "notes": "<optional rationale for non-obvious choices>"
-}}]
-
-Default signal → entry_type mapping (override when a better fit is clear):
-- concept   → learning    (scope: project if term is codebase-specific, global if cross-project)
-- entity    → context     (scope: project)
-- correction → preference (scope: global — corrections outlive projects; project only if codebase-specific)
-- pattern   → learning    (scope: project if codebase-specific, global if tool-general)
-- idea      → context     (scope: project)
-- decision  → context     (scope: project)
-- gap       → observation (scope: project)
-
-## Quality Rules
-
-- Only emit project-, user-, or session-specific findings — no general programming knowledge
-- Emit corrections at confidence >= 0.5; all other signals at confidence >= 0.6
-- One signal per draft (a finding that fits two signals = two drafts)
-- dedup_hits: list IDs of near-duplicate existing memories if you know them; otherwise []
-- Return [] if the session contains no clear signal-worthy findings
-
-## Transcript
-{transcript_excerpt}
-{file_context}
-
-Return only the JSON array, no prose, no markdown wrapper."#
-    );
+    let prompt_text = build_session_learn_prompt(transcript_excerpt, &file_context);
 
     let result = traced_prompt(
         &prompt_text,
@@ -1727,6 +1685,19 @@ Return only the JSON array, no prose, no markdown wrapper."#
 #[cfg(test)]
 mod session_learn_tests {
     use super::*;
+
+    #[test]
+    fn session_learn_prompt_starts_with_the_canonical_skill_body() {
+        let prompt = build_session_learn_prompt("transcript excerpt", "");
+        assert!(
+            prompt.starts_with(SESSION_LEARN_SKILL_BODY),
+            "Stop hook classifier prompt must use the embedded session-learn skill body"
+        );
+        assert!(
+            prompt.contains("## Transcript\ntranscript excerpt"),
+            "dynamic transcript must be appended after the canonical skill body"
+        );
+    }
 
     /// Confirm `SessionLearnDraft` round-trips through JSON correctly.
     /// This exercises the serde mapping without a live LLM.

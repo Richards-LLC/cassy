@@ -28,6 +28,6 @@ Find and consolidate duplicate entries to reduce noise and keep the knowledge ba
 - Keep the entry with higher importance, more helpful_count, or more recent timestamp
 - Union tags from both entries
 - When merging content, prefer the clearer/more specific phrasing
-- Flag uncertain cases for manual review — don't merge if unsure
+- Flag uncertain cases for manual review by writing a task note for the supervisor: `mcp__cas__task action=notes id=<task-id> note_type=question notes="<case and evidence>"` — don't merge if unsure
 - Don't dedupe across scopes — global and project entries may legitimately overlap
 - Don't merge entries that have different conclusions about the same topic (they may reflect evolving understanding)

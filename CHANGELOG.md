@@ -7,6 +7,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.12.1] - 2026-09-02
+
+### Added
+- `cas-cut-release`, the supervisor's single release procedure: a ten-step
+  fail-closed train with a "what went wrong before" appendix and a
+  self-learning `references/failure-log.md` that any agent must extend
+  (`scripts/release-gate.sh --learn`) before retrying a new release failure.
+- `scripts/release-gate.sh <version>`: the pre-queue gate that refuses to
+  proceed on version literals in tests, workspace check, nextest, doctests,
+  an archive-mode run outside the checkout without ripgrep, snapshot host
+  independence, stale root projections or ledger, changelog and version
+  mismatches, release-script preconditions, procedure guardrails, or a dirty
+  tree; every failure-log entry must map to a gate check.
+
+### Fixed
+- `scripts/release.sh` removes stale BLAKE3 build outputs before its
+  portable-ISA audit, so a prior build in the tag worktree no longer fails
+  the "exactly one BLAKE3 build output" check.
+
+
 ## [3.12.0] - 2026-09-02
 
 ### Fixed

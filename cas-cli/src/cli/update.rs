@@ -1232,8 +1232,13 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> Vec<PathBuf> {
     for root in roots {
         scan_for_projects(&root, &mut projects);
     }
+    // The user-level store (~/.cas) is never a project: a cwd under the home
+    // directory but outside any project walks up to it, and without this
+    // guard `cas update --all-projects` lists the home directory itself.
+    let user_level_root = dirs::home_dir().map(|home| canonical_path(&home.join(".cas")));
     if let Some(cas_root) = current_cas_root
         && let Some(project) = cas_root.parent()
+        && user_level_root.as_deref() != Some(canonical_path(cas_root).as_path())
     {
         projects.insert(canonical_path(project));
     }

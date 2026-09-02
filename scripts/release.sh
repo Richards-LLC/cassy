@@ -24,6 +24,9 @@
 #   ./scripts/release.sh                 # local audit only; no remote mutation
 #   ./scripts/release.sh --publish-tag   # push tag and start CI publication
 #   ./scripts/release.sh --publish-tag --manual-publish --acknowledge-workflow-conflict
+#
+# Pre-warming rule: in a tag worktree, use only the bare ./scripts/release.sh;
+# it is audit-only and remote-safe. Do not pre-warm with a direct cargo build.
 
 set -euo pipefail
 
@@ -165,11 +168,21 @@ done
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
+clean_stale_release_package_outputs() {
+    local target="$1"
+    # Keep this package list aligned with check-portable-x86_64-isa.sh and its
+    # duplicate-output audits. Different prewarm environments can leave
+    # incompatible fingerprints even after Cargo's profile clean.
+    rm -rf "target/$target/release/build"/blake3-* \
+        "target/$target/release/.fingerprint"/blake3-*
+}
+
 for target in "${TARGETS[@]}"; do
     echo ""
     echo "=== Building $target ==="
     if [[ "$target" == *"linux"* ]]; then
         cargo clean --release --target "$target"
+        clean_stale_release_package_outputs "$target"
         CFLAGS_x86_64_unknown_linux_gnu="-march=x86_64" \
         CXXFLAGS_x86_64_unknown_linux_gnu="-march=x86_64" \
             cargo zigbuild -p cas --release --target "$target" --locked

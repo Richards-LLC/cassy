@@ -50,6 +50,12 @@ Match controls via [model-selection.md](cas-supervisor/references/model-selectio
 
 **In the pane, shape beats compression.** Answer first, then bullets or a small table so it lands at a glance; a short dense paragraph fails that as badly as a long one. Don't recap the message you just received, restate the board every turn, or close with a summary of what you just said.
 
+## Release train
+
+For runtime releases, use the only supported procedure in
+skills/cas-cut-release/SKILL.md; it owns the mechanical gate, merge queue,
+publish receipt, Slack POSTED block, and host verification.
+
 ## References
 
 Open the focused file in `cas-supervisor/references/`: preflight, intake, planning, workflow, model-selection, [reminders.md](cas-supervisor/references/reminders.md), [epic-driving.md](cas-supervisor/references/epic-driving.md), worker-recovery, reference, or filing-cas-bugs.

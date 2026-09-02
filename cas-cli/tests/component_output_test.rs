@@ -22,6 +22,9 @@ fn cas_cmd(dir: &Path) -> Command {
         cmd.env("CAS_TEST_PROTECTED_HOME", host_home);
     }
     cmd.env("HOME", home).env("XDG_CONFIG_HOME", xdg);
+    // Pin the wrap width so snapshots do not depend on the host terminal or on
+    // how long a redacted path happens to be before redaction.
+    cmd.env("COLUMNS", "4000");
     cmd.env_remove("CAS_ROOT");
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
@@ -232,6 +235,7 @@ fn pty_cas_in_dir(dir: &TempDir, args: &[&str]) -> PtyRunner {
     std::fs::create_dir_all(&xdg).unwrap();
     let mut config = PtyRunnerConfig::with_size(80, 24)
         .env("HOME", home.to_string_lossy())
+        .env("COLUMNS", "4000")
         .env("XDG_CONFIG_HOME", xdg.to_string_lossy())
         .env("CAS_SKIP_FACTORY_TOOLING", "1")
         .env_remove("CAS_ROOT")
@@ -311,7 +315,24 @@ fn pty_doctor_has_expected_sections() {
 ///
 /// Replaces file paths, timestamps, byte sizes, and other
 /// machine-specific values with placeholders.
+fn redact_temp_roots(s: &str) -> String {
+    // Replace any configured temp root by value so hosts whose TMPDIR is not
+    // under /tmp (or is very long) still redact to [TEMP_PATH].
+    let mut result = s.to_string();
+    for root in [std::env::temp_dir()]
+        .into_iter()
+        .chain(std::env::var_os("TMPDIR").map(std::path::PathBuf::from))
+    {
+        let root = root.to_string_lossy().trim_end_matches('/').to_string();
+        if root.len() > 1 && !root.starts_with("/tmp") {
+            result = result.replace(&root, "/tmp");
+        }
+    }
+    result
+}
+
 fn redact_dynamic_values(s: &str) -> String {
+    let s = &redact_temp_roots(s);
     let mut result = s.to_string();
 
     // Redact absolute paths (Unix-style)

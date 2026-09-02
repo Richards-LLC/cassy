@@ -3859,8 +3859,9 @@ This is the body content."#;
             let target = temp.path().join(label);
             sync(&target).unwrap();
             assert_eq!(
-                std::fs::read_to_string(target.join(SKILL)).unwrap(),
-                claude_skill
+                canonical_skill(&std::fs::read_to_string(target.join(SKILL)).unwrap()),
+                canonical_skill(claude_skill),
+                "{label} synced {SKILL} must match the Claude copy apart from the harness tool prefix"
             );
             assert_eq!(
                 std::fs::read_to_string(target.join(DIAGNOSIS)).unwrap(),

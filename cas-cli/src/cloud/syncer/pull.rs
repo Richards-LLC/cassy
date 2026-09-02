@@ -357,7 +357,7 @@ impl CloudSyncer {
     }
 }
 
-/// Read the cloud mutation timestamp carried by a team-pull entry.
+/// Read the cloud mutation timestamp carried by a pulled entry.
 ///
 /// The local `Entry` model predates the wire-level `updated_at` field, so
 /// retain the timestamp as pull metadata instead of changing that public
@@ -1105,6 +1105,7 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_entry, &current_project_id, "entry") {
                 continue;
             }
+            let remote_updated_at = pulled_entry_updated_at(&raw_entry);
             let remote_entry: Entry = match deserialize_pulled_entity(raw_entry, "entry") {
                 Ok(e) => e,
                 Err(e) => {
@@ -1112,7 +1113,9 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            match self.upsert_entry(store, remote_entry) {
+            let remote_updated_at = remote_updated_at
+                .unwrap_or_else(|| remote_entry.last_accessed.unwrap_or(remote_entry.created));
+            match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_entries += 1;
                 }
@@ -1411,35 +1414,6 @@ impl CloudSyncer {
 
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
-    }
-
-    fn upsert_entry(&self, store: &dyn Store, entry: Entry) -> Result<UpsertResult, CasError> {
-        match store.get(&entry.id) {
-            Ok(local) => {
-                // Compare timestamps for conflict resolution (last-write-wins)
-                let local_time = local.last_accessed.unwrap_or(local.created);
-                let remote_time = entry.last_accessed.unwrap_or(entry.created);
-
-                if remote_time > local_time {
-                    self.journal_local_overwrite(
-                        EntityType::Entry,
-                        &entry.id,
-                        &local,
-                        "remote",
-                        "timestamp_lww",
-                    )?;
-                    store.update(&entry)?;
-                    Ok(UpsertResult::Updated)
-                } else {
-                    Ok(UpsertResult::Skipped)
-                }
-            }
-            Err(cas_store::StoreError::EntryNotFound(_)) => {
-                store.add(&entry)?;
-                Ok(UpsertResult::Created)
-            }
-            Err(e) => Err(e.into()),
-        }
     }
 
     fn upsert_task(

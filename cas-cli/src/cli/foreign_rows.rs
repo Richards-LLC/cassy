@@ -72,6 +72,9 @@ const LOCAL_ACTIVITY_TABLES: &[&str] = &[
 pub struct TaskRow {
     pub id: String,
     pub title: String,
+    /// Persisted owner identity, when the local schema has it. Legacy rows
+    /// without this field are not safe purge candidates even with peer proof.
+    pub origin_project: Option<String>,
     /// `status == "closed"`. Split out because closed replicas are noise while
     /// non-closed replicas actively lie in ready queues (AC3).
     pub closed: bool,
@@ -133,6 +136,9 @@ pub struct ForeignRow {
     pub id: String,
     pub title: String,
     pub closed: bool,
+    /// The local row's persisted owner identity. A backfilled current-project
+    /// value is the signal that peer evidence must override.
+    pub origin_project: Option<String>,
     /// Project whose database carries local-activity evidence for this row.
     pub home_project: String,
     /// Every other project database holding the same `(id, title)`.
@@ -339,6 +345,7 @@ origin_project_id before removing a page, then re-run a scoped pull and this aud
                     "id": r.id,
                     "title": r.title,
                     "closed": r.closed,
+                    "origin_project": r.origin_project,
                     "home_project": r.home_project,
                     "also_present_in": r.also_present_in,
                 })
@@ -510,6 +517,7 @@ pub fn classify(local: &DbSnapshot, peers: &[DbSnapshot]) -> ForeignRowReport {
                 id: row.id.clone(),
                 title: row.title.clone(),
                 closed: row.closed,
+                origin_project: row.origin_project.clone(),
                 home_project: peers[home_idx].project.clone(),
                 also_present_in: present_in
                     .iter()
@@ -597,12 +605,23 @@ pub fn read_snapshot(db_path: &Path, project: &str) -> anyhow::Result<DbSnapshot
     )?;
     conn.busy_timeout(Duration::from_millis(250))?;
 
-    let mut stmt = conn.prepare("SELECT id, title, status FROM tasks")?;
+    let task_columns = conn
+        .prepare("PRAGMA table_info(tasks)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let origin_column = task_columns.iter().any(|column| column == "origin_project");
+    let task_sql = if origin_column {
+        "SELECT id, title, status, origin_project FROM tasks"
+    } else {
+        "SELECT id, title, status, NULL FROM tasks"
+    };
+    let mut stmt = conn.prepare(task_sql)?;
     let mut tasks = Vec::new();
     let rows = stmt.query_map([], |row| {
         Ok(TaskRow {
             id: row.get::<_, String>(0)?,
             title: row.get::<_, String>(1)?,
+            origin_project: row.get::<_, Option<String>>(3)?,
             closed: row.get::<_, String>(2)?.eq_ignore_ascii_case("closed"),
         })
     })?;
@@ -804,6 +823,7 @@ mod tests {
         TaskRow {
             id: id.to_string(),
             title: title.to_string(),
+            origin_project: None,
             closed,
         }
     }

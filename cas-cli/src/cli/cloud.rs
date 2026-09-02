@@ -4295,6 +4295,48 @@ pub struct PurgeEntity {
     pub id: String,
     /// Human label (title/name/first content line) — may be empty.
     pub label: String,
+    /// Evidence that made this row purgeable. This is rendered in dry-run
+    /// output so a destructive preview names the classifier it relied on.
+    pub evidence: PurgeEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurgeEvidence {
+    /// `origin_project` for the persisted project field, or `peer-evidence`
+    /// when the doctor's cross-database activity classifier overrode a
+    /// backfilled current-project value.
+    pub source: &'static str,
+    /// Stored origin project, or the peer project whose activity proves the
+    /// row's home.
+    pub project: String,
+}
+
+impl PurgeEntity {
+    pub fn with_evidence(
+        kind: &'static str,
+        id: impl Into<String>,
+        label: impl Into<String>,
+        source: &'static str,
+        project: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            id: id.into(),
+            label: label.into(),
+            evidence: PurgeEvidence {
+                source,
+                project: project.into(),
+            },
+        }
+    }
+
+    fn evidence_label(&self) -> String {
+        if self.evidence.source == "peer-evidence" {
+            format!("peer-evidence + home project: {}", self.evidence.project)
+        } else {
+            format!("origin_project: {}", self.evidence.project)
+        }
+    }
 }
 
 /// The concrete set of rows a purge would delete.
@@ -4323,10 +4365,19 @@ impl PurgeDeleteSet {
         ]
     }
 
-    fn to_json(&self) -> serde_json::Value {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
         let render = |rows: &Vec<PurgeEntity>| {
             rows.iter()
-                .map(|e| serde_json::json!({"id": e.id, "label": e.label}))
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.id,
+                        "label": e.label,
+                        "evidence": {
+                            "source": e.evidence.source,
+                            "project": e.evidence.project,
+                        },
+                    })
+                })
                 .collect::<Vec<_>>()
         };
         serde_json::json!({
@@ -4338,6 +4389,27 @@ impl PurgeDeleteSet {
             "total": self.total(),
         })
     }
+}
+
+/// A foreign row found by doctor but intentionally retained by purge. These
+/// are cross-project proposal materializations, not accidental replicas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurgeRetainedTask {
+    pub id: String,
+    pub title: String,
+    pub reason: String,
+}
+
+/// The shared result consumed by purge and doctor's cross-project check. The
+/// report count is the doctor's peer/evidence count; the delete set is the
+/// concrete, safety-filtered set purge can actually reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurgeForeignAnalysis {
+    pub delete_set: PurgeDeleteSet,
+    pub foreign_task_count: usize,
+    pub retained_foreign_tasks: Vec<PurgeRetainedTask>,
+    pub unattributed_task_count: usize,
+    pub collision_count: usize,
 }
 
 /// Canonical attribution fields that have existed in cloud payloads. The local
@@ -4403,11 +4475,10 @@ fn attributed_rows(
     let mut stmt = conn.prepare(&sql)?;
     let mapped = stmt.query_map([], |row| {
         Ok((
-            PurgeEntity {
-                kind,
-                id: row.get::<_, String>(0)?,
-                label: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            },
+            (
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            ),
             row.get::<_, String>(2)?,
         ))
     })?;
@@ -4415,16 +4486,100 @@ fn attributed_rows(
     Ok(rows
         .into_iter()
         .filter(|(_, stored_project)| !project_ids_match(stored_project, current_project))
-        .map(|(row, _)| row)
+        .map(|((id, label), stored_project)| {
+            PurgeEntity::with_evidence(kind, id, label, "origin_project", stored_project)
+        })
         .collect())
+}
+
+const PROPOSAL_PROVENANCE_BEGIN: &str = "--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---";
+const PROPOSAL_PROVENANCE_END: &str = "--- END CLIENT-ASSERTED PROPOSAL PROVENANCE ---";
+const PROPOSAL_PROVENANCE_SERVER_END: &str = "--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---";
+
+/// A task materialized by an accepted cross-project proposal is intentionally
+/// retained in the target project even though its origin belongs to a peer.
+/// Pull persists the server-attested target project in the task notes; only a
+/// complete marker block targeting this project qualifies.
+fn is_accepted_proposal_task(
+    conn: &rusqlite::Connection,
+    task_id: &str,
+    current_project: &str,
+) -> anyhow::Result<bool> {
+    let has_notes = conn
+        .prepare("PRAGMA table_info(tasks)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|column| column == "notes");
+    if !has_notes {
+        return Ok(false);
+    }
+
+    let notes: Option<String> = conn.query_row(
+        "SELECT notes FROM tasks WHERE id = ?1",
+        [task_id],
+        |row| row.get(0),
+    )?;
+    let Some(notes) = notes else {
+        return Ok(false);
+    };
+    let Some(start) = notes.find(PROPOSAL_PROVENANCE_BEGIN) else {
+        return Ok(false);
+    };
+    let Some((end_offset, end_marker)) = [
+        PROPOSAL_PROVENANCE_END,
+        PROPOSAL_PROVENANCE_SERVER_END,
+    ]
+    .iter()
+    .filter_map(|marker| notes[start..].find(marker).map(|offset| (offset, *marker)))
+    .min_by_key(|(offset, _)| *offset)
+    else {
+        return Ok(false);
+    };
+    let end = start + end_offset + end_marker.len();
+    let block = &notes[start..end];
+    let target = block.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("target_project_canonical_id:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    });
+    Ok(target.is_some_and(|target| project_ids_match(target, current_project)))
+}
+
+/// A task with a local external-blocker projection is deliberately retained:
+/// `blocks_origin_task_id` created this origin-side row and the projection is
+/// the local model for that cross-project handoff.
+fn has_external_task_dependency(
+    conn: &rusqlite::Connection,
+    task_id: &str,
+) -> anyhow::Result<bool> {
+    let result = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'external_task_dependencies'
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !result {
+        return Ok(false);
+    }
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM external_task_dependencies
+             WHERE origin_task_id = ?1
+         )",
+        [task_id],
+        |row| row.get(0),
+    )?)
 }
 
 fn count_proven_attributed_rules(
     conn: &rusqlite::Connection,
     current_project: &str,
 ) -> anyhow::Result<usize> {
-    let Some(project_column) =
-        first_existing_project_column(conn, "rules", PURGE_PROJECT_COLUMNS)?
+    let Some(project_column) = first_existing_project_column(conn, "rules", PURGE_PROJECT_COLUMNS)?
     else {
         return Ok(0);
     };
@@ -4486,7 +4641,16 @@ fn collect_purge_delete_set(
     conn: &rusqlite::Connection,
     current_project: &str,
 ) -> anyhow::Result<PurgeDeleteSet> {
-    let tasks = attributed_rows(conn, "task", "tasks", "title", current_project)?;
+    let mut tasks = Vec::new();
+    for task in attributed_rows(conn, "task", "tasks", "title", current_project)? {
+        // Fail closed if a safety lookup cannot be completed. The caller gets
+        // the database error rather than a misleadingly smaller delete set.
+        if !is_accepted_proposal_task(conn, &task.id, current_project)?
+            && !has_external_task_dependency(conn, &task.id)?
+        {
+            tasks.push(task);
+        }
+    }
     Ok(PurgeDeleteSet {
         entries: attributed_rows(
             conn,
@@ -4506,6 +4670,125 @@ fn collect_purge_delete_set(
         skills: attributed_rows(conn, "skill", "skills", "name", current_project)?,
         dependencies: count_purge_dependencies(conn, &tasks)?,
     })
+}
+
+/// Combine the explicit project-column classifier with doctor's read-only
+/// cross-database activity evidence. Peer evidence may only expand the task
+/// set for rows whose persisted `origin_project` says this is the current
+/// project; missing provenance, id collisions, and unattributed replicas are
+/// never promoted to deletions.
+pub(crate) fn collect_purge_delete_set_with_report(
+    conn: &rusqlite::Connection,
+    current_project: &str,
+    report: &crate::cli::foreign_rows::ForeignRowReport,
+) -> anyhow::Result<PurgeForeignAnalysis> {
+    let mut delete_set = collect_purge_delete_set(conn, current_project)?;
+    let collision_ids = report
+        .collisions
+        .iter()
+        .map(|collision| collision.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let unattributed_ids = report
+        .unattributed
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<BTreeSet<_>>();
+    // An explicit origin value cannot override the doctor's safety verdict for
+    // a collision or an unattributed replica. Both categories are retained.
+    delete_set.tasks.retain(|task| {
+        !collision_ids.contains(task.id.as_str())
+            && !unattributed_ids.contains(task.id.as_str())
+    });
+    let mut known_task_ids = delete_set
+        .tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<BTreeSet<_>>();
+
+    for foreign in &report.foreign {
+        if known_task_ids.contains(&foreign.id) {
+            continue;
+        }
+        if collision_ids.contains(foreign.id.as_str())
+            || unattributed_ids.contains(foreign.id.as_str())
+        {
+            continue;
+        }
+        let origin_is_current = foreign
+            .origin_project
+            .as_deref()
+            .is_some_and(|origin| project_ids_match(origin, current_project));
+        if !origin_is_current {
+            continue;
+        }
+        if is_accepted_proposal_task(conn, &foreign.id, current_project)?
+            || has_external_task_dependency(conn, &foreign.id)?
+        {
+            continue;
+        }
+        delete_set.tasks.push(PurgeEntity::with_evidence(
+            "task",
+            foreign.id.clone(),
+            foreign.title.clone(),
+            "peer-evidence",
+            foreign.home_project.clone(),
+        ));
+        known_task_ids.insert(foreign.id.clone());
+    }
+    delete_set.tasks.sort_by(|left, right| left.id.cmp(&right.id));
+    delete_set.dependencies = count_purge_dependencies(conn, &delete_set.tasks)?;
+
+    let mut retained_foreign_tasks = Vec::new();
+    for foreign in &report.foreign {
+        if delete_set.tasks.iter().any(|task| {
+            task.id == foreign.id && task.label.trim() == foreign.title.trim()
+        }) {
+            continue;
+        }
+        let reason = if collision_ids.contains(foreign.id.as_str()) {
+            "id collision across peer rows; purge fails closed".to_string()
+        } else if unattributed_ids.contains(foreign.id.as_str()) {
+            "unattributed replica; purge fails closed".to_string()
+        } else if is_accepted_proposal_task(conn, &foreign.id, current_project)? {
+            "accepted proposal materialized for this project".to_string()
+        } else if has_external_task_dependency(conn, &foreign.id)? {
+            "blocks_origin external dependency is retained locally".to_string()
+        } else if foreign.origin_project.is_none() {
+            "origin_project is missing; peer evidence is advisory and purge fails closed"
+                .to_string()
+        } else {
+            "row is not explicitly attributed to the current project".to_string()
+        };
+        retained_foreign_tasks.push(PurgeRetainedTask {
+            id: foreign.id.clone(),
+            title: foreign.title.clone(),
+            reason,
+        });
+    }
+
+    Ok(PurgeForeignAnalysis {
+        delete_set,
+        foreign_task_count: report.foreign.len(),
+        retained_foreign_tasks,
+        unattributed_task_count: report.unattributed.len(),
+        collision_count: report.collisions.len(),
+    })
+}
+
+/// Build the same purge analysis used by the destructive command from an
+/// already-collected doctor report. The database remains read-only.
+pub fn purge_analysis_for_report(
+    cas_root: &Path,
+    current_project: &str,
+    report: &crate::cli::foreign_rows::ForeignRowReport,
+) -> anyhow::Result<PurgeForeignAnalysis> {
+    let db_path = cas_root.join("cas.db");
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    collect_purge_delete_set_with_report(&conn, current_project, report)
 }
 
 /// A named reason the purge refuses to run destructively.
@@ -4628,8 +4911,17 @@ fn delete_purge_rows(
         ("skills", &delete_set.skills),
     ] {
         for row in rows {
-            let sql = format!("DELETE FROM {table} WHERE id = ?1");
-            match tx.execute(&sql, [&row.id]) {
+            let sql = if table == "tasks" {
+                format!("DELETE FROM {table} WHERE id = ?1 AND trim(title) = trim(?2)")
+            } else {
+                format!("DELETE FROM {table} WHERE id = ?1")
+            };
+            let result = if table == "tasks" {
+                tx.execute(&sql, rusqlite::params![&row.id, &row.label])
+            } else {
+                tx.execute(&sql, [&row.id])
+            };
+            match result {
                 Ok(_) => {}
                 Err(error) if error.to_string().contains("no such table") => break,
                 Err(error) => return Err(error.into()),
@@ -4833,9 +5125,19 @@ fn execute_purge_foreign(
     // cas-a034 / GH #132: resolve the concrete delete set and the safety state
     // BEFORE anything destructive happens, so --dry-run can show exactly what
     // would be lost and a real run can refuse when losing it is unrecoverable.
-    let (delete_set, refusals) = {
+    let (analysis, refusals) = {
         let conn = rusqlite::Connection::open(&db_path)?;
-        let delete_set = collect_purge_delete_set(&conn, &project_id)?;
+        // Use doctor's cross-DB classifier so a legacy backfill that stamped
+        // foreign rows with this project cannot make purge under-delete them.
+        // A failed read is fatal to the purge preview: an incomplete peer scan
+        // must not be presented as a complete delete set.
+        let doctor_report = crate::cli::foreign_rows::scan(cas_root)?;
+        let analysis = collect_purge_delete_set_with_report(
+            &conn,
+            &project_id,
+            &doctor_report,
+        )?;
+        let delete_set = &analysis.delete_set;
         let proven_rule_count = count_proven_attributed_rules(&conn, &project_id)?;
         let last_pull_at: Option<String> = conn
             .query_row(
@@ -4852,12 +5154,13 @@ fn execute_purge_foreign(
             args.stale_days,
         );
         refusals.extend(evaluate_purge_hard_guards(
-            &delete_set,
+            delete_set,
             tasks_before,
             proven_rule_count,
         ));
-        (delete_set, refusals)
+        (analysis, refusals)
     };
+    let delete_set = &analysis.delete_set;
 
     if cli.json {
         if args.dry_run {
@@ -4874,6 +5177,21 @@ fn execute_purge_foreign(
                         "total": total_before,
                     },
                     "delete_set": delete_set.to_json(),
+                    "foreign_task_evidence_count": analysis.foreign_task_count,
+                    "doctor_exclusions": {
+                        "unattributed_tasks": analysis.unattributed_task_count,
+                        "id_collisions": analysis.collision_count,
+                        "retained_foreign_tasks": analysis.retained_foreign_tasks.len(),
+                    },
+                    "retained_foreign_tasks": analysis
+                        .retained_foreign_tasks
+                        .iter()
+                        .map(|row| serde_json::json!({
+                            "id": row.id,
+                            "title": row.title,
+                            "reason": row.reason,
+                        }))
+                        .collect::<Vec<_>>(),
                     "refusals": refusals.iter()
                         .map(|r| serde_json::json!({"code": r.code(), "reason": r.reason()}))
                         .collect::<Vec<_>>(),
@@ -4912,7 +5230,12 @@ fn execute_purge_foreign(
                 fmt.newline()?;
                 for row in rows.iter().take(PURGE_DRY_RUN_PRINT_LIMIT) {
                     fmt.write_muted("      - ")?;
-                    fmt.write_raw(&format!("{}  {}", row.id, row.label))?;
+                    fmt.write_raw(&format!(
+                        "{}  {} [{}]",
+                        row.id,
+                        row.label,
+                        row.evidence_label()
+                    ))?;
                     fmt.newline()?;
                 }
                 if rows.len() > PURGE_DRY_RUN_PRINT_LIMIT {
@@ -4922,6 +5245,22 @@ fn execute_purge_foreign(
                     ))?;
                     fmt.newline()?;
                 }
+            }
+            if analysis.foreign_task_count != delete_set.tasks.len() {
+                fmt.write_muted(&format!(
+                    "    doctor evidence: {} foreign task row(s); purge delete set: {} task row(s)",
+                    analysis.foreign_task_count,
+                    delete_set.tasks.len()
+                ))?;
+                fmt.newline()?;
+            }
+            if analysis.unattributed_task_count > 0 || analysis.collision_count > 0 {
+                fmt.write_muted(&format!(
+                    "    doctor exclusions: {} unattributed task row(s), {} id collision(s) (never deleted)",
+                    analysis.unattributed_task_count,
+                    analysis.collision_count
+                ))?;
+                fmt.newline()?;
             }
             fmt.write_raw(&format!("    {} dependency edges", delete_set.dependencies))?;
             fmt.newline()?;
@@ -5938,6 +6277,141 @@ mod purge_foreign_safety_tests {
         assert!(set.skills.is_empty());
         assert_eq!(set.dependencies, 1);
         assert!(set.tasks.len() <= 5, "delete count cannot exceed rows present");
+    }
+
+    #[test]
+    fn backfilled_current_origin_rows_use_doctor_peer_evidence_and_label_the_source() {
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
+
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 5,
+            peers_compared: vec!["accounting".to_string()],
+            foreign: vec![ForeignRow {
+                id: "own-1".to_string(),
+                title: "own task 1".to_string(),
+                closed: false,
+                origin_project: Some("cas-src".to_string()),
+                home_project: "accounting".to_string(),
+                also_present_in: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        let analysis = collect_purge_delete_set_with_report(&conn, "cas-src", &report).unwrap();
+        let row = analysis
+            .delete_set
+            .tasks
+            .iter()
+            .find(|row| row.id == "own-1")
+            .expect("doctor peer evidence must add the backfilled row");
+        assert_eq!(row.evidence.source, "peer-evidence");
+        assert_eq!(row.evidence.project, "accounting");
+        assert_eq!(
+            analysis.delete_set.to_json()["tasks"][0]["evidence"]["source"],
+            "origin_project"
+        );
+        assert_eq!(
+            row_to_json(&analysis.delete_set, "own-1")["evidence"]["project"],
+            "accounting"
+        );
+    }
+
+    #[test]
+    fn accepted_proposal_tasks_with_foreign_origin_are_never_purge_candidates() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        conn.execute("ALTER TABLE tasks ADD COLUMN notes TEXT", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE tasks SET notes = ?1 WHERE id = 'foreign-1'",
+            ["--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---\n  target_project_canonical_id: cas-src\n--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---"],
+        )
+        .unwrap();
+
+        let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+
+        assert!(
+            set.tasks.iter().all(|task| task.id != "foreign-1"),
+            "an accepted proposal materialized in this project must be retained"
+        );
+    }
+
+    #[test]
+    fn blocks_origin_and_doctor_safety_categories_are_never_purged() {
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport, IdCollision, UnattributedRow};
+
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        conn.execute_batch(
+            "CREATE TABLE external_task_dependencies (
+                 origin_task_id TEXT NOT NULL,
+                 target_task_id TEXT NOT NULL
+             );
+             INSERT INTO external_task_dependencies (origin_task_id, target_task_id)
+             VALUES ('own-2', 'remote-1');",
+        )
+        .unwrap();
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 5,
+            peers_compared: vec!["accounting".to_string()],
+            foreign: vec![
+                ForeignRow {
+                    id: "own-2".to_string(),
+                    title: "own task 2".to_string(),
+                    closed: false,
+                    origin_project: Some("cas-src".to_string()),
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+                ForeignRow {
+                    id: "foreign-1".to_string(),
+                    title: "foreign task 1".to_string(),
+                    closed: false,
+                    origin_project: Some("other-project".to_string()),
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+            ],
+            unattributed: vec![UnattributedRow {
+                id: "foreign-1".to_string(),
+                title: "foreign task 1".to_string(),
+                closed: false,
+                present_in: vec!["accounting".to_string()],
+            }],
+            collisions: vec![IdCollision {
+                id: "foreign-2".to_string(),
+                local_title: "foreign task 2".to_string(),
+                other_project: "accounting".to_string(),
+                other_title: "different task".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let analysis = collect_purge_delete_set_with_report(&conn, "cas-src", &report).unwrap();
+
+        assert!(analysis.delete_set.tasks.iter().all(|task| {
+            !matches!(task.id.as_str(), "own-2" | "foreign-1" | "foreign-2")
+        }));
+        assert_eq!(analysis.unattributed_task_count, 1);
+        assert_eq!(analysis.collision_count, 1);
+        assert!(analysis
+            .retained_foreign_tasks
+            .iter()
+            .any(|task| task.id == "own-2" && task.reason.contains("blocks_origin")));
+    }
+
+    fn row_to_json(set: &PurgeDeleteSet, id: &str) -> serde_json::Value {
+        set.to_json()["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .cloned()
+            .unwrap()
     }
 
     #[test]

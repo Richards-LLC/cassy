@@ -836,11 +836,44 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // `(id, title)`.
     if cas_root.join("cas.db").is_file() {
         let report = crate::cli::foreign_rows::scan(&cas_root);
+        let (purge_analysis, purge_analysis_error) = match (
+            report.as_ref(),
+            crate::cloud::resolve_canonical_id(&cas_root),
+        ) {
+            (Ok(report), Some(current_project)) => {
+                match crate::cli::cloud::purge_analysis_for_report(
+                    &cas_root,
+                    &current_project,
+                    report,
+                ) {
+                    Ok(analysis) => (Some(analysis), None),
+                    Err(error) => (None, Some(error.to_string())),
+                }
+            }
+            (Ok(_), None) => (
+                None,
+                Some("current project canonical id could not be resolved".to_string()),
+            ),
+            (Err(_), _) => (None, None),
+        };
         if args.foreign_rows {
-            return output_foreign_rows_detail(report, cli);
+            return output_foreign_rows_detail(
+                report,
+                purge_analysis.as_ref(),
+                purge_analysis_error.as_deref(),
+                cli,
+            );
         }
         checks.push(cloud_queue_check(&cas_root));
-        checks.push(foreign_rows_check(report.as_ref()));
+        let foreign_check = match purge_analysis_error.as_deref() {
+            Some(error) => foreign_rows_check_with_classifier_error(
+                report.as_ref(),
+                purge_analysis.as_ref(),
+                Some(error),
+            ),
+            None => foreign_rows_check(report.as_ref(), purge_analysis.as_ref()),
+        };
+        checks.push(foreign_check);
     } else if args.foreign_rows {
         anyhow::bail!(
             "`cas doctor --foreign-rows` needs a SQLite database at {}; this project uses legacy \
@@ -978,6 +1011,15 @@ fn legacy_versioned_search_index_check(cas_root: &Path) -> Option<Check> {
 /// wrong answer for the user consulting doctor because they suspect it.
 fn foreign_rows_check(
     report: Result<&crate::cli::foreign_rows::ForeignRowReport, &anyhow::Error>,
+    purge_analysis: Option<&crate::cli::cloud::PurgeForeignAnalysis>,
+) -> Check {
+    foreign_rows_check_with_classifier_error(report, purge_analysis, None)
+}
+
+fn foreign_rows_check_with_classifier_error(
+    report: Result<&crate::cli::foreign_rows::ForeignRowReport, &anyhow::Error>,
+    purge_analysis: Option<&crate::cli::cloud::PurgeForeignAnalysis>,
+    purge_analysis_error: Option<&str>,
 ) -> Check {
     let report = match report {
         Ok(report) => report,
@@ -995,6 +1037,45 @@ fn foreign_rows_check(
     };
 
     let mut message = report.summary();
+    if let Some(analysis) = purge_analysis {
+        let evidence_count = analysis.foreign_task_count;
+        let purge_count = analysis.delete_set.tasks.len();
+        message.push_str(&format!(
+            ". foreign evidence: {evidence_count} task row(s); purge delete set: {purge_count} task row(s)"
+        ));
+        if evidence_count == purge_count {
+            message.push_str(" — counts agree");
+        } else if evidence_count > purge_count {
+            let gap = evidence_count - purge_count;
+            message.push_str(&format!(" — purge cannot reach {gap} evidence row(s)"));
+            if !analysis.retained_foreign_tasks.is_empty() {
+                let retained = analysis
+                    .retained_foreign_tasks
+                    .iter()
+                    .map(|row| format!("{} ({})", row.id, row.reason))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                message.push_str(&format!(": {retained}"));
+            }
+        } else {
+            message.push_str(&format!(
+                " — purge includes {} task row(s) attributed by origin_project but absent from peer evidence",
+                purge_count - evidence_count
+            ));
+        }
+        if analysis.unattributed_task_count > 0 || analysis.collision_count > 0 {
+            message.push_str(&format!(
+                ". purge excludes {} unattributed task row(s) and {} id collision(s); neither category is deletable",
+                analysis.unattributed_task_count,
+                analysis.collision_count
+            ));
+        }
+    }
+    if let Some(error) = purge_analysis_error {
+        message.push_str(&format!(
+            ". purge delete-set classifier unavailable: {error}; foreign-count comparison is incomplete"
+        ));
+    }
     if !report.peers_unreadable.is_empty() {
         let named = report
             .peers_unreadable
@@ -1008,12 +1089,22 @@ fn foreign_rows_check(
         ));
     }
 
-    let status = if report.is_clean() && report.peers_unreadable.is_empty() {
+    let purge_counts_disagree = purge_analysis
+        .is_some_and(|analysis| analysis.foreign_task_count != analysis.delete_set.tasks.len());
+    let status = if report.is_clean()
+        && report.peers_unreadable.is_empty()
+        && purge_analysis_error.is_none()
+        && !purge_counts_disagree
+    {
         CheckStatus::Ok
     } else {
         CheckStatus::Warning
     };
-    if !report.is_clean() {
+    if purge_counts_disagree {
+        message.push_str(
+            ". Do not treat purge-foreign as complete remediation: inspect the retained evidence rows and their stated reasons before taking action.",
+        );
+    } else if !report.is_clean() {
         message.push_str(&format!(". {}", report.remediation()));
     }
 
@@ -1027,12 +1118,37 @@ fn foreign_rows_check(
 /// `cas doctor --foreign-rows`: the full read-only contamination listing.
 fn output_foreign_rows_detail(
     report: anyhow::Result<crate::cli::foreign_rows::ForeignRowReport>,
+    purge_analysis: Option<&crate::cli::cloud::PurgeForeignAnalysis>,
+    purge_analysis_error: Option<&str>,
     cli: &Cli,
 ) -> anyhow::Result<()> {
     let report = report?;
 
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&report.to_json())?);
+        let mut output = report.to_json();
+        if let Some(analysis) = purge_analysis {
+            output["purge_foreign"] = serde_json::json!({
+                "foreign_task_evidence_count": analysis.foreign_task_count,
+                "delete_set": analysis.delete_set.to_json(),
+                "retained_foreign_tasks": analysis.retained_foreign_tasks.iter().map(|row| {
+                    serde_json::json!({
+                        "id": row.id,
+                        "title": row.title,
+                        "reason": row.reason,
+                    })
+                }).collect::<Vec<_>>(),
+                "unattributed_task_count": analysis.unattributed_task_count,
+                "id_collision_count": analysis.collision_count,
+            });
+        }
+        if let Some(error) = purge_analysis_error {
+            output["purge_foreign_error"] = serde_json::json!({
+                "message": format!(
+                    "purge delete-set classifier unavailable: {error}; foreign-count comparison is incomplete"
+                ),
+            });
+        }
+        println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
 
@@ -1057,6 +1173,38 @@ fn output_foreign_rows_detail(
             peer.project,
             peer.db_path.display(),
             peer.error
+        ))?;
+    }
+
+    if let Some(analysis) = purge_analysis {
+        fmt.write_muted(&format!(
+            "doctor evidence: {} foreign task row(s); purge delete set: {} task row(s)",
+            analysis.foreign_task_count,
+            analysis.delete_set.tasks.len()
+        ))?;
+        fmt.newline()?;
+        if analysis.foreign_task_count == analysis.delete_set.tasks.len() {
+            fmt.success("doctor evidence and purge delete-set counts agree")?;
+        } else {
+            fmt.warning(&format!(
+                "purge cannot reach {} doctor evidence row(s) — see retained proposal rows below",
+                analysis
+                    .foreign_task_count
+                    .saturating_sub(analysis.delete_set.tasks.len())
+            ))?;
+        }
+        for row in &analysis.retained_foreign_tasks {
+            fmt.warning(&format!(
+                "    retained [{}] {} — {}",
+                row.id,
+                truncate(&row.title, 55),
+                row.reason
+            ))?;
+        }
+    }
+    if let Some(error) = purge_analysis_error {
+        fmt.warning(&format!(
+            "purge delete-set classifier unavailable: {error}; foreign-count comparison is incomplete"
         ))?;
     }
 
@@ -1163,8 +1311,14 @@ fn output_foreign_rows_detail(
     }
 
     fmt.newline()?;
-    if report.is_clean() {
+    let purge_counts_disagree = purge_analysis
+        .is_some_and(|analysis| analysis.foreign_task_count != analysis.delete_set.tasks.len());
+    if report.is_clean() && purge_analysis_error.is_none() && !purge_counts_disagree {
         fmt.success("no cross-project contamination detected")?;
+    } else if purge_counts_disagree {
+        fmt.warning(
+            "Do not treat purge-foreign as complete remediation: inspect retained evidence rows above.",
+        )?;
     } else {
         fmt.warning(&report.remediation())?;
     }
@@ -2413,6 +2567,7 @@ mod tests {
                     id: "cas-0001".to_string(),
                     title: "Reconcile Q3 payroll".to_string(),
                     closed: false,
+                    origin_project: None,
                     home_project: "accounting".to_string(),
                     also_present_in: Vec::new(),
                 },
@@ -2420,6 +2575,7 @@ mod tests {
                     id: "cas-0002".to_string(),
                     title: "Finished months ago".to_string(),
                     closed: true,
+                    origin_project: None,
                     home_project: "accounting".to_string(),
                     also_present_in: Vec::new(),
                 },
@@ -2434,7 +2590,7 @@ mod tests {
         };
         let _ = DbSnapshot::default(); // keep the public snapshot type exercised
 
-        let check = foreign_rows_check(Ok(&report));
+        let check = foreign_rows_check(Ok(&report), None);
 
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(
@@ -2460,6 +2616,64 @@ mod tests {
     }
 
     #[test]
+    fn foreign_rows_check_explains_when_purge_cannot_reach_evidence_rows() {
+        use crate::cli::cloud::{PurgeDeleteSet, PurgeEntity, PurgeForeignAnalysis};
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 3,
+            peers_compared: vec!["accounting".to_string()],
+            foreign: vec![
+                ForeignRow {
+                    id: "cas-0001".to_string(),
+                    title: "Backfilled foreign task".to_string(),
+                    closed: false,
+                    origin_project: Some("cas-src".to_string()),
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+                ForeignRow {
+                    id: "cas-0002".to_string(),
+                    title: "Accepted proposal".to_string(),
+                    closed: false,
+                    origin_project: Some("accounting".to_string()),
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        let analysis = PurgeForeignAnalysis {
+            delete_set: PurgeDeleteSet {
+                tasks: vec![PurgeEntity::with_evidence(
+                    "task",
+                    "cas-0001",
+                    "Backfilled foreign task",
+                    "peer-evidence",
+                    "accounting",
+                )],
+                ..Default::default()
+            },
+            foreign_task_count: 2,
+            retained_foreign_tasks: vec![crate::cli::cloud::PurgeRetainedTask {
+                id: "cas-0002".to_string(),
+                title: "Accepted proposal".to_string(),
+                reason: "accepted proposal materialized for this project".to_string(),
+            }],
+            unattributed_task_count: 0,
+            collision_count: 0,
+        };
+
+        let check = foreign_rows_check(Ok(&report), Some(&analysis));
+
+        assert!(check.message.contains("foreign evidence: 2"), "{}", check.message);
+        assert!(check.message.contains("purge delete set: 1"), "{}", check.message);
+        assert!(check.message.contains("cannot reach 1"), "{}", check.message);
+        assert!(check.message.contains("accepted proposal"), "{}", check.message);
+    }
+
+    #[test]
     fn foreign_rows_check_zero_states_its_coverage_never_a_bare_clean_cas_fc6fa() {
         use crate::cli::foreign_rows::ForeignRowReport;
 
@@ -2470,7 +2684,7 @@ mod tests {
             ..Default::default()
         };
 
-        let check = foreign_rows_check(Ok(&report));
+        let check = foreign_rows_check(Ok(&report), None);
 
         assert!(matches!(check.status, CheckStatus::Ok));
         // An Ok row that just said "clean" would be indistinguishable from a
@@ -2502,7 +2716,7 @@ mod tests {
         // Same reassuring-zero failure mode as the canonical-id registry row:
         // a scan that could not run must not render as "no contamination".
         let err = anyhow::anyhow!("disk I/O error");
-        let check = foreign_rows_check(Err(&err));
+        let check = foreign_rows_check(Err(&err), None);
 
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("SKIPPED"), "{}", check.message);
@@ -2742,7 +2956,7 @@ mod tests {
             ..Default::default()
         };
 
-        let check = foreign_rows_check(Ok(&report));
+        let check = foreign_rows_check(Ok(&report), None);
 
         // Clean against what could be read, but partial coverage is not a
         // clean bill of health.

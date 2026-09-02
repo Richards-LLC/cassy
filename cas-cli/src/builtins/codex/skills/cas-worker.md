@@ -29,7 +29,7 @@ working directory.
    proof with its exit code and output tail.
 7. Close with `mcp__cs__task action=close id=<task-id> reason="..."`.
    - **Success:** message the supervisor, then wait for another assignment.
-   - **Verification required:** send the exact guidance to the supervisor and
+   - **verification required:** send the exact guidance to the supervisor and
      ask them to verify and close on your behalf.
    - **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
      capture the current factory-branch tip SHA, push the branch, and ask the

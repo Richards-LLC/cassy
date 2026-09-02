@@ -7,7 +7,6 @@
 //! The three-flavor byte parity of these files is owned by
 //! `builtin_flavor_drift_test.rs`; here we assert content and registration.
 
-use std::fs;
 use std::path::PathBuf;
 
 use cas::builtins::{
@@ -15,19 +14,24 @@ use cas::builtins::{
     GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS, REQUIRED_FACTORY_AGENTS,
 };
 
-fn repo_root() -> PathBuf {
-    cas::test_paths::workspace_root()
-}
+#[path = "support/builtin_catalog.rs"]
+mod builtin_catalog;
 
-fn builtins_root() -> PathBuf {
-    repo_root().join("cas-cli/src/builtins")
+fn checkout_builtins_root() -> Option<PathBuf> {
+    let root = cas::test_paths::workspace_root().join("cas-cli/src/builtins");
+    if !root.is_dir() {
+        eprintln!(
+            "SKIP builtin source projection checks: source checkout is absent at {}",
+            root.display()
+        );
+        return None;
+    }
+    Some(root)
 }
 
 /// Read a builtin source path relative to `cas-cli/src/builtins`.
-fn load(relative: &str) -> String {
-    let path = builtins_root().join(relative);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+fn load(relative: &str) -> &'static str {
+    builtin_catalog::find_source_path(&format!("cas-cli/src/builtins/{relative}"))
 }
 
 /// The claude canonical plus both twins for one builtins-relative path.
@@ -77,11 +81,13 @@ fn doc_family_shares_one_hygiene_reference_instead_of_restating_it() {
 #[test]
 fn doc_hygiene_reference_is_registered_in_every_flavor() {
     let rel = "skills/codemap/references/doc-hygiene.md";
-    for flavor_rel in all_flavors(rel) {
-        assert!(
-            builtins_root().join(&flavor_rel).is_file(),
-            "{flavor_rel} must exist on disk"
-        );
+    if let Some(root) = checkout_builtins_root() {
+        for flavor_rel in all_flavors(rel) {
+            assert!(
+                root.join(&flavor_rel).is_file(),
+                "{flavor_rel} must exist on disk"
+            );
+        }
     }
     for (name, catalog) in [
         ("BUILTIN_SKILLS", BUILTIN_SKILLS),
@@ -159,12 +165,15 @@ const REMOVED_BUILTIN_PATHS: [&str; 4] = [
 
 #[test]
 fn merged_and_inlined_builtins_are_gone_from_disk_and_from_every_catalog() {
+    let checkout_root = checkout_builtins_root();
     for rel in REMOVED_BUILTIN_PATHS {
-        for flavor_rel in all_flavors(rel) {
-            assert!(
-                !builtins_root().join(&flavor_rel).exists(),
-                "{flavor_rel} was merged or inlined and must be deleted"
-            );
+        if let Some(root) = checkout_root.as_ref() {
+            for flavor_rel in all_flavors(rel) {
+                assert!(
+                    !root.join(&flavor_rel).exists(),
+                    "{flavor_rel} was merged or inlined and must be deleted"
+                );
+            }
         }
         for (name, catalog) in [
             ("BUILTIN_SKILLS", BUILTIN_SKILLS),
@@ -215,13 +224,16 @@ const RETIRED_AGENTS: [&str; 2] = ["git-history-analyzer", "issue-intelligence-a
 
 #[test]
 fn unwired_agents_are_retired_from_every_agent_registry() {
+    let checkout_root = checkout_builtins_root();
     for agent in RETIRED_AGENTS {
         let rel = format!("agents/{agent}.md");
-        for flavor_rel in all_flavors(&rel) {
-            assert!(
-                !builtins_root().join(&flavor_rel).exists(),
-                "{flavor_rel} is retired and must be deleted"
-            );
+        if let Some(root) = checkout_root.as_ref() {
+            for flavor_rel in all_flavors(&rel) {
+                assert!(
+                    !root.join(&flavor_rel).exists(),
+                    "{flavor_rel} is retired and must be deleted"
+                );
+            }
         }
         for (name, catalog) in [
             ("BUILTIN_AGENTS", BUILTIN_AGENTS),

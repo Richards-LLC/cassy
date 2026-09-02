@@ -49,11 +49,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cas::builtins::{
-    agent_catalog_for_harness, skill_catalog_for_harness, BUILTIN_AGENTS, BUILTIN_SKILLS,
+    BUILTIN_AGENTS, BUILTIN_SKILLS, agent_catalog_for_harness, skill_catalog_for_harness,
 };
 use cas_mux::SupervisorCli;
 use serde_json::Value;
 use tempfile::TempDir;
+
+#[path = "support/builtin_catalog.rs"]
+mod builtin_catalog;
 
 // ---------------------------------------------------------------------------
 // Flavors
@@ -66,9 +69,18 @@ struct Flavor {
     subdir: &'static str,
 }
 
-const CLAUDE: Flavor = Flavor { name: "claude", subdir: "" };
-const CODEX: Flavor = Flavor { name: "codex", subdir: "codex" };
-const GROK: Flavor = Flavor { name: "grok", subdir: "grok" };
+const CLAUDE: Flavor = Flavor {
+    name: "claude",
+    subdir: "",
+};
+const CODEX: Flavor = Flavor {
+    name: "codex",
+    subdir: "codex",
+};
+const GROK: Flavor = Flavor {
+    name: "grok",
+    subdir: "grok",
+};
 
 /// Flavors compared against the claude baseline.
 const TWINS: [&Flavor; 2] = [&CODEX, &GROK];
@@ -82,22 +94,25 @@ const TWINS: [&Flavor; 2] = [&CODEX, &GROK];
 /// The heading is matched exactly as it appears in the file (after
 /// canonicalization). Sections listed here may differ in body OR be absent in
 /// that flavor. Everything else in the file is still compared.
-const ALLOWED_SECTION_DIVERGENCE: &[(&str, &str, &str, &str)] = &[(
-    "skills/cas-worker/references/recovery.md",
-    "codex",
-    "## Close requires task-scoped verification",
-    "The claude body enumerates the per-CLI tool spellings as an audience-facing \
+const ALLOWED_SECTION_DIVERGENCE: &[(&str, &str, &str, &str)] = &[
+    (
+        "skills/cas-worker/references/recovery.md",
+        "codex",
+        "## Close requires task-scoped verification",
+        "The claude body enumerates the per-CLI tool spellings as an audience-facing \
      list ('Claude workers: ... / Codex workers: ...') because a claude worker may \
      be reading on behalf of either. A codex worker has exactly one spelling, so \
      the list collapses to a single inline sentence. Both were written in the same \
      commit; this is presentation, not content.",
-), (
-    "skills/cas-worker/references/recovery.md",
-    "grok",
-    "## Close requires task-scoped verification",
-    "Same rationale as the codex entry above: the per-CLI enumeration collapses to \
+    ),
+    (
+        "skills/cas-worker/references/recovery.md",
+        "grok",
+        "## Close requires task-scoped verification",
+        "Same rationale as the codex entry above: the per-CLI enumeration collapses to \
      one line for a single-spelling harness.",
-)];
+    ),
+];
 
 /// Claude files with no counterpart in a given flavor: (path, flavor, rationale).
 const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
@@ -158,7 +173,11 @@ fn canonicalize(content: &str) -> String {
     }
 
     // Agent-catalog constant name. Longest first.
-    for pat in ["CODEX_BUILTIN_AGENTS", "GROK_BUILTIN_AGENTS", "BUILTIN_AGENTS"] {
+    for pat in [
+        "CODEX_BUILTIN_AGENTS",
+        "GROK_BUILTIN_AGENTS",
+        "BUILTIN_AGENTS",
+    ] {
         out = out.replace(pat, CANON_CATALOG);
     }
 
@@ -267,10 +286,16 @@ fn is_heading(line: &str) -> bool {
 /// Split into sections keyed by heading line. Content before the first heading
 /// (YAML frontmatter, intro prose) becomes the PREAMBLE section.
 fn split_sections(content: &str) -> Vec<Section> {
-    let mut sections = vec![Section { heading: PREAMBLE.to_string(), body: Vec::new() }];
+    let mut sections = vec![Section {
+        heading: PREAMBLE.to_string(),
+        body: Vec::new(),
+    }];
     for line in content.lines() {
         if is_heading(line) {
-            sections.push(Section { heading: line.trim_end().to_string(), body: Vec::new() });
+            sections.push(Section {
+                heading: line.trim_end().to_string(),
+                body: Vec::new(),
+            });
         } else {
             sections
                 .last_mut()
@@ -301,7 +326,8 @@ fn render_diff(claude: &[String], twin: &[String], claude_label: &str, twin_labe
         start += 1;
     }
     let mut back = 0;
-    while back < claude.len() - start && back < twin.len() - start
+    while back < claude.len() - start
+        && back < twin.len() - start
         && claude[claude.len() - 1 - back] == twin[twin.len() - 1 - back]
     {
         back += 1;
@@ -335,14 +361,6 @@ fn render_diff(claude: &[String], twin: &[String], claude_label: &str, twin_labe
 // Discovery
 // ---------------------------------------------------------------------------
 
-fn repo_root() -> PathBuf {
-    cas::test_paths::workspace_root()
-}
-
-fn builtins_root() -> PathBuf {
-    repo_root().join("cas-cli/src/builtins")
-}
-
 /// Non-markdown builtin payloads that ship alongside the skill bodies. These
 /// are mirrored per flavor exactly like the `.md` files, but until cas-ef87a
 /// the walk below hard-filtered `extension == "md"`, so
@@ -350,41 +368,41 @@ fn builtins_root() -> PathBuf {
 /// (the whole `# Example:` block was missing) without the guard noticing.
 const ASSET_EXTENSIONS: &[&str] = &["sh", "js", "yaml", "yml"];
 
+/// These legacy skill bodies remain flat in the source tree while their
+/// catalog destination uses the conventional `<skill>/SKILL.md` path.
+fn source_relative(catalog_path: &str) -> String {
+    match catalog_path {
+        "skills/cas-search/SKILL.md"
+        | "skills/cas-task-tracking/SKILL.md"
+        | "skills/cas-supervisor/SKILL.md"
+        | "skills/cas-supervisor-checklist/SKILL.md"
+        | "skills/cas-codex-supervisor-checklist/SKILL.md"
+        | "skills/cas-worker/SKILL.md" => {
+            let stem = catalog_path
+                .strip_prefix("skills/")
+                .and_then(|path| path.strip_suffix("/SKILL.md"))
+                .expect("flat legacy skill path");
+            format!("skills/{stem}.md")
+        }
+        _ => catalog_path.to_string(),
+    }
+}
+
 /// All files under `dir` whose extension is in `extensions`, returned as paths
 /// relative to `dir`. `skip_top_level` names immediate subdirectories to
 /// exclude (the twin trees).
 fn files_with_extensions(dir: &Path, skip_top_level: &[&str], extensions: &[&str]) -> Vec<String> {
     let mut found = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&current) else {
+    let flavor = catalog_flavor(dir);
+    for builtin in builtin_catalog::skills(flavor)
+        .iter()
+        .chain(builtin_catalog::agents(flavor))
+    {
+        let Some(extension) = builtin.path.rsplit('.').next() else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let is_skipped = path
-                    .strip_prefix(dir)
-                    .ok()
-                    .and_then(|rel| rel.to_str())
-                    .is_some_and(|rel| skip_top_level.contains(&rel));
-                if !is_skipped {
-                    stack.push(path);
-                }
-                continue;
-            }
-            let matches = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|ext| extensions.contains(&ext));
-            if !matches {
-                continue;
-            }
-            if let Ok(rel) = path.strip_prefix(dir) {
-                if let Some(rel) = rel.to_str() {
-                    found.push(rel.replace('\\', "/"));
-                }
-            }
+        if extensions.contains(&extension) {
+            found.push(source_relative(builtin.path));
         }
     }
     found.sort();
@@ -397,11 +415,36 @@ fn markdown_files(dir: &Path, skip_top_level: &[&str]) -> Vec<String> {
     files_with_extensions(dir, skip_top_level, &["md"])
 }
 
-fn flavor_path(rel: &str, flavor: &Flavor) -> PathBuf {
-    if flavor.subdir.is_empty() {
-        builtins_root().join(rel)
-    } else {
-        builtins_root().join(flavor.subdir).join(rel)
+fn builtins_root() -> PathBuf {
+    PathBuf::from("cas-cli/src/builtins")
+}
+
+fn checkout_root() -> Option<PathBuf> {
+    let root = cas::test_paths::workspace_root();
+    if !root.join("cas-cli/src/builtins").is_dir() {
+        eprintln!(
+            "SKIP root projection checks: source checkout is absent at {}",
+            root.display()
+        );
+        return None;
+    }
+    Some(root)
+}
+
+fn catalog_flavor(dir: &Path) -> builtin_catalog::Flavor {
+    match dir.to_string_lossy().as_ref() {
+        path if path.contains("cas-cli/src/builtins/codex") => builtin_catalog::Flavor::Codex,
+        path if path.contains("cas-cli/src/builtins/grok") => builtin_catalog::Flavor::Grok,
+        _ => builtin_catalog::Flavor::Claude,
+    }
+}
+
+fn catalog_for(flavor: &Flavor) -> builtin_catalog::Flavor {
+    match flavor.name {
+        "claude" => builtin_catalog::Flavor::Claude,
+        "codex" => builtin_catalog::Flavor::Codex,
+        "grok" => builtin_catalog::Flavor::Grok,
+        other => panic!("unknown builtin flavor {other}"),
     }
 }
 
@@ -425,7 +468,10 @@ fn codemap_build_contract_violations(content: &str) -> Vec<&'static str> {
     let lower = content.to_ascii_lowercase();
     let mut violations = Vec::new();
 
-    let Some(build_line) = lower.lines().find(|line| line.contains("cas knowledge build")) else {
+    let Some(build_line) = lower
+        .lines()
+        .find(|line| line.contains("cas knowledge build"))
+    else {
         return vec!["knowledge-build command"];
     };
 
@@ -449,7 +495,9 @@ fn codemap_build_contract_violations(content: &str) -> Vec<&'static str> {
     let mut bound_seconds = None;
     for (index, token) in command_tokens.iter().enumerate() {
         if *token == "--timeout-secs" {
-            bound_seconds = command_tokens.get(index + 1).and_then(|value| value.parse().ok());
+            bound_seconds = command_tokens
+                .get(index + 1)
+                .and_then(|value| value.parse().ok());
         } else if let Some(value) = token.strip_prefix("--timeout-secs=") {
             bound_seconds = value.parse().ok();
         }
@@ -536,8 +584,7 @@ fn codemap_build_contract_violations(content: &str) -> Vec<&'static str> {
 fn codemap_build_contract_is_bounded_non_blocking_and_non_detached() {
     for flavor in [&CLAUDE, &CODEX, &GROK] {
         let rel = CODEMAP_SKILL_REL;
-        let content = fs::read_to_string(flavor_path(rel, flavor))
-            .unwrap_or_else(|e| panic!("{} {rel} missing: {e}", flavor.name));
+        let content = builtin_catalog::find(catalog_for(flavor), rel);
         let violations = codemap_build_contract_violations(&content);
         assert!(
             violations.is_empty(),
@@ -631,14 +678,11 @@ fn builtin_flavors_stay_content_identical_after_normalization() {
     let mut compared = 0usize;
 
     for rel in &claude_files {
-        let claude_raw = fs::read_to_string(flavor_path(rel, &CLAUDE))
-            .unwrap_or_else(|e| panic!("failed to read claude {rel}: {e}"));
+        let claude_raw = builtin_catalog::find(builtin_catalog::Flavor::Claude, rel);
         let claude_sections = split_sections(&canonicalize(&claude_raw));
 
         for twin in TWINS {
-            let twin_path = flavor_path(rel, twin);
-
-            if !twin_path.exists() {
+            let Some(twin_raw) = builtin_catalog::try_find(catalog_for(twin), rel) else {
                 let exempt = ALLOWED_MISSING_TWIN
                     .iter()
                     .any(|(p, f, _)| *p == rel && *f == twin.name);
@@ -650,10 +694,7 @@ fn builtin_flavors_stay_content_identical_after_normalization() {
                     ));
                 }
                 continue;
-            }
-
-            let twin_raw = fs::read_to_string(&twin_path)
-                .unwrap_or_else(|e| panic!("failed to read {} {rel}: {e}", twin.name));
+            };
             let twin_sections = split_sections(&canonicalize(&twin_raw));
             compared += 1;
 
@@ -673,10 +714,14 @@ fn builtin_flavors_stay_content_identical_after_normalization() {
                 .collect();
 
             if claude_headings != twin_headings {
-                let only_claude: Vec<&&str> =
-                    claude_headings.iter().filter(|h| !twin_headings.contains(h)).collect();
-                let only_twin: Vec<&&str> =
-                    twin_headings.iter().filter(|h| !claude_headings.contains(h)).collect();
+                let only_claude: Vec<&&str> = claude_headings
+                    .iter()
+                    .filter(|h| !twin_headings.contains(h))
+                    .collect();
+                let only_twin: Vec<&&str> = twin_headings
+                    .iter()
+                    .filter(|h| !claude_headings.contains(h))
+                    .collect();
                 failures.push(format!(
                     "SECTION SET DIFFERS: {rel} (claude vs {})\n    \
                      only in claude: {:?}\n    only in {}: {:?}\n    \
@@ -747,14 +792,11 @@ fn non_markdown_builtin_twins_stay_identical_after_normalization() {
     let mut compared = 0usize;
 
     for rel in &claude_files {
-        let claude_raw = fs::read_to_string(flavor_path(rel, &CLAUDE))
-            .unwrap_or_else(|e| panic!("failed to read claude {rel}: {e}"));
+        let claude_raw = builtin_catalog::find(builtin_catalog::Flavor::Claude, rel);
         let claude_body = canonicalize(&claude_raw);
 
         for twin in TWINS {
-            let twin_path = flavor_path(rel, twin);
-
-            if !twin_path.exists() {
+            let Some(twin_raw) = builtin_catalog::try_find(catalog_for(twin), rel) else {
                 let exempt = ALLOWED_MISSING_TWIN
                     .iter()
                     .any(|(p, f, _)| *p == rel && *f == twin.name);
@@ -766,16 +808,12 @@ fn non_markdown_builtin_twins_stay_identical_after_normalization() {
                     ));
                 }
                 continue;
-            }
-
-            let twin_raw = fs::read_to_string(&twin_path)
-                .unwrap_or_else(|e| panic!("failed to read {} {rel}: {e}", twin.name));
+            };
             let twin_body = canonicalize(&twin_raw);
             compared += 1;
 
             if claude_body != twin_body {
-                let claude_lines: Vec<String> =
-                    claude_body.lines().map(str::to_string).collect();
+                let claude_lines: Vec<String> = claude_body.lines().map(str::to_string).collect();
                 let twin_lines: Vec<String> = twin_body.lines().map(str::to_string).collect();
                 failures.push(format!(
                     "CONTENT DRIFT: {rel} (claude vs {}){}",
@@ -845,7 +883,9 @@ fn flavor_only_non_markdown_builtin_files_are_explicitly_sanctioned() {
 /// embedded source such as `cas-seo-expert`.
 #[test]
 fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
-    let root = repo_root();
+    let Some(root) = checkout_root() else {
+        return;
+    };
 
     for builtin in BUILTIN_AGENTS {
         let path = root.join(".claude").join(builtin.path);
@@ -1007,21 +1047,6 @@ fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
     );
 }
 
-/// Resolve a catalog path to its Claude source file. Five historical skill
-/// bodies use a flat `skills/cas-foo.md` source while their managed catalog
-/// path is the conventional `skills/cas-foo/SKILL.md` destination.
-fn claude_source_path(catalog_path: &str) -> PathBuf {
-    let direct = flavor_path(catalog_path, &CLAUDE);
-    if direct.exists() {
-        return direct;
-    }
-    catalog_path
-        .strip_suffix("/SKILL.md")
-        .map(|stem| builtins_root().join(format!("{stem}.md")))
-        .filter(|flat| flat.exists())
-        .unwrap_or(direct)
-}
-
 /// The fourth flavor is generated in-process, not written under a user-level
 /// `.opencode` tree. Compare every projected catalog entry to the Claude
 /// source after normalizing OpenCode's `cas_<tool>` sanitizer spelling.
@@ -1035,8 +1060,7 @@ fn opencode_projection_stays_content_identical_after_normalization() {
     for (kind, catalog) in [("skill", BUILTIN_SKILLS), ("agent", BUILTIN_AGENTS)] {
         for builtin in catalog {
             let rel = builtin.path;
-            let source = fs::read_to_string(claude_source_path(rel))
-                .unwrap_or_else(|e| panic!("failed to read claude source for {rel}: {e}"));
+            let source = builtin_catalog::find(builtin_catalog::Flavor::Claude, rel);
             let projection = if kind == "skill" {
                 skills.iter().find(|candidate| candidate.path == rel)
             } else {
@@ -1050,9 +1074,7 @@ fn opencode_projection_stays_content_identical_after_normalization() {
             let source_sections = split_sections(&canonicalize_opencode(&source));
             let projection_sections = split_sections(&canonicalize_opencode(projection.content));
             if source_sections.len() != projection_sections.len() {
-                failures.push(format!(
-                    "SECTION SET DIFFERS: {rel} (claude vs opencode)"
-                ));
+                failures.push(format!("SECTION SET DIFFERS: {rel} (claude vs opencode)"));
                 continue;
             }
             for (source_section, projection_section) in
@@ -1070,7 +1092,10 @@ fn opencode_projection_stays_content_identical_after_normalization() {
         }
     }
 
-    assert!(compared > 80, "expected over 80 OpenCode projections, got {compared}");
+    assert!(
+        compared > 80,
+        "expected over 80 OpenCode projections, got {compared}"
+    );
     assert!(
         failures.is_empty(),
         "OpenCode builtin projection drifted ({} issue(s)):\n{}",
@@ -1086,9 +1111,7 @@ fn opencode_projection_stays_content_identical_after_normalization() {
 #[test]
 fn memory_lifecycle_reference_stays_three_way_synchronized() {
     const REL: &str = "skills/cas-memory-management/references/lifecycle-and-storage.md";
-    let claude = canonicalize(
-        &fs::read_to_string(flavor_path(REL, &CLAUDE)).expect("claude memory lifecycle reference"),
-    );
+    let claude = canonicalize(builtin_catalog::find(builtin_catalog::Flavor::Claude, REL));
 
     for required in [
         "recent_at desc, id desc",
@@ -1106,10 +1129,7 @@ fn memory_lifecycle_reference_stays_three_way_synchronized() {
     }
 
     for twin in TWINS {
-        let twin_content = canonicalize(
-            &fs::read_to_string(flavor_path(REL, twin))
-                .unwrap_or_else(|e| panic!("{} memory lifecycle reference: {e}", twin.name)),
-        );
+        let twin_content = canonicalize(builtin_catalog::find(catalog_for(twin), REL));
         assert_eq!(
             twin_content, claude,
             "memory lifecycle reference drifted between claude and {}",
@@ -1127,10 +1147,7 @@ fn cli_routing_skill_stays_three_way_synchronized() {
         "skills/cli-routing/SKILL.md",
         "skills/cli-routing/references/routing.md",
     ] {
-        let claude = canonicalize(
-            &fs::read_to_string(flavor_path(rel, &CLAUDE))
-                .unwrap_or_else(|e| panic!("claude {rel} missing: {e}")),
-        );
+        let claude = canonicalize(builtin_catalog::find(builtin_catalog::Flavor::Claude, rel));
         for required in [
             "codex exec",
             "release.claude_account_allowlist",
@@ -1155,10 +1172,7 @@ fn cli_routing_skill_stays_three_way_synchronized() {
             );
         }
         for twin in TWINS {
-            let body = canonicalize(
-                &fs::read_to_string(flavor_path(rel, twin))
-                    .unwrap_or_else(|e| panic!("{} {rel} missing: {e}", twin.name)),
-            );
+            let body = canonicalize(builtin_catalog::find(catalog_for(twin), rel));
             assert_eq!(claude, body, "{rel} drifted for {}", twin.name);
         }
     }
@@ -1205,7 +1219,7 @@ fn drift_guard_exemptions_are_live() {
     let mut stale = Vec::new();
 
     for (rel, flavor, heading, _) in ALLOWED_SECTION_DIVERGENCE {
-        if !flavor_path(rel, &CLAUDE).exists() {
+        if builtin_catalog::try_find(builtin_catalog::Flavor::Claude, rel).is_none() {
             stale.push(format!(
                 "ALLOWED_SECTION_DIVERGENCE names missing claude file {rel}"
             ));
@@ -1215,18 +1229,22 @@ fn drift_guard_exemptions_are_live() {
             .iter()
             .find(|f| f.name == *flavor)
             .unwrap_or_else(|| panic!("unknown flavor {flavor} in ALLOWED_SECTION_DIVERGENCE"));
-        let Ok(content) = fs::read_to_string(flavor_path(rel, twin)) else {
+        let Some(content) = builtin_catalog::try_find(catalog_for(twin), rel) else {
             stale.push(format!(
                 "ALLOWED_SECTION_DIVERGENCE names missing {flavor} file {rel}"
             ));
             continue;
         };
         // The heading is stored canonicalized; compare against canonicalized content.
-        let has_heading = split_sections(&canonicalize(&content))
+        let has_heading = split_sections(&canonicalize(content))
             .iter()
             .any(|s| s.heading == *heading);
-        let claude_has_heading = fs::read_to_string(flavor_path(rel, &CLAUDE))
-            .map(|c| split_sections(&canonicalize(&c)).iter().any(|s| s.heading == *heading))
+        let claude_has_heading = builtin_catalog::try_find(builtin_catalog::Flavor::Claude, rel)
+            .map(|c| {
+                split_sections(&canonicalize(c))
+                    .iter()
+                    .any(|s| s.heading == *heading)
+            })
             .unwrap_or(false);
         if !has_heading && !claude_has_heading {
             stale.push(format!(
@@ -1237,15 +1255,17 @@ fn drift_guard_exemptions_are_live() {
     }
 
     for (rel, flavor, _) in ALLOWED_MISSING_TWIN {
-        if !flavor_path(rel, &CLAUDE).exists() {
-            stale.push(format!("ALLOWED_MISSING_TWIN names missing claude file {rel}"));
+        if builtin_catalog::try_find(builtin_catalog::Flavor::Claude, rel).is_none() {
+            stale.push(format!(
+                "ALLOWED_MISSING_TWIN names missing claude file {rel}"
+            ));
             continue;
         }
         let twin = TWINS
             .iter()
             .find(|f| f.name == *flavor)
             .unwrap_or_else(|| panic!("unknown flavor {flavor} in ALLOWED_MISSING_TWIN"));
-        if flavor_path(rel, twin).exists() {
+        if builtin_catalog::try_find(catalog_for(twin), rel).is_some() {
             stale.push(format!(
                 "ALLOWED_MISSING_TWIN says {flavor} has no {rel}, but the file now exists — \
                  remove the entry so the twin is compared"
@@ -1258,7 +1278,7 @@ fn drift_guard_exemptions_are_live() {
             .iter()
             .find(|f| f.name == *flavor)
             .unwrap_or_else(|| panic!("unknown flavor {flavor} in ALLOWED_FLAVOR_ONLY"));
-        if !flavor_path(rel, twin).exists() {
+        if builtin_catalog::try_find(catalog_for(twin), rel).is_none() {
             stale.push(format!(
                 "ALLOWED_FLAVOR_ONLY names missing file {flavor}/{rel} — remove the entry"
             ));
@@ -1277,13 +1297,23 @@ fn drift_guard_exemptions_are_live() {
 /// silently blinds the comparison.
 #[test]
 fn canonicalization_is_idempotent_and_prefix_safe() {
-    let claude = "Call `mcp__cas__task action=show` and see `.claude/skills/x` in `BUILTIN_AGENTS`.";
-    let codex = "Call `mcp__cs__task action=show` and see `.codex/skills/x` in `CODEX_BUILTIN_AGENTS`.";
+    let claude =
+        "Call `mcp__cas__task action=show` and see `.claude/skills/x` in `BUILTIN_AGENTS`.";
+    let codex =
+        "Call `mcp__cs__task action=show` and see `.codex/skills/x` in `CODEX_BUILTIN_AGENTS`.";
     let grok = "Call `cas__task action=show` and see `.grok/skills/x` in `GROK_BUILTIN_AGENTS`.";
 
     let c = canonicalize(claude);
-    assert_eq!(c, canonicalize(codex), "codex spelling must canonicalize to the claude form");
-    assert_eq!(c, canonicalize(grok), "grok spelling must canonicalize to the claude form");
+    assert_eq!(
+        c,
+        canonicalize(codex),
+        "codex spelling must canonicalize to the claude form"
+    );
+    assert_eq!(
+        c,
+        canonicalize(grok),
+        "grok spelling must canonicalize to the claude form"
+    );
     assert_eq!(c, canonicalize(&c), "canonicalization must be idempotent");
 
     // The longest-first ordering must not let `cas__` corrupt `mcp__cas__`.
@@ -1347,19 +1377,33 @@ fn reflow_tolerates_rewrapping_but_not_content_change() {
     );
 
     // A dropped sentence must still be caught.
-    let shortened: Vec<String> = "This file remains in `X` solely so `cas sync` can overwrite any\nstale downstream copies."
-        .lines()
-        .map(str::to_string)
-        .collect();
-    assert_ne!(reflow(&wrapped_a), reflow(&shortened), "dropped content must be detected");
+    let shortened: Vec<String> =
+        "This file remains in `X` solely so `cas sync` can overwrite any\nstale downstream copies."
+            .lines()
+            .map(str::to_string)
+            .collect();
+    assert_ne!(
+        reflow(&wrapped_a),
+        reflow(&shortened),
+        "dropped content must be detected"
+    );
 
     // A dropped bullet must still be caught.
     let three: Vec<String> = vec!["- a".into(), "- b".into(), "- c".into()];
     let two: Vec<String> = vec!["- a".into(), "- b".into()];
-    assert_ne!(reflow(&three), reflow(&two), "a removed bullet must be detected");
+    assert_ne!(
+        reflow(&three),
+        reflow(&two),
+        "a removed bullet must be detected"
+    );
 
     // Line structure inside fenced code blocks must be preserved verbatim.
-    let fenced: Vec<String> = vec!["```bash".into(), "cmd one".into(), "cmd two".into(), "```".into()];
+    let fenced: Vec<String> = vec![
+        "```bash".into(),
+        "cmd one".into(),
+        "cmd two".into(),
+        "```".into(),
+    ];
     let joined: Vec<String> = vec!["```bash".into(), "cmd one cmd two".into(), "```".into()];
     assert_ne!(
         reflow(&fenced),
@@ -1388,7 +1432,10 @@ fn guard_detects_injected_drift() {
     let c_sections = split_sections(&canonicalize(claude));
     let t_sections = split_sections(&canonicalize(changed));
     assert!(
-        c_sections.iter().zip(t_sections.iter()).any(|(a, b)| a.body != b.body),
+        c_sections
+            .iter()
+            .zip(t_sections.iter())
+            .any(|(a, b)| a.body != b.body),
         "body drift must be detected"
     );
 
@@ -1405,5 +1452,8 @@ fn guard_detects_injected_drift() {
     //    prefix spelling, different action — must still fail.
     let a = canonicalize("run `mcp__cas__task action=close`");
     let b = canonicalize("run `mcp__cs__task action=reopen`");
-    assert_ne!(a, b, "prefix normalization must not mask a changed action name");
+    assert_ne!(
+        a, b,
+        "prefix normalization must not mask a changed action name"
+    );
 }

@@ -5,17 +5,23 @@
 //! catalog can miss an unregistered or stale mirror.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-fn repo_root() -> PathBuf {
-    cas::test_paths::workspace_root()
-}
+#[path = "support/builtin_catalog.rs"]
+mod builtin_catalog;
 
-fn load(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+fn load(relative: &str) -> &'static str {
+    match relative {
+        "cas-cli/src/hooks/handlers/handlers_session.rs" => {
+            include_str!("../src/hooks/handlers/handlers_session.rs")
+        }
+        "cas-cli/src/hooks/handlers/handlers_middle/session_stop/mod.rs" => {
+            include_str!("../src/hooks/handlers/handlers_middle/session_stop/mod.rs")
+        }
+        "cas-cli/src/builtins.rs" => include_str!("../src/builtins.rs"),
+        _ => builtin_catalog::find_source_path(relative),
+    }
 }
 
 const VERIFIER_PATHS: [&str; 3] = [
@@ -50,20 +56,14 @@ const DUPLICATE_DETECTOR_PATHS: [&str; 3] = [
 /// therefore has nothing left to assert; the durable half — no agent may
 /// hard-code a calendar year — now sweeps the whole catalog instead, so it
 /// still catches the next agent that tries.
-fn every_agent_definition_path() -> Vec<PathBuf> {
+fn every_agent_definition() -> Vec<(String, &'static str)> {
     let mut found = Vec::new();
-    for flavor in ["agents", "codex/agents", "grok/agents"] {
-        let dir = repo_root().join("cas-cli/src/builtins").join(flavor);
-        let entries = fs::read_dir(&dir)
-            .unwrap_or_else(|error| panic!("failed to list {}: {error}", dir.display()));
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                found.push(path);
-            }
+    for (flavor, label) in builtin_catalog::FLAVORS {
+        for builtin in builtin_catalog::agents(*flavor) {
+            found.push((format!("{label}/{}", builtin.path), builtin.content));
         }
     }
-    found.sort();
+    found.sort_by(|left, right| left.0.cmp(&right.0));
     assert!(
         found.len() >= 15,
         "expected the three agent catalogs to be discovered, found {}",
@@ -89,12 +89,12 @@ fn verifier_mirrors_document_the_current_close_contract() {
             "{path} must not use the unknown verification field files="
         );
         assert!(
-            body.contains("git diff --name-status HEAD~10 | rg -e "),
-            "{path} must use ripgrep's regexp option in its test-first check"
+            body.contains("git diff --name-status HEAD~10 | grep -E "),
+            "{path} must use POSIX grep's extended regexp option in its test-first check"
         );
         assert!(
-            !body.contains("| rg -E "),
-            "{path} retains invalid rg -E syntax"
+            !body.contains("| rg -e ") && !body.contains("| rg -E "),
+            "{path} retains a ripgrep-only test-first command"
         );
         assert!(
             !body.contains("VERIFICATION JAIL"),
@@ -162,13 +162,10 @@ fn agent_hygiene_instructions_match_available_actions_and_runtime_context() {
         );
     }
 
-    for path in every_agent_definition_path() {
-        let body = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    for (path, body) in every_agent_definition() {
         assert!(
             !body.contains("Current year: 2026"),
-            "{} must not hard-code a calendar year",
-            path.display()
+            "{path} must not hard-code a calendar year"
         );
     }
 }
@@ -215,11 +212,13 @@ fn verifier_test_first_command_runs_on_a_fixture_repo() {
 
     // This is the exact command shape documented by task-verifier.md after
     // the fix: HEAD~10 is valid because the fixture has eleven commits, and
-    // `-e` is ripgrep's pattern option (unlike the invalid `-E` encoding flag).
+    // POSIX grep's `-E` selects extended regular expressions.
     let output = Command::new("sh")
         .current_dir(repo)
         .arg("-c")
-        .arg("git diff --name-status HEAD~10 | rg -e '^A\\s+.*(_test\\.rs|tests/.*\\.rs)'")
+        .arg(
+            "git diff --name-status HEAD~10 | grep -E '^A[[:space:]]+.*(_test\\.rs|tests/.*\\.rs)'",
+        )
         .output()
         .expect("run documented verifier command");
     assert!(

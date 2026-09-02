@@ -6059,6 +6059,57 @@ mod team_cmd_tests {
     }
 
     #[test]
+    fn sync_summary_merges_team_counts_conflicts_and_healed_edges() {
+        let mut summary = SyncSummary::pull(
+            &crate::cloud::SyncResult {
+                pulled_entries: 3,
+                conflicts_resolved: 4,
+                healed_task_dependencies_to_cloud: 6,
+                ..Default::default()
+            },
+            true,
+        );
+        summary.merge_team_pull(&crate::cloud::SyncResult {
+            pulled_entries: 2,
+            pulled_tasks: 1,
+            conflicts_resolved: 8,
+            conflicts_resolved_local: 3,
+            conflicts_resolved_remote: 5,
+            healed_task_dependencies_from_cloud: 10,
+            ..Default::default()
+        });
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(120);
+
+        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+
+        assert_eq!(
+            tf.output(),
+            "[OK] Pull complete · 3 entries · 12 conflicts resolved · team 2 entries, 1 task · 16 edges healed · team + personal\n"
+        );
+    }
+
+    #[test]
+    fn sync_summary_verbose_renders_counted_conflict_details() {
+        let now = chrono::Utc::now();
+        let mut result = crate::cloud::SyncResult::default();
+        result.record_conflict(crate::cloud::SyncConflict {
+            entity_type: "entry".to_string(),
+            entity_id: "cas-conflict".to_string(),
+            local_updated: now,
+            remote_updated: now,
+            resolution: crate::cloud::ConflictResolution::RemoteWins,
+            action: crate::cloud::ConflictAction::UseRemote,
+        });
+        let summary = SyncSummary::pull(&result, false);
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(120);
+
+        render_sync_summary(&mut tf.fmt(), &summary, true).unwrap();
+
+        assert!(tf.output().contains("1 conflict(s) resolved"));
+        assert!(tf.output().contains("entry cas-conflict"));
+    }
+
+    #[test]
     fn sync_summary_renders_successful_push_with_batch_and_pending_counts() {
         let summary = SyncSummary::push(
             &crate::cloud::SyncResult {

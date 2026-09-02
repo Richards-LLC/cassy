@@ -3823,10 +3823,17 @@ This is the body content."#;
         }
 
         let (_, claude_skill, claude_diagnosis) = shipped[0];
+        let canonical_skill = |content: &str| {
+            content
+                .replace("mcp__cas__", "<MCP_TOOL>")
+                .replace("mcp__cs__", "<MCP_TOOL>")
+                .replace("cas__", "<MCP_TOOL>")
+        };
         for (label, skill, diagnosis) in &shipped[1..] {
             assert_eq!(
-                *skill, claude_skill,
-                "{label} {SKILL} must be byte-identical to the Claude copy"
+                canonical_skill(skill),
+                canonical_skill(claude_skill),
+                "{label} {SKILL} must match the Claude copy apart from the harness tool prefix"
             );
             assert_eq!(
                 *diagnosis, claude_diagnosis,

@@ -1,6 +1,6 @@
 <!-- Auto-generated from CLAUDE.md by `cas sync agents-md`. Do not edit directly. -->
 <!-- CAS:BEGIN - This section is managed by CAS. Do not edit manually. -->
-# IMPORTANT: USE CAS FOR TASK AND MEMORY MANAGEMENT
+# IMPORTANT: USE Cassy FOR TASK AND MEMORY MANAGEMENT
 
 **DO NOT USE BUILT-IN TOOLS (TodoWrite, EnterPlanMode) FOR TASK TRACKING.**
 
@@ -12,9 +12,9 @@ First use each session — load MCP schemas: ToolSearch(query="select:mcp__cs__t
 - `mcp__cs__memory` with action: remember - Store memories and learnings
 - `mcp__cs__search` with action: search - Search all context
 
-CAS provides persistent context across sessions. Built-in tools are ephemeral.
+Cassy provides persistent context across sessions. Built-in tools are ephemeral.
 
-Release notes: every PR merged to `staging` or `main` must be announced in Slack per `docs/release-notes/RUBRIC.md` (run the `release-notes` skill; it installs the rubric if missing).
+Release notes: when a merge reaches `staging` or `main`, use the `release-notes` skill and follow docs/release-notes/RUBRIC.md.
 <!-- CAS:END -->
 
 ## Codex-specific notes
@@ -49,6 +49,8 @@ with `cargo check`, then run only the affected `--lib` or `--test` target; the
 PreToolUse guard rejects an unscoped worker test run. Full suites are owned by
 the supervisor integration merge and release gate.
 
+Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
+
 Factory worker spawns use `sccache` automatically when it is installed, while
 keeping a separate target directory per worktree so concurrent Cargo builds do
 not serialize. An existing `RUSTC_WRAPPER` wins; set
@@ -68,8 +70,12 @@ shared live `CARGO_TARGET_DIR`: its Cargo lock serializes the worker fleet.
 
 **Standing operator CI-load policy:** factory/* pushes run only Scoped
 Validation; protected-default PRs run only the required Fast Validation and
-macOS Check lanes. The non-required full/heavy tier (Clippy, Test Compile
-Guard, Build Benchmark, and both Panic Isolation profiles) belongs only to
+macOS Check lanes. The merge queue validates its synthetic tree once; when its
+successful tree is pushed unchanged to main, the main-push Fast Validation and
+macOS lanes reuse that receipt and name the validating run. Direct pushes,
+bypass merges, receipt lookup failures, and changed trees still run those
+lanes. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
+Benchmark, and both Panic Isolation profiles) belongs only to
 supervisor-controlled main pushes, schedules, or manual dispatches—never
 factory/*, epic/*, tags, or pull requests. Keep this policy pinned by
 `scripts/test-ci-test-tiers.sh`, rather than relying on convention.
@@ -86,7 +92,7 @@ The MCP server is always included because factory agents depend on `cas serve`; 
 
 ## Rust Version
 
-Minimum supported Rust version: **1.85** (edition 2024).
+Minimum supported Rust version: **1.88** (edition 2024).
 
 ## Architecture & Contributing
 

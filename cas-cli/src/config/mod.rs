@@ -31,6 +31,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_validation: Option<SkillValidationConfig>,
 
+    /// Optional stack-specific builtin skills enabled for this project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<SkillsConfig>,
+
     /// Cloud sync configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<CloudSyncConfig>,
@@ -161,6 +165,7 @@ impl Config {
         }
         merge_option!(cloud);
         merge_option!(skill_validation);
+        merge_option!(skills);
         merge_option!(hooks);
         merge_option!(tasks);
         merge_option!(dev);

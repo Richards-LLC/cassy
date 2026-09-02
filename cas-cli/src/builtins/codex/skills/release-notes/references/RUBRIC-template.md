@@ -18,7 +18,9 @@ a revert, a hotfix, and a one-line copy change all get an announcement.
 
 ## What to post
 
-Two threads. Each thread = one punchy top-level message + **exactly one** threaded reply.
+Two threads. Each thread = one punchy top-level message plus a threaded reply.
+**Default: one threaded reply per thread.** A project may explicitly document a
+different reply count in its local rubric when its posting route requires it.
 
 ### 1. User thread
 

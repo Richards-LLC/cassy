@@ -19,7 +19,7 @@ First use each session — load MCP schemas: ToolSearch(query="select:mcp__cas__
 
 Cassy provides persistent context across sessions. Built-in tools are ephemeral.
 
-Release notes: every PR merged to `staging` or `main` must be announced in Slack per `docs/release-notes/RUBRIC.md` (run the `release-notes` skill; it installs the rubric if missing)."#;
+Release notes: when a merge reaches `staging` or `main`, use the `release-notes` skill and follow docs/release-notes/RUBRIC.md."#;
 
 /// Build the full Cassy section with markers
 pub(crate) fn build_cas_section() -> String {

@@ -2937,6 +2937,24 @@ This is the body content."#;
         );
     }
 
+    #[test]
+    fn test_worker_guidance_under_session_start_budget() {
+        use crate::hooks::handlers::session_budget::SESSION_START_BUDGET_BYTES;
+
+        let guide = worker_guidance();
+        let headroom = SESSION_START_BUDGET_BYTES.saturating_sub(guide.len());
+        assert!(
+            guide.len() < SESSION_START_BUDGET_BYTES,
+            "worker_guidance is {} bytes — over the {SESSION_START_BUDGET_BYTES}B SessionStart budget",
+            guide.len()
+        );
+        assert!(
+            headroom >= 1_024,
+            "worker_guidance is {} bytes — only {headroom}B remains below the {SESSION_START_BUDGET_BYTES}B SessionStart budget",
+            guide.len()
+        );
+    }
+
     /// cas-5787 (EPIC cas-ebea, third-brain borrow): both supervisor and
     /// worker skill bodies must document the "Context budgeting" 3-layer
     /// model so future maintainers see the framework before adding to the

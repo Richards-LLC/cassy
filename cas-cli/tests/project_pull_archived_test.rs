@@ -3,21 +3,153 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cas::cloud::{
     CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue, get_project_canonical_id,
 };
 use cas::store::{
-    Store, open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
-    open_rule_store_local, open_skill_store_local, open_spec_store, open_store_local,
-    open_task_store_local,
+    SqliteStore, Store, StoreError, open_commit_link_store, open_event_store,
+    open_file_change_store, open_prompt_store, open_rule_store_local, open_skill_store_local,
+    open_spec_store, open_store_local, open_task_store_local,
 };
 use cas::types::{Entry, EntryType, Scope};
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::Connection;
 use tempfile::TempDir;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+struct RaceStore {
+    inner: SqliteStore,
+    race_id: String,
+    concurrent_entry: Entry,
+    raced: AtomicBool,
+}
+
+impl RaceStore {
+    fn new(inner: SqliteStore, concurrent_entry: Entry) -> Self {
+        Self {
+            inner,
+            race_id: concurrent_entry.id.clone(),
+            concurrent_entry,
+            raced: AtomicBool::new(false),
+        }
+    }
+}
+
+impl Store for RaceStore {
+    fn init(&self) -> cas::store::Result<()> {
+        self.inner.init()
+    }
+
+    fn generate_id(&self) -> cas::store::Result<String> {
+        self.inner.generate_id()
+    }
+
+    fn add(&self, entry: &Entry) -> cas::store::Result<()> {
+        if entry.id == self.race_id && !self.raced.swap(true, Ordering::SeqCst) {
+            self.inner.add(&self.concurrent_entry)?;
+            return Err(StoreError::EntryExists(entry.id.clone()));
+        }
+        self.inner.add(entry)
+    }
+
+    fn get(&self, id: &str) -> cas::store::Result<Entry> {
+        self.inner.get(id)
+    }
+
+    fn get_archived(&self, id: &str) -> cas::store::Result<Entry> {
+        self.inner.get_archived(id)
+    }
+
+    fn update(&self, entry: &Entry) -> cas::store::Result<()> {
+        self.inner.update(entry)
+    }
+
+    fn delete(&self, id: &str) -> cas::store::Result<()> {
+        self.inner.delete(id)
+    }
+
+    fn list(&self) -> cas::store::Result<Vec<Entry>> {
+        self.inner.list()
+    }
+
+    fn recent(&self, n: usize) -> cas::store::Result<Vec<Entry>> {
+        self.inner.recent(n)
+    }
+
+    fn recent_timestamp(&self, entry: &Entry) -> cas::store::Result<DateTime<Utc>> {
+        self.inner.recent_timestamp(entry)
+    }
+
+    fn archive(&self, id: &str) -> cas::store::Result<()> {
+        self.inner.archive(id)
+    }
+
+    fn unarchive(&self, id: &str) -> cas::store::Result<()> {
+        self.inner.unarchive(id)
+    }
+
+    fn list_archived(&self) -> cas::store::Result<Vec<Entry>> {
+        self.inner.list_archived()
+    }
+
+    fn list_by_branch(&self, branch: &str) -> cas::store::Result<Vec<Entry>> {
+        self.inner.list_by_branch(branch)
+    }
+
+    fn list_pending(&self, limit: usize) -> cas::store::Result<Vec<Entry>> {
+        self.inner.list_pending(limit)
+    }
+
+    fn mark_extracted(&self, id: &str) -> cas::store::Result<()> {
+        self.inner.mark_extracted(id)
+    }
+
+    fn list_pinned(&self) -> cas::store::Result<Vec<Entry>> {
+        self.inner.list_pinned()
+    }
+
+    fn list_helpful(&self, limit: usize) -> cas::store::Result<Vec<Entry>> {
+        self.inner.list_helpful(limit)
+    }
+
+    fn list_by_session(&self, session_id: &str) -> cas::store::Result<Vec<Entry>> {
+        self.inner.list_by_session(session_id)
+    }
+
+    fn list_unreviewed_learnings(&self, limit: usize) -> cas::store::Result<Vec<Entry>> {
+        self.inner.list_unreviewed_learnings(limit)
+    }
+
+    fn mark_reviewed(&self, id: &str) -> cas::store::Result<()> {
+        self.inner.mark_reviewed(id)
+    }
+
+    fn list_pending_index(&self, limit: usize) -> cas::store::Result<Vec<Entry>> {
+        self.inner.list_pending_index(limit)
+    }
+
+    fn mark_indexed(&self, id: &str) -> cas::store::Result<()> {
+        self.inner.mark_indexed(id)
+    }
+
+    fn mark_indexed_batch(&self, ids: &[&str]) -> cas::store::Result<()> {
+        self.inner.mark_indexed_batch(ids)
+    }
+
+    fn mark_index_pending_batch(&self, ids: &[&str]) -> cas::store::Result<()> {
+        self.inner.mark_index_pending_batch(ids)
+    }
+
+    fn cas_dir(&self) -> &Path {
+        self.inner.cas_dir()
+    }
+
+    fn close(&self) -> cas::store::Result<()> {
+        self.inner.close()
+    }
+}
 
 struct PullHarness {
     _tmp: TempDir,
@@ -38,6 +170,20 @@ impl PullHarness {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let store = open_store_local(root).unwrap();
+        Self::from_store(tmp, endpoint, store)
+    }
+
+    fn with_duplicate_race(endpoint: &str, concurrent_entry: Entry) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let inner = SqliteStore::open(root).unwrap();
+        inner.init().unwrap();
+        let store: Arc<dyn Store> = Arc::new(RaceStore::new(inner, concurrent_entry));
+        Self::from_store(tmp, endpoint, store)
+    }
+
+    fn from_store(tmp: TempDir, endpoint: &str, store: Arc<dyn Store>) -> Self {
+        let root = tmp.path();
         let task_store = open_task_store_local(root).unwrap();
         let rule_store = open_rule_store_local(root).unwrap();
         let skill_store = open_skill_store_local(root).unwrap();
@@ -305,19 +451,14 @@ async fn duplicate_race_reconciles_through_lww() {
     )
     .await;
 
-    let harness = PullHarness::new(&server.uri());
-    let trigger_conn = Connection::open(harness._tmp.path().join("cas.db")).unwrap();
-    trigger_conn
-        .execute_batch(
-            "CREATE TRIGGER insert_duplicate_race
-             BEFORE INSERT ON entries
-             WHEN NEW.id = 'project-duplicate-race'
-             BEGIN
-               INSERT INTO entries (id, type, created, content, scope, updated_at)
-               VALUES (NEW.id, 'context', '2026-08-01T00:00:00Z', 'concurrent local', 'project', '2026-08-01T00:00:00Z');
-             END;",
-        )
-        .unwrap();
+    let harness = PullHarness::with_duplicate_race(
+        &server.uri(),
+        entry(
+            "project-duplicate-race",
+            "concurrent local",
+            now - Duration::hours(3),
+        ),
+    );
 
     let store = Arc::clone(&harness.store);
     let result = tokio::task::spawn_blocking(move || harness.pull())
@@ -371,7 +512,7 @@ async fn unrelated_store_error_is_reported() {
     );
 }
 
-fn drop_entries_table(root: &Path) {
-    let connection = Connection::open(root.join("cas.db")).unwrap();
+fn drop_entries_table(root: &std::path::Path) {
+    let connection = rusqlite::Connection::open(root.join("cas.db")).unwrap();
     connection.execute_batch("DROP TABLE entries").unwrap();
 }

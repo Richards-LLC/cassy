@@ -3180,6 +3180,8 @@ fn execute_pull(
     cli: &Cli,
     cas_root: &Path,
 ) -> anyhow::Result<SyncSummary> {
+    // The delegated implementation clears the `last_team_pull_at_` watermark
+    // for `--full` and invokes `execute_team_pull` for standalone pulls too.
     execute_pull_with_output(args, cli, cas_root, true)
 }
 

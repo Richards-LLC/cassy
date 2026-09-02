@@ -36,7 +36,7 @@ In shared mode, file-overlap analysis is even more critical — two workers edit
    Grep pattern="<feature-name>" or mcp__cas__search action=search query="<keywords>" scope=code
    ```
 2. Create EPIC: `mcp__cas__task action=create task_type=epic title="..." description="..."`
-3. Gather spec with `/epic-spec`, break down with `/epic-breakdown`
+3. Gather the EPIC specification and task breakdown through the supervisor's task/spec workflow.
 4. Review task scope and dependencies
 
 **Standalone follow-up work (no EPIC needed).** An EPIC is for a body of work broken into
@@ -51,7 +51,7 @@ mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model
 
 A concrete open, unassigned `task_id` authorizes the spawn on its own. It authorizes exactly
 one worker: a second spawn for the same still-queued task is refused, as is a task that is
-blocked, awaiting merge, awaiting review, or already assigned to another worker — those state
+blocked, awaiting_merge, or already assigned to another worker — those state
 that no new worker can pick the task up. Ceremonial single-child epics distort epic reporting
 and the "all subtasks closed -> verify and close the epic" flow, so this is the preferred path.
 
@@ -127,12 +127,13 @@ base branch ────────────────────► (sta
                └─ factory/owl ┘
 ```
 
-### Merging with Cassy, not raw git
+### Merge workers with Cassy
 
-`mcp__cas__coordination action=worktree_merge` is the **primary** merge path. It resolves
+`mcp__cas__coordination action=worktree_merge` is the worker merge path. It resolves
 the merge target from task state, enforces the trunk guard, and keeps factory tracking,
-leases, and cleanup consistent. Raw `git merge` / `git worktree remove` bypasses all of
-that — see the fallback note at the end of this section.
+leases, and cleanup consistent.
+
+Run the canonical merge-time diff review in Phase 3 after a successful merge and before assigning the next task.
 
 ```
 mcp__cas__coordination action=worktree_merge id=<worker> task_id=<task-id>
@@ -200,38 +201,8 @@ and restored). A worktree already **mid-rebase is always refused**, `force` or n
 did not create that state and rebasing on top of it destroys the resolution in progress;
 finish it or `git rebase --abort` in that worktree first.
 
-**Fallback only (labelled, not the default).** Raw `git merge --no-ff` / `git worktree
-remove` / hand-written per-worker rebase messages bypass factory tracking, leases, and
-cleanup entirely. Reach for them only when `worktree_merge` / `sync_all_workers` cannot
-act (e.g. a conflict you must resolve by hand in the worktree), and say so explicitly in
-the task notes so the audit trail shows the bypass was deliberate.
-
-**Worker completes a task:**
-1. Worker closes their own task
-2. Review changes in the worker worktree: `git -C .cas/worktrees/<worker> log --oneline main..HEAD`
-3. Cherry-pick to base branch: `git cherry-pick <commit-sha>` (one per commit)
-   - **If conflicts arise:** (a) non-overlapping additions (e.g., both workers added to Cargo.toml) — keep both entries, (b) semantic conflicts — review both changes and pick the correct merge, (c) if unsure — message the worker who committed for context before resolving
-4. Verify build after cherry-pick: `~/.cargo/bin/cargo build --quiet`
-5. Run the canonical merge-time diff review. This review is the acceptance gate
-   for every worker merge:
-   - Read the worker's direct diff against the task spec and acceptance
-     criteria, then inspect the resulting diff on the merged epic tree.
-   - Check ownership boundaries, behavior and interface contracts, missing
-     files or tests, and whether the worker supplied credible test receipts.
-   - Re-run the tests for touched modules (or the narrowest justified scoped
-     equivalent) on the merged tree and record the real exit status.
-   - Record the review receipt only after those checks pass:
-     `mcp__cas__verification action=add task_id=<task-id> verification_type=task status=approved summary="<merged-tree diff vs spec; ownership, tests, receipts, and touched-module proof checked>" files="<changed-files>"`.
-   - If the review finds a defect or a missing proof, do not merge or record an
-     approval. Create a bounded fix task or use `request_changes`, then repeat
-     this review after the correction lands.
-6. Bring the other worktrees onto the updated **local** branch (not `origin/`):
-   ```
-   mcp__cas__coordination action=sync_all_workers branch=<base-branch>
-   ```
-   Read the skip list it returns — dirty and mid-task worktrees are intentionally left alone until you consent with `force=true`, and a mid-rebase worktree is never touched.
-7. Clear completed worker's context: `mcp__cas__coordination action=clear_context target=<worker>`
-8. Assign next task
+If `worktree_merge` cannot act, stop and ask the supervisor to resolve the merge; do not
+invent a second merge procedure.
 
 ## Phase 3: Review (Shared Mode)
 
@@ -246,7 +217,7 @@ When workers share the main directory, there's no branch merging — workers com
 
 - Workers set status to blocked and add a blocker note
 - Help resolve or reassign the task
-- **Race condition warning:** Task state updates are not atomic across supervisor and worker. After closing a task (especially via the escape hatch), verify it stayed closed before proceeding — a worker's stale `status=blocked` update can overwrite the close. If a worker resurrects a closed task, re-close with an audit trail noting the race.
+- **Race condition warning:** Task state updates are not atomic across supervisor and worker. After closing a task, verify it stayed closed before proceeding — a worker's stale `status=blocked` update can overwrite the close. If a worker resurrects a closed task, re-close with an audit trail noting the race.
 - **Stale outbox replays:** Workers may send duplicate stale messages due to outbox replay. Before acting on a blocker notification or status change, check the task's current state with `mcp__cas__task action=show` — the message may be outdated.
 
 **Multiple workers complete simultaneously:**
@@ -284,6 +255,6 @@ When workers share the main directory, there's no branch merging — workers com
    needs no trunk flag. Only a missing-target fallback to trunk needs `allow_trunk=true`;
    its refusal names the destination and its success receipt carries a loud trunk-push warning.
    `force=true` will not authorize trunk.
-   Fallback only, when a merge must be resolved by hand: `git checkout <base-branch> && git merge epic/<slug>`, `git worktree remove <path>`, `git branch -d epic/<slug>` — this bypasses factory tracking/lease/cleanup, so note it on the task.
+   If the tracked merge cannot act, stop and ask the supervisor to resolve it; do not use an untracked merge path.
 7. Close the epic and post release notes.
 8. Shutdown workers: `mcp__cas__coordination action=shutdown_workers count=0`

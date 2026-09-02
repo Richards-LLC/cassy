@@ -51,9 +51,9 @@ mcp__cas__search action=search query="<the issue's subject in your own words>"
 
 **Do not filter this list by `status=open`.** The status filter is a single
 substring match, so `status=open` returns *only* untouched tasks — every task
-someone is actually working on (`in_progress`, `blocked`, `awaiting_merge`,
-`pending_supervisor_review`) drops out, and the sweep concludes an in-flight
-issue was never tasked. List everything and ignore the closed ones yourself.
+someone is actually working on (`in_progress`, `blocked`, `awaiting_merge`)
+drops out, and the sweep concludes an in-flight issue was never tasked. List
+everything and ignore the closed ones yourself.
 
 ## 1. List open issues
 

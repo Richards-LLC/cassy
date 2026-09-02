@@ -159,13 +159,9 @@ Workers fail in production. These are recurring observed failure modes and their
 2. Respawn workers — they will pick up the new binary
 
 **Recovery (binary is outdated or rebuild is not feasible mid-session):**
-1. Close the jailed task with an audit trail: `mcp__cs__task action=close id=<task-id> reason="Supervisor close — verification jail deadlock. Work verified at <commit-sha>. Worker jailed, Cassy binary predates bba6fbf exemption fix."`
-2. If `close` is also blocked, use direct sqlite as last resort:
-   ```sql
-   UPDATE tasks SET status='closed', pending_verification=0 WHERE id='cas-XXXX';
-   UPDATE task_leases SET status='released' WHERE task_id='cas-XXXX' AND status='active';
-   ```
-3. After clearing the jail, message the worker that they can proceed with remaining tasks.
+1. Do not edit the database directly. Record the stale-binary evidence and ask the supervisor to rebuild Cassy or respawn the worker.
+2. If the task must be intentionally ended after delivery and evidence are confirmed, use `mcp__cs__task action=cancel id=<task-id> reason="..."`; use `request_changes` for rework, or `reset` only for an orphaned dead session.
+3. After the state transition, message the worker that they can proceed with remaining tasks.
 4. File a note on the epic that the binary needs rebuilding before the next session.
 
 ### Resource-Contention Worker Crashes (cas-0bf4)

@@ -134,6 +134,12 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         ),
     },
     BuiltinFile {
+        path: "skills/cas-memory-management/references/response-shapes.md",
+        content: include_str!(
+            "builtins/skills/cas-memory-management/references/response-shapes.md"
+        ),
+    },
+    BuiltinFile {
         path: "skills/cas-search/SKILL.md",
         content: include_str!("builtins/skills/cas-search.md"),
     },
@@ -494,6 +500,12 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
         content: include_str!(
             "builtins/codex/skills/cas-memory-management/references/lifecycle-and-storage.md"
+        ),
+    },
+    BuiltinFile {
+        path: "skills/cas-memory-management/references/response-shapes.md",
+        content: include_str!(
+            "builtins/codex/skills/cas-memory-management/references/response-shapes.md"
         ),
     },
     BuiltinFile {
@@ -962,6 +974,12 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
         content: include_str!(
             "builtins/grok/skills/cas-memory-management/references/lifecycle-and-storage.md"
+        ),
+    },
+    BuiltinFile {
+        path: "skills/cas-memory-management/references/response-shapes.md",
+        content: include_str!(
+            "builtins/grok/skills/cas-memory-management/references/response-shapes.md"
         ),
     },
     // cas-cc8c: required-capability parity — a Grok factory session must resolve

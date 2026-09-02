@@ -10,54 +10,60 @@ Use `mcp__cas__search` to find information across Cassy content and code. Choose
 
 ## Which Action to Use
 
-**`search`** — Conceptual queries across memories, tasks, rules, skills:
-```
-mcp__cas__search action=search query="authentication flow" doc_type=entry
-```
-Filter with `doc_type` (entry, task, rule, skill, code_symbol, code_file) for better relevance.
+**`search`** — conceptual queries across memories, tasks, rules, skills, and indexed code:
+`mcp__cas__search action=search query="authentication flow" doc_type=entry`
+Filter with `doc_type`: `entry`, `task`, `rule`, `skill`, `code_symbol`, or
+`code_file`.
 
-**Structured memory filters (`key:value` tokens):** For memories with structured frontmatter (see `cas-memory-management`), the query string supports inline filters that AND with keyword terms:
+**`context`** — session context summary. Use `task_id` to focus the result on one task and `max_tokens` to bound it.
 
-```
-mcp__cas__search action=search query="deadlock module:cas-mcp severity:critical"
-mcp__cas__search action=search query="track:bug problem_type:runtime_error"
-```
+**`context_for_subagent`** — task-focused context for a delegated worker; pass `task_id` and `max_tokens`.
 
-Recognized filter keys: `module`, `track`, `problem_type`, `severity`, `root_cause`, `date`. Unknown `key:value` tokens pass through as raw keyword text. Legacy memories (no structured frontmatter) still match keyword queries but are excluded from any filter that references a structured field.
+**`code_search`** — find code symbols by what they do, not only by exact names. Use `kind`, `language`, and `include_source` when useful:
+`mcp__cas__search action=code_search query="user authentication" kind=function language=rust`
 
-Phase 1 grammar limitation: values cannot contain whitespace and there is no quoting or escaping — tokens split on whitespace and the first `:` separates key from value. `module:"cas mcp"` and escaped colons are not supported.
+**`grep`** — exact regex matching in indexed files. Use `pattern`, optionally `glob`, `before_context`, `after_context`, and `case_insensitive`:
+`mcp__cas__search action=grep pattern="TODO:" glob="*.rs"`
 
-**`code_search`** — Find code symbols by what they do, not exact names:
-```
-mcp__cas__search action=code_search query="user authentication" kind=function language=rust
-```
-Use `include_source=true` to get source code inline.
+**`history`** — search the indexed git commit history. Use `query`, optionally `path`, `symbol`, `since`, `until`, and `include_merges`; every response includes index freshness information.
 
-**`grep`** — Exact regex pattern matching in files:
-```
-mcp__cas__search action=grep pattern="TODO:" glob="*.rs"
-```
-Prefer the built-in Grep tool for simple patterns where you already know file paths.
+**`retrieval_feedback`** — record an outcome for a provenance result. Pass `query_id`, `result_id`, `outcome`, and `actor_id`; add `correction_ref` when the outcome is `corrected`.
+
+**`retrieval_metrics`** — aggregate recorded retrieval outcomes. An optional `session_id` limits the report.
+
+**`skill_impact`** — report skill usage and session outcomes. `impact_report` is an accepted alias for this action.
+
+**`observe`** — record an observation with `content`, `observation_type`, `source_tool`, and optional `tags`/`scope`.
+
+**`entity_list`**, **`entity_show`**, **`entity_extract`** — browse or derive knowledge-graph entities. Use `id` for `entity_show`; use `entity_type`, `query`, `tags`, `scope`, and `limit` as applicable.
+
+**`code_show`** — show a code symbol by its indexed symbol ID; use `include_source` for source text.
+
+## Structured Memory Filters
+
+For memories with structured frontmatter embedded in their `content` (see `cas-memory-management`), search queries support inline filters that AND with keyword terms:
+
+`mcp__cas__search action=search query="deadlock module:cas-mcp severity:critical"`
+`mcp__cas__search action=search query="track:bug problem_type:runtime_error"`
+
+Recognized filter keys are `module`, `track`, `problem_type`, `severity`, `root_cause`, and `date`. Unknown `key:value` tokens remain keyword text. Values cannot contain whitespace; quoting and escaping are not supported.
 
 ## Decision Guide
 
 | Need | Action |
-|------|--------|
-| "How does X work?" | `search` or `code_search` |
-| Find exact string or regex | `grep` |
-| Find past learnings | `search` with `doc_type=entry` |
-| Find function by concept | `code_search` |
-| Find related tasks | `search` with `doc_type=task` |
-
-## Other Actions
-
-- **`context`** — Session context summary: recent activity, active tasks, relevant memories
-- **`context_for_subagent`** — Task-focused context for spawning subagents (pass `task_id` and `max_tokens`)
-- **`observe`** — Record discoveries/decisions during work (`observation_type`: general, decision, bugfix, feature, refactor, discovery)
-- **`entity_list`** / **`entity_show`** — Browse extracted entities (person, project, technology, etc.)
-- **`code_show`** — Full details for a specific code symbol by ID
-- **`blame`** — Git blame with optional AI-line filtering (`file_path`, `line_start`, `line_end`)
+| --- | --- |
+| Conceptual or memory lookup | `search` |
+| Session or task context | `context` or `context_for_subagent` |
+| Exact regex or file scan | `grep` |
+| Find a function by behavior | `code_search` |
+| Inspect one indexed symbol | `code_show` |
+| Find an old change | `history` |
+| Record retrieval quality | `retrieval_feedback` |
+| Aggregate retrieval quality | `retrieval_metrics` |
+| Inspect entities | `entity_list`, `entity_show`, or `entity_extract` |
 
 ## Valid Actions
 
-**Valid `mcp__cas__search` actions** (exact list — do not invent others): `search`, `context`, `context_for_subagent`, `observe`, `entity_list`, `entity_show`, `entity_extract`, `code_search`, `code_show`, `grep`, `blame`.
+The list below is the dispatch order for `mcp__cas__search`; `impact_report` is the alias accepted by the same handler as `skill_impact`.
+
+**Valid `mcp__cas__search` actions** (exact list — do not invent others): `search`, `retrieval_feedback`, `retrieval_metrics`, `skill_impact`, `impact_report`, `context`, `context_for_subagent`, `observe`, `entity_list`, `entity_show`, `entity_extract`, `code_search`, `code_show`, `grep`, `blame`, `history`.

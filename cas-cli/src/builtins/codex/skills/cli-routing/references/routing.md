@@ -50,21 +50,29 @@ CLAUDE_CONFIG_DIR="$HOME/.claude-alt" \
   claude auth status --json < /dev/null | jq '{loggedIn, authMethod, apiProvider, email, subscriptionType}'
 ```
 
-The probe is verified on this machine with Claude Code 2.1.231. The explicit
-allowlist contains exactly one email: `pippenz@gmail.com`. The gate passes only
-when JSON has `loggedIn: true`, `authMethod: "claude.ai"`, `apiProvider:
-"firstParty"`, and that exact email. The live approved-profile probe on
-2026-08-13 produced this decisive, credential-free shape:
+Which accounts are approved is operator policy, held in configuration rather
+than in this skill:
 
-```json
-{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"pippenz@gmail.com","subscriptionType":"max"}
+```bash
+cas config get release.claude_account_allowlist
+cas config set release.claude_account_allowlist "ops@example.com,release@example.com"
 ```
 
-Any email outside that one-entry allowlist is an unapproved account and
-hard-fails the gate even when `loggedIn` is true. A missing profile, false
-`loggedIn`, wrong auth method or provider, malformed JSON, or a failed probe
-also fails closed. Do not inspect or copy credential tokens from config files;
-the status command is the account authority.
+The gate passes only when the probe reports `loggedIn: true`, `authMethod:
+"claude.ai"`, `apiProvider: "firstParty"`, and an address on that allowlist
+(compared case-insensitively). A credential-free passing probe has this shape:
+
+```json
+{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"<allowlisted address>","subscriptionType":"max"}
+```
+
+The list is empty by default and the gate fails closed, so a project that has
+not configured it approves no Claude account at all. An address outside the
+allowlist is an unapproved account and hard-fails the gate even when
+`loggedIn` is true. A missing profile, false `loggedIn`, wrong auth method or
+provider, malformed JSON, or a failed probe also fails closed. Do not inspect
+or copy credential tokens from config files; the status command is the account
+authority.
 
 Only after a passing probe may a one-shot run:
 
@@ -81,24 +89,20 @@ report blocked with both captured receipts.
 
 ## Posting release notes
 
-The trigger is automatic on every merge to `main` or `staging`; only the target
-channel is project-specific. Use [release-notes](../../release-notes/SKILL.md)
-for content and its project rubric. For cas-src, the channel is
-`#cas-internal` (`C0B44GUKDK2`); local-only projects post nowhere.
+The trigger is automatic on every merge to `main` or `staging`. Everything
+else — target channel, message shape, reply count, and which Slack transport is
+approved — is project policy, owned by the project's release-notes rubric.
+Use [release-notes](../../release-notes/SKILL.md) and that rubric for content;
+a project with no rubric and no channel posts nowhere.
 
-Follow [`docs/SLACK_POSTING_RUNBOOK.md`](../../../../../../docs/SLACK_POSTING_RUNBOOK.md)
-for transport, and [`docs/RELEASE_SLACK_RUBRIC.md`](../../../../../../docs/RELEASE_SLACK_RUBRIC.md)
-for content. The operational sequence is:
+This skill contributes only the routing half of the sequence:
 
-1. Write the exact user and dev bodies to a file with `=== MESSAGE N ===`
-   separators; keep the headers out of the sent text.
-2. Read the target channel first to deduplicate a previous or partial attempt.
-3. Use the approved Claude Slack MCP route after the account/server preflight.
-   Use the Codex `codex_apps` Slack plugin only when the current session's
-   resource probe is positive; default Codex workers must use the supervisor
-   handoff in the project runbook when it is absent.
-4. Post the two top-level messages and required replies in rubric order, then
-   record the returned message timestamps as receipts.
+1. Read the target channel first to deduplicate a previous or partial attempt.
+2. Choose the posting CLI by the gate above: Codex when its Slack plugin is
+   present in the current session's resource probe, Claude only after its
+   account gate passes. When neither is available, hand the drafted bodies to
+   the supervisor rather than posting from an unapproved account.
+3. Retain the returned message timestamps as receipts.
 
-The runbook owns the exact Slack commands, stdin/approval/buffering traps, and
-write permission details; do not create a competing copy here.
+The rubric owns the exact commands, message bodies, and ordering; do not create
+a competing copy here.

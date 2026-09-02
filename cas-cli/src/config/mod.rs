@@ -127,6 +127,13 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
 
+    /// `[release]` — operator policy for release-note routing (cas-37f6).
+    /// Currently the account allowlist consulted before the one-shot
+    /// `claude -p` route documented by the `cli-routing` skill. Absent by
+    /// default, and the gate fails closed when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<ReleaseConfig>,
+
     /// `[hub]` — public origin used for Commander reverse pairing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub: Option<HubConfig>,
@@ -177,12 +184,24 @@ impl Config {
         merge_option!(memory);
         merge_option!(hub);
         merge_option!(project);
+        merge_option!(release);
         changed
     }
 
     /// Get daemon maintenance config with defaults.
     pub fn daemon(&self) -> DaemonSettings {
         self.daemon.clone().unwrap_or_default()
+    }
+
+    /// Whether a probed Claude account e-mail may run the one-shot
+    /// `claude -p` route (`release.claude_account_allowlist`).
+    ///
+    /// The gate fails closed when `[release]` is absent, so no account is
+    /// approved until a project configures one.
+    pub fn claude_account_allowed(&self, email: &str) -> bool {
+        self.release
+            .as_ref()
+            .is_some_and(|release| release.claude_account_allowed(email))
     }
 }
 

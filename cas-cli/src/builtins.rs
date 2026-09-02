@@ -3145,8 +3145,12 @@ This is the body content."#;
         }
     }
 
+    /// cas-37f6: cas-brainstorm ends by writing a document, so it must not
+    /// disallow the tools that phase requires. The earlier contract here
+    /// pinned `disallowed-tools: Write, Edit, NotebookEdit`, which Claude Code
+    /// honours — the skill's own final step could not run.
     #[test]
-    fn test_builtin_cas_brainstorm_disallowed_tools() {
+    fn test_builtin_cas_brainstorm_allows_artifact_writes() {
         for (label, skills) in [
             ("BUILTIN_SKILLS", BUILTIN_SKILLS),
             ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
@@ -3155,17 +3159,20 @@ This is the body content."#;
                 .iter()
                 .find(|b| b.path == "skills/cas-brainstorm/SKILL.md")
                 .unwrap_or_else(|| panic!("{label}: cas-brainstorm SKILL.md missing"));
-            for required in ["disallowed-tools:", "- Write", "- Edit", "- NotebookEdit"] {
-                assert!(
-                    entry.content.contains(required),
-                    "{label}: cas-brainstorm SKILL.md missing disallowed-tools entry: {required:?}"
-                );
-            }
+            assert!(
+                !entry.content.contains("disallowed-tools:"),
+                "{label}: cas-brainstorm SKILL.md must not disallow the tools its \
+                 artifact phase requires"
+            );
         }
     }
 
+    /// cas-37f6: cas-ideate ends by writing a document, so it must not
+    /// disallow the tools that phase requires. The earlier contract here
+    /// pinned `disallowed-tools: Write, Edit, NotebookEdit`, which Claude Code
+    /// honours — the skill's own final step could not run.
     #[test]
-    fn test_builtin_cas_ideate_disallowed_tools() {
+    fn test_builtin_cas_ideate_allows_artifact_writes() {
         for (label, skills) in [
             ("BUILTIN_SKILLS", BUILTIN_SKILLS),
             ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
@@ -3174,12 +3181,11 @@ This is the body content."#;
                 .iter()
                 .find(|b| b.path == "skills/cas-ideate/SKILL.md")
                 .unwrap_or_else(|| panic!("{label}: cas-ideate SKILL.md missing"));
-            for required in ["disallowed-tools:", "- Write", "- Edit", "- NotebookEdit"] {
-                assert!(
-                    entry.content.contains(required),
-                    "{label}: cas-ideate SKILL.md missing disallowed-tools entry: {required:?}"
-                );
-            }
+            assert!(
+                !entry.content.contains("disallowed-tools:"),
+                "{label}: cas-ideate SKILL.md must not disallow the tools its \
+                 artifact phase requires"
+            );
         }
     }
 
@@ -3828,7 +3834,7 @@ This is the body content."#;
                 "message, not the chart", "claim-title", "annotate the decisive", "Show uncertainty",
                 "small multiples", "table", "@media print", "cas-html-reports", "color last",
                 "becoming text-dense", "30 seconds", "Visually verify the rendered artifact",
-                "390×844", "Grepping HTML", "H7 acceptance-report precedent",
+                "390×844", "Grepping HTML",
             ] {
                 assert!(skill.contains(marker), "{label} cas-dataviz missing {marker:?}");
             }
@@ -4185,9 +4191,8 @@ This is the body content."#;
                 "name: cli-routing",
                 "codex exec",
                 "claude auth status --json",
-                "pippenz@gmail.com",
+                "release.claude_account_allowlist",
                 "unapproved account",
-                "docs/SLACK_POSTING_RUNBOOK.md",
                 "release-notes",
             ] {
                 assert!(
@@ -4195,10 +4200,20 @@ This is the body content."#;
                     "{label} cli-routing SKILL.md missing required marker: {required:?}"
                 );
             }
-            assert!(
-                !skill.content.contains("daniel@petrastella.io"),
-                "{label} cli-routing SKILL.md retains the stale Daniel-only account gate"
-            );
+            // cas-37f6: the account gate is operator policy read from config,
+            // and the Slack transport belongs to the project's release-notes
+            // rubric. Neither an operator address nor a link to a document
+            // that is not shipped with the skill may appear here.
+            for banned in [
+                "@gmail.com",
+                "@petrastella.io",
+                "docs/SLACK_POSTING_RUNBOOK.md",
+            ] {
+                assert!(
+                    !skill.content.contains(banned),
+                    "{label} cli-routing SKILL.md ships operator-specific text: {banned:?}"
+                );
+            }
         }
     }
 
@@ -5543,11 +5558,14 @@ This is the body content."#;
         }
     }
 
-    // cas-e0d1: pin the opt-in description so a future sync or hand-edit can't
-    // silently re-introduce auto-trigger phrasing into either mirror — that
-    // would resurrect the wall-clock regression the rewrite fixed.
+    // cas-e0d1: keep this skill out of autonomous dispatch, so a future sync or
+    // hand-edit can't silently re-introduce auto-trigger phrasing into either
+    // mirror — that would resurrect the wall-clock regression the rewrite
+    // fixed. cas-37f6: the opt-in is now enforced by the frontmatter field the
+    // harness actually reads, and the description is free to name the stack it
+    // covers so a human invoking it can tell what it is for.
     #[test]
-    fn test_cas_nuxt_playwright_description_is_opt_in() {
+    fn test_cas_nuxt_playwright_is_not_model_invocable() {
         for (label, set) in [
             ("BUILTIN_SKILLS", BUILTIN_SKILLS),
             ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
@@ -5557,11 +5575,12 @@ This is the body content."#;
                 .find(|b| b.path == "skills/cas-nuxt-playwright/SKILL.md")
                 .unwrap_or_else(|| panic!("{label} missing cas-nuxt-playwright SKILL.md"));
             assert!(
-                entry.content.contains("Opt-in only")
-                    && entry
-                        .content
-                        .contains("invoke ONLY when the operator explicitly asks"),
-                "{label}: cas-nuxt-playwright description must keep explicit opt-in wording"
+                entry.content.contains("disable-model-invocation: true"),
+                "{label}: cas-nuxt-playwright must opt out of model invocation in frontmatter"
+            );
+            assert!(
+                !entry.content.contains("user-invocable:"),
+                "{label}: cas-nuxt-playwright must not restate the user-invocable default"
             );
             assert!(
                 !entry

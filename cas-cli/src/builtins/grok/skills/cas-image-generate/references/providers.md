@@ -1,8 +1,8 @@
 # Provider reference and boundaries
 
-Research basis: [image-generation-dossier.md](../../../../../../.cas/artifacts/cas-1c67/research/image-generation-dossier.md),
-compiled 2026-08-29. Verify live provider documentation before adding an
-integration; model names and pricing can change.
+Research basis: a provider survey compiled 2026-08-29. Verify live provider
+documentation before adding an integration; model names, limits, and pricing
+change without notice.
 
 ## Wired: Google Nano Banana
 

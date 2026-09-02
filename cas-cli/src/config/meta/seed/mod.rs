@@ -7,6 +7,7 @@ mod issues;
 mod llm;
 mod memory;
 mod notifications;
+mod release;
 mod sections;
 mod skill_validation;
 
@@ -19,5 +20,6 @@ pub(crate) fn populate_registry(registry: &mut ConfigRegistry) {
     coordination::register_coordination_lease_telemetry_and_missing(registry);
     llm::register_llm(registry);
     memory::register_memory(registry);
+    release::register_release(registry);
     skill_validation::register_skill_validation(registry);
 }

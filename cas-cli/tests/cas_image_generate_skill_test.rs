@@ -168,7 +168,10 @@ fn references_document_research_and_unwired_provider_boundaries() {
     let style = load("cas-cli/src/builtins/skills/cas-image-generate/references/style-harvest.md");
 
     for marker in [
-        "image-generation-dossier.md",
+        // cas-37f6: the research basis is dated in prose. It used to link a
+        // `.cas/artifacts/...` dossier that resolves nowhere once the skill is
+        // installed — and did not exist in this tree either.
+        "provider survey compiled 2026-08-29",
         "gemini-3.1-flash-image",
         "gemini-3-pro-image",
         "Recraft",

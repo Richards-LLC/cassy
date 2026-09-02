@@ -1,6 +1,6 @@
 ---
 name: session-learn
-description: Use when asked to save or extract session learnings, or when ending a substantive session with durable concepts, corrections, decisions, gaps, or patterns.
+description: Use when asked to extract or save session learnings; classifies the session into concept, entity, correction, pattern, idea, decision, and gap drafts, then hands each accepted draft to cas-memory-management.
 managed_by: cas
 ---
 

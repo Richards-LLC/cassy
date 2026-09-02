@@ -2,10 +2,6 @@
 name: cas-brainstorm
 description: Use when the user asks to brainstorm or clarify an ambiguous feature, problem, scope, or direction before planning or coding.
 managed_by: cas
-disallowed-tools:
-  - Write
-  - Edit
-  - NotebookEdit
 ---
 
 # Brainstorm Before You Build
@@ -82,7 +78,7 @@ mcp__cs__search action=search query="<topic keywords>" doc_type=entry limit=5
 
 If a recent matching `*-requirements.md` file exists, or the user references prior work:
 - Read the document
-- Confirm with the user (one question, `AskUserQuestion`): "Found an existing requirements doc for [topic]. Continue from this, or start fresh?" In factory mode AskUserQuestion is blocked — ask the question in plain text and end your turn; the director relays answers.
+- Confirm with the user (one question, `AskUserQuestion`): "Found an existing requirements doc for [topic]. Continue from this, or start fresh?"
 - If resuming, summarize the current state, continue from existing decisions and outstanding questions, and update the existing document instead of duplicating it.
 
 #### 0.2 Assess Whether Brainstorming Is Even Needed
@@ -168,7 +164,7 @@ Before generating approaches, challenge the request to catch misframing. **This 
 
 #### 1.3 Collaborative Dialogue
 
-This is the heart of the skill. Follow the Interaction Rules above. **Use `AskUserQuestion` for questions whenever possible.** In factory mode AskUserQuestion is blocked — ask the questions in plain text and end your turn; the director relays answers.
+This is the heart of the skill. Follow the Interaction Rules above. **Use `AskUserQuestion` for questions whenever possible.**
 
 **Guidelines:**
 - Ask what the user is already thinking before offering your own ideas

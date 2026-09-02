@@ -4,21 +4,26 @@
   "files": {
     "skills/cas-brainstorm/references/handoff.md": [
       "0b849d1e3d7e84ebd0959943f90ced4a96c3ee84681c4a7b67bc29350a039013",
+      "10319189a6a1b64cf3c31a7510e72082ad330db4b1ddaf767baeca0b1df271fb",
       "44f5e713a5d88f9da6f4cf6f858d302446e71a306f803d2751fc5ee762f73f69",
       "4c2a3b68554a0be7827e313d24cbcc8e085778b8ff0bf464033137f8ce5a1aa2",
       "518274f25dde9576b76bb2743152aaaef1df71e986620dda634a36ab52286e97",
       "57b8fb0bfc9ad37256fcaf11b90abe3929d668db302c68444e40559c52561f4f",
+      "6d275f3fda7d8b2b7fb06ab3c641e5863c1ce6d5bab91a7ffbbe1b7c510d0951",
       "71fbe0f4328e91e140a1a374bed5dc1af34a2d869937facc3ad3dcd4355271d0",
       "8ce62eca5fa759c1757c0dabee65808f9c08ef17a055688f86d01819c5aa43e1",
+      "a612e974902d94744c32a0273dcf560c7f2e98d512a371cbca0113e8e4d5e51c",
       "bb3c2e3a607e2b23a399f4f442b3478f7caff11f8410f90ba3e4bf41ad2257c0",
       "fecb6a8b64b4eb0c218ffa20d44468ef854dafd87c9aebf0b6a7c7a164e9ae60"
     ],
     "skills/cas-brainstorm/references/requirements-capture.md": [
+      "9f8a2cb857bc9f4b61e67a510e9790ee54e206bd4c9e882c0f4364ea2e1a3d47",
       "ca5c28eac7c8e646d1fec67d1fb5cd0f8fcc183d0a23d2a288abea80b579de73"
     ],
     "skills/cas-dataviz/references/design-review.md": [
       "5d999e3a4c2be2e21cc1579bef4c2678fc4e515cbac044875c0207a13c1f1af7",
       "6fb1d24c0c5e61178190d939c598b5162961d0ff910bb3829c3adbb59bb12bbe",
+      "ab2ec6158ee044671c86b4343f47ef2eb50800c0982d8e3e9e2aec8dff68fec4",
       "b096606a438257dc0611121c0ad6ca2ba5e2800fb8a3061053285e39a10e29a4"
     ],
     "skills/cas-dataviz/references/quality-checklist.md": [
@@ -54,22 +59,27 @@
       "10e7e53e39a66944e1927d9f9fa0e3dd138c63c5fd748223fec53cd58929dbc1",
       "204ab69b96eb7f6efc1d9843ec51200da098c4409b42f29d29e1648aa561edbf",
       "5193ed0e473b4bf5a31a5a39da8f781154b92eda61e2c3e1d9ddb869c5a59e77",
+      "5af57922717bd8438a2d8fe2d9baefec6bb3ad78d082056be0fb0b5154bf0c61",
       "755010d82ac1bdc886822a3eef670bc040d8fc419a1d1b9b2c71c0298df91ff6",
       "7734852cd1b701a2fbfe7ab8532e785d6228503d18f2c8f6f9f5891bdf7f7be1",
+      "7fe9b550685f05b00e8279e9bbf60fd8237ffcbe9eca9692d5abacc7e7b132a3",
       "922816265f9cd654446c6a961e970f61f83889adf329155dd42a11af782fd6e1",
       "dcd4333ad1b00989ed8b1370849334b2b14292107f3dd056c70db666d06df28f",
+      "dda4c9217681a88d1c81b866f1d289e08543e3d3d37e4d024417dfeaf5e6ef4a",
       "e0f1248b553a18edbd8a9c2e04a47b6ea53cf05b922148a4214824c0665d39f5",
       "f66f2bba375ea246be492bb1bd8386a819f86569285681795ad3e381b5c426fc"
     ],
     "skills/cas-image-generate/references/asset-playbook.md": [
       "06a50e2ede4f701196f8320d3f482230b1e93b92d84ca8095c6991cd23f4d3fc",
       "130ad93370ab51675c01c079307c9c2361237a70fcc3f45a2136cb15957600cf",
+      "672f218ce52222e0407ed64c676d130cbf4764444eb0067218356962a4e834af",
       "bacb0a284c2eb6f67126cb4bb17270bc848b03a174035a1e770c4f185ef938f5"
     ],
     "skills/cas-image-generate/references/output-checklist.md": [
       "6a97d55157978978b02d7c3d39aea02724d00ff00a858b7145a7a781cce926b1"
     ],
     "skills/cas-image-generate/references/providers.md": [
+      "03a021d35928e3cef2d3ea7fab790743958683c607e3c235186ad13456354129",
       "c90084f3807f9c731c828f6e3b6eb98ebeb2a367e4cb234ec762173dcd3f2d08"
     ],
     "skills/cas-image-generate/references/style-harvest.md": [
@@ -79,10 +89,16 @@
       "c1e8fac243aebbc7df4025eb9a938f84875396dc5c3d70f115385f87ab801755"
     ],
     "skills/cas-memory-management/references/body-templates.md": [
+      "1f4e4f8739271932bf6e89400ffde8d38b63da093571b39df1e3bc0e5a76f8a8",
+      "3fe2d2947926bc1987a0052d20a21317c72219844f6357c8a32685cb9c4b1bcf",
+      "9906be0fa531919dc9601f0c05ae302a11d2ddc2b1355ded7b4d04829ee47b8f",
       "dd425f5b4518bf4622661de5c377e74285bcb8f6d4a473acf0153266d20c9e20",
       "e3d58410bad40b38d0d0521ceb9107576cadde5bc44f75b27c2cb6d86b45a4ac"
     ],
     "skills/cas-memory-management/references/lifecycle-and-storage.md": [
+      "0ab4004541f685b2b1a0dfb7939ed72d7eef5a1a555ed9167ccc266a252d6282",
+      "6d13ebef24158d829b92e4cc34f40e776ccdc6d9db3f1e78500fb487940f1bb1",
+      "d4d584a54f6839c6f41d6d5f549e1303241d3723abf4d0fced6c0b985a0ac415",
       "dbc172f804c52f98f0dd88443590f4afbcf321e06ed84a64e1fa60496aa800bb"
     ],
     "skills/cas-memory-management/references/overlap-detection.md": [
@@ -90,12 +106,23 @@
       "1c9a2bd0f35fe6d318670e89d41a7baf3e1bf8987c87cb4378bdb814f66406f2",
       "249335385c4f9de2d96b4426ddb3d7ff1f71bbd5f72a415ccad64a07130defdb",
       "3d103aa1e7ad9f4d3d69caf88bfcab9e6dd386a8af0cb23d45049b9c6bce52d4",
+      "6c2fdf7bbfb93d4998abda33c1c19ba1bd816b8e0cf5ef9579eeeb51be28cc66",
+      "76461c44e404e0336eaf41d96a0e4831c673c43162bb3f88582baa17f19fc716",
       "7ba718c4157c2d325b508cfc7b7eb65f1d5db9dbee058705d55643963f0987f9",
+      "9cdd6a0a68bdbd7e893621754b5c28fa915532c254bd7d1b11e9bcfbf3c74fed",
       "c995ccf3f92a8e2fdfc1a80f1b761b17f927c4eb7e4c035b7899743431a54cb7"
     ],
+    "skills/cas-memory-management/references/response-shapes.md": [
+      "4cdd5fd2764ed047e28aeeca81f24ca2d9b3f2a01208b3432f88087e29844acb",
+      "4fbd25d048b432d3a58e8256ea1e34b001bc5217ae4bf22b98c8ba76672b7875",
+      "e3a892592116994be39e36429830e2f30e59cafd2b64f644bae60392d7902094"
+    ],
     "skills/cas-memory-management/references/schema.yaml": [
+      "33a2e8c448a6f39e52b44effd3db0e89ab6da15314eb4c48444088375e5985a5",
       "3724bbce65536273116893c0bab5da01adf5decee919a698ac8414c9801dd919",
+      "610abd6312234f516df895499ed3829ef6a9d043e82ca47d4acbd0f2fc1811b1",
       "8ab27882077070c3be99071e5f811dccda8ada0db867e180ba1ec9b20d04989e",
+      "8db797ad0e9f81c3594fe282246b03b762080a1de8b5c00f25b516f4559896d7",
       "ddcd665359b281748111ab2e6f599d2d7ae9387301fc3dd8a46898ce88c008cc"
     ],
     "skills/cas-nuxt-playwright/references/auth-fixture-template.md": [
@@ -580,6 +607,7 @@
     ],
     "skills/cli-routing/references/routing.md": [
       "348c86049edb8e907bab54980e04a6985eb5680b71f57ede6a3b8221e8a8caf9",
+      "34e4687d8ada3d2b73dc446ee021c8d53862bf37932c945636130a4c2b4497be",
       "60f261dc20e7c8261edb8b1bbcc341c1f54f684f0fc0ddb3d554674570e9b1a6",
       "f28b0d10a4281789f76d697a7bdbecf6635b2ee0f425cbccc5f126cde6fd31ae"
     ],

@@ -22,6 +22,38 @@ pub struct IssuesConfig {
     pub repo: Option<String>,
 }
 
+/// Release-routing configuration. Lives at `[release]` in `.cas/config.toml`.
+///
+/// The one-shot `claude -p` route used for release-note posting is gated on the
+/// account that would make the call (`claude auth status --json`). Which
+/// accounts are approved is operator policy, not a property of Cassy, so it is
+/// configured here instead of being written into the shipped `cli-routing`
+/// skill (cas-37f6). The list is empty by default and the gate fails closed:
+/// an unconfigured project approves no Claude account at all.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReleaseConfig {
+    /// E-mail addresses approved for the one-shot Claude route. Compared
+    /// case-insensitively against the probed `email` field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_account_allowlist: Vec<String>,
+}
+
+impl ReleaseConfig {
+    /// Whether a probed account e-mail is on the configured allowlist.
+    ///
+    /// Fails closed: an empty allowlist approves nobody, so a project that has
+    /// not opted in cannot spend a Claude account by accident.
+    pub fn claude_account_allowed(&self, email: &str) -> bool {
+        let probed = email.trim().to_ascii_lowercase();
+        if probed.is_empty() {
+            return false;
+        }
+        self.claude_account_allowlist
+            .iter()
+            .any(|allowed| allowed.trim().to_ascii_lowercase() == probed)
+    }
+}
+
 /// Project-scoped configuration. Lives at `[project]` in `.cas/config.toml`.
 ///
 /// `canonical_id` is the project's canonical slug used to scope cloud-sync

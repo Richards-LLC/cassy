@@ -151,7 +151,7 @@ focus: <optional focus hint>
 
 ## Phase 6: Refine or Hand Off
 
-After presenting the results, ask (`AskUserQuestion`) what should happen next. In factory mode AskUserQuestion is blocked — ask the question in plain text and end your turn; the director relays answers.
+After presenting the results, ask (`AskUserQuestion`) what should happen next.
 
 **Options:**
 

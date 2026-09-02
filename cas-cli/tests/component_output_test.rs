@@ -24,7 +24,7 @@ fn cas_cmd(dir: &Path) -> Command {
     cmd.env("HOME", home).env("XDG_CONFIG_HOME", xdg);
     // Pin the wrap width so snapshots do not depend on the host terminal or on
     // how long a redacted path happens to be before redaction.
-    cmd.env("COLUMNS", "200");
+    cmd.env("COLUMNS", "4000");
     cmd.env_remove("CAS_ROOT");
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
@@ -235,7 +235,7 @@ fn pty_cas_in_dir(dir: &TempDir, args: &[&str]) -> PtyRunner {
     std::fs::create_dir_all(&xdg).unwrap();
     let mut config = PtyRunnerConfig::with_size(80, 24)
         .env("HOME", home.to_string_lossy())
-        .env("COLUMNS", "200")
+        .env("COLUMNS", "4000")
         .env("XDG_CONFIG_HOME", xdg.to_string_lossy())
         .env("CAS_SKIP_FACTORY_TOOLING", "1")
         .env_remove("CAS_ROOT")

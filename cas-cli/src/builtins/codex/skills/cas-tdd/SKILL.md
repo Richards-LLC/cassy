@@ -19,15 +19,19 @@ Use a red → green loop to produce tests worth keeping. Test behavior through p
 
 When module shape or a seam is unclear, consult `cas-codebase-design` for module, interface, depth, seam, adapter, leverage, and locality vocabulary.
 
-## Anti-patterns
+## Tests worth keeping
 
-- **Implementation-coupled:** tests private methods, verifies a side channel rather than the interface, or breaks under a behavior-preserving refactor.
-- **Tautological:** the assertion recomputes expected output with the same logic as production code.
+A test describes observable behavior through a public interface and survives an internal refactor. Name what a caller can do, not which helper happened to run. One logical capability per test keeps a failure legible; a small table is useful when independent cases share a public contract, but it is not a substitute for behavior-focused names.
+
+Three shapes to reject:
+
+- **Implementation-coupled:** tests private methods, asserts call counts or ordering, verifies a persistence side channel rather than the interface, or breaks under a behavior-preserving refactor.
+- **Tautological:** the assertion recomputes the expected output with the same logic as production code. Take the expected value from a known literal, a worked example, or a specification instead.
 - **Horizontal slicing:** tests all anticipated behavior before any implementation, so the suite becomes insensitive to what actually ships.
 
 ## Mocking at real boundaries
 
-Mock external systems, time, randomness, and selected filesystem/network boundaries when a real fixture is unsuitable. Prefer real in-process behavior for code you own; do not mock a collaborator merely to prove it was called.
+Mock external systems, time, randomness, and selected filesystem, network, or database boundaries when a real fixture is unsuitable. Keep each mock specific to that boundary's contract, so a failing test names the behavior that changed. Prefer real in-process behavior for code you own; do not mock an internal collaborator merely to prove it was called.
 
 A framework's own testing seam (a DI container's provider override, a test harness's module builder) is not an implementation-coupled mock when the test still asserts the module's public behavior and the override stands in for a real external or separately-owned dependency.
 

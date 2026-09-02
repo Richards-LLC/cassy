@@ -187,6 +187,23 @@ check_doctests() {
     "$cargo_bin" test -p cas --doc
 }
 
+# Scratch bases must mirror the merge-queue runner: no ancestor directory may
+# hold a .cas store, or every cas child that walks up from its cwd/TMPDIR
+# finds the host's user-level store instead of the fixture.
+assert_no_cas_ancestor() {
+    local base="$1" probe
+    probe="$(cd "$(dirname "$base")" 2>/dev/null && pwd -P || printf '%s' "$(dirname "$base")")"
+    while [[ "$probe" != "/" && -n "$probe" ]]; do
+        if [[ -d "$probe/.cas" ]]; then
+            printf 'scratch base %s has a .cas ancestor at %s; set CAS_RELEASE_GATE_HOME_DIR to a path with no .cas ancestor (the queue runner has none)\n' "$base" "$probe/.cas"
+            return 1
+        fi
+        probe="$(dirname "$probe")"
+    done
+    [[ -d "/.cas" ]] && { printf 'scratch base %s has a .cas ancestor at /.cas\n' "$base"; return 1; }
+    return 0
+}
+
 make_archive_path() {
     local name command
     for name in cargo rustc git sh bash jq python3; do
@@ -204,6 +221,7 @@ check_archive_mode() {
     local archive_base archive_dir archive remap archive_tmp archive_path manifest package_dir status
     archive_base="${CAS_RELEASE_GATE_HOME_DIR:-${HOME:?}/.cache/cas-release-gate}"
     mkdir -p "$(dirname "$archive_base")"
+    assert_no_cas_ancestor "$archive_base" || return 1
     archive_dir="$(mktemp -d "${archive_base}.XXXXXX")"
     archive="$archive_dir/suite.tar.zst"
     remap="$archive_dir/workspace-remap"
@@ -257,6 +275,7 @@ check_snapshot_portability() {
     # up into the real project store and the snapshot captures live data.
     local deep_base="${CAS_RELEASE_GATE_HOME_DIR:-${HOME:?}/.cache/cas-release-gate}"
     mkdir -p "$(dirname "$deep_base")"
+    assert_no_cas_ancestor "$deep_base" || return 1
     local deep_tmp
     deep_tmp="$(mktemp -d "${deep_base}.snap.XXXXXX")/$(printf 'deep-temp-path-%.0s' {1..12})"
     mkdir -p "$deep_tmp"

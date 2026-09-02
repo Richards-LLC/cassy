@@ -33,8 +33,10 @@ and do not claim success without its receipt.
    run cargo update --workspace --offline, update CHANGELOG.md and the
    runtime-release Slack draft, and carry the previous release's POSTED receipt.
    Then run scripts/release-gate.sh <version>; all PASS rows are required.
-5. For archive mode, put suite.tar.zst and TMPDIR on the home disk, never a
-   32-GB /tmp tmpfs. Run cargo nextest archive -p cas --archive-file
+5. For archive mode, put suite.tar.zst and TMPDIR under a scratch base with
+   NO .cas ancestor directory (the queue runner has none; anything under
+   $HOME walks up into ~/.cas), on a large disk, never a 32-GB /tmp tmpfs:
+   export CAS_RELEASE_GATE_HOME_DIR=/var/tmp/cas-release-gate on this host. Run cargo nextest archive -p cas --archive-file
    <home-disk>/suite.tar.zst. Build a remap containing a copy of root
    Cargo.toml and an empty directory for every package path from
    git ls-files '*/Cargo.toml'. From outside the checkout, use a bin directory

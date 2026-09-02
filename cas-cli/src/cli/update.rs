@@ -3,8 +3,10 @@
 //! Downloads and installs the latest version from GitHub releases,
 //! and runs schema migrations for the local database.
 
-use std::collections::BTreeSet;
-use std::io;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -16,7 +18,9 @@ use crate::builtins::{
     prune_stale_user_skills_for_harness, sync_all_builtins_for_harness,
 };
 use crate::cli::Cli;
-use crate::cli::cloud::{CloudSyncArgs, execute_sync};
+use crate::cli::cloud::{
+    CloudSyncArgs, SyncSummary, execute_sync_with_summaries, render_sync_summary,
+};
 use crate::cli::factory_tooling;
 use crate::cli::hook::{
     configure_claude_hooks, configure_mcp_server, provision_codex_project,
@@ -29,7 +33,8 @@ use crate::hybrid_search::{LegacyRepairLimits, LegacyRepairOutcome, repair_legac
 use crate::migration::{check_migrations, run_migrations};
 use crate::store::{open_rule_store, open_skill_store, open_store};
 use crate::sync::{SkillSyncer, Syncer};
-use crate::ui::components::Formatter;
+use crate::ui::components::table::Column as TableColumn;
+use crate::ui::components::{Border, Formatter, OutputMode, Renderable, Table, Width};
 use crate::ui::theme::ActiveTheme;
 
 mod preview;
@@ -211,7 +216,16 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // the desired binary. It deliberately does the same complete sweep that a
     // successful ordinary `cas update` performs below.
     if args.all_projects {
-        return refresh_all_projects(args, cli, cas_root);
+        let mut steps = UpdateStepTracker::new(1, !cli.json);
+        let report = steps.run("Refreshing all local Cassy projects", || {
+            refresh_all_projects(args, cli, cas_root)
+        })?;
+        if !cli.json {
+            let mut out = io::stdout();
+            let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+            print_update_banner_with_formatter(&mut fmt, &report)?;
+        }
+        return Ok(());
     }
 
     // Handle user-level builtin distribution (~/.claude, ~/.codex)
@@ -257,7 +271,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         fmt.newline()?;
     }
 
-    steps.run("Refreshing all local Cassy projects", || {
+    let report = steps.run("Refreshing all local Cassy projects", || {
         refresh_all_projects(args, cli, cas_root)
     })?;
 
@@ -266,7 +280,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         let theme = ActiveTheme::default();
         let mut fmt = Formatter::stdout(&mut out, theme);
         fmt.newline()?;
-        fmt.success("Update completed")?;
+        print_update_banner_with_formatter(&mut fmt, &report)?;
     }
 
     Ok(())
@@ -298,6 +312,48 @@ impl ProjectPhase {
     fn failed(&self) -> bool {
         matches!(self, Self::Failed(_))
     }
+
+    fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok(_))
+    }
+
+    fn glyph(&self) -> &'static str {
+        match self {
+            Self::Ok(_) => "✓",
+            Self::Warning(_) => "⚠",
+            Self::Failed(_) => "✗",
+            Self::Skipped(_) | Self::Planned(_) => "–",
+        }
+    }
+
+    fn detail(&self) -> &str {
+        match self {
+            Self::Ok(detail)
+            | Self::Skipped(detail)
+            | Self::Planned(detail)
+            | Self::Warning(detail)
+            | Self::Failed(detail) => detail,
+        }
+    }
+
+    fn severity(&self) -> u8 {
+        match self {
+            Self::Failed(_) => 3,
+            Self::Warning(_) => 2,
+            Self::Skipped(_) | Self::Planned(_) => 1,
+            Self::Ok(_) => 0,
+        }
+    }
+
+    fn status_label(&self) -> &'static str {
+        match self {
+            Self::Ok(_) => "[OK]",
+            Self::Skipped(_) => "[SKIP]",
+            Self::Planned(_) => "[DRY]",
+            Self::Warning(_) => "[WARN]",
+            Self::Failed(_) => "[ERROR]",
+        }
+    }
 }
 
 struct ProjectRefreshReceipt {
@@ -307,6 +363,8 @@ struct ProjectRefreshReceipt {
     skills: ProjectPhase,
     membership: ProjectPhase,
     cloud: ProjectPhase,
+    details: String,
+    phase_details: Vec<(bool, String)>,
 }
 
 impl ProjectRefreshReceipt {
@@ -314,6 +372,405 @@ impl ProjectRefreshReceipt {
         [&self.migration, &self.skills, &self.membership, &self.cloud]
             .into_iter()
             .any(ProjectPhase::failed)
+    }
+}
+
+struct RefreshReport {
+    project_count: usize,
+    failed_count: usize,
+    elapsed: Duration,
+}
+
+#[derive(Default)]
+struct RepeatedWarning {
+    projects: BTreeSet<String>,
+    paths: BTreeSet<String>,
+}
+
+#[derive(Default)]
+struct RepeatedWarningCollector {
+    warnings: BTreeMap<String, RepeatedWarning>,
+}
+
+impl RepeatedWarningCollector {
+    fn record(&mut self, warning: &str, project: &str) {
+        self.warnings
+            .entry(warning.to_owned())
+            .or_default()
+            .projects
+            .insert(project.to_owned());
+    }
+
+    fn record_builtin_paths<I, S>(&mut self, project: &str, paths: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let warning = self
+            .warnings
+            .entry("Cassy-managed builtin paths already tracked".to_owned())
+            .or_default();
+        warning.projects.insert(project.to_owned());
+        warning.paths.extend(paths.into_iter().map(Into::into));
+    }
+
+    fn collect_output(&mut self, project: &str, output: &str) {
+        let mut builtin_warning = false;
+        for line in output.lines() {
+            let raw_line = line;
+            let line = raw_line.trim();
+            let normalized = line
+                .strip_prefix("[WARN] ")
+                .or_else(|| line.strip_prefix("[ERROR] "))
+                .or_else(|| line.strip_prefix("! "))
+                .unwrap_or(line)
+                .trim();
+            if normalized.contains("Cassy-managed builtin path(s) are already tracked") {
+                builtin_warning = true;
+                self.record_builtin_paths(project, std::iter::empty::<String>());
+            } else if normalized.starts_with("Push incomplete") {
+                self.record("Push incomplete; queued rows remain", project);
+            } else if let Some(error) = normalized.strip_prefix("remaining error: ") {
+                self.record(&format!("remaining error: {error}"), project);
+            } else if builtin_warning && let Some(path) = raw_line.trim_start().strip_prefix('!') {
+                self.record_builtin_paths(project, [path.trim().to_owned()]);
+            } else if builtin_warning
+                && (line.starts_with("To make") || line.starts_with("Review each file"))
+            {
+                continue;
+            } else if builtin_warning && !line.is_empty() {
+                builtin_warning = false;
+            }
+        }
+    }
+
+    fn render(&self, verbose: bool) -> String {
+        if verbose {
+            return String::new();
+        }
+        let mut output = String::new();
+        for (message, warning) in &self.warnings {
+            let count = warning.projects.len();
+            output.push_str(&format!(
+                "[WARN] {message} ({count} {})\n",
+                if count == 1 { "project" } else { "projects" }
+            ));
+            let paths = warning.paths.iter();
+            let limit = if verbose { usize::MAX } else { 5 };
+            for path in paths.take(limit) {
+                output.push_str(&format!("  ! {path}\n"));
+            }
+            if warning.paths.len() > limit {
+                output.push_str(&format!(
+                    "  … and {} more path(s)\n",
+                    warning.paths.len() - limit
+                ));
+            }
+        }
+        output
+    }
+}
+
+fn project_display_name(path: &Path, verbose: bool) -> String {
+    if verbose {
+        return path.display().to_string();
+    }
+    let components = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    components
+        .get(components.len().saturating_sub(2)..)
+        .unwrap_or(&components)
+        .join("/")
+}
+
+fn project_note(receipt: &ProjectRefreshReceipt) -> String {
+    let phases = [
+        ("migration", &receipt.migration),
+        ("index", &receipt.search_index),
+        ("skills", &receipt.skills),
+        ("member", &receipt.membership),
+        ("cloud", &receipt.cloud),
+    ];
+    let non_ok =
+        phases
+            .iter()
+            .filter(|(_, phase)| !phase.is_ok())
+            .fold(None, |most_severe, candidate| match most_severe {
+                None => Some(candidate),
+                Some(current) if candidate.1.severity() > current.1.severity() => Some(candidate),
+                Some(current) => Some(current),
+            });
+    if let Some((label, phase)) = non_ok {
+        let detail = phase.detail().trim();
+        let reason = if detail.is_empty() {
+            format!("{label} {}", phase.status_label().trim_matches(['[', ']']))
+        } else {
+            detail.to_owned()
+        };
+        return shorten_project_note(&reason);
+    }
+
+    let detail = phases
+        .iter()
+        .find(|(_, phase)| !phase.detail().is_empty())
+        .map(|(_, phase)| phase.detail())
+        .unwrap_or_default();
+    if detail.contains("not cloud-linked") {
+        return "not cloud-linked".to_owned();
+    }
+    if let Some(version) = version_token(detail).or_else(|| version_token(&receipt.details)) {
+        return version;
+    }
+    shorten_project_note(detail)
+}
+
+fn shorten_project_note(detail: &str) -> String {
+    if detail.chars().count() > 28 {
+        let short = detail.chars().take(28).collect::<String>();
+        format!("{short}…")
+    } else {
+        detail.to_owned()
+    }
+}
+
+fn version_token(text: &str) -> Option<String> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .find(|word| {
+            word.starts_with('v')
+                && word.len() > 1
+                && word[1..]
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
+        })
+        .map(str::to_owned)
+}
+
+fn project_table(receipts: &[ProjectRefreshReceipt], verbose: bool) -> Table {
+    let rows = receipts
+        .iter()
+        .map(|receipt| {
+            vec![
+                project_display_name(&receipt.project, verbose),
+                receipt.migration.glyph().to_owned(),
+                receipt.search_index.glyph().to_owned(),
+                receipt.skills.glyph().to_owned(),
+                receipt.membership.glyph().to_owned(),
+                receipt.cloud.glyph().to_owned(),
+                project_note(receipt),
+            ]
+        })
+        .collect::<Vec<_>>();
+    Table::new()
+        .columns_detailed(vec![
+            TableColumn::new("project"),
+            TableColumn::new("migr").width(Width::Min(4)),
+            TableColumn::new("index").width(Width::Min(5)),
+            TableColumn::new("skills").width(Width::Min(6)),
+            TableColumn::new("member").width(Width::Min(6)),
+            TableColumn::new("cloud").width(Width::Min(5)),
+            TableColumn::new("note"),
+        ])
+        .rows(rows)
+        .border(Border::None)
+        .indent(2)
+}
+
+fn render_project_table_at_width(
+    receipts: &[ProjectRefreshReceipt],
+    verbose: bool,
+    mode: OutputMode,
+    width: u16,
+) -> String {
+    let table = project_table(receipts, verbose);
+    let mut bytes = Vec::new();
+    {
+        let mut fmt = Formatter::new(&mut bytes, mode, ActiveTheme::default(), width);
+        table.render(&mut fmt).expect("project table cannot fail");
+    }
+    String::from_utf8(bytes).expect("project table is UTF-8")
+}
+
+fn render_project_table_plain(receipts: &[ProjectRefreshReceipt], verbose: bool) -> String {
+    render_project_table_at_width(receipts, verbose, OutputMode::Plain, 80)
+}
+
+fn strip_repeated_warning_lines(
+    output: &str,
+    warnings: &mut RepeatedWarningCollector,
+    project: &str,
+    verbose: bool,
+    preserve_phase_summaries: bool,
+) -> String {
+    warnings.collect_output(project, output);
+    if verbose {
+        return output.to_owned();
+    }
+    let mut kept = String::new();
+    let mut builtin_warning = false;
+    for line in output.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("[Cassy sync] Conflict resolved:")
+            || trimmed.starts_with("[Cassy sync] Starting team pull:")
+            || trimmed.starts_with("healed ")
+        {
+            continue;
+        }
+        let normalized = line
+            .trim_start()
+            .strip_prefix("[WARN] ")
+            .unwrap_or(line.trim());
+        if normalized.contains("Cassy-managed builtin path(s) are already tracked")
+            || normalized.starts_with("Push incomplete")
+            || normalized.starts_with("remaining error: ")
+        {
+            builtin_warning = normalized.contains("Cassy-managed builtin");
+            if preserve_phase_summaries
+                && (normalized.starts_with("Push incomplete")
+                    || normalized.starts_with("remaining error: "))
+            {
+                kept.push_str(line);
+                kept.push('\n');
+            }
+            continue;
+        }
+        if builtin_warning && (line.trim_start().starts_with('!') || line.trim().is_empty()) {
+            continue;
+        }
+        if builtin_warning && line.trim_start().starts_with("To make") {
+            builtin_warning = false;
+            continue;
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    kept
+}
+
+fn render_project_phase_details(
+    receipt: &ProjectRefreshReceipt,
+    verbose: bool,
+    warnings: &mut RepeatedWarningCollector,
+    project: &str,
+) -> String {
+    let phases = [
+        ("migration", &receipt.migration),
+        ("index", &receipt.search_index),
+        ("skills", &receipt.skills),
+        ("member", &receipt.membership),
+        ("cloud", &receipt.cloud),
+    ];
+    let mut selected = String::new();
+    for (index, (label, phase)) in phases.into_iter().enumerate() {
+        let (captured_ok, output) = receipt
+            .phase_details
+            .get(index)
+            .map(|(is_ok, output)| (*is_ok, output.as_str()))
+            .unwrap_or((phase.is_ok(), ""));
+        if verbose || !captured_ok {
+            if output.trim().is_empty() && !phase.is_ok() {
+                selected.push_str(&format!(
+                    "{} {label}: {}\n",
+                    phase.status_label(),
+                    phase.detail()
+                ));
+            } else {
+                selected.push_str(output);
+            }
+        }
+    }
+    strip_repeated_warning_lines(&selected, warnings, project, verbose, true)
+}
+
+fn print_update_banner_with_formatter(
+    fmt: &mut Formatter<'_>,
+    report: &RefreshReport,
+) -> io::Result<()> {
+    fmt.success(&format!(
+        "Cassy {} · {} projects refreshed · {} failed · {}",
+        env!("CARGO_PKG_VERSION"),
+        report.project_count,
+        report.failed_count,
+        format_elapsed(report.elapsed)
+    ))
+}
+
+fn capture_phase<T>(enabled: bool, operation: impl FnOnce() -> T) -> (T, String) {
+    if !enabled {
+        return (operation(), String::new());
+    }
+
+    #[cfg(unix)]
+    {
+        if let Ok(mut capture) = OutputCapture::new() {
+            let value = operation();
+            let output = capture.finish();
+            return (value, output);
+        }
+    }
+
+    (operation(), String::new())
+}
+
+#[cfg(unix)]
+struct OutputCapture {
+    stdout_backup: RawFd,
+    stderr_backup: RawFd,
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl OutputCapture {
+    fn new() -> io::Result<Self> {
+        let file = tempfile::tempfile()?;
+        let stdout_backup = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        if stdout_backup < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let stderr_backup = unsafe { libc::dup(libc::STDERR_FILENO) };
+        if stderr_backup < 0 {
+            unsafe { libc::close(stdout_backup) };
+            return Err(io::Error::last_os_error());
+        }
+        let fd = file.as_raw_fd();
+        if unsafe { libc::dup2(fd, libc::STDOUT_FILENO) } < 0
+            || unsafe { libc::dup2(fd, libc::STDERR_FILENO) } < 0
+        {
+            unsafe {
+                libc::dup2(stdout_backup, libc::STDOUT_FILENO);
+                libc::dup2(stderr_backup, libc::STDERR_FILENO);
+                libc::close(stdout_backup);
+                libc::close(stderr_backup);
+            }
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            stdout_backup,
+            stderr_backup,
+            file,
+        })
+    }
+
+    fn finish(&mut self) -> String {
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+        let mut output = String::new();
+        let _ = self.file.seek(SeekFrom::Start(0));
+        let _ = self.file.read_to_string(&mut output);
+        output
+    }
+}
+
+#[cfg(unix)]
+impl Drop for OutputCapture {
+    fn drop(&mut self) {
+        unsafe {
+            libc::dup2(self.stdout_backup, libc::STDOUT_FILENO);
+            libc::dup2(self.stderr_backup, libc::STDERR_FILENO);
+            libc::close(self.stdout_backup);
+            libc::close(self.stderr_backup);
+        }
     }
 }
 
@@ -325,35 +782,46 @@ fn refresh_all_projects(
     args: &UpdateArgs,
     cli: &Cli,
     current_cas_root: Option<&Path>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<RefreshReport> {
+    let started_at = Instant::now();
     let projects = discover_local_projects(current_cas_root);
     let mut receipts = Vec::with_capacity(projects.len());
 
-    if !cli.json {
-        println!(
-            "Refreshing {} local Cassy project(s){}",
-            projects.len(),
-            if args.dry_run { " (DRY RUN)" } else { "" }
-        );
-    }
-
     for project in projects {
         let cas_root = project.join(".cas");
-        if !cli.json {
-            println!("\n  {}", project.display());
-        }
+        let mut details = String::new();
 
         // Run each phase independently. A malformed database must be visible
         // in the receipt, but must not leave another project stale.
-        let migration = run_project_phase("migration", args.dry_run, || {
-            run_schema_migrations(args, cli, Some(&cas_root))
+        let (migration, output) = capture_phase(!cli.json, || {
+            run_project_phase("migration", args.dry_run, || {
+                run_schema_migrations(args, cli, Some(&cas_root))
+            })
         });
-        let search_index = repair_project_search_index(&cas_root, args.dry_run, cli);
-        let skills = run_project_phase("skills", args.dry_run, || {
-            sync_claude_files(cli, Some(&cas_root))
+        details.push_str(&output);
+        let mut phase_details = vec![(migration.is_ok(), output)];
+        let (search_index, output) = capture_phase(!cli.json, || {
+            repair_project_search_index(&cas_root, args.dry_run, cli)
         });
-        let membership = refresh_project_membership(&cas_root, args.dry_run);
-        let cloud = sync_project_cloud(&cas_root, args.dry_run, cli);
+        details.push_str(&output);
+        phase_details.push((search_index.is_ok(), output));
+        let (skills, output) = capture_phase(!cli.json, || {
+            run_project_phase("skills", args.dry_run, || {
+                sync_claude_files(cli, Some(&cas_root))
+            })
+        });
+        details.push_str(&output);
+        phase_details.push((skills.is_ok(), output));
+        let (membership, output) = capture_phase(!cli.json, || {
+            refresh_project_membership(&cas_root, args.dry_run)
+        });
+        details.push_str(&output);
+        phase_details.push((membership.is_ok(), output));
+        let ((cloud, _summaries), output) = capture_phase(!cli.json, || {
+            sync_project_cloud(&cas_root, args.dry_run, cli)
+        });
+        details.push_str(&output);
+        phase_details.push((cloud.is_ok(), output));
 
         receipts.push(ProjectRefreshReceipt {
             project,
@@ -362,25 +830,35 @@ fn refresh_all_projects(
             skills,
             membership,
             cloud,
+            details,
+            phase_details,
         });
     }
 
-    let user_builtins = if args.dry_run {
-        ProjectPhase::Planned("user-level builtins".to_string())
-    } else {
-        match sync_user_builtins(cli) {
-            Ok(()) => ProjectPhase::Ok("user-level builtins".to_string()),
-            Err(error) => ProjectPhase::Failed(error.to_string()),
+    let (user_builtins, user_details) = capture_phase(!cli.json, || {
+        if args.dry_run {
+            ProjectPhase::Planned("user-level builtins".to_string())
+        } else {
+            match sync_user_builtins(cli) {
+                Ok(()) => ProjectPhase::Ok("user-level builtins".to_string()),
+                Err(error) => ProjectPhase::Failed(error.to_string()),
+            }
         }
-    };
-    print_project_refresh_summary(&receipts, &user_builtins, cli);
+    });
+    print_project_refresh_summary(&receipts, &user_builtins, &user_details, cli);
 
-    if receipts.iter().any(ProjectRefreshReceipt::failed) || user_builtins.failed() {
+    let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
+        + usize::from(user_builtins.failed());
+    if failed_count > 0 {
         anyhow::bail!(
             "one or more projects were not fully refreshed; see the per-project phase summary above"
         );
     }
-    Ok(())
+    Ok(RefreshReport {
+        project_count: receipts.len(),
+        failed_count,
+        elapsed: started_at.elapsed(),
+    })
 }
 
 /// Repair the pre-cas-bc42 Tantivy root as part of the native update walk.
@@ -516,7 +994,8 @@ fn refresh_project_membership(cas_root: &Path, dry_run: bool) -> ProjectPhase {
     match fetch_and_cache_teams(&project.endpoint, token) {
         FetchTeamsOutcome::Updated { team_count } => match maybe_adopt_team_scope(cas_root) {
             Ok(adoption) => ProjectPhase::Ok(format!(
-                "refreshed {team_count} membership(s); {adoption:?}"
+                "refreshed {team_count} membership(s); {}",
+                adoption_summary(&adoption)
             )),
             Err(error) => ProjectPhase::Failed(format!(
                 "memberships refreshed but project scope could not be validated: {error}"
@@ -535,21 +1014,46 @@ fn refresh_project_membership(cas_root: &Path, dry_run: bool) -> ProjectPhase {
     }
 }
 
-fn sync_project_cloud(cas_root: &Path, dry_run: bool, cli: &Cli) -> ProjectPhase {
+fn adoption_summary(adoption: &crate::cloud::TeamScopeAdoption) -> &'static str {
+    match adoption {
+        crate::cloud::TeamScopeAdoption::Adopted(_) => "adopted team scope",
+        crate::cloud::TeamScopeAdoption::AlreadyScoped { .. } => "already scoped",
+        crate::cloud::TeamScopeAdoption::OptedOut => "opted out",
+        crate::cloud::TeamScopeAdoption::NotLoggedIn => "not logged in",
+        crate::cloud::TeamScopeAdoption::NoResolvableTeam { .. } => "no resolvable team",
+    }
+}
+
+fn sync_project_cloud(
+    cas_root: &Path,
+    dry_run: bool,
+    cli: &Cli,
+) -> (ProjectPhase, Vec<SyncSummary>) {
     if !cas_root.join("cloud.json").exists() {
-        return ProjectPhase::Skipped("not cloud-linked".to_string());
+        return (
+            ProjectPhase::Skipped("not cloud-linked".to_string()),
+            Vec::new(),
+        );
     }
     let config = match CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root) {
         Ok(config) => config,
-        Err(error) => return ProjectPhase::Failed(format!("could not read cloud config: {error}")),
+        Err(error) => {
+            return (
+                ProjectPhase::Failed(format!("could not read cloud config: {error}")),
+                Vec::new(),
+            );
+        }
     };
     if !config.is_logged_in() {
-        return ProjectPhase::Skipped("not logged in — run cas login".to_string());
+        return (
+            ProjectPhase::Skipped("not logged in — run cas login".to_string()),
+            Vec::new(),
+        );
     }
     if dry_run {
-        return ProjectPhase::Planned("cloud sync".to_string());
+        return (ProjectPhase::Planned("cloud sync".to_string()), Vec::new());
     }
-    match execute_sync(
+    match execute_sync_with_summaries(
         &CloudSyncArgs {
             dry_run: false,
             full: false,
@@ -558,14 +1062,81 @@ fn sync_project_cloud(cas_root: &Path, dry_run: bool, cli: &Cli) -> ProjectPhase
         cli,
         cas_root,
     ) {
-        Ok(()) => ProjectPhase::Ok("cloud sync".to_string()),
-        Err(error) => ProjectPhase::Failed(format!("cloud sync: {error:#}")),
+        Ok(summaries) => {
+            let phase = cloud_phase_from_summaries(&summaries);
+            let mut out = io::stdout();
+            let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+            if let Err(error) = summaries
+                .iter()
+                .try_for_each(|summary| render_sync_summary(&mut fmt, summary, cli.verbose))
+            {
+                return (
+                    ProjectPhase::Failed(format!("could not render cloud summary: {error}")),
+                    summaries,
+                );
+            }
+            (phase, summaries)
+        }
+        Err(error) => (
+            ProjectPhase::Failed(format!("cloud sync: {error:#}")),
+            Vec::new(),
+        ),
+    }
+}
+
+fn cloud_phase_from_summaries(summaries: &[SyncSummary]) -> ProjectPhase {
+    let failed = summaries.iter().any(|summary| {
+        !summary.errors.is_empty()
+            || summary.failed > 0
+            || summary.pending > 0
+            || summary.team_backlog_pending > 0
+            || summary.team_backlog_failed > 0
+    });
+    let mut parts = Vec::new();
+    for summary in summaries {
+        if summary.is_push() {
+            let pushed = summary.counts.values().sum::<usize>();
+            if pushed > 0 {
+                parts.push(format!("{pushed} pushed"));
+            }
+            let queued = summary.pending
+                + summary.failed
+                + summary.team_backlog_pending
+                + summary.team_backlog_failed;
+            if queued > 0 {
+                parts.push(format!("{queued} queued"));
+            }
+        } else if summary.is_pull() {
+            let pulled = summary.counts.values().sum::<usize>();
+            if pulled > 0 {
+                parts.push(format!("{pulled} pulled"));
+            }
+        }
+        if summary.knowledge_pushed > 0
+            || summary.knowledge_pulled > 0
+            || summary.knowledge_embedded > 0
+        {
+            parts.push(format!(
+                "knowledge {} pushed, {} pulled, {} embedded",
+                summary.knowledge_pushed, summary.knowledge_pulled, summary.knowledge_embedded
+            ));
+        }
+    }
+    if parts.is_empty() {
+        parts.push("up to date".to_string());
+    }
+    let detail = parts.join("; ");
+    if failed {
+        ProjectPhase::Warning(detail)
+    } else {
+        ProjectPhase::Ok(detail)
     }
 }
 
 fn print_project_refresh_summary(
     receipts: &[ProjectRefreshReceipt],
     user_builtins: &ProjectPhase,
+    user_details: &str,
     cli: &Cli,
 ) {
     if cli.json {
@@ -589,22 +1160,52 @@ fn print_project_refresh_summary(
         return;
     }
 
-    println!("\nProject refresh summary:");
+    let mut warnings = RepeatedWarningCollector::default();
+    let mut details = Vec::with_capacity(receipts.len());
     for receipt in receipts {
-        println!("  {}", receipt.project.display());
-        println!("    migration:  {}", receipt.migration.summary());
-        println!("    search index: {}", receipt.search_index.summary());
-        println!("    skills:     {}", receipt.skills.summary());
-        println!("    membership: {}", receipt.membership.summary());
-        println!("    cloud sync: {}", receipt.cloud.summary());
+        let project = project_display_name(&receipt.project, cli.verbose);
+        // Collect warnings from every phase, including successful phases whose
+        // output is intentionally omitted from the compact transcript.
+        warnings.collect_output(&project, &receipt.details);
+        let detail = render_project_phase_details(receipt, cli.verbose, &mut warnings, &project);
+        let show_detail = cli.verbose
+            || [
+                &receipt.migration,
+                &receipt.search_index,
+                &receipt.skills,
+                &receipt.membership,
+                &receipt.cloud,
+            ]
+            .into_iter()
+            .any(|phase| !phase.is_ok());
+        details.push((project, show_detail.then_some(detail)));
     }
-    let failed = receipts.iter().filter(|receipt| receipt.failed()).count();
-    println!(
-        "  Total: {} succeeded, {} failed; user builtins: {}",
-        receipts.len().saturating_sub(failed),
-        failed,
-        user_builtins.summary()
-    );
+    if !user_details.is_empty() {
+        let project = "user-level";
+        let detail =
+            strip_repeated_warning_lines(user_details, &mut warnings, project, cli.verbose, false);
+        if cli.verbose && !detail.trim().is_empty() {
+            details.push((project.to_owned(), Some(detail)));
+        }
+    }
+
+    let table_lines = render_project_table_plain(receipts, cli.verbose);
+    let mut table_lines = table_lines.lines();
+    if let Some(header) = table_lines.next() {
+        println!("{header}");
+    }
+    for ((_, row), (project, detail)) in receipts.iter().zip(table_lines).zip(details) {
+        println!("{row}");
+        if let Some(detail) = detail
+            && !detail.trim().is_empty()
+        {
+            println!("  {project} details:");
+            for line in detail.lines().filter(|line| !line.trim().is_empty()) {
+                println!("    {line}");
+            }
+        }
+    }
+    print!("{}", warnings.render(cli.verbose));
 }
 
 /// Discovery is the union of the host's known-repo registry and the legacy
@@ -1775,6 +2376,7 @@ impl UpdateStepTracker {
     {
         let step_num = self.current + 1;
         let started_at = Instant::now();
+        let mut styled = false;
 
         if self.enabled {
             let mut out = io::stdout();
@@ -1783,7 +2385,12 @@ impl UpdateStepTracker {
             fmt.write_accent("\u{2192} ")?;
             fmt.write_raw(&format!("[{}/{}] ", step_num, self.total))?;
             fmt.write_bold(label)?;
-            fmt.newline()?;
+            styled = fmt.is_styled();
+            if !styled {
+                fmt.newline()?;
+            } else {
+                fmt.flush()?;
+            }
         }
 
         match f() {
@@ -1792,11 +2399,16 @@ impl UpdateStepTracker {
                     let mut out = io::stdout();
                     let theme = ActiveTheme::default();
                     let mut fmt = Formatter::stdout(&mut out, theme);
-                    fmt.write_raw("  ")?;
-                    fmt.success(&format!(
-                        "{label} ({})",
-                        format_elapsed(started_at.elapsed())
-                    ))?;
+                    if styled {
+                        fmt.write_raw(" ")?;
+                        fmt.success(&format_elapsed(started_at.elapsed()))?;
+                    } else {
+                        fmt.write_raw("  ")?;
+                        fmt.success(&format!(
+                            "{label} ({})",
+                            format_elapsed(started_at.elapsed())
+                        ))?;
+                    }
                 }
                 self.current += 1;
                 Ok(value)
@@ -1806,11 +2418,16 @@ impl UpdateStepTracker {
                     let mut out = io::stdout();
                     let theme = ActiveTheme::default();
                     let mut fmt = Formatter::stdout(&mut out, theme);
-                    fmt.write_raw("  ")?;
-                    fmt.error(&format!(
-                        "{label} ({})",
-                        format_elapsed(started_at.elapsed())
-                    ))?;
+                    if styled {
+                        fmt.write_raw(" ")?;
+                        fmt.error(&format_elapsed(started_at.elapsed()))?;
+                    } else {
+                        fmt.write_raw("  ")?;
+                        fmt.error(&format!(
+                            "{label} ({})",
+                            format_elapsed(started_at.elapsed())
+                        ))?;
+                    }
                 }
                 Err(err)
             }

@@ -167,9 +167,14 @@ async fn team_pull_reconciles_same_id_entries_with_lww_and_skips_foreign_rows() 
     );
     assert_eq!(result.pulled_entries, 1, "only the newer team copy applies");
     assert_eq!(
-        result.conflicts_resolved, 2,
+        result.conflicts_resolved_local, 2,
         "older and equal rows are no-ops"
     );
+    assert_eq!(
+        result.conflicts_resolved_remote, 1,
+        "the newer team copy is a remote-win conflict"
+    );
+    assert_eq!(result.conflicts_resolved, 3, "total counts both directions");
 
     let store = open_store_local(tmp.path()).unwrap();
     assert_eq!(

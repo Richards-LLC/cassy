@@ -6,6 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -318,8 +319,8 @@ pub fn execute(cmd: &CloudCommands, cli: &Cli, cas_root: &Path) -> anyhow::Resul
         CloudCommands::Status => execute_status(cli, cas_root),
         CloudCommands::Queue(args) => execute_queue(args, cli, cas_root),
         CloudCommands::Conflicts(args) => execute_conflicts(args, cli, cas_root),
-        CloudCommands::Push(args) => execute_push(args, cli, cas_root),
-        CloudCommands::Pull(args) => execute_pull(args, cli, cas_root),
+        CloudCommands::Push(args) => execute_push(args, cli, cas_root).map(|_| ()),
+        CloudCommands::Pull(args) => execute_pull(args, cli, cas_root).map(|_| ()),
         CloudCommands::Sync(args) => execute_sync(args, cli, cas_root),
         CloudCommands::Team(cmd) => execute_team(cmd, cli, cas_root),
         CloudCommands::Project(args) => {
@@ -1888,6 +1889,13 @@ pub(crate) struct KnowledgeCounts {
     pub pending_embedding: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct KnowledgeSyncSummary {
+    pushed: usize,
+    pulled: usize,
+    embedded: usize,
+}
+
 /// Count local knowledge pages, or `None` when this project has no knowledge
 /// store yet. Never an error path: a status command must not fail because a
 /// repo has not been distilled.
@@ -1912,7 +1920,11 @@ pub(crate) fn local_knowledge_counts(cas_root: &Path) -> Option<KnowledgeCounts>
 /// no network call and created no vector storage. Failures are reported and
 /// swallowed — knowledge distribution is an enhancement, and it must never
 /// take down a sync that already moved entries and tasks.
-pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+fn sync_project_knowledge_with_output(
+    cli: &Cli,
+    cas_root: &Path,
+    emit_output: bool,
+) -> anyhow::Result<KnowledgeSyncSummary> {
     use crate::cloud::embeddings::{
         DEFAULT_EMBED_BATCH, KnowledgeEmbedder, KnowledgeVectorCache, embed_pending_pages,
     };
@@ -1922,14 +1934,14 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
 
     let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
     if !config.is_logged_in() {
-        return Ok(());
+        return Ok(KnowledgeSyncSummary::default());
     }
 
     let store = match SqliteKnowledgeStore::open(cas_root) {
         Ok(store) => store,
         Err(e) => {
             tracing::debug!(error = %e, "knowledge sync skipped: no knowledge store");
-            return Ok(());
+            return Ok(KnowledgeSyncSummary::default());
         }
     };
 
@@ -2007,7 +2019,7 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
         embed_problems.push("no cloud embedding capability configured (not logged in)".to_string());
     }
 
-    if cli.json {
+    if emit_output && cli.json {
         println!(
             "{}",
             serde_json::json!({
@@ -2029,7 +2041,7 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
                 }
             })
         );
-    } else {
+    } else if emit_output {
         if pushed > 0 || pulled.applied > 0 || embedded > 0 {
             println!(
                 "  Knowledge: {pushed} pushed, {} pulled, {embedded} embedded",
@@ -2076,7 +2088,11 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
         }
     }
 
-    Ok(())
+    Ok(KnowledgeSyncSummary {
+        pushed,
+        pulled: pulled.applied,
+        embedded,
+    })
 }
 
 fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
@@ -2548,7 +2564,7 @@ fn push_result_counts(
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-struct SkippedTeamBacklog {
+pub(crate) struct SkippedTeamBacklog {
     team_id: String,
     pending: usize,
     failed: usize,
@@ -2559,6 +2575,522 @@ impl SkippedTeamBacklog {
     fn total(&self) -> usize {
         self.pending + self.failed
     }
+}
+
+/// The display-ready result of one cloud push or pull operation.
+///
+/// Keeping the presentation data separate from [`crate::cloud::SyncResult`]
+/// lets command handlers preserve their JSON wire shape while `cas update`
+/// and the interactive cloud commands share one human renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncSummary {
+    pub kind: SyncSummaryKind,
+    pub counts: BTreeMap<String, usize>,
+    /// Counts produced by the team-side operation, kept separate from the
+    /// current project's personal counts for a useful combined receipt.
+    pub team_counts: BTreeMap<String, usize>,
+    pub batches: usize,
+    pub pending: usize,
+    pub failed: usize,
+    pub failures: Vec<String>,
+    pub errors: Vec<String>,
+    pub team_backlog_pending: usize,
+    pub team_backlog_failed: usize,
+    pub team_configured: bool,
+    pub task_transition: Option<String>,
+    pub knowledge_pushed: usize,
+    pub knowledge_pulled: usize,
+    pub knowledge_embedded: usize,
+    pub conflicts_resolved: usize,
+    pub conflicts_resolved_local: usize,
+    pub conflicts_resolved_remote: usize,
+    pub conflicts: Vec<crate::cloud::SyncConflict>,
+    pub team_conflicts_resolved: usize,
+    pub team_conflicts_resolved_local: usize,
+    pub team_conflicts_resolved_remote: usize,
+    pub team_conflicts: Vec<crate::cloud::SyncConflict>,
+    pub healed_task_dependencies_to_cloud: usize,
+    pub healed_task_dependencies_from_cloud: usize,
+    pub team_healed_task_dependencies_to_cloud: usize,
+    pub team_healed_task_dependencies_from_cloud: usize,
+    pub team_errors: Vec<String>,
+    pub team_push_attention: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncSummaryKind {
+    Push,
+    Pull,
+}
+
+impl SyncSummary {
+    fn push(
+        result: &crate::cloud::SyncResult,
+        scope: crate::cloud::PushScope,
+        team_backlog: Option<SkippedTeamBacklog>,
+    ) -> Self {
+        let counts = push_result_counts(result, scope)
+            .into_iter()
+            .map(|(key, count)| (key.to_string(), count))
+            .collect();
+        let failures = if result.remaining_backlog.failed > 0
+            && !result.remaining_backlog.failed_errors.is_empty()
+        {
+            result.remaining_backlog.failed_errors.clone()
+        } else {
+            result.errors.clone()
+        };
+        Self {
+            kind: SyncSummaryKind::Push,
+            counts,
+            team_counts: BTreeMap::new(),
+            batches: result.batches_run,
+            pending: result.remaining_backlog.pending,
+            failed: result.remaining_backlog.failed,
+            failures,
+            errors: result.errors.clone(),
+            team_backlog_pending: team_backlog
+                .as_ref()
+                .map(|backlog| backlog.pending)
+                .unwrap_or_default(),
+            team_backlog_failed: team_backlog
+                .as_ref()
+                .map(|backlog| backlog.failed)
+                .unwrap_or_default(),
+            team_configured: team_backlog.is_some(),
+            task_transition: None,
+            knowledge_pushed: result.pushed_knowledge_pages,
+            knowledge_pulled: result.pulled_knowledge_pages,
+            knowledge_embedded: 0,
+            conflicts_resolved: result.conflicts_resolved,
+            conflicts_resolved_local: result.conflicts_resolved_local,
+            conflicts_resolved_remote: result.conflicts_resolved_remote,
+            conflicts: result.conflicts.clone(),
+            team_conflicts_resolved: 0,
+            team_conflicts_resolved_local: 0,
+            team_conflicts_resolved_remote: 0,
+            team_conflicts: Vec::new(),
+            healed_task_dependencies_to_cloud: result.healed_task_dependencies_to_cloud,
+            healed_task_dependencies_from_cloud: result.healed_task_dependencies_from_cloud,
+            team_healed_task_dependencies_to_cloud: 0,
+            team_healed_task_dependencies_from_cloud: 0,
+            team_errors: Vec::new(),
+            team_push_attention: 0,
+        }
+    }
+
+    fn pull(result: &crate::cloud::SyncResult, team_configured: bool) -> Self {
+        let counts = [
+            ("entries", result.pulled_entries),
+            ("tasks", result.pulled_tasks),
+            ("rules", result.pulled_rules),
+            ("skills", result.pulled_skills),
+            ("specs", result.pulled_specs),
+            ("events", result.pulled_events),
+            ("prompts", result.pulled_prompts),
+            ("file changes", result.pulled_file_changes),
+            ("commit links", result.pulled_commit_links),
+            ("task dependencies", result.pulled_task_dependencies),
+        ]
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(key, count)| (key.to_string(), count))
+        .collect();
+        Self {
+            kind: SyncSummaryKind::Pull,
+            counts,
+            team_counts: BTreeMap::new(),
+            batches: 0,
+            pending: 0,
+            failed: 0,
+            failures: Vec::new(),
+            errors: result.errors.clone(),
+            team_backlog_pending: 0,
+            team_backlog_failed: 0,
+            team_configured,
+            task_transition: task_transition_summary(result),
+            knowledge_pushed: result.pushed_knowledge_pages,
+            knowledge_pulled: result.pulled_knowledge_pages,
+            knowledge_embedded: 0,
+            conflicts_resolved: result.conflicts_resolved,
+            conflicts_resolved_local: result.conflicts_resolved_local,
+            conflicts_resolved_remote: result.conflicts_resolved_remote,
+            conflicts: result.conflicts.clone(),
+            team_conflicts_resolved: 0,
+            team_conflicts_resolved_local: 0,
+            team_conflicts_resolved_remote: 0,
+            team_conflicts: Vec::new(),
+            healed_task_dependencies_to_cloud: result.healed_task_dependencies_to_cloud,
+            healed_task_dependencies_from_cloud: result.healed_task_dependencies_from_cloud,
+            team_healed_task_dependencies_to_cloud: 0,
+            team_healed_task_dependencies_from_cloud: 0,
+            team_errors: Vec::new(),
+            team_push_attention: 0,
+        }
+    }
+
+    pub(crate) fn is_push(&self) -> bool {
+        self.kind == SyncSummaryKind::Push
+    }
+
+    pub(crate) fn is_pull(&self) -> bool {
+        self.kind == SyncSummaryKind::Pull
+    }
+
+    fn with_knowledge(mut self, knowledge: KnowledgeSyncSummary) -> Self {
+        self.knowledge_pushed = knowledge.pushed;
+        self.knowledge_pulled = knowledge.pulled;
+        self.knowledge_embedded = knowledge.embedded;
+        self
+    }
+
+    fn merge_team_summary(&mut self, team: &SyncSummary) {
+        self.team_counts.extend(team.counts.clone());
+        self.team_conflicts_resolved += team.conflicts_resolved;
+        self.team_conflicts_resolved_local += team.conflicts_resolved_local;
+        self.team_conflicts_resolved_remote += team.conflicts_resolved_remote;
+        self.team_conflicts.extend(team.conflicts.clone());
+        self.team_healed_task_dependencies_to_cloud +=
+            team.healed_task_dependencies_to_cloud;
+        self.team_healed_task_dependencies_from_cloud +=
+            team.healed_task_dependencies_from_cloud;
+        self.team_errors.extend(team.errors.clone());
+        if team.is_push() {
+            self.team_push_attention += team.errors.len();
+        }
+        self.team_configured = true;
+    }
+
+    fn merge_team_pull(&mut self, result: &crate::cloud::SyncResult) {
+        let team = Self::pull(result, true);
+        self.merge_team_summary(&team);
+    }
+
+    fn push_complete(&self) -> bool {
+        self.is_push()
+            && self.errors.is_empty()
+            && self.pending == 0
+            && self.failed == 0
+            && self.team_backlog_pending == 0
+            && self.team_backlog_failed == 0
+            && self.team_push_attention == 0
+    }
+}
+
+fn pull_summary_label(key: &str, count: usize) -> String {
+    let singular = match key {
+        "entries" => "entry",
+        "tasks" => "task",
+        "rules" => "rule",
+        "skills" => "skill",
+        "specs" => "spec",
+        "events" => "event",
+        "prompts" => "prompt",
+        "file changes" => "file change",
+        "commit links" => "commit link",
+        "task dependencies" => "task dependency",
+        _ => key,
+    };
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {key}")
+    }
+}
+
+fn summary_count_labels(counts: &BTreeMap<String, usize>) -> Vec<String> {
+    counts
+        .iter()
+        .map(|(key, count)| pull_summary_label(&key.replace('_', " "), *count))
+        .collect()
+}
+
+fn conflict_summary_line(conflict: &crate::cloud::SyncConflict) -> String {
+    format!(
+        "[Cassy sync] Conflict resolved: {} {} local={} remote={} strategy={:?} action={:?}",
+        conflict.entity_type,
+        conflict.entity_id,
+        conflict.local_updated.format("%H:%M:%S"),
+        conflict.remote_updated.format("%H:%M:%S"),
+        conflict.resolution,
+        conflict.action,
+    )
+}
+
+fn concise_push_failure(error: &str) -> String {
+    let mut message = error
+        .split("; server response:")
+        .next()
+        .unwrap_or(error)
+        .trim()
+        .to_string();
+    if let Some(fields) = message.strip_prefix("permanent cloud rejection: ") {
+        if let Some(reason) = fields
+            .split("; ")
+            .find_map(|field| field.strip_prefix("reason="))
+        {
+            return reason.to_string();
+        }
+    }
+    if let Some((_, suffix)) = message.split_once(": Push failed with status ") {
+        message = format!("Push failed with status {suffix}");
+    }
+    if let Some((prefix, body)) = message.split_once(": {") {
+        let json = format!("{{{body}");
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
+            if let Some(server_error) = value.get("error").and_then(|value| value.as_str()) {
+                return server_error.to_string();
+            }
+        }
+        if prefix.ends_with("Push failed with status 400") {
+            return message;
+        }
+    }
+    message
+}
+
+fn grouped_push_failures(summary: &SyncSummary, verbose: bool) -> Vec<(String, usize)> {
+    let mut groups = BTreeMap::<String, usize>::new();
+    for error in &summary.failures {
+        *groups.entry(concise_push_failure(error)).or_default() += 1;
+    }
+    if groups.is_empty() && summary.failed > 0 {
+        groups.insert("unknown error".to_string(), summary.failed);
+    }
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    if !verbose {
+        groups.truncate(3);
+    }
+    groups
+}
+
+/// Render one human-facing cloud sync result.
+pub(crate) fn render_sync_summary(
+    fmt: &mut Formatter,
+    summary: &SyncSummary,
+    verbose: bool,
+) -> io::Result<()> {
+    match summary.kind {
+        SyncSummaryKind::Pull => {
+            let count_details = [
+                "entries",
+                "tasks",
+                "rules",
+                "skills",
+                "specs",
+                "events",
+                "prompts",
+                "file changes",
+                "commit links",
+                "task dependencies",
+            ]
+            .into_iter()
+            .filter_map(|key| {
+                summary
+                    .counts
+                    .get(key)
+                    .map(|count| pull_summary_label(key, *count))
+            })
+            .collect::<Vec<_>>();
+            let mut details = if count_details.is_empty() {
+                vec!["nothing newer".to_string()]
+            } else {
+                vec![count_details.join(", ")]
+            };
+            let conflicts = summary.conflicts_resolved + summary.team_conflicts_resolved;
+            if conflicts > 0 {
+                details.push(format!("{conflicts} conflicts resolved"));
+            }
+            let team_count_details = summary_count_labels(&summary.team_counts);
+            if !team_count_details.is_empty() {
+                details.push(format!("team {}", team_count_details.join(", ")));
+            }
+            let healed = summary.healed_task_dependencies_to_cloud
+                + summary.healed_task_dependencies_from_cloud
+                + summary.team_healed_task_dependencies_to_cloud
+                + summary.team_healed_task_dependencies_from_cloud;
+            if healed > 0 {
+                details.push(format!("{healed} edges healed"));
+            }
+            if summary.knowledge_pushed > 0
+                || summary.knowledge_pulled > 0
+                || summary.knowledge_embedded > 0
+            {
+                let mut knowledge = Vec::new();
+                if summary.knowledge_pushed > 0 {
+                    knowledge.push(format!("{} pushed", summary.knowledge_pushed));
+                }
+                if summary.knowledge_pulled > 0 {
+                    knowledge.push(format!("{} pulled", summary.knowledge_pulled));
+                }
+                if summary.knowledge_embedded > 0 {
+                    knowledge.push(format!("{} embedded", summary.knowledge_embedded));
+                }
+                details.push(format!("knowledge {}", knowledge.join(", ")));
+            }
+            if let Some(transition) = &summary.task_transition {
+                if !verbose {
+                    details.push(transition.clone());
+                }
+            }
+            details.push(if summary.team_configured {
+                "team + personal".to_string()
+            } else {
+                "personal only".to_string()
+            });
+            let error_count = summary.errors.len() + summary.team_errors.len();
+            let message = if error_count == 0 {
+                format!("Pull complete · {}", details.join(" · "))
+            } else {
+                format!(
+                    "Pull incomplete · {} errors · {}",
+                    error_count,
+                    details.join(" · ")
+                )
+            };
+            if error_count == 0 {
+                fmt.success(&message)?;
+            } else {
+                fmt.warning(&message)?;
+            }
+            if verbose {
+                for key in [
+                    "entries",
+                    "tasks",
+                    "rules",
+                    "skills",
+                    "specs",
+                    "events",
+                    "prompts",
+                    "file changes",
+                    "commit links",
+                    "task dependencies",
+                ] {
+                    let count = summary.counts.get(key).copied().unwrap_or_default();
+                    fmt.write_raw(&format!("    {count} {key} synced"))?;
+                    fmt.newline()?;
+                }
+                if let Some(transition) = &summary.task_transition {
+                    fmt.write_raw(transition)?;
+                    fmt.newline()?;
+                }
+                let conflict_count =
+                    summary.conflicts.len() + summary.team_conflicts.len();
+                if conflict_count > 0 {
+                    fmt.write_raw(&format!(
+                        "    {conflict_count} conflict(s) resolved"
+                    ))?;
+                    fmt.newline()?;
+                }
+                for conflict in summary.conflicts.iter().chain(summary.team_conflicts.iter()) {
+                    fmt.write_raw(&format!("    {}", conflict_summary_line(conflict)))?;
+                    fmt.newline()?;
+                }
+                for error in summary.errors.iter().chain(summary.team_errors.iter()) {
+                    fmt.write_muted("    - ")?;
+                    fmt.write_raw(error)?;
+                    fmt.newline()?;
+                }
+            }
+        }
+        SyncSummaryKind::Push => {
+            let team_pending = summary.team_backlog_pending;
+            let team_failed = summary.team_backlog_failed;
+            let push_complete = summary.push_complete();
+            let groups = grouped_push_failures(summary, verbose);
+            if !verbose {
+                if push_complete {
+                    let mut parts = vec![
+                        format!("{} batches", summary.batches),
+                        format!("{} pending", summary.pending),
+                    ];
+                    let team_counts = summary_count_labels(&summary.team_counts);
+                    if !team_counts.is_empty() {
+                        parts.push(format!("team {}", team_counts.join(", ")));
+                    }
+                    fmt.success(&format!("Push complete · {}", parts.join(" · ")))?;
+                } else {
+                    let failed = summary
+                        .failed
+                        .max(groups.iter().map(|(_, count)| *count).sum::<usize>());
+                    let mut parts = Vec::new();
+                    if failed > 0 {
+                        let failures = groups
+                            .iter()
+                            .map(|(message, count)| {
+                                if groups.len() == 1 {
+                                    message.clone()
+                                } else {
+                                    format!("{message} ({count})")
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        parts.push(format!("{failed} rows failed ({failures})"));
+                    }
+                    if summary.team_push_attention > 0 {
+                        parts.push(format!(
+                            "Team push needs attention: {} issue(s)",
+                            summary.team_push_attention
+                        ));
+                    }
+                    let pending = summary.pending + team_pending;
+                    if pending > 0 {
+                        parts.push(format!("{pending} pending"));
+                    }
+                    if parts.is_empty() {
+                        parts.push("queued rows remain".to_string());
+                    }
+                    parts.push("run cas cloud queue --retry".to_string());
+                    fmt.warning(&format!("Push incomplete · {}", parts.join(" · ")))?;
+                }
+            } else {
+                if push_complete {
+                    fmt.success("Push complete")?;
+                } else {
+                    fmt.warning("Push incomplete; queued rows remain")?;
+                }
+                fmt.write_raw(&format!("    batches: {}", summary.batches))?;
+                fmt.newline()?;
+                fmt.write_raw(&format!(
+                    "    remaining: {} pending, {} failed/parked",
+                    summary.pending + team_pending,
+                    summary.failed + team_failed
+                ))?;
+                fmt.newline()?;
+                for (key, count) in &summary.counts {
+                    fmt.write_raw(&format!("    {key}: {count} pushed"))?;
+                    fmt.newline()?;
+                }
+                for error in &summary.failures {
+                    fmt.write_raw(&format!("    remaining error: {error}"))?;
+                    fmt.newline()?;
+                }
+                for error in &summary.errors {
+                    fmt.write_raw(&format!("    error: {error}"))?;
+                    fmt.newline()?;
+                }
+                for key in summary.team_counts.keys() {
+                    if let Some(count) = summary.team_counts.get(key) {
+                        fmt.write_raw(&format!("    team {key}: {count} pushed"))?;
+                        fmt.newline()?;
+                    }
+                }
+                for error in &summary.team_errors {
+                    fmt.write_raw(&format!("    team error: {error}"))?;
+                    fmt.newline()?;
+                }
+                if team_pending > 0 || team_failed > 0 {
+                    fmt.write_raw(&format!(
+                        "    team backlog skipped: {} row(s); run `cas cloud sync`",
+                        team_pending + team_failed
+                    ))?;
+                    fmt.newline()?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Personal `cloud push` deliberately does not send the team endpoint. Make
@@ -2587,7 +3119,20 @@ fn active_team_backlog(
 
 /// Queue-driven personal push, rooted explicitly at `cas_root`.
 #[doc(hidden)]
-pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+pub fn execute_push(
+    args: &CloudPushArgs,
+    cli: &Cli,
+    cas_root: &Path,
+) -> anyhow::Result<SyncSummary> {
+    execute_push_with_output(args, cli, cas_root, true)
+}
+
+fn execute_push_with_output(
+    args: &CloudPushArgs,
+    cli: &Cli,
+    cas_root: &Path,
+    emit_output: bool,
+) -> anyhow::Result<SyncSummary> {
     use std::sync::Arc;
 
     use crate::cloud::{CloudSyncer, PushScope, resolve_canonical_id};
@@ -2619,7 +3164,7 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
     let team_backlog = active_team_backlog(&queue, &config)?;
 
     if args.dry_run {
-        if cli.json {
+        if emit_output && cli.json {
             let mut output = serde_json::json!({
                     "dry_run": true,
                     "root": cas_root,
@@ -2631,7 +3176,7 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
                 output["team_backlog_skipped"] = serde_json::to_value(backlog)?;
             }
             println!("{output}");
-        } else {
+        } else if emit_output {
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
             fmt.write_accent("  \u{2192} ")?;
@@ -2669,13 +3214,17 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
                 fmt.newline()?;
             }
         }
-        return Ok(());
+        return Ok(SyncSummary::push(
+            &crate::cloud::SyncResult::default(),
+            scope,
+            team_backlog,
+        ));
     }
 
     if let Err(msg) = check_canonical_id_rehome(&queue, &project_id, args.rehome) {
-        if cli.json {
+        if emit_output && cli.json {
             println!("{}", serde_json::json!({"status": "error", "message": msg}));
-        } else {
+        } else if emit_output {
             let mut err = io::stderr();
             let mut fmt = Formatter::stdout(&mut err, ActiveTheme::default());
             let error_color = fmt.theme().palette.status_error;
@@ -2683,7 +3232,11 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
             fmt.write_raw(&msg)?;
             fmt.newline()?;
         }
-        return Ok(());
+        return Ok(SyncSummary::push(
+            &crate::cloud::SyncResult::default(),
+            scope,
+            team_backlog,
+        ));
     }
 
     let result = match args.max_batches {
@@ -2696,14 +3249,11 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
         }
     }
     let counts = push_result_counts(&result, scope);
-    let personal_complete = result.errors.is_empty()
-        && result.remaining_backlog.pending == 0
-        && result.remaining_backlog.failed == 0;
-    let push_complete = personal_complete && team_backlog.is_none();
+    let summary = SyncSummary::push(&result, scope, team_backlog.clone());
 
-    if cli.json {
+    if emit_output && cli.json {
         let mut output = serde_json::json!({
-                "status": if push_complete { "ok" } else { "partial" },
+                "status": if summary.push_complete() { "ok" } else { "partial" },
                 "source": "sync_queue",
                 "root": cas_root,
                 "project_canonical_id": project_id,
@@ -2712,68 +3262,29 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
                 "total_pushed": result.total_pushed(),
                 "batches_run": result.batches_run,
                 "remaining_backlog": result.remaining_backlog,
+                "conflicts_resolved": result.conflicts_resolved,
+                "conflicts_resolved_local": result.conflicts_resolved_local,
+                "conflicts_resolved_remote": result.conflicts_resolved_remote,
+                "healed_task_dependencies_to_cloud": result.healed_task_dependencies_to_cloud,
+                "healed_task_dependencies_from_cloud": result.healed_task_dependencies_from_cloud,
                 "errors": result.concise_errors(),
         });
         if let Some(backlog) = &team_backlog {
             output["team_backlog_skipped"] = serde_json::to_value(backlog)?;
         }
         println!("{output}");
-    } else {
+    } else if emit_output {
         let mut out = io::stdout();
         let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-        if push_complete {
-            fmt.success("Push complete")?;
-        } else {
-            let warning_color = fmt.theme().palette.status_warning;
-            fmt.write_colored("  ! ", warning_color)?;
-            fmt.write_raw("Push incomplete; queued rows remain")?;
-            fmt.newline()?;
-        }
-        fmt.write_raw(&format!("    batches: {}", result.batches_run))?;
-        fmt.newline()?;
-        fmt.write_raw(&format!(
-            "    remaining: {} pending, {} failed/parked",
-            result.remaining_backlog.pending, result.remaining_backlog.failed
-        ))?;
-        fmt.newline()?;
-        for (key, count) in counts {
-            fmt.write_raw(&format!("    {key}: {count} pushed"))?;
-            fmt.newline()?;
-        }
-        for error in &result.remaining_backlog.failed_errors {
-            fmt.write_raw(&format!("    remaining error: {error}"))?;
-            fmt.newline()?;
-        }
-        for error in result.concise_errors() {
-            fmt.write_raw(&format!("    error: {error}"))?;
-            fmt.newline()?;
-        }
-        if let Some(backlog) = team_backlog {
-            fmt.write_raw(&format!(
-                "    team backlog skipped: {} row(s); run `cas cloud sync`",
-                backlog.total()
-            ))?;
-            fmt.newline()?;
-        }
+        render_sync_summary(&mut fmt, &summary, cli.verbose)?;
     }
 
-    Ok(())
+    Ok(summary)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PULL
 // ═══════════════════════════════════════════════════════════════════════════════
-
-fn personal_pull_summary(total: usize, team_configured: bool) -> String {
-    if total > 0 {
-        format!("Personal pull: pulled {total}")
-    } else if team_configured {
-        "Personal pull: up to date (nothing newer)".to_string()
-    } else {
-        "Personal pull: up to date (nothing newer); no team configured — personal scope only"
-            .to_string()
-    }
-}
 
 /// Render the lifecycle portion of a pull receipt. Kept separate from row
 /// counts because operators need to spot a status mutation immediately, while
@@ -2807,7 +3318,22 @@ fn task_transition_summary(result: &crate::cloud::SyncResult) -> Option<String> 
     ))
 }
 
-fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+fn execute_pull(
+    args: &CloudPullArgs,
+    cli: &Cli,
+    cas_root: &Path,
+) -> anyhow::Result<SyncSummary> {
+    // The delegated implementation clears the `last_team_pull_at_` watermark
+    // for `--full` and invokes `execute_team_pull` for standalone pulls too.
+    execute_pull_with_output(args, cli, cas_root, true)
+}
+
+fn execute_pull_with_output(
+    args: &CloudPullArgs,
+    cli: &Cli,
+    cas_root: &Path,
+    emit_output: bool,
+) -> anyhow::Result<SyncSummary> {
     use std::sync::Arc;
 
     use crate::cloud::{CloudSyncer, CloudSyncerConfig, SyncQueue};
@@ -2839,7 +3365,7 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
         use crate::ui::components::{Spinner, clear_inline, render_inline_view};
 
         let theme = ActiveTheme::default();
-        let prev_lines = if !cli.json {
+        let prev_lines = if emit_output && !cli.json && io::stdout().is_terminal() {
             let spinner = Spinner::new("Pulling from cloud...");
             render_inline_view(&spinner, &theme)?
         } else {
@@ -2914,12 +3440,23 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
         let prompts_count = pull_result.pulled_prompts;
         let file_changes_count = pull_result.pulled_file_changes;
         let commit_links_count = pull_result.pulled_commit_links;
+        let mut summary = SyncSummary::pull(&pull_result, config.active_team_id().is_some());
 
         if prev_lines > 0 {
             clear_inline(prev_lines)?;
         }
 
-        if cli.json {
+        // Fold the team pull into the personal result before rendering so a
+        // normal pull has one receipt rather than one personal and one team
+        // line. JSON keeps its historical separate wrapper below.
+        let team_output = emit_output && cli.json;
+        if let Some(team_summary) =
+            execute_team_pull_with_output(&config, cas_root, cli, team_output)?
+        {
+            summary.merge_team_summary(&team_summary);
+        }
+
+        if emit_output && cli.json {
             let mut output = serde_json::json!({
                     "status": "ok",
                     "entries": entries_count,
@@ -2931,6 +3468,13 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
                     "prompts": prompts_count,
                     "file_changes": file_changes_count,
                     "commit_links": commit_links_count,
+                    "conflicts_resolved": pull_result.conflicts_resolved,
+                    "conflicts_resolved_local": pull_result.conflicts_resolved_local,
+                    "conflicts_resolved_remote": pull_result.conflicts_resolved_remote,
+                    "healed_task_dependencies_to_cloud":
+                        pull_result.healed_task_dependencies_to_cloud,
+                    "healed_task_dependencies_from_cloud":
+                        pull_result.healed_task_dependencies_from_cloud,
                     "errors": &pull_result.errors,
             });
             if !pull_result.task_status_transitions.is_empty() {
@@ -2938,68 +3482,16 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
                     serde_json::to_value(&pull_result.task_status_transitions)?;
             }
             println!("{output}");
-        } else {
+        } else if emit_output {
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-            fmt.success("Pull complete")?;
-            let total = entries_count
-                + tasks_count
-                + rules_count
-                + skills_count
-                + specs_count
-                + events_count
-                + prompts_count
-                + file_changes_count
-                + commit_links_count;
-            fmt.write_raw(&personal_pull_summary(
-                total,
-                config.active_team_id().is_some(),
-            ))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {entries_count} entries synced"))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {tasks_count} tasks synced"))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {rules_count} rules synced"))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {skills_count} skills synced"))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {specs_count} specs synced"))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {events_count} events synced"))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {prompts_count} prompts synced"))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {file_changes_count} file changes synced"))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {commit_links_count} commit links synced"))?;
-            fmt.newline()?;
-            if let Some(summary) = task_transition_summary(&pull_result) {
-                fmt.write_raw(&summary)?;
-                fmt.newline()?;
-            }
-            if !pull_result.errors.is_empty() {
-                let warning_color = fmt.theme().palette.status_warning;
-                fmt.write_colored("  \u{26A0} ", warning_color)?;
-                fmt.write_raw(&format!("{} pull errors:", pull_result.errors.len()))?;
-                fmt.newline()?;
-                for err in &pull_result.errors {
-                    fmt.write_muted("    - ")?;
-                    fmt.write_raw(err)?;
-                    fmt.newline()?;
-                }
-            }
+            render_sync_summary(&mut fmt, &summary, cli.verbose)?;
         }
+
+        // Return the display-ready result so callers such as `cas update` can
+        // render the cloud column without scraping command output.
+        return Ok(summary);
     }
-
-    // Team pull layers on top of personal pull when a team is configured.
-    // cas-6ec7: `cas cloud pull` was missing this call, leaving new team
-    // members with zero team-scoped rows on a fresh `cas cloud pull`. The
-    // helper is a no-op when `active_team_id()` is None and isolates its
-    // own errors so it cannot regress personal-pull results.
-    execute_team_pull(&config, cas_root, cli)?;
-
-    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3058,6 +3550,28 @@ pub(crate) fn print_backfill_notice(cli: &Cli, outcome: &BackfillOutcome) {
 /// `execute_team_push` / `execute_team_pull`.
 #[doc(hidden)]
 pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+    execute_sync_with_output(args, cli, cas_root, true).map(|_| ())
+}
+
+/// Execute a cloud sync and return the display-ready summaries for the
+/// operations it performed. The regular CLI entry point above intentionally
+/// keeps its historical `Result<()>` API; `cas update` uses this seam to put
+/// the same cloud result in its project table and detail section.
+pub(crate) fn execute_sync_with_summaries(
+    args: &CloudSyncArgs,
+    cli: &Cli,
+    cas_root: &Path,
+) -> anyhow::Result<Vec<SyncSummary>> {
+    execute_sync_with_output(args, cli, cas_root, false)
+}
+
+fn execute_sync_with_output(
+    args: &CloudSyncArgs,
+    cli: &Cli,
+    cas_root: &Path,
+    emit_output: bool,
+) -> anyhow::Result<Vec<SyncSummary>> {
+    let mut summaries = Vec::new();
     // T2 lazy refresh: re-fetch /api/me when teams[] is empty or the last
     // fetch is more than 24 h old.  Best-effort — failure is logged but does
     // not abort sync.
@@ -3089,12 +3603,13 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
                         FetchTeamsOutcome::Empty => {
                             tracing::debug!("lazy /api/me refresh: zero team memberships");
                         }
-                        FetchTeamsOutcome::AuthFailed => {
+                        FetchTeamsOutcome::AuthFailed if emit_output => {
                             eprintln!(
                                 "warning: could not refresh team membership (/api/me 401). \
                                  Token may be expired — run `cas cloud login` to re-authenticate."
                             );
                         }
+                        FetchTeamsOutcome::AuthFailed => {}
                         FetchTeamsOutcome::NetworkError(msg) => {
                             tracing::warn!(
                                 error = %msg,
@@ -3114,7 +3629,9 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
     // execute_push via open_store → active_team_id().
     if !args.dry_run {
         let outcome = maybe_apply_team_backfill();
-        print_backfill_notice(cli, &outcome);
+        if emit_output {
+            print_backfill_notice(cli, &outcome);
+        }
 
         // cas-c117 (operator directive): the team identity is already known
         // locally by this point — `/api/me` filled `teams[]` and the backfill
@@ -3124,14 +3641,16 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
         // notice (which then correctly says nothing) and before execute_push
         // opens the syncing stores that read `active_team_id()`.
         match crate::cloud::maybe_adopt_team_scope(cas_root) {
-            Ok(adoption) => print_team_scope_adoption(cli, &adoption),
+            Ok(adoption) if emit_output => print_team_scope_adoption(cli, &adoption),
+            Ok(_) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "could not adopt the resolvable team scope");
             }
         }
 
         match maybe_mark_personal_scope_notice(cas_root) {
-            Ok(Some(notice)) => print_personal_scope_notice(cli, &notice),
+            Ok(Some(notice)) if emit_output => print_personal_scope_notice(cli, &notice),
+            Ok(Some(_)) => {}
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!(
@@ -3151,10 +3670,17 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
     // whole command with the real reason.
     if !args.dry_run {
         let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
-        ensure_team_project_registration(&cloud_config, cas_root, cli, args.full)?;
+        ensure_team_project_registration_with_output(
+            &cloud_config,
+            cas_root,
+            cli,
+            args.full,
+            emit_output,
+        )?;
     }
 
-    execute_push(
+    let operation_output = emit_output && (cli.json || args.dry_run);
+    summaries.push(execute_push_with_output(
         &CloudPushArgs {
             entries_only: false,
             tasks_only: false,
@@ -3164,7 +3690,8 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
         },
         cli,
         cas_root,
-    )?;
+        operation_output,
+    )?);
 
     if !args.dry_run {
         // Drain the team queue before pulling — when a team is configured,
@@ -3173,7 +3700,13 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
         // push failure is isolated from the personal drain above (which
         // already succeeded by now) and from the pull below (best-effort).
         let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
-        execute_team_push(&cloud_config, cas_root, cli)?;
+        if let Some(team_summary) =
+            execute_team_push_with_output(&cloud_config, cas_root, cli, emit_output && cli.json)?
+        {
+            if let Some(push_summary) = summaries.first_mut() {
+                push_summary.merge_team_summary(&team_summary);
+            }
+        }
 
         // Personal pull AND team pull happen transitively here:
         // `execute_pull` invokes `execute_team_pull` at its tail when an
@@ -3185,7 +3718,7 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
         // behavioral wiremock test in `team_pull_wiring_test.rs`
         // (`execute_sync_hits_each_pull_endpoint_exactly_once_when_team_configured`)
         // locks this invariant in with `.expect(1)` on both endpoints.
-        execute_pull(
+        let pull_summary = execute_pull_with_output(
             &CloudPullArgs {
                 entries_only: false,
                 tasks_only: false,
@@ -3193,17 +3726,32 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
             },
             cli,
             cas_root,
+            operation_output,
         )?;
 
         // T5: distilled knowledge rides the same sync. Kept last and
         // non-fatal — entries and tasks have already landed by here, and a
         // cloud without knowledge support must not fail the whole command.
-        if let Err(e) = sync_project_knowledge(cli, cas_root) {
-            tracing::warn!(error = %e, "knowledge sync failed (non-fatal)");
+        let pull_summary = match sync_project_knowledge_with_output(cli, cas_root, operation_output)
+        {
+            Ok(knowledge) => pull_summary.with_knowledge(knowledge),
+            Err(e) => {
+                tracing::warn!(error = %e, "knowledge sync failed (non-fatal)");
+                pull_summary
+            }
+        };
+        summaries.push(pull_summary);
+    }
+
+    if emit_output && !cli.json && !args.dry_run {
+        let mut out = io::stdout();
+        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+        for summary in &summaries {
+            render_sync_summary(&mut fmt, summary, cli.verbose)?;
         }
     }
 
-    Ok(())
+    Ok(summaries)
 }
 
 /// Metadata key recording a confirmed project↔team registration, so the
@@ -3234,6 +3782,16 @@ pub fn ensure_team_project_registration(
     cas_root: &Path,
     cli: &Cli,
     force: bool,
+) -> anyhow::Result<()> {
+    ensure_team_project_registration_with_output(cloud_config, cas_root, cli, force, true)
+}
+
+fn ensure_team_project_registration_with_output(
+    cloud_config: &CloudConfig,
+    cas_root: &Path,
+    cli: &Cli,
+    force: bool,
+    emit_output: bool,
 ) -> anyhow::Result<()> {
     let Some(team_id) = cloud_config.active_team_id() else {
         return Ok(());
@@ -3308,7 +3866,9 @@ pub fn ensure_team_project_registration(
                 let effective_cache_key = team_registration_metadata_key(&team_id, &effective_id);
                 let _ = q.set_metadata(&effective_cache_key, &chrono::Utc::now().to_rfc3339());
             }
-            report_team_registration(cli, &team_id, &effective_id, &outcome)?;
+            if emit_output {
+                report_team_registration(cli, &team_id, &effective_id, &outcome)?;
+            }
             Ok(())
         }
         Err(failure) => {
@@ -3318,7 +3878,7 @@ pub fn ensure_team_project_registration(
                 interaction = %failure.interaction,
                 "project could not be registered with the team; failing the sync"
             );
-            if cli.json {
+            if emit_output && cli.json {
                 println!(
                     "{}",
                     serde_json::json!({
@@ -3406,8 +3966,17 @@ pub fn execute_team_push(
     cas_root: &Path,
     cli: &Cli,
 ) -> anyhow::Result<()> {
+    execute_team_push_with_output(cloud_config, cas_root, cli, true).map(|_| ())
+}
+
+fn execute_team_push_with_output(
+    cloud_config: &CloudConfig,
+    cas_root: &Path,
+    cli: &Cli,
+    emit_output: bool,
+) -> anyhow::Result<Option<SyncSummary>> {
     let Some(team_id) = cloud_config.active_team_id() else {
-        return Ok(());
+        return Ok(None);
     };
     let team_id = team_id.to_string();
 
@@ -3420,14 +3989,32 @@ pub fn execute_team_push(
                     "team sync queue init failed; draining aborted",
                 );
                 // Isolation contract: reporter errors must not escape.
-                let _ = report_team_push_error(cli, &format!("Team sync queue init failed: {e}"));
-                return Ok(());
+                if emit_output {
+                    let _ = report_team_push_error(cli, &format!("Team sync queue init failed: {e}"));
+                }
+                return Ok(Some(SyncSummary::push(
+                    &crate::cloud::SyncResult {
+                        errors: vec![format!("Team sync queue init failed: {e}")],
+                        ..Default::default()
+                    },
+                    crate::cloud::PushScope::All,
+                    None,
+                )));
             }
             q
         }
         Err(e) => {
-            let _ = report_team_push_error(cli, &format!("Could not open sync queue: {e}"));
-            return Ok(());
+            if emit_output {
+                let _ = report_team_push_error(cli, &format!("Could not open sync queue: {e}"));
+            }
+            return Ok(Some(SyncSummary::push(
+                &crate::cloud::SyncResult {
+                    errors: vec![format!("Could not open sync queue: {e}")],
+                    ..Default::default()
+                },
+                crate::cloud::PushScope::All,
+                None,
+            )));
         }
     };
 
@@ -3441,17 +4028,30 @@ pub fn execute_team_push(
     // path must not propagate out and block the caller's pull step.
     match syncer.push_team(&team_id) {
         Ok(result) => {
-            if result.errors.is_empty() {
-                let _ = report_team_push_result(cli, &team_id, &result);
-            } else {
-                let _ = report_team_push_partial(cli, &team_id, &result);
+            let summary = SyncSummary::push(&result, crate::cloud::PushScope::All, None);
+            if emit_output {
+                if result.errors.is_empty() {
+                    let _ = report_team_push_result(cli, &team_id, &result);
+                } else {
+                    let _ = report_team_push_partial(cli, &team_id, &result);
+                }
             }
+            Ok(Some(summary))
         }
         Err(e) => {
-            let _ = report_team_push_error(cli, &format!("Team push failed: {e}"));
+            if emit_output {
+                let _ = report_team_push_error(cli, &format!("Team push failed: {e}"));
+            }
+            Ok(Some(SyncSummary::push(
+                &crate::cloud::SyncResult {
+                    errors: vec![format!("Team push failed: {e}")],
+                    ..Default::default()
+                },
+                crate::cloud::PushScope::All,
+                None,
+            )))
         }
     }
-    Ok(())
 }
 
 fn report_team_push_result(
@@ -3462,24 +4062,15 @@ fn report_team_push_result(
     if cli.json {
         println!("{}", team_push_json(team_id, result, &[]));
     } else {
-        // `total_pushed()` sums all 12 entity types — not just
-        // entries/tasks/rules/skills — so a sync that only pushes
-        // sessions/events/prompts still surfaces in the human output.
+        // `total_pushed()` sums all entity types — not just the four most
+        // common kinds — so an otherwise quiet team push stays quiet unless
+        // it actually moved data.
         if result.total_pushed() > 0 {
             let theme = ActiveTheme::default();
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, theme);
-            let success_color = fmt.theme().palette.status_success;
-            fmt.write_colored("  \u{2713} ", success_color)?;
-            fmt.write_raw(&format!(
-                "Team push: {} entries, {} tasks, {} rules, {} skills ({} total)",
-                result.pushed_entries,
-                result.pushed_tasks,
-                result.pushed_rules,
-                result.pushed_skills,
-                result.total_pushed(),
-            ))?;
-            fmt.newline()?;
+            let summary = SyncSummary::push(result, crate::cloud::PushScope::All, None);
+            render_sync_summary(&mut fmt, &summary, cli.verbose)?;
         }
     }
     Ok(())
@@ -3511,6 +4102,11 @@ fn team_push_json(
             "pushed_commit_links": result.pushed_commit_links,
             "pushed_agents": result.pushed_agents,
             "pushed_worktrees": result.pushed_worktrees,
+            "conflicts_resolved": result.conflicts_resolved,
+            "conflicts_resolved_local": result.conflicts_resolved_local,
+            "conflicts_resolved_remote": result.conflicts_resolved_remote,
+            "healed_task_dependencies_to_cloud": result.healed_task_dependencies_to_cloud,
+            "healed_task_dependencies_from_cloud": result.healed_task_dependencies_from_cloud,
             "total_pushed": result.total_pushed(),
             "duration_ms": result.duration_ms,
             "errors": errors,
@@ -3531,18 +4127,8 @@ fn report_team_push_partial(
         let theme = ActiveTheme::default();
         let mut out = io::stdout();
         let mut fmt = Formatter::stdout(&mut out, theme);
-        let warning_color = fmt.theme().palette.status_warning;
-        fmt.write_colored("  \u{26A0} ", warning_color)?;
-        fmt.write_raw(&format!(
-            "Team push needs attention: {} issue(s); permanent rejections are parked",
-            result.concise_errors().len()
-        ))?;
-        fmt.newline()?;
-        for err in result.concise_errors() {
-            fmt.write_muted("    - ")?;
-            fmt.write_raw(&err)?;
-            fmt.newline()?;
-        }
+        let summary = SyncSummary::push(result, crate::cloud::PushScope::All, None);
+        render_sync_summary(&mut fmt, &summary, cli.verbose)?;
     }
     Ok(())
 }
@@ -3593,8 +4179,17 @@ pub fn execute_team_pull(
     cas_root: &Path,
     cli: &Cli,
 ) -> anyhow::Result<()> {
+    execute_team_pull_with_output(cloud_config, cas_root, cli, true).map(|_| ())
+}
+
+fn execute_team_pull_with_output(
+    cloud_config: &CloudConfig,
+    cas_root: &Path,
+    cli: &Cli,
+    emit_output: bool,
+) -> anyhow::Result<Option<SyncSummary>> {
     let Some(team_id) = cloud_config.active_team_id() else {
-        return Ok(());
+        return Ok(None);
     };
     let team_id = team_id.to_string();
 
@@ -3607,14 +4202,30 @@ pub fn execute_team_pull(
                     "team sync queue init failed; team pull aborted",
                 );
                 // Isolation contract: reporter errors must not escape.
-                let _ = report_team_pull_error(cli, &format!("Team sync queue init failed: {e}"));
-                return Ok(());
+                if emit_output {
+                    let _ = report_team_pull_error(cli, &format!("Team sync queue init failed: {e}"));
+                }
+                return Ok(Some(SyncSummary::pull(
+                    &crate::cloud::SyncResult {
+                        errors: vec![format!("Team sync queue init failed: {e}")],
+                        ..Default::default()
+                    },
+                    true,
+                )));
             }
             q
         }
         Err(e) => {
-            let _ = report_team_pull_error(cli, &format!("Could not open sync queue: {e}"));
-            return Ok(());
+            if emit_output {
+                let _ = report_team_pull_error(cli, &format!("Could not open sync queue: {e}"));
+            }
+            return Ok(Some(SyncSummary::pull(
+                &crate::cloud::SyncResult {
+                    errors: vec![format!("Could not open sync queue: {e}")],
+                    ..Default::default()
+                },
+                true,
+            )));
         }
     };
 
@@ -3627,29 +4238,61 @@ pub fn execute_team_pull(
     let store = match open_store_local(cas_root) {
         Ok(s) => s,
         Err(e) => {
-            let _ = report_team_pull_error(cli, &format!("Could not open entry store: {e}"));
-            return Ok(());
+            if emit_output {
+                let _ = report_team_pull_error(cli, &format!("Could not open entry store: {e}"));
+            }
+            return Ok(Some(SyncSummary::pull(
+                &crate::cloud::SyncResult {
+                    errors: vec![format!("Could not open entry store: {e}")],
+                    ..Default::default()
+                },
+                true,
+            )));
         }
     };
     let task_store = match open_task_store_local(cas_root) {
         Ok(s) => s,
         Err(e) => {
-            let _ = report_team_pull_error(cli, &format!("Could not open task store: {e}"));
-            return Ok(());
+            if emit_output {
+                let _ = report_team_pull_error(cli, &format!("Could not open task store: {e}"));
+            }
+            return Ok(Some(SyncSummary::pull(
+                &crate::cloud::SyncResult {
+                    errors: vec![format!("Could not open task store: {e}")],
+                    ..Default::default()
+                },
+                true,
+            )));
         }
     };
     let rule_store = match open_rule_store_local(cas_root) {
         Ok(s) => s,
         Err(e) => {
-            let _ = report_team_pull_error(cli, &format!("Could not open rule store: {e}"));
-            return Ok(());
+            if emit_output {
+                let _ = report_team_pull_error(cli, &format!("Could not open rule store: {e}"));
+            }
+            return Ok(Some(SyncSummary::pull(
+                &crate::cloud::SyncResult {
+                    errors: vec![format!("Could not open rule store: {e}")],
+                    ..Default::default()
+                },
+                true,
+            )));
         }
     };
     let skill_store = match open_skill_store_local(cas_root) {
         Ok(s) => s,
         Err(e) => {
-            let _ = report_team_pull_error(cli, &format!("Could not open skill store: {e}"));
-            return Ok(());
+            if emit_output {
+                let _ = report_team_pull_error(cli, &format!("Could not open skill store: {e}"));
+            }
+            return Ok(Some(SyncSummary::pull(
+                &crate::cloud::SyncResult {
+                    errors: vec![format!("Could not open skill store: {e}")],
+                    ..Default::default()
+                },
+                true,
+            )));
         }
     };
 
@@ -3666,11 +4309,21 @@ pub fn execute_team_pull(
     let project_id = match crate::cloud::get_project_canonical_id() {
         Some(id) => id,
         None => {
-            let _ = report_team_pull_error(
-                cli,
-                "Team pull skipped: not inside a Cassy project directory",
-            );
-            return Ok(());
+            if emit_output {
+                let _ = report_team_pull_error(
+                    cli,
+                    "Team pull skipped: not inside a Cassy project directory",
+                );
+            }
+            return Ok(Some(SyncSummary::pull(
+                &crate::cloud::SyncResult {
+                    errors: vec![
+                        "Team pull skipped: not inside a Cassy project directory".to_string(),
+                    ],
+                    ..Default::default()
+                },
+                true,
+            )));
         }
     };
 
@@ -3685,17 +4338,29 @@ pub fn execute_team_pull(
         skill_store.as_ref(),
     ) {
         Ok(result) => {
-            if result.errors.is_empty() {
-                let _ = report_team_pull_result(cli, &team_id, &result);
-            } else {
-                let _ = report_team_pull_partial(cli, &team_id, &result);
+            let summary = SyncSummary::pull(&result, true);
+            if emit_output {
+                if result.errors.is_empty() {
+                    let _ = report_team_pull_result(cli, &team_id, &result);
+                } else {
+                    let _ = report_team_pull_partial(cli, &team_id, &result);
+                }
             }
+            Ok(Some(summary))
         }
         Err(e) => {
-            let _ = report_team_pull_error(cli, &format!("Team pull failed: {e}"));
+            if emit_output {
+                let _ = report_team_pull_error(cli, &format!("Team pull failed: {e}"));
+            }
+            Ok(Some(SyncSummary::pull(
+                &crate::cloud::SyncResult {
+                    errors: vec![format!("Team pull failed: {e}")],
+                    ..Default::default()
+                },
+                true,
+            )))
         }
     }
-    Ok(())
 }
 
 /// Shared JSON shape for `report_team_pull_{result,partial,error}` —
@@ -3717,6 +4382,10 @@ fn team_pull_json(
             "pulled_rules": result.pulled_rules,
             "pulled_skills": result.pulled_skills,
             "conflicts_resolved": result.conflicts_resolved,
+            "conflicts_resolved_local": result.conflicts_resolved_local,
+            "conflicts_resolved_remote": result.conflicts_resolved_remote,
+            "healed_task_dependencies_to_cloud": result.healed_task_dependencies_to_cloud,
+            "healed_task_dependencies_from_cloud": result.healed_task_dependencies_from_cloud,
             "duration_ms": result.duration_ms,
             "errors": errors,
         }
@@ -5604,23 +6273,146 @@ mod team_cmd_tests {
     }
 
     #[test]
-    fn personal_pull_summary_names_up_to_date_with_team() {
+    fn sync_summary_renders_zero_pull_as_one_quiet_line() {
+        let summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+
+        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+
         assert_eq!(
-            personal_pull_summary(0, true),
-            "Personal pull: up to date (nothing newer)"
+            tf.output(),
+            "[OK] Pull complete · nothing newer · personal only\n"
         );
     }
 
     #[test]
-    fn personal_pull_summary_names_personal_only_without_team() {
-        assert!(
-            personal_pull_summary(0, false).contains("no team configured — personal scope only")
+    fn sync_summary_renders_only_nonzero_pull_kinds() {
+        let summary = SyncSummary::pull(
+            &crate::cloud::SyncResult {
+                pulled_entries: 3,
+                pulled_tasks: 12,
+                pulled_rules: 1,
+                pulled_skills: 0,
+                ..Default::default()
+            },
+            true,
+        );
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+
+        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+
+        assert_eq!(
+            tf.output(),
+            "[OK] Pull complete · 3 entries, 12 tasks, 1 rule · team + personal\n"
         );
     }
 
     #[test]
-    fn personal_pull_summary_names_pulled_total() {
-        assert_eq!(personal_pull_summary(3, false), "Personal pull: pulled 3");
+    fn sync_summary_merges_team_counts_conflicts_and_healed_edges() {
+        let mut summary = SyncSummary::pull(
+            &crate::cloud::SyncResult {
+                pulled_entries: 3,
+                conflicts_resolved: 4,
+                healed_task_dependencies_to_cloud: 6,
+                ..Default::default()
+            },
+            true,
+        );
+        summary.merge_team_pull(&crate::cloud::SyncResult {
+            pulled_entries: 2,
+            pulled_tasks: 1,
+            conflicts_resolved: 8,
+            conflicts_resolved_local: 3,
+            conflicts_resolved_remote: 5,
+            healed_task_dependencies_from_cloud: 10,
+            ..Default::default()
+        });
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(120);
+
+        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+
+        assert_eq!(
+            tf.output(),
+            "[OK] Pull complete · 3 entries · 12 conflicts resolved · team 2 entries, 1 task · 16 edges healed · team + personal\n"
+        );
+    }
+
+    #[test]
+    fn sync_summary_verbose_renders_counted_conflict_details() {
+        let now = chrono::Utc::now();
+        let mut result = crate::cloud::SyncResult::default();
+        result.record_conflict(crate::cloud::SyncConflict {
+            entity_type: "entry".to_string(),
+            entity_id: "cas-conflict".to_string(),
+            local_updated: now,
+            remote_updated: now,
+            resolution: crate::cloud::ConflictResolution::RemoteWins,
+            action: crate::cloud::ConflictAction::UseRemote,
+        });
+        let summary = SyncSummary::pull(&result, false);
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(120);
+
+        render_sync_summary(&mut tf.fmt(), &summary, true).unwrap();
+
+        assert!(tf.output().contains("1 conflict(s) resolved"));
+        assert!(tf.output().contains("entry cas-conflict"));
+    }
+
+    #[test]
+    fn sync_summary_renders_successful_push_with_batch_and_pending_counts() {
+        let summary = SyncSummary::push(
+            &crate::cloud::SyncResult {
+                batches_run: 2,
+                ..Default::default()
+            },
+            crate::cloud::PushScope::All,
+            None,
+        );
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+
+        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+
+        assert_eq!(
+            tf.output(),
+            "[OK] Push complete · 2 batches · 0 pending\n"
+        );
+    }
+
+    #[test]
+    fn sync_summary_groups_identical_push_failures_once_with_retry_hint() {
+        let message = "Client version 3.7.7 is below minimum 3.8.0";
+        let mut summary = SyncSummary::push(
+            &crate::cloud::SyncResult {
+                batches_run: 2,
+                ..Default::default()
+            },
+            crate::cloud::PushScope::All,
+            None,
+        );
+        summary.failed = 43;
+        summary.failures = (0..43).map(|_| message.to_string()).collect();
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(120);
+
+        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+
+        assert_eq!(
+            tf.output(),
+            "[WARN] Push incomplete · 43 rows failed (Client version 3.7.7 is below minimum 3.8.0) · run cas cloud queue --retry\n"
+        );
+    }
+
+    #[test]
+    fn sync_summary_styled_output_uses_formatter_status_color() {
+        let summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::styled(80);
+
+        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+
+        assert!(tf.output().contains('\x1b'));
+        assert_eq!(
+            tf.output_plain(),
+            "✓ Pull complete · nothing newer · personal only\n"
+        );
     }
 
     #[test]

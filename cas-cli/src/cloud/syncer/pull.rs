@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
@@ -30,6 +31,59 @@ use crate::types::{
 /// through [`build_scoped_pull_url`], which is what keeps the pull scoped to
 /// the current project (cas-2eb3 / cas-ed15).
 pub(crate) const PULL_PATH: &str = "/api/sync/pull";
+
+/// One deduplicated project-scoping warning observed during a pull or doctor
+/// contamination scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SyncWarningSummary {
+    pub entity_kind: String,
+    pub project: String,
+    pub count: usize,
+}
+
+thread_local! {
+    static WARNING_SINK: RefCell<Option<BTreeMap<(String, String), usize>>> = const { RefCell::new(None) };
+}
+
+/// Collect project-scope warnings for a bounded operation. The normal cloud
+/// pull path has no collector and therefore logs the original warning through
+/// tracing without writing directly to stderr.
+pub(crate) fn collect_sync_warnings<T>(
+    operation: impl FnOnce() -> T,
+) -> (T, Vec<SyncWarningSummary>) {
+    WARNING_SINK.with(|sink| {
+        let previous = sink.replace(Some(BTreeMap::new()));
+        let result = operation();
+        let collected = sink.replace(previous).unwrap_or_default();
+        let warnings = collected
+            .into_iter()
+            .map(|((entity_kind, project), count)| SyncWarningSummary {
+                entity_kind,
+                project,
+                count,
+            })
+            .collect();
+        (result, warnings)
+    })
+}
+
+fn record_project_warning(entity_kind: &str, project: &str, message: &str) {
+    let collected = WARNING_SINK.with(|sink| {
+        sink.borrow_mut()
+            .as_mut()
+            .map(|warnings| {
+                *warnings
+                    .entry((entity_kind.to_string(), project.to_string()))
+                    .or_default() += 1;
+            })
+            .is_some()
+    });
+    if collected {
+        return;
+    }
+
+    tracing::debug!("[Cassy sync] WARNING: {message}");
+}
 
 /// Deserialize one raw pull entity while retaining its wire identifier in any
 /// error. Pull payloads are raw JSON specifically so one malformed row does
@@ -102,13 +156,13 @@ fn task_dependency_matches_project(raw: &serde_json::Value, current_project_id: 
     match project_field.and_then(serde_json::Value::as_str) {
         Some(project) if project_ids_match(project, current_project_id) => true,
         Some(project) => {
-            eprintln!(
+            tracing::debug!(
                 "[Cassy sync] WARNING: skipping task dependency '{edge_id}' from foreign project '{project}' (expected '{current_project_id}')"
             );
             false
         }
         None => {
-            eprintln!(
+            tracing::debug!(
                 "[Cassy sync] WARNING: parking task dependency '{edge_id}' — no project identity (expected '{current_project_id}')"
             );
             false
@@ -352,7 +406,7 @@ impl CloudSyncer {
         result.healed_task_dependencies_to_cloud += report.to_cloud;
         result.healed_task_dependencies_from_cloud += report.from_cloud;
         if let Some(summary) = result.dependency_heal_summary() {
-            eprintln!("{summary}");
+            tracing::debug!("[Cassy sync] {summary}");
         }
     }
 }
@@ -533,26 +587,31 @@ pub(crate) fn entity_matches_project(
     let project_field = raw
         .get("project_canonical_id")
         .or_else(|| raw.get("project_id"));
-
     let entity_id = raw
         .get("id")
-        .and_then(|v| v.as_str())
+        .and_then(|value| value.as_str())
         .unwrap_or("<unknown>");
 
     match project_field {
         None => {
             // Missing field — cloud now always includes project_id; treat as unscoped/foreign.
-            eprintln!(
-                "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' — no project_id field \
-                 (expected '{current_project_id}')"
+            record_project_warning(
+                entity_kind,
+                "<missing>",
+                &format!(
+                    "skipping {entity_kind} '{entity_id}' — no project_id field (expected '{current_project_id}')"
+                ),
             );
             false
         }
         Some(serde_json::Value::Null) => {
             // Explicitly null — no longer accepted; cloud must scope all entities.
-            eprintln!(
-                "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' — null project_id \
-                 (expected '{current_project_id}')"
+            record_project_warning(
+                entity_kind,
+                "<null>",
+                &format!(
+                    "skipping {entity_kind} '{entity_id}' — null project_id (expected '{current_project_id}')"
+                ),
             );
             false
         }
@@ -560,18 +619,24 @@ pub(crate) fn entity_matches_project(
             if project_ids_match(s, current_project_id) {
                 true
             } else {
-                eprintln!(
-                    "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' from foreign \
-                     project '{s}' (expected '{current_project_id}')"
+                record_project_warning(
+                    entity_kind,
+                    s,
+                    &format!(
+                        "skipping {entity_kind} '{entity_id}' from foreign project '{s}' (expected '{current_project_id}')"
+                    ),
                 );
                 false
             }
         }
         Some(_) => {
             // Unexpected type — reject; unexpected field shapes shouldn't be silently accepted.
-            eprintln!(
-                "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' — unexpected \
-                 project_id type (expected string '{current_project_id}')"
+            record_project_warning(
+                entity_kind,
+                "<invalid>",
+                &format!(
+                    "skipping {entity_kind} '{entity_id}' — unexpected project_id type (expected string '{current_project_id}')"
+                ),
             );
             false
         }
@@ -1032,11 +1097,11 @@ impl CloudSyncer {
         params: &[String],
     ) -> Result<(serde_json::Value, String), CasError> {
         let (pull_url, project_id) = match project_id {
-            Some(project_id) => build_scoped_pull_url_with(
-                &self.cloud_config.endpoint,
-                params,
-                || Some(project_id.to_owned()),
-            )?,
+            Some(project_id) => {
+                build_scoped_pull_url_with(&self.cloud_config.endpoint, params, || {
+                    Some(project_id.to_owned())
+                })?
+            }
             None => build_scoped_pull_url(&self.cloud_config.endpoint, params)?,
         };
         let token = self
@@ -1078,6 +1143,7 @@ impl CloudSyncer {
         file_change_store: &dyn FileChangeStore,
         commit_link_store: &dyn CommitLinkStore,
     ) -> Result<SyncResult, CasError> {
+        self.clear_conflict_log();
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -1120,7 +1186,7 @@ impl CloudSyncer {
                     result.pulled_entries += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Entry error: {e}"));
@@ -1188,7 +1254,7 @@ impl CloudSyncer {
                     }
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Task error: {e}"));
@@ -1228,7 +1294,7 @@ impl CloudSyncer {
                     result.pulled_rules += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Rule error: {e}"));
@@ -1253,7 +1319,7 @@ impl CloudSyncer {
                     result.pulled_skills += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Skill error: {e}"));
@@ -1286,7 +1352,7 @@ impl CloudSyncer {
                     result.pulled_specs += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Spec error: {e}"));
@@ -1333,7 +1399,7 @@ impl CloudSyncer {
             };
             match prompt_store.get(&remote_prompt.id) {
                 Ok(Some(_)) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Ok(None) => match prompt_store.add(&remote_prompt) {
                     Ok(_) => result.pulled_prompts += 1,
@@ -1357,7 +1423,7 @@ impl CloudSyncer {
             };
             match file_change_store.get(&remote_fc.id) {
                 Ok(Some(_)) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Ok(None) => match file_change_store.add(&remote_fc) {
                     Ok(_) => result.pulled_file_changes += 1,
@@ -1381,7 +1447,7 @@ impl CloudSyncer {
             };
             match commit_link_store.get(&remote_cl.commit_hash) {
                 Ok(Some(_)) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Ok(None) => match commit_link_store.add(&remote_cl) {
                     Ok(_) => result.pulled_commit_links += 1,
@@ -1389,6 +1455,10 @@ impl CloudSyncer {
                 },
                 Err(e) => result.errors.push(format!("CommitLink lookup error: {e}")),
             }
+        }
+
+        for conflict in self.take_conflict_log() {
+            result.record_conflict_detail(conflict);
         }
 
         // An empty first pull can mean this new machine resolved the wrong
@@ -1872,6 +1942,9 @@ impl CloudSyncer {
             healed_task_dependencies_from_cloud: pull_result.healed_task_dependencies_from_cloud,
             task_status_transitions: pull_result.task_status_transitions,
             conflicts_resolved: pull_result.conflicts_resolved,
+            conflicts_resolved_local: pull_result.conflicts_resolved_local,
+            conflicts_resolved_remote: pull_result.conflicts_resolved_remote,
+            conflicts: pull_result.conflicts,
             errors: [
                 push_result.errors,
                 team_push_result.errors,
@@ -1910,6 +1983,7 @@ impl CloudSyncer {
         rule_store: &dyn RuleStore,
         skill_store: &dyn SkillStore,
     ) -> Result<SyncResult, CasError> {
+        self.clear_conflict_log();
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -1968,8 +2042,9 @@ impl CloudSyncer {
 
         // Use configured conflict resolution strategy for team sync
         let strategy = self.config.team_conflict_resolution;
-        #[cfg(debug_assertions)]
-        eprintln!("[Cassy sync] Starting team pull: team={team_id} strategy={strategy:?}");
+        tracing::debug!(
+            "[Cassy sync] Starting team pull: team={team_id} strategy={strategy:?}"
+        );
 
         // Use the caller-supplied project ID for client-side validation.
         // (cas-53d5: previously resolved internally via
@@ -1998,7 +2073,7 @@ impl CloudSyncer {
                     result.pulled_entries += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Entry error: {e}"));
@@ -2015,7 +2090,7 @@ impl CloudSyncer {
             select_owner_task_rows(body.tasks.unwrap_or_default(), current_project_id);
         for (task_id, discarded_row) in discarded_task_rows {
             self.record_owner_conflict_value(&task_id, &discarded_row)?;
-            result.conflicts_resolved += 1;
+            result.record_local_conflict();
         }
         for mut raw_task in raw_tasks {
             render_task_proposal_provenance(&mut raw_task);
@@ -2059,7 +2134,7 @@ impl CloudSyncer {
                     }
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Task error: {e}"));
@@ -2099,7 +2174,7 @@ impl CloudSyncer {
                     result.pulled_rules += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Rule error: {e}"));
@@ -2124,7 +2199,7 @@ impl CloudSyncer {
                     result.pulled_skills += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Skill error: {e}"));
@@ -2145,6 +2220,9 @@ impl CloudSyncer {
             let _ = self.queue.delete_metadata(&legacy_key);
         }
 
+        for conflict in self.take_conflict_log() {
+            result.record_conflict_detail(conflict);
+        }
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
     }
@@ -2153,9 +2231,9 @@ impl CloudSyncer {
 #[cfg(test)]
 mod tests {
     use super::{
-        PROPOSAL_PROVENANCE_BEGIN, PROPOSAL_PROVENANCE_END, PULL_PATH,
-        build_scoped_pull_url_with, deserialize_pulled_entity, entity_matches_project,
-        render_task_proposal_provenance, task_dependency_matches_project,
+        PROPOSAL_PROVENANCE_BEGIN, PROPOSAL_PROVENANCE_END, PULL_PATH, SyncWarningSummary,
+        build_scoped_pull_url_with, collect_sync_warnings, deserialize_pulled_entity,
+        entity_matches_project, render_task_proposal_provenance, task_dependency_matches_project,
     };
     use crate::types::{Entry, Task};
     use serde_json::json;
@@ -2403,6 +2481,42 @@ mod tests {
     }
 
     #[test]
+    fn collect_sync_warnings_groups_rejected_rows() {
+        let (matched, warnings) = collect_sync_warnings(|| {
+            vec![
+                entity_matches_project(
+                    &json!({ "project_id": "other" }),
+                    "current",
+                    "knowledge_page",
+                ),
+                entity_matches_project(
+                    &json!({ "project_id": "other" }),
+                    "current",
+                    "knowledge_page",
+                ),
+                entity_matches_project(&json!({ "project_id": "other" }), "current", "task"),
+            ]
+        });
+
+        assert_eq!(matched, vec![false, false, false]);
+        assert_eq!(
+            warnings,
+            vec![
+                SyncWarningSummary {
+                    entity_kind: "knowledge_page".to_string(),
+                    project: "other".to_string(),
+                    count: 2,
+                },
+                SyncWarningSummary {
+                    entity_kind: "task".to_string(),
+                    project: "other".to_string(),
+                    count: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn test_entity_matches_project_null_project_id() {
         // Null project_id — rejected; cloud must scope all entities (cas-6479)
         let entity = json!({ "id": "t-abc", "project_id": null });
@@ -2436,18 +2550,18 @@ mod tests {
             "project_canonical_id": "git@GitHub.com:Richards-LLC/gabber-studio.git"
         });
 
-        assert!(entity_matches_project(
-            &entity,
-            "gabber-studio",
-            "task"
-        ));
+        assert!(entity_matches_project(&entity, "gabber-studio", "task"));
     }
 
     #[test]
     fn canonical_identity_pull_accepts_remote_alias_spellings() {
         let entity = json!({ "id": "t-1", "project_canonical_id": "github.com/Acme/Ledger" });
 
-        assert!(entity_matches_project(&entity, "github.com/Acme/Ledger", "task"));
+        assert!(entity_matches_project(
+            &entity,
+            "github.com/Acme/Ledger",
+            "task"
+        ));
         for variant in [
             "github.com/acme/ledger",
             "github.com/ACME/LEDGER",
@@ -2484,8 +2598,8 @@ mod tests {
 #[cfg(test)]
 mod web_close_tests {
     use super::{CloudSyncer, is_web_close_tombstone, merge_task_notes, reconcile_web_close};
-    use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
     use crate::cloud::syncer::{CloudSyncerConfig, UpsertResult};
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
     use crate::store::{init_cas_dir, open_task_store};
     use crate::types::{Task, TaskStatus};
     use serde_json::json;
@@ -2532,9 +2646,13 @@ mod web_close_tests {
         local.updated_at = chrono::Utc::now() + chrono::Duration::hours(1);
         store.add(&local).unwrap();
 
-        let outcome =
-            reconcile_web_close(&*store, closed_tombstone("t-web"), "sync-web", "personal_pull")
-                .unwrap();
+        let outcome = reconcile_web_close(
+            &*store,
+            closed_tombstone("t-web"),
+            "sync-web",
+            "personal_pull",
+        )
+        .unwrap();
         assert!(matches!(outcome, UpsertResult::Updated));
 
         let got = store.get("t-web").unwrap();
@@ -2598,9 +2716,13 @@ mod web_close_tests {
         local.close_reason = Some("already closed locally".to_string());
         store.add(&local).unwrap();
 
-        let outcome =
-            reconcile_web_close(&*store, closed_tombstone("t-done"), "sync-web", "personal_pull")
-                .unwrap();
+        let outcome = reconcile_web_close(
+            &*store,
+            closed_tombstone("t-done"),
+            "sync-web",
+            "personal_pull",
+        )
+        .unwrap();
         assert!(matches!(outcome, UpsertResult::Skipped));
         // The no-op must not clobber the pre-existing local close_reason.
         let got = store.get("t-done").unwrap();
@@ -2613,9 +2735,13 @@ mod web_close_tests {
         let cas_dir = init_cas_dir(temp.path()).unwrap();
         let store = open_task_store(&cas_dir).unwrap();
 
-        let outcome =
-            reconcile_web_close(&*store, closed_tombstone("t-new"), "sync-web", "personal_pull")
-                .unwrap();
+        let outcome = reconcile_web_close(
+            &*store,
+            closed_tombstone("t-new"),
+            "sync-web",
+            "personal_pull",
+        )
+        .unwrap();
         assert!(matches!(outcome, UpsertResult::Created));
         assert_eq!(store.get("t-new").unwrap().status, TaskStatus::Closed);
     }
@@ -2639,12 +2765,18 @@ mod web_close_tests {
         let store = open_task_store(&cas_dir).unwrap();
         let queue = Arc::new(SyncQueue::open(&cas_dir).unwrap());
         queue.init().unwrap();
-        let syncer = CloudSyncer::new(queue.clone(), CloudConfig::default(), CloudSyncerConfig::default());
+        let syncer = CloudSyncer::new(
+            queue.clone(),
+            CloudConfig::default(),
+            CloudSyncerConfig::default(),
+        );
 
         let mut local = Task::new("cas-conflict".to_string(), "local title".to_string());
         local.notes = "[2026-08-09 10:30] 📝 PROGRESS local note".to_string();
         store.add(&local).unwrap();
-        queue.enqueue(EntityType::Task, &local.id, SyncOperation::Upsert, None).unwrap();
+        queue
+            .enqueue(EntityType::Task, &local.id, SyncOperation::Upsert, None)
+            .unwrap();
 
         let mut remote = local.clone();
         remote.title = "remote title".to_string();
@@ -2657,7 +2789,10 @@ mod web_close_tests {
 
         let merged = store.get("cas-conflict").unwrap();
         assert_eq!(merged.title, "remote title");
-        assert_eq!(merged.notes, "[2026-08-09 09:30] 📝 PROGRESS remote note\n\n[2026-08-09 10:30] 📝 PROGRESS local note");
+        assert_eq!(
+            merged.notes,
+            "[2026-08-09 09:30] 📝 PROGRESS remote note\n\n[2026-08-09 10:30] 📝 PROGRESS local note"
+        );
         let conflicts = queue.list_conflicts(1).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].winner_side, "merged");
@@ -2735,7 +2870,10 @@ mod web_close_tests {
             ),
             Ok(UpsertResult::Skipped)
         ));
-        assert_eq!(store.get("cas-team-terminal").unwrap().status, TaskStatus::Cancelled);
+        assert_eq!(
+            store.get("cas-team-terminal").unwrap().status,
+            TaskStatus::Cancelled
+        );
     }
 
     #[test]
@@ -2776,7 +2914,7 @@ mod web_close_tests {
         assert!(
             reopened
                 .notes
-            .contains("prior_close_reason=original delivery merged")
+                .contains("prior_close_reason=original delivery merged")
         );
     }
 

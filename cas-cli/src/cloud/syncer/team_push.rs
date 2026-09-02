@@ -796,7 +796,7 @@ impl CloudSyncer {
                             canonical_id = %adopted,
                             "cas-8ca5: adopted server canonical project id"
                         );
-                        eprintln!(
+                        tracing::info!(
                             "[Cassy sync] adopted team canonical project id \
                              '{adopted}' (matched git remote)"
                         );

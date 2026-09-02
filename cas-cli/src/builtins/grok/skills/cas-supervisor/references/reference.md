@@ -2,12 +2,16 @@
 
 Wrong field names and invalid actions waste dispatch cycles. This section covers exact valid actions and field names.
 
-**Valid `cas__task` actions** (do not invent others): `create`, `show`, `update`, `start`, `close`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
+**Valid `cas__task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
 
 Two of those are supervisor-specific and easy to confuse:
 
 - **`request_changes`** — the sanctioned exit from `awaiting_merge` whenever review fails: declined merge, amendment required after a merge landed, or work rejected outright. It reopens the task with its **assignee preserved**, so the same worker picks the rework back up. This is the rejection path — do not improvise one out of `update status=open`.
 - **`reset`** — revive a task **orphaned by a dead session**. Atomic: force-releases the lease, clears the assignee, forces `status=open`. Because it clears the assignee it is the wrong tool for "this worker must redo it" — use `request_changes` for that. `reset` does not require you to hold the lease; add `force=true` only to override a still-heartbeating assignee (logged as a forced-reset audit note).
+
+## Supervisor override
+
+`supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.
 
 **Valid `cas__coordination` actions** (do not invent others):
 - *Agent*: `register`, `unregister`, `whoami`, `heartbeat`, `agent_list`, `agent_cleanup`, `session_start`, `session_end`, `loop_start`, `loop_cancel`, `loop_status`, `lease_history`, `queue_notify`, `queue_poll`, `queue_peek`, `queue_ack`, `inbox_poll`, `message`, `interrupt`, `message_ack`, `message_status`
@@ -36,10 +40,10 @@ cas__coordination action=server_stop ...
 | `cli` | string | Explicit CLI backend for this spawn: `claude`, `codex`, `grok`, or `opencode`. OpenCode's QwenCloud Token Plan route is validated by receipt `opencode-1.18.23-hosted-token-plan-2026-08-27`; local and Alibaba PAYG routes remain pending-conformance and are refused before queue insertion. If omitted, resolves through factory config, then stock fallback. |
 | `model` | string | Explicit model name. Registry routes are Claude `claude-haiku-4-5-20251001`/low for light and `claude-opus-5`/high for taste, Codex `gpt-5.6-luna`/xhigh for standard and `gpt-5.6-sol`/high for heavy. Terra is standing-suspended; never spawn it. Luna must not use lower effort. Grok models are `grok-4.5` and `grok-4.6`, but provider capacity is not an active registry lane. Claude's stock fallback remains the verified `opus` alias. OpenCode defaults explicitly to `qwencloud/qwen3.8-max` on the receipt-gated Token Plan route; `alibaba/qwen3.8-max` and `alibaba-cn/qwen3.8-max` select PAYG explicitly. Passed as `-m`/`--model`. If omitted, resolves through factory config, then the selected harness's stock default. |
 | `effort` | string | Explicit reasoning effort. Cassy vocabulary: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` (alias `x-high`). Mapping: Claude `--effort`; Codex `--config model_reasoning_effort=<v>`; Grok `--reasoning-effort`; OpenCode generated primary-agent `variant` (QwenCloud Token Plan and Alibaba PAYG: `low`, `medium`, `xhigh`). Token Plan pins OpenAI-compatible `extra_body.enable_thinking`; PAYG uses `reasoning_effort`. If omitted, resolves through factory config, then stock fallback. For multi-step Claude workers prefer `high` as the ceiling — see [model-selection.md](model-selection.md). |
-| `task_id` | string | Pre-assign this task to the spawned worker. **Single-worker requests only** (`count=1`) — a multi-worker spawn is rejected. An open, unassigned `task_id` also *authorizes* the spawn on its own, so a post-epic follow-up needs no ceremonial single-child epic. Refused when the task is closed, already assigned, blocked/awaiting-merge/awaiting-review, or when a spawn for that task is already queued and unconsumed. |
+| `task_id` | string | Pre-assign this task to the spawned worker. **Single-worker requests only** (`count=1`) — a multi-worker spawn is rejected. An open, unassigned `task_id` also *authorizes* the spawn on its own, so a post-epic follow-up needs no ceremonial single-child epic. Refused when the task is closed, already assigned, blocked/awaiting_merge, or when a spawn for that task is already queued and unconsumed. |
 | `config_dir` | string | Claude account directory for the spawned workers (e.g. `~/.claude-alt`). **Claude-only** — Codex/Grok workers ignore it and the acknowledgement carries a warning. Resolution: an explicit `config_dir` wins; otherwise the requesting supervisor's `CLAUDE_CONFIG_DIR` is captured **at enqueue time** (the daemon may consume the queue row under a different environment). An explicit value also strips inherited `ANTHROPIC_API_KEY` so the selected OAuth account is actually used. |
 
-`cli`, `model`, and `effort` are per-spawn controls — they apply to the workers spawned by this call only. Supervisors MUST pass explicit `cli=`, `model=`, and `effort=` on every `spawn_workers` call; omitted fields resolve through the config cascade as a fallback and produce an acknowledgement warning. Copy-paste recipes for all four backends: [model-selection.md](model-selection.md#spawn-cookbook-all-four-harnesses).
+`cli`, `model`, and `effort` are per-spawn controls — they apply to the workers spawned by this call only. Supervisors MUST pass explicit `cli=`, `model=`, and `effort=` on every `spawn_workers` call; omitted fields resolve through the config cascade as a fallback and produce an acknowledgement warning. Copy-paste recipes for all four backends: [workflow.md](workflow.md#phase-2-coordinate).
 
 For OpenCode Token Plan fan-out, honor the operator-declared concurrency tier: Lite 1–2 agents, Standard 3–4, or Pro 6–8. Warn or cap requests beyond that tier; do not scrape the operator console.
 
@@ -61,13 +65,13 @@ cas__task action=transfer id=cas-abc1 to_agent=<worker>
 
 The `transfer` action's target field is `to_agent` (not `assignee`). The `update` action's target field is `assignee` (not `to_agent`). Yes, they disagree. Remember: `update assignee=...` for initial assignment; `transfer to_agent=...` only when reassigning a claimed task.
 
-**Reassigning a task owned by a live worker (supervisor override):**
+**Reassigning a task owned by a live worker:**
 
-When a task is claimed by a live worker and you need to reassign it without shutting the worker down, use `bypass_code_review=true` as the supervisor-override flag on `transfer`:
+When a task is claimed by a live worker and you need to reassign it without shutting the worker down, use `supervisor_override=true` on `transfer` as described in [Supervisor override](#supervisor-override):
 
 ```
 # Force-transfer from a live worker to another agent (single atomic step)
-cas__task action=transfer id=cas-abc1 to_agent=<new-worker> bypass_code_review=true \
+cas__task action=transfer id=cas-abc1 to_agent=<new-worker> supervisor_override=true \
   notes="Reassigned due to <reason>"
 ```
 

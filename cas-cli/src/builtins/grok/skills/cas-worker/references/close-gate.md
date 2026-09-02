@@ -37,7 +37,7 @@ If the task you're closing is `depth=light` (check the `Depth:` line in `task sh
 
 ## Check 0 — merge state (the rejection you WILL hit)
 
-Close runs a merge-state guard before anything else: every commit on your `factory/<name>` branch must already be on the task's parent branch, or close rejects with `⚠️ MERGE REQUIRED`. This is a **data-state guard** — `bypass_code_review=true` does not skip it, and neither can the supervisor. Get merged *before* attempting close:
+Close runs a merge-state guard before anything else: every commit on your `factory/<name>` branch must already be on the task's parent branch, or close rejects with `⚠️ MERGE REQUIRED`. This is a **data-state guard** — supervisor overrides do not skip it. Get merged *before* attempting close:
 
 When `delivery_mode=local_merge`, await supervisor local merge: the supervisor merges your local factory branch from the shared repository, and you must **not push origin**. `CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1` is allowed only after explicit supervisor authorization. The normal push/merge route below applies only to `delivery_mode=push_branch`.
 
@@ -56,7 +56,7 @@ Bad (observed): start a corrective commit from an old rejection while the merge/
 Two distinct `close` fields — you supply them, no supervisor needed:
 
 - **`commit_receipt=<sha>`** — full SHA or unambiguous abbreviation of the commit this task delivered. Cassy resolves it to an immutable commit id, validates a **non-empty diff** and **ancestry from the parent branch**, and persists only the resolved id. This is the self-serve remedy for squash-merge SHA drift, and for cherry-picked delivery out of a lane branch that still carries other tasks' commits: a valid receipt clears the merge-state guard and close proceeds with a note about the lane's residue (cas-e74c). If the receipt is rejected, close tells you why — fix that, don't retry blind.
-- **`completion_receipt=<json>`** — opt-in transactional close. Serialize a `WorkerCompletionReceiptInput`: `{task_id, worker_agent_id, repo_selector, source_branch, commit_sha, merge_base_sha, target_branch, target_sha, proof_reference, scope_summary}`. Cassy revalidates every identity-bearing field against registered agent state and live Git before persisting an immutable delivery transaction, then releases your lease and moves the task to `pending_supervisor_review` awaiting a fresh verification verdict. Omit it and the legacy close path is unchanged. Rejection returns `DELIVERY RECEIPT REJECTED` and changes nothing.
+- **`completion_receipt=<json>`** — opt-in transactional close. Serialize a `WorkerCompletionReceiptInput`: `{task_id, worker_agent_id, repo_selector, source_branch, commit_sha, merge_base_sha, target_branch, target_sha, proof_reference, scope_summary}`. Cassy revalidates every identity-bearing field against registered agent state and live Git before persisting an immutable delivery transaction, then releases your lease and moves the task to `awaiting_merge` awaiting a fresh verification verdict. Omit it and the legacy close path is unchanged. Rejection returns `DELIVERY RECEIPT REJECTED` and changes nothing.
 
 ## Task-type extras
 

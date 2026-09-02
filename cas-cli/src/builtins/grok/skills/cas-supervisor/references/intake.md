@@ -24,8 +24,6 @@ After intake passes, create the EPIC immediately — but distinguish permission 
 - **Clarification** — "what exactly do you mean by X?" when X is genuinely vague and you cannot execute without knowing.
 - **Counter-proposal** — "you said X; I think Y is a better approach, here are three anchors" — per the counter-propose rule above.
 
-AskUserQuestion is blocked in factory mode; put clarifying questions for the human in your plain-text reply and end your turn.
-
 Permission-seeking is deference with nothing to offer; the forbidden pattern is "should I do X?" when the answer is obviously yes. Clarification and counter-proposal are substantive input and remain encouraged.
 
 ## Skill Triggers: Brainstorm and Ideate

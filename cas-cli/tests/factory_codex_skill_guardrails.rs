@@ -374,15 +374,23 @@ fn worker_failure_recovery_guidance_is_pinned_cas_62a9() {
 #[test]
 fn supervisor_reference_tree_uses_current_lifecycle_contract() {
     let root = repo_root();
-    let valid_actions = "create, proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show, update, start, close, cancel, reopen, request_changes, delete, list, ready, blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine";
+    let valid_actions = "`create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`";
     let flavors = [("", "mcp__cas__"), ("codex/", "mcp__cs__"), ("grok/", "cas__")];
 
     for (flavor, tool_prefix) in flavors {
         let base = root.join(format!("cas-cli/src/builtins/{flavor}skills"));
         let supervisor = load(&base.join("cas-supervisor.md"));
-        let checklist = load(&base.join("cas-supervisor-checklist.md"));
+        let checklist_name = if flavor == "codex/" {
+            "cas-codex-supervisor-checklist.md"
+        } else {
+            "cas-supervisor-checklist.md"
+        };
+        let checklist = load(&base.join(checklist_name));
         let reference = load(&base.join("cas-supervisor/references/reference.md"));
         let workflow = load(&base.join("cas-supervisor/references/workflow.md"));
+        let intake = load(&base.join("cas-supervisor/references/intake.md"));
+        let planning = load(&base.join("cas-supervisor/references/planning.md"));
+        let model_selection = load(&base.join("cas-supervisor/references/model-selection.md"));
         let close_gate = load(&base.join("cas-worker/references/close-gate.md"));
         let recovery = load(&base.join("cas-worker/references/recovery.md"));
         let details = load(&base.join("cas-worker/references/details.md"));
@@ -418,6 +426,12 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
             )),
             "{flavor} reference.md does not match the task dispatch action list"
         );
+        assert!(
+            details.contains(&format!(
+                "**Valid `{tool_prefix}task` actions** (do not invent others): {valid_actions}."
+            )),
+            "{flavor} details.md does not match the task dispatch action list"
+        );
         assert_eq!(
             reference.matches("## Supervisor override").count(),
             1,
@@ -444,6 +458,38 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
         assert!(
             !workflow.contains("git cherry-pick"),
             "{flavor} workflow must not teach the retired cherry-pick merge procedure"
+        );
+        assert!(
+            !workflow.contains("git checkout <base-branch>"),
+            "{flavor} workflow must not teach an untracked raw-git merge fallback"
+        );
+        assert!(
+            !recovery.contains("UPDATE tasks SET"),
+            "{flavor} worker-recovery must not teach direct SQL task mutation"
+        );
+        assert!(
+            !intake.contains("AskUserQuestion"),
+            "{flavor} intake must not restate the factory AskUserQuestion guard"
+        );
+        for content in [&reference, &workflow, &planning] {
+            assert!(
+                !content.to_ascii_lowercase().contains("awaiting review"),
+                "{flavor} supervisor references must use awaiting_merge, not awaiting review"
+            );
+        }
+        assert_eq!(
+            model_selection.matches("suspended").count(),
+            1,
+            "{flavor} model-selection must keep one canonical suspension statement"
+        );
+        assert_eq!(
+            model_selection.matches("## Spawn recipes").count(),
+            1,
+            "{flavor} model-selection must keep one recipe pointer"
+        );
+        assert!(
+            !model_selection.contains("BEGIN GENERATED SPAWN RECIPES"),
+            "{flavor} model-selection must not duplicate workflow recipes"
         );
     }
 

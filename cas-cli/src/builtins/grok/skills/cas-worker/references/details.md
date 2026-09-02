@@ -80,7 +80,7 @@ cas__coordination action=message target=supervisor \
 
 Sending `message` alone without `summary` is rejected. `summary` is the one-line preview shown in the UI.
 
-**Valid `cas__task` actions** (do not invent others): `create`, `show`, `update`, `start`, `close`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
+**Valid `cas__task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
 
 `request_changes` and `reset` exist but are supervisor moves, not yours: `request_changes` is the sanctioned exit from `AwaitingMerge` when review fails (it reopens the task with the assignee preserved), and `reset` revives a task orphaned by a dead session (force-releases the lease, clears the assignee, forces `status=open`). Know them so you can read what happened to your task; don't run them on yourself.
 

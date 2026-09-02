@@ -180,10 +180,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-supervisor/references/reference.md"),
     },
     BuiltinFile {
-        path: "skills/cas-supervisor/references/code-review-queue.md",
-        content: include_str!("builtins/skills/cas-supervisor/references/code-review-queue.md"),
-    },
-    BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
         content: include_str!("builtins/skills/cas-supervisor/references/filing-cas-bugs.md"),
     },
@@ -538,12 +534,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/reference.md",
         content: include_str!("builtins/codex/skills/cas-supervisor/references/reference.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-supervisor/references/code-review-queue.md",
-        content: include_str!(
-            "builtins/codex/skills/cas-supervisor/references/code-review-queue.md"
-        ),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
@@ -919,12 +909,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/reference.md",
         content: include_str!("builtins/grok/skills/cas-supervisor/references/reference.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-supervisor/references/code-review-queue.md",
-        content: include_str!(
-            "builtins/grok/skills/cas-supervisor/references/code-review-queue.md"
-        ),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
@@ -4897,22 +4881,17 @@ This is the body content."#;
         // lists that can drift from enforcement.
         let registry = embedded_registry().expect("embedded registry validates");
         let generated_table = render_route_table().expect("route table renders");
-        for (label, content, tool_prefix) in [
-            ("claude", claude.content, "mcp__cas__"),
-            ("codex", codex.content, "mcp__cs__"),
-            ("grok", grok.content, "cas__"),
+        let canonical_workflow =
+            include_str!("builtins/skills/cas-supervisor/references/workflow.md");
+        for (label, content) in [
+            ("claude", claude.content),
+            ("codex", codex.content),
+            ("grok", grok.content),
         ] {
             assert!(
                 content.contains(&generated_table),
                 "{label} model-selection.md is missing the registry-generated route table"
             );
-            let generated_recipes =
-                render_spawn_recipes(tool_prefix).expect("spawn recipes render");
-            assert!(
-                content.contains(&generated_recipes),
-                "{label} model-selection.md is missing the registry-generated spawn recipes"
-            );
-
             // Use the same acceptance-set seam as the runtime validator with
             // a deterministic stub CLI. A generated recipe is copyable
             // operator input, so a documented model outside the harness's
@@ -4930,6 +4909,30 @@ This is the body content."#;
                 .unwrap_or_else(|error| panic!("{label} documents an unaccepted Claude model: {error}"));
             }
         }
+        for (label, workflow, tool_prefix) in [
+            (
+                "claude",
+                include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
+                "mcp__cas__",
+            ),
+            (
+                "codex",
+                include_str!("builtins/codex/skills/cas-supervisor/references/workflow.md"),
+                "mcp__cs__",
+            ),
+            (
+                "grok",
+                include_str!("builtins/grok/skills/cas-supervisor/references/workflow.md"),
+                "cas__",
+            ),
+        ] {
+            let generated_recipes =
+                render_spawn_recipes(tool_prefix).expect("spawn recipes render");
+            assert!(
+                workflow.contains(&generated_recipes),
+                "{label} workflow.md is missing the registry-generated spawn recipes"
+            );
+        }
         for lane_name in registry.lanes.keys() {
             let decision = cas_factory::resolve_lane(
                 lane_name,
@@ -4938,13 +4941,13 @@ This is the body content."#;
             .expect("registry lane has an active recipe");
             let recipe = &registry.recipes[&decision.recipe_id];
             assert!(
-                claude.content.contains(&format!(
+                canonical_workflow.contains(&format!(
                     "{} model={} effort={}",
                     recipe.harness.backend().name(),
                     recipe.model,
                     recipe.default_effort
                 )),
-                "registry recipe for {lane_name:?} missing from model-selection.md"
+                "registry recipe for {lane_name:?} missing from the supervisor guidance"
             );
         }
         assert!(claude.content.contains("Claude Opus 5 at high"));
@@ -5157,7 +5160,6 @@ This is the body content."#;
     #[test]
     fn test_supervisor_fix_round_recovery_guidance_present_and_mirrored() {
         for path in [
-            "skills/cas-supervisor/references/code-review-queue.md",
             "skills/cas-supervisor/references/planning.md",
             "skills/cas-supervisor/references/worker-recovery.md",
             "skills/cas-supervisor/references/workflow.md",
@@ -5178,24 +5180,6 @@ This is the body content."#;
                 codex.content,
                 "{path} .claude and .codex copies must be identical apart from the \
                  mcp__cas__/mcp__cs__ tool prefix",
-            );
-        }
-
-        let code_review_queue = BUILTIN_SKILLS
-            .iter()
-            .find(|b| b.path == "skills/cas-supervisor/references/code-review-queue.md")
-            .expect("BUILTIN_SKILLS missing cas-supervisor code-review-queue.md");
-        for required in [
-            "Awaiting-merge triage",
-            "visibility and handoff list",
-            "canonical review procedure",
-            "touched-module tests",
-            "verification action=add",
-            "final epic gate runs full nextest",
-        ] {
-            assert!(
-                code_review_queue.content.contains(required),
-                "code-review-queue.md missing fix-round marker: {required:?}"
             );
         }
 
@@ -5223,10 +5207,9 @@ This is the body content."#;
             .expect("BUILTIN_SKILLS missing cas-supervisor workflow.md");
         for required in [
             "Run the canonical merge-time diff review",
-            "worker's direct diff against the task spec",
-            "Re-run the tests for touched modules",
-            "Record the review receipt",
-            "verification_type=task",
+            "Contract changes first",
+            "Read the lane CI signal",
+            "worktree_merge id=<worker> task_id=<task-id>",
             "Hold the main merge",
             "Run the final assembled-tree gate",
             "cargo nextest run -p cas",

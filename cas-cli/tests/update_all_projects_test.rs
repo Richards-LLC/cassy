@@ -97,6 +97,12 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
         "offline/unlinked team phase must be an advisory skip; output was:\n{synced_out}"
     );
     assert!(
+        !synced_out.contains("Syncing .claude files")
+            && !synced_out.contains("[OK] Schema up to date")
+            && !synced_out.contains("built-ins up to date"),
+        "compact output must suppress successful phase details; output was:\n{synced_out}"
+    );
+    assert!(
         missing.is_file(),
         "native sweep must restore the stale builtin"
     );
@@ -121,12 +127,12 @@ fn all_projects_repairs_stray_search_roots_and_reports_clean_projects() {
         .success();
     let output = String::from_utf8_lossy(&update.get_output().stdout);
     assert!(
-        output.contains("[OK] search index: repaired 1 stranded memories (1 re-queued)"),
-        "repair receipt missing from output:\n{output}"
+        output.contains("projects/clean") && output.contains("projects/stranded"),
+        "project table rows missing from output:\n{output}"
     );
     assert!(
-        output.contains("[OK] search index: no stray root"),
-        "clean-project receipt missing from output:\n{output}"
+        !output.contains("[OK] search index:"),
+        "successful phase details must stay out of compact output:\n{output}"
     );
     assert!(
         !stranded.join(".cas/index/meta.json").exists(),

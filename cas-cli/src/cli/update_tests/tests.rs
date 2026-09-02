@@ -1,6 +1,8 @@
 use crate::cli::update::*;
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::{Mutex, OnceLock};
 
 use crate::cli::Cli;
 
@@ -66,6 +68,33 @@ fn repeated_warnings_render_once_with_affected_project_count() {
         output.matches(".claude/skills/cas-worker/SKILL.md").count(),
         1
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_phase_collects_both_stdout_and_stderr() {
+    // OutputCapture redirects process-global descriptors. Keep this check
+    // isolated from the other unit tests so their harness output cannot be
+    // mistaken for phase output while the descriptors are redirected.
+    static CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = CAPTURE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("capture test lock should not be poisoned");
+
+    let (value, output) = capture_phase(true, || {
+        let stdout = b"captured stdout\n";
+        let stderr = b"captured stderr\n";
+        unsafe {
+            let _ = libc::write(libc::STDOUT_FILENO, stdout.as_ptr().cast(), stdout.len());
+            let _ = libc::write(libc::STDERR_FILENO, stderr.as_ptr().cast(), stderr.len());
+        }
+        42
+    });
+
+    assert_eq!(value, 42);
+    assert!(output.contains("captured stdout"), "output was: {output:?}");
+    assert!(output.contains("captured stderr"), "output was: {output:?}");
 }
 
 #[test]

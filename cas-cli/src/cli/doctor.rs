@@ -2107,10 +2107,10 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
 #[cfg(feature = "mcp-proxy")]
 fn proxy_stdio_commands_check(cas_root: &Path) -> Check {
     let proxy_path = cas_root.join("proxy.toml");
-    let config = match cmcp_core::config::Config::load_merged(
+    let (config, sources) = match cmcp_core::config::Config::load_merged_with_sources(
         proxy_path.exists().then_some(proxy_path.as_path()),
     ) {
-        Ok(config) => config,
+        Ok(loaded) => loaded,
         Err(error) => {
             return Check {
                 name: "MCP stdio upstreams".to_string(),
@@ -2134,7 +2134,13 @@ fn proxy_stdio_commands_check(cas_root: &Path) -> Check {
     let missing = commands
         .iter()
         .filter(|(_, command)| cmcp_core::resolve_stdio_executable(command).is_none())
-        .map(|(name, command)| format!("{name} = {command}"))
+        .map(|(name, command)| {
+            let source = sources
+                .get(*name)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "unknown configuration source".to_string());
+            format!("{name} = {command} (from {source})")
+        })
         .collect::<Vec<_>>();
 
     if missing.is_empty() {
@@ -2147,11 +2153,24 @@ fn proxy_stdio_commands_check(cas_root: &Path) -> Check {
             ),
         }
     } else {
+        let mut source_paths = commands
+            .iter()
+            .filter(|(_, command)| cmcp_core::resolve_stdio_executable(command).is_none())
+            .filter_map(|(name, _)| sources.get(*name))
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        source_paths.sort();
+        source_paths.dedup();
+        let remediation = if source_paths.is_empty() {
+            "repair the registering configuration file".to_string()
+        } else {
+            format!("repair {}", source_paths.join(", "))
+        };
         Check {
             name: "MCP stdio upstreams".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "{} of {} registered command(s) do not resolve: {}; repair proxy.toml before restarting cas serve",
+                "{} of {} registered command(s) do not resolve: {}; {remediation} before restarting cas serve",
                 missing.len(),
                 commands.len(),
                 missing.join(", ")
@@ -2613,6 +2632,98 @@ mod tests {
             );
             assert!(!check.message.contains("working ="), "{}", check.message);
         });
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn doctor_proxy_stdio_check_names_user_config_source_for_missing_command() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let xdg_config_home = env.home().join("xdg");
+        env.set("XDG_CONFIG_HOME", &xdg_config_home);
+        let user_path = xdg_config_home.join("code-mode-mcp/config.toml");
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let mut config = cmcp_core::config::Config::default();
+        config.add_server(
+            "user-missing".to_string(),
+            cmcp_core::config::ServerConfig::Stdio {
+                command: "/definitely/missing-user-command".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new().into_iter().collect(),
+            },
+        );
+        config.save_to(&user_path).unwrap();
+
+        let check = proxy_stdio_commands_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check
+                .message
+                .contains(&format!("from {}", user_path.display())),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains(&format!("repair {}", user_path.display())),
+            "{}",
+            check.message
+        );
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn doctor_proxy_stdio_check_names_project_source_for_overridden_command() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let xdg_config_home = env.home().join("xdg");
+        env.set("XDG_CONFIG_HOME", &xdg_config_home);
+        let user_path = xdg_config_home.join("code-mode-mcp/config.toml");
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let project_path = cas_root.join("proxy.toml");
+
+        let mut user_config = cmcp_core::config::Config::default();
+        user_config.add_server(
+            "shared".to_string(),
+            cmcp_core::config::ServerConfig::Stdio {
+                command: "/definitely/missing-user-command".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new().into_iter().collect(),
+            },
+        );
+        user_config.save_to(&user_path).unwrap();
+
+        let mut project_config = cmcp_core::config::Config::default();
+        project_config.add_server(
+            "shared".to_string(),
+            cmcp_core::config::ServerConfig::Stdio {
+                command: "/definitely/missing-project-command".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new().into_iter().collect(),
+            },
+        );
+        project_config.save_to(&project_path).unwrap();
+
+        let check = proxy_stdio_commands_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check
+                .message
+                .contains(&format!("from {}", project_path.display())),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check
+                .message
+                .contains(&format!("from {}", user_path.display())),
+            "{}",
+            check.message
+        );
     }
 
     #[test]

@@ -25,6 +25,7 @@ fn project_table_plain_uses_phase_glyphs_and_compact_project_names() {
         membership: ProjectPhase::Ok("2 memberships".to_owned()),
         cloud: ProjectPhase::Failed("timeout".to_owned()),
         details: String::new(),
+        phase_details: Vec::new(),
     }];
 
     let output = render_project_table_plain(&receipts, false);
@@ -48,13 +49,23 @@ fn repeated_warnings_render_once_with_affected_project_count() {
     let output = warnings.render(false);
 
     assert_eq!(
-        output.matches("Cassy-managed builtin paths already tracked").count(),
+        output
+            .matches("Cassy-managed builtin paths already tracked")
+            .count(),
         1,
         "output was:\n{output}"
     );
     assert!(output.contains("2 projects"), "output was:\n{output}");
-    assert_eq!(output.matches("Push incomplete; queued rows remain").count(), 1);
-    assert_eq!(output.matches(".claude/skills/cas-worker/SKILL.md").count(), 1);
+    assert_eq!(
+        output
+            .matches("Push incomplete; queued rows remain")
+            .count(),
+        1
+    );
+    assert_eq!(
+        output.matches(".claude/skills/cas-worker/SKILL.md").count(),
+        1
+    );
 }
 
 #[test]

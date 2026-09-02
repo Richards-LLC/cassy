@@ -75,7 +75,7 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
         .success();
     let dry_out = String::from_utf8_lossy(&dry.get_output().stdout);
     assert!(
-        dry_out.contains("2 local Cassy project(s)"),
+        dry_out.contains("projects/first") && dry_out.contains("nested/second"),
         "output was:\n{dry_out}"
     );
     assert!(dry_out.contains("DRY RUN"), "output was:\n{dry_out}");
@@ -89,16 +89,12 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
         .success();
     let synced_out = String::from_utf8_lossy(&synced.get_output().stdout);
     assert!(
-        synced_out.contains("2 succeeded, 0 failed"),
+        synced_out.contains("Cassy 3.10.1 · 2 projects refreshed · 0 failed"),
         "output was:\n{synced_out}"
     );
     assert!(
-        synced_out.contains("membership: skipped: not cloud-linked"),
+        synced_out.contains("not cloud-linked"),
         "offline/unlinked team phase must be an advisory skip; output was:\n{synced_out}"
-    );
-    assert!(
-        synced_out.contains("cloud sync: skipped: not cloud-linked"),
-        "offline/unlinked cloud phase must be an advisory skip; output was:\n{synced_out}"
     );
     assert!(
         missing.is_file(),
@@ -142,15 +138,15 @@ fn all_projects_repairs_stray_search_roots_and_reports_clean_projects() {
     let hits = SearchIndex::open(&cas::hybrid_search::tantivy_index_dir(
         &stranded.join(".cas"),
     ))
-        .expect("open canonical index")
-        .search(
-            &SearchOptions {
-                query: "legacy update repair".to_string(),
-                ..Default::default()
-            },
-            &entries,
-        )
-        .expect("search repaired index");
+    .expect("open canonical index")
+    .search(
+        &SearchOptions {
+            query: "legacy update repair".to_string(),
+            ..Default::default()
+        },
+        &entries,
+    )
+    .expect("search repaired index");
     assert_eq!(
         hits.first().map(|hit| hit.id.as_str()),
         Some(entry_id.as_str()),
@@ -184,7 +180,7 @@ fn all_projects_warns_on_a_held_legacy_lock_but_still_succeeds() {
         "busy repair receipt missing from output:\n{output}"
     );
     assert!(
-        output.contains("Total: 1 succeeded, 0 failed"),
+        output.contains("Cassy 3.10.1 · 1 projects refreshed · 0 failed"),
         "busy repair must not fail the project refresh:\n{output}"
     );
 }

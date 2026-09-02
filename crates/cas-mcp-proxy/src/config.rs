@@ -451,6 +451,61 @@ mod tests {
     }
 
     #[test]
+    fn load_merged_with_sources_tracks_user_and_project_server_origins() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+
+        let mut user_config = Config::default();
+        user_config.add_server(
+            "user-only".to_string(),
+            ServerConfig::Stdio {
+                command: "/user-only".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+        );
+        user_config.add_server(
+            "shared".to_string(),
+            ServerConfig::Stdio {
+                command: "/user-shared".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+        );
+        user_config.save_to(&user).unwrap();
+
+        let mut project_config = Config::default();
+        project_config.add_server(
+            "shared".to_string(),
+            ServerConfig::Stdio {
+                command: "/project-shared".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+        );
+        project_config.add_server(
+            "project-only".to_string(),
+            ServerConfig::Stdio {
+                command: "/project-only".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+        );
+        project_config.save_to(&project).unwrap();
+
+        let (merged, sources) =
+            Config::load_merged_with_sources_from(Some(&user), Some(&project)).unwrap();
+        assert!(matches!(
+            merged.servers.get("shared"),
+            Some(ServerConfig::Stdio { command, .. }) if command == "/project-shared"
+        ));
+        assert_eq!(sources.get("user-only"), Some(&user));
+        assert_eq!(sources.get("shared"), Some(&project));
+        assert_eq!(sources.get("project-only"), Some(&project));
+    }
+
+    #[test]
     fn project_security_policy_replaces_instead_of_widens_user_policy() {
         let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join("user.toml");

@@ -22,8 +22,11 @@ and do not claim success without its receipt.
    suite on the assembled tree, inspect guardrail/marker and counted-field
    tests (grep conflicts_resolved in tests and assert directional fields),
    and make a reconciliation commit for any cross-lane trim or move.
-3. Resync root projections after builtin changes with cas update --sync in
-   this worktree; run the root_managed_projections drift test. Regenerate the
+3. Resync root projections after builtin changes by copying each changed
+   embedded agent file from cas-cli/src/builtins/**/agents onto its root
+   projection (.claude/agents, .codex/agents). Never run cas update --sync
+   for this: it refreshes every registered project on the host. Run the
+   root_managed_projections drift test. Regenerate the
    reference ledger with scripts/gen-builtin-reference-history.sh and require
    git diff --quiet -- cas-cli/src/builtins/reference-history.json.
 4. Prepare one source commit: run scripts/bump-release-version.sh <version>,

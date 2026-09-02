@@ -102,13 +102,13 @@ fn task_dependency_matches_project(raw: &serde_json::Value, current_project_id: 
     match project_field.and_then(serde_json::Value::as_str) {
         Some(project) if project_ids_match(project, current_project_id) => true,
         Some(project) => {
-            eprintln!(
+            tracing::debug!(
                 "[Cassy sync] WARNING: skipping task dependency '{edge_id}' from foreign project '{project}' (expected '{current_project_id}')"
             );
             false
         }
         None => {
-            eprintln!(
+            tracing::debug!(
                 "[Cassy sync] WARNING: parking task dependency '{edge_id}' — no project identity (expected '{current_project_id}')"
             );
             false
@@ -352,7 +352,7 @@ impl CloudSyncer {
         result.healed_task_dependencies_to_cloud += report.to_cloud;
         result.healed_task_dependencies_from_cloud += report.from_cloud;
         if let Some(summary) = result.dependency_heal_summary() {
-            eprintln!("{summary}");
+            tracing::debug!("[Cassy sync] {summary}");
         }
     }
 }
@@ -542,7 +542,7 @@ pub(crate) fn entity_matches_project(
     match project_field {
         None => {
             // Missing field — cloud now always includes project_id; treat as unscoped/foreign.
-            eprintln!(
+            tracing::debug!(
                 "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' — no project_id field \
                  (expected '{current_project_id}')"
             );
@@ -550,7 +550,7 @@ pub(crate) fn entity_matches_project(
         }
         Some(serde_json::Value::Null) => {
             // Explicitly null — no longer accepted; cloud must scope all entities.
-            eprintln!(
+            tracing::debug!(
                 "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' — null project_id \
                  (expected '{current_project_id}')"
             );
@@ -560,7 +560,7 @@ pub(crate) fn entity_matches_project(
             if project_ids_match(s, current_project_id) {
                 true
             } else {
-                eprintln!(
+                tracing::debug!(
                     "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' from foreign \
                      project '{s}' (expected '{current_project_id}')"
                 );
@@ -569,7 +569,7 @@ pub(crate) fn entity_matches_project(
         }
         Some(_) => {
             // Unexpected type — reject; unexpected field shapes shouldn't be silently accepted.
-            eprintln!(
+            tracing::debug!(
                 "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' — unexpected \
                  project_id type (expected string '{current_project_id}')"
             );
@@ -1078,6 +1078,7 @@ impl CloudSyncer {
         file_change_store: &dyn FileChangeStore,
         commit_link_store: &dyn CommitLinkStore,
     ) -> Result<SyncResult, CasError> {
+        self.clear_conflict_log();
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -1120,7 +1121,7 @@ impl CloudSyncer {
                     result.pulled_entries += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Entry error: {e}"));
@@ -1188,7 +1189,7 @@ impl CloudSyncer {
                     }
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Task error: {e}"));
@@ -1228,7 +1229,7 @@ impl CloudSyncer {
                     result.pulled_rules += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Rule error: {e}"));
@@ -1253,7 +1254,7 @@ impl CloudSyncer {
                     result.pulled_skills += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Skill error: {e}"));
@@ -1286,7 +1287,7 @@ impl CloudSyncer {
                     result.pulled_specs += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Spec error: {e}"));
@@ -1333,7 +1334,7 @@ impl CloudSyncer {
             };
             match prompt_store.get(&remote_prompt.id) {
                 Ok(Some(_)) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Ok(None) => match prompt_store.add(&remote_prompt) {
                     Ok(_) => result.pulled_prompts += 1,
@@ -1357,7 +1358,7 @@ impl CloudSyncer {
             };
             match file_change_store.get(&remote_fc.id) {
                 Ok(Some(_)) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Ok(None) => match file_change_store.add(&remote_fc) {
                     Ok(_) => result.pulled_file_changes += 1,
@@ -1381,7 +1382,7 @@ impl CloudSyncer {
             };
             match commit_link_store.get(&remote_cl.commit_hash) {
                 Ok(Some(_)) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Ok(None) => match commit_link_store.add(&remote_cl) {
                     Ok(_) => result.pulled_commit_links += 1,
@@ -1389,6 +1390,10 @@ impl CloudSyncer {
                 },
                 Err(e) => result.errors.push(format!("CommitLink lookup error: {e}")),
             }
+        }
+
+        for conflict in self.take_conflict_log() {
+            result.record_conflict_detail(conflict);
         }
 
         // An empty first pull can mean this new machine resolved the wrong
@@ -1872,6 +1877,9 @@ impl CloudSyncer {
             healed_task_dependencies_from_cloud: pull_result.healed_task_dependencies_from_cloud,
             task_status_transitions: pull_result.task_status_transitions,
             conflicts_resolved: pull_result.conflicts_resolved,
+            conflicts_resolved_local: pull_result.conflicts_resolved_local,
+            conflicts_resolved_remote: pull_result.conflicts_resolved_remote,
+            conflicts: pull_result.conflicts,
             errors: [
                 push_result.errors,
                 team_push_result.errors,
@@ -1910,6 +1918,7 @@ impl CloudSyncer {
         rule_store: &dyn RuleStore,
         skill_store: &dyn SkillStore,
     ) -> Result<SyncResult, CasError> {
+        self.clear_conflict_log();
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -1968,8 +1977,9 @@ impl CloudSyncer {
 
         // Use configured conflict resolution strategy for team sync
         let strategy = self.config.team_conflict_resolution;
-        #[cfg(debug_assertions)]
-        eprintln!("[Cassy sync] Starting team pull: team={team_id} strategy={strategy:?}");
+        tracing::debug!(
+            "[Cassy sync] Starting team pull: team={team_id} strategy={strategy:?}"
+        );
 
         // Use the caller-supplied project ID for client-side validation.
         // (cas-53d5: previously resolved internally via
@@ -1998,7 +2008,7 @@ impl CloudSyncer {
                     result.pulled_entries += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Entry error: {e}"));
@@ -2015,7 +2025,7 @@ impl CloudSyncer {
             select_owner_task_rows(body.tasks.unwrap_or_default(), current_project_id);
         for (task_id, discarded_row) in discarded_task_rows {
             self.record_owner_conflict_value(&task_id, &discarded_row)?;
-            result.conflicts_resolved += 1;
+            result.record_local_conflict();
         }
         for mut raw_task in raw_tasks {
             render_task_proposal_provenance(&mut raw_task);
@@ -2059,7 +2069,7 @@ impl CloudSyncer {
                     }
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Task error: {e}"));
@@ -2099,7 +2109,7 @@ impl CloudSyncer {
                     result.pulled_rules += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Rule error: {e}"));
@@ -2124,7 +2134,7 @@ impl CloudSyncer {
                     result.pulled_skills += 1;
                 }
                 Ok(UpsertResult::Skipped) => {
-                    result.conflicts_resolved += 1;
+                    result.record_local_conflict();
                 }
                 Err(e) => {
                     result.errors.push(format!("Skill error: {e}"));
@@ -2145,6 +2155,9 @@ impl CloudSyncer {
             let _ = self.queue.delete_metadata(&legacy_key);
         }
 
+        for conflict in self.take_conflict_log() {
+            result.record_conflict_detail(conflict);
+        }
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
     }

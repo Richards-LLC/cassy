@@ -2597,36 +2597,12 @@ pub fn supervisor_guidance() -> String {
     extract_body(SUPERVISOR_GUIDE).to_string()
 }
 
-/// Remove one top-level Markdown section while preserving the surrounding
-/// guidance. On-demand sections belong in the synchronized skill file, not in
-/// every SessionStart's protected payload.
-fn without_markdown_section(body: &str, heading: &str) -> String {
-    let mut output = String::with_capacity(body.len());
-    let mut skipping = false;
-    for line in body.split_inclusive('\n') {
-        let title = line.trim_end_matches(['\r', '\n']);
-        if title == heading {
-            skipping = true;
-            continue;
-        }
-        if skipping && title.starts_with("## ") {
-            skipping = false;
-        }
-        if !skipping {
-            output.push_str(line);
-        }
-    }
-    output
-}
-
 /// Get the worker guidance injected at factory SessionStart.
 ///
 /// Returns only the worker SKILL.md. task-tracking/memory/search load on
-/// demand — same rationale as `supervisor_guidance`. The structured execution
-/// state section remains in the on-demand skill file but is omitted here so
-/// protected SessionStart guidance keeps its 800-byte harness margin.
+/// demand — same rationale as `supervisor_guidance`.
 pub fn worker_guidance() -> String {
-    without_markdown_section(extract_body(WORKER_GUIDE), "## Structured execution state")
+    extract_body(WORKER_GUIDE).to_string()
 }
 
 #[cfg(test)]
@@ -2975,55 +2951,62 @@ This is the body content."#;
             "should NOT bundle task-tracking — loads on demand"
         );
         assert!(
-            WORKER_GUIDE.contains("## Structured execution state")
-                && WORKER_GUIDE.contains("state_patch"),
-            "on-demand worker skill must retain structured-state instructions"
+            !guide.contains("## Structured execution state")
+                && !guide.contains("## Context budgeting"),
+            "SessionStart worker guidance must omit on-demand details"
         );
-        assert!(
-            !guide.contains("## Structured execution state"),
-            "protected SessionStart guidance must omit on-demand structured-state section"
-        );
+        for (label, details) in [
+            (
+                "claude",
+                include_str!("builtins/skills/cas-worker/references/details.md"),
+            ),
+            (
+                "codex",
+                include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+            ),
+            (
+                "grok",
+                include_str!("builtins/grok/skills/cas-worker/references/details.md"),
+            ),
+        ] {
+            for required in ["## Structured execution state", "state_patch", "## Context budgeting"] {
+                assert!(
+                    details.contains(required),
+                    "{label} worker details missing on-demand marker: {required:?}"
+                );
+            }
+        }
     }
 
-    /// Same rationale as `test_supervisor_guidance_under_12kb` — the worker
-    /// SessionStart bundle must stay small enough that the harness doesn't
-    /// truncate it to a preview. Move content into cas-worker/references/
-    /// instead of inlining.
     #[test]
-    fn test_worker_guidance_under_12kb() {
-        const HARD_CEILING: usize = 12_288; // Claude Code harness truncation point.
-        const SOFT_CAP: usize = 11_488; // early-warning margin (800B) below the ceiling.
+    fn test_worker_guidance_under_session_start_budget() {
+        use crate::hooks::handlers::session_budget::SESSION_START_BUDGET_BYTES;
+
         let guide = worker_guidance();
+        let headroom = SESSION_START_BUDGET_BYTES.saturating_sub(guide.len());
         assert!(
-            guide.len() < HARD_CEILING,
-            "worker_guidance is {} bytes — over the 12KB ceiling. \
-             Move content into cas-worker/references/ instead of \
-             inlining it in cas-worker.md.",
+            guide.len() <= 8_000,
+            "worker_guidance is {} bytes — over the 8,000B component cap",
             guide.len()
         );
         assert!(
-            guide.len() <= SOFT_CAP,
-            "worker_guidance is {} bytes — over the {SOFT_CAP}B soft cap (only \
-             {}B from the {HARD_CEILING}B hard ceiling). Trim body prose or move it \
-             into cas-worker/references/ to keep CI headroom.",
-            guide.len(),
-            HARD_CEILING - guide.len()
+            headroom >= 1_024,
+            "worker_guidance is {} bytes — only {headroom}B remains below the \
+             {SESSION_START_BUDGET_BYTES}B SessionStart budget",
+            guide.len()
         );
     }
 
     /// cas-5787 (EPIC cas-ebea, third-brain borrow): both supervisor and
-    /// worker skill bodies must document the "Context budgeting" 3-layer
+    /// worker reference files must document the "Context budgeting" 3-layer
     /// model so future maintainers see the framework before adding to the
-    /// Immutable Core (this skill body). The section names the three
-    /// layers explicitly (Immutable Core / Task Context / Ephemeral),
-    /// cites its component ceiling (8 KB supervisor / 12 KB worker) plus,
-    /// for the worker, the 9 KB aggregate SessionStart budget, and points
-    /// at the rationale memory file
-    /// `project_session_start_truncation.md`. Both Claude and Codex
-    /// mirrors are checked so neither surface silently drifts.
+    /// Immutable Core. The section names the three layers explicitly
+    /// (Immutable Core / Task Context / Ephemeral), cites the 8 KB worker
+    /// component cap and 9 KB aggregate SessionStart budget, and points at
+    /// `project_session_start_truncation.md`.
     #[test]
     fn test_skills_document_context_budgeting_cas_5787() {
-        // Common markers required in all four skill files.
+        // Common markers required in all supervisor/worker files.
         let common = [
             "## Context budgeting",
             "Immutable Core",
@@ -3032,16 +3015,9 @@ This is the body content."#;
             "project_session_start_truncation.md",
             "references/",
         ];
-        // Supervisor cap was lowered to 8KB (cas-5e4b); the worker *component*
-        // cap remains 12KB. cas-4c25: the worker body must additionally name
-        // the 9KB aggregate SessionStart budget introduced by cas-b114, so the
-        // section can't drift back to describing a silent-truncation model
-        // that no longer exists.
-        // cas-703a: grok was previously absent from this list, so the grok
-        // bodies could lose a context-budgeting marker with this test green.
-        // Grok is now checked here directly, and additionally guarded by
-        // cas-cli/tests/builtin_flavor_drift_test.rs, which holds all three
-        // flavors of these two files content-identical after normalization.
+        // Supervisor cap was lowered to 8KB (cas-5e4b). The worker reference
+        // names the 8KB component cap and 9KB aggregate budget introduced by
+        // cas-b114; keeping it on demand protects the SessionStart payload.
         let supervisor_files = [
             ("claude cas-supervisor.md", SUPERVISOR_GUIDE),
             (
@@ -3054,14 +3030,17 @@ This is the body content."#;
             ),
         ];
         let worker_files = [
-            ("claude cas-worker.md", WORKER_GUIDE),
             (
-                "codex cas-worker.md",
-                include_str!("builtins/codex/skills/cas-worker.md"),
+                "claude cas-worker details.md",
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
             (
-                "grok cas-worker.md",
-                include_str!("builtins/grok/skills/cas-worker.md"),
+                "codex cas-worker details.md",
+                include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+            ),
+            (
+                "grok cas-worker details.md",
+                include_str!("builtins/grok/skills/cas-worker/references/details.md"),
             ),
         ];
         for (label, content) in supervisor_files {
@@ -3072,8 +3051,15 @@ This is the body content."#;
                 );
             }
         }
+        let worker_common = [
+            "## Context budgeting",
+            "Immutable Core",
+            "Task Context",
+            "Ephemeral",
+            "project_session_start_truncation.md",
+        ];
         for (label, content) in worker_files {
-            for required in common.iter().chain(["12 KB", "9 KB"].iter()) {
+            for required in worker_common.iter().chain(["8 KB", "9 KB"].iter()) {
                 assert!(
                     content.contains(required),
                     "{label} missing required Context-budgeting marker: {required:?}"
@@ -3293,13 +3279,24 @@ This is the body content."#;
     /// killed mid-compaction, so the operator paid to re-summarize work a
     /// `git push` would have preserved.
     ///
-    /// All THREE harness flavors must carry both mandates: terse hard rules on
-    /// the always-loaded surface (the SKILL.md body is on the hot path and has
-    /// a 12 KB ceiling — see `test_worker_guidance_under_12kb`) with the
-    /// recipes in references/discipline.md. The flavor set is spelled out here
-    /// because this guidance has a documented drift history (GH #116).
+    /// All THREE harness flavors carry the launch-time contract in
+    /// `crates/cas-pty/src/pty.rs`. The on-demand discipline reference keeps
+    /// only repository-specific test-loop and clean-environment guidance.
     #[test]
     fn test_worker_skills_carry_backgrounding_mandate_cas_b4921() {
+        let spawn_prompt = include_str!("../../crates/cas-pty/src/pty.rs");
+        for required in [
+            "NEVER foreground-block",
+            "Budget your context",
+            "facts, not narration",
+            "never trims evidence",
+        ] {
+            assert!(
+                spawn_prompt.contains(required),
+                "worker spawn prompt missing launch-contract marker: {required:?}"
+            );
+        }
+
         for (label, skill_content, ref_content) in [
             (
                 "claude",
@@ -3317,75 +3314,49 @@ This is the body content."#;
                 include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
             ),
         ] {
-            // Always-loaded body: terse hard rules only (Rules of Engagement),
-            // each naming its threshold, plus the breadcrumb to the recipes.
-            for required in [
-                "Never block the pane",
+            // These launch-contract rules are intentionally absent from both
+            // the SessionStart body and the on-demand reference. They have one
+            // source: the PTY spawn prompt above.
+            for forbidden in [
                 "~2 minutes",
                 "gh run watch",
                 "action=remind",
-                "Checkpoint, never compact",
-                "discipline.md",
                 "last_token_usage",
                 "model_context_window",
                 "total_token_usage",
+                "facts, not narration",
+                "never trims evidence",
             ] {
                 assert!(
-                    skill_content.contains(required),
-                    "{label} cas-worker SKILL.md missing hard-rule marker: {required:?}"
+                    !skill_content.contains(forbidden),
+                    "{label} cas-worker SKILL.md duplicates spawn-contract marker: {forbidden:?}"
                 );
             }
-            // Scoped-test discipline lives with the test guidance (A-3):
-            // compile continuously without linking test binaries, then use
-            // nextest only for the affected target. These are deliberately
-            // concrete commands rather than a generic "be scoped" reminder.
-            for required in [
-                "cargo check -p <crate> --lib --tests",
-                "cargo nextest run",
-                "--lib <module>",
-                "--test <name>",
-            ] {
-                assert!(
-                    skill_content.contains(required),
-                    "{label} cas-worker SKILL.md missing scoped-test marker: {required:?}"
-                );
-            }
-            // Part A recipes: background builds, the server registry for
-            // anything listening, the sanctioned CI shape (queue rerun ->
-            // reminder -> end turn -> one-shot check), and inbox_poll first if
-            // you did come back from a blocked turn.
-            for required in [
-                "run_in_background",
+            for forbidden in [
+                "## Part 1",
+                "## Part 2",
+                "gh run watch",
                 "action=server_start",
-                "remind_delay_secs",
-                "gh run list",
-                "inbox_poll",
+                "Checkpoint before compaction",
+                "Context: ~",
+                "auto-compaction",
+                "facts, not narration",
+                "never trims evidence",
             ] {
                 assert!(
-                    ref_content.contains(required),
-                    "{label} cas-worker discipline.md missing backgrounding recipe: {required:?}"
+                    !ref_content.contains(forbidden),
+                    "{label} discipline.md duplicates spawn-contract marker: {forbidden:?}"
                 );
             }
-            assert!(
-                ref_content.contains("BANNED") || ref_content.contains("banned"),
-                "{label} cas-worker discipline.md must explicitly ban foreground CI watching"
-            );
-            // Part B: headroom reporting, the four-step checkpoint protocol,
-            // and commit sizing.
             for required in [
-                "note_type=progress",
-                "Context: ~",
-                "CHECKPOINT",
-                "git push",
-                "respawn",
-                "auto-compaction",
-                "37,952",
-                "258,400",
-                "356,457",
+                "Scoped tests",
+                "cargo check -p <crate> --lib --tests",
+                "scripts/run-scoped-tests.sh --proof",
+                "Clean-CI environment",
             ] {
                 assert!(
                     ref_content.contains(required),
-                    "{label} cas-worker discipline.md missing context-budget marker: {required:?}"
+                    "{label} discipline.md missing unique test guidance marker: {required:?}"
                 );
             }
         }
@@ -3433,11 +3404,8 @@ This is the body content."#;
     /// nothing distinguished the seconds-long targeted loop you iterate in
     /// from the minutes-long full sweep you are allowed to run twice.
     ///
-    /// Same two-layer shape as the backgrounding mandate above: terse rules on
-    /// the always-loaded SKILL.md body (12 KB ceiling — see
-    /// `test_worker_guidance_under_12kb`), the worked recipe in
-    /// references/discipline.md. All three flavors, because the builtin skills
-    /// have a documented drift history (GH #116, cas-703a).
+    /// The test-loop recipe is on demand in references/discipline.md; all three
+    /// flavors must carry the same unique guidance.
     #[test]
     fn test_worker_skills_teach_test_loop_discipline_cas_3627() {
         for (label, skill_content, ref_content) in [
@@ -3457,31 +3425,25 @@ This is the body content."#;
                 include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
             ),
         ] {
-            // Always-loaded body: batch-first, the two named loops, the
-            // two-sweep ceiling, nextest, and the no-foreground-sleep rule.
+            // The hot body keeps only the pointer; the detailed test loop is
+            // on demand so it does not consume SessionStart budget.
             for required in [
-                "Batch the fixes",
-                "Inner loop",
-                "Final proof",
-                "at most twice",
-                "cargo nextest run",
-                "sleep",
+                "discipline.md",
+                "scoped test-loop",
             ] {
                 assert!(
                     skill_content.contains(required),
-                    "{label} cas-worker SKILL.md missing test-loop marker: {required:?}"
+                    "{label} cas-worker SKILL.md missing discipline pointer: {required:?}"
                 );
             }
-            // The recipe: both loops named, the batching rule, the banked-receipt
-            // allowance, nextest with a fallback, and the ban on sleeping in the
-            // foreground while a background run cooks.
+            // The recipe: both loops named, batching, banked receipts, and the
+            // guarded nextest target.
             for required in [
+                "Batch before you verify",
                 "inner loop",
                 "Final proof",
-                "Batch before you verify",
                 "banked receipt",
                 "cargo nextest run",
-                "foreground-`sleep`",
             ] {
                 assert!(
                     ref_content.contains(required),

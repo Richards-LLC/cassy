@@ -1,8 +1,11 @@
 use crate::cli::update::*;
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::{Mutex, OnceLock};
 
 use crate::cli::Cli;
+use crate::ui::components::OutputMode;
 
 #[test]
 fn test_is_newer() {
@@ -13,6 +16,182 @@ fn test_is_newer() {
     assert!(!is_newer("0.1.0", "0.2.0"));
     assert!(is_newer("v0.3.0", "0.2.0"));
     assert!(is_newer("0.3.0", "v0.2.0"));
+}
+
+#[test]
+fn project_table_plain_uses_phase_glyphs_and_compact_project_names() {
+    let receipts = vec![ProjectRefreshReceipt {
+        project: PathBuf::from("/home/alice/projects/demo"),
+        migration: ProjectPhase::Ok("v248".to_owned()),
+        search_index: ProjectPhase::Warning("busy".to_owned()),
+        skills: ProjectPhase::Skipped("not installed".to_owned()),
+        membership: ProjectPhase::Ok("2 memberships".to_owned()),
+        cloud: ProjectPhase::Failed("timeout".to_owned()),
+        details: String::new(),
+        phase_details: Vec::new(),
+    }];
+
+    let output = render_project_table_plain(&receipts, false);
+
+    assert!(output.contains("projects/demo"), "output was:\n{output}");
+    assert!(output.contains("✓"), "output was:\n{output}");
+    assert!(output.contains("⚠"), "output was:\n{output}");
+    assert!(output.contains("✗"), "output was:\n{output}");
+    assert!(output.contains("–"), "output was:\n{output}");
+    assert!(!output.contains("/home/alice"), "output was:\n{output}");
+    let row = output.lines().nth(1).expect("project table row");
+    assert!(
+        row.contains("timeout"),
+        "most severe phase reason missing:\n{output}"
+    );
+}
+
+#[test]
+fn project_table_phase_headers_are_not_truncated_at_supported_widths() {
+    let receipts = vec![ProjectRefreshReceipt {
+        project: PathBuf::from(
+            "/home/alice/projects/a-project-with-a-deliberately-long-name/another-project",
+        ),
+        migration: ProjectPhase::Ok("v248".to_owned()),
+        search_index: ProjectPhase::Ok("up to date".to_owned()),
+        skills: ProjectPhase::Ok("up to date".to_owned()),
+        membership: ProjectPhase::Ok("up to date".to_owned()),
+        cloud: ProjectPhase::Ok("up to date".to_owned()),
+        details: String::new(),
+        phase_details: Vec::new(),
+    }];
+
+    for mode in [OutputMode::Plain, OutputMode::Styled] {
+        for width in [80, 120] {
+            let output = render_project_table_at_width(&receipts, false, mode, width);
+            let header = output.lines().next().expect("project table header");
+            for truncated in ["migra…", "inde…", "skill…", "membe…", "clou…"] {
+                assert!(
+                    !header.contains(truncated),
+                    "phase header truncated at {width} columns in {mode:?}: {header:?}"
+                );
+            }
+            for label in ["project", "migr", "index", "skills", "member", "cloud"] {
+                assert!(
+                    header.contains(label),
+                    "missing {label:?} header at {width} columns in {mode:?}: {header:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn non_ok_phase_details_include_phase_summary_when_capture_is_empty() {
+    let receipt = ProjectRefreshReceipt {
+        project: PathBuf::from("/home/alice/projects/demo"),
+        migration: ProjectPhase::Ok("v248".to_owned()),
+        search_index: ProjectPhase::Ok("up to date".to_owned()),
+        skills: ProjectPhase::Ok("up to date".to_owned()),
+        membership: ProjectPhase::Ok("up to date".to_owned()),
+        cloud: ProjectPhase::Warning("12 queued".to_owned()),
+        details: String::new(),
+        phase_details: vec![
+            (true, String::new()),
+            (true, String::new()),
+            (true, String::new()),
+            (true, String::new()),
+            (false, String::new()),
+        ],
+    };
+    let mut warnings = RepeatedWarningCollector::default();
+
+    let detail = render_project_phase_details(&receipt, false, &mut warnings, "projects/demo");
+
+    assert!(
+        detail.contains("[WARN] cloud: 12 queued"),
+        "cloud phase summary missing from detail output: {detail:?}"
+    );
+}
+
+#[test]
+fn cloud_warning_summary_stays_under_the_non_ok_project_row() {
+    let receipt = ProjectRefreshReceipt {
+        project: PathBuf::from("/home/alice/projects/demo"),
+        migration: ProjectPhase::Ok("v248".to_owned()),
+        search_index: ProjectPhase::Ok("up to date".to_owned()),
+        skills: ProjectPhase::Ok("up to date".to_owned()),
+        membership: ProjectPhase::Ok("up to date".to_owned()),
+        cloud: ProjectPhase::Warning("4 queued".to_owned()),
+        details: String::new(),
+        phase_details: vec![
+            (true, String::new()),
+            (true, String::new()),
+            (true, String::new()),
+            (true, String::new()),
+            (false, "[WARN] Push incomplete · 4 pending\n".to_owned()),
+        ],
+    };
+    let mut warnings = RepeatedWarningCollector::default();
+
+    let detail = render_project_phase_details(&receipt, false, &mut warnings, "projects/demo");
+
+    assert!(
+        detail.contains("[WARN] Push incomplete · 4 pending"),
+        "cloud warning summary missing from detail output: {detail:?}"
+    );
+}
+
+#[test]
+fn repeated_warnings_render_once_with_affected_project_count() {
+    let mut warnings = RepeatedWarningCollector::default();
+    warnings.record_builtin_paths("projects/one", [".claude/skills/cas-worker/SKILL.md"]);
+    warnings.record_builtin_paths("projects/two", [".claude/skills/cas-worker/SKILL.md"]);
+    warnings.record("Push incomplete; queued rows remain", "projects/one");
+    warnings.record("Push incomplete; queued rows remain", "projects/two");
+
+    let output = warnings.render(false);
+
+    assert_eq!(
+        output
+            .matches("Cassy-managed builtin paths already tracked")
+            .count(),
+        1,
+        "output was:\n{output}"
+    );
+    assert!(output.contains("2 projects"), "output was:\n{output}");
+    assert_eq!(
+        output
+            .matches("Push incomplete; queued rows remain")
+            .count(),
+        1
+    );
+    assert_eq!(
+        output.matches(".claude/skills/cas-worker/SKILL.md").count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_phase_collects_both_stdout_and_stderr() {
+    // OutputCapture redirects process-global descriptors. Keep this check
+    // isolated from the other unit tests so their harness output cannot be
+    // mistaken for phase output while the descriptors are redirected.
+    static CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = CAPTURE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("capture test lock should not be poisoned");
+
+    let (value, output) = capture_phase(true, || {
+        let stdout = b"captured stdout\n";
+        let stderr = b"captured stderr\n";
+        unsafe {
+            let _ = libc::write(libc::STDOUT_FILENO, stdout.as_ptr().cast(), stdout.len());
+            let _ = libc::write(libc::STDERR_FILENO, stderr.as_ptr().cast(), stderr.len());
+        }
+        42
+    });
+
+    assert_eq!(value, 42);
+    assert!(output.contains("captured stdout"), "output was: {output:?}");
+    assert!(output.contains("captured stderr"), "output was: {output:?}");
 }
 
 #[test]

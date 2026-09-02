@@ -62,6 +62,39 @@ fn heal_summary_is_quiet_for_noop_and_exact_when_edges_change() {
 }
 
 #[test]
+fn conflict_recording_tracks_directional_counts_and_details() {
+    use chrono::Utc;
+
+    let now = Utc::now();
+    let mut result = SyncResult::default();
+    result.record_conflict(SyncConflict {
+        entity_type: "entry".to_string(),
+        entity_id: "local-wins".to_string(),
+        local_updated: now,
+        remote_updated: now,
+        resolution: ConflictResolution::KeepRecent,
+        action: ConflictAction::UseLocal,
+    });
+    result.record_conflict(SyncConflict {
+        entity_type: "task".to_string(),
+        entity_id: "remote-wins".to_string(),
+        local_updated: now,
+        remote_updated: now,
+        resolution: ConflictResolution::RemoteWins,
+        action: ConflictAction::UseRemote,
+    });
+
+    assert_eq!(result.conflicts_resolved, 2);
+    assert_eq!(result.conflicts_resolved_local, 1);
+    assert_eq!(result.conflicts_resolved_remote, 1);
+    assert_eq!(result.conflicts.len(), 2);
+
+    let json = serde_json::to_value(&result).unwrap();
+    assert_eq!(json["conflicts_resolved_local"], 1);
+    assert_eq!(json["conflicts_resolved_remote"], 1);
+}
+
+#[test]
 fn concise_errors_groups_parked_rejections_without_server_json() {
     let result = SyncResult {
         errors: vec![

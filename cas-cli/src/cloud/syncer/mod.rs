@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::cloud::{CloudConfig, EntityType, SyncQueue};
@@ -17,7 +17,7 @@ pub use knowledge::{
     KNOWLEDGE_ENTITY, KnowledgePageRecord, KnowledgePullReport, knowledge_share_scope,
 };
 mod pull;
-pub(crate) use pull::entity_matches_project;
+pub(crate) use pull::{SyncWarningSummary, collect_sync_warnings, entity_matches_project};
 mod push;
 mod team_push;
 
@@ -94,6 +94,12 @@ pub struct SyncResult {
     pub pulled_knowledge_pages: usize,
     /// Number of conflicts resolved
     pub conflicts_resolved: usize,
+    /// Number of conflicts resolved in favor of the local row.
+    pub conflicts_resolved_local: usize,
+    /// Number of conflicts resolved in favor of the remote row.
+    pub conflicts_resolved_remote: usize,
+    /// Conflict decisions retained for verbose human-facing output.
+    pub conflicts: Vec<SyncConflict>,
     /// Errors encountered during sync
     pub errors: Vec<String>,
     /// Number of personal queue batches fetched and attempted.
@@ -185,11 +191,41 @@ pub struct PushPlan {
 }
 
 impl SyncResult {
+    /// Retain one conflict decision and update its aggregate counters.
+    pub fn record_conflict(&mut self, conflict: SyncConflict) {
+        self.conflicts_resolved += 1;
+        match conflict.action {
+            ConflictAction::UseRemote => self.conflicts_resolved_remote += 1,
+            ConflictAction::UseLocal | ConflictAction::Skip => {
+                self.conflicts_resolved_local += 1;
+            }
+        }
+        self.conflicts.push(conflict);
+    }
+
+    /// Retain a resolver-produced detail. Resolver calls that keep the local
+    /// row are counted by their pull loop's `Skipped` branch; remote winners
+    /// are counted here because their pull loop reports an applied update.
+    pub(crate) fn record_conflict_detail(&mut self, conflict: SyncConflict) {
+        if conflict.action == ConflictAction::UseRemote {
+            self.conflicts_resolved += 1;
+            self.conflicts_resolved_remote += 1;
+        }
+        self.conflicts.push(conflict);
+    }
+
+    /// Record a conflict where the local row was retained without a detailed
+    /// remote timestamp (for example an append-only duplicate or terminal
+    /// status guard).
+    pub fn record_local_conflict(&mut self) {
+        self.conflicts_resolved += 1;
+        self.conflicts_resolved_local += 1;
+    }
+
     /// Render the one-line dependency healing receipt when reconciliation did
     /// work. A quiet no-op is intentional for steady-state pulls.
     pub fn dependency_heal_summary(&self) -> Option<String> {
-        (self.healed_task_dependencies_to_cloud > 0
-            || self.healed_task_dependencies_from_cloud > 0)
+        (self.healed_task_dependencies_to_cloud > 0 || self.healed_task_dependencies_from_cloud > 0)
             .then(|| {
                 format!(
                     "healed {} edge(s) to cloud, {} from cloud",
@@ -285,7 +321,8 @@ impl SyncResult {
 }
 
 /// Strategy for resolving sync conflicts
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConflictResolution {
     /// Remote version wins (default for team sync)
     #[default]
@@ -307,7 +344,8 @@ impl ConflictResolution {
 }
 
 /// Action to take after conflict resolution
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConflictAction {
     UseRemote,
     UseLocal,
@@ -315,7 +353,7 @@ pub enum ConflictAction {
 }
 
 /// A sync conflict that was resolved
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SyncConflict {
     /// Type of entity (entry, task, rule, skill)
     pub entity_type: String,
@@ -332,10 +370,9 @@ pub struct SyncConflict {
 }
 
 impl SyncConflict {
-    /// Log this conflict for debugging
-    #[cfg(debug_assertions)]
+    /// Log this conflict for debugging without writing directly to stderr.
     pub fn log(&self) {
-        eprintln!(
+        tracing::debug!(
             "[Cassy sync] Conflict resolved: {} {} local={} remote={} strategy={:?} action={:?}",
             self.entity_type,
             self.entity_id,
@@ -346,11 +383,6 @@ impl SyncConflict {
         );
     }
 
-    /// Log this conflict for debugging (no-op in release)
-    #[cfg(not(debug_assertions))]
-    pub fn log(&self) {
-        // No-op in release builds
-    }
 }
 
 /// Configuration for CloudSyncer
@@ -410,6 +442,9 @@ pub struct CloudSyncer {
     /// Optional normalized `origin` identity sent with personal pushes.
     /// Missing/non-git remotes deliberately remain absent from the envelope.
     personal_push_git_remote: Option<String>,
+    /// Conflict decisions are collected during pull application and folded
+    /// into the returned `SyncResult` after the operation completes.
+    conflict_log: Arc<Mutex<Vec<SyncConflict>>>,
 }
 
 impl CloudSyncer {
@@ -428,6 +463,7 @@ impl CloudSyncer {
             cloud_config,
             push_project_canonical_id: None,
             personal_push_git_remote,
+            conflict_log: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -446,6 +482,7 @@ impl CloudSyncer {
             cloud_config,
             push_project_canonical_id: Some(project_canonical_id),
             personal_push_git_remote: crate::cloud::normalized_git_remote_for_push(cas_root),
+            conflict_log: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -468,12 +505,11 @@ impl CloudSyncer {
     /// Requeue terminal cloud failures whose version gate is satisfied by the
     /// current client before either personal or team push reads the queue.
     pub(crate) fn requeue_version_gated_items(&self) -> Result<usize, CasError> {
-        let requeued = self.queue.requeue_version_gated_failures(
-            env!("CARGO_PKG_VERSION"),
-            self.config.max_retries,
-        )?;
+        let requeued = self
+            .queue
+            .requeue_version_gated_failures(env!("CARGO_PKG_VERSION"), self.config.max_retries)?;
         if requeued > 0 {
-            eprintln!("requeued {requeued} version-gated item(s)");
+            tracing::debug!("requeued {requeued} version-gated item(s)");
         }
         Ok(requeued)
     }
@@ -517,8 +553,24 @@ impl CloudSyncer {
             action,
         };
         conflict.log();
+        if let Ok(mut conflicts) = self.conflict_log.lock() {
+            conflicts.push(conflict);
+        }
 
         action
+    }
+
+    pub(crate) fn clear_conflict_log(&self) {
+        if let Ok(mut conflicts) = self.conflict_log.lock() {
+            conflicts.clear();
+        }
+    }
+
+    pub(crate) fn take_conflict_log(&self) -> Vec<SyncConflict> {
+        self.conflict_log
+            .lock()
+            .map(|mut conflicts| std::mem::take(&mut *conflicts))
+            .unwrap_or_default()
     }
 }
 
@@ -1046,11 +1098,7 @@ impl PushResponse {
     ) -> Result<Option<HashMap<String, PushRowResult>>, String> {
         let queued_ids = queued_ids.collect::<Vec<_>>();
         if let Some(entity) = self.fields.get(entity_type) {
-            if let Some(rows) = row_results_for(
-                entity,
-                entity_type,
-                queued_ids.iter().cloned(),
-            )? {
+            if let Some(rows) = row_results_for(entity, entity_type, queued_ids.iter().cloned())? {
                 return Ok(Some(rows));
             }
         }

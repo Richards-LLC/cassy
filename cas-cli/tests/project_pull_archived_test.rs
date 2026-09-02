@@ -427,7 +427,9 @@ async fn active_local_lww_behavior_remains_unchanged() {
 
     assert_no_pull_errors(&result);
     assert_eq!(result.pulled_entries, 1);
-    assert_eq!(result.conflicts_resolved, 1);
+    assert_eq!(result.conflicts_resolved_local, 1);
+    assert_eq!(result.conflicts_resolved_remote, 1);
+    assert_eq!(result.conflicts_resolved, 2);
     assert_eq!(
         store.get("project-active-newer").unwrap().content,
         "remote newer"

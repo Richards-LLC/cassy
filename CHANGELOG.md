@@ -7,6 +7,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.11.0] - 2026-09-02
+
+### Changed
+- `cas doctor` renders a grouped report: a header with project and version,
+  one line per section (Store, Indexes, Cloud, Config, Integrations) when
+  every check passes, non-OK checks on their own row with a short message and
+  the remediation on an indented line, thousands-separated counts, and a
+  counted summary with elapsed time. `--verbose` prints every check in full.
+  Cloud-pull attribution warnings no longer spill onto stderr ahead of the
+  report; they are collected into one Cloud row.
+- `cas update` prints one row per refreshed project (migration, index,
+  skills, membership, cloud) with detail only for projects that warned or
+  failed, deduplicates warnings that repeat across projects, drops the second
+  per-project summary block, keeps step receipts on one line, and closes with
+  a version, project count, and elapsed-time banner. `--verbose` restores the
+  full transcript. No Rust debug formatting reaches the terminal.
+- `cas cloud push`, `cas cloud pull`, and `cas cloud sync` print one summary
+  line: non-zero counts only, "nothing newer" when nothing changed, push
+  failures grouped by message with a retry hint, and a spinner that only
+  appears on a terminal. `--verbose` prints per-kind and per-error detail.
+  JSON output for all three commands is unchanged.
+
+
 ## [3.10.1] - 2026-09-02
 
 ### Fixed

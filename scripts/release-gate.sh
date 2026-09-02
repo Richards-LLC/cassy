@@ -237,12 +237,19 @@ check_archive_mode() {
     # CARGO_MANIFEST_DIR reads fail while cwd-relative reads still work.
     # Empty package directories were stricter than CI and rejected a
     # pre-existing cwd-relative source inspection.
-    git archive --format=tar HEAD | tar -x -C "$remap"
+    # A detached git worktree, not `git archive`: the runner's checkout has a
+    # .git, and tests that call git (check-ignore, rev-parse) need it.
+    rmdir "$remap" 2>/dev/null || true
+    git worktree add --detach "$remap" HEAD >/dev/null 2>&1 || {
+        printf 'archive-mode: cannot create remap worktree at %s\n' "$remap"
+        return 1
+    }
     archive_path="$(make_archive_path)"
     if "$cargo_bin" nextest archive -p cas --archive-file "$archive"; then
         :
     else
         status=$?
+        git worktree remove --force "$remap" >/dev/null 2>&1 || true
         rm -rf "$archive_dir"
         return "$status"
     fi
@@ -265,6 +272,7 @@ check_archive_mode() {
     else
         status=$?
     fi
+    git worktree remove --force "$remap" >/dev/null 2>&1 || true
     rm -rf "$archive_dir"
     return "$status"
 }

@@ -39,14 +39,13 @@ pub use backfill::{BackfillOutcome, maybe_apply_team_backfill, maybe_apply_team_
 pub use config::{
     CanonicalIdCollision, CanonicalIdSource, CloudConfig, LocalRootIdentity, PersonalScopeNotice,
     TeamInfo, TeamScopeAdoption, adopt_team_scope_for_configs, canonical_id_from_cas_root,
-    canonical_id_from_config_toml, clear_login_credentials, derive_canonical_id_from_git_remote,
-    detect_canonical_id_collisions, get_project_canonical_id, invalidate_cached_project_id,
-    maybe_adopt_team_scope, maybe_mark_personal_scope_notice, canonical_project_id,
-    canonical_project_id_with_pin, normalize_project_canonical_id, normalized_git_remote_for_push,
-    project_ids_match,
-    personal_scope_notice_for_configs, resolve_canonical_id, resolve_canonical_id_with_source,
-    set_canonical_id_in_config_toml, should_adopt_canonical_id,
-    store_login_credentials,
+    canonical_id_from_config_toml, canonical_project_id, canonical_project_id_with_pin,
+    clear_login_credentials, derive_canonical_id_from_git_remote, detect_canonical_id_collisions,
+    get_project_canonical_id, invalidate_cached_project_id, maybe_adopt_team_scope,
+    maybe_mark_personal_scope_notice, normalize_project_canonical_id,
+    normalized_git_remote_for_push, personal_scope_notice_for_configs, project_ids_match,
+    resolve_canonical_id, resolve_canonical_id_with_source, set_canonical_id_in_config_toml,
+    should_adopt_canonical_id, store_login_credentials,
 };
 pub(crate) use config::{
     default_endpoint, is_acceptable_endpoint, normalize_git_remote_url, user_level_cloud_json_path,
@@ -63,13 +62,13 @@ pub use me::{
     FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner, teams_cache_stale,
 };
 pub use sync_queue::{EntityType, QueueHealth, QueuedSync, SyncOperation, SyncQueue};
-pub use team_registration::{
-    REGISTRATION_TIMEOUT, RegistrationFailure, RegistrationOutcome, TeamRegistration,
-};
-pub(crate) use syncer::entity_matches_project;
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,
     KnowledgePageRecord, KnowledgePullReport, PushPlan, PushScope, SyncConflict, SyncResult,
-    TaskStatusTransition,
-    TeamMemoriesResponse, TeamProject, TeamProjectsResponse, knowledge_share_scope,
+    TaskStatusTransition, TeamMemoriesResponse, TeamProject, TeamProjectsResponse,
+    knowledge_share_scope,
+};
+pub(crate) use syncer::{SyncWarningSummary, collect_sync_warnings, entity_matches_project};
+pub use team_registration::{
+    REGISTRATION_TIMEOUT, RegistrationFailure, RegistrationOutcome, TeamRegistration,
 };

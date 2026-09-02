@@ -207,7 +207,7 @@ Read the `execution_note` field from `mcp__cas__task action=show id=<task-id>`. 
 
 - **`execution_note=test-first`** — advisory. The diff MUST contain at least one **new** test file that exercises the change. "Test file" means files matching `*_test.rs`, `tests/*.rs`, `*.test.ts`, `*.spec.ts`, `test_*.py`, `*_test.py`, or anything under a `tests/` / `__tests__/` directory. Check with:
   ```bash
-  git diff --name-status HEAD~10 | rg -e '^A\s+.*(_test\.rs|tests/.*\.rs|\.test\.tsx?$|\.spec\.tsx?$|test_.*\.py|_test\.py|tests?/|__tests__/)'
+  git diff --name-status HEAD~10 | grep -E '^A[[:space:]]+.*(_test\.rs|tests/.*\.rs|\.test\.tsx?$|\.spec\.tsx?$|test_.*\.py|_test\.py|tests?/|__tests__/)'
   ```
   If zero new test files found, reject with:
   > "REJECTED (test-first posture): Task was declared `execution_note=test-first` but the diff contains no new test files. Expected at least one new test exercising the change. Add the test or ask the supervisor to downgrade the execution_note."

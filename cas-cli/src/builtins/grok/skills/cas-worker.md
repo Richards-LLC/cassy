@@ -84,7 +84,7 @@ Tool loading is two steps, not one: if `cas__task` is unavailable, use
 
 ## cas-src surface checklist — required before close
 
-For every applicable item, record the proving file, command, or test in the
+In the pre-close task note, every applicable entry must paste its proving file, command, or test; every `not applicable` entry must state why. Bare assertions are non-compliant. For every applicable item, record the proving file, command, or test in the
 pre-close note. For every `not applicable` item, state why.
 This is a requirement, not a suggestion; bare assertions are not evidence.
 
@@ -102,11 +102,15 @@ This is a requirement, not a suggestion; bare assertions are not evidence.
 
 ## Blockers
 
+- **Recover from workspace denials; never retry the denied target.** Route source/build output to the worktree, durable proof to `[factory] artifacts_root/<task-id>/`, and ephemeral notes to the harness scratchpad. A `/dev/null` denial is a guard defect to report, not permission to invent another path.
+
 Add a blocker note with the exact error, re-read the task, set `status=blocked`,
 and message the supervisor. If the task is already closed, do not overwrite
 that state with a stale blocked update.
 
 ## References
+
+- [reminders.md](../cas-supervisor/references/reminders.md) for bounded checkpoint/recovery timing, the shared push-first decision table, and the cleanup contract.
 
 - [details.md](cas-worker/references/details.md) — structured execution state,
   context budgeting, exact fields/actions, and sync mechanics.

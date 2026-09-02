@@ -110,6 +110,7 @@ alias as its stock model; this is a fallback route, not a registry lane.
 
 ```text
 # Claude stock fallback
+cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
 cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
 ```
 

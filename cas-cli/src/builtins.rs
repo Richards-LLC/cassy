@@ -10,6 +10,7 @@
 //! The factory guide skill files are also the source of truth for HooksConfig
 //! guidance that gets injected into supervisor/worker context.
 
+use crate::config::Config;
 use cas_mux::SupervisorCli;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -2071,6 +2072,157 @@ pub fn sync_all_builtins_for_harness(
     }
 }
 
+const OPTIONAL_PROJECT_SKILLS: &[&str] = &["fallow", "cas-nuxt-playwright"];
+
+/// Sync project builtins while keeping stack-specific skills opt-in.
+///
+/// The user-level sync functions intentionally retain the complete catalog.
+/// Project sync is different: `fallow` belongs in JavaScript/TypeScript
+/// projects and `cas-nuxt-playwright` belongs in Nuxt projects. A project can
+/// explicitly enable either id in `[skills].optional` when detection cannot
+/// see an indirect or generated dependency.
+pub fn sync_all_builtins_for_project(
+    harness: SupervisorCli,
+    project_root: &Path,
+) -> std::io::Result<SyncResult> {
+    match harness {
+        SupervisorCli::Claude => {
+            let skills = filtered_project_skills(BUILTIN_SKILLS, project_root);
+            sync_project_catalog(
+                &project_root.join(".claude"),
+                BUILTIN_AGENTS,
+                &skills,
+                BUILTIN_WORKFLOWS,
+            )
+        }
+        SupervisorCli::Codex => {
+            let skills = filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root);
+            sync_project_catalog(&project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, &[])
+        }
+        SupervisorCli::Grok => {
+            let skills = filtered_project_skills(GROK_BUILTIN_SKILLS, project_root);
+            sync_project_catalog(&project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, &[])
+        }
+        SupervisorCli::OpenCode => Ok(SyncResult::default()),
+    }
+}
+
+fn sync_project_catalog(
+    target_dir: &Path,
+    agents: &[BuiltinFile],
+    skills: &[BuiltinFile],
+    workflows: &[BuiltinFile],
+) -> std::io::Result<SyncResult> {
+    let mut result = sync_all_builtins_inner(target_dir, agents, skills)?;
+    if !workflows.is_empty() {
+        sync_workflows(target_dir, workflows, &mut result)?;
+        let keep = builtin_workflow_names(workflows);
+        prune_stale_cas_workflow_files(&target_dir.join("workflows"), &keep)?;
+    }
+    let keep = builtin_skill_dir_names(skills);
+    prune_stale_cas_skill_dirs(&target_dir.join("skills"), &keep)?;
+    Ok(result)
+}
+
+fn filtered_project_skills(
+    skills: &[BuiltinFile],
+    project_root: &Path,
+) -> Vec<BuiltinFile> {
+    let optional = enabled_optional_project_skills(project_root);
+    skills
+        .iter()
+        .copied()
+        .filter(|builtin| {
+            let Some(skill_id) = builtin_skill_id(builtin.path) else {
+                return true;
+            };
+            !OPTIONAL_PROJECT_SKILLS.contains(&skill_id) || optional.contains(skill_id)
+        })
+        .collect()
+}
+
+fn builtin_skill_id(path: &str) -> Option<&str> {
+    path.strip_prefix("skills/")?.split('/').next()
+}
+
+fn enabled_optional_project_skills(project_root: &Path) -> HashSet<&'static str> {
+    let mut enabled = HashSet::new();
+    let explicit = Config::load(&project_root.join(".cas"))
+        .ok()
+        .and_then(|config| config.skills)
+        .map(|skills| skills.optional)
+        .unwrap_or_default();
+
+    let explicit = explicit
+        .iter()
+        .map(|id| id.trim().to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    if explicit.iter().any(|id| id == "fallow" || id == "cas-fallow") {
+        enabled.insert("fallow");
+    }
+    if explicit.iter().any(|id| {
+        id == "cas-nuxt-playwright" || id == "nuxt-playwright" || id == "nuxt"
+    }) {
+        enabled.insert("cas-nuxt-playwright");
+    }
+
+    let package_path = project_root.join("package.json");
+    let package = std::fs::read_to_string(&package_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok());
+    if package_path.is_file() || project_contains_js_ts(project_root) {
+        enabled.insert("fallow");
+    }
+    if package.as_ref().is_some_and(package_declares_nuxt) {
+        enabled.insert("cas-nuxt-playwright");
+    }
+    if ["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mjs"]
+        .iter()
+        .any(|name| project_root.join(name).is_file())
+    {
+        enabled.insert("cas-nuxt-playwright");
+    }
+    enabled
+}
+
+fn project_contains_js_ts(project_root: &Path) -> bool {
+    walkdir::WalkDir::new(project_root)
+        .follow_links(false)
+        .max_depth(4)
+        .into_iter()
+        .filter_entry(|entry| {
+            !entry.file_type().is_dir()
+                || !matches!(
+                    entry.file_name().to_str(),
+                    Some(".git" | ".cas" | "node_modules" | "target")
+                )
+        })
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry.file_type().is_file()
+                && matches!(
+                    entry.path().extension().and_then(|ext| ext.to_str()),
+                    Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
+                )
+        })
+}
+
+fn package_declares_nuxt(package: &serde_json::Value) -> bool {
+    [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ]
+    .iter()
+    .any(|section| {
+        package
+            .get(section)
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|dependencies| dependencies.contains_key("nuxt"))
+    })
+}
+
 /// Markers for the block that excludes distributed builtin files from a
 /// consumer project's Git worktree. The block is deliberately generated from
 /// the catalogs below so adding a builtin automatically updates the ignore
@@ -4046,7 +4198,7 @@ This is the body content."#;
 
     /// GH #65: the release-notes skill plus its canonical rubric template must
     /// ship for every harness, and both must keep the hard rules (Was → Now,
-    /// no ticket IDs, no process talk, two threads with one reply each).
+    /// no ticket IDs, no process talk, and a rubric-defined reply default).
     #[test]
     fn test_builtin_skills_contains_release_notes_rubric() {
         for (label, catalog) in [
@@ -4069,14 +4221,12 @@ This is the body content."#;
                 "docs/release-notes/RUBRIC.md",
                 "references/RUBRIC-template.md",
                 "Was → Now",
-                "Live on production",
-                "Staging",
-                "## POSTED",
-                "UTC timestamp",
-                "Step 1a — preflight and worker ownership",
-                "supervisor-owned",
-                "designed handoff",
-                "timestamps/permalinks",
+                "Ensure the rubric exists",
+                "Gather the merge",
+                "Draft the messages from the rubric",
+                "Save the draft",
+                "Post in rubric order",
+                "Record the receipt",
             ] {
                 assert!(
                     skill.content.contains(required),
@@ -4099,6 +4249,9 @@ This is the body content."#;
                 "docs/release-notes/<date>-<topic>-slack.md",
                 "## POSTED",
                 "UTC timestamp",
+                "Default: one threaded reply per thread",
+                "Live on production",
+                "Staging",
             ] {
                 assert!(
                     template.content.to_lowercase().contains(&required.to_lowercase()),

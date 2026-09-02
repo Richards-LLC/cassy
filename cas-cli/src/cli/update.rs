@@ -14,6 +14,7 @@ use clap::Args;
 use crate::builtins::{
     SyncResult, ensure_builtin_gitignore, mark_missing_owned_references_for_replacement,
     prune_stale_user_skills_for_harness, sync_all_builtins_for_harness,
+    sync_all_builtins_for_project,
 };
 use crate::cli::Cli;
 use crate::cli::cloud::{CloudSyncArgs, execute_sync};
@@ -868,7 +869,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     // Sync built-in agents, skills, and commands AFTER database sync
     // (so they don't get removed as "stale" by the skill syncer)
     let builtin_result =
-        sync_all_builtins_for_harness(cas_mux::SupervisorCli::Claude, &claude_dir)?;
+        sync_all_builtins_for_project(cas_mux::SupervisorCli::Claude, project_root)?;
     if !cli.json {
         report_builtin_sync(&builtin_result, ".claude", &theme)?;
     }
@@ -935,7 +936,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         }
 
         let codex_result =
-            sync_all_builtins_for_harness(cas_mux::SupervisorCli::Codex, &codex_dir)?;
+            sync_all_builtins_for_project(cas_mux::SupervisorCli::Codex, project_root)?;
         codex_modified_references = codex_result.modified_reference_files.len();
         if !cli.json {
             report_builtin_sync(&codex_result, ".codex", &theme)?;
@@ -956,7 +957,8 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
             fmt.subheading("Syncing .grok files")?;
         }
 
-        let grok_result = sync_all_builtins_for_harness(cas_mux::SupervisorCli::Grok, &grok_dir)?;
+        let grok_result =
+            sync_all_builtins_for_project(cas_mux::SupervisorCli::Grok, project_root)?;
         grok_modified_references = grok_result.modified_reference_files.len();
         if !cli.json {
             report_builtin_sync(&grok_result, ".grok", &theme)?;

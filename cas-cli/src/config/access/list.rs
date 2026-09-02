@@ -11,6 +11,7 @@ impl Config {
         let issues = self.issues.clone().unwrap_or_default();
         let notifications = self.notifications.clone().unwrap_or_default();
         let skill_validation = self.skill_validation.clone().unwrap_or_default();
+        let skills = self.skills.clone().unwrap_or_default();
         let memory = self.memory.clone().unwrap_or_default();
         vec![
             // Sync section
@@ -36,6 +37,7 @@ impl Config {
                 "skill_validation.require_sandbox".to_string(),
                 skill_validation.require_sandbox.to_string(),
             ),
+            ("skills.optional".to_string(), skills.optional.join(",")),
             // Cloud section
             ("cloud.auto_sync".to_string(), cloud.auto_sync.to_string()),
             (

@@ -79,4 +79,8 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
         "skill_validation",
         "Sandbox policy for skill validation scripts",
     );
+    registry.section_descriptions.insert(
+        "skills",
+        "Optional stack-specific builtin skills for this project",
+    );
 }

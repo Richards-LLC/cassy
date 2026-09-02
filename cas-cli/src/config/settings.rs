@@ -74,6 +74,16 @@ pub struct SyncConfig {
     pub promotion_evidence: Vec<String>,
 }
 
+/// Project-scoped optional builtin skills. Skills in this list are enabled
+/// even when stack detection does not find their usual language/framework.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkillsConfig {
+    /// Optional builtin skill ids, such as `fallow` or
+    /// `cas-nuxt-playwright`.
+    #[serde(default)]
+    pub optional: Vec<String>,
+}
+
 /// Skill validation sandbox policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillValidationConfig {

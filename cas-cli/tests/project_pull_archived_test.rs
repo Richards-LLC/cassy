@@ -2,6 +2,7 @@
 //! local entries instead of trying to insert the same primary key again.
 
 use std::path::Path;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 

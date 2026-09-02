@@ -2339,6 +2339,69 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[test]
+    fn grouped_report_uses_sections_remediation_and_counted_summary() {
+        let checks = vec![
+            Check {
+                name: "database".to_string(),
+                group: CheckGroup::Store,
+                status: CheckStatus::Ok,
+                message: "SQLite database found".to_string(),
+                remediation: None,
+            },
+            Check {
+                name: "entries".to_string(),
+                group: CheckGroup::Store,
+                status: CheckStatus::Ok,
+                message: "1234567 entries accessible".to_string(),
+                remediation: None,
+            },
+            Check {
+                name: "search index".to_string(),
+                group: CheckGroup::Indexes,
+                status: CheckStatus::Warning,
+                message: "index is stale".to_string(),
+                remediation: Some("run cas index".to_string()),
+            },
+        ];
+
+        let report = render_report_plain(
+            &checks,
+            "example/project",
+            "3.10.1",
+            std::time::Duration::from_millis(123),
+            false,
+            80,
+        );
+
+        assert!(report.contains("cas doctor · example/project · 3.10.1"));
+        assert!(report.contains("Store"));
+        assert!(report.contains("[OK] database"));
+        assert!(report.contains("[OK] entries"));
+        assert!(report.contains("[WARN] search index"));
+        assert!(report.contains("  → run cas index"));
+        assert!(report.contains("1,234,567 entries accessible"));
+        assert!(report.contains("2 ok · 1 warnings · 0 errors · 123ms"));
+    }
+
+    #[test]
+    fn doctor_json_is_a_superset_with_group_and_remediation() {
+        let checks = vec![Check {
+            name: "symbol index".to_string(),
+            group: CheckGroup::Indexes,
+            status: CheckStatus::Warning,
+            message: "coverage incomplete".to_string(),
+            remediation: Some("run cas index code".to_string()),
+        }];
+
+        let json = serialize_checks(&checks);
+        assert_eq!(json[0]["name"], "symbol index");
+        assert_eq!(json[0]["status"], "warning");
+        assert_eq!(json[0]["message"], "coverage incomplete");
+        assert_eq!(json[0]["group"], "indexes");
+        assert_eq!(json[0]["remediation"], "run cas index code");
+    }
+
     /// cas-25a9 AC1, behaviourally: `cas doctor --fix` against a held lock must
     /// return BOUNDED with a Warning, not hang.
     ///

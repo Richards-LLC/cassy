@@ -69,7 +69,7 @@ If step 3 showed failure: do not close. Go back to step 1 of the worker workflow
 
 | Claim type | Proof shape |
 |---|---|
-| "Tests pass" | `cargo test [--lib --test --workspace]` against the relevant scope (see close-gate.md) |
+| "Tests pass" | `cargo test [--lib --test --workspace]` against the relevant scope (see [cas-worker/references/close-gate.md](../cas-worker/references/close-gate.md)) |
 | "Build is clean" | `cargo build` for the touched crate(s); `cargo build --workspace` for `pub` type changes |
 | "Script runs end-to-end" | The actual script invocation, with the expected input |
 | "New CLI subcommand works" | `<binary> <subcommand> [args]` against the rebuilt binary |
@@ -84,7 +84,7 @@ A proof command is **observable, deterministic, and recoverable** — anyone re-
 
 - **Pure documentation / markdown-only tasks**: no executable proof exists. Record this explicitly (`note_type=decision`: "No executable proof — documentation-only change. Reviewer must inspect rendered output.") and skip the four steps.
 - **Spike / decision tasks** (`task_type=spike`): the deliverable is a decision note, not code. The proof is the existence and content of the decision note — capture that as the proof step instead.
-- **Tasks marked `additive-only` with zero behavior change**: ship the file, verify presence (`ls`, `git status`), capture that as the proof. The close gate's `additive-only` enforcement (no `M`/`D` lines) is the real safety net.
+- **Tasks with `execution_note=additive-only`**: ship only new files, verify presence (`ls`, `git status`), and capture that as the proof. The close gate's `additive-only` enforcement (no `M`/`D` lines) is the safety net.
 
 ## Decision: Advisory vs Required-Paste (v1)
 

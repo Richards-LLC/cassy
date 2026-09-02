@@ -126,3 +126,25 @@ fn cas_worker_guide_mentions_verify_before_claim_in_pre_close() {
         );
     }
 }
+
+#[test]
+fn tests_pass_link_resolves_to_worker_close_gate_in_all_flavors() {
+    let expected = "[cas-worker/references/close-gate.md](../cas-worker/references/close-gate.md)";
+    for path in [
+        "cas-cli/src/builtins/skills/verify-before-claim/SKILL.md",
+        "cas-cli/src/builtins/codex/skills/verify-before-claim/SKILL.md",
+        "cas-cli/src/builtins/grok/skills/verify-before-claim/SKILL.md",
+    ] {
+        let skill_path = repo_root().join(path);
+        let content = load(path);
+        assert!(content.contains(expected), "{path} must use the worker close-gate link");
+        assert!(
+            skill_path
+                .parent()
+                .expect("skill has a parent")
+                .join("../cas-worker/references/close-gate.md")
+                .is_file(),
+            "{path} close-gate link target must resolve"
+        );
+    }
+}

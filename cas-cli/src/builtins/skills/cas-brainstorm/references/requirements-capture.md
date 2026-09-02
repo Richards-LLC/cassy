@@ -73,7 +73,7 @@ topic: <kebab-case-topic>
 - [Affects R2][Needs research] [Question that likely requires research during planning]
 
 ## Next Steps
-[If `Resolve Before Planning` is empty: `→ Hand off to planning (cas-supervisor or /plan)`]
+[If `Resolve Before Planning` is empty: `→ Hand off to cas-supervisor for EPIC creation`]
 [If `Resolve Before Planning` is not empty: `→ Resume cas-brainstorm to resolve blocking questions before planning`]
 ```
 

@@ -26,6 +26,10 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
     registry
         .section_descriptions
         .insert("dev", "Development and tracing options");
+    registry.section_descriptions.insert(
+        "release",
+        "Release-note routing policy, including approved Claude accounts",
+    );
     registry
         .section_descriptions
         .insert("daemon", "Background maintenance and trace archives");

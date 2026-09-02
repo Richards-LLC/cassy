@@ -6,6 +6,6 @@ Mock at boundaries: third-party APIs, time, randomness, filesystems, and databas
 
 Do not mock internal collaborators solely to assert that they were called. Test through the owning module’s public interface whenever that yields the behavior a caller cares about.
 
-## NestJS provider seam
+## Framework-provided seams
 
-`Test.createTestingModule` and provider overrides are sanctioned NestJS seams. Mock an injected provider when it is an external system or separately-owned dependency and the test is asserting the module’s public behavior. Do not reject this pattern as an internal-collaborator mock merely because Nest resolves it through dependency injection.
+A framework's sanctioned test seam — a DI container's provider override, a test module builder — is a legitimate boundary. Mock an injected dependency through it when that dependency is an external system or separately-owned code and the test asserts the module's public behavior. Do not reject the pattern as an internal-collaborator mock merely because the framework resolves it through dependency injection.

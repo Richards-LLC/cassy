@@ -1,6 +1,6 @@
 ---
 name: cas-image-generate
-description: Generate style-matched raster assets for apps, websites, and reports through Google Nano Banana. Use when a project needs a hero, background, logo, icon, card, illustration, or report artwork.
+description: Use when a project needs a hero, background, logo, icon, OG card, illustration, or report artwork that must match its existing design system; routes flat or geometric assets to agent-authored SVG and photographic or painterly work to Google Nano Banana via `GEMINI_API_KEY`.
 managed_by: cas
 ---
 

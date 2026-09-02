@@ -1003,20 +1003,27 @@ fn cli_routing_skill_stays_three_way_synchronized() {
         );
         for required in [
             "codex exec",
-            "pippenz@gmail.com",
+            "release.claude_account_allowlist",
             "unapproved account",
             "CLAUDE_CONFIG_DIR",
-            "docs/SLACK_POSTING_RUNBOOK.md",
         ] {
             assert!(
                 claude.contains(required),
                 "claude {rel} missing {required:?}"
             );
         }
-        assert!(
-            !claude.contains("daniel@petrastella.io"),
-            "claude {rel} retains the stale Daniel-only account gate"
-        );
+        // cas-37f6: operator policy lives in config and the project rubric,
+        // never in the shipped skill text.
+        for banned in [
+            "@gmail.com",
+            "@petrastella.io",
+            "docs/SLACK_POSTING_RUNBOOK.md",
+        ] {
+            assert!(
+                !claude.contains(banned),
+                "claude {rel} ships operator-specific text: {banned:?}"
+            );
+        }
         for twin in TWINS {
             let body = canonicalize(
                 &fs::read_to_string(flavor_path(rel, twin))

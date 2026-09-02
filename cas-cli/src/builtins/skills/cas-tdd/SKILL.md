@@ -1,6 +1,6 @@
 ---
 name: cas-tdd
-description: Test-driven development discipline for behavior-focused, scoped Cassy changes. Use when a task requires test-first work, red-green-refactor, or integration-test design.
+description: Use when a task requires test-first work, red-green-refactor, seam selection for tests, or integration-test design.
 managed_by: cas
 ---
 
@@ -29,7 +29,7 @@ When module shape or a seam is unclear, consult `cas-codebase-design` for module
 
 Mock external systems, time, randomness, and selected filesystem/network boundaries when a real fixture is unsuitable. Prefer real in-process behavior for code you own; do not mock a collaborator merely to prove it was called.
 
-**NestJS carve-out:** `Test.createTestingModule` provider overrides and mocks are the framework-sanctioned seam for isolating a Nest module’s injected dependencies. They are not an implementation-coupled anti-pattern when the test exercises the module’s public behavior and the override represents a real external or separately-owned provider boundary.
+A framework's own testing seam (a DI container's provider override, a test harness's module builder) is not an implementation-coupled mock when the test still asserts the module's public behavior and the override stands in for a real external or separately-owned dependency.
 
 ## Loop rules
 

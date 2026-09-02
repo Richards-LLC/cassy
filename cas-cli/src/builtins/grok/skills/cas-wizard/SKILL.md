@@ -1,6 +1,6 @@
 ---
 name: cas-wizard
-description: Generate an interactive Bash wizard for human-only setup, secrets, dashboard, cutover, or migration steps. Do not use it for work the agent can perform directly.
+description: Use when a human must perform setup, secrets, dashboard, cutover, or migration steps; generates an interactive Bash wizard. Not for work the agent can do itself.
 managed_by: cas
 ---
 

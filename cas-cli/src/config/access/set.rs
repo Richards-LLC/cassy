@@ -388,6 +388,15 @@ impl Config {
                     Some(value.trim().to_string())
                 };
             }
+            // Release section
+            "release.claude_account_allowlist" => {
+                let release = self.release.get_or_insert_with(ReleaseConfig::default);
+                release.claude_account_allowlist = value
+                    .split(',')
+                    .map(|entry| entry.trim().to_ascii_lowercase())
+                    .filter(|entry| !entry.is_empty())
+                    .collect();
+            }
             // Notifications section
             "notifications.enabled" => {
                 let notifications = self

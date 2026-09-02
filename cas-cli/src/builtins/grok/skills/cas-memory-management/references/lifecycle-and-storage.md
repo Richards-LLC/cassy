@@ -1,39 +1,61 @@
-# Memory lifecycle and storage decisions
+---
+managed_by: cas
+---
 
-## Recent ordering
+# Memory Lifecycle and Record Choice
 
-`memory recent` orders active entries by `recent_at desc, id desc`, where
-`recent_at` is the later of creation and last update. The ID tie-break makes
-entries with equal timestamps deterministic. The response repeats this exact
-`ordered_by` value so callers do not infer ordering from display timestamps.
+Memory entries are durable rows in Cassy's SQLite entry store. Their Markdown
+body and optional YAML frontmatter are carried by the `content` field of the
+memory API. Use the API actions to change lifecycle state; do not maintain a
+parallel document or index.
 
-## Lifecycle without a parallel store
+## Recent Ordering
 
-Keep one durable memory entry per continuing fact. Use the existing lifecycle
-fields and actions rather than creating a second store or a scheduler:
+`cas__memory action=recent` orders active entries by
+`recent_at desc, id desc`, where `recent_at` is the later of creation and last
+update. The response repeats that `ordered_by` value so callers do not infer
+ordering from display timestamps. The `limit` request field bounds the result
+and defaults to 10.
 
-- **Merge or supersede:** update the surviving entry with the current guidance,
-  provenance, and any relevant `related_memories`; archive the replaced entry
-  when it should leave normal retrieval. A superseded entry is historical
-  context, not a new memory kind.
-- **Expire:** set `valid_until` when a fact has a known end date. Keep it
-  unarchived while it remains useful as time-bounded context; archive it when
-  it should no longer appear in normal retrieval.
-- **Revise:** use `update` for changed content, tags, title, importance, or
-  validity. `updated_at` then moves the revised entry in `recent`.
-- **Restore:** use `unarchive` if an archived entry becomes active again. Do
-  not duplicate it merely to make it visible.
+## Lifecycle Actions
 
-## Choose the authoritative record
+- **Revise**: `update` a continuing fact when its content, tags, or importance
+  change. The live update action supports only those three mutable fields;
+  title and validity are set when remembering an entry and are not update
+  parameters.
+- **Archive**: `archive` an entry that should leave normal retrieval. Archiving
+  also removes it from the search index.
+- **Restore**: `unarchive` an archived entry when it becomes useful again.
+- **Time-bound**: set `valid_from` or `valid_until` on `remember` when a fact
+  has a known validity window.
+- **Review**: `get` records access; `helpful`, `harmful`, and `mark_reviewed`
+  record feedback or review state.
+- **Tier**: `set_tier` moves an entry among `working`, `cold`, and `archive`;
+  `list` can filter by that tier.
+- **Delete**: use `delete` only when the entry should be removed entirely and
+  no longer needs an audit trail.
+
+Keep one authoritative entry for a continuing fact. Update it rather than
+creating a second entry merely because its wording changed. Use the
+`related:<slug>` tags returned by moderate overlap detection when two distinct
+entries genuinely belong together.
+
+## Team and Personal Scope
+
+`remember` can use an explicit `team_id`. In a team-linked project, the
+`personal=true` request field keeps a note personal unless `team_id` is also
+set; an explicit team always wins. `list` can filter by `scope`, `team_id`,
+`tags`, `tier`, `sort`, and `sort_order`.
+
+## Choose the Authoritative Record
 
 | Need | Use | Why |
 | --- | --- | --- |
-| An enduring fact, preference, lesson, or local constraint | **Memory** | Persists across sessions and is retrieved as working context. |
-| Work to assign, sequence, block, verify, or close | **Task** | Carries ownership, dependencies, and lifecycle state. |
-| A curated project-wide reference page | **Knowledge** | Distilled, navigable documentation rather than personal working context. |
-| A normative product, API, or architecture decision with scope and acceptance criteria | **Spec / ADR** | Provides an approved contract and decision record. |
+| An enduring fact, preference, lesson, or local constraint | **Memory** | Persists across sessions and is retrieved as working context |
+| Work to assign, sequence, block, verify, or close | **Task** | Carries ownership, dependencies, and lifecycle state |
+| A curated project-wide reference page | **Knowledge** | Distilled, navigable documentation rather than working context |
+| A normative product, API, or architecture decision | **Spec / ADR** | Provides an approved contract and decision record |
 
 If an item fits more than one row, keep the operational source of truth in the
-right system and link or summarize it elsewhere. For example, a task can leave
-a memory of its reusable lesson, and an approved spec can have a knowledge page
-that explains it.
+right system and link or summarize it elsewhere. A task may leave a reusable
+memory, and an approved spec may have a knowledge page explaining it.

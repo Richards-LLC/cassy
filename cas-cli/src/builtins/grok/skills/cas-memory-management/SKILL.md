@@ -6,148 +6,108 @@ managed_by: cas
 
 # Cassy Memory Management
 
-Store memories proactively — don't wait to be asked. Before creating a new memory, check whether Cassy already has one on the same topic (see Overlap Detection below); the cheapest duplicate is the one you never write.
+Cassy stores durable memory entries in its SQLite-backed entry store. Use the
+`cas__memory` tool for entry lifecycle operations, and use
+`cas__search` when you need to find a memory by topic. Store useful
+project facts proactively, especially after a non-trivial diagnosis or design
+decision.
 
-## When to Remember
+## Valid Actions
 
-- After discovering project-specific patterns or conventions
-- After fixing non-trivial bugs (capture root cause + solution)
-- After learning how unfamiliar code works
-- When finding important architectural decisions
-- After resolving configuration or setup issues
+The list below is the dispatch order for `cas__memory`; keep it aligned
+with the live service.
 
-## Actions
+**Valid `cas__memory` actions** (exact list — do not invent others): `remember`, `get`, `list`, `update`, `delete`, `archive`, `unarchive`, `helpful`, `harmful`, `mark_reviewed`, `recent`, `set_tier`, `opinion_reinforce`, `opinion_weaken`, `opinion_contradict`.
 
-- **Store**: `cas__memory action=remember title="..." content="..." entry_type=learning` (types: learning, preference, context, observation)
+## Common Operations
+
+- **Remember**: `cas__memory action=remember title="..." content="..." entry_type=learning`
 - **Find**: `cas__search action=search query="..." doc_type=entry`
-- **Promote**: `cas__memory action=helpful id=<id>` — increases priority for future retrieval
+- **Read**: `cas__memory action=get id=<entry-id>`
+- **List**: `cas__memory action=list scope=project limit=20`
+- **Revise**: `cas__memory action=update id=<entry-id> content="..."`
+- **Feedback**: use `helpful`, `harmful`, or `mark_reviewed` with `id`.
+- **Lifecycle**: use `archive` to remove an entry from normal retrieval and
+  `unarchive` to restore it.
+- **Recent**: `cas__memory action=recent limit=10`
 
-**Valid `cas__memory` actions** (exact list — do not invent others): `remember`, `get`, `list`, `update`, `delete`, `archive`, `unarchive`, `helpful`, `harmful`, `mark_reviewed`, `recent`, `set_tier`, `opinion_reinforce`, `opinion_weaken`, `opinion_contradict`. There is **no `recall` action** — use `get` (by id) or `cas__search action=search` (by query).
+## Request Fields
 
-## Host-Scoped Memories
+These are the fields on the unified `MemoryRequest`. `action` is required;
+the other fields are optional and apply to the actions described here.
 
-Use a global memory tagged `host:<hostname>` for machine-specific constraints that should follow every project session on the same host: tmpfs mount rules, local disk budgets, staging directories, hardware quirks, or installed-tool constraints. SessionStart injects matching host-tagged global memories into each project on that machine, within the startup context budget.
+- `action`: operation name from the valid-actions list above.
+- `id`: entry ID for `get`, `update`, `delete`, `archive`, `unarchive`,
+  `helpful`, `harmful`, `mark_reviewed`, `set_tier`, and `opinion_*` actions.
+- `content`: text for `remember` and `update`; evidence for `opinion_*` actions.
+- `entry_type`: one of `learning`, `preference`, `context`, or `observation`
+  for `remember` (default: `learning`).
+- `tags`: comma-separated tags for `remember`; for `list`, every supplied tag
+  must match case-insensitively.
+- `title`: optional entry title for `remember`.
+- `importance`: `0.0` through `1.0` for `remember` (default: `0.5`).
+- `tier`: `working`, `cold`, or `archive` for `set_tier` and `list`.
+- `limit`: maximum results for `list` and `recent` (`list` defaults to 20;
+  `recent` defaults to 10).
+- `scope`: `global`, `project`, or `all` for list filtering; remember defaults
+  to project scope.
+- `team_id`: team filter for `list`, or explicit team association for
+  `remember`.
+- `bypass_overlap`: set `true` only for bulk imports or tests that deliberately
+  create overlapping entries; the default is `false`.
+- `mode`: `interactive` (default) or `autofix` for `remember`. Autofix performs
+  an atomic merge of a high-overlap entry.
+- `expected_updated_at`: RFC3339 timestamp for a `remember` autofix merge. A
+  stale value returns a non-mutating conflict.
+- `sort`: `created`, `updated`, `importance`, or `title` for `list`.
+- `sort_order`: `asc` or `desc` for `list` (default: `desc`).
+- `valid_from`: optional RFC3339 start timestamp for `remember`.
+- `valid_until`: optional RFC3339 expiry timestamp for `remember`.
+- `personal`: set `true` on `remember` to skip team auto-promotion. An
+  explicit `team_id` takes precedence.
 
-- Example: `cas__memory action=remember scope=global tags=host:<hostname>,tmpfs title="Host tmpfs constraint" content="..." entry_type=context`
-- Do not tag project-specific facts as host-scoped; keep those in project scope.
-- If a constraint applies to multiple machines, create one global memory per hostname tag or use a different cross-project mechanism.
+## Content and Frontmatter
 
-## Two Modes: Legacy and Structured
+The `content` field is the authoritative memory body. It may begin with a YAML
+frontmatter block followed by Markdown prose. Frontmatter is embedded in the
+entry content; it is not a separate document or filesystem record.
 
-Cassy memories support two frontmatter modes. Both are valid; structured mode is preferred for new memories but never required.
-
-### Legacy mode (backward compatible)
-
-Only the three legacy fields are required:
-
-```yaml
----
-name: <short title>
-description: <one-line summary used in MEMORY.md index>
-type: <user | feedback | project | reference | bugfix | architecture | learning>
----
-```
-
-Legacy memories continue to work unchanged. Validators warn on missing structured fields but never hard-fail reads or writes. No migration is forced.
-
-### Structured mode (preferred for new memories)
-
-Structured mode layers required fields on top of the legacy three:
-
-- `track` — `bug` or `knowledge` (determined by `problem_type`)
-- `module` — crate or area affected (e.g. `cas-mcp`, `cas-core`, `ghostty_vt_sys`)
-- `problem_type` — enum; the value determines the track
-- `severity` — `critical` | `high` | `medium` | `low`
-- `date` — `YYYY-MM-DD`
-
-Bug-track memories additionally require `symptoms` (1–5 items) and `root_cause` (enum). Knowledge-track has no extra required fields.
-
-Optional for both: `tags` (max 8), `related_modules`, `related_memories`, `resolution_type`, `commit`, `applies_when`.
-
-The full schema — including enum values, track classification, validation rules, and indexed fields — lives in **[references/schema.yaml](references/schema.yaml)**. Read it once before writing structured memories; refer back for enum values.
-
-## Body Templates
-
-Two body templates are shipped, one per track:
-
-- **Bug track** — Problem / Symptoms / What Didn't Work / Solution / Why This Works / Prevention / Related
-- **Knowledge track** — Context / Guidance / Why This Matters / When to Apply / Examples / Related
-
-Use the template matching your `problem_type`'s track. If a memory captures both a bug and a general lesson, prefer the **bug** template and place the general guidance in the Prevention section.
-
-Full templates, per-section guidance, and the bug-vs-knowledge decision table: **[references/body-templates.md](references/body-templates.md)**.
+The overlap scorer reads `name`, `description`, `module`, `track`, and
+`root_cause` from that block. The search index also extracts the filter fields
+documented in `cas-search`: `module`, `track`, `problem_type`, `severity`,
+`root_cause`, and `date`. Keep frontmatter concise and put explanatory detail
+in the body. See [schema.yaml](references/schema.yaml) and
+[body-templates.md](references/body-templates.md).
 
 ## Overlap Detection
 
-Before you create a new memory, run the overlap check. The goal is to catch the case where Cassy already has a memory about this problem — silent duplication is the primary way the memory set decays over time.
+`remember` checks for overlapping entries by default. It scores problem
+statement, root cause, solution approach, referenced files, and tags, then
+applies module and track mismatch penalties.
 
-High-level workflow:
+- Low overlap creates the new entry.
+- Moderate overlap creates the entry and adds bounded `related:<slug>` tags to
+  cross-reference the matching entries.
+- High overlap returns a structured blocked result in interactive mode. Follow
+  its `existing_slug` and `recommended_action` instead of creating a duplicate.
+- `mode=autofix` atomically replaces the overlapping entry's content while
+  preserving its ID. Supply `expected_updated_at` when coordinating with
+  another writer; a conflict does not change stored data.
 
-1. **Extract key terms** from the new memory — prefer reference symbols (file paths, function names, commit SHAs), then symptom/error strings, then title tokens.
-2. **Search existing memories** via `cas__search action=search doc_type=entry` using those terms. Take the top 3–5 candidates. If the new memory has a `module` field, prefer same-module candidates.
-3. **Score each candidate 0–5** across five dimensions: problem statement, root cause, solution approach, referenced files, tags. Subtract 1 for `module` mismatch and 1 for `track` mismatch (floor at 0).
-4. **Act on the highest score:**
-   - **4–5 (high overlap)** — do not create. Update the existing memory in place (autofix/headless) or surface the match for user decision (interactive).
-   - **2–3 (moderate overlap)** — create with bidirectional cross-references. Add the matched slug(s) to the new memory's `related_memories`; append the new slug to the existing memory's `related_memories`. Cap cross-references at 3 per memory.
-   - **0–1 (low overlap)** — create normally.
+Use `bypass_overlap=true` only when the caller is intentionally importing or
+testing duplicate entries. See [overlap-detection.md](references/overlap-detection.md)
+for scoring and cross-reference details. Structured response examples live in
+[response-shapes.md](references/response-shapes.md).
 
-Full workflow — scoring rules, update/cross-reference flows, edge cases (stale candidates, `supersedes`, legacy memories with no `module`), and the interactive vs headless modes — lives in **[references/overlap-detection.md](references/overlap-detection.md)**.
+## Choosing Memory vs Other Records
 
-Phase 1 enforces the overlap check in Rust at the `action=remember` entry point (shipped in cas-4721). The check runs automatically on every call; pass `bypass_overlap=true` only for bulk imports and tests.
+- Use a **memory** for an enduring fact, preference, lesson, or local constraint.
+- Use a **task** for work that needs ownership, dependencies, verification, or
+  closure.
+- Use a **knowledge page** for a curated project reference.
+- Use a **spec** for an approved product, API, or architecture contract.
 
-## `action=remember` response shape
-
-`cas__memory action=remember` returns a structured response on `CallToolResult.structured_content` in addition to the legacy free-text block. Agents should pattern-match on the tagged `status` field rather than parsing the text. Phase 1 emits two variants (`Created` and `Blocked`); Phase 2 may add additional variants for `mode=autofix` outcomes — the serde-tagged shape makes that backwards-compatible.
-
-### `Created` — the memory was inserted
-
-```json
-{
-  "status": "created",
-  "slug": "cas-abcd",
-  "related_memories": [],
-  "refresh_recommended": false
-}
-```
-
-- `related_memories` is empty on a low-overlap insert or populated with the slugs of every cross-referenced match on a moderate-overlap (score 2–3) insert.
-- `refresh_recommended` is `true` when at least one of those matches has already hit the 3-link cross-reference cap. When you see this, run a refresh on the module before creating more memories on the same topic.
-- `CallToolResult.is_error` is `false`.
-
-### `Blocked` — the insert was rejected (high overlap, score 4–5)
-
-```json
-{
-  "status": "blocked",
-  "reason": "high_overlap",
-  "existing_slug": "cas-xxxx",
-  "dimension_scores": {
-    "problem_statement": 1,
-    "root_cause": 1,
-    "solution_approach": 1,
-    "referenced_files": 1,
-    "tags": 0,
-    "penalty": 0,
-    "net": 4
-  },
-  "recommended_action": "update_existing",
-  "other_high_scoring": ["cas-yyyy"]
-}
-```
-
-- Do NOT retry the insert. Update the existing memory at `existing_slug` in place (or surface the match to the user, depending on your interaction model).
-- `recommended_action` is either `"update_existing"` (headless callers should apply automatically) or `"surface_for_user_decision"` (interactive callers should ask first).
-- `other_high_scoring` lists additional slugs that also scored ≥4 — rare, but a signal that the module needs a refresh pass.
-- `CallToolResult.is_error` is `true`. The tool call itself returns `Ok`; only the `is_error` flag signals failure so structured_content is always parseable.
-
-### `mode` parameter
-
-- `mode=interactive` (default, or omitted) — the behavior documented above. On a high-overlap match, return `Blocked` so the caller decides.
-- `mode=autofix` — reserved for Phase 2. Passing it today returns an explicit `"mode=autofix is reserved for Phase 2"` error rather than silently falling back.
-
-## References
-
-- [`references/schema.yaml`](references/schema.yaml) — canonical frontmatter schema, enum values, validation rules
-- [`references/body-templates.md`](references/body-templates.md) — bug + knowledge body templates and guidance
-- [`references/overlap-detection.md`](references/overlap-detection.md) — 4-step duplicate prevention workflow
-- [`references/lifecycle-and-storage.md`](references/lifecycle-and-storage.md) — recent ordering, lifecycle guidance, and when to use memory, tasks, knowledge, or specs
+Use `update` to revise a continuing fact, `archive` when it should leave normal
+retrieval, `unarchive` when it becomes current again, and temporal validity
+fields when the fact has a known time window. See
+[lifecycle-and-storage.md](references/lifecycle-and-storage.md).

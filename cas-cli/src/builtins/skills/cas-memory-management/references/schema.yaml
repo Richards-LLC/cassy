@@ -2,205 +2,55 @@
 managed_by: cas
 ---
 
-# Canonical frontmatter schema for CAS memory files.
+# Schema for memory content and the unified mcp__cas__memory request.
 #
-# Memory files live at:
-#   ~/.claude/projects/<project>/memory/<slug>.md
-#
-# The schema has two tracks based on problem_type:
-#   bug       — defects/failures that were diagnosed and fixed
-#   knowledge — best practices, patterns, workflow improvements, references
-#
-# Both tracks share the same required core fields. Tracks differ in which
-# additional fields are required (see track_rules below).
-#
-# Backward compatibility:
-#   Pre-existing memories use only `name`, `description`, `type`. These
-#   continue to work. The new fields (track, module, problem_type, severity,
-#   root_cause, symptoms, tags, date) are additive. Validators MUST warn
-#   on missing required fields but MUST NOT hard-fail.
+# Memory content is stored in a SQLite entry row. Optional YAML frontmatter is
+# embedded at the beginning of that content, followed by the Markdown body.
+# This is guidance for callers, not a second file-backed memory store.
 
-# --- Legacy fields (always present, kept for backward compat) ---------------
-legacy_fields:
-  name:
-    type: string
-    required: true
-    description: "Short human title for the memory"
-  description:
-    type: string
-    required: true
-    description: "One-line summary used in MEMORY.md index and in retrieval ranking"
-  type:
+request:
+  entry_type:
     type: enum
-    required: true
-    values: [user, feedback, project, reference, bugfix, architecture, learning]
-    description: "Legacy memory category. New fields layer on top of this."
+    values: [learning, preference, context, observation]
+    default: learning
+    applies_to: remember
+    description: "The single entry-type enum accepted by the memory request."
 
-# --- Track classification ---------------------------------------------------
-tracks:
-  bug:
-    description: "Defects, failures, and errors that were diagnosed and fixed"
-    problem_types:
-      - build_error
-      - test_failure
-      - runtime_error
-      - performance_issue
-      - database_issue
-      - security_issue
-      - integration_issue
-      - logic_error
-  knowledge:
-    description: "Best practices, workflow improvements, patterns, and references"
-    problem_types:
-      - best_practice
-      - documentation_gap
-      - workflow_issue
-      - developer_experience
+content_frontmatter:
+  description: "Optional YAML at the start of the content field."
+  overlap_fields:
+    - name
+    - description
+    - module
+    - track
+    - root_cause
+  fields:
+    name:
+      type: string
+      description: "Short title used when extracting overlap facets."
+    description:
+      type: string
+      description: "One-line summary used when extracting overlap facets."
+    module:
+      type: string
+      description: "Affected crate, subsystem, or project area."
+    track:
+      type: string
+      recommended_values: [bug, knowledge]
+      description: "Whether the entry describes a defect or reusable guidance."
+    root_cause:
+      type: string
+      description: "The diagnosed cause when the entry describes a defect."
 
-# --- Fields required by BOTH tracks (when track is set) ---------------------
-required_fields:
-  track:
-    type: enum
-    values: [bug, knowledge]
-    description: "Which track this memory belongs to. Must agree with problem_type."
+search_index_fields:
+  description: "Structured fields extracted by the search index when present in content frontmatter."
+  filter_keys: [module, track, problem_type, severity, root_cause, date]
+  notes:
+    - "Values are whitespace-free in key:value search tokens."
+    - "Legacy content without structured frontmatter remains searchable by body text."
 
-  module:
-    type: string
-    description: |
-      Module, crate, or area affected. Free-form but should match a real
-      area of the codebase. Examples: cas-mcp, cas-mux, cas-cli, cas-core,
-      ghostty_vt_sys, cloud-client, factory-supervisor, hooks.
-
-  problem_type:
-    type: enum
-    values:
-      # bug track
-      - build_error
-      - test_failure
-      - runtime_error
-      - performance_issue
-      - database_issue
-      - security_issue
-      - integration_issue
-      - logic_error
-      # knowledge track
-      - best_practice
-      - documentation_gap
-      - workflow_issue
-      - developer_experience
-    description: "Primary category — determines track (bug vs knowledge)"
-
-  severity:
-    type: enum
-    values: [critical, high, medium, low]
-    description: |
-      Impact severity.
-      critical = production broken / data loss / security exposure
-      high     = major feature broken or many users blocked
-      medium   = single feature degraded, workaround exists
-      low      = cosmetic, minor friction, edge case
-
-  date:
-    type: string
-    pattern: '^\d{4}-\d{2}-\d{2}$'
-    description: "Date the memory was captured (YYYY-MM-DD)"
-
-# --- Track-specific rules ----------------------------------------------------
-track_rules:
-  bug:
-    required:
-      symptoms:
-        type: array[string]
-        min_items: 1
-        max_items: 5
-        description: "Observable symptoms (errors, broken behavior). Strings, not paragraphs."
-      root_cause:
-        type: enum
-        values:
-          - missing_dependency
-          - wrong_api
-          - scope_issue
-          - thread_violation
-          - async_timing
-          - memory_leak
-          - config_error
-          - logic_error
-          - test_isolation
-          - missing_validation
-          - missing_permission
-          - incomplete_setup
-          - race_condition
-          - off_by_one
-          - stale_cache
-          - platform_incompatibility
-        description: "Fundamental technical cause of the problem"
-    optional:
-      resolution_type:
-        type: enum
-        values:
-          - code_fix
-          - migration
-          - config_change
-          - test_fix
-          - dependency_update
-          - environment_setup
-          - workflow_improvement
-          - documentation_update
-          - tooling_addition
-        description: "Type of fix applied"
-      commit:
-        type: string
-        description: "Short SHA or commit hash where the fix landed"
-
-  knowledge:
-    optional:
-      applies_when:
-        type: array[string]
-        max_items: 5
-        description: "Conditions or situations where this guidance applies"
-      symptoms:
-        type: array[string]
-        max_items: 5
-        description: "Observable gaps or friction that prompted this guidance"
-
-# --- Fields optional for BOTH tracks ----------------------------------------
-optional_fields:
-  tags:
-    type: array[string]
-    max_items: 8
-    description: "Search keywords, lowercase and hyphen-separated. Used for filtered retrieval."
-  related_modules:
-    type: array[string]
-    description: "Other modules/crates involved"
-  related_memories:
-    type: array[string]
-    description: "Slugs of related memory files for cross-linking"
-
-# --- Validation rules --------------------------------------------------------
-validation_rules:
-  - "Legacy fields (name, description, type) are always required"
-  - "If `track` is present, all required_fields must be present"
-  - "If `track` is absent, the memory is treated as legacy and only legacy fields are checked"
-  - "Track must match problem_type's track classification"
-  - "Bug-track required fields (symptoms, root_cause) must be present on bug-track memories"
-  - "Knowledge-track memories have no additional required fields beyond the shared ones"
-  - "Enum fields must match allowed values exactly"
-  - "Array fields must respect min_items/max_items"
-  - "date must match YYYY-MM-DD format"
-  - "tags should be lowercase and hyphen-separated, max 8"
-  - "Validators warn on violation but do not hard-fail (backward compat)"
-
-# --- Search indexing hints ---------------------------------------------------
-# mcp__cas__search should index these fields as filterable metadata so users
-# can run queries like:
-#   - "show all runtime_error memories for cas-mcp"
-#   - "show critical/high severity memories from the last 30 days"
-#   - "show memories tagged 'sqlite' across all modules"
-indexed_fields:
-  - track
-  - module
-  - problem_type
-  - severity
-  - root_cause
-  - tags
-  - date
+validation:
+  - "The memory request always carries action; all other request fields are optional and action-specific."
+  - "entry_type must be one of the four values above when supplied to remember."
+  - "Frontmatter is best-effort metadata inside content; malformed or absent frontmatter does not prevent body-text indexing."
+  - "track and root_cause are recommendations for overlap metadata, not separate request parameters."

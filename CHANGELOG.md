@@ -7,6 +7,27 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.10.1] - 2026-09-02
+
+### Fixed
+- Project-scope cloud pull reconciles entries that exist locally as archived
+  rows through the same last-writer-wins path as team pull, instead of
+  failing every one of them with "entry already exists" (347 per pull on
+  one contaminated store); duplicate-key races resolve the same way and
+  unrelated store errors still surface.
+- `cas cloud purge-foreign` no longer trusts a backfilled `origin_project`
+  alone: rows the doctor's cross-database (id, title) and activity evidence
+  attribute to another project are now purgeable, id collisions and
+  unattributed replicas are never deleted, task deletes match on (id, title),
+  safety lookups fail closed, and the dry-run labels each row with the
+  evidence that selected it.
+- `cas doctor` reports the doctor's foreign-row evidence count next to the
+  purge delete-set count, names every retained row with its reason, and stops
+  prescribing `purge-foreign` as complete remediation when the two disagree.
+- `cas doctor` names the configuration file that registered an unresolvable
+  MCP stdio command (the user-scope `code-mode-mcp/config.toml` or the project
+  `proxy.toml`) instead of always saying "repair proxy.toml".
+
 ## [3.10.0] - 2026-09-01
 
 ### Removed

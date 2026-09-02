@@ -2107,10 +2107,10 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
 #[cfg(feature = "mcp-proxy")]
 fn proxy_stdio_commands_check(cas_root: &Path) -> Check {
     let proxy_path = cas_root.join("proxy.toml");
-    let config = match cmcp_core::config::Config::load_merged(
+    let (config, sources) = match cmcp_core::config::Config::load_merged_with_sources(
         proxy_path.exists().then_some(proxy_path.as_path()),
     ) {
-        Ok(config) => config,
+        Ok(loaded) => loaded,
         Err(error) => {
             return Check {
                 name: "MCP stdio upstreams".to_string(),
@@ -2134,7 +2134,13 @@ fn proxy_stdio_commands_check(cas_root: &Path) -> Check {
     let missing = commands
         .iter()
         .filter(|(_, command)| cmcp_core::resolve_stdio_executable(command).is_none())
-        .map(|(name, command)| format!("{name} = {command}"))
+        .map(|(name, command)| {
+            let source = sources
+                .get(*name)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "unknown configuration source".to_string());
+            format!("{name} = {command} (from {source})")
+        })
         .collect::<Vec<_>>();
 
     if missing.is_empty() {
@@ -2147,11 +2153,24 @@ fn proxy_stdio_commands_check(cas_root: &Path) -> Check {
             ),
         }
     } else {
+        let mut source_paths = commands
+            .iter()
+            .filter(|(_, command)| cmcp_core::resolve_stdio_executable(command).is_none())
+            .filter_map(|(name, _)| sources.get(*name))
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        source_paths.sort();
+        source_paths.dedup();
+        let remediation = if source_paths.is_empty() {
+            "repair the registering configuration file".to_string()
+        } else {
+            format!("repair {}", source_paths.join(", "))
+        };
         Check {
             name: "MCP stdio upstreams".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "{} of {} registered command(s) do not resolve: {}; repair proxy.toml before restarting cas serve",
+                "{} of {} registered command(s) do not resolve: {}; {remediation} before restarting cas serve",
                 missing.len(),
                 commands.len(),
                 missing.join(", ")

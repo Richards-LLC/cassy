@@ -264,19 +264,42 @@ impl Config {
     /// Load and merge project config with user config (~/.config/code-mode-mcp/config.toml).
     /// Project config takes precedence over user config.
     pub fn load_merged(project_path: Option<&Path>) -> Result<Config> {
-        let user_path = Scope::User.config_path().ok();
-        Self::load_merged_from(user_path.as_deref(), project_path)
+        let (config, _) = Self::load_merged_with_sources(project_path)?;
+        Ok(config)
     }
 
-    fn load_merged_from(user_path: Option<&Path>, project_path: Option<&Path>) -> Result<Config> {
-        let mut merged = match user_path {
-            Some(path) => Config::load_from(path)?,
-            None => Config::default(),
+    /// Load and merge project config with user config, retaining the source
+    /// path that supplied each final server definition. Project config takes
+    /// precedence over user config, so an overridden server is attributed to
+    /// the project file.
+    pub fn load_merged_with_sources(
+        project_path: Option<&Path>,
+    ) -> Result<(Config, HashMap<String, PathBuf>)> {
+        let user_path = Scope::User.config_path().ok();
+        Self::load_merged_with_sources_from(user_path.as_deref(), project_path)
+    }
+
+    fn load_merged_with_sources_from(
+        user_path: Option<&Path>,
+        project_path: Option<&Path>,
+    ) -> Result<(Config, HashMap<String, PathBuf>)> {
+        let (mut merged, mut sources) = match user_path {
+            Some(path) => {
+                let config = Config::load_from(path)?;
+                let sources = config
+                    .servers
+                    .keys()
+                    .map(|name| (name.clone(), path.to_path_buf()))
+                    .collect();
+                (config, sources)
+            }
+            None => (Config::default(), HashMap::new()),
         };
         if let Some(path) = project_path {
             let project = Config::load_from(path)?;
             for (name, server) in project.servers {
-                merged.servers.insert(name, server);
+                merged.servers.insert(name.clone(), server);
+                sources.insert(name, path.to_path_buf());
             }
             // Security policy is not union-merged. When a project config is
             // present it is authoritative, including an omitted/empty list;
@@ -285,7 +308,7 @@ impl Config {
             merged.delegation = project.delegation;
         }
 
-        Ok(merged)
+        Ok((merged, sources))
     }
 
     /// Save config to a TOML file.
@@ -438,15 +461,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let malformed = dir.path().join("malformed.toml");
         std::fs::write(&malformed, "[[not valid").unwrap();
-        let error = Config::load_merged_from(None, Some(&malformed)).unwrap_err();
+        let error = Config::load_merged_with_sources_from(None, Some(&malformed)).unwrap_err();
         assert!(error.to_string().contains("failed to parse"));
 
         let unreadable = dir.path().join("directory-not-file");
         std::fs::create_dir(&unreadable).unwrap();
-        let error = Config::load_merged_from(None, Some(&unreadable)).unwrap_err();
+        let error = Config::load_merged_with_sources_from(None, Some(&unreadable)).unwrap_err();
         assert!(error.to_string().contains("failed to read"));
 
-        let error = Config::load_merged_from(Some(&malformed), None).unwrap_err();
+        let error = Config::load_merged_with_sources_from(Some(&malformed), None).unwrap_err();
         assert!(error.to_string().contains("failed to parse"));
     }
 
@@ -532,7 +555,8 @@ tool = "ask_viktor"
         )
         .unwrap();
 
-        let merged = Config::load_merged_from(Some(&user), Some(&project)).unwrap();
+        let (merged, _) =
+            Config::load_merged_with_sources_from(Some(&user), Some(&project)).unwrap();
         assert_eq!(
             merged.allowlist,
             vec![ExternalToolConfig {

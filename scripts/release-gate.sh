@@ -252,7 +252,13 @@ check_archive_mode() {
 }
 
 check_snapshot_portability() {
-    local deep_tmp="$tmp_dir/$(printf 'deep-temp-path-%.0s' {1..12})"
+    # The deep TMPDIR must live OUTSIDE every checkout: worktrees sit under the
+    # main repo's .cas/, so a temp dir inside the tree lets find_cas_root walk
+    # up into the real project store and the snapshot captures live data.
+    local deep_base="${CAS_RELEASE_GATE_HOME_DIR:-${HOME:?}/.cache/cas-release-gate}"
+    mkdir -p "$(dirname "$deep_base")"
+    local deep_tmp
+    deep_tmp="$(mktemp -d "${deep_base}.snap.XXXXXX")/$(printf 'deep-temp-path-%.0s' {1..12})"
     mkdir -p "$deep_tmp"
     # COLUMNS must be absent, rather than merely empty: terminal-width probes
     # commonly distinguish the two states.

@@ -1,6 +1,6 @@
 ---
 name: cas-codebase-design
-description: Use when designing or restructuring a module, choosing a seam, or assessing testability and architectural depth.
+description: Use when designing or restructuring a module, choosing a seam, assessing testability and architectural depth, or settling the project's domain terminology and durable technical decisions.
 managed_by: cas
 license: MIT
 metadata:
@@ -30,8 +30,24 @@ maintainers, and tests that exercise real behavior.
 - **Leverage** and **locality**: the caller and maintainer benefits of depth.
 
 Use this language consistently, except that established framework vocabulary
-always wins. In NestJS projects, `*.service.ts` and `service` are normal,
-meaningful conventions; do not apply an "avoid service" rule there.
+always wins: where the project's framework already gives a word a precise,
+conventional meaning, that meaning is the project's language and this skill
+does not override it.
+
+## Challenge the language
+
+Sharpen the shared domain model while you design. When a term conflicts with
+established project language, surface the conflict immediately. When it is
+vague or overloaded, propose a precise canonical term. Stress-test
+relationships with concrete edge cases, and verify claims about behavior
+against the code before treating them as domain truth.
+
+When a term is settled, store its concise definition with
+`mcp__cs__memory action=remember`, using project scope and tags that make it
+retrievable: the term, its boundaries, synonyms to avoid, and the scenario that
+disambiguated it. Search existing project memories first so the entry refines
+rather than duplicates the canonical language. Never open a parallel glossary
+or decision file that competes with CAS memory/spec storage.
 
 ## Principles
 
@@ -45,13 +61,31 @@ meaningful conventions; do not apply an "avoid service" rule there.
 - Accept dependencies rather than creating them; return results where possible
   rather than hiding critical work in side effects.
 
+## Design it twice
+
+Before committing to a consequential interface, frame constraints, dependency
+categories, and an illustrative sketch.
+Explore at least three materially different interfaces:
+minimum surface, maximum flexibility, and the common caller.
+Compare depth, locality, seam placement, hidden complexity, and trade-offs.
+
+## Deepening an existing shallow module
+
+Classify dependencies before combining shallow modules: in-process dependencies
+can be tested through the new interface directly; local-substitutable ones use
+their real local stand-in; owned remote dependencies justify an injected port
+and in-memory/transport adapters; true externals use an injected mock adapter.
+
+Keep internal seams private. Replace old shallow-module tests with tests at the
+deepened interface once that interface covers the behavior; do not layer tests
+that assert internals or must change with every refactor.
+
 ## Completion
 
-Name the selected seam, the interface facts callers must learn, what complexity
-stays behind it, and the deletion-test result. If the choice is consequential,
-capture it in the active Cassy task or a `mcp__cs__spec` decision rather than a
-parallel architecture-record directory.
-
-For dependency categories and replacement testing, read
-[DEEPENING.md](DEEPENING.md). For alternatives, read
-[DESIGN-IT-TWICE.md](DESIGN-IT-TWICE.md).
+Done when a task note (`mcp__cs__task action=notes note_type=decision`) lists:
+the chosen seam, the interface facts callers must learn, what complexity stays
+hidden behind it, the deletion-test result, and two rejected alternatives with
+the reason each lost. If the choice is hard to reverse, surprising without
+context, and the result of a real trade-off, also record it with
+`mcp__cs__spec action=create` — never in a parallel architecture-record
+directory.

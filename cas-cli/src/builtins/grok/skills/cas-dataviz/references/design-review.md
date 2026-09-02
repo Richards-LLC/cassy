@@ -1,6 +1,6 @@
 # Designer review: bundled `dataviz` skill
 
-Review basis: the complete Claude Code bundled skill captured at `/home/pippenz/.cas/artifacts/dataviz-reference/` on 2026-08-11, including its references and runnable palette validator.
+Review basis: the complete harness-bundled `dataviz` skill as shipped with Claude Code, read in full on 2026-08-11 including its references and runnable palette validator.
 
 ## Preserve
 

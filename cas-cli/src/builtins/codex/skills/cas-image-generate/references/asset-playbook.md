@@ -1,9 +1,8 @@
 # Asset playbook
 
-Research basis: the current [image-generation dossier](../../../../../../.cas/artifacts/cas-1c67/research/image-generation-dossier.md)
-was compiled 2026-08-29. The hosted route in this skill is Google Nano Banana;
-the dossier's other providers are retained as explicitly unwired references in
-[providers.md](providers.md).
+Research basis: a provider survey compiled 2026-08-29. The hosted route in this
+skill is Google Nano Banana; the other surveyed providers are retained as
+explicitly unwired references in [providers.md](providers.md).
 
 ## Routing and presets
 

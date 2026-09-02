@@ -10,6 +10,7 @@
 //! The factory guide skill files are also the source of truth for HooksConfig
 //! guidance that gets injected into supervisor/worker context.
 
+use crate::config::Config;
 use cas_mux::SupervisorCli;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,10 +25,6 @@ pub const SUPERVISOR_GUIDE: &str = include_str!("builtins/skills/cas-supervisor.
 /// Factory worker guide - embedded at compile time (source of truth)
 pub const WORKER_GUIDE: &str = include_str!("builtins/skills/cas-worker.md");
 
-/// Shared skills preloaded into factory sessions
-pub const TASK_TRACKING_GUIDE: &str = include_str!("builtins/skills/cas-task-tracking.md");
-pub const MEMORY_GUIDE: &str = include_str!("builtins/skills/cas-memory-management/SKILL.md");
-pub const SEARCH_GUIDE: &str = include_str!("builtins/skills/cas-search.md");
 pub const CHECKLIST_GUIDE: &str = include_str!("builtins/skills/cas-supervisor-checklist.md");
 
 /// A built-in file that Cassy manages
@@ -61,14 +58,6 @@ pub const BUILTIN_AGENTS: &[BuiltinFile] = &[
         path: "agents/session-summarizer.md",
         content: include_str!("builtins/agents/session-summarizer.md"),
     },
-    BuiltinFile {
-        path: "agents/git-history-analyzer.md",
-        content: include_str!("builtins/agents/git-history-analyzer.md"),
-    },
-    BuiltinFile {
-        path: "agents/issue-intelligence-analyst.md",
-        content: include_str!("builtins/agents/issue-intelligence-analyst.md"),
-    },
 ];
 
 /// All built-in agents managed by Cassy for Codex
@@ -97,14 +86,6 @@ pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[
         path: "agents/factory-supervisor.md",
         content: include_str!("builtins/codex/agents/factory-supervisor.md"),
     },
-    BuiltinFile {
-        path: "agents/git-history-analyzer.md",
-        content: include_str!("builtins/codex/agents/git-history-analyzer.md"),
-    },
-    BuiltinFile {
-        path: "agents/issue-intelligence-analyst.md",
-        content: include_str!("builtins/codex/agents/issue-intelligence-analyst.md"),
-    },
 ];
 
 /// All built-in skills managed by Cassy
@@ -131,6 +112,12 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
         content: include_str!(
             "builtins/skills/cas-memory-management/references/lifecycle-and-storage.md"
+        ),
+    },
+    BuiltinFile {
+        path: "skills/cas-memory-management/references/response-shapes.md",
+        content: include_str!(
+            "builtins/skills/cas-memory-management/references/response-shapes.md"
         ),
     },
     BuiltinFile {
@@ -178,10 +165,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/reference.md",
         content: include_str!("builtins/skills/cas-supervisor/references/reference.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-supervisor/references/code-review-queue.md",
-        content: include_str!("builtins/skills/cas-supervisor/references/code-review-queue.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
@@ -277,6 +260,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/codemap/SKILL.md",
         content: include_str!("builtins/skills/codemap/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/codemap/references/doc-hygiene.md",
+        content: include_str!("builtins/skills/codemap/references/doc-hygiene.md"),
     },
     // cas-servers skill (cas-7c93, GH #87): the sanctioned lifecycle for
     // long-running servers. Registered servers are the only ones that survive
@@ -425,23 +412,11 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
-        content: include_str!("builtins/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
-    },
-    BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
-    BuiltinFile {
-        path: "skills/cas-domain-modeling/SKILL.md",
-        content: include_str!("builtins/skills/cas-domain-modeling/SKILL.md"),
-    },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/skills/cas-codebase-design/DEEPENING.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
-    BuiltinFile { path: "skills/cas-tdd/tests.md", content: include_str!("builtins/skills/cas-tdd/tests.md") },
-    BuiltinFile { path: "skills/cas-tdd/mocking.md", content: include_str!("builtins/skills/cas-tdd/mocking.md") },
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
@@ -497,6 +472,12 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         ),
     },
     BuiltinFile {
+        path: "skills/cas-memory-management/references/response-shapes.md",
+        content: include_str!(
+            "builtins/codex/skills/cas-memory-management/references/response-shapes.md"
+        ),
+    },
+    BuiltinFile {
         path: "skills/cas-search/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-search.md"),
     },
@@ -538,12 +519,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/reference.md",
         content: include_str!("builtins/codex/skills/cas-supervisor/references/reference.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-supervisor/references/code-review-queue.md",
-        content: include_str!(
-            "builtins/codex/skills/cas-supervisor/references/code-review-queue.md"
-        ),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
@@ -636,6 +611,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/codemap/SKILL.md",
         content: include_str!("builtins/codex/skills/codemap/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/codemap/references/doc-hygiene.md",
+        content: include_str!("builtins/codex/skills/codemap/references/doc-hygiene.md"),
     },
     // cas-servers skill (cas-7c93, GH #87) — codex mirror. Kept byte-identical
     // to the .claude copy by `test_builtin_skills_contains_cas_servers`.
@@ -767,23 +746,11 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/codex/skills/cas-writing-for-agents/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
-        content: include_str!("builtins/codex/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
-    },
-    BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-diagnosing-bugs/SKILL.md"),
     },
-    BuiltinFile {
-        path: "skills/cas-domain-modeling/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-domain-modeling/SKILL.md"),
-    },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/codex/skills/cas-codebase-design/SKILL.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/codex/skills/cas-codebase-design/DEEPENING.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/codex/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/codex/skills/cas-tdd/SKILL.md") },
-    BuiltinFile { path: "skills/cas-tdd/tests.md", content: include_str!("builtins/codex/skills/cas-tdd/tests.md") },
-    BuiltinFile { path: "skills/cas-tdd/mocking.md", content: include_str!("builtins/codex/skills/cas-tdd/mocking.md") },
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/codex/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/codex/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/codex/skills/cas-resolving-merge-conflicts/SKILL.md") },
@@ -824,14 +791,6 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "agents/session-summarizer.md",
         content: include_str!("builtins/grok/agents/session-summarizer.md"),
-    },
-    BuiltinFile {
-        path: "agents/git-history-analyzer.md",
-        content: include_str!("builtins/grok/agents/git-history-analyzer.md"),
-    },
-    BuiltinFile {
-        path: "agents/issue-intelligence-analyst.md",
-        content: include_str!("builtins/grok/agents/issue-intelligence-analyst.md"),
     },
 ];
 
@@ -921,12 +880,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/grok/skills/cas-supervisor/references/reference.md"),
     },
     BuiltinFile {
-        path: "skills/cas-supervisor/references/code-review-queue.md",
-        content: include_str!(
-            "builtins/grok/skills/cas-supervisor/references/code-review-queue.md"
-        ),
-    },
-    BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
         content: include_str!("builtins/grok/skills/cas-supervisor/references/filing-cas-bugs.md"),
     },
@@ -962,6 +915,12 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
         content: include_str!(
             "builtins/grok/skills/cas-memory-management/references/lifecycle-and-storage.md"
+        ),
+    },
+    BuiltinFile {
+        path: "skills/cas-memory-management/references/response-shapes.md",
+        content: include_str!(
+            "builtins/grok/skills/cas-memory-management/references/response-shapes.md"
         ),
     },
     // cas-cc8c: required-capability parity — a Grok factory session must resolve
@@ -1011,6 +970,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/codemap/SKILL.md",
         content: include_str!("builtins/grok/skills/codemap/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/codemap/references/doc-hygiene.md",
+        content: include_str!("builtins/grok/skills/codemap/references/doc-hygiene.md"),
     },
     BuiltinFile {
         path: "skills/project-overview/SKILL.md",
@@ -1153,23 +1116,11 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/grok/skills/cas-writing-for-agents/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
-        content: include_str!("builtins/grok/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
-    },
-    BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-diagnosing-bugs/SKILL.md"),
     },
-    BuiltinFile {
-        path: "skills/cas-domain-modeling/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-domain-modeling/SKILL.md"),
-    },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/grok/skills/cas-codebase-design/SKILL.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/grok/skills/cas-codebase-design/DEEPENING.md") },
-    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/grok/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/grok/skills/cas-tdd/SKILL.md") },
-    BuiltinFile { path: "skills/cas-tdd/tests.md", content: include_str!("builtins/grok/skills/cas-tdd/tests.md") },
-    BuiltinFile { path: "skills/cas-tdd/mocking.md", content: include_str!("builtins/grok/skills/cas-tdd/mocking.md") },
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/grok/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/grok/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/grok/skills/cas-resolving-merge-conflicts/SKILL.md") },
@@ -1458,8 +1409,6 @@ pub const REQUIRED_FACTORY_AGENTS: &[&str] = &[
     "agents/rule-reviewer.md",
     "agents/duplicate-detector.md",
     "agents/session-summarizer.md",
-    "agents/git-history-analyzer.md",
-    "agents/issue-intelligence-analyst.md",
 ];
 
 /// The skill catalog for a harness (cas-cc8c parity helpers).
@@ -1993,7 +1942,8 @@ fn sync_all_builtins_inner(
 /// Unlike skills and agents (which use the `managed_by: cas` gate), workflow
 /// scripts are always force-written — they are machine-generated JS files that
 /// users should not hand-edit. A workflow that diverges from the builtin is
-/// always replaced on sync.
+/// always replaced on sync. Stale managed workflow files are pruned after the
+/// current set is written.
 ///
 /// Counts are returned on `result.skills_updated` (workflow scripts don't have
 /// their own counter; they are a minor surface relative to skills).
@@ -2024,6 +1974,8 @@ fn sync_workflows(
 pub fn sync_all_builtins(claude_dir: &Path) -> std::io::Result<SyncResult> {
     let mut result = sync_all_builtins_inner(claude_dir, BUILTIN_AGENTS, BUILTIN_SKILLS)?;
     sync_workflows(claude_dir, BUILTIN_WORKFLOWS, &mut result)?;
+    let keep = builtin_workflow_names(BUILTIN_WORKFLOWS);
+    prune_stale_cas_workflow_files(&claude_dir.join("workflows"), &keep)?;
     Ok(result)
 }
 
@@ -2052,6 +2004,157 @@ pub fn sync_all_builtins_for_harness(
         // user-level skill tree is written by the sync command.
         SupervisorCli::OpenCode => Ok(SyncResult::default()),
     }
+}
+
+const OPTIONAL_PROJECT_SKILLS: &[&str] = &["fallow", "cas-nuxt-playwright"];
+
+/// Sync project builtins while keeping stack-specific skills opt-in.
+///
+/// The user-level sync functions intentionally retain the complete catalog.
+/// Project sync is different: `fallow` belongs in JavaScript/TypeScript
+/// projects and `cas-nuxt-playwright` belongs in Nuxt projects. A project can
+/// explicitly enable either id in `[skills].optional` when detection cannot
+/// see an indirect or generated dependency.
+pub fn sync_all_builtins_for_project(
+    harness: SupervisorCli,
+    project_root: &Path,
+) -> std::io::Result<SyncResult> {
+    match harness {
+        SupervisorCli::Claude => {
+            let skills = filtered_project_skills(BUILTIN_SKILLS, project_root);
+            sync_project_catalog(
+                &project_root.join(".claude"),
+                BUILTIN_AGENTS,
+                &skills,
+                BUILTIN_WORKFLOWS,
+            )
+        }
+        SupervisorCli::Codex => {
+            let skills = filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root);
+            sync_project_catalog(&project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, &[])
+        }
+        SupervisorCli::Grok => {
+            let skills = filtered_project_skills(GROK_BUILTIN_SKILLS, project_root);
+            sync_project_catalog(&project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, &[])
+        }
+        SupervisorCli::OpenCode => Ok(SyncResult::default()),
+    }
+}
+
+fn sync_project_catalog(
+    target_dir: &Path,
+    agents: &[BuiltinFile],
+    skills: &[BuiltinFile],
+    workflows: &[BuiltinFile],
+) -> std::io::Result<SyncResult> {
+    let mut result = sync_all_builtins_inner(target_dir, agents, skills)?;
+    if !workflows.is_empty() {
+        sync_workflows(target_dir, workflows, &mut result)?;
+        let keep = builtin_workflow_names(workflows);
+        prune_stale_cas_workflow_files(&target_dir.join("workflows"), &keep)?;
+    }
+    let keep = builtin_skill_dir_names(skills);
+    prune_stale_cas_skill_dirs(&target_dir.join("skills"), &keep)?;
+    Ok(result)
+}
+
+fn filtered_project_skills(
+    skills: &[BuiltinFile],
+    project_root: &Path,
+) -> Vec<BuiltinFile> {
+    let optional = enabled_optional_project_skills(project_root);
+    skills
+        .iter()
+        .copied()
+        .filter(|builtin| {
+            let Some(skill_id) = builtin_skill_id(builtin.path) else {
+                return true;
+            };
+            !OPTIONAL_PROJECT_SKILLS.contains(&skill_id) || optional.contains(skill_id)
+        })
+        .collect()
+}
+
+fn builtin_skill_id(path: &str) -> Option<&str> {
+    path.strip_prefix("skills/")?.split('/').next()
+}
+
+fn enabled_optional_project_skills(project_root: &Path) -> HashSet<&'static str> {
+    let mut enabled = HashSet::new();
+    let explicit = Config::load(&project_root.join(".cas"))
+        .ok()
+        .and_then(|config| config.skills)
+        .map(|skills| skills.optional)
+        .unwrap_or_default();
+
+    let explicit = explicit
+        .iter()
+        .map(|id| id.trim().to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    if explicit.iter().any(|id| id == "fallow" || id == "cas-fallow") {
+        enabled.insert("fallow");
+    }
+    if explicit.iter().any(|id| {
+        id == "cas-nuxt-playwright" || id == "nuxt-playwright" || id == "nuxt"
+    }) {
+        enabled.insert("cas-nuxt-playwright");
+    }
+
+    let package_path = project_root.join("package.json");
+    let package = std::fs::read_to_string(&package_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok());
+    if package_path.is_file() || project_contains_js_ts(project_root) {
+        enabled.insert("fallow");
+    }
+    if package.as_ref().is_some_and(package_declares_nuxt) {
+        enabled.insert("cas-nuxt-playwright");
+    }
+    if ["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mjs"]
+        .iter()
+        .any(|name| project_root.join(name).is_file())
+    {
+        enabled.insert("cas-nuxt-playwright");
+    }
+    enabled
+}
+
+fn project_contains_js_ts(project_root: &Path) -> bool {
+    walkdir::WalkDir::new(project_root)
+        .follow_links(false)
+        .max_depth(4)
+        .into_iter()
+        .filter_entry(|entry| {
+            !entry.file_type().is_dir()
+                || !matches!(
+                    entry.file_name().to_str(),
+                    Some(".git" | ".cas" | "node_modules" | "target")
+                )
+        })
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry.file_type().is_file()
+                && matches!(
+                    entry.path().extension().and_then(|ext| ext.to_str()),
+                    Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
+                )
+        })
+}
+
+fn package_declares_nuxt(package: &serde_json::Value) -> bool {
+    [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ]
+    .iter()
+    .any(|section| {
+        package
+            .get(section)
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|dependencies| dependencies.contains_key("nuxt"))
+    })
 }
 
 /// Markers for the block that excludes distributed builtin files from a
@@ -2259,25 +2362,23 @@ fn builtin_skill_dir_names(skills: &[BuiltinFile]) -> HashSet<String> {
         .collect()
 }
 
-/// Prune stale, non-managed `cas-*` skill directories from a `skills/` dir.
+/// Prune stale managed `cas-*` skill directories from a `skills/` dir.
 ///
 /// This mirrors the project-level prune in `SkillSyncer::sync_all`
 /// (`cas-cli/src/sync/skills.rs`): a directory is removed only when ALL of
 /// these hold:
 ///   1. its name is `cas-*` prefixed (we never touch user-authored skills),
 ///   2. it is not one of the builtin skill dirs we just wrote (`keep`), and
-///   3. its `SKILL.md` is genuinely absent OR present-and-unmanaged (no
-///      `managed_by: cas` marker). Any other read error (permission denied,
-///      I/O) preserves the directory — we only delete when we can positively
-///      confirm it is not a managed builtin.
+///   3. its `SKILL.md` is present and carries the `managed_by: cas` marker.
+///      Any other read error (including a missing file) preserves the
+///      directory — we only delete when we can positively confirm it is a
+///      managed builtin.
 ///
-/// The managed-by check is the critical safety net: a freshly-synced builtin
-/// always carries the marker, so even if `keep` is somehow incomplete the
-/// builtin survives. Non-`cas-` dirs are left untouched. Used by
-/// `cas update --user` (`sync_user_builtins`) so that legacy
-/// orphans like `cas-playwright-debug` — which the project-level sync already
-/// prunes but the user-level path historically never did — are removed from
-/// `~/.claude/skills` and `~/.codex/skills` on every downstream host.
+/// The managed-by check is the critical safety net: an unmanaged user skill
+/// is never removed, even when its name has a `cas-` prefix. Non-`cas-` dirs
+/// are left untouched. Used by `cas update --user` (`sync_user_builtins`) so
+/// that removed managed builtins are removed from `~/.claude/skills` and
+/// `~/.codex/skills` on every downstream host.
 ///
 /// Returns the names of the directories that were removed.
 pub fn prune_stale_cas_skill_dirs(
@@ -2306,14 +2407,13 @@ pub fn prune_stale_cas_skill_dirs(
             continue;
         }
 
-        // Only delete when we can positively confirm this is not a managed
-        // builtin: SKILL.md is either genuinely absent, or present without the
-        // managed_by: cas marker. A permission/I/O read error (anything other
-        // than NotFound) preserves the dir — never destroy on uncertainty.
+        // Only delete when we can positively confirm this is a managed builtin:
+        // SKILL.md must be readable and carry the managed_by: cas marker. A
+        // missing file or permission/I/O read error preserves the dir — never
+        // destroy on uncertainty.
         let skill_file = path.join("SKILL.md");
         let safe_to_remove = match std::fs::read_to_string(&skill_file) {
-            Ok(content) => !is_managed_by_cas(&content),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Ok(content) => is_managed_by_cas(&content),
             Err(_) => false,
         };
         if !safe_to_remove {
@@ -2327,7 +2427,83 @@ pub fn prune_stale_cas_skill_dirs(
     Ok(removed)
 }
 
-/// Prune stale non-managed `cas-*` skill dirs from a harness's user-level
+/// Return the workflow filenames currently shipped by Cassy.
+fn builtin_workflow_names(workflows: &[BuiltinFile]) -> HashSet<String> {
+    workflows
+        .iter()
+        .filter_map(|builtin| builtin.path.strip_prefix("workflows/"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Legacy workflow files shipped before the review layer was retired. They
+/// predate a portable JS managed marker, so their exact names are retained as
+/// a one-release migration allowlist. New stale workflow files require the
+/// `managed_by: cas` marker before deletion.
+const RETIRED_CAS_WORKFLOW_NAMES: &[&str] = &[
+    "cas-code-review.js",
+    "cas-code-review-constants.js",
+    "cas-code-review-prototype.js",
+    "merge-findings.js",
+    "merge-findings.test.js",
+];
+
+fn is_managed_workflow(name: &str, content: &str) -> bool {
+    is_managed_by_cas(content)
+        || RETIRED_CAS_WORKFLOW_NAMES.contains(&name)
+        || content.lines().take(20).any(|line| {
+            let line = line.trim();
+            line.strip_prefix("//")
+                .or_else(|| line.strip_prefix("/*"))
+                .is_some_and(|comment| comment.trim().starts_with("managed_by: cas"))
+        })
+}
+
+/// Prune stale Cassy-managed workflow files from a `.claude/workflows/` dir.
+///
+/// Workflows are JS rather than frontmatter-bearing Markdown, so current
+/// builtins are protected by their relative filename and newly-managed files
+/// use a `managed_by: cas` comment marker. The exact retired review filenames
+/// are also recognized for migration from versions that force-wrote workflows
+/// without a marker. Unmanaged files and unreadable files are preserved.
+pub fn prune_stale_cas_workflow_files(
+    workflows_dir: &Path,
+    keep: &HashSet<String>,
+) -> std::io::Result<Vec<String>> {
+    let mut removed = Vec::new();
+    if !workflows_dir.exists() {
+        return Ok(removed);
+    }
+
+    for entry in std::fs::read_dir(workflows_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".js") || keep.contains(name) {
+            continue;
+        }
+
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !is_managed_workflow(name, &content) {
+            continue;
+        }
+
+        std::fs::remove_file(&path)?;
+        removed.push(name.to_string());
+    }
+
+    Ok(removed)
+}
+
+/// Prune stale managed `cas-*` skill dirs from a harness's user-level
 /// `skills/` directory, keeping the builtins that harness owns. Thin wrapper
 /// over [`prune_stale_cas_skill_dirs`] that selects the right builtin set.
 pub fn prune_stale_user_skills_for_harness(
@@ -2523,36 +2699,12 @@ pub fn supervisor_guidance() -> String {
     extract_body(SUPERVISOR_GUIDE).to_string()
 }
 
-/// Remove one top-level Markdown section while preserving the surrounding
-/// guidance. On-demand sections belong in the synchronized skill file, not in
-/// every SessionStart's protected payload.
-fn without_markdown_section(body: &str, heading: &str) -> String {
-    let mut output = String::with_capacity(body.len());
-    let mut skipping = false;
-    for line in body.split_inclusive('\n') {
-        let title = line.trim_end_matches(['\r', '\n']);
-        if title == heading {
-            skipping = true;
-            continue;
-        }
-        if skipping && title.starts_with("## ") {
-            skipping = false;
-        }
-        if !skipping {
-            output.push_str(line);
-        }
-    }
-    output
-}
-
 /// Get the worker guidance injected at factory SessionStart.
 ///
 /// Returns only the worker SKILL.md. task-tracking/memory/search load on
-/// demand — same rationale as `supervisor_guidance`. The structured execution
-/// state section remains in the on-demand skill file but is omitted here so
-/// protected SessionStart guidance keeps its 800-byte harness margin.
+/// demand — same rationale as `supervisor_guidance`.
 pub fn worker_guidance() -> String {
-    without_markdown_section(extract_body(WORKER_GUIDE), "## Structured execution state")
+    extract_body(WORKER_GUIDE).to_string()
 }
 
 #[cfg(test)]
@@ -2901,55 +3053,62 @@ This is the body content."#;
             "should NOT bundle task-tracking — loads on demand"
         );
         assert!(
-            WORKER_GUIDE.contains("## Structured execution state")
-                && WORKER_GUIDE.contains("state_patch"),
-            "on-demand worker skill must retain structured-state instructions"
+            !guide.contains("## Structured execution state")
+                && !guide.contains("## Context budgeting"),
+            "SessionStart worker guidance must omit on-demand details"
         );
-        assert!(
-            !guide.contains("## Structured execution state"),
-            "protected SessionStart guidance must omit on-demand structured-state section"
-        );
+        for (label, details) in [
+            (
+                "claude",
+                include_str!("builtins/skills/cas-worker/references/details.md"),
+            ),
+            (
+                "codex",
+                include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+            ),
+            (
+                "grok",
+                include_str!("builtins/grok/skills/cas-worker/references/details.md"),
+            ),
+        ] {
+            for required in ["## Structured execution state", "state_patch", "## Context budgeting"] {
+                assert!(
+                    details.contains(required),
+                    "{label} worker details missing on-demand marker: {required:?}"
+                );
+            }
+        }
     }
 
-    /// Same rationale as `test_supervisor_guidance_under_12kb` — the worker
-    /// SessionStart bundle must stay small enough that the harness doesn't
-    /// truncate it to a preview. Move content into cas-worker/references/
-    /// instead of inlining.
     #[test]
-    fn test_worker_guidance_under_12kb() {
-        const HARD_CEILING: usize = 12_288; // Claude Code harness truncation point.
-        const SOFT_CAP: usize = 11_488; // early-warning margin (800B) below the ceiling.
+    fn test_worker_guidance_under_session_start_budget() {
+        use crate::hooks::handlers::session_budget::SESSION_START_BUDGET_BYTES;
+
         let guide = worker_guidance();
+        let headroom = SESSION_START_BUDGET_BYTES.saturating_sub(guide.len());
         assert!(
-            guide.len() < HARD_CEILING,
-            "worker_guidance is {} bytes — over the 12KB ceiling. \
-             Move content into cas-worker/references/ instead of \
-             inlining it in cas-worker.md.",
+            guide.len() <= 8_000,
+            "worker_guidance is {} bytes — over the 8,000B component cap",
             guide.len()
         );
         assert!(
-            guide.len() <= SOFT_CAP,
-            "worker_guidance is {} bytes — over the {SOFT_CAP}B soft cap (only \
-             {}B from the {HARD_CEILING}B hard ceiling). Trim body prose or move it \
-             into cas-worker/references/ to keep CI headroom.",
-            guide.len(),
-            HARD_CEILING - guide.len()
+            headroom >= 1_024,
+            "worker_guidance is {} bytes — only {headroom}B remains below the \
+             {SESSION_START_BUDGET_BYTES}B SessionStart budget",
+            guide.len()
         );
     }
 
     /// cas-5787 (EPIC cas-ebea, third-brain borrow): both supervisor and
-    /// worker skill bodies must document the "Context budgeting" 3-layer
+    /// worker reference files must document the "Context budgeting" 3-layer
     /// model so future maintainers see the framework before adding to the
-    /// Immutable Core (this skill body). The section names the three
-    /// layers explicitly (Immutable Core / Task Context / Ephemeral),
-    /// cites its component ceiling (8 KB supervisor / 12 KB worker) plus,
-    /// for the worker, the 9 KB aggregate SessionStart budget, and points
-    /// at the rationale memory file
-    /// `project_session_start_truncation.md`. Both Claude and Codex
-    /// mirrors are checked so neither surface silently drifts.
+    /// Immutable Core. The section names the three layers explicitly
+    /// (Immutable Core / Task Context / Ephemeral), cites the 8 KB worker
+    /// component cap and 9 KB aggregate SessionStart budget, and points at
+    /// `project_session_start_truncation.md`.
     #[test]
     fn test_skills_document_context_budgeting_cas_5787() {
-        // Common markers required in all four skill files.
+        // Common markers required in all supervisor/worker files.
         let common = [
             "## Context budgeting",
             "Immutable Core",
@@ -2958,16 +3117,9 @@ This is the body content."#;
             "project_session_start_truncation.md",
             "references/",
         ];
-        // Supervisor cap was lowered to 8KB (cas-5e4b); the worker *component*
-        // cap remains 12KB. cas-4c25: the worker body must additionally name
-        // the 9KB aggregate SessionStart budget introduced by cas-b114, so the
-        // section can't drift back to describing a silent-truncation model
-        // that no longer exists.
-        // cas-703a: grok was previously absent from this list, so the grok
-        // bodies could lose a context-budgeting marker with this test green.
-        // Grok is now checked here directly, and additionally guarded by
-        // cas-cli/tests/builtin_flavor_drift_test.rs, which holds all three
-        // flavors of these two files content-identical after normalization.
+        // Supervisor cap was lowered to 8KB (cas-5e4b). The worker reference
+        // names the 8KB component cap and 9KB aggregate budget introduced by
+        // cas-b114; keeping it on demand protects the SessionStart payload.
         let supervisor_files = [
             ("claude cas-supervisor.md", SUPERVISOR_GUIDE),
             (
@@ -2980,14 +3132,17 @@ This is the body content."#;
             ),
         ];
         let worker_files = [
-            ("claude cas-worker.md", WORKER_GUIDE),
             (
-                "codex cas-worker.md",
-                include_str!("builtins/codex/skills/cas-worker.md"),
+                "claude cas-worker details.md",
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
             (
-                "grok cas-worker.md",
-                include_str!("builtins/grok/skills/cas-worker.md"),
+                "codex cas-worker details.md",
+                include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+            ),
+            (
+                "grok cas-worker details.md",
+                include_str!("builtins/grok/skills/cas-worker/references/details.md"),
             ),
         ];
         for (label, content) in supervisor_files {
@@ -2998,8 +3153,15 @@ This is the body content."#;
                 );
             }
         }
+        let worker_common = [
+            "## Context budgeting",
+            "Immutable Core",
+            "Task Context",
+            "Ephemeral",
+            "project_session_start_truncation.md",
+        ];
         for (label, content) in worker_files {
-            for required in common.iter().chain(["12 KB", "9 KB"].iter()) {
+            for required in worker_common.iter().chain(["8 KB", "9 KB"].iter()) {
                 assert!(
                     content.contains(required),
                     "{label} missing required Context-budgeting marker: {required:?}"
@@ -3085,8 +3247,12 @@ This is the body content."#;
         }
     }
 
+    /// cas-37f6: cas-brainstorm ends by writing a document, so it must not
+    /// disallow the tools that phase requires. The earlier contract here
+    /// pinned `disallowed-tools: Write, Edit, NotebookEdit`, which Claude Code
+    /// honours — the skill's own final step could not run.
     #[test]
-    fn test_builtin_cas_brainstorm_disallowed_tools() {
+    fn test_builtin_cas_brainstorm_allows_artifact_writes() {
         for (label, skills) in [
             ("BUILTIN_SKILLS", BUILTIN_SKILLS),
             ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
@@ -3095,17 +3261,20 @@ This is the body content."#;
                 .iter()
                 .find(|b| b.path == "skills/cas-brainstorm/SKILL.md")
                 .unwrap_or_else(|| panic!("{label}: cas-brainstorm SKILL.md missing"));
-            for required in ["disallowed-tools:", "- Write", "- Edit", "- NotebookEdit"] {
-                assert!(
-                    entry.content.contains(required),
-                    "{label}: cas-brainstorm SKILL.md missing disallowed-tools entry: {required:?}"
-                );
-            }
+            assert!(
+                !entry.content.contains("disallowed-tools:"),
+                "{label}: cas-brainstorm SKILL.md must not disallow the tools its \
+                 artifact phase requires"
+            );
         }
     }
 
+    /// cas-37f6: cas-ideate ends by writing a document, so it must not
+    /// disallow the tools that phase requires. The earlier contract here
+    /// pinned `disallowed-tools: Write, Edit, NotebookEdit`, which Claude Code
+    /// honours — the skill's own final step could not run.
     #[test]
-    fn test_builtin_cas_ideate_disallowed_tools() {
+    fn test_builtin_cas_ideate_allows_artifact_writes() {
         for (label, skills) in [
             ("BUILTIN_SKILLS", BUILTIN_SKILLS),
             ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
@@ -3114,12 +3283,11 @@ This is the body content."#;
                 .iter()
                 .find(|b| b.path == "skills/cas-ideate/SKILL.md")
                 .unwrap_or_else(|| panic!("{label}: cas-ideate SKILL.md missing"));
-            for required in ["disallowed-tools:", "- Write", "- Edit", "- NotebookEdit"] {
-                assert!(
-                    entry.content.contains(required),
-                    "{label}: cas-ideate SKILL.md missing disallowed-tools entry: {required:?}"
-                );
-            }
+            assert!(
+                !entry.content.contains("disallowed-tools:"),
+                "{label}: cas-ideate SKILL.md must not disallow the tools its \
+                 artifact phase requires"
+            );
         }
     }
 
@@ -3135,32 +3303,33 @@ This is the body content."#;
         assert!(!is_managed_by_cas(no_frontmatter));
     }
 
+    /// `git-history-analyzer` and `issue-intelligence-analyst` were retired from
+    /// the universal set (cas-ef87a): nothing ever spawned them, and their
+    /// bodies instructed tools their own `tools:` list excluded. Re-adding an
+    /// agent nothing dispatches costs every session a menu entry, so the
+    /// marker test is inverted rather than deleted.
     #[test]
-    fn test_builtin_agents_contains_git_history_analyzer() {
-        assert!(
-            BUILTIN_AGENTS
-                .iter()
-                .any(|b| b.path == "agents/git-history-analyzer.md")
-        );
-        assert!(
-            CODEX_BUILTIN_AGENTS
-                .iter()
-                .any(|b| b.path == "agents/git-history-analyzer.md")
-        );
-    }
-
-    #[test]
-    fn test_builtin_agents_contains_issue_intelligence_analyst() {
-        assert!(
-            BUILTIN_AGENTS
-                .iter()
-                .any(|b| b.path == "agents/issue-intelligence-analyst.md")
-        );
-        assert!(
-            CODEX_BUILTIN_AGENTS
-                .iter()
-                .any(|b| b.path == "agents/issue-intelligence-analyst.md")
-        );
+    fn test_retired_agents_stay_out_of_every_catalog() {
+        for retired in [
+            "agents/git-history-analyzer.md",
+            "agents/issue-intelligence-analyst.md",
+        ] {
+            for (name, catalog) in [
+                ("BUILTIN_AGENTS", BUILTIN_AGENTS),
+                ("CODEX_BUILTIN_AGENTS", CODEX_BUILTIN_AGENTS),
+                ("GROK_BUILTIN_AGENTS", GROK_BUILTIN_AGENTS),
+            ] {
+                assert!(
+                    !catalog.iter().any(|b| b.path == retired),
+                    "{name} re-registered the retired agent {retired}; wire a real \
+                     caller first or leave it out"
+                );
+            }
+            assert!(
+                !REQUIRED_FACTORY_AGENTS.contains(&retired),
+                "REQUIRED_FACTORY_AGENTS re-required the retired agent {retired}"
+            );
+        }
     }
 
     #[test]
@@ -3219,13 +3388,24 @@ This is the body content."#;
     /// killed mid-compaction, so the operator paid to re-summarize work a
     /// `git push` would have preserved.
     ///
-    /// All THREE harness flavors must carry both mandates: terse hard rules on
-    /// the always-loaded surface (the SKILL.md body is on the hot path and has
-    /// a 12 KB ceiling — see `test_worker_guidance_under_12kb`) with the
-    /// recipes in references/discipline.md. The flavor set is spelled out here
-    /// because this guidance has a documented drift history (GH #116).
+    /// All THREE harness flavors carry the launch-time contract in
+    /// `crates/cas-pty/src/pty.rs`. The on-demand discipline reference keeps
+    /// only repository-specific test-loop and clean-environment guidance.
     #[test]
     fn test_worker_skills_carry_backgrounding_mandate_cas_b4921() {
+        let spawn_prompt = include_str!("../../crates/cas-pty/src/pty.rs");
+        for required in [
+            "NEVER foreground-block",
+            "Budget your context",
+            "facts, not narration",
+            "never trims evidence",
+        ] {
+            assert!(
+                spawn_prompt.contains(required),
+                "worker spawn prompt missing launch-contract marker: {required:?}"
+            );
+        }
+
         for (label, skill_content, ref_content) in [
             (
                 "claude",
@@ -3243,75 +3423,49 @@ This is the body content."#;
                 include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
             ),
         ] {
-            // Always-loaded body: terse hard rules only (Rules of Engagement),
-            // each naming its threshold, plus the breadcrumb to the recipes.
-            for required in [
-                "Never block the pane",
+            // These launch-contract rules are intentionally absent from both
+            // the SessionStart body and the on-demand reference. They have one
+            // source: the PTY spawn prompt above.
+            for forbidden in [
                 "~2 minutes",
                 "gh run watch",
                 "action=remind",
-                "Checkpoint, never compact",
-                "discipline.md",
                 "last_token_usage",
                 "model_context_window",
                 "total_token_usage",
+                "facts, not narration",
+                "never trims evidence",
             ] {
                 assert!(
-                    skill_content.contains(required),
-                    "{label} cas-worker SKILL.md missing hard-rule marker: {required:?}"
+                    !skill_content.contains(forbidden),
+                    "{label} cas-worker SKILL.md duplicates spawn-contract marker: {forbidden:?}"
                 );
             }
-            // Scoped-test discipline lives with the test guidance (A-3):
-            // compile continuously without linking test binaries, then use
-            // nextest only for the affected target. These are deliberately
-            // concrete commands rather than a generic "be scoped" reminder.
-            for required in [
-                "cargo check -p <crate> --lib --tests",
-                "cargo nextest run",
-                "--lib <module>",
-                "--test <name>",
-            ] {
-                assert!(
-                    skill_content.contains(required),
-                    "{label} cas-worker SKILL.md missing scoped-test marker: {required:?}"
-                );
-            }
-            // Part A recipes: background builds, the server registry for
-            // anything listening, the sanctioned CI shape (queue rerun ->
-            // reminder -> end turn -> one-shot check), and inbox_poll first if
-            // you did come back from a blocked turn.
-            for required in [
-                "run_in_background",
+            for forbidden in [
+                "## Part 1",
+                "## Part 2",
+                "gh run watch",
                 "action=server_start",
-                "remind_delay_secs",
-                "gh run list",
-                "inbox_poll",
+                "Checkpoint before compaction",
+                "Context: ~",
+                "auto-compaction",
+                "facts, not narration",
+                "never trims evidence",
             ] {
                 assert!(
-                    ref_content.contains(required),
-                    "{label} cas-worker discipline.md missing backgrounding recipe: {required:?}"
+                    !ref_content.contains(forbidden),
+                    "{label} discipline.md duplicates spawn-contract marker: {forbidden:?}"
                 );
             }
-            assert!(
-                ref_content.contains("BANNED") || ref_content.contains("banned"),
-                "{label} cas-worker discipline.md must explicitly ban foreground CI watching"
-            );
-            // Part B: headroom reporting, the four-step checkpoint protocol,
-            // and commit sizing.
             for required in [
-                "note_type=progress",
-                "Context: ~",
-                "CHECKPOINT",
-                "git push",
-                "respawn",
-                "auto-compaction",
-                "37,952",
-                "258,400",
-                "356,457",
+                "Scoped tests",
+                "cargo check -p <crate> --lib --tests",
+                "scripts/run-scoped-tests.sh --proof",
+                "Clean-CI environment",
             ] {
                 assert!(
                     ref_content.contains(required),
-                    "{label} cas-worker discipline.md missing context-budget marker: {required:?}"
+                    "{label} discipline.md missing unique test guidance marker: {required:?}"
                 );
             }
         }
@@ -3359,11 +3513,8 @@ This is the body content."#;
     /// nothing distinguished the seconds-long targeted loop you iterate in
     /// from the minutes-long full sweep you are allowed to run twice.
     ///
-    /// Same two-layer shape as the backgrounding mandate above: terse rules on
-    /// the always-loaded SKILL.md body (12 KB ceiling — see
-    /// `test_worker_guidance_under_12kb`), the worked recipe in
-    /// references/discipline.md. All three flavors, because the builtin skills
-    /// have a documented drift history (GH #116, cas-703a).
+    /// The test-loop recipe is on demand in references/discipline.md; all three
+    /// flavors must carry the same unique guidance.
     #[test]
     fn test_worker_skills_teach_test_loop_discipline_cas_3627() {
         for (label, skill_content, ref_content) in [
@@ -3383,31 +3534,25 @@ This is the body content."#;
                 include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
             ),
         ] {
-            // Always-loaded body: batch-first, the two named loops, the
-            // two-sweep ceiling, nextest, and the no-foreground-sleep rule.
+            // The hot body keeps only the pointer; the detailed test loop is
+            // on demand so it does not consume SessionStart budget.
             for required in [
-                "Batch the fixes",
-                "Inner loop",
-                "Final proof",
-                "at most twice",
-                "cargo nextest run",
-                "sleep",
+                "discipline.md",
+                "scoped test-loop",
             ] {
                 assert!(
                     skill_content.contains(required),
-                    "{label} cas-worker SKILL.md missing test-loop marker: {required:?}"
+                    "{label} cas-worker SKILL.md missing discipline pointer: {required:?}"
                 );
             }
-            // The recipe: both loops named, the batching rule, the banked-receipt
-            // allowance, nextest with a fallback, and the ban on sleeping in the
-            // foreground while a background run cooks.
+            // The recipe: both loops named, batching, banked receipts, and the
+            // guarded nextest target.
             for required in [
+                "Batch before you verify",
                 "inner loop",
                 "Final proof",
-                "Batch before you verify",
                 "banked receipt",
                 "cargo nextest run",
-                "foreground-`sleep`",
             ] {
                 assert!(
                     ref_content.contains(required),
@@ -3581,10 +3726,17 @@ This is the body content."#;
         }
 
         let (_, claude_skill, claude_diagnosis) = shipped[0];
+        let canonical_skill = |content: &str| {
+            content
+                .replace("mcp__cas__", "<MCP_TOOL>")
+                .replace("mcp__cs__", "<MCP_TOOL>")
+                .replace("cas__", "<MCP_TOOL>")
+        };
         for (label, skill, diagnosis) in &shipped[1..] {
             assert_eq!(
-                *skill, claude_skill,
-                "{label} {SKILL} must be byte-identical to the Claude copy"
+                canonical_skill(skill),
+                canonical_skill(claude_skill),
+                "{label} {SKILL} must match the Claude copy apart from the harness tool prefix"
             );
             assert_eq!(
                 *diagnosis, claude_diagnosis,
@@ -3610,8 +3762,9 @@ This is the body content."#;
             let target = temp.path().join(label);
             sync(&target).unwrap();
             assert_eq!(
-                std::fs::read_to_string(target.join(SKILL)).unwrap(),
-                claude_skill
+                canonical_skill(&std::fs::read_to_string(target.join(SKILL)).unwrap()),
+                canonical_skill(claude_skill),
+                "{label} synced {SKILL} must match the Claude copy apart from the harness tool prefix"
             );
             assert_eq!(
                 std::fs::read_to_string(target.join(DIAGNOSIS)).unwrap(),
@@ -3792,7 +3945,7 @@ This is the body content."#;
                 "message, not the chart", "claim-title", "annotate the decisive", "Show uncertainty",
                 "small multiples", "table", "@media print", "cas-html-reports", "color last",
                 "becoming text-dense", "30 seconds", "Visually verify the rendered artifact",
-                "390×844", "Grepping HTML", "H7 acceptance-report precedent",
+                "390×844", "Grepping HTML",
             ] {
                 assert!(skill.contains(marker), "{label} cas-dataviz missing {marker:?}");
             }
@@ -3941,8 +4094,9 @@ This is the body content."#;
                 "## Shapes",
                 "## Components",
                 "## Do's & Don'ts",
-                // Regeneration must not destroy hand edits.
-                "<!-- keep -->",
+                // Regeneration hygiene (keep blocks, pointer memory, commit)
+                // is shared with codemap/project-overview, not restated here.
+                "doc-hygiene.md",
                 // Thin pointer so Cassy search surfaces the doc.
                 "project_<slug>_designmd",
             ] {
@@ -3956,7 +4110,7 @@ This is the body content."#;
 
     /// GH #65: the release-notes skill plus its canonical rubric template must
     /// ship for every harness, and both must keep the hard rules (Was → Now,
-    /// no ticket IDs, no process talk, two threads with one reply each).
+    /// no ticket IDs, no process talk, and a rubric-defined reply default).
     #[test]
     fn test_builtin_skills_contains_release_notes_rubric() {
         for (label, catalog) in [
@@ -3979,14 +4133,12 @@ This is the body content."#;
                 "docs/release-notes/RUBRIC.md",
                 "references/RUBRIC-template.md",
                 "Was → Now",
-                "Live on production",
-                "Staging",
-                "## POSTED",
-                "UTC timestamp",
-                "Step 1a — preflight and worker ownership",
-                "supervisor-owned",
-                "designed handoff",
-                "timestamps/permalinks",
+                "Ensure the rubric exists",
+                "Gather the merge",
+                "Draft the messages from the rubric",
+                "Save the draft",
+                "Post in rubric order",
+                "Record the receipt",
             ] {
                 assert!(
                     skill.content.contains(required),
@@ -4009,6 +4161,9 @@ This is the body content."#;
                 "docs/release-notes/<date>-<topic>-slack.md",
                 "## POSTED",
                 "UTC timestamp",
+                "Default: one threaded reply per thread",
+                "Live on production",
+                "Staging",
             ] {
                 assert!(
                     template.content.to_lowercase().contains(&required.to_lowercase()),
@@ -4045,8 +4200,8 @@ This is the body content."#;
             "name: project-overview",
             "managed_by: cas",
             "docs/PRODUCT_OVERVIEW.md",
-            "<!-- keep -->",
-            "mcp__cas__memory",
+            "doc-hygiene.md",
+            "git add docs/PRODUCT_OVERVIEW.md",
             "cas project-overview clear",
         ] {
             assert!(
@@ -4117,7 +4272,7 @@ This is the body content."#;
             "name: cas-codex-exec",
             "managed_by: cas",
             "token-heavy READ-ONLY investigation",
-            "codex exec -s read-only -m gpt-5.5",
+            "codex exec -s read-only -C",
             "If you find nothing, say so explicitly and name what you inspected.",
             "If `codex` is not installed",
         ] {
@@ -4149,9 +4304,8 @@ This is the body content."#;
                 "name: cli-routing",
                 "codex exec",
                 "claude auth status --json",
-                "pippenz@gmail.com",
+                "release.claude_account_allowlist",
                 "unapproved account",
-                "docs/SLACK_POSTING_RUNBOOK.md",
                 "release-notes",
             ] {
                 assert!(
@@ -4159,10 +4313,20 @@ This is the body content."#;
                     "{label} cli-routing SKILL.md missing required marker: {required:?}"
                 );
             }
-            assert!(
-                !skill.content.contains("daniel@petrastella.io"),
-                "{label} cli-routing SKILL.md retains the stale Daniel-only account gate"
-            );
+            // cas-37f6: the account gate is operator policy read from config,
+            // and the Slack transport belongs to the project's release-notes
+            // rubric. Neither an operator address nor a link to a document
+            // that is not shipped with the skill may appear here.
+            for banned in [
+                "@gmail.com",
+                "@petrastella.io",
+                "docs/SLACK_POSTING_RUNBOOK.md",
+            ] {
+                assert!(
+                    !skill.content.contains(banned),
+                    "{label} cli-routing SKILL.md ships operator-specific text: {banned:?}"
+                );
+            }
         }
     }
 
@@ -4289,6 +4453,43 @@ This is the body content."#;
             task_verifier.content.contains("description:"),
             "task-verifier must have description"
         );
+    }
+
+    #[test]
+    fn test_verifier_and_learning_reviewer_markers_stay_in_all_harness_catalogs() {
+        for (label, agents) in [
+            ("BUILTIN_AGENTS", BUILTIN_AGENTS),
+            ("CODEX_BUILTIN_AGENTS", CODEX_BUILTIN_AGENTS),
+            ("GROK_BUILTIN_AGENTS", GROK_BUILTIN_AGENTS),
+        ] {
+            let verifier = agents
+                .iter()
+                .find(|builtin| builtin.path == "agents/task-verifier.md")
+                .unwrap_or_else(|| panic!("{label}: task-verifier agent is not registered"));
+            for marker in [
+                "model:",
+                "files_reviewed=",
+                "Close-Path Error Detection",
+                "Stranded-branch gate",
+                "Epic verification owner gate",
+            ] {
+                assert!(
+                    verifier.content.contains(marker),
+                    "{label} task-verifier missing marker {marker:?}"
+                );
+            }
+
+            let reviewer = agents
+                .iter()
+                .find(|builtin| builtin.path == "agents/learning-reviewer.md")
+                .unwrap_or_else(|| panic!("{label}: learning-reviewer agent is not registered"));
+            for marker in ["model: sonnet", "complete list of unreviewed learning IDs"] {
+                assert!(
+                    reviewer.content.contains(marker),
+                    "{label} learning-reviewer missing marker {marker:?}"
+                );
+            }
+        }
     }
 
     /// cas-4900 regression: `sync_all_builtins` was reported to silently
@@ -4748,8 +4949,6 @@ This is the body content."#;
         std::fs::create_dir_all(&claude_dir).unwrap();
         sync_all_builtins(&claude_dir).unwrap();
         for p in [
-            "agents/git-history-analyzer.md",
-            "agents/issue-intelligence-analyst.md",
             "skills/cas-brainstorm/SKILL.md",
             "skills/cas-brainstorm/references/handoff.md",
             "skills/cas-brainstorm/references/requirements-capture.md",
@@ -4897,22 +5096,17 @@ This is the body content."#;
         // lists that can drift from enforcement.
         let registry = embedded_registry().expect("embedded registry validates");
         let generated_table = render_route_table().expect("route table renders");
-        for (label, content, tool_prefix) in [
-            ("claude", claude.content, "mcp__cas__"),
-            ("codex", codex.content, "mcp__cs__"),
-            ("grok", grok.content, "cas__"),
+        let canonical_workflow =
+            include_str!("builtins/skills/cas-supervisor/references/workflow.md");
+        for (label, content) in [
+            ("claude", claude.content),
+            ("codex", codex.content),
+            ("grok", grok.content),
         ] {
             assert!(
                 content.contains(&generated_table),
                 "{label} model-selection.md is missing the registry-generated route table"
             );
-            let generated_recipes =
-                render_spawn_recipes(tool_prefix).expect("spawn recipes render");
-            assert!(
-                content.contains(&generated_recipes),
-                "{label} model-selection.md is missing the registry-generated spawn recipes"
-            );
-
             // Use the same acceptance-set seam as the runtime validator with
             // a deterministic stub CLI. A generated recipe is copyable
             // operator input, so a documented model outside the harness's
@@ -4930,6 +5124,30 @@ This is the body content."#;
                 .unwrap_or_else(|error| panic!("{label} documents an unaccepted Claude model: {error}"));
             }
         }
+        for (label, workflow, tool_prefix) in [
+            (
+                "claude",
+                include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
+                "mcp__cas__",
+            ),
+            (
+                "codex",
+                include_str!("builtins/codex/skills/cas-supervisor/references/workflow.md"),
+                "mcp__cs__",
+            ),
+            (
+                "grok",
+                include_str!("builtins/grok/skills/cas-supervisor/references/workflow.md"),
+                "cas__",
+            ),
+        ] {
+            let generated_recipes =
+                render_spawn_recipes(tool_prefix).expect("spawn recipes render");
+            assert!(
+                workflow.contains(&generated_recipes),
+                "{label} workflow.md is missing the registry-generated spawn recipes"
+            );
+        }
         for lane_name in registry.lanes.keys() {
             let decision = cas_factory::resolve_lane(
                 lane_name,
@@ -4938,13 +5156,13 @@ This is the body content."#;
             .expect("registry lane has an active recipe");
             let recipe = &registry.recipes[&decision.recipe_id];
             assert!(
-                claude.content.contains(&format!(
+                canonical_workflow.contains(&format!(
                     "{} model={} effort={}",
                     recipe.harness.backend().name(),
                     recipe.model,
                     recipe.default_effort
                 )),
-                "registry recipe for {lane_name:?} missing from model-selection.md"
+                "registry recipe for {lane_name:?} missing from the supervisor guidance"
             );
         }
         assert!(claude.content.contains("Claude Opus 5 at high"));
@@ -5157,7 +5375,6 @@ This is the body content."#;
     #[test]
     fn test_supervisor_fix_round_recovery_guidance_present_and_mirrored() {
         for path in [
-            "skills/cas-supervisor/references/code-review-queue.md",
             "skills/cas-supervisor/references/planning.md",
             "skills/cas-supervisor/references/worker-recovery.md",
             "skills/cas-supervisor/references/workflow.md",
@@ -5178,24 +5395,6 @@ This is the body content."#;
                 codex.content,
                 "{path} .claude and .codex copies must be identical apart from the \
                  mcp__cas__/mcp__cs__ tool prefix",
-            );
-        }
-
-        let code_review_queue = BUILTIN_SKILLS
-            .iter()
-            .find(|b| b.path == "skills/cas-supervisor/references/code-review-queue.md")
-            .expect("BUILTIN_SKILLS missing cas-supervisor code-review-queue.md");
-        for required in [
-            "Awaiting-merge triage",
-            "visibility and handoff list",
-            "canonical review procedure",
-            "touched-module tests",
-            "verification action=add",
-            "final epic gate runs full nextest",
-        ] {
-            assert!(
-                code_review_queue.content.contains(required),
-                "code-review-queue.md missing fix-round marker: {required:?}"
             );
         }
 
@@ -5223,10 +5422,9 @@ This is the body content."#;
             .expect("BUILTIN_SKILLS missing cas-supervisor workflow.md");
         for required in [
             "Run the canonical merge-time diff review",
-            "worker's direct diff against the task spec",
-            "Re-run the tests for touched modules",
-            "Record the review receipt",
-            "verification_type=task",
+            "Contract changes first",
+            "Read the lane CI signal",
+            "worktree_merge id=<worker> task_id=<task-id>",
             "Hold the main merge",
             "Run the final assembled-tree gate",
             "cargo nextest run -p cas",
@@ -5471,11 +5669,14 @@ This is the body content."#;
         }
     }
 
-    // cas-e0d1: pin the opt-in description so a future sync or hand-edit can't
-    // silently re-introduce auto-trigger phrasing into either mirror — that
-    // would resurrect the wall-clock regression the rewrite fixed.
+    // cas-e0d1: keep this skill out of autonomous dispatch, so a future sync or
+    // hand-edit can't silently re-introduce auto-trigger phrasing into either
+    // mirror — that would resurrect the wall-clock regression the rewrite
+    // fixed. cas-37f6: the opt-in is now enforced by the frontmatter field the
+    // harness actually reads, and the description is free to name the stack it
+    // covers so a human invoking it can tell what it is for.
     #[test]
-    fn test_cas_nuxt_playwright_description_is_opt_in() {
+    fn test_cas_nuxt_playwright_is_not_model_invocable() {
         for (label, set) in [
             ("BUILTIN_SKILLS", BUILTIN_SKILLS),
             ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
@@ -5485,11 +5686,12 @@ This is the body content."#;
                 .find(|b| b.path == "skills/cas-nuxt-playwright/SKILL.md")
                 .unwrap_or_else(|| panic!("{label} missing cas-nuxt-playwright SKILL.md"));
             assert!(
-                entry.content.contains("Opt-in only")
-                    && entry
-                        .content
-                        .contains("invoke ONLY when the operator explicitly asks"),
-                "{label}: cas-nuxt-playwright description must keep explicit opt-in wording"
+                entry.content.contains("disable-model-invocation: true"),
+                "{label}: cas-nuxt-playwright must opt out of model invocation in frontmatter"
+            );
+            assert!(
+                !entry.content.contains("user-invocable:"),
+                "{label}: cas-nuxt-playwright must not restate the user-invocable default"
             );
             assert!(
                 !entry
@@ -5501,11 +5703,11 @@ This is the body content."#;
         }
     }
 
-    // cas-e0d1: the user-level prune must drop legacy non-managed cas-* orphans
-    // (e.g. cas-playwright-debug) while preserving managed builtins and any
-    // non-cas user skill. Covers all three guard branches plus idempotency.
+    // cas-1532: the user-level prune must drop removed managed cas-* builtins
+    // while preserving unmanaged user skills and current builtins. Covers all
+    // three guard branches plus idempotency.
     #[test]
-    fn test_prune_stale_cas_skill_dirs_orphan_removed_managed_and_non_cas_kept() {
+    fn test_prune_stale_cas_skill_dirs_removed_managed_and_unmanaged_kept() {
         use std::collections::HashSet;
         use tempfile::tempdir;
 
@@ -5519,19 +5721,17 @@ This is the body content."#;
             p
         };
 
-        // 1. Legacy non-managed cas-* orphan (no marker, not a builtin) — REMOVED.
-        let orphan = write_skill(
+        // 1. Removed managed builtin — REMOVED.
+        let removed_managed = write_skill(
+            "cas-retired-review",
+            "---\nname: cas-retired-review\nmanaged_by: cas\n---\n# retired\n",
+        );
+        // 2. Unmanaged cas-* user skill — PRESERVED by the marker guard.
+        let unmanaged = write_skill(
             "cas-playwright-debug",
-            "---\nname: cas-playwright-debug\nuser-invocable: true\n---\n# legacy\n",
+            "---\nname: cas-playwright-debug\nuser-invocable: true\n---\n# user\n",
         );
-        // 2. Managed builtin carrying the marker but NOT in `keep` — preserved by
-        //    the managed_by: cas marker guard.
-        let managed = write_skill(
-            "cas-nuxt-playwright",
-            "---\nname: cas-nuxt-playwright\nmanaged_by: cas\n---\n# keep\n",
-        );
-        // 3. Builtin present in `keep` but missing the marker — preserved by the
-        //    builtin-name guard.
+        // 3. Current builtin, even without a marker — PRESERVED by `keep`.
         let kept_by_name = write_skill("cas-codemap", "---\nname: cas-codemap\n---\n# no marker\n");
         // 4. Non-cas user-authored skill — never touched.
         let non_cas = write_skill("my-skill", "---\nname: my-skill\n---\n# user\n");
@@ -5541,14 +5741,14 @@ This is the body content."#;
 
         let removed = prune_stale_cas_skill_dirs(&skills_dir, &keep).unwrap();
 
-        assert_eq!(removed, vec!["cas-playwright-debug".to_string()]);
+        assert_eq!(removed, vec!["cas-retired-review".to_string()]);
         assert!(
-            !orphan.exists(),
-            "non-managed cas-* orphan should be removed"
+            !removed_managed.exists(),
+            "removed managed builtin should be pruned"
         );
         assert!(
-            managed.exists(),
-            "managed_by: cas builtin should be preserved via marker guard"
+            unmanaged.exists(),
+            "unmanaged cas-* skill should be preserved via marker guard"
         );
         assert!(
             kept_by_name.exists(),
@@ -5559,6 +5759,41 @@ This is the body content."#;
         // Idempotent: a second pass with nothing stale removes nothing.
         let removed2 = prune_stale_cas_skill_dirs(&skills_dir, &keep).unwrap();
         assert!(removed2.is_empty(), "second prune should be a no-op");
+    }
+
+    #[test]
+    fn test_sync_all_builtins_prunes_removed_managed_workflows() {
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
+        let claude_dir = temp.path().join(".claude");
+        let workflows_dir = claude_dir.join("workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+
+        let removed = workflows_dir.join("cas-code-review-retired.js");
+        std::fs::write(&removed, "// managed_by: cas\nexport const meta = {};\n").unwrap();
+        let legacy_removed = workflows_dir.join("cas-code-review-prototype.js");
+        std::fs::write(&legacy_removed, "export const meta = {};\n").unwrap();
+        let unmanaged_cas = workflows_dir.join("cas-local-workflow.js");
+        std::fs::write(&unmanaged_cas, "export const meta = {};\n").unwrap();
+        let unmanaged = workflows_dir.join("local-workflow.js");
+        std::fs::write(&unmanaged, "export const meta = {};\n").unwrap();
+
+        sync_all_builtins(&claude_dir).unwrap();
+
+        assert!(!removed.exists(), "removed managed workflow should be pruned");
+        assert!(
+            !legacy_removed.exists(),
+            "legacy Cassy workflow should be pruned during migration"
+        );
+        assert!(
+            unmanaged_cas.exists(),
+            "unmarked cas-* workflow should never be touched by pruning"
+        );
+        assert!(
+            unmanaged.exists(),
+            "unmanaged workflow should never be touched by pruning"
+        );
     }
 
     // cas-e0d1: builtin_skill_dir_names extracts `<dir>` from `skills/<dir>/...`
@@ -5714,12 +5949,17 @@ This is the body content."#;
         // Sync first so the real builtin dirs exist and are correctly kept...
         sync_all_grok_builtins(&grok_dir).unwrap();
 
-        // ...then plant a stale, unmanaged cas-* orphan that isn't part of
-        // GROK_BUILTIN_SKILLS and confirm it gets pruned, while a real
+        // ...then plant a stale, managed cas-* orphan that isn't part of
+        // GROK_BUILTIN_SKILLS and confirm it gets pruned, while an unmanaged
+        // user skill and a real
         // builtin dir (cas-worker) survives.
         let orphan_dir = grok_dir.join("skills").join("cas-orphan-skill");
         std::fs::create_dir_all(&orphan_dir).unwrap();
-        std::fs::write(orphan_dir.join("SKILL.md"), "not managed by cas").unwrap();
+        std::fs::write(
+            orphan_dir.join("SKILL.md"),
+            "---\nname: cas-orphan-skill\nmanaged_by: cas\n---\n# retired\n",
+        )
+        .unwrap();
 
         let removed = prune_stale_user_skills_for_harness(SupervisorCli::Grok, &grok_dir).unwrap();
 

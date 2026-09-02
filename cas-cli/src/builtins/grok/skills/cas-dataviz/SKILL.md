@@ -1,6 +1,6 @@
 ---
 name: cas-dataviz
-description: Use when work involves a chart, graph, plot, dashboard, visualization, heatmap, sparkline, palette, or “visualize data”; when a report is about to include quantitative comparisons; or when a document/report is becoming text-dense.
+description: Use when a Cassy report, GitHub issue, or Markdown note needs a static, self-contained figure (inline SVG plus its data table, print-safe) or when a document is becoming text-dense. The harness-bundled `dataviz` skill owns interactive and library-rendered charts; this skill owns durable evidence artifacts.
 managed_by: cas
 ---
 
@@ -42,7 +42,7 @@ Use small multiples when the comparison is among several similarly shaped series
 6. Assign color last. Use one hue, light-to-dark, for magnitude; fixed categorical colors for identity; a warm/cool pair with neutral midpoint for polarity; and reserve status colors for status. Color follows an entity, never its rank after filtering.
 7. Validate any categorical palette with `node scripts/validate_palette.js "#hex,#hex" --surface "#ffffff"`; do not eyeball contrast or separability. The validator is bundled in every harness mirror.
 8. Add a text alternative and an adjacent data table. In a report, chart sections follow `cas-dataviz`; the report’s own contract remains in `cas-html-reports`.
-9. **Visually verify the rendered artifact — mandatory.** Use headless Chrome to screenshot at a desktop width and a phone-class `390×844` viewport; for a report, also render print/PDF. Look at those renders for label collisions, overflow/clipping, contrast in situ, broken layout, and the 30-second visual-argument test. Grepping HTML for expected strings or tags is **not** visual verification and never satisfies this check: it proves markup exists, not that a human can read it. Follow the H7 acceptance-report precedent: headless Chrome at `390×844` plus PDF render.
+9. **Visually verify the rendered artifact — mandatory.** Use headless Chrome to screenshot at a desktop width and a phone-class `390×844` viewport; for a report, also render print/PDF. Look at those renders for label collisions, overflow/clipping, contrast in situ, broken layout, and the 30-second visual-argument test. Grepping HTML for expected strings or tags is **not** visual verification and never satisfies this check: it proves markup exists, not that a human can read it.
 
 ## Cassy output contexts
 

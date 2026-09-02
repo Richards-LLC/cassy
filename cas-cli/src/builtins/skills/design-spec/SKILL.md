@@ -6,7 +6,7 @@ managed_by: cas
 
 # Design Spec
 
-Produce a **single, self-contained** design source of truth at `DESIGN.md` (repo root, or the frontend app root — e.g. `apps/frontend/DESIGN.md` — when the UI lives in one package of a monorepo). Front-end workers and the design-review persona read this file *instead of* grepping components and theme files to reconstruct design intent.
+Produce a **single, self-contained** design source of truth at `DESIGN.md` (repo root, or the frontend app root — e.g. `apps/frontend/DESIGN.md` — when the UI lives in one package of a monorepo). Front-end workers read this file *instead of* grepping components and theme files to reconstruct design intent; point every UI task at it.
 
 **IMPORTANT: All file references use repo-relative paths** (e.g., `apps/frontend/assets/app.scss`), never absolute paths.
 
@@ -40,7 +40,7 @@ modal/dialog, card/panel, primary + secondary button, text input, badge/chip, ta
 ### 3. Mine guardrails (for Do's & Don'ts)
 
 - Cassy memories and rules tagged design / css / ui / frontend (`mcp__cas__search` with `action=search`)
-- Recurring design-review findings and prior corrections in task notes
+- Recurring UI corrections recorded in task notes
 - Framework gotchas the repo has already tripped on (search for comments like `// don't`, `// override`, `!important`)
 
 **Skip** `node_modules/`, `dist/`, generated CSS, vendor themes, snapshot files.
@@ -83,67 +83,19 @@ Every line must fail this test:
 
 Every token value in the frontmatter must be **copied from the token source**, not remembered or inferred. If you cannot find a value, omit the key and note the gap in Overview.
 
-## Preserving hand-edited sections
-
-If `DESIGN.md` already exists:
-
-1. **Read it first.**
-2. **Preserve any `<!-- keep -->` … `<!-- /keep -->` blocks verbatim.** These are user-owned; do not rewrite, reflow, or even re-whitespace them. Place them back in the same section they appeared in.
-3. Everything outside keep-blocks is regenerated.
-4. If a section header has `<!-- keep -->` on the line directly below it, preserve that entire section including the header.
-
-Example:
-
-```markdown
-## Do's & Don'ts
-<!-- keep -->
-- ❌ Never use Quasar's `--q-*` variables; the theme only wires `--g-*`.
-<!-- /keep -->
-- ✅ ...
-```
-
 ## After writing the doc
 
-### 1. Write a thin memory pointer
+Follow [../codemap/references/doc-hygiene.md](../codemap/references/doc-hygiene.md) for the three steps this skill shares with `codemap` and `project-overview`: keep-block preservation on re-runs, the thin pointer memory, and the commit. This skill's specifics:
 
-Invoke `mcp__cas__memory` with `action=remember` to create/update a pointer memory.
-
-- **Name / title:** `project_<slug>_designmd` (slug = lowercase kebab-case of project name)
-- **Body:** ONE line only. A repo-relative link to the doc plus a single-sentence hook.
-- **No content duplication.** Do not inline the tokens — search surfaces the pointer, the reader opens the doc.
-
-Example:
-
-```
-See [apps/frontend/DESIGN.md](apps/frontend/DESIGN.md) — Quasar dark-first `--g-*` theme, Playfair/Inter, 8pt grid.
-```
-
-If a pointer already exists with the same name, update it. Do not create duplicates.
-
-### 2. Commit DESIGN.md to reset the staleness signal
-
-Drift is measured from git history: when the token source moves after `DESIGN.md`'s last commit, the spec is stale. Committing the doc advances its timestamp past those changes.
-
-```bash
-git add DESIGN.md
-git commit -m "docs: regenerate DESIGN.md"
-```
-
-### 3. Report back
-
-Print two things to the user:
-
-1. The file path that was written.
-2. A 3-bullet summary: (a) the token source it was grounded in, (b) how many roles/components are documented, (c) any token the project is missing.
-
-## Consumed by other skills and agents
-
-- **Front-end worker dispatch:** point workers at `DESIGN.md` so generated UI uses the right tokens, states, and breakpoints by default.
+- **Keep-blocks** most often wrap `## Do's & Don'ts` rules the team wrote by hand (`❌ Never use Quasar's --q-* variables; the theme only wires --g-*.`). Put them back in the section they came from.
+- **Pointer memory title:** `project_<slug>_designmd` (slug = lowercase kebab-case of project name). Body example: `See [apps/frontend/DESIGN.md](apps/frontend/DESIGN.md) — Quasar dark-first `--g-*` theme, Playfair/Inter, 8pt grid.`
+- **Commit** `DESIGN.md` so reviewers can diff it against the token source. Nothing in Cassy reads `DESIGN.md`: there is no hook, banner, or `cas` subcommand for it, and no automatic signal will tell anyone it went stale. Comparing the commit dates of `DESIGN.md` and its token source, by hand, is the only check there is.
+- **Report back:** (a) the token source it was grounded in, (b) how many roles/components are documented, (c) any token the project is missing.
 
 ## When to run
 
-- **Missing:** no `DESIGN.md` → generate from scratch before any significant UI work or design review.
-- **Drift:** the token source changed after `DESIGN.md`'s last commit → regenerate; keep-blocks survive.
+- **Missing:** no `DESIGN.md` → generate from scratch before any significant UI work.
+- **Drift:** the token source has commits newer than `DESIGN.md`'s last commit → regenerate; keep-blocks survive. You have to look; nothing announces it.
 - **Manual:** user invokes `/design-spec` or asks for a design spec / DESIGN.md.
 - **After a re-theme:** palette, type stack, or spacing unit changed.
 

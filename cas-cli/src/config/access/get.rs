@@ -9,8 +9,10 @@ impl Config {
         let daemon = self.daemon.clone().unwrap_or_default();
         let staging = self.staging.clone().unwrap_or_default();
         let issues = self.issues.clone().unwrap_or_default();
+        let release = self.release.clone().unwrap_or_default();
         let notifications = self.notifications.clone().unwrap_or_default();
         let skill_validation = self.skill_validation.clone().unwrap_or_default();
+        let skills = self.skills.clone().unwrap_or_default();
         let memory = self.memory.clone().unwrap_or_default();
         match key {
             // Sync section
@@ -23,6 +25,7 @@ impl Config {
             "skill_validation.require_sandbox" => {
                 Some(skill_validation.require_sandbox.to_string())
             }
+            "skills.optional" => Some(skills.optional.join(",")),
             // Cloud section
             "cloud.auto_sync" => Some(cloud.auto_sync.to_string()),
             "cloud.interval_secs" => Some(cloud.interval_secs.to_string()),
@@ -111,6 +114,8 @@ impl Config {
             }
             // Issues section
             "issues.repo" => Some(issues.repo.unwrap_or_default()),
+            // Release section
+            "release.claude_account_allowlist" => Some(release.claude_account_allowlist.join(",")),
             // Notifications section
             "notifications.enabled" => Some(notifications.enabled.to_string()),
             "notifications.sound_enabled" => Some(notifications.sound_enabled.to_string()),

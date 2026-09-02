@@ -15,23 +15,6 @@ Run all six steps in order. **If no step changed anything, end the turn without
 a report** — a silent sweep is the success case, and a "nothing to do" summary
 every hour is noise.
 
-## Why you may be here: the unfiled-reports banner
-
-`docs/requests/` is **deprecated for new outbound actionable requests**. Do not create a new file there: file directly on the receiving Richards-LLC team's issue board and save a Cassy memory receipt (issue URL, one-line ask, date). This skill still sweeps pre-existing staged legacy files so they are not lost; history and inbound `RESPONSE-*.md` files remain readable. Prose-heavy specifications and design documents may remain there until cross-project task proposals ship.
-
-Cassy emits a SessionStart banner when `BUG-*.md` / `FEATURE-*.md` files are
-staged at the `docs/requests/` root — reports the write-first flow wrote but
-never pushed, so nobody outside that checkout can see them. Sweeping those
-staged files into GitHub is part of this skill's job: read each one, search for
-an existing issue (step 6's dedupe check applies), file it with `gh issue
-create --body-file docs/requests/<file>`, and delete the staged file only after
-the issue URL is known. The banner clears when the directory root is empty.
-
-A companion banner fires when `[issues] repo` is unset while `docs/requests/`
-exists. It names `cas config set issues.repo owner/repo` and deliberately
-suggests no value — use the tracker the receiving team specified, never one
-derived from the `origin` remote.
-
 ## Before you start
 
 ```bash
@@ -51,9 +34,9 @@ mcp__cas__search action=search query="<the issue's subject in your own words>"
 
 **Do not filter this list by `status=open`.** The status filter is a single
 substring match, so `status=open` returns *only* untouched tasks — every task
-someone is actually working on (`in_progress`, `blocked`, `awaiting_merge`,
-`pending_supervisor_review`) drops out, and the sweep concludes an in-flight
-issue was never tasked. List everything and ignore the closed ones yourself.
+someone is actually working on (`in_progress`, `blocked`, `awaiting_merge`)
+drops out, and the sweep concludes an in-flight issue was never tasked. List
+everything and ignore the closed ones yourself.
 
 ## 1. List open issues
 
@@ -138,7 +121,7 @@ Close the loop on GitHub so the reporter (and the next sweep) can see it:
 gh issue comment <n> --body "Tracked as \`cas-XXXX\`. <one line on the plan.>"
 ```
 
-**Issue-comment specificity (observed 2026-08-11):** Bad: `Tracked as \`cas-2a13\`.`
+**Issue-comment specificity.** Bad: `Tracked as \`cas-2a13\`.`
 Good: `Tracked as \`cas-2a13\`. I’ll add real bad/good pairs to the guidance writers use.`
 Keep the tracker link, then state the concrete outcome; a bare ID leaves the reporter without an answer.
 
@@ -198,6 +181,23 @@ gh issue create --title "<surface>: <what goes wrong>" --body-file /tmp/issue.md
 
 Write the body to a file rather than splicing a multi-line string through the
 shell. Then task it in step 4's format if it is actionable now.
+
+## Why you may be here: the unfiled-reports banner
+
+`docs/requests/` is **deprecated for new outbound actionable requests**. Do not create a new file there: file directly on the receiving Richards-LLC team's issue board and save a Cassy memory receipt (issue URL, one-line ask, date). This skill still sweeps pre-existing staged legacy files so they are not lost; history and inbound `RESPONSE-*.md` files remain readable. Prose-heavy specifications and design documents may remain there until cross-project task proposals ship.
+
+Cassy emits a SessionStart banner when `BUG-*.md` / `FEATURE-*.md` files are
+staged at the `docs/requests/` root — reports the write-first flow wrote but
+never pushed, so nobody outside that checkout can see them. Sweeping those
+staged files into GitHub is part of this skill's job: read each one, search for
+an existing issue (step 6's dedupe check applies), file it with `gh issue
+create --body-file docs/requests/<file>`, and delete the staged file only after
+the issue URL is known. The banner clears when the directory root is empty.
+
+A companion banner fires when `[issues] repo` is unset while `docs/requests/`
+exists. It names `cas config set issues.repo owner/repo` and deliberately
+suggests no value — use the tracker the receiving team specified, never one
+derived from the `origin` remote.
 
 ## The recurring sweep
 

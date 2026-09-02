@@ -1,375 +1,73 @@
-# Operating Discipline — Staying Reachable and Staying Alive
+# Operating Discipline — Scoped Verification
 
-## Marked throwaway prototypes
+The PTY spawn contract is the source of truth for worker availability, long
+commands, context limits, and reporting shape. This reference intentionally
+does not restate those launch-time rules. It covers test execution details that
+belong with the repository's scoped-test wrapper.
 
-Adapted from mattpocock/skills `prototype`, MIT © 2026 Matt Pocock. A prototype exists to answer one stated design question and is throwaway from day one. Mark it clearly, keep it near the code or UI it explores, avoid persistence and production-grade polish, and surface the state or variant being tested.
+## Scoped tests
 
-When it settles a decision, capture the question and verdict in `mcp__cas__task`, `mcp__cas__spec`, or `mcp__cas__memory`. Keep the prototype itself off the delivery branch or remove it after the decision; only validated production changes belong in the task’s deliverable. Never create an unmarked root-level script, parallel tracker, or context-file workflow.
+Workers do not own full-suite runs. A full suite links dozens of test binaries;
+iterate by compiling, then prove only the affected target:
 
-Proactive habits that keep a worker useful for a whole shift. The other references are about
-moments (closing, breaking, looking things up); this one is about how you run continuously.
-Two failure modes cost real money on 2026-08-06 (GH #121) and both are fully preventable:
+- `cargo check -p <crate> --lib --tests` — compile feedback without test runs.
+- `scripts/run-scoped-tests.sh -p cas --lib <module>` — one library target or
+  filter through nextest.
+- `scripts/run-scoped-tests.sh -p cas --test <name>` — one integration test
+  file through nextest.
+- `scripts/run-scoped-tests.sh --proof ...` — final receipt; it checks that the
+  committed test surface is covered.
+- `CARGO_CMD=test scripts/run-scoped-tests.sh ...` — diagnostic fallback only.
 
-- **Blocked pane** — a worker foreground-watched a queued CI run for 40+ minutes through a
-  provider outage. Nine messages, including two stand-down orders, could not reach it. The
-  operator had to kill it.
-- **Working into auto-compaction** — the same worker, and a second one in the same window,
-  ran their context to the wall and were killed mid-compaction. The operator paid for
-  re-summarizing work that a `git push` would have preserved for free.
+Package selection alone (`-p cas`) is not a scope here: that package owns many
+test binaries. Reserve full runs for supervisor integration and release gates.
 
-## Part 1 — Never block the pane
+## The test loop: inner loop vs final proof
 
-A foreground command owns your turn until it exits. Messages are delivered *between* turns,
-so while it runs you are unreachable — there is no recovery from inside a blocked turn, only
-prevention.
+Batch before you verify: group related fixes before running the affected target.
+The inner loop is quick
+compile feedback; the final proof is the one affected-target run after the
+batch and, if needed, one pre-push receipt. Do not spend a full sweep after
+each micro-fix.
 
-### The 2-minute rule
+**Inner loop:** use `cargo check -p <crate> --lib --tests` while editing. It
+catches type, borrow, feature, and test-compilation errors without linking or
+executing test binaries.
 
-If a command *can* exceed ~2 minutes, it does not run in the foreground. That includes:
+**Final proof:** run the affected target after all fixes, at most twice unless a
+new edit changes that target. The equivalent direct command is
+`cargo nextest run --lib <filter>`; use the guarded wrapper and read its summary.
+Reuse a banked receipt when later edits are outside its blast radius, recording
+the commit and covered surface in the task note.
 
-- builds (`cargo build`, `cargo test` link steps, `pnpm build`, Docker builds)
-- full test suites
-- deploys and release pipelines
-- anything that listens on a port
-- **every CI wait** — `gh run watch`, `gh pr checks --watch`, sleep/poll loops
+The standard shape is: check while editing → batch fixes → one scoped nextest
+run → record the passed count and output tail → push. A background build or
+test must be allowed to finish before its result is reported.
 
-"It usually finishes in 30 seconds" is not an exemption. The failure mode is the tail, and
-the tail is where outages, queues and hangs live.
+## A green exit code is not a green test run
 
-Two sanctioned shapes: **background it** and end your turn (or keep working), or **replace
-the wait with a reminder** and end your turn.
-
-### Recipe 1 — builds and test suites
-
-Run it detached and return to the pane immediately. If your harness exposes a background-run
-affordance (Claude Code's Bash `run_in_background`), use it; otherwise redirect and detach:
-
-```bash
-cargo test --lib > /tmp/cas-test.log 2>&1 &
-```
-
-Then end your turn or do unrelated work. When you come back, tail the log and report the exit
-status — never claim a pass you did not read:
-
-```bash
-tail -40 /tmp/cas-test.log
-```
-
-Do not sit in a `wait`/`sleep` loop watching it. Waiting in the foreground for a backgrounded
-job re-creates exactly the problem backgrounding solved.
-
-### Recipe 2 — servers and anything that listens
-
-Never `npm run dev &` by hand: a raw background process dies with your worker teardown or,
-worse, outlives it unowned. Use the Cassy server registry — the only supported way to keep a
-server alive across worker lifetime:
-
-```
-mcp__cas__coordination action=server_start command="npm run dev" cwd=<dir> port=3000
-mcp__cas__coordination action=server_list
-mcp__cas__coordination action=server_stop id=<id>
-```
-
-`server_list` reports the ports actually bound and who started them. Use `shared=true` only
-for services that must survive your teardown.
-
-### Recipe 3 — CI waits (foreground `gh run watch` is BANNED)
-
-There is no acceptable foreground CI wait. Not `gh run watch`, not `gh pr checks --watch`,
-not a hand-rolled poll loop, not "just this once because the run is already green-ish".
-
-The sanctioned pattern is **queue the rerun → set a reminder → end the turn → go idle**:
-
-```bash
-git push                                   # or: gh workflow run <wf> --ref <branch>
-gh run list --branch <branch> --limit 1    # one-shot: confirm it was queued, then stop
-```
-
-```
-mcp__cas__coordination action=remind target=<your-name> remind_delay_secs=600 \
-  remind_message="Check CI on <branch>: gh run list --branch <branch> --limit 3"
-```
-
-Then end your turn. The reminder arrives as an injected turn; act on it, run one-shot
-`gh run list` / `gh run view --log-failed`, and re-arm another reminder if the run is still in
-flight. Each check is a fresh short turn, so the supervisor can reach you between them.
-
-If CI is queued behind an outage or a long backlog, say so in a progress note and re-arm with
-a longer delay — do not convert waiting into watching.
-
-### Recipe 4 — anything else that might hang
-
-Bound it explicitly rather than hoping: `timeout 120 <cmd>`, `--max-time` for `curl`,
-`--no-watch`/`--run` for test runners that default to watch mode. If you cannot bound it,
-background it.
-
-### Scoped tests
-
-Workers do not own full-suite runs. A full suite in this repo links dozens of test binaries;
-multiplied by every worktree, that link tax is the dominant gate cost. Iterate by compiling,
-then prove only the affected target:
-
-- `cargo check -p <crate> --lib --tests` — inner-loop compile feedback, no test execution
-- `scripts/run-scoped-tests.sh -p cas --lib <module>` — one library target/filter via nextest
-- `scripts/run-scoped-tests.sh -p cas --test <name>` — one integration-test file via nextest
-- `scripts/run-scoped-tests.sh --proof ...` — final receipt only; refuses a filter that misses a committed changed test module or integration target
-- `CARGO_CMD=test scripts/run-scoped-tests.sh ...` — diagnostic fallback only, not the default
-
-Package selection alone (`-p cas`) is not a scope here: that one package owns dozens of test
-binaries. Full runs are sanctioned at exactly two points: the supervisor integration merge and
-the release gate. The worker PreToolUse guard refuses an unscoped `cargo test` or
-`cargo nextest run` and points back to the recipes above.
-
-### The test loop: inner loop vs final proof
-
-Most multi-fix tasks are lost here, not in the thinking. The failure looks like this, observed
-live: a worker fixing several test entry points ran the full `cargo test -p <crate> --lib`
-sweep (~3,700 tests, ~5 minutes) after **each individual fix**, foreground-`sleep`ing between
-checks. 47+ minutes of wall-clock, almost all of it waiting, for maybe 4 minutes of edits.
-
-Two loops, and they are not the same loop:
-
-**Inner loop — seconds, run constantly.** Use `cargo check -p <crate> --lib --tests`. This is
-where you catch type, borrow, feature, and test-compilation errors while editing without linking
-or executing test binaries after every micro-fix.
-
-**Final proof — minutes, run at most twice.** The affected target runs once after you have
-landed the whole batch of fixes, and once more as the pre-push receipt. That is the budget.
-A third real test run means you skipped the batching step unless new edits changed that target.
-
-The rules that follow from that:
-
-1. **Batch before you verify.** When you find three broken call sites, fix all three, then run.
-   Do not fix-run-fix-run. Each unnecessary full run costs you ~5 minutes and buys information
-   you were about to get anyway.
-2. **Reuse a banked receipt.** If a scoped sweep already passed at the commit you are closing on
-   and your later edits are provably outside its blast radius, cite it — do not re-run it to
-   feel better. Say which commit it was taken at and what it covered.
-3. **Nextest is the standard runner.** The guarded wrapper defaults to
-   `cargo nextest run --lib <filter>` and verifies that a harness reported a nonzero passed
-   count. Install it once with `cargo install cargo-nextest`; do not silently fall back to a
-   slower full `cargo test` shape.
-4. **Never foreground-`sleep` waiting on a run.** Background it (Recipe 1) and spend the
-   minutes on other deliverable work: the next fix, the task note, the close-gate checks, the
-   PR body. A worker asleep in the foreground cannot even receive a stand-down order.
-5. **Arm the relevant guard in the inner loop**, not just in the final sweep. A guard that only
-   runs in the 5-minute sweep teaches you nothing for 5 minutes.
-
-A worked shape, start to close: `cargo check` while fixing → one affected-target nextest sweep
-after the batch, backgrounded → other work while it cooks → pre-push scoped receipt, or a banked
-receipt plus one target run covering exactly what changed since.
-
-### A green exit code is not a green test run
-
-Exit code 0 means "nothing reported failure". It does **not** mean tests ran. Three runs in
-this repo exited 0 while executing **zero tests**, all on one day, all judged green by their
-author (GH #173):
-
-1. `cargo test -p cas-cli --lib <filter>` — the crate is named `cas`, not `cas-cli`. cargo
-   errored; the compound command around it swallowed the status.
-2. `cargo test -p cas --lib <filter>` with a **relative** `$ZIG` — ghostty_vt_sys's build
-   script panicked. Build scripts run with cwd set to the *crate* directory, so a relative
-   `.context/zig/zig` resolves against the wrong root. Factory provisioning links the primary
-   checkout's pinned `.context/zig` into new worktrees, so leave `$ZIG` unset unless an
-   absolute override is necessary.
-3. `cargo test -p cas --lib some_module::tests::` where the module had been renamed to
-   `some_module::additive_only_tests::`. Output, verbatim: `test result: ok. 0 passed;
-   0 failed; 0 ignored; 0 measured; 3929 filtered out`. Exit 0.
-
-Run your final-proof suite through the guard, which enforces all of that mechanically:
+The wrapper's receipt must show a harness summary and a nonzero passed count.
+An exit code without a reported test is not proof. Read the `test result:` or
+nextest `Summary` line yourself; record the exact passed and failed counts in
+the close note. A zero-test run is a failure to run.
 
 ```bash
 make -C cas-cli test-scoped SCOPED_ARGS='--proof -p cas --lib my_module'
-scripts/run-scoped-tests.sh --proof -p cas --test cli_test # same thing, directly
+scripts/run-scoped-tests.sh --proof -p cas --test cli_test
 ```
 
-It fails the run unless cargo exited 0, **a test harness actually reported**, the passed
-count is greater than zero, and (with `--proof`) the committed diff's changed test modules and
-integration targets are covered. The middle condition is the one that matters: a wrapper or a
-pipeline can drop a nonzero status, but nothing can invent a `test result:` line. It also
-rejects a relative `$ZIG` before spending a build on it, and reads `cargo nextest run`'s
-`Summary` line as well as `cargo test`'s.
+## Clean-CI environment
 
-Then quote the number. **"Tests pass" is not a receipt; "210 passed; 0 failed" is.** Read the
-`test result:` line yourself and put its counts in your close note. A passed count of 0 is a
-failure to run — never report it as green, however cheerfully cargo prints `ok`.
-
-### Running tests in the clean-CI environment shape
-
-Your shell exports ~15 `CAS_*` identity variables. A test that reads one passes for you and
-fails only on a clean CI runner. That is not hypothetical: GH #136's tests shipped red exactly
-this way — they resolved a supervisor name from the ambient `CAS_SUPERVISOR_NAME` and passed
-100% of the time in every factory shell.
+Factory shells export `CAS_*` identity variables. Tests that read them can pass
+locally and fail in clean CI, so use the project's clean-environment wrapper
+when the diff touches agent resolution, coordination, messaging, cloud config,
+or another environment-sensitive path:
 
 ```bash
-make -C cas-cli test-clean-env                                     # one binary, clean env
+make -C cas-cli test-clean-env
 make -C cas-cli test-clean-env CLEAN_ENV_ARGS='--lib cloud::config'
 ```
 
-It enumerates `CAS_*` from your live environment, prints what it stripped, and runs the scoped
-tests without them. **Use it for scoped runs too**, not just full-suite gates, whenever your
-diff touches agent resolution, coordination, messaging, cloud config, or anything else that
-reads the environment. Scoped is where this bites: the GH #136 tests were only ever run with
-`--test factory_mcp_ops_test`, so a full-suite-only rule would not have caught them.
-
-Do not hand-maintain an `env -u ...` list. The one that used to live here had drifted in both
-directions — it missed `CAS_CLOUD_TOKEN` and `CAS_CLOUD_ENDPOINT` (a "sanitized" run could
-still reach the real cloud) and stripped two variables that no longer exist. `CAS_ROOT` and
-`CAS_CLONE_PATH` matter most: left set, a test can reach the *main* checkout's `.cas`. There is
-no `CAS_TASK_ID`; don't add it back.
-
-### If you are already blocked
-
-You cannot message from inside a blocked turn. Once the command finally returns, run
-`mcp__cas__coordination action=inbox_poll` **first**, before anything else, to pull the
-messages that could not reach you — and keep polling until it says no unread messages. Then
-honor anything that superseded your work: a stand-down order you answer 40 minutes late is
-still an order, and a scope change you missed means your last hour needs redoing, not merging.
-
-## Part 2 — Context budget discipline
-
-Context is a consumable the operator pays for. Auto-compaction is not a safety net — it is the
-expensive failure mode. Budget it the way you budget wall-clock.
-
-### Measure Codex live occupancy, never cumulative totals
-
-For Codex, calculate occupancy from the newest rollout `token_count` event:
-`last_token_usage.input_tokens / model_context_window`. `total_token_usage` is a cumulative,
-cache-heavy history counter, not current prompt occupancy and never a checkpoint trigger.
-
-Worked incident: `last_token_usage.input_tokens = 37,952` against
-`model_context_window = 258,400` is about **15% occupied** (about **85% headroom**). The same
-rollout reported `total_token_usage.input_tokens = 356,457`, including about 330k cached tokens;
-that total does **not** mean the worker is near exhaustion. Keep working unless the live
-occupancy or another real failure signal requires a checkpoint.
-
-### Report headroom in every milestone note
-
-Every `note_type=progress` milestone note ends with your remaining context, plainly:
-
-```
-mcp__cas__task action=notes id=<task-id> note_type=progress \
-  notes="Migration + tests written, suite green. Context: ~45% used."
-```
-
-An estimate is fine; the point is the *trend*. The supervisor cannot see your context, so a
-note without it hides the one signal that predicts a mid-task death. A worker that goes from
-40% to 75% in one step is about to need a checkpoint, and the supervisor can only stage a
-replacement if it can see that coming.
-
-### Checkpoint before compaction — never work through it
-
-When context is running low (roughly 70–75% used, or sooner if the remaining work is large),
-**stop feature work and checkpoint**. Four steps, in order:
-
-1. `git add -A && git commit` — commit everything, even partial work, with an honest message.
-2. `git push` — an unpushed checkpoint is not a checkpoint.
-3. Write a structured handoff note on the task: current state, exact next step, gotchas found,
-   commands already proven and their results.
-   ```
-   mcp__cas__task action=notes id=<task-id> note_type=progress \
-     notes="CHECKPOINT. State: <what is done + tip SHA>. Next: <exact next step>. \
-            Gotchas: <traps found>. Proven: <command + result>. Context: ~75% used."
-   ```
-4. Message the supervisor asking for a respawn, naming the branch and tip SHA.
-
-Then stop. A fresh worker resuming from a pushed checkpoint is dramatically cheaper than
-compaction plus a degraded continuation — and far cheaper than being killed mid-compaction
-with uncommitted work. Never let a factory task run into auto-compaction.
-
-If you are already degrading — garbled output, repeating a fix you already made, losing the
-thread of your own plan — that is context exhaustion, and you cannot self-recover. Checkpoint
-now and see [recovery.md](recovery.md).
-
-### Right-size your commits
-
-Prefer many small pushed commits over one large uncommitted WIP. Commit and push after each
-logical unit, not at the end. The cost of any checkpoint, kill, respawn or crash is exactly
-the work since your last push — keep that measured in minutes, not hours. Small commits also
-make the supervisor's merges reviewable and let a replacement worker see where you got to.
-
-## Part 3 — Report in facts, not narration
-
-Measured on a real delivery cycle (cas-e948, 16 worker notes, 887 words): classic filler was
-0%, verbatim restatement across notes 1.2%. The waste is not adjectives — it is narrated
-intent, ritual fields, and prose that would read the same in any other task. That is what this
-part targets, and only that.
-
-### Cut
-
-- **Preamble and recap.** Do not restate the brief, announce what you are about to do, or
-  summarize what you just said. A note records what is now true and what it cost.
-- **Tool-call narration.** The supervisor can see the calls.
-- **Forward-looking intent.** "I will next…" / "awaiting…" is stale by your next note. Report
-  the state, and report the blocker if you are actually blocked.
-- **Self-congratulation and hedging filler.** If a sentence would read identically in a
-  different task, it carries no information — cut it.
-- **Ritual fields.** Headroom is a number (`~70%`). *Ample* and *adequate* are unactionable and
-  were 4.9% of that sampled corpus.
-
-### Keep in full — brevity never trims evidence
-
-These are the first things a naive "be terse" rule destroys, and their loss is invisible
-downstream because the next worker cannot know what was dropped:
-
-- Commit SHAs, PR numbers, run IDs, `file:line` root causes, exit codes, measured numbers.
-- **Approaches you tried that failed.** A note that omits a dead end makes the next worker
-  repeat it. This is the single highest-value thing you can record.
-- **Uncertainty, marked as uncertainty.** "Probably X, verify before relying on it" must not
-  flatten into "X" — two handoffs later it will be cited as fact.
-- Why a decision was made, not only what was decided.
-
-### Worked pair (observed)
-
-Bad — 46 words, three of them load-bearing:
-
-> Checkpoint pushed: e44b5250 ci(cas-e948): short-circuit required lanes and shard suite. Static
-> tier policy contract passes 151 assertions. I am awaiting cas-aa27's cache measurement only to
-> confirm no late change to the strategy; current branch is clean and ready for PR once
-> rechecked/rebased. Context headroom: ample.
-
-Good — 31 words, same evidence, no intent narration and an actionable headroom number:
-
-> Checkpoint e44b5250 (short-circuit + shard suite). Tier contract: 151 assertions pass. Branch
-> clean, PR-ready after rebase. cas-aa27's cache measurement would only change strategy if it
-> lands before the PR. Headroom ~85%.
-
-Rewriting four real notes this way: 183 → 129 words, a 29.5% reduction with every SHA, run ID
-and timing retained.
-
-### Pane output vs the durable record
-
-Roughly 90% of a worker's pane prose is never read. The durable record is the task note and the
-close reason — those are what a supervisor reads at review and what survives your session. Pane
-prose that restates the note you just wrote is written for nobody.
-
-- **Answer first**, then one or two bullets. That is the whole shape.
-- **Scannable beats dense.** Bullets, and a small table when you are comparing things, so it lands
-  at a glance. A short but word-dense paragraph fails this requirement as badly as a long one —
-  the goal is maximum information absorbed per second of reading, not minimum words.
-- **Put it in the note, not the pane.** If it matters later, it belongs in `action=notes` or the
-  close reason.
-- **Exceptions that stay complete:** blocker escalations and merge requests. Those are read, acted
-  on, and expensive to get wrong.
-
-### Worked pair (observed, this session)
-
-Bad — a delivery report as a pane wall, restating what the close note already held:
-
-> All lanes green and evidence collected. Per-job stats confirmed emitted by 7 of the 9 compiling
-> ci.yml lanes. Scoped Validation showed 611 hits / 630 misses, 49% on the first cold push, then
-> 32/6, 84% on the second once the branch seeded — the cold-penalty dynamic the spike described,
-> now visible, and the 49% run correctly raised the cold-lane warning annotation. Fast Validation
-> preflight measured 32/4 at 88%, the suite archive build 19/2 at 90% … [continues for 12 more
-> lines, every number already recorded in the close note]
-
-Good — the same turn as a triage line:
-
-> **sccache stats live on 7/9 compiling lanes; PR #478 green.**
-> - Cold→warm proved: Scoped Validation 49% → 84%, cold-lane warning fired as designed.
-> - Needs you: panic-isolation lanes are schedule-only, so their summaries are unverified pre-merge.
->
-> Full per-lane numbers are in the cas-67a2 close note.
-
-Same decisions available to the reader; the evidence still exists, one hop away, in the surface
-built to hold it.
+The wrapper enumerates and strips the live `CAS_*` variables; do not hand-write
+an `env -u` list. In particular, `CAS_ROOT` and `CAS_CLONE_PATH` can redirect a
+test to the main checkout's `.cas`. There is no `CAS_TASK_ID`.

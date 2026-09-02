@@ -1,8 +1,8 @@
 ---
 name: cas-nuxt-playwright
-description: Opt-in only: invoke ONLY when the operator explicitly asks for Nuxt + Playwright E2E testing help; do not invoke for ordinary development, test edits, or routine verification.
+description: Use when writing or debugging Playwright E2E tests for a Nuxt 3 or Nuxt 4 app with Firebase auth and Quasar UI: SSR-mode detection, auth-state reuse, selector and timing triage.
 managed_by: cas
-user-invocable: true
+disable-model-invocation: true
 ---
 
 # Nuxt + Playwright E2E Testing

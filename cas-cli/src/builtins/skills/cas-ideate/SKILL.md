@@ -2,10 +2,6 @@
 name: cas-ideate
 description: Use when the user asks for new grounded project-improvement ideas ("what should I improve?", "surprise me", or "what would you change?") rather than refinement of an existing idea.
 managed_by: cas
-disallowed-tools:
-  - Write
-  - Edit
-  - NotebookEdit
 ---
 
 # Adversarial Ideation
@@ -64,7 +60,7 @@ A prior ideation doc is relevant when:
 - The path or subsystem overlaps the requested focus
 - The request is open-ended and there's an obvious recent open ideation doc
 
-If a relevant doc exists, ask (via `AskUserQuestion`): "Found an existing ideation doc for [topic]. Continue from it, or start fresh?" In factory mode AskUserQuestion is blocked — ask the question in plain text and end your turn; the director relays answers.
+If a relevant doc exists, ask (via `AskUserQuestion`): "Found an existing ideation doc for [topic]. Continue from it, or start fresh?"
 
 If continuing:
 - Read the document

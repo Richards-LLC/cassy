@@ -1,6 +1,6 @@
 ---
 name: cli-routing
-description: Use when a bounded task needs a one-shot Codex or Claude CLI subprocess, including capacity recovery or release-note posting; Claude requires the explicitly approved pippenz@gmail.com profile.
+description: Use when a bounded, non-interactive task needs a one-shot `codex exec` or `claude -p` subprocess, such as capacity recovery or release-note posting. Codex first; Claude only after the account gate in references/routing.md passes.
 managed_by: cas
 ---
 
@@ -19,26 +19,23 @@ subprocess, not as a replacement for a factory worker or the current agent.
    and stderr. Do not infer an exhaustion signature from slow output.
 3. Claude is a fallback **only** after `claude auth status --json`, run with the
    exact `CLAUDE_CONFIG_DIR`, reports `loggedIn: true`, `authMethod:
-   "claude.ai"`, `apiProvider: "firstParty"`, and the exact email
-   `pippenz@gmail.com`. This is a one-entry allowlist: any other email is an
-   unapproved account, and missing config, malformed JSON, or a failed probe is
-   also a hard no-Claude result.
+   "claude.ai"`, `apiProvider: "firstParty"`, and an address listed in this
+   project's `release.claude_account_allowlist` config key. Any address outside
+   that allowlist is an unapproved account, and an empty allowlist, missing
+   config, malformed JSON, or a failed probe is also a hard no-Claude result.
 4. If eligible Claude also fails for capacity/rate limit, preserve its evidence
    and report blocked. Never spend another Claude account to work around it.
 
 See [routing.md](references/routing.md) for runnable probes, one-shot examples,
-strict Codex output schemas, and the verified local approved-account result.
+strict Codex output schemas, and the account-gate procedure.
 
 ## Release-note posting
 
 Every merge to `main` or `staging` needs the existing
-[release-notes](../release-notes/SKILL.md) flow; channel choice remains
-project-local. For the actual Slack transport, follow
-[`docs/SLACK_POSTING_RUNBOOK.md`](../../../../../docs/SLACK_POSTING_RUNBOOK.md):
-write exact bodies to a separator-delimited file, read the channel to dedupe,
-then post and retain returned timestamps as receipts. For cas-src, use the
-approved Claude Slack MCP route after its account/server preflight; use the
-Codex Slack plugin only when the current session's resource probe is positive.
+[release-notes](../release-notes/SKILL.md) flow. Content, channel, and the
+Slack transport are all project policy: follow the project's release-notes
+rubric, which names them. This skill only decides which CLI runs the post, and
+that decision is the account gate above.
 
 ## Do not trigger
 

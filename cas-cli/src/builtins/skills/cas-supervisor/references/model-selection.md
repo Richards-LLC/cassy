@@ -12,14 +12,14 @@ Routing is two stages. **Stage 1 — tier the task** by complexity; the tier is 
 
 - **Light** is Claude Haiku 4.5 at the registry's default low effort: bounded chores, docs, and mechanical work still carry an explicit effort.
 - **Standard** is Codex GPT-5.6 Luna at xhigh: the stock engineering floor for normal feature and bug work.
-- **Taste** is Claude Opus 5 at high: public surfaces, prompts, docs, naming, release notes, and general judgment are normal Opus work, not a special-case escape hatch.
+- **Taste** is Claude Opus 5 at high: public surfaces, prompts, docs, naming, release notes, and general judgment are normal taste work, not a special-case route.
 - **Heavy** is Codex GPT-5.6 Sol at high: cross-cutting refactors, concurrency/lifecycle code, migrations, and critical-path work.
 - **OpenCode is route-specific** — its local and hosted Qwen lanes each require their
   own live receipt before production spawning. Never infer provider auth or effort
   support from the selector alone. The operator's default hosted lane is the explicit
   QwenCloud Token Plan route.
 
-Terra is a **standing suspension**: `gpt-5.6-terra` is documented for compatibility, but it is not an active lane and must never be spawned. Luna remains xhigh-only; `max` and `ultra` are not Cassy effort values.
+Luna remains xhigh-only; `max` and `ultra` are not Cassy effort values. The generated route table is the source of truth for lane status.
 
 ## Registry route table
 
@@ -39,10 +39,6 @@ Lane request mode: call `coordination spawn_workers` with `lane=<lane>`. The reg
 <!-- END GENERATED ROUTE TABLE -->
 
 Token-heavy read-only investigation belongs in a `cas-codex-exec` shell-out, not a worker and not your own context window.
-
-### Taste/judgment lane (Claude Opus 5 high)
-
-Taste-sensitive output is a first-class registry lane: route public surfaces, API/SDK shape, naming, prompts, docs, release notes, error wording, and general judgment to Claude Opus 5 at high effort. This is normal taste work, not a special-case escape hatch.
 
 ### Claude Opus lane (taste plus exceptional architecture)
 
@@ -101,7 +97,7 @@ carry the operator-declared tier as metadata when supplied.
 
 | `cli=` | Accepted `model=` slugs | Notes |
 |---|---|---|
-| `codex` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Sol/high is the heavy route; Luna/xhigh is the standard route; **Terra is standing-suspended and has no active lane**. Luna is the gpt-5.4-mini successor. |
+| `codex` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Sol/high is the heavy route; Luna/xhigh is the standard route; Luna is the gpt-5.4-mini successor. |
 | `claude` | any canonical `claude-*` id (e.g. `claude-opus-5`, `claude-haiku-4-5-20251001`, `claude-sonnet-5`) or the `opus`/`sonnet`/`haiku` aliases | Canonical IDs accept future numeric family/version releases and the CLI's optional `[1m]` context suffix; Haiku/low is the light lane; Opus/high is the taste lane and also serves exceptional architecture/safety/rescue/challenge. Sonnet is available for explicit non-lane work. |
 | `grok` | `grok-4.5`, `grok-4.6` | Provider capacity is not an active registry lane in this matrix; never invent `cli=cursor` or a fallback recipe. |
 | `opencode` | `local/<model>`, `qwencloud/qwen3.8-max`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Explicit local, Token Plan, or DashScope pay-as-you-go lane; per-lane conformance receipt required. Hosted auth/model availability are operator preflight inputs. |
@@ -114,6 +110,7 @@ alias as its stock model; this is a fallback route, not a registry lane.
 
 ```text
 # Claude stock fallback
+mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
 mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
 ```
 
@@ -132,28 +129,9 @@ How each backend receives them:
 
 For non-Luna multi-step workers, `effort=high` is the ceiling. Luna is the exception: its only permitted Cassy effort is the current maximum, `xhigh`. The registry sets Haiku light to low, Opus taste to high, and Sol heavy to high; do not use `max`/`ultra` until Cassy's vocabulary is extended and validated.
 
-## Spawn cookbook (all four harnesses)
+## Spawn recipes
 
-Copy-paste `spawn_workers` recipes generated from the active registry lanes. The tool prefix changes with the supervisor harness, but every command pins the registry's `cli`, `model`, and `effort`.
-
-<!-- BEGIN GENERATED SPAWN RECIPES: cas-factory lane registry -->
-Copy-paste commands generated from the registry; every recipe pins `cli`, `model`, and `effort`:
-
-```text
-# light — recipe claude_haiku
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-haiku-4-5-20251001 effort=low
-
-# standard — recipe codex_luna
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
-
-# taste — recipe claude_opus
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5 effort=high
-
-# heavy — recipe codex_sol
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high
-
-```
-<!-- END GENERATED SPAWN RECIPES -->
+The canonical copy-paste recipes are maintained once in [workflow.md](workflow.md#phase-2-coordinate). Use that generated block; this reference owns the registry policy and route table.
 
 ### OpenCode workers (route-specific conformance)
 
@@ -169,16 +147,9 @@ discovery. Use `alibaba/qwen3.8-max` with `DASHSCOPE_API_KEY` for pay-as-you-go,
 `local/<model>` for a local server. Parameter table and field names:
 [reference.md](reference.md#spawn_workers-parameters).
 
-## Routing Axes
+## Decision glossary
 
-Use the registry lane as the default, then check four axes before spawning:
-
-| Lane | Cost | Intelligence | Speed | Taste |
-|---|---|---|---|---|
-| **light** | Lowest agent cost | Sufficient for bounded mechanical work | Highest throughput | Review public surfaces before shipping |
-| **standard** | Default engineering cost | High for clear feature/bug work | High throughput | Review user-facing prose |
-| **taste** | Higher cost justified by public quality | High judgment ceiling | Strong multi-step output | First-class: docs, prompts, naming, API shape, and release notes |
-| **heavy** | Critical-path cost | High for messy, cross-cutting work | Slower but deliberate | Strong engineering judgment |
+Use the registry lane as the default, then balance cost, intelligence, speed, and taste before spawning.
 
 Glossary:
 
@@ -199,7 +170,7 @@ Score each task while breaking down the EPIC:
 - Architecture, safety, rescue, or independent challenge → **taste** for the public decision, **heavy** for implementation risk
 - Everything else → **standard**
 
-Use the generated recipe block above for the selected lane. Every command must carry explicit `cli=`, `model=`, and `effort=`; do not invent a fallback route outside the registry. Terra is standing-suspended.
+Use the generated recipe block in [workflow.md](workflow.md#phase-2-coordinate) for the selected lane. Every command must carry explicit `cli=`, `model=`, and `effort=`; do not invent a fallback route outside the registry.
 
 For every worker, `effort=high` is the ceiling except for the registry's Luna/xhigh standard route. `max` and `ultra` are not Cassy effort values. If a route is unavailable, report it and choose another active registry lane deliberately rather than silently changing the requested route.
 

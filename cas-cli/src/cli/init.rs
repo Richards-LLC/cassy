@@ -18,7 +18,7 @@ use crossterm::{
 };
 use tracing::{error, info, warn};
 
-use crate::builtins::sync_all_builtins_for_harness;
+use crate::builtins::sync_all_builtins_for_project;
 use crate::config::{Config, HookConfig, SyncConfig, TasksConfig};
 use crate::store::detect::init_cas_dir;
 
@@ -459,9 +459,8 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
         claude_md_updated = update_claude_md(cwd).unwrap_or(false);
         skill_generated = generate_cas_skill(cwd).unwrap_or(false);
 
-        let claude_dir = cwd.join(".claude");
         let builtins_result =
-            sync_all_builtins_for_harness(cas_mux::SupervisorCli::Claude, &claude_dir).ok();
+            sync_all_builtins_for_project(cas_mux::SupervisorCli::Claude, cwd).ok();
         builtins_count = builtins_result
             .as_ref()
             .map(|r| r.agents_updated + r.skills_updated)
@@ -474,9 +473,8 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
         // failure as success would leave the default install non-functional.
         codex_configured = provision_codex_project(cwd)?;
 
-        let codex_dir = cwd.join(".codex");
         let builtins_result =
-            sync_all_builtins_for_harness(cas_mux::SupervisorCli::Codex, &codex_dir).ok();
+            sync_all_builtins_for_project(cas_mux::SupervisorCli::Codex, cwd).ok();
         builtins_count += builtins_result
             .as_ref()
             .map(|r| r.agents_updated + r.skills_updated)
@@ -489,9 +487,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
         // Reuses the same idempotent writer Claude uses.
         grok_configured = configure_mcp_server(cwd).unwrap_or(false);
 
-        let grok_dir = cwd.join(".grok");
-        let builtins_result =
-            sync_all_builtins_for_harness(cas_mux::SupervisorCli::Grok, &grok_dir).ok();
+        let builtins_result = sync_all_builtins_for_project(cas_mux::SupervisorCli::Grok, cwd).ok();
         builtins_count += builtins_result
             .as_ref()
             .map(|r| r.agents_updated + r.skills_updated)
@@ -941,9 +937,7 @@ fn apply_configuration(
 
         // Step 6: Sync built-ins
         execute_step("Syncing built-in files", animate, || {
-            let claude_dir = cwd.join(".claude");
-            let result =
-                sync_all_builtins_for_harness(cas_mux::SupervisorCli::Claude, &claude_dir)?;
+            let result = sync_all_builtins_for_project(cas_mux::SupervisorCli::Claude, cwd)?;
             let total = result.agents_updated + result.skills_updated;
             Ok(format!("{total} files"))
         })?;
@@ -956,8 +950,7 @@ fn apply_configuration(
         })?;
 
         execute_step("Syncing Codex built-in files", animate, || {
-            let codex_dir = cwd.join(".codex");
-            let result = sync_all_builtins_for_harness(cas_mux::SupervisorCli::Codex, &codex_dir)?;
+            let result = sync_all_builtins_for_project(cas_mux::SupervisorCli::Codex, cwd)?;
             let total = result.agents_updated + result.skills_updated;
             Ok(format!("{total} files"))
         })?;
@@ -973,8 +966,7 @@ fn apply_configuration(
         })?;
 
         execute_step("Syncing Grok built-in files", animate, || {
-            let grok_dir = cwd.join(".grok");
-            let result = sync_all_builtins_for_harness(cas_mux::SupervisorCli::Grok, &grok_dir)?;
+            let result = sync_all_builtins_for_project(cas_mux::SupervisorCli::Grok, cwd)?;
             let total = result.agents_updated + result.skills_updated;
             Ok(format!("{total} files"))
         })?;

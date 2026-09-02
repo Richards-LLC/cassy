@@ -43,7 +43,7 @@ Read only what's needed to extract domain meaning. Stop once the picture is clea
    - Any `types/`, `schemas/`, or DTO directories with named domain nouns
 4. **Routes / pages / top-level components** — confirms user-facing journeys
    - `apps/*/src/pages/**`, `app/**`, `src/routes/**`
-5. **Planning docs** — `docs/brainstorms/`, `docs/requests/`, `docs/plans/` — to pick up in-flight direction
+5. **Planning docs** — `docs/brainstorms/`, `docs/requests/` — to pick up in-flight direction
 6. **package.json / Cargo.toml / pyproject.toml** — name, description, deps hint at stack + category
 
 **Skip** framework chrome: lockfiles, `node_modules`, `target/`, generated clients, migration up/down boilerplate, ESLint/Prettier configs, CI YAML, test fixtures.
@@ -97,47 +97,22 @@ If yes, rewrite with project-specific nouns. Examples of what to cut:
 
 When in doubt, **name something concrete from the schema or routes**. If you can't, you haven't read enough yet.
 
-## Preserving hand-edited sections
-
-If `docs/PRODUCT_OVERVIEW.md` already exists:
-
-1. **Read it first.**
-2. **Preserve any `<!-- keep -->` … `<!-- /keep -->` blocks verbatim.** These are user-owned; do not rewrite, reflow, or even re-whitespace them. Place them back in the same section they appeared in.
-3. Everything outside keep-blocks is regenerated.
-4. If a section header has `<!-- keep -->` on the line directly below it, preserve that entire section including the header.
-
-Example:
-
-```markdown
-## Core Concepts
-<!-- keep -->
-- **Campaign** — a paid engagement between a brand and a creator, scoped to a single platform
-- **Deliverable** — the post URL the creator submits as proof of work
-<!-- /keep -->
-- **Payout** — ...
-```
-
-The two bulleted lines and the `keep` markers survive re-runs.
-
 ## After writing the doc
 
-### 1. Write a thin memory pointer
+Follow [../codemap/references/doc-hygiene.md](../codemap/references/doc-hygiene.md) for the three steps this skill shares with `codemap` and `design-spec`: keep-block preservation on re-runs, the thin pointer memory, and the commit. This skill's specifics:
 
-Invoke `cas__memory` with `action=remember` to create/update a pointer memory.
+- **Keep-blocks** most often wrap `## Core Concepts` entries the team wrote by hand. Put them back in the section they came from.
+- **Pointer memory title:** `project_<slug>_domain` (slug = lowercase kebab-case of project name). Body example: `See [docs/PRODUCT_OVERVIEW.md](docs/PRODUCT_OVERVIEW.md) — creator-brand campaign performance platform.`
+- **Commit** `docs/PRODUCT_OVERVIEW.md`. Git history is the primary freshness signal, so an uncommitted regeneration keeps reporting drift:
 
-- **Name / title:** `project_<slug>_domain.md` (slug = lowercase kebab-case of project name)
-- **Body:** ONE line only. A repo-relative link to the doc plus a single-sentence hook.
-- **No content duplication.** Do not inline the pitch, personas, or concepts. The whole point is that search surfaces the pointer and the reader opens the doc.
+  ```bash
+  git add docs/PRODUCT_OVERVIEW.md
+  git commit -m "docs: regenerate PRODUCT_OVERVIEW.md"
+  ```
 
-Example:
+- **Report back:** a 3-bullet summary of the pitch — one bullet each for what, for whom, why.
 
-```
-See [docs/PRODUCT_OVERVIEW.md](docs/PRODUCT_OVERVIEW.md) — creator-brand campaign performance platform.
-```
-
-If a pointer already exists with the same name, update it. Do not create duplicates.
-
-### 2. Seed the knowledge store
+### Seed the knowledge store
 
 `docs/PRODUCT_OVERVIEW.md` is a distillable source, so one build turns the doc you just wrote into a knowledge page plus a source-ledger entry:
 
@@ -145,7 +120,7 @@ If a pointer already exists with the same name, update it. Do not create duplica
 cas knowledge build --max-sources 5
 ```
 
-Nothing else in the repo changed, so the ledger short-circuits every other source and this costs at most one model call. Confirm it landed:
+Nothing else in the repo changed, so the ledger short-circuits every other source and this costs at most one model call. Rust bounds the build to 90 seconds and cleans up after itself, so this is one invocation observed once — do not detach it, background it, or poll. A non-zero exit is non-blocking: note the command and status and carry on, because the doc on disk is still the artifact. Confirm it landed:
 
 ```bash
 cas knowledge search "product overview"
@@ -153,22 +128,15 @@ cas knowledge search "product overview"
 
 If the store is not initialized in this project, the command says so and there is nothing to fix — the doc on disk is still the artifact of record.
 
-### 3. Clear the freshness counter
+### Clear the freshness counter
 
-Run:
+After the commit, run:
 
 ```bash
 cas project-overview clear
 ```
 
 This resets the pending-change counter that `SessionStart` uses to warn about drift. Skipping this step means the next session will keep nagging about staleness even though the doc was just refreshed.
-
-### 4. Report back
-
-Print two things to the user:
-
-1. The file path that was written.
-2. A 3-bullet summary of the pitch (one bullet each: what, for whom, why).
 
 ## When to run
 

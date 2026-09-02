@@ -80,7 +80,7 @@ mcp__cs__coordination action=message target=supervisor \
 
 Sending `message` alone without `summary` is rejected. `summary` is the one-line preview shown in the UI.
 
-**Valid `mcp__cs__task` actions** (do not invent others): `create`, `show`, `update`, `start`, `close`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
+**Valid `mcp__cs__task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
 
 `request_changes` and `reset` exist but are supervisor moves, not yours: `request_changes` is the sanctioned exit from `AwaitingMerge` when review fails (it reopens the task with the assignee preserved), and `reset` revives a task orphaned by a dead session (force-releases the lease, clears the assignee, forces `status=open`). Know them so you can read what happened to your task; don't run them on yourself.
 
@@ -89,3 +89,34 @@ Sending `message` alone without `summary` is rejected. `summary` is the one-line
 **`mcp__cs__coordination` actions workers routinely use**: `message`, `message_ack`, `message_status`, `inbox_poll`, `whoami`, `heartbeat`, `queue_poll`, `queue_ack`. Read-only diagnostics such as `gc_report`, `worker_status`, and `worktree_list` are also available to you — [recovery.md](recovery.md) tells you to run `gc_report` when a build wedges.
 
 Only `hold_worker` and `release_worker` are hard role-gated to supervisors (`only supervisors may change a worker's director hold state`). The rest of the factory/worktree surface — `spawn_workers`, `worktree_merge`, `gc_cleanup force=true` — is not blocked by a role check, which is exactly why you must not call it: those actions dispatch or destroy work across *every* worker on the host, and they are the supervisor's to run. Ask, don't invoke.
+
+## Structured execution state
+
+Use the task's compact structured execution state as the machine resume surface at
+each meaningful milestone. Patch it in the same task update round-trip as any
+ordinary task-field update when possible; `null` deletes a field. The schema is
+bounded to `phase`, `receipts` (each `{command, exit_status}`), `files_touched`,
+`decisions`, and `next_step`:
+
+```
+mcp__cs__task action=update id=<task-id> \
+  state_patch='{"phase":"verify","receipts":[{"command":"cargo test -p cas","exit_status":0}],"files_touched":["src/lib.rs"],"next_step":"push branch"}'
+```
+
+Read it first after a context clear with `action=start brief=true` or `action=show`.
+Keep prose progress notes as the human/audit trail; structured state supplements
+notes and never replaces them.
+
+## Context budgeting
+
+Three layers (`project_session_start_truncation.md`):
+
+- **Immutable Core** — this skill body is the protected SessionStart guidance;
+  keep it below 8 KB. The assembled payload has a 9 KB budget
+  (`SESSION_START_BUDGET_BYTES`): degradable listings collapse to a heading and
+  their reprint command when needed, while role guidance stays verbatim.
+- **Task Context** — EPIC, task, and memories, loaded on demand.
+- **Ephemeral** — command output and transcript; expendable.
+
+Add guidance to the body only if every session needs it. Otherwise put it in a
+reference such as this file.

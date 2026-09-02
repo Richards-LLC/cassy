@@ -74,6 +74,15 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
+            "skills.optional" => {
+                let skills = self.skills.get_or_insert_with(SkillsConfig::default);
+                skills.optional = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
             // Cloud section
             "cloud.auto_sync" => {
                 let cloud = self.cloud.get_or_insert_with(CloudSyncConfig::default);
@@ -387,6 +396,15 @@ impl Config {
                 } else {
                     Some(value.trim().to_string())
                 };
+            }
+            // Release section
+            "release.claude_account_allowlist" => {
+                let release = self.release.get_or_insert_with(ReleaseConfig::default);
+                release.claude_account_allowlist = value
+                    .split(',')
+                    .map(|entry| entry.trim().to_ascii_lowercase())
+                    .filter(|entry| !entry.is_empty())
+                    .collect();
             }
             // Notifications section
             "notifications.enabled" => {

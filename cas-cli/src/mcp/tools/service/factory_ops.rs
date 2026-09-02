@@ -1512,6 +1512,19 @@ fn parse_worker_name_filter(filter: Option<&String>) -> std::collections::HashSe
 /// against a pathologically backed-up queue, not a correctness knob.
 const SPAWN_QUEUE_DUPLICATE_SCAN: usize = 100;
 
+fn no_active_epic_guidance(why: &str) -> String {
+    format!(
+        "No active EPIC found, and {why} Either name the work directly or open an EPIC:\n\
+         0. Spawn for one existing open task (no EPIC needed): \
+         mcp__cas__coordination action=spawn_workers count=1 task_id=<task-id>\n\
+         1. Create EPIC: mcp__cas__task action=create task_type=epic title=\"...\" description=\"...\"\n\
+         2. Or assign existing EPIC: mcp__cas__task action=start id=<epic-id>\n\
+         3. Optionally gather requirements using the cas-supervisor skill's planning references\n\
+         4. Break into tasks using the cas-supervisor skill's planning references\n\
+         5. Then spawn workers to work on the tasks"
+    )
+}
+
 impl CasService {
     pub(super) async fn factory_spawn_workers(
         &self,
@@ -1739,17 +1752,7 @@ impl CasService {
                 };
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
-                    format!(
-                        "No active EPIC found, and {why} Either name the work directly or open an \
-                         EPIC:\n\
-                         0. Spawn for one existing open task (no EPIC needed): \
-                         mcp__cas__coordination action=spawn_workers count=1 task_id=<task-id>\n\
-                         1. Create EPIC: mcp__cas__task action=create task_type=epic title=\"...\" description=\"...\"\n\
-                         2. Or assign existing EPIC: mcp__cas__task action=start id=<epic-id>\n\
-                         3. Optionally gather requirements using the epic-spec skill\n\
-                         4. Break into tasks using the epic-breakdown skill\n\
-                         5. Then spawn workers to work on the tasks"
-                    ),
+                    no_active_epic_guidance(&why),
                 ));
             }
         }
@@ -9249,6 +9252,19 @@ mod tests {
         std::fs::write(dir.join(".credentials.json"), "credential").unwrap();
         std::fs::create_dir(dir.join("agents")).unwrap();
         std::fs::create_dir(dir.join("skills")).unwrap();
+    }
+
+    #[test]
+    fn no_active_epic_guidance_points_to_cas_supervisor_planning_references() {
+        let guidance = no_active_epic_guidance("no task_id was supplied.");
+        assert!(
+            guidance.contains("cas-supervisor skill's planning references"),
+            "planning guidance must point at the shipped supervisor references: {guidance}"
+        );
+        assert!(
+            !guidance.contains("epic-spec") && !guidance.contains("epic-breakdown"),
+            "planning guidance must not advertise retired commands: {guidance}"
+        );
     }
 
     #[test]

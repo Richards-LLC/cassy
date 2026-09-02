@@ -18,7 +18,10 @@ set_secret() { local name="$1" value="$2"; command -v gh >/dev/null && printf '%
 finish() { printf '\nWizard complete.\n'; }
 
 # STAGES: define TOTAL_STAGES and one stage per human action below.
+# `confirm` returns 1 on "no", which under `set -e` aborts the whole wizard.
+# Always test it with `if`; never call it bare.
 # Example:
 # TOTAL_STAGES=1
 # stage "Dashboard key"; open_url "https://example.invalid"; ask_secret API_KEY "Paste key:"; write_env API_KEY "$API_KEY"
+# if confirm "Set it as a GitHub secret too?"; then set_secret API_KEY "$API_KEY"; else say "Skipped."; fi
 # finish

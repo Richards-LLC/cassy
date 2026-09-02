@@ -7,16 +7,14 @@
 //! drops the frontmatter, deletes a protocol step, or forgets to register
 //! the skill in `BUILTIN_SKILLS` / `CODEX_BUILTIN_SKILLS`.
 
-use std::fs;
-use std::path::PathBuf;
+#[path = "support/builtin_catalog.rs"]
+mod builtin_catalog;
 
-fn repo_root() -> PathBuf {
-    cas::test_paths::workspace_root()
-}
-
-fn load(rel: &str) -> String {
-    let p = repo_root().join(rel);
-    fs::read_to_string(&p).unwrap_or_else(|e| panic!("failed to read {}: {}", p.display(), e))
+fn load(rel: &str) -> &'static str {
+    match rel {
+        "cas-cli/src/builtins.rs" => include_str!("../src/builtins.rs"),
+        _ => builtin_catalog::find_source_path(rel),
+    }
 }
 
 #[test]
@@ -123,6 +121,30 @@ fn cas_worker_guide_mentions_verify_before_claim_in_pre_close() {
         assert!(
             content.contains("verify-before-claim"),
             "{path} must mention the verify-before-claim skill in the pre-close step"
+        );
+    }
+}
+
+#[test]
+fn tests_pass_link_resolves_to_worker_close_gate_in_all_flavors() {
+    let expected = "[cas-worker/references/close-gate.md](../cas-worker/references/close-gate.md)";
+    for path in [
+        "cas-cli/src/builtins/skills/verify-before-claim/SKILL.md",
+        "cas-cli/src/builtins/codex/skills/verify-before-claim/SKILL.md",
+        "cas-cli/src/builtins/grok/skills/verify-before-claim/SKILL.md",
+    ] {
+        let content = load(path);
+        assert!(
+            content.contains(expected),
+            "{path} must use the worker close-gate link"
+        );
+        let close_gate_path = path.replace(
+            "verify-before-claim/SKILL.md",
+            "cas-worker/references/close-gate.md",
+        );
+        assert!(
+            !load(&close_gate_path).is_empty(),
+            "{path} close-gate link target must be embedded"
         );
     }
 }

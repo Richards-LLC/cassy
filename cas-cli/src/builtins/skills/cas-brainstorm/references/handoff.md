@@ -10,13 +10,13 @@ This content is loaded when Phase 4 begins — after the requirements document i
 
 ## 4.1 Present Next-Step Options
 
-Present next steps using `AskUserQuestion`. In factory mode AskUserQuestion is blocked — ask the questions in plain text and end your turn; the director relays answers. Otherwise, present numbered options in chat and end the turn waiting for the user.
+Present next steps using `AskUserQuestion`. Otherwise, present numbered options in chat and end the turn waiting for the user.
 
 ### Blocked-handoff pattern (CRITICAL)
 
 If the requirements document has any items under `Resolve Before Planning`:
 
-- **By default**: Ask the blocking questions now, one at a time, using `AskUserQuestion`. In factory mode AskUserQuestion is blocked — ask the questions in plain text and end your turn; the director relays answers. Do not present handoff options yet.
+- **By default**: Ask the blocking questions now, one at a time, using `AskUserQuestion`. Do not present handoff options yet.
 - **If the user explicitly wants to proceed anyway**: First convert each remaining item into an explicit decision, assumption, or `Deferred to Planning` question. Only then present handoff options.
 - **If the user chooses to pause instead**: Present the handoff as paused/blocked rather than complete.
 - **Do NOT offer "Proceed to planning" or "Proceed directly to work"** while `Resolve Before Planning` remains non-empty.
@@ -84,7 +84,7 @@ Key decisions:
 - [Decision 1]
 - [Decision 2]
 
-Recommended next step: hand off to cas-supervisor for planning, or run /plan.
+Recommended next step: hand off to cas-supervisor to create the EPIC and its task breakdown.
 ```
 
 ### Paused with blocking questions

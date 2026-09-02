@@ -7,6 +7,51 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.12.0] - 2026-09-02
+
+### Fixed
+- The task verifier's verdict templates now record `files_reviewed` (the
+  field was silently dropped before) and its test-first check uses a valid
+  ripgrep flag instead of erroring on every run; the learning reviewer now
+  receives the unreviewed learning IDs it is asked to review; the Stop hook
+  and the session-learn skill share one prompt source.
+- Removed managed builtins are pruned from every synced skill directory
+  (the retired code-review skill no longer appears in session menus), the
+  orphaned code-review workflow files are removed, the close-rejection and
+  factory-planning messages name the real procedures, and dead guide
+  constants are gone.
+- Supervisor and worker references no longer teach the retired
+  `pending_supervisor_review` status or the `bypass_code_review` flag;
+  `supervisor_override` is documented once with its constraints; the two
+  contradictory merge procedures collapse to the worktree merge; the raw SQL
+  recovery recipe is gone; the Codex factory supervisor definition is
+  constraints plus a pointer.
+- cas-memory-management is rewritten against the live memory API (all
+  request fields, one entry type enum, frontmatter inside content, no
+  file-store model); the valid-action lists in cas-task-tracking and
+  cas-search are generated from the dispatch table and pinned by a test.
+
+### Changed
+- Worker session guidance fits the SessionStart budget (about 6 KB instead
+  of 9.9 KB), so ready tasks and memories are populated on every spawn;
+  harness-enforced rules are no longer restated as prose.
+- Eight skill descriptions lead with their trigger; shipped builtins carry no
+  operator e-mail, host paths, or unshipped runbook links; the Claude release
+  account gate is a config key; cas-brainstorm and cas-ideate can write their
+  own artifacts again and hand off to the supervisor instead of a missing
+  `/plan` command.
+- mcp-integration teaches `cas mcp add/list/import`, proxy.toml and the
+  `mcp__cas__system` proxy actions; release-notes is procedure-only and
+  rubric-driven; fallow and cas-nuxt-playwright are an opt-in stack tier
+  (synced on stack detection or `[skills] optional`).
+- The three documentation skills share one hygiene reference;
+  cas-domain-modeling is merged into cas-codebase-design; tiny references
+  are inlined; the git-history-analyzer and issue-intelligence-analyst agents
+  are retired from the builtin set; cas-writing-for-agents now states steps,
+  frontmatter, information hierarchy and completion criteria; the projection
+  drift guard covers shell, YAML and JS twins.
+
+
 ## [3.11.0] - 2026-09-02
 
 ### Changed

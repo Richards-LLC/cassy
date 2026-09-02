@@ -10,17 +10,20 @@ Use `codex exec` as a disposable read-only investigator when the question is too
 
 ## Command
 
-Verified on this machine with `codex exec --help`:
+This is the canonical `codex exec` recipe; every other Cassy skill that shells
+out to Codex points here rather than restating its own variant.
 
 ```bash
-/usr/bin/timeout 600 codex exec -s read-only -m gpt-5.5 -C "$PWD" "<prompt>"
+/usr/bin/timeout 600 codex exec -s read-only -C "$PWD" "<prompt>"
 ```
 
 Useful flags:
 
 - `-s, --sandbox read-only` keeps model-generated shell commands read-only.
-- `-m, --model gpt-5.5` uses the plain subscription model slug. Do not use `-codex`-suffixed slugs.
 - `-C, --cd <DIR>` sets the working root.
+- Omit `-m/--model`. The configured default is correct and a pinned slug goes
+  stale; pass one only when a specific model is the point, and never a
+  `-codex`-suffixed slug.
 - `-o, --output-last-message <FILE>` writes the final response for polling or later notes.
 - `--json` prints JSONL events when event streams are easier to inspect.
 
@@ -28,7 +31,7 @@ For long sweeps, run in the background and poll an output file:
 
 ```bash
 out=/tmp/codex-exec-investigation.txt
-/usr/bin/timeout 1800 codex exec -s read-only -m gpt-5.5 -C "$PWD" -o "$out" "<prompt>" &
+/usr/bin/timeout 1800 codex exec -s read-only -C "$PWD" -o "$out" "<prompt>" &
 ```
 
 ## Prompt Shape

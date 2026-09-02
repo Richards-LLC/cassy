@@ -24,8 +24,10 @@ Use `cas__task` instead of built-in TodoWrite. Cassy tasks persist across sessio
 
 ## Note Types
 
-`progress`, `blocker`, `decision`, `discovery` — use the right type so notes are meaningful in context.
+`progress`, `blocker`, `decision`, `discovery`, `question` — use the right type so notes are meaningful in context.
 
 ## Valid Actions
 
-**Valid `cas__task` actions** (exact list — do not invent others): `create`, `show`, `update`, `start`, `close`, `reopen`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `transfer`, `available`, `mine`.
+The list below is the dispatch order for `cas__task`; keep it synchronized with the live service.
+
+**Valid `cas__task` actions** (exact list — do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.

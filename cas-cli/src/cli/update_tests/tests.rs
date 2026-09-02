@@ -16,6 +16,48 @@ fn test_is_newer() {
 }
 
 #[test]
+fn project_table_plain_uses_phase_glyphs_and_compact_project_names() {
+    let receipts = vec![ProjectRefreshReceipt {
+        project: PathBuf::from("/home/alice/projects/demo"),
+        migration: ProjectPhase::Ok("v248".to_owned()),
+        search_index: ProjectPhase::Warning("busy".to_owned()),
+        skills: ProjectPhase::Skipped("not installed".to_owned()),
+        membership: ProjectPhase::Ok("2 memberships".to_owned()),
+        cloud: ProjectPhase::Failed("timeout".to_owned()),
+        details: String::new(),
+    }];
+
+    let output = render_project_table_plain(&receipts, false);
+
+    assert!(output.contains("projects/demo"), "output was:\n{output}");
+    assert!(output.contains("✓"), "output was:\n{output}");
+    assert!(output.contains("⚠"), "output was:\n{output}");
+    assert!(output.contains("✗"), "output was:\n{output}");
+    assert!(output.contains("–"), "output was:\n{output}");
+    assert!(!output.contains("/home/alice"), "output was:\n{output}");
+}
+
+#[test]
+fn repeated_warnings_render_once_with_affected_project_count() {
+    let mut warnings = RepeatedWarningCollector::default();
+    warnings.record_builtin_paths("projects/one", [".claude/skills/cas-worker/SKILL.md"]);
+    warnings.record_builtin_paths("projects/two", [".claude/skills/cas-worker/SKILL.md"]);
+    warnings.record("Push incomplete; queued rows remain", "projects/one");
+    warnings.record("Push incomplete; queued rows remain", "projects/two");
+
+    let output = warnings.render(false);
+
+    assert_eq!(
+        output.matches("Cassy-managed builtin paths already tracked").count(),
+        1,
+        "output was:\n{output}"
+    );
+    assert!(output.contains("2 projects"), "output was:\n{output}");
+    assert_eq!(output.matches("Push incomplete; queued rows remain").count(), 1);
+    assert_eq!(output.matches(".claude/skills/cas-worker/SKILL.md").count(), 1);
+}
+
+#[test]
 fn post_swap_command_targets_install_destination_path() {
     let install_destination = Path::new("/usr/local/bin/cas");
     let command = build_post_swap_command(install_destination, "3.7.7", true);

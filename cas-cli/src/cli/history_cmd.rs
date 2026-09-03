@@ -46,6 +46,14 @@ pub struct EmbedArgs {
     #[arg(long)]
     pub limit: Option<usize>,
 
+    /// Re-arm every unit the provider previously refused, then drain.
+    ///
+    /// Quarantined units are not retried on their own — the same payload would
+    /// be refused again. Use this once the cause is gone: the provider raised
+    /// its cap, or a client upgrade now truncates the oversized text.
+    #[arg(long)]
+    pub retry_quarantined: bool,
+
     /// Emit JSON instead of prose
     #[arg(long)]
     pub json: bool,
@@ -227,7 +235,24 @@ pub fn execute(
 /// and hope the embedding half comes along for the ride.
 fn execute_embed(args: &EmbedArgs, cas_root: &Path) -> anyhow::Result<()> {
     let limit = args.limit.unwrap_or(crate::cloud::DRAIN_BATCH);
+
+    let requeued = if args.retry_quarantined {
+        use cas_store::HistoryStore;
+        let store = cas_store::SqliteHistoryStore::open(cas_root)?;
+        store.init()?;
+        store.requeue_quarantined_embeddings()?
+    } else {
+        0
+    };
+
     let report = crate::cloud::drain_all_pending(cas_root, limit)?;
+    let (quarantined_commits, quarantined_docs) = {
+        use cas_store::HistoryStore;
+        cas_store::SqliteHistoryStore::open(cas_root)
+            .and_then(|store| store.count_quarantined_embedding())
+            .unwrap_or((0, 0))
+    };
+    let quarantined_total = quarantined_commits + quarantined_docs;
 
     if args.json {
         println!(
@@ -238,10 +263,17 @@ fn execute_embed(args: &EmbedArgs, cas_root: &Path) -> anyhow::Result<()> {
                 "skipped": report.skipped(),
                 "requests": report.requests(),
                 "pending_after": report.pending_after(),
+                "quarantined_this_run": report.quarantined(),
+                "quarantined_total": quarantined_total,
+                "requeued": requeued,
                 "problems": report.problems(),
             })
         );
         return Ok(());
+    }
+
+    if requeued > 0 {
+        println!("re-armed {requeued} previously refused unit(s) before draining");
     }
 
     if report.capability_absent {
@@ -261,6 +293,22 @@ fn execute_embed(args: &EmbedArgs, cas_root: &Path) -> anyhow::Result<()> {
         report.skipped(),
         report.pending_after(),
     );
+    // Quarantine is reported apart from the backlog on purpose: these units are
+    // not waiting their turn, they need a decision. Naming the provider's own
+    // words is what turns the count into something actionable.
+    if quarantined_total > 0 {
+        println!(
+            "{quarantined_total} unit(s) quarantined — the provider refused them and a retry              would be refused again; re-arm with `cas history embed --retry-quarantined`"
+        );
+        for (id, message) in report
+            .history
+            .as_ref()
+            .map(|r| r.quarantine_errors.as_slice())
+            .unwrap_or_default()
+        {
+            println!("  - {id}: {message}");
+        }
+    }
     for problem in report.problems() {
         println!("  ! {problem}");
     }

@@ -203,6 +203,14 @@ CREATE TABLE IF NOT EXISTS history_index_state (
         let upgraded = Connection::open_in_memory().unwrap();
         pre_m3(&upgraded);
         apply(&upgraded);
+        // Every later migration that touches these tables belongs in the
+        // upgrade path too, or this guard compares a partially-migrated store
+        // against a fresh one and fails for the wrong reason.
+        for statement in super::super::m253_history_embedding_error::MIGRATION.up {
+            if statement.contains("history_commits") {
+                upgraded.execute_batch(statement).unwrap();
+            }
+        }
 
         let fresh = Connection::open_in_memory().unwrap();
         fresh.execute_batch(cas_store::HISTORY_SCHEMA).unwrap();

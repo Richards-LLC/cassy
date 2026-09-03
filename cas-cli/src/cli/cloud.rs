@@ -6530,6 +6530,51 @@ mod team_cmd_tests {
         );
     }
 
+    /// cas-f64e x cas-cf1f: one sync carries both the push-side per-row
+    /// outcomes and the pull-side dependency-edge outcomes. They are rendered
+    /// by different branches of the same function, so a summary built from one
+    /// SyncResult must not let either set swallow the other.
+    #[test]
+    fn push_row_outcomes_and_dependency_edge_outcomes_both_render() {
+        let mut backlog = crate::cloud::PushBacklog {
+            pending: 0,
+            failed: 1,
+            ..Default::default()
+        };
+        backlog
+            .rejected_by_reason
+            .insert("project_mismatch".to_string(), 1);
+        let result = crate::cloud::SyncResult {
+            batches_run: 1,
+            skipped_lww_acked: 4,
+            requeued_after_upgrade: 860,
+            remaining_backlog: backlog,
+            deleted_task_dependencies: 3,
+            skipped_task_dependencies_by_tombstone: 9,
+            pulled_task_dependencies: 2,
+            ..Default::default()
+        };
+
+        let push = SyncSummary::push(&result, crate::cloud::PushScope::All, None);
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(400);
+        render_sync_summary(&mut tf.fmt(), &push, false).unwrap();
+        let push_output = tf.output();
+        assert!(push_output.contains("4 kept newer by cloud"), "{push_output}");
+        assert!(
+            push_output.contains("1 rejected by cloud (project_mismatch ×1)"),
+            "{push_output}"
+        );
+
+        let pull = SyncSummary::pull(&result, false);
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(400);
+        render_sync_summary(&mut tf.fmt(), &pull, false).unwrap();
+        let pull_output = tf.output();
+        assert!(
+            pull_output.contains("edges 3 deleted, 9 skipped (tombstoned)"),
+            "{pull_output}"
+        );
+    }
+
     /// GH #668: the receipt distinguishes what the cloud kept newer from what
     /// it refused, and names the repair for the leading reason. "N rows failed"
     /// stays reserved for failures the cloud never explained.

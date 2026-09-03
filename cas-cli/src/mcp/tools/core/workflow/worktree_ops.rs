@@ -2978,64 +2978,155 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::{
-        BranchCiState, DeliveryMergePreflight, authorize_explicit_task_for_system_b_worker,
+        DeliveryMergePreflight, GhApiOutput, authorize_explicit_task_for_system_b_worker,
         classify_delivery_merge_preflight, declared_system_b_merge_target,
         derive_delivery_supervisor_authority, describe_branch_ci_state, describe_target_push_state,
         is_cas_pattern_worktree, is_factory_style_worktree, is_git_worktree, lookup_branch_ci_with,
         path_is_under, protected_default_branch_pr_error, resolve_worktree_merge_cleanup,
-        worktree_merge_mcp_error,
+        worktree_merge_mcp_error, CI_ADVISORY_POLICY_NOTICE,
     };
     use crate::worktree::git::TargetPushOutcome;
     use crate::worktree::{GitError, WorktreeError};
     use std::path::Path;
     use tempfile::TempDir;
 
-    #[test]
-    fn mocked_branch_ci_lookup_renders_a_red_lane_with_its_run_url() {
-        let state = lookup_branch_ci_with("factory/fox", |_| {
-            Ok(br#"{"workflow_runs":[{"conclusion":"failure","html_url":"https://github.com/acme/cas/actions/runs/42"}]}"#.to_vec())
-        });
-
-        assert_eq!(
-            state,
-            BranchCiState::Red {
-                url: "https://github.com/acme/cas/actions/runs/42".to_string(),
-            }
-        );
-        let receipt = describe_branch_ci_state("factory/fox", &state);
-        assert!(receipt.contains("CI RED"), "{receipt}");
-        assert!(receipt.contains("actions/runs/42"), "{receipt}");
+    fn gh_output(success: bool, status: &str, stdout: &[u8], stderr: &str) -> GhApiOutput {
+        GhApiOutput {
+            success,
+            status: status.to_string(),
+            stdout: stdout.to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
     }
 
     #[test]
-    fn mocked_branch_ci_lookup_renders_a_green_lane() {
-        let state = lookup_branch_ci_with("factory/fox", |_| {
-            Ok(br#"{"workflow_runs":[{"conclusion":"success","html_url":"https://github.com/acme/cas/actions/runs/43"}]}"#.to_vec())
+    fn mocked_branch_ci_lookup_distinguishes_no_pr_from_gh_failure() {
+        let no_pr = lookup_branch_ci_with("factory/fox", "deadbeef", |_, _| {
+            gh_output(
+                false,
+                "exit status: 1",
+                br#"{"message":"Not Found"}"#,
+                "HTTP 404: Not Found\n",
+            )
         });
-
-        assert_eq!(
-            state,
-            BranchCiState::Green {
-                url: "https://github.com/acme/cas/actions/runs/43".to_string(),
-            }
+        let no_pr_receipt = describe_branch_ci_state("factory/fox", &no_pr);
+        assert!(
+            no_pr_receipt.contains("repos/{owner}/{repo}/commits/deadbeef/check-runs"),
+            "{no_pr_receipt}"
         );
-        let receipt = describe_branch_ci_state("factory/fox", &state);
-        assert!(receipt.contains("CI state: green"), "{receipt}");
+        assert!(
+            no_pr_receipt.contains("no CI checks found for deadbeef (no PR for branch)"),
+            "{no_pr_receipt}"
+        );
+        assert!(
+            no_pr_receipt.contains("HTTP 404: Not Found"),
+            "{no_pr_receipt}"
+        );
+        assert!(
+            format!("{no_pr_receipt}{CI_ADVISORY_POLICY_NOTICE}")
+                .contains("Merge policy: merge proceeded because CI is advisory."),
+            "{no_pr_receipt}"
+        );
+        assert!(
+            !no_pr_receipt.contains("CI state unknown"),
+            "{no_pr_receipt}"
+        );
+
+        let auth_failure = lookup_branch_ci_with("factory/fox", "deadbeef", |_, _| {
+            gh_output(
+                false,
+                "exit status: 1",
+                br#"{"message":"Bad credentials"}"#,
+                "HTTP 401: Bad credentials\n",
+            )
+        });
+        let auth_receipt = describe_branch_ci_state("factory/fox", &auth_failure);
+        assert!(
+            auth_receipt.contains("CI gh auth/transport failure"),
+            "{auth_receipt}"
+        );
+        assert!(
+            auth_receipt.contains("HTTP 401: Bad credentials"),
+            "{auth_receipt}"
+        );
+        assert!(!auth_receipt.contains("CI state unknown"), "{auth_receipt}");
     }
 
     #[test]
-    fn mocked_branch_ci_lookup_renders_an_explicit_unknown_on_api_failure() {
-        let state = lookup_branch_ci_with("factory/fox", |_| Err("gh api timed out".to_string()));
-
-        assert_eq!(
-            state,
-            BranchCiState::Unknown {
-                reason: "gh api timed out".to_string(),
-            }
+    fn mocked_branch_ci_lookup_distinguishes_no_checks_from_red() {
+        let no_checks = lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
+            gh_output(true, "exit status: 0", br#"{"check_runs":[]}"#, "")
+        });
+        let no_checks_receipt = describe_branch_ci_state("factory/fox", &no_checks);
+        assert!(
+            no_checks_receipt.contains("no CI checks found for abc123 (no check runs for sha)"),
+            "{no_checks_receipt}"
         );
+        assert!(
+            !no_checks_receipt.contains("CI state unknown"),
+            "{no_checks_receipt}"
+        );
+
+        let red = lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
+            gh_output(
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[{"name":"Fast Validation","status":"completed","conclusion":"failure","html_url":"https://github.com/acme/cas/actions/runs/42"}]}"#,
+                "",
+            )
+        });
+        let red_receipt = describe_branch_ci_state("factory/fox", &red);
+        assert!(red_receipt.contains("CI RED"), "{red_receipt}");
+        assert!(red_receipt.contains("abc123"), "{red_receipt}");
+        assert!(red_receipt.contains("actions/runs/42"), "{red_receipt}");
+        assert!(!red_receipt.contains("CI state unknown"), "{red_receipt}");
+    }
+
+    #[test]
+    fn mocked_branch_ci_lookup_renders_green_and_pending_states() {
+        let green = lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
+            gh_output(
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[{"name":"Fast Validation","status":"completed","conclusion":"success","html_url":"https://github.com/acme/cas/actions/runs/43"}]}"#,
+                "",
+            )
+        });
+        let green_receipt = describe_branch_ci_state("factory/fox", &green);
+        assert!(green_receipt.contains("CI state: green"), "{green_receipt}");
+        assert!(green_receipt.contains("abc123"), "{green_receipt}");
+        assert!(green_receipt.contains("actions/runs/43"), "{green_receipt}");
+
+        let pending = lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
+            gh_output(
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[{"name":"Fast Validation","status":"in_progress","conclusion":null,"html_url":"https://github.com/acme/cas/actions/runs/44"}]}"#,
+                "",
+            )
+        });
+        let pending_receipt = describe_branch_ci_state("factory/fox", &pending);
+        assert!(
+            pending_receipt.contains("CI state: pending"),
+            "{pending_receipt}"
+        );
+        assert!(pending_receipt.contains("actions/runs/44"), "{pending_receipt}");
+    }
+
+    #[test]
+    fn mocked_branch_ci_lookup_redacts_tokens_but_keeps_first_stderr_line() {
+        let state = lookup_branch_ci_with("factory/fox", "deadbeef", |_, _| {
+            gh_output(
+                false,
+                "exit status: 1",
+                br#"{"message":"Bad credentials"}"#,
+                "HTTP 401: token ghp_super_secret_value\nsecond detail is omitted\n",
+            )
+        });
         let receipt = describe_branch_ci_state("factory/fox", &state);
-        assert!(receipt.contains("CI state unknown"), "{receipt}");
-        assert!(receipt.contains("gh api timed out"), "{receipt}");
+        assert!(receipt.contains("HTTP 401: token [REDACTED]"), "{receipt}");
+        assert!(!receipt.contains("ghp_super_secret_value"), "{receipt}");
+        assert!(!receipt.contains("second detail is omitted"), "{receipt}");
     }
 
     // -----------------------------------------------------------------

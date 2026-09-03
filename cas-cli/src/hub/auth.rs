@@ -65,6 +65,20 @@ impl Scope {
         })
     }
 
+    /// Wire spelling used by the pairing exchange payload and the invitation URL.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::MachineRead => "machine-read",
+            Self::SessionRead => "session-read",
+            Self::PaneRead => "pane-read",
+            Self::PaneInput => "pane-input",
+            Self::MessageSend => "message-send",
+            Self::PaneInterrupt => "pane-interrupt",
+            Self::FactoryManage => "factory-manage",
+            Self::HubAdmin => "hub-admin",
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MachineRead => "machine:read",
@@ -459,9 +473,17 @@ impl AuthStore {
             failed_attempts: 0,
         });
         self.persist(&state)?;
+        // Commander preselects exactly the scopes named here. Without the
+        // ceiling in the link the form has to guess, and a guess above the
+        // ceiling is refused by `exchange_pairing` with an opaque 401.
+        let declared_scopes = max_scopes
+            .iter()
+            .map(|scope| scope.as_wire())
+            .collect::<Vec<_>>()
+            .join(",");
         Ok(PairingInvitation {
             url: format!(
-                "{controller_origin}/#pair={token}&hub={}",
+                "{controller_origin}/#pair={token}&hub={}&scopes={declared_scopes}",
                 self.0.machine_id
             ),
             token,

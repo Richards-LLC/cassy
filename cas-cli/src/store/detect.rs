@@ -167,7 +167,7 @@ pub fn find_cas_root_from(start: &Path) -> Result<PathBuf> {
 /// this location have resolved to on its own?" and name it when `CAS_ROOT`
 /// overrides it. The resolution order is byte-for-byte the pre-existing one —
 /// only its call site moved.
-fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
+pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     // Check if we're inside a Cassy worktree (.cas/worktrees/<name>/).
     // This is the most reliable detection for factory workers because it
     // doesn't depend on git state or .git file parsing.

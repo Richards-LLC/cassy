@@ -705,11 +705,11 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).toContain('backTarget ? `<button id="session-back" class="session-back"');
     // Every session the hub exposes, with its role and status — a bare animal
     // name does not distinguish one supervisor from another.
-    expect(main).toContain("const role = entry.supervisor ? `${entry.role} ${entry.supervisor}` : entry.role;");
-    expect(main).toContain('[role, workers, entry.status].filter(Boolean).join(" · ")');
-    // The hub reports an empty worker list for sessions that plainly have
-    // workers, so the count is omitted rather than stated as zero.
-    expect(main).toContain("const workers = entry.workerCount > 0 ?");
+    expect(main).toContain("escapeHtml(sessionPickerMeta(entry))");
+    // cas-5d94: the hub derives the roster from the live agent registry, so the
+    // count is stated — including a real zero — instead of being suppressed.
+    expect(main).not.toContain("const workers = entry.workerCount > 0 ?");
+    expect(main).toContain("escapeHtml(workerCountLabel(session.workers.length))");
     expect(main).toContain('if (entry.current) button.setAttribute("aria-current", "true");');
     // A five-second heartbeat render must not close the picker mid-choice.
     expect(main).toContain('if (sessionPickerOpen) document.querySelector<HTMLDialogElement>("#session-picker")?.showModal();');

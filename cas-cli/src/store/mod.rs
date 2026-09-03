@@ -167,6 +167,7 @@ pub use detect::{
     open_store_local, open_supervisor_queue_store, open_task_store, open_task_store_local,
     open_verification_store, open_worktree_store,
 };
+pub(crate) use detect::find_cas_root_ignoring_env;
 pub use notifying_entry::NotifyingEntryStore;
 pub use notifying_rule::NotifyingRuleStore;
 pub use notifying_skill::NotifyingSkillStore;

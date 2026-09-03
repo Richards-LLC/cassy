@@ -11,6 +11,8 @@ import {
   saveStoredSelection,
   selectSelection,
   sessionPickerEntries,
+  sessionPickerMeta,
+  workerCountLabel,
   SELECTION_HISTORY_LIMIT,
   type SelectionState,
   type SelectionStorage,
@@ -187,5 +189,28 @@ describe("session picker entries", () => {
 
   it("returns nothing when the hub has listed no sessions yet", () => {
     expect(sessionPickerEntries({ machines, sessions: new Map(), selection: { machineId: "m1" } })).toEqual([]);
+  });
+
+  it("is what the picker line says between the role and the hub status", () => {
+    const [entry] = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1", session: "cas-src-young-raven-93" } });
+    expect(sessionPickerMeta(entry!)).toBe("supervisor fast-kestrel-6 · 5 workers · live");
+  });
+
+  it("says a worker-less session has none instead of omitting the fact", () => {
+    const entries = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1" } });
+    const idle = entries.find((entry) => entry.session === "gabber-studio-witty-panda-98")!;
+    expect(sessionPickerMeta(idle)).toBe("supervisor witty-panda-98 · no workers · stale metadata");
+  });
+
+});
+
+describe("worker count label", () => {
+  // The hub used to report an empty roster for a session running five workers,
+  // so the picker hid the number rather than state a wrong one. The roster is
+  // now the live registry, so zero means zero and is said out loud.
+  it("counts in words a human reads, including a real zero", () => {
+    expect(workerCountLabel(0)).toBe("no workers");
+    expect(workerCountLabel(1)).toBe("1 worker");
+    expect(workerCountLabel(5)).toBe("5 workers");
   });
 });

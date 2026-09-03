@@ -21,7 +21,7 @@ import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
-import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
+import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerMeta, workerCountLabel, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
@@ -2000,7 +2000,7 @@ function sessionButton(machineId: string, session: HubSession): HTMLButtonElemen
   const stale = summary && summary.phase !== "idle" && Date.now() - Date.parse(summary.generated_at) > 10 * 60 * 1000;
   button.innerHTML = summary
     ? `<small class="session-name session-eyebrow">${escapeHtml(session.name)}</small><span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description${stale ? " stale" : ""}">${escapeHtml(summary.description)}</small>`
-    : `<span class="session-name">${escapeHtml(session.name)}</span><small class="session-meta">${escapeHtml(session.supervisor)} · ${session.workers.length} ${session.workers.length === 1 ? "worker" : "workers"} · ${escapeHtml(session.liveness.replaceAll("_", " "))}</small>`;
+    : `<span class="session-name">${escapeHtml(session.name)}</span><small class="session-meta">${escapeHtml(session.supervisor)} · ${escapeHtml(workerCountLabel(session.workers.length))} · ${escapeHtml(session.liveness.replaceAll("_", " "))}</small>`;
   button.onclick = () => { machineDrawerOpen = false; void openSession(machineId, session.name); };
   return button;
 }
@@ -2058,13 +2058,9 @@ function renderSessionPicker(): void {
     button.dataset.searchText = `${entry.machineLabel} ${entry.supervisor ?? ""} ${entry.title ?? ""} ${entry.status}`;
     if (entry.current) button.setAttribute("aria-current", "true");
     // Role and status are what tell one supervisor from another; the name
-    // alone reads as a random animal.
-    const role = entry.supervisor ? `${entry.role} ${entry.supervisor}` : entry.role;
-    // Session metadata carries an empty worker list for sessions that plainly
-    // have workers, so a "0 workers" line would be a confident wrong number.
-    // Absence says nothing; it does not claim nothing.
-    const workers = entry.workerCount > 0 ? `${entry.workerCount} ${entry.workerCount === 1 ? "worker" : "workers"}` : undefined;
-    button.innerHTML = `<span class="session-name">${escapeHtml(entry.session)}</span><small class="session-meta">${escapeHtml([role, workers, entry.status].filter(Boolean).join(" · "))}</small>${entry.title ? `<span class="session-summary-title">${escapeHtml(entry.title)}</span>` : ""}${entry.phase ? `<span class="phase-chip phase-${escapeAttr(entry.phase)}">${escapeHtml(entry.phase)}</span>` : ""}${entry.current ? '<span class="session-picker-current">Open</span>' : ""}`;
+    // alone reads as a random animal. The hub now derives the roster from the
+    // live agent registry, so the count is stated rather than hidden.
+    button.innerHTML = `<span class="session-name">${escapeHtml(entry.session)}</span><small class="session-meta">${escapeHtml(sessionPickerMeta(entry))}</small>${entry.title ? `<span class="session-summary-title">${escapeHtml(entry.title)}</span>` : ""}${entry.phase ? `<span class="phase-chip phase-${escapeAttr(entry.phase)}">${escapeHtml(entry.phase)}</span>` : ""}${entry.current ? '<span class="session-picker-current">Open</span>' : ""}`;
     button.onclick = () => {
       closeSessionPicker();
       machineDrawerOpen = false;

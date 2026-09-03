@@ -141,6 +141,23 @@ export interface SessionPickerInput {
   readonly summaries?: ReadonlyMap<string, { readonly title: string; readonly phase: SessionPhase }>;
 }
 
+/**
+ * Say the roster size in words. The hub once reported an empty roster for a
+ * session running five workers, so the picker suppressed the number rather than
+ * state a wrong one; the roster is now the live agent registry, so a zero is a
+ * fact worth printing.
+ */
+export function workerCountLabel(count: number): string {
+  if (count === 0) return "no workers";
+  return `${count} ${count === 1 ? "worker" : "workers"}`;
+}
+
+/** The one-line summary under a session name: who runs it, how many, how it is. */
+export function sessionPickerMeta(entry: SessionPickerEntry): string {
+  const role = entry.supervisor ? `${entry.role} ${entry.supervisor}` : entry.role;
+  return [role, workerCountLabel(entry.workerCount), entry.status].join(" · ");
+}
+
 export function sessionPickerEntries(input: SessionPickerInput): SessionPickerEntry[] {
   const selectedMachineId = input.selection?.machineId;
   const ordered = [...input.machines].sort((a, b) =>

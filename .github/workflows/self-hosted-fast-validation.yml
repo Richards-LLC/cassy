@@ -73,8 +73,8 @@ jobs:
           test "$(nproc)" -ge 16
           command -v cargo rustup sccache mold gcc >/dev/null
 
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up shared self-hosted Rust toolchain
+        run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest

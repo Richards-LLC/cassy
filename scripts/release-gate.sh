@@ -21,6 +21,7 @@ readonly -a gate_check_ids=(
     version-literals workspace-tests nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions
     working-tree release-script procedure-guardrails failure-log
+    ancestor-proxy-config
 )
 
 usage() {
@@ -185,6 +186,42 @@ check_nextest() {
 
 check_doctests() {
     "$cargo_bin" test -p cas --doc
+}
+
+# A populated proxy.toml in an ancestor .cas is visible to any test that
+# resolves project config by walking up from its cwd — release worktrees live at
+# <repo>/.cas/worktrees/<name>, so the main checkout is always an ancestor.
+#
+# On 2026-09-03 that made three hermetic proxy tests fail during the v3.14.0
+# gate; the suite is now immune (TestEnvGuard pins CAS_ROOT inside its temp
+# HOME, cas-4ccc), and this check is the tripwire for the next reader of
+# ancestor config: it names the exact file rather than leaving someone to
+# rediscover it by moving files aside one at a time.
+#
+# Reports, never mutates: the file belongs to the operator's machine, and a
+# release gate must not delete or rename their MCP configuration.
+check_ancestor_proxy_config() {
+    local probe found=0
+    probe="$(cd "$repo_root" && pwd -P)"
+    while [[ "$probe" != "/" && -n "$probe" ]]; do
+        if [[ -s "$probe/.cas/proxy.toml" ]]; then
+            # The repo's own store is the expected home for a project proxy
+            # config; only a store ABOVE the worktree is the leak.
+            if [[ "$probe/.cas" != "$repo_root/.cas" ]]; then
+                printf 'ancestor .cas/proxy.toml is visible to this worktree: %s\n' \
+                    "$probe/.cas/proxy.toml"
+                found=1
+            fi
+        fi
+        probe="$(dirname "$probe")"
+    done
+    if (( found )); then
+        printf 'Tests that resolve project config by ancestor walk can read it.\n'
+        printf 'Either move it aside for the gate run, or confirm the affected\n'
+        printf 'tests pin CAS_ROOT (TestEnvGuard::temp_home does since cas-4ccc).\n'
+        return 1
+    fi
+    return 0
 }
 
 # Scratch bases must mirror the merge-queue runner: no ancestor directory may
@@ -407,6 +444,9 @@ printf 'repository: %s\n' "$repo_root"
 run_check failure-log \
     "parse $failure_log_rel; every entry maps to a gate check id or manual:" \
     check_failure_log
+run_check ancestor-proxy-config \
+    'no populated .cas/proxy.toml above this worktree that ancestor-walking tests could read' \
+    check_ancestor_proxy_config
 run_check version-literals \
     'find source/test files for <version> (excluding manifests, CHANGELOG, reference-history, failure-log)' \
     check_version_literals

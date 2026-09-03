@@ -334,6 +334,58 @@ mod tests {
         drop(client);
     }
 
+    /// cas-4ccc: a hermetic test must not read the *host's* project config.
+    ///
+    /// `proxy_config_path` resolves through `find_cas_root`, which walks up
+    /// from the current directory (and maps a git worktree onto its main
+    /// repository's `.cas`). Every factory worktree lives under
+    /// `<repo>/.cas/worktrees/<name>`, so on 2026-09-03 a `proxy.toml` the
+    /// operator created in the main checkout became visible to three tests
+    /// that had set only HOME and XDG_CONFIG_HOME: the loader handed cmcp_core
+    /// a configured http server, reqwest built a client outside `main()`, and
+    /// they panicked with "No provider set". Moving the file aside made them
+    /// pass with no code change — the tests were never hermetic.
+    ///
+    /// This plants the same shape in an ancestor of the test's own directory,
+    /// so it fails on any machine rather than only on one that happens to have
+    /// the operator's file.
+    #[test]
+    fn ancestor_project_proxy_config_is_invisible_to_a_hermetic_test() {
+        let mut env = TestEnvGuard::temp_home();
+        let xdg = env.home().join(".config");
+        env.set("XDG_CONFIG_HOME", xdg);
+
+        // <ancestor>/.cas/proxy.toml — exactly what the main checkout has.
+        let ancestor = env.home().join("checkout");
+        std::fs::create_dir_all(ancestor.join(".cas")).expect("ancestor .cas");
+        std::fs::write(
+            ancestor.join(".cas").join("proxy.toml"),
+            "[servers.mecha-cassy]\ntype = \"http\"\nurl = \"https://example.invalid/mcp\"\n",
+        )
+        .expect("ancestor proxy.toml");
+
+        // …and the test runs from a directory below it, like a worktree does.
+        let work = ancestor.join(".cas").join("worktrees").join("worker");
+        std::fs::create_dir_all(&work).expect("worktree dir");
+        env.set_current_dir(&work);
+
+        assert_eq!(
+            proxy_config_path(),
+            None,
+            "a hermetic test must not resolve an ancestor project's proxy.toml"
+        );
+
+        // The whole point: the client must reach its own empty-config error
+        // instead of building a real http transport for the ancestor's server.
+        let client = ProxyClient::new("vercel");
+        let err = client.call("list_projects", None).unwrap_err();
+        assert!(
+            err.to_string().contains("no MCP servers configured"),
+            "expected the empty-config Err; got: {err}"
+        );
+        drop(client);
+    }
+
     #[test]
     fn first_call_attempts_lazy_init_and_engine_stays_uninstalled_on_empty_config() {
         // Hermetic env: no proxy.toml anywhere → load_merged returns

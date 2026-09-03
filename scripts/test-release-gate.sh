@@ -205,6 +205,39 @@ cmp "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md
     "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"
 ok '--learn appends and mirrors a dated failure entry'
 
+# cas-4ccc. A populated .cas/proxy.toml ABOVE the worktree is readable by any
+# test that resolves project config by walking up from its cwd. The gate must
+# name that file rather than let three unrelated proxy tests fail as if the
+# release broke them.
+repo="$(new_fixture ancestor-proxy)"
+mkdir -p "$(dirname "$repo")/.cas"
+printf '[servers.mecha-cassy]\ntype = "http"\nurl = "https://example.invalid/mcp"\n' \
+    >"$(dirname "$repo")/.cas/proxy.toml"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+assert_named_failure ancestor-proxy-config "$output"
+if grep -qF '.cas/proxy.toml' <<<"$output"; then
+    ok 'ancestor proxy.toml failure names the exact leaking file'
+else
+    bad 'ancestor proxy.toml failure did not name the file'
+fi
+# Remove the whole directory, not just the file: later scenarios assert that no
+# ancestor of their scratch base holds a .cas store at all, and an empty
+# leftover would fail them for this fixture's reason.
+rm -rf "$(dirname "$repo")/.cas"
+
+# The repository's OWN .cas/proxy.toml is where a project config belongs and
+# must not trip the check — only a store above the worktree is the leak.
+repo="$(new_fixture own-proxy)"
+mkdir -p "$repo/.cas"
+printf '[servers.local]\ntype = "http"\nurl = "https://example.invalid/mcp"\n' \
+    >"$repo/.cas/proxy.toml"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+if grep -qF 'FAIL ancestor-proxy-config' <<<"$output"; then
+    bad "the repository's own .cas/proxy.toml must not trip the ancestor check"
+else
+    ok "the repository's own .cas/proxy.toml is not treated as an ancestor leak"
+fi
+
 repo="$(new_fixture passing)"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1)"
 assert_all_pass "$output"

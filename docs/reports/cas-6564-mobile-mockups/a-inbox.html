@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Direction A — The Inbox · Commander phone mock-up (cas-6564)</title>
+<style>
+/* ============================================================
+   LAB CHROME — the page around the phone. House report taste.
+   ============================================================ */
+:root{
+  --ink:#14181f; --ink-2:#3d4653; --ink-3:#6b7686; --rule:#dfe4ec; --rule-2:#eef1f6;
+  --paper:#ffffff; --wash:#f6f8fb; --warn-ink:#8a5a00; --warn-bg:#fdf7e8; --warn-line:#eedfb4;
+  --mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --ui:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--wash);color:var(--ink);font-family:var(--ui);font-size:16px;line-height:1.6}
+.wrap{max-width:74rem;margin:0 auto;padding:0 20px 80px}
+header.masthead{background:var(--paper);border-bottom:1px solid var(--rule);padding:34px 0 26px}
+header.masthead .wrap{padding-bottom:0}
+.eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin:0 0 10px}
+h1.lab-title{font-size:27px;line-height:1.2;margin:0 0 10px;letter-spacing:-.015em}
+.sub{font-size:16px;color:var(--ink-2);margin:0;max-width:56rem}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:26px 0 22px}
+.controls .grp{display:flex;flex-wrap:wrap;gap:6px;background:var(--paper);border:1px solid var(--rule);border-radius:999px;padding:5px}
+.tab{font:inherit;font-size:13px;font-family:var(--ui);border:0;background:transparent;color:var(--ink-2);
+     padding:7px 14px;border-radius:999px;cursor:pointer;white-space:nowrap}
+.tab:hover{background:var(--rule-2)}
+.tab[aria-pressed="true"]{background:var(--ink);color:#fff}
+.tab .num{font-family:var(--mono);font-size:11px;opacity:.62;margin-right:6px}
+.spacer{flex:1 1 auto}
+.stage{display:grid;grid-template-columns:minmax(0,auto) minmax(280px,1fr);gap:34px;align-items:start}
+@media (max-width:960px){.stage{grid-template-columns:1fr;justify-items:center}}
+.readout{background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:20px 22px;position:sticky;top:20px}
+.readout h2{font-size:17px;margin:0 0 6px}
+.readout p{font-size:14.5px;color:var(--ink-2);margin:0 0 12px}
+.readout .kv{font-family:var(--mono);font-size:12px;color:var(--ink-3);border-top:1px dashed var(--rule);padding-top:12px;margin-top:4px}
+.readout .kv div{margin-bottom:5px}
+.tagline{display:inline-block;font-family:var(--mono);font-size:11px;color:var(--warn-ink);
+  background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:999px;padding:3px 9px;margin:0 6px 6px 0}
+.tagline.client{color:#1f6f43;background:#eff8f2;border-color:#c3e2ce}
+.foot{font-size:13px;color:var(--ink-3);border-top:1px solid var(--rule);padding-top:16px;margin-top:40px}
+a{color:#1a4fb4}
+
+/* ============================================================
+   COMMANDER TOKENS — verbatim from hub-web/src/styles.css :root.
+   Every rule below consumes var(...); no ad-hoc colour in components.
+   ============================================================ */
+.screen{
+  --bg-root:#101318; --bg-panel:#151922; --bg-raised:#1B202B; --bg-terminal:#0C0E13;
+  --bg-hover:#222836; --bg-active:#2A3142;
+  --line-subtle:#232936; --line-strong:#38415A;
+  --text-hi:#E8EBF2; --text-mid:#9AA3B5; --text-lo:#5C6577;
+  --state-ok:#4CC38A; --state-warn:#E5B454; --state-crit:#E5645E; --state-info:#6CA7F2; --state-idle:#5C6577;
+  --tint-warn:rgba(229,180,84,.09); --tint-crit:rgba(229,100,94,.10);
+  --overlay-backdrop:color-mix(in srgb, var(--bg-terminal) 72%, transparent);
+  --shadow-overlay:0 24px 80px color-mix(in srgb, var(--bg-terminal) 72%, transparent);
+  --font-ui:Inter,ui-sans-serif,system-ui,sans-serif;
+  --font-mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,monospace;
+  --fs-xs:11px; --fs-sm:12.5px; --fs-base:13.5px; --fs-terminal:13px; --fs-md:15px; --fs-lg:18px;
+  --weight-regular:400; --weight-medium:500; --weight-semibold:600;
+  --tracking-label:.06em; --line-ui:1.4; --line-terminal:1.35;
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-5:20px;
+  --space-6:24px; --space-8:32px; --space-10:40px;
+  --radius-card:6px; --radius-pane:8px; --radius-pill:999px;
+  --line-width:1px; --state-rule-width:2px; --focus-ring-width:2px;
+  /* Terminal content keeps its own palette in both themes: machine output is
+     the deepest layer and the Ghostty ANSI data is independent of app tokens. */
+  --term-fg:#9AA3B5; --term-hi:#E8EBF2; --term-dim:#5C6577;
+  --term-ok:#4CC38A; --term-warn:#E5B454; --term-crit:#E5645E; --term-info:#6CA7F2;
+}
+/* Light ramp. Commander ships dark-only today (color-scheme: dark, one :root
+   block) — so this whole column is itself a "needs hub" item, tagged as such. */
+.screen[data-theme="light"]{
+  --bg-root:#E9ECF2; --bg-panel:#F4F6FA; --bg-raised:#FFFFFF;
+  --bg-hover:#EBEEF4; --bg-active:#DDE3ED;
+  --line-subtle:#DCE1E9; --line-strong:#8E9AB4;
+  --text-hi:#151920; --text-mid:#576073; --text-lo:#7C8494;
+  --state-ok:#1F7A4D; --state-warn:#8A5A00; --state-crit:#B3352F; --state-info:#2456A6; --state-idle:#7C8494;
+  --tint-warn:rgba(138,90,0,.09); --tint-crit:rgba(179,53,47,.08);
+  /* Machine output stays the deepest layer in both themes. */
+  --bg-terminal:#0C0E13;
+}
+
+/* ---------- device ---------- */
+.device{width:452px;padding:20px;border-radius:46px;background:#171a20;
+        box-shadow:0 28px 64px rgba(20,24,31,.30);flex:none}
+.screen{width:412px;height:915px;border-radius:28px;overflow:hidden;position:relative;
+        background:var(--bg-root);color:var(--text-hi);
+        font-family:var(--font-ui);font-size:var(--fs-base);line-height:var(--line-ui);
+        display:flex;flex-direction:column}
+.screen *{box-sizing:border-box}
+.screen button{font:inherit;color:inherit;border:0;cursor:pointer;-webkit-tap-highlight-color:transparent}
+
+/* ---------- android status bar ---------- */
+.sysbar{flex:none;height:28px;display:flex;align-items:center;justify-content:space-between;
+        padding:0 var(--space-4);font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-lo)}
+
+/* ---------- app header ---------- */
+.appbar{flex:none;background:var(--bg-panel);padding:var(--space-3) var(--space-4) var(--space-3)}
+.appbar-row{display:flex;align-items:center;gap:var(--space-2);min-height:24px}
+.machine{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid);
+         letter-spacing:var(--tracking-label);text-transform:uppercase}
+.grow{flex:1 1 auto;min-width:0}
+.conn{display:inline-flex;align-items:center;gap:var(--space-2);padding:var(--space-1) var(--space-2);
+      background:var(--bg-raised);border-radius:var(--radius-pill);
+      font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid)}
+.dot{width:var(--space-2);height:var(--space-2);border-radius:var(--radius-pill);background:var(--state-info);flex:none}
+.dot--ok{background:var(--state-ok)} .dot--crit{background:var(--state-crit)}
+.dot--warn{background:var(--state-warn)} .dot--idle{background:var(--state-idle)}
+.title-row{display:flex;align-items:baseline;gap:var(--space-2);margin-top:var(--space-3)}
+h1.app-title{margin:0;font-family:var(--font-ui);font-size:var(--fs-lg);font-weight:var(--weight-semibold);
+             letter-spacing:-.01em}
+.count{padding:var(--space-1) var(--space-2);background:var(--bg-active);border-radius:var(--radius-pill);
+       font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid)}
+.subline{margin:var(--space-1) 0 0;font-size:var(--fs-sm);color:var(--text-mid)}
+
+/* ---------- scroll body ---------- */
+.body{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:var(--space-4);display:grid;gap:var(--space-3);align-content:start}
+.body::-webkit-scrollbar{width:0}
+
+.group-label{display:flex;align-items:center;gap:var(--space-2);
+             font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid)}
+.group-label .count{margin-left:auto}
+
+/* ---------- attention item ---------- */
+.att{display:grid;gap:var(--space-2);padding:var(--space-3);background:var(--bg-raised);
+     border-radius:var(--radius-card);font-size:var(--fs-sm);text-align:left;width:100%}
+.att--critical{padding-left:calc(var(--space-3) - var(--state-rule-width));
+               background:var(--tint-crit);border-left:var(--state-rule-width) solid var(--state-crit)}
+.att--warning{background:var(--tint-warn)}
+.att:active{background:var(--bg-hover)}
+.att-eyebrow{display:flex;align-items:center;gap:var(--space-2);min-width:0;
+             font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-lo)}
+.att-eyebrow .kind{color:var(--text-mid)}
+.att-title{margin:0;font-family:var(--font-ui);font-size:var(--fs-base);
+           font-weight:var(--weight-semibold);color:var(--text-hi)}
+.att-detail{margin:0;color:var(--text-mid);font-size:var(--fs-sm)}
+.att-foot{display:flex;align-items:center;gap:var(--space-2);
+          font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid)}
+.ticket{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid)}
+.chev{color:var(--text-lo)}
+
+/* ---------- quoted machine output ---------- */
+.quote{background:var(--bg-terminal);border-radius:var(--radius-card);padding:var(--space-2) var(--space-3);
+       font-family:var(--font-mono);font-size:var(--fs-terminal);line-height:var(--line-terminal);
+       color:var(--term-fg);display:grid;gap:2px}
+.quote span{white-space:pre-wrap;word-break:break-word}
+.quote .q-warn{color:var(--term-warn)} .quote .q-crit{color:var(--term-crit)}
+.quote .q-ok{color:var(--term-ok)} .quote .q-dim{color:var(--term-dim)}
+
+/* ---------- quiet section ---------- */
+.quiet-row{display:flex;align-items:center;gap:var(--space-2);width:100%;text-align:left;
+           padding:var(--space-3);background:var(--bg-raised);border-radius:var(--radius-card);
+           font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-mid)}
+.quiet-row .count{margin-left:auto}
+
+/* ---------- actions ---------- */
+.actions{display:grid;gap:var(--space-2)}
+.btn{min-height:40px;padding:0 var(--space-3);background:var(--bg-raised);border-radius:var(--radius-card);
+     font-size:var(--fs-base);color:var(--text-hi);display:inline-flex;align-items:center;
+     justify-content:center;gap:var(--space-2);width:100%}
+.btn:active{background:var(--bg-hover)}
+.btn.primary{background:var(--bg-active);font-weight:var(--weight-medium)}
+.btn.tall{min-height:48px}
+.btn small{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2)}
+.label{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-lo);
+       letter-spacing:var(--tracking-label);text-transform:uppercase}
+
+/* ---------- composer bar (Direction C lives here) ---------- */
+.composer{flex:none;display:grid;gap:var(--space-2);padding:var(--space-2) var(--space-3) var(--space-4);
+          background:var(--bg-panel)}
+.composer .mic{min-height:48px;background:var(--bg-active);border-radius:var(--radius-card);
+               display:flex;align-items:center;justify-content:center;gap:var(--space-2);
+               font-size:var(--fs-base);font-weight:var(--weight-medium)}
+.composer .mic small{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid)}
+.composer .alt{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2)}
+.composer .alt .btn{min-height:36px;font-size:var(--fs-sm)}
+
+/* ---------- empty state ---------- */
+.empty{display:grid;gap:var(--space-2);justify-items:center;text-align:center;
+       padding:var(--space-10) var(--space-4) var(--space-6)}
+.empty h2{margin:0;font-size:var(--fs-lg);font-weight:var(--weight-semibold)}
+.empty p{margin:0;font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid)}
+.rule-quiet{height:1px;background:var(--line-subtle);margin:var(--space-2) 0}
+
+/* ---------- terminal sheet (overlay: shadow allowed) ---------- */
+.sheet{position:absolute;inset:0;display:none;background:var(--overlay-backdrop);
+       align-items:flex-end;z-index:5}
+.screen[data-state="terminal"] .sheet{display:flex}
+.sheet-panel{width:100%;height:88%;background:var(--bg-terminal);border-radius:var(--radius-pane) var(--radius-pane) 0 0;
+             box-shadow:var(--shadow-overlay);display:flex;flex-direction:column;overflow:hidden}
+.sheet-head{flex:none;height:32px;display:flex;align-items:center;gap:var(--space-2);
+            padding:0 var(--space-3);background:var(--bg-panel);
+            font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid)}
+.sheet-head .x{margin-left:auto;min-height:24px;padding:0 var(--space-2);background:var(--bg-raised);
+               border-radius:var(--radius-card);font-size:var(--fs-xs)}
+.term{flex:1 1 auto;overflow:auto;padding:var(--space-3);
+      font-family:var(--font-mono);font-size:var(--fs-terminal);line-height:var(--line-terminal);
+      color:var(--term-fg);white-space:pre}
+.term b{color:var(--term-hi);font-weight:var(--weight-semibold)}
+.term .c-warn{color:var(--term-warn)} .term .c-crit{color:var(--term-crit)}
+.term .c-ok{color:var(--term-ok)} .term .c-info{color:var(--term-info)}
+.sheet-foot{flex:none;padding:var(--space-2) var(--space-3);background:var(--bg-panel);
+            font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-lo);
+            display:flex;gap:var(--space-2);align-items:center}
+
+/* ---------- needs-hub tag, drawn on the mock-up itself ---------- */
+.needs{display:inline-flex;align-items:center;gap:var(--space-1);
+       padding:var(--space-1) var(--space-2);background:var(--tint-warn);border-radius:var(--radius-pill);
+       font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--state-warn);
+       line-height:var(--line-terminal)}
+.needs::before{content:"◆";font-size:9px}
+
+/* ---------- state machine ---------- */
+.view{display:none}
+.screen[data-state="inbox"] .appbar-row.view--inbox,
+.screen[data-state="expanded"] .appbar-row.view--expanded,
+.screen[data-state="terminal"] .appbar-row.view--expanded,
+.screen[data-state="empty"] .appbar-row.view--empty{display:flex}
+.screen[data-state="inbox"] .body.view--inbox,
+.screen[data-state="expanded"] .body.view--expanded,
+.screen[data-state="terminal"] .body.view--expanded,
+.screen[data-state="empty"] .body.view--empty{display:grid}
+.screen[data-state="empty"] .appbar .title-row,
+.screen[data-state="empty"] .appbar .subline{display:none}
+.back{min-height:24px;min-width:24px;display:inline-flex;align-items:center;justify-content:center;
+      background:transparent;color:var(--text-mid);font-size:var(--fs-md);padding:0}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">cas-6564 · phone mock-up · direction A</p>
+    <h1 class="lab-title">The Inbox — attention is the app, terminals are an attachment</h1>
+    <p class="sub">Primary object: <b>an attention item</b>. The home screen is a prioritised list of things that want a decision. Four states, 412×915 CSS px, live data from the <code>soundwave-linux</code> hub. Tap the cards — everything here moves.</p>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="controls">
+    <div class="grp" role="group" aria-label="States">
+      <button class="tab" data-goto="inbox" aria-pressed="true"><span class="num">A1</span>Inbox</button>
+      <button class="tab" data-goto="expanded" aria-pressed="false"><span class="num">A2</span>Item expanded</button>
+      <button class="tab" data-goto="empty" aria-pressed="false"><span class="num">A3</span>Nothing needs you</button>
+      <button class="tab" data-goto="terminal" aria-pressed="false"><span class="num">A4</span>Terminal attachment</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="grp" role="group" aria-label="Theme">
+      <button class="tab" id="theme-dark" aria-pressed="true">Dark</button>
+      <button class="tab" id="theme-light" aria-pressed="false">Light</button>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="device">
+      <div class="screen" id="screen" data-state="inbox" data-theme="dark">
+
+        <div class="sysbar"><span>18:24</span><span>LTE ▮▮▮ 86%</span></div>
+
+        <!-- ============ app bar ============ -->
+        <div class="appbar">
+          <div class="appbar-row view view--inbox">
+            <span class="machine">soundwave-linux</span>
+            <span class="grow"></span>
+            <span class="conn"><span class="dot dot--ok"></span>live · 38ms</span>
+          </div>
+          <div class="appbar-row view view--expanded">
+            <button class="back" data-goto="inbox" aria-label="Back">‹</button>
+            <span class="dot dot--crit"></span>
+            <span class="machine" style="text-transform:none;letter-spacing:0">zen-eagle-20</span>
+            <span class="grow"></span>
+            <span class="conn"><span class="dot dot--ok"></span>live · 38ms</span>
+          </div>
+          <div class="appbar-row view view--empty">
+            <span class="machine">soundwave-linux</span>
+            <span class="grow"></span>
+            <span class="conn"><span class="dot dot--ok"></span>live · 38ms</span>
+          </div>
+          <div class="title-row">
+            <h1 class="app-title" id="app-title">Needs you</h1>
+            <span class="count" id="app-count">3</span>
+          </div>
+          <p class="subline" id="app-sub">2 sessions · 9 agents · newest first</p>
+        </div>
+
+        <!-- ============ A1 · inbox ============ -->
+        <div class="body view view--inbox">
+          <div class="group-label"><span>soundwave-linux / cas-src</span><span class="count">3</span></div>
+
+          <div class="att att--critical" data-goto="expanded" role="button" tabindex="0">
+            <span class="att-eyebrow">
+              <span class="dot dot--crit"></span><span class="kind">pane_exited</span><span>· 2m</span>
+              <span class="grow"></span><span class="ticket">cas-dc93</span>
+            </span>
+            <h2 class="att-title">Worker stopped</h2>
+            <p class="att-detail">zen-eagle-20 exited mid-run on the reflowed-transcript spike.</p>
+            <span class="quote">
+              <span class="q-crit">error: could not compile `cas` (lib) due to 1 error</span>
+              <span class="q-dim">pane exited · code 101 · 4m 12s</span>
+            </span>
+            <span class="att-foot"><span>zen-eagle-20</span><span>· codex</span><span class="grow"></span><span class="chev">›</span></span>
+          </div>
+
+          <div class="att att--warning" data-goto="expanded" role="button" tabindex="0">
+            <span class="att-eyebrow">
+              <span class="dot dot--warn"></span><span class="kind">awaiting_merge</span><span>· 9m</span>
+              <span class="grow"></span><span class="ticket">cas-0d61</span>
+            </span>
+            <h2 class="att-title">Change is ready to merge</h2>
+            <p class="att-detail">Enter now sends in the phone composer. 3 files, +48 −12.</p>
+            <span class="att-foot"><span>brave-raven-22</span><span>· factory/brave-raven-22</span><span class="grow"></span><span class="chev">›</span></span>
+          </div>
+
+          <div class="att" data-goto="expanded" role="button" tabindex="0">
+            <span class="att-eyebrow">
+              <span class="dot"></span><span class="kind">blocked_question</span><span>· 14m</span>
+              <span class="grow"></span><span class="ticket">cas-67b6</span>
+            </span>
+            <h2 class="att-title">Worker asked a question</h2>
+            <p class="att-detail">Should the pairing form request write scope, or refuse a read-only invitation outright?</p>
+            <span class="att-foot"><span>golden-parrot-30</span><span class="grow"></span><span class="chev">›</span></span>
+            <span class="needs">needs hub: kind=blocked_question</span>
+          </div>
+
+          <div class="rule-quiet"></div>
+          <div class="group-label"><span>Quiet · 6 running</span></div>
+          <button class="quiet-row" data-goto="empty">▸ soundwave-linux / cas-src<span class="count">4</span></button>
+          <button class="quiet-row" data-goto="empty">▸ soundwave-linux / petrastella<span class="count">2</span></button>
+        </div>
+
+        <!-- ============ A2 · expanded (also the base for A4) ============ -->
+        <div class="body view view--expanded">
+          <span class="att-eyebrow">
+            <span class="kind">pane_exited</span><span>· 2m</span><span>· exit 101</span>
+            <span class="grow"></span><span class="ticket">cas-dc93</span>
+          </span>
+          <p class="att-detail">D15: streaming text on narrow viewports — a reflowed transcript path.</p>
+
+          <div class="quote">
+            <span class="q-dim">$ cargo check -p cas --lib --tests</span>
+            <span>    Checking cas v3.13.1 (…/worktrees/zen-eagle-20)</span>
+            <span class="q-crit">error[E0599]: no method named `reflow_tail` found for</span>
+            <span class="q-crit">  struct `TerminalTail`</span>
+            <span>   --&gt; hub-web/src/terminal/tail.rs:212:18</span>
+            <span class="q-warn">error: could not compile `cas` (lib) due to 1 error</span>
+            <span class="q-dim">pane exited · code 101 · 4m 12s</span>
+          </div>
+          <span class="needs">needs hub: 5-line excerpt on the attention item</span>
+
+          <div class="label" style="margin-top:var(--space-2)">Suggested</div>
+          <div class="actions">
+            <button class="btn primary tall" data-toast="Approved · respawning zen-eagle-20 on cas-dc93">
+              Approve <small>respawn on cas-dc93</small>
+            </button>
+            <a class="btn" href="c-voice.html" style="text-decoration:none">🎙 Redirect by voice</a>
+            <div class="row2">
+              <button class="btn" data-toast="Interrupt sent to zen-eagle-20">Interrupt</button>
+              <button class="btn" data-toast="Snoozed for 1 hour">Snooze 1h</button>
+            </div>
+            <button class="btn" data-goto="terminal">Open terminal <small>80 cols</small></button>
+          </div>
+          <span class="needs">needs hub: suggested-action field on AttentionContent</span>
+          <p class="att-detail" style="text-align:center;font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-lo)">
+            swipe down to dismiss
+          </p>
+        </div>
+
+        <!-- ============ A3 · nothing needs you ============ -->
+        <div class="body view view--empty">
+          <div class="empty">
+            <h2>Nothing needs you</h2>
+            <p>9 agents running · 2 sessions · quiet for 6m</p>
+          </div>
+          <div class="group-label"><span>Running</span><span class="count">9</span></div>
+          <button class="quiet-row" data-goto="inbox">▸ soundwave-linux / cas-src<span class="count">5</span></button>
+          <button class="quiet-row" data-goto="inbox">▸ soundwave-linux / petrastella<span class="count">4</span></button>
+          <div class="rule-quiet"></div>
+          <p class="att-detail" style="font-size:var(--fs-sm)">
+            You will be tapped on the shoulder when something changes.
+          </p>
+          <span class="needs">needs backend: Web Push subscription + PWA install</span>
+        </div>
+
+        <!-- ============ A4 · terminal as attachment ============ -->
+        <div class="sheet">
+          <div class="sheet-panel">
+            <div class="sheet-head">
+              <span>zen-eagle-20 · pane 2</span>
+              <button class="x" data-goto="expanded">Close</button>
+            </div>
+            <div class="term"><span class="c-info">●</span> <b>Bash</b>(cargo check -p cas --lib --tests)
+  <span class="c-ok">⎿</span>     Checking cas v3.13.1 (/home/pippenz/…/zen-eagle-20)
+     <span class="c-crit">error[E0599]</span>: no method named `reflow_tail` found for struct `TerminalTail`
+        --&gt; hub-web/src/terminal/tail.rs:212:18
+         |
+     212 |         let tail = TerminalTail::new(cols).reflow_tail(rows);
+         |                                            <span class="c-crit">^^^^^^^^^^^</span> method not found
+         |
+     <span class="c-warn">error</span>: could not compile `cas` (lib) due to 1 previous error
+<span class="c-info">●</span> The reflow helper does not exist yet — I was about to write it when the
+  turn ended. Next step is to add `TerminalTail::reflow_tail` behind the
+  existing tail buffer rather than touching the Ghostty adapter.
+<span class="c-crit">▌</span> pane exited · code 101 · 4m 12s
+</div>
+            <div class="sheet-foot">
+              <span>80 cols · scroll →</span>
+              <span class="grow"></span>
+              <span class="needs">the fallback, never the entry point</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ============ composer — Direction C lives here ============ -->
+        <div class="composer">
+          <a class="mic" href="c-voice.html" style="text-decoration:none;color:inherit">
+            🎙 Talk <small>fast-kestrel-6 · cas-src</small>
+          </a>
+          <div class="alt">
+            <a class="btn" href="b-deck.html" style="text-decoration:none">Deck</a>
+            <button class="btn" data-toast="Keyboard opens the same editable field; Send stays explicit.">Keyboard</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="readout">
+      <h2 id="ro-title">A1 · Inbox</h2>
+      <p id="ro-body">Three things want a decision, one per severity, grouped by machine and session. Healthy work collapses into two mono lines at the bottom — the screen's job is to be short.</p>
+      <div class="kv">
+        <div><b>Buildable today:</b> <span id="ro-cost">client only</span></div>
+        <div><b>Data:</b> <span id="ro-data">AttentionItem · severity · kind · ticketId</span></div>
+      </div>
+      <div style="margin-top:14px" id="ro-tags">
+        <span class="tagline client">client only · grouping, severity, actions</span>
+        <span class="tagline">needs hub · kind=blocked_question</span>
+      </div>
+      <p style="margin-top:16px;font-size:13px;color:var(--ink-3)">
+        <a href="index.html">← all three directions</a> · <a href="b-deck.html">B · Deck</a> · <a href="c-voice.html">C · Voice</a>
+      </p>
+    </div>
+  </div>
+
+  <p class="foot">
+    Tokens are lifted verbatim from <code>hub-web/src/styles.css</code>. Agent names, task IDs and severities come from the live
+    <code>soundwave-linux</code> hub on 2026-09-03. Light theme is a proposal: Commander is dark-only today.
+  </p>
+</div>
+
+<script>
+(function () {
+  var screenEl = document.getElementById('screen');
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.controls [data-goto]'));
+
+  var READOUT = {
+    inbox: {
+      title: 'A1 · Inbox',
+      body: 'Three things want a decision, one per severity, grouped by machine and session. Healthy work collapses into two mono lines at the bottom — the screen’s job is to be short.',
+      cost: 'client only',
+      data: 'AttentionItem · severity · kind · ticketId',
+      tags: '<span class="tagline client">client only · grouping, severity, actions</span><span class="tagline">needs hub · kind=blocked_question</span>'
+    },
+    expanded: {
+      title: 'A2 · Item expanded',
+      body: 'The decision is makeable without a terminal: five quoted lines, one suggested action, and Redirect / Interrupt / Snooze in the thumb arc. Two taps from the lock screen to done.',
+      cost: 'needs hub data',
+      data: 'AttentionContent + excerpt[] + suggestedAction',
+      tags: '<span class="tagline">needs hub · 5-line output excerpt</span><span class="tagline">needs hub · suggested action</span><span class="tagline client">client only · action layout</span>'
+    },
+    empty: {
+      title: 'A3 · Nothing needs you',
+      body: 'The most valuable screen the product can show a person at dinner. Today this state is a dashed rectangle (D13). Push turns the badge into a notification you act on.',
+      cost: 'needs new backend',
+      data: 'AttentionCounts = {critical:0, warning:0, info:0}',
+      tags: '<span class="tagline client">client only · the empty screen</span><span class="tagline">needs backend · Web Push + PWA</span>'
+    },
+    terminal: {
+      title: 'A4 · Terminal as attachment',
+      body: 'The 80-column grid still exists — as a sheet you open deliberately, horizontally scrollable, over the decision you were already making. It is never the entry point.',
+      cost: 'client only',
+      data: 'existing terminal attach path',
+      tags: '<span class="tagline client">client only · sheet over the card</span>'
+    }
+  };
+
+  function goto(state) {
+    if (!READOUT[state]) return;
+    screenEl.setAttribute('data-state', state);
+    tabs.forEach(function (t) { t.setAttribute('aria-pressed', String(t.dataset.goto === state)); });
+    var r = READOUT[state];
+    document.getElementById('ro-title').textContent = r.title;
+    document.getElementById('ro-body').textContent = r.body;
+    document.getElementById('ro-cost').textContent = r.cost;
+    document.getElementById('ro-data').textContent = r.data;
+    document.getElementById('ro-tags').innerHTML = r.tags;
+    var title = document.getElementById('app-title');
+    var count = document.getElementById('app-count');
+    var sub = document.getElementById('app-sub');
+    if (state === 'empty') { title.textContent = 'All quiet'; count.textContent = '0'; sub.textContent = 'last event 6m ago'; }
+    else if (state === 'inbox') { title.textContent = 'Needs you'; count.textContent = '3'; sub.textContent = '2 sessions · 9 agents · newest first'; }
+    else { title.textContent = 'Worker stopped'; count.textContent = 'critical'; sub.textContent = 'soundwave-linux / cas-src · zen-eagle-20'; }
+    if (location.hash.slice(1) !== state) history.replaceState(null, '', '#' + state);
+  }
+
+  document.addEventListener('click', function (event) {
+    var target = event.target.closest('[data-goto]');
+    if (target) { event.preventDefault(); goto(target.dataset.goto); return; }
+    var toast = event.target.closest('[data-toast]');
+    if (toast) { event.preventDefault(); showToast(toast.dataset.toast); }
+  });
+
+  var toastTimer = null;
+  function showToast(text) {
+    var el = document.getElementById('mock-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'mock-toast';
+      el.style.cssText = 'position:absolute;left:12px;right:12px;bottom:96px;z-index:9;' +
+        'padding:12px;border-radius:6px;background:var(--bg-raised);color:var(--text-hi);' +
+        'font-family:var(--font-mono);font-size:11px;box-shadow:var(--shadow-overlay);text-align:center';
+      screenEl.appendChild(el);
+    }
+    el.textContent = text;
+    el.style.opacity = '1';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.style.opacity = '0'; }, 1800);
+  }
+
+  function setTheme(theme) {
+    screenEl.setAttribute('data-theme', theme);
+    document.getElementById('theme-dark').setAttribute('aria-pressed', String(theme === 'dark'));
+    document.getElementById('theme-light').setAttribute('aria-pressed', String(theme === 'light'));
+  }
+  document.getElementById('theme-dark').addEventListener('click', function () { setTheme('dark'); });
+  document.getElementById('theme-light').addEventListener('click', function () { setTheme('light'); });
+
+  var params = new URLSearchParams(location.search);
+  if (params.get('theme') === 'light') setTheme('light');
+  window.addEventListener('hashchange', function () { goto(location.hash.slice(1) || 'inbox'); });
+  goto(location.hash.slice(1) || 'inbox');
+})();
+</script>
+</body>
+</html>

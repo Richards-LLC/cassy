@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Commander on a phone — three clickable directions (cas-6564)</title>
+<style>
+:root{
+  --ink:#14181f; --ink-2:#3d4653; --ink-3:#6b7686; --rule:#dfe4ec; --rule-2:#eef1f6;
+  --paper:#ffffff; --wash:#f6f8fb; --crit:#b3261e; --warn:#8a5a00; --ok:#1f6f43; --link:#1a4fb4;
+  --mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --ui:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--wash);color:var(--ink);font-family:var(--ui);font-size:16px;line-height:1.6}
+.wrap{max-width:64rem;margin:0 auto;padding:0 20px 96px}
+header.masthead{background:var(--paper);border-bottom:1px solid var(--rule);padding:44px 0 34px;margin-bottom:34px}
+header.masthead .wrap{padding-bottom:0}
+.eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin:0 0 12px}
+h1{font-size:31px;line-height:1.22;margin:0 0 14px;letter-spacing:-.015em}
+.sub{font-size:17px;color:var(--ink-2);margin:0 0 22px;max-width:52rem}
+.meta{display:flex;flex-wrap:wrap;gap:8px 10px;font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
+.meta span{background:var(--wash);border:1px solid var(--rule);border-radius:999px;padding:4px 11px}
+h2{font-size:23px;margin:52px 0 6px;letter-spacing:-.01em;padding-top:14px;border-top:2px solid var(--ink);display:inline-block}
+h3{font-size:17.5px;margin:30px 0 8px}
+p{margin:0 0 14px}
+a{color:var(--link)}
+code{font-family:var(--mono);font-size:.885em;background:var(--rule-2);border-radius:3px;padding:1px 5px;word-break:break-word}
+.card{background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:22px 24px;margin:0 0 20px}
+.lede{background:var(--paper);border:1px solid var(--rule);border-left:5px solid var(--ink);border-radius:8px;
+      padding:20px 24px;margin:0 0 26px}
+.lede p:last-child{margin-bottom:0}
+ol.composition{margin:0;padding-left:22px;font-size:15.5px}
+ol.composition li{margin-bottom:8px}
+ol.composition li:last-child{margin-bottom:0}
+ul{margin:0 0 15px;padding-left:22px}
+li{margin-bottom:6px}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:0 0 20px;background:var(--paper)}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+th{font-size:11.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);border-bottom:1.5px solid var(--ink-3)}
+td.mono,th.mono{font-family:var(--mono);font-size:12px}
+.cost{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+      padding:3px 9px;border-radius:999px;white-space:nowrap;display:inline-block}
+.cost.client{background:#eff8f2;color:var(--ok);border:1px solid #c3e2ce}
+.cost.hub{background:#fdf7e8;color:var(--warn);border:1px solid #eedfb4}
+.cost.backend{background:#fdf0ef;color:var(--crit);border:1px solid #f2c7c3}
+
+.dirs{display:grid;grid-template-columns:repeat(auto-fit,minmax(268px,1fr));gap:18px;margin:0 0 8px}
+.dir{background:var(--paper);border:1px solid var(--rule);border-radius:10px;overflow:hidden;
+     display:flex;flex-direction:column;text-decoration:none;color:inherit;transition:border-color .12s}
+.dir:hover{border-color:var(--ink-3)}
+.dir .shot{display:block;width:100%;height:auto;background:#0c0e13;border-bottom:1px solid var(--rule)}
+.dir .pad{padding:16px 18px 18px}
+.dir .tag{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+          margin:0 0 6px}
+.dir h3{margin:0 0 6px;font-size:17px}
+.dir p{font-size:14px;color:var(--ink-2);margin:0 0 10px}
+.dir .go{font-family:var(--mono);font-size:12px;color:var(--link)}
+
+.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:0 0 22px}
+figure{margin:0;background:var(--paper);border:1px solid var(--rule);border-radius:8px;padding:8px}
+figure img{display:block;width:100%;height:auto;border-radius:4px;background:#0c0e13}
+figcaption{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:7px;line-height:1.45}
+.foot{font-size:13px;color:var(--ink-3);border-top:1px solid var(--rule);padding-top:18px;margin-top:44px}
+@media print{
+  body{background:#fff;font-size:11.5pt}
+  .wrap{max-width:none;padding:0}
+  header.masthead{padding:0 0 18px;margin-bottom:22px}
+  h2{page-break-after:avoid}
+  .card,.dir,figure{page-break-inside:avoid;border-color:#bbb}
+  a{color:#000;text-decoration:none}
+}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">Cassy Commander · mobile mock-ups · 2026-09-03</p>
+    <h1>Three phone-native Commanders, clickable, at real phone size</h1>
+    <p class="sub">Directions A, B and C from the <b>cas-b652</b> redesign brief, built as working HTML at 412×915 CSS px in
+    Commander's own tokens — dark and light, thirteen states, every state you can tap into. The names, task IDs, models and
+    severities are the live <code>soundwave-linux</code> fleet, not lorem ipsum.</p>
+    <div class="meta">
+      <span>cas-6564</span>
+      <span>412 × 915 CSS px · DPR 2</span>
+      <span>13 states · 26 screenshots</span>
+      <span>dark + light</span>
+      <span>no build step</span>
+      <span>tokens: hub-web/src/styles.css</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="dirs">
+    <a class="dir" href="a-inbox.html">
+      <img class="shot" src="screens/a-inbox-inbox-dark.png" alt="Direction A, the inbox" loading="lazy">
+      <div class="pad">
+        <p class="tag">Direction A</p>
+        <h3>The Inbox</h3>
+        <p>Attention is the app. Three things want a decision; the terminal is an attachment you may never open.</p>
+        <span class="go">4 states · inbox → expanded → empty → terminal ›</span>
+      </div>
+    </a>
+    <a class="dir" href="b-deck.html">
+      <img class="shot" src="screens/b-deck-supervisor-dark.png" alt="Direction B, the deck" loading="lazy">
+      <div class="pad">
+        <p class="tag">Direction B</p>
+        <h3>The Deck</h3>
+        <p>One agent per card, supervisor and workers as peers, with a reflowed output tail sized for a thumb.</p>
+        <span class="go">5 states · swipe, stream, expand, rotate ›</span>
+      </div>
+    </a>
+    <a class="dir" href="c-voice.html">
+      <img class="shot" src="screens/c-voice-confirm-dark.png" alt="Direction C, the walkie-talkie" loading="lazy">
+      <div class="pad">
+        <p class="tag">Direction C</p>
+        <h3>The Walkie-Talkie</h3>
+        <p>Voice first, screen second. Every mutating action shows its target and waits for a tap.</p>
+        <span class="go">4 states · idle → listening → confirm → answer ›</span>
+      </div>
+    </a>
+  </div>
+
+  <h2>How A → B → C fit together</h2>
+  <div class="lede">
+    <ol class="composition">
+      <li><b>A is the front door.</b> The phone opens on the list of things that want a decision — not on a fleet, a session, or a terminal.</li>
+      <li><b>Tapping an item lands in B.</b> "Show me zen-eagle-20" is that agent's card, with its peers one swipe away.</li>
+      <li><b>C is not a fourth screen — it is the composer</b> for both, reachable from the bar at the bottom of A and the Talk button on every B card.</li>
+      <li><b>A still works when the terminal does not.</b> The quoted excerpt carries the decision, so a dead renderer (D3) costs you detail, not the answer.</li>
+      <li><b>B is the answer to D15.</b> A reflowed tail is legible at phone width; a 46-column ANSI grid is not, at any size the 12–16px clamp allows.</li>
+      <li><b>C is the answer to D4.</b> Voice never opens the keyboard that destroys the layout, and it is the only input that works while walking.</li>
+      <li><b>Sequence: A, then B, then C.</b> A runs against today's attention feed; B needs a logical-line tail; C is the only one needing new backend, so it must not gate the first two.</li>
+      <li><b>None of this is the 53rem media query.</b> Each direction starts from a different answer to "what is the primary object on this screen?", which is the one thing a narrower column cannot change.</li>
+    </ol>
+  </div>
+
+  <h2>What each state costs to build</h2>
+  <p>Three tiers: <span class="cost client">client only</span> is composition and CSS against data the hub already broadcasts;
+  <span class="cost hub">needs hub data</span> means an existing payload has to carry more;
+  <span class="cost backend">needs new backend</span> means a capability that does not exist yet. Every state that needs
+  more than the client carries a <code>needs hub: …</code> tag drawn on the mock-up itself.</p>
+
+  <table>
+    <thead>
+      <tr><th class="mono">state</th><th>what it shows</th><th>cost</th><th>what it would take</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="mono">A1 inbox</td><td>3 items, one per severity, grouped by session; healthy work collapsed</td>
+          <td><span class="cost client">client only</span></td>
+          <td><code>AttentionItem</code> already carries severity, kind, ticketId, machine and session</td></tr>
+      <tr><td class="mono">A2 expanded</td><td>quoted excerpt + Approve · Redirect · Interrupt · Snooze</td>
+          <td><span class="cost hub">needs hub data</span></td>
+          <td>an excerpt array and a suggested action on <code>AttentionContent</code>; today it carries headline, detail, cause</td></tr>
+      <tr><td class="mono">A3 empty</td><td>"Nothing needs you", the success state</td>
+          <td><span class="cost backend">needs new backend</span></td>
+          <td>the screen is client-only; making it matter needs Web Push on an installed PWA</td></tr>
+      <tr><td class="mono">A4 terminal</td><td>the 80-column pane as a sheet over the decision</td>
+          <td><span class="cost client">client only</span></td>
+          <td>the existing attach path, opened deliberately instead of on arrival</td></tr>
+      <tr><td class="mono">B1 supervisor</td><td>full-bleed agent card, actions in the thumb arc</td>
+          <td><span class="cost client">client only</span></td>
+          <td>pane list, phase and liveness are already per-session</td></tr>
+      <tr><td class="mono">B2 worker</td><td>swipe between peers with a position indicator</td>
+          <td><span class="cost client">client only</span></td>
+          <td>retires the 65/35 supervisor split; no new data</td></tr>
+      <tr><td class="mono">B3 streaming</td><td>reflowed tail, hanging indent preserved, lines landing live</td>
+          <td><span class="cost hub">needs hub data</span></td>
+          <td>"last N logical lines" that survives ANSI — a new render path, not a restyled canvas</td></tr>
+      <tr><td class="mono">B4 terminal</td><td>the real Ghostty pane, one tap away</td>
+          <td><span class="cost client">client only</span></td>
+          <td>unchanged behaviour, moved behind a deliberate tap</td></tr>
+      <tr><td class="mono">B5 landscape</td><td>915×412: identity left, tail right</td>
+          <td><span class="cost client">client only</span></td>
+          <td>one container query on the card; the desktop grid never appears (D5)</td></tr>
+      <tr><td class="mono">C1 idle</td><td>push-to-talk, honest recogniser mode line</td>
+          <td><span class="cost client">client only</span></td>
+          <td><code>speech-input.ts</code> already resolves local / cloud / typing and hides the mic on failure</td></tr>
+      <tr><td class="mono">C2 listening</td><td>interim transcript muted, finalised words primary</td>
+          <td><span class="cost client">client only</span></td>
+          <td><code>interimResults</code> and <code>isFinal</code> are already in the recogniser contract</td></tr>
+      <tr><td class="mono">C3 confirm</td><td>agent · session · pane · scope, then wait</td>
+          <td><span class="cost backend">needs new backend</span></td>
+          <td>intent → target inference and a scope check; the sheet itself is client-only</td></tr>
+      <tr><td class="mono">C4 answer</td><td>spoken summary plus a card to tap</td>
+          <td><span class="cost backend">needs new backend</span></td>
+          <td>fleet-wide summarisation; playback is <code>speechSynthesis</code> in the browser</td></tr>
+    </tbody>
+  </table>
+
+  <h2>What these are made of</h2>
+  <div class="card">
+    <h3 style="margin-top:0">Tokens, verbatim</h3>
+    <p>Every colour, size, radius and spacing step is copied from the <code>:root</code> block of
+    <code>hub-web/src/styles.css</code> and consumed through <code>var(...)</code> — the same discipline
+    <code>DESIGN.md</code> requires of the app. Cards use 12px padding and 6px radii, panes 8px, pills 999px; type stays on
+    the 11 / 12.5 / 13.5 / 15 / 18px ramp; no weight goes above 600; saturated colour appears only as state.</p>
+
+    <h3>Live data, not placeholders</h3>
+    <p>The fleet shown is the one running on this machine on 2026-09-03: supervisor <code>fast-kestrel-6</code> with
+    <code>zen-eagle-20</code>, <code>brave-raven-22</code>, <code>sharp-heron-50</code>, <code>golden-parrot-30</code> and
+    <code>fair-hound-98</code>, against real task IDs <code>cas-dc93</code>, <code>cas-0d61</code>, <code>cas-8b59</code>,
+    <code>cas-67b6</code>. Attention kinds (<code>pane_exited</code>, <code>awaiting_merge</code>) are real entries in
+    <code>MACHINE_EVENT_TEMPLATES</code>; <code>blocked_question</code> is not, and is tagged on the mock-up as needing the hub.</p>
+
+    <h3>Two honest caveats</h3>
+    <ul style="margin-bottom:0">
+      <li><b>Light theme is a proposal.</b> Commander is dark-only today: one <code>:root</code> ramp under
+      <code>color-scheme: dark</code>. The light column here is a derived ramp with the state colours darkened for contrast on
+      white — it is a design question to settle, not an existing surface.</li>
+      <li><b>Terminal wells stay dark in both themes.</b> Machine output is the deepest layer, and the Ghostty ANSI palette is
+      deliberately independent of the application tokens, so the terminal foreground does not flip with the theme.</li>
+    </ul>
+  </div>
+
+  <h2>Every state, both themes</h2>
+  <p>Rendered headless in Chromium at 412×915 (B5 at 915×412), DPR 2, no console errors.</p>
+
+  <h3>Direction A — The Inbox</h3>
+  <div class="gallery">
+    <figure><img src="screens/a-inbox-inbox-dark.png" alt="A1 inbox dark" loading="lazy"><figcaption>A1 · inbox · dark</figcaption></figure>
+    <figure><img src="screens/a-inbox-expanded-dark.png" alt="A2 expanded dark" loading="lazy"><figcaption>A2 · expanded · dark</figcaption></figure>
+    <figure><img src="screens/a-inbox-empty-dark.png" alt="A3 empty dark" loading="lazy"><figcaption>A3 · nothing needs you · dark</figcaption></figure>
+    <figure><img src="screens/a-inbox-terminal-dark.png" alt="A4 terminal dark" loading="lazy"><figcaption>A4 · terminal attachment · dark</figcaption></figure>
+    <figure><img src="screens/a-inbox-inbox-light.png" alt="A1 inbox light" loading="lazy"><figcaption>A1 · inbox · light</figcaption></figure>
+    <figure><img src="screens/a-inbox-expanded-light.png" alt="A2 expanded light" loading="lazy"><figcaption>A2 · expanded · light</figcaption></figure>
+    <figure><img src="screens/a-inbox-empty-light.png" alt="A3 empty light" loading="lazy"><figcaption>A3 · nothing needs you · light</figcaption></figure>
+    <figure><img src="screens/a-inbox-terminal-light.png" alt="A4 terminal light" loading="lazy"><figcaption>A4 · terminal attachment · light</figcaption></figure>
+  </div>
+
+  <h3>Direction B — The Deck</h3>
+  <div class="gallery">
+    <figure><img src="screens/b-deck-supervisor-dark.png" alt="B1 supervisor dark" loading="lazy"><figcaption>B1 · supervisor · dark</figcaption></figure>
+    <figure><img src="screens/b-deck-worker-dark.png" alt="B2 worker dark" loading="lazy"><figcaption>B2 · worker · dark</figcaption></figure>
+    <figure><img src="screens/b-deck-streaming-dark.png" alt="B3 streaming dark" loading="lazy"><figcaption>B3 · tail streaming · dark</figcaption></figure>
+    <figure><img src="screens/b-deck-terminal-dark.png" alt="B4 terminal dark" loading="lazy"><figcaption>B4 · full terminal · dark</figcaption></figure>
+    <figure><img src="screens/b-deck-supervisor-light.png" alt="B1 supervisor light" loading="lazy"><figcaption>B1 · supervisor · light</figcaption></figure>
+    <figure><img src="screens/b-deck-worker-light.png" alt="B2 worker light" loading="lazy"><figcaption>B2 · worker · light</figcaption></figure>
+    <figure><img src="screens/b-deck-streaming-light.png" alt="B3 streaming light" loading="lazy"><figcaption>B3 · tail streaming · light</figcaption></figure>
+    <figure><img src="screens/b-deck-terminal-light.png" alt="B4 terminal light" loading="lazy"><figcaption>B4 · full terminal · light</figcaption></figure>
+  </div>
+  <div class="gallery" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr))">
+    <figure><img src="screens/b-deck-landscape-dark.png" alt="B5 landscape dark" loading="lazy"><figcaption>B5 · landscape 915×412 · dark</figcaption></figure>
+    <figure><img src="screens/b-deck-landscape-light.png" alt="B5 landscape light" loading="lazy"><figcaption>B5 · landscape 915×412 · light</figcaption></figure>
+  </div>
+
+  <h3>Direction C — The Walkie-Talkie</h3>
+  <div class="gallery">
+    <figure><img src="screens/c-voice-idle-dark.png" alt="C1 idle dark" loading="lazy"><figcaption>C1 · push-to-talk idle · dark</figcaption></figure>
+    <figure><img src="screens/c-voice-listening-dark.png" alt="C2 listening dark" loading="lazy"><figcaption>C2 · listening · dark</figcaption></figure>
+    <figure><img src="screens/c-voice-confirm-dark.png" alt="C3 confirm dark" loading="lazy"><figcaption>C3 · confirm target · dark</figcaption></figure>
+    <figure><img src="screens/c-voice-answer-dark.png" alt="C4 answer dark" loading="lazy"><figcaption>C4 · spoken summary · dark</figcaption></figure>
+    <figure><img src="screens/c-voice-idle-light.png" alt="C1 idle light" loading="lazy"><figcaption>C1 · push-to-talk idle · light</figcaption></figure>
+    <figure><img src="screens/c-voice-listening-light.png" alt="C2 listening light" loading="lazy"><figcaption>C2 · listening · light</figcaption></figure>
+    <figure><img src="screens/c-voice-confirm-light.png" alt="C3 confirm light" loading="lazy"><figcaption>C3 · confirm target · light</figcaption></figure>
+    <figure><img src="screens/c-voice-answer-light.png" alt="C4 answer light" loading="lazy"><figcaption>C4 · spoken summary · light</figcaption></figure>
+  </div>
+
+  <p class="foot">
+    Mock-ups only — no <code>hub-web/</code> or <code>hub/</code> source was changed. Plain HTML, CSS and JavaScript with no build
+    step: open any file directly. Screenshots regenerate with <code>node shoot.js</code> in this directory (Playwright, headless or <code>HEADED=1</code>).
+  </p>
+
+</div>
+</body>
+</html>

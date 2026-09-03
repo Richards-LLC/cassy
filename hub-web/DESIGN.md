@@ -25,6 +25,8 @@ typography:
     terminal: "--fs-terminal 13px / 1.35 / 400–600"
     md: "--fs-md 15px / pane and section titles / 400–600"
     lg: "--fs-lg 18px / current session title only / 400–600"
+rail:
+  item: "--rail-item-min 44px / one container treatment for every phone-rail control"
 spacing:
   base: "4px"
   steps: ["4px", "8px", "12px", "16px", "20px", "24px", "32px", "40px"]
@@ -83,6 +85,8 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - `.session-header` is exactly 44px. The supervisor receives 65% of the pane grid and the worker strip 35%; collapsed worker bars are exactly 32px.
 - The collapsed attention region is the same 48px rail width, while the expanded operations panel occupies the 320px context column.
 - At `max-width: 53rem`, navigation becomes a 48px bottom rail, drawers open above it, and workers scroll horizontally below the readable supervisor terminal.
+- Every control in that rail — Machines, each machine chip, Pair, the attention summary, the message button — shares one container treatment at `--rail-item-min` (44px) on `--bg-raised` with `--radius-card`. The rail is one bar, so it may not mix bordered, filled, and bare controls in a single row.
+- The collapsed context pill floats over the rail: it stays transparent, clips its own contents, and lets its two controls carry the shared rail-item surface, so it never paints a second surface or spills across Pair.
 - The selected session's `.talk-supervisor` action occupies its own 48px row immediately above the phone rail; it is never moved into the top-bar overflow or a drawer.
 - The phone message composer makes `#message-mic` the full-width first action, with Keyboard and explicit Send beneath it; desktop leaves the textarea keyboard-primary and keeps the mic secondary.
 - Compact pane-order controls use 24px geometry; primary buttons remain 40px high.
@@ -112,6 +116,7 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - Enriched session card: `.session-summary-title`, `.session-summary-description`, and `.phase-chip` consume the single server-broadcast summary. The machine codename remains a mono eyebrow; stale active descriptions dim after ten minutes. Testing/building use info text, blocked alone may use the warning tint, and idle recedes. Enrichment is per-machine, default off, and must plainly warn that redacted terminal transcript excerpts are sent to the configured model provider.
 - Header: `.session-header` in `hub-web/src/styles.css` and `render()` in `hub-web/src/main.ts`; only an active session receives `.toolbar-session-title` mono styling.
 - Terminal pane: `.pane`, `.pane.selected`, `.pane-header`, and `.terminal-mount`; the terminal canvas owns its independent ANSI palette.
+- Attention counts: `.attention-count` is one badge on `--bg-active` for every severity, and the collapsed phone rail shows the single labelled `.attention-summary` instead of three bare numbers; severity is carried by text colour and the dot, never by a fill only some severities receive.
 - Attention/status cards: `.attention-item` and `.status-row`; prose stays UI face while `.attention-group-label`, `.attention-ticket`, and `.status-identifier` isolate machine copy.
 - Primary button: `.primary`; it uses `--bg-active` because blue is state/focus, not a decorative call-to-action fill.
 - Pairing dialog: `dialog`, `.pair-flow`, `.pair-code`, and `.pair-details`; code, origins, URLs, and scopes are mono inside an otherwise UI-face flow.

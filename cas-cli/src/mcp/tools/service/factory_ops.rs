@@ -291,6 +291,19 @@ fn short_session(session_id: &str) -> &str {
     &session_id[..8.min(session_id.len())]
 }
 
+fn factory_rehome_label(agent: &cas_types::Agent) -> String {
+    agent
+        .metadata
+        .get("factory_session_rehomed_from")
+        .map(|prior| {
+            format!(
+                "\n    registry: re-homed from prior factory session {}",
+                prior
+            )
+        })
+        .unwrap_or_default()
+}
+
 /// Collapse accidental duplicate registrations for one logical factory
 /// identity.
 ///
@@ -1192,19 +1205,25 @@ fn format_assigned_task_info(
 ///
 /// Pure over its input so the wording and the empty case are unit-testable
 /// without a daemon, a queue, or a clock.
-fn format_undelivered_relay_section(
-    rows: &[cas_store::UndeliveredLifecycleRelay],
-    total: usize,
-) -> String {
-    if rows.is_empty() {
+fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay]) -> String {
+    let actionable = rows
+        .iter()
+        .filter(|row| {
+            crate::prompt_revalidation::parse_worker_died_envelope(&row.prompt).is_none_or(
+                |envelope| !envelope.held_tasks.is_empty() || !envelope.recovered_tasks.is_empty(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if actionable.is_empty() {
         return String::new();
     }
+    let total = actionable.len();
+    let displayed = actionable.len().min(10);
     let mut out = String::new();
     out.push_str(&format!(
-        "⚠ UNDELIVERED SUPERVISOR RELAY ({total} total; displaying {}) — these never reached you:\n",
-        rows.len()
+        "⚠ UNDELIVERED SUPERVISOR RELAY ({total} total; displaying {displayed}) — these never reached you:\n",
     ));
-    for row in rows {
+    for row in actionable.into_iter().take(displayed) {
         let what = row
             .summary
             .as_deref()
@@ -2683,6 +2702,14 @@ impl CasService {
             .into_iter()
             .filter(|a| a.visible_to_factory_session(factory_session.as_deref()))
             .collect();
+        let mut duplicate_names = std::collections::BTreeSet::new();
+        let mut seen_identities = std::collections::BTreeSet::new();
+        for agent in &agents {
+            let identity = (agent.role.to_string(), agent.name.clone());
+            if !seen_identities.insert(identity) {
+                duplicate_names.insert(agent.name.clone());
+            }
+        }
         let (agents, duplicate_registrations_filtered) = dedupe_authoritative_agents(agents);
 
         // cas-2e81: always surface recently-died-while-leased even when the
@@ -2719,24 +2746,24 @@ impl CasService {
         // rendered even when no agents are registered — the whole failure mode
         // being fixed is that a lost relay left no trace anywhere, so the
         // fleet read silence as "nothing is waiting on me".
-        let (undelivered_relays, undelivered_total) =
-            crate::store::open_prompt_queue_store(&self.inner.cas_root)
-                .ok()
-                .map(|queue| {
-                    // A terminal task is positive evidence that the lifecycle
-                    // relay's requested supervisor action is moot. Reconcile it
-                    // durably (while retaining the forensic prompt row) before
-                    // sampling the remaining actionable backlog.
-                    let _ = queue.reconcile_terminal_lifecycle_relays();
-                    let total = queue.undelivered_lifecycle_relay_count().unwrap_or(0);
-                    let rows = queue
-                        .list_undelivered_lifecycle_relays(10)
-                        .unwrap_or_default();
-                    (rows, total)
-                })
-                .unwrap_or_default();
-        let undelivered_section =
-            format_undelivered_relay_section(&undelivered_relays, undelivered_total);
+        let undelivered_relays = crate::store::open_prompt_queue_store(&self.inner.cas_root)
+            .ok()
+            .map(|queue| {
+                // A terminal task is positive evidence that the lifecycle
+                // relay's requested supervisor action is moot. Reconcile it
+                // durably (while retaining the forensic prompt row) before
+                // sampling the remaining actionable backlog. Scan the same
+                // bounded maximum as worker-death coalescing so task-free
+                // informational deaths cannot occupy the ten-row display cap.
+                let _ = queue.reconcile_terminal_lifecycle_relays();
+                queue
+                    .list_undelivered_lifecycle_relays(
+                        super::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,
+                    )
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let undelivered_section = format_undelivered_relay_section(&undelivered_relays);
 
         if agents.is_empty() {
             let mut msg = String::from(
@@ -2758,7 +2785,8 @@ impl CasService {
         output.push_str(&undelivered_section);
         if duplicate_registrations_filtered > 0 {
             output.push_str(&format!(
-                "Filtered duplicate factory registration(s): {duplicate_registrations_filtered}\n\n"
+                "Collapsed {duplicate_registrations_filtered} superseded registry row(s) for: {}\n\n",
+                duplicate_names.into_iter().collect::<Vec<_>>().join(", ")
             ));
         }
 
@@ -3388,6 +3416,7 @@ impl CasService {
                         }
                     }
                 };
+                let rehome_info = factory_rehome_label(agent);
                 let priority_alert = format_priority_worker_status_alert(
                     stalled,
                     last_activity,
@@ -3475,7 +3504,7 @@ impl CasService {
                     }),
                 );
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
+                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     if usage_limited {
@@ -3496,6 +3525,7 @@ impl CasService {
                     harness_turn_info,
                     task_info,
                     inbox_info,
+                    rehome_info,
                     session_uuid
                 ));
                 if worker_cli == cas_mux::SupervisorCli::OpenCode {
@@ -8873,6 +8903,8 @@ mod spawn_lifecycle_tests {
             source: "lifecycle-wake:3386".to_string(),
             target: "supervisor".to_string(),
             summary: Some(task_summary.to_string()),
+            prompt: "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-fe23\">"
+                .to_string(),
             stage: "abandoned".to_string(),
             reason: Some(cas_store::PendingReason::UndeliveredLifecycleRelay),
             detail: Some("task closed before delivery".to_string()),
@@ -8887,12 +8919,9 @@ mod spawn_lifecycle_tests {
     /// read the absence of a message as "nothing needs me".
     #[test]
     fn an_undelivered_relay_is_named_in_worker_status() {
-        let out = format_undelivered_relay_section(
-            &[lost_relay(
-                "task_awaiting_merge: cas-fe23 (2026-08-07T18:51:51Z)",
-            )],
-            1,
-        );
+        let out = format_undelivered_relay_section(&[lost_relay(
+            "task_awaiting_merge: cas-fe23 (2026-08-07T18:51:51Z)",
+        )]);
         assert!(
             out.contains("UNDELIVERED SUPERVISOR RELAY"),
             "the banner must state the failure outright: {out}"
@@ -8917,18 +8946,42 @@ mod spawn_lifecycle_tests {
     /// has to be believed the single time it fires.
     #[test]
     fn no_undelivered_relays_renders_nothing() {
-        assert!(format_undelivered_relay_section(&[], 0).is_empty());
+        assert!(format_undelivered_relay_section(&[]).is_empty());
     }
 
     #[test]
     fn relay_banner_states_the_true_total_beyond_its_display_cap() {
-        let rendered = format_undelivered_relay_section(
-            &[lost_relay("task_blocked: cas-open (2026-08-09T15:57:00Z)")],
-            12,
-        );
+        let rows = (0..12)
+            .map(|index| {
+                let mut row = lost_relay("task_blocked: cas-open (2026-08-09T15:57:00Z)");
+                row.prompt_id += index;
+                row
+            })
+            .collect::<Vec<_>>();
+        let rendered = format_undelivered_relay_section(&rows);
         assert!(
-            rendered.contains("12 total; displaying 1"),
+            rendered.contains("12 total; displaying 10"),
             "the display cap must never conceal backlog depth: {rendered}"
+        );
+    }
+
+    #[test]
+    fn task_free_worker_death_is_not_an_undelivered_lane_warning() {
+        let mut informational = lost_relay("worker died: steady-fox-24");
+        informational.source = "lifecycle-wake:worker-died:2466".to_string();
+        informational.prompt = crate::prompt_revalidation::format_worker_died_relay(
+            "old-supervisor-row",
+            "steady-fox-24",
+            "worker_died:old-supervisor-row:1",
+            "heartbeat stale",
+            &[],
+            &[],
+            2466,
+        );
+
+        assert!(
+            format_undelivered_relay_section(&[informational]).is_empty(),
+            "a death envelope with no held or recovered tasks cannot represent a waiting lane"
         );
     }
 
@@ -9247,6 +9300,105 @@ mod spawn_lifecycle_tests {
 mod tests {
     use super::*;
 
+    fn response_text(response: CallToolResult) -> String {
+        response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn restarted_supervisor_sees_rehomed_worker_on_status_and_activity_surfaces() {
+        use cas_store::{AgentStore, EventStore, SqliteAgentStore, SqliteEventStore};
+        use cas_types::{Agent, AgentRole, Event, EventEntityType, EventType};
+
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_FACTORY_SESSION", "factory-session-s2"),
+            ("CAS_AGENT_ROLE", "supervisor"),
+            ("CAS_AGENT_NAME", "stable-supervisor"),
+        ]);
+        let project = tempfile::tempdir().expect("temp project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("initialize CAS root");
+        let agent_store = SqliteAgentStore::open(&cas_root).expect("open agent store");
+
+        let mut supervisor_s1 = Agent::new(
+            "supervisor-session-s1".to_string(),
+            "stable-supervisor".to_string(),
+        );
+        supervisor_s1.role = AgentRole::Supervisor;
+        supervisor_s1.factory_session = Some("factory-session-s1".to_string());
+        agent_store.register(&supervisor_s1).expect("register S1 supervisor");
+
+        let mut worker = Agent::new(
+            "worker-session-w1".to_string(),
+            "surviving-worker".to_string(),
+        );
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-session-s1".to_string());
+        agent_store.register(&worker).expect("register S1 worker");
+
+        let mut supervisor_s2 = Agent::new(
+            "supervisor-session-s2".to_string(),
+            "stable-supervisor".to_string(),
+        );
+        supervisor_s2.role = AgentRole::Supervisor;
+        supervisor_s2.factory_session = Some("factory-session-s2".to_string());
+        agent_store.register(&supervisor_s2).expect("register S2 supervisor");
+
+        let mut activity = Event::new(
+            EventType::WorkerFileEdited,
+            EventEntityType::Agent,
+            worker.id.clone(),
+            "edited src/lib.rs",
+        );
+        activity.session_id = Some(worker.id.clone());
+        SqliteEventStore::open(&cas_root)
+            .expect("open event store")
+            .record(&activity)
+            .expect("record worker activity");
+
+        let core = CasCore::with_daemon(cas_root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+
+        let status_request: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "worker_status"
+        }))
+        .expect("valid status request");
+        let status = response_text(
+            service
+                .factory_worker_status(status_request)
+                .await
+                .expect("worker status"),
+        );
+        assert!(status.contains("surviving-worker"), "{status}");
+        assert!(
+            status.contains("re-homed from prior factory session factory-session-s1"),
+            "{status}"
+        );
+
+        let activity_request: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "worker_activity",
+            "worker_names": "surviving-worker"
+        }))
+        .expect("valid activity request");
+        let activity = response_text(
+            service
+                .factory_worker_activity(activity_request)
+                .await
+                .expect("worker activity"),
+        );
+        assert!(activity.contains("surviving-worker"), "{activity}");
+        assert!(!activity.contains("No recent worker activity"), "{activity}");
+    }
+
     fn valid_claude_config(dir: &std::path::Path) {
         std::fs::write(dir.join("settings.json"), "{}").unwrap();
         std::fs::write(dir.join(".credentials.json"), "credential").unwrap();
@@ -9425,6 +9577,22 @@ mod tests {
             worker_cli_from_agent(worker_one),
             cas_mux::SupervisorCli::Claude,
             "the fresh Claude registration must not inherit the stale Codex row's resolver"
+        );
+    }
+
+    #[test]
+    fn worker_status_names_the_prior_session_for_a_rehomed_worker() {
+        let mut worker = cas_types::Agent::new("worker-session".into(), "wild-cobra-45".into());
+        worker.metadata.insert(
+            "factory_session_rehomed_from".into(),
+            "gabber-studio-brave-merlin-89".into(),
+        );
+
+        let rendered = factory_rehome_label(&worker);
+        assert!(rendered.contains("re-homed"), "{rendered}");
+        assert!(
+            rendered.contains("gabber-studio-brave-merlin-89"),
+            "{rendered}"
         );
     }
 

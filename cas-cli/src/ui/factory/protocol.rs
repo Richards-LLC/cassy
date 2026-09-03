@@ -224,6 +224,17 @@ pub enum ClientMessage {
     },
 }
 
+/// Who owns the PTY geometry of a pane (cas-37f8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PaneSizeAuthority {
+    /// The operator's local dashboard is attached and owns the size; viewers
+    /// render it and must not try to drive the PTY.
+    LocalDashboard,
+    /// No local dashboard is attached, so the smallest attached viewer owns
+    /// the size.
+    Viewer,
+}
+
 /// Messages sent from daemon to TUI client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonMessage {
@@ -254,6 +265,20 @@ pub enum DaemonMessage {
         cols: u16,
         rows: u16,
         ansi: Vec<u8>,
+    },
+
+    /// The authoritative PTY geometry of a pane, and who owns it.
+    ///
+    /// Sent to a client whose `ResizePane` was not applied verbatim — most
+    /// importantly when the operator's local dashboard owns the geometry and a
+    /// remote viewer asked for something smaller. The viewer must render this
+    /// size (scale / letterbox / scroll) instead of retrying the resize
+    /// (cas-37f8).
+    PaneSize {
+        pane_id: String,
+        cols: u16,
+        rows: u16,
+        authority: PaneSizeAuthority,
     },
 
     /// A bounded, styled page of historical screen rows.

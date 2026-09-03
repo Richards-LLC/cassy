@@ -289,6 +289,38 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain("max-width: var(--mobile-attention-label-width)");
   });
 
+  it("opens the pairing dialog for an invitation instead of leaving the user on the empty state", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+
+    // A consumed fragment used to render the same "No machine paired yet"
+    // screen, so the only signal that the invitation arrived was that nothing
+    // visibly changed.
+    expect(main).toContain("function openPairDialog(): void {");
+    expect(main).toContain("if (pendingPairing) openPairDialog();");
+    // And a fragment delivered to an already-open tab must still be consumed.
+    expect(main).toContain("watchPairingFragment(window, pendingPairingStore, (fragment) => {");
+
+    // The soft keyboard belongs to a field the operator chose to fill. Focusing
+    // an optional email on open pops it and scrolls the title off the screen.
+    expect(main).toContain('<section class="pair-flow" tabindex="-1" autofocus>');
+    expect(main).not.toContain('<input id="pair-email" type="email" autofocus');
+    expect(main).toContain('<input name="url" type="url" required autofocus');
+    expect(main).toContain('<input name="device" required autofocus');
+
+    // With the keyboard up the dialog can be 300px tall: the fields scroll and
+    // the action row does not, so Pair stays reachable.
+    expect(css).toContain("dialog[open] {\n  display: flex;");
+    expect(css).toContain("  max-height: min(88dvh, 720px);");
+    expect(css).toContain("  position: sticky;\n  bottom: 0;");
+
+    expect(css).toContain('.pair-flow[tabindex="-1"]:focus-visible { outline: none; }');
+
+    // D13: a sized card, not a full-viewport dashed rectangle.
+    expect(css).toContain(".empty-pane-slot {\n  place-self: center;");
+    expect(css).toContain("  width: min(var(--terminal-state-width), 100%);");
+    expect(css).not.toContain("border: var(--line-width) dashed var(--line-strong);");
+  });
+
   it("D7 gives every control in the phone rail one container treatment", async () => {
     const [main, css, view, design] = await Promise.all(
       ["main.ts", "styles.css", "attention-view.ts", "../DESIGN.md"]

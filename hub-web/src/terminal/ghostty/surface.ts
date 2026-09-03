@@ -2,6 +2,7 @@ import { isMacPlatform } from "../../lib/utils";
 import { collectWrappedTerminalLinkLine, extractTerminalLinks } from "../../terminal-links";
 import {
   GhosttyTerminalCore,
+  type GhosttyRow,
   type GhosttyScrollbar,
   type GhosttySnapshot,
   type GhosttyTheme,
@@ -492,6 +493,8 @@ export interface GhosttyTerminalSurfaceOptions {
   readonly onCopy: (text: string) => void;
   readonly beforeKey: (event: KeyboardEvent) => boolean;
   readonly onLinkActivate: (text: string, event: MouseEvent) => void;
+  /** Fires after every painted or skipped frame, so a reflowed view can follow the grid. */
+  readonly onRender?: () => void;
 }
 
 export class GhosttyTerminalSurface {
@@ -555,6 +558,11 @@ export class GhosttyTerminalSurface {
   private controlMode = false;
   private resizeNotified = false;
   private canvasConfigured = false;
+  // A phone's CSS width would hand an 80-column agent TUI a ~46-column grid.
+  // The floor decouples the PTY geometry from the mount, and the canvas then
+  // sizes to the grid rather than the mount so the true columns stay intact.
+  private minColumns = 0;
+  private canvasPainting = true;
   private theme: GhosttyTheme;
   private readonly suppressedKeyCodes = new Set<string>();
   private pasteShortcutToken = 0;
@@ -775,7 +783,13 @@ export class GhosttyTerminalSurface {
     const height = this.mount.clientHeight;
     if (width <= 0 || height <= 0) return false;
     const ratio = window.devicePixelRatio || 1;
-    const pixelWidth = Math.max(1, Math.round(width * ratio));
+    const grid = terminalGridSize(width, height, this.metrics, CONTENT_PADDING);
+    const cols = Math.max(grid.cols, this.minColumns);
+    // Below the column floor the canvas is wider than its mount; the mount pans
+    // horizontally so "Show terminal" reveals the real grid instead of a
+    // squeezed one.
+    const contentWidth = Math.max(width, cols * this.metrics.width + CONTENT_PADDING * 2);
+    const pixelWidth = Math.max(1, Math.round(contentWidth * ratio));
     const pixelHeight = Math.max(1, Math.round(height * ratio));
     let shouldRender = false;
     // The DPR transform must be installed even when the target size happens to
@@ -788,20 +802,23 @@ export class GhosttyTerminalSurface {
     ) {
       this.canvas.width = pixelWidth;
       this.canvas.height = pixelHeight;
+      // The stylesheet sizes the canvas to its mount; a grid wider than the
+      // mount has to state its own CSS width or the backing store would be
+      // squashed back into the phone's width.
+      this.canvas.style.width = contentWidth > width ? `${contentWidth}px` : "";
       this.context.setTransform(ratio, 0, 0, ratio, 0, 0);
       this.canvasConfigured = true;
       this.forceFullRender = true;
       this.scrollbarDirty = true;
       shouldRender = true;
     }
-    const grid = terminalGridSize(width, height, this.metrics, CONTENT_PADDING);
     this.mountHeight = height;
     // onResize is the only PTY resize channel, so the first successful fit must
     // notify even when the measured grid equals the 1x1 construction sentinel.
-    if (grid.cols !== this.cols || grid.rows !== this.rows || !this.resizeNotified) {
-      this.cols = grid.cols;
+    if (cols !== this.cols || grid.rows !== this.rows || !this.resizeNotified) {
+      this.cols = cols;
       this.rows = grid.rows;
-      this.core.resize(grid.cols, grid.rows, this.metrics.width, this.metrics.height);
+      this.core.resize(cols, grid.rows, this.metrics.width, this.metrics.height);
       this.notifyResize();
       this.forceFullRender = true;
       this.scrollbarDirty = true;
@@ -886,6 +903,50 @@ export class GhosttyTerminalSurface {
     // Selection highlights span rows Ghostty may not mark dirty for this change.
     this.forceFullRender = true;
     this.requestRender();
+  }
+
+  /**
+   * Floor on the columns handed to the PTY. A phone mount measures ~46 columns
+   * at the smallest legible glyph, which is half the width an agent TUI lays
+   * out for; the transcript view reads the resulting 80-column lines back and
+   * reflows them, so the floor is what keeps hanging indents intact.
+   */
+  setMinimumColumns(columns: number): void {
+    const next = Math.max(0, Math.floor(columns));
+    if (this.disposed || next === this.minColumns) return;
+    this.minColumns = next;
+    this.fit();
+  }
+
+  /**
+   * Skips the canvas paint while a reflowed transcript is the visible view.
+   * The snapshot is still taken — the transcript is built from it — but a
+   * hidden grid is not worth a full canvas repaint on every streamed frame.
+   */
+  setCanvasPainting(enabled: boolean): void {
+    if (this.disposed || enabled === this.canvasPainting) return;
+    this.canvasPainting = enabled;
+    if (!enabled) return;
+    this.forceFullRender = true;
+    this.scrollbarDirty = true;
+    this.requestRender();
+  }
+
+  /** Rows of the last rendered frame, with their soft-wrap flags. */
+  snapshotRows(): readonly GhosttyRow[] {
+    return this.snapshot?.rowData ?? [];
+  }
+
+  /** Whether scrollback exists above the current viewport. */
+  hasScrollbackAbove(): boolean {
+    const state = this.readScrollbarState();
+    return state !== null && state.offset > 0;
+  }
+
+  /** Moves the viewport by whole rows; negative goes back into scrollback. */
+  scrollRows(deltaRows: number): void {
+    if (this.disposed) return;
+    this.scrollViewport(deltaRows);
   }
 
   scrollToBottom(): void {
@@ -1536,6 +1597,14 @@ export class GhosttyTerminalSurface {
       this.frame = 0;
     }
     this.snapshot = this.core.snapshot();
+    if (!this.canvasPainting) {
+      // The transcript reads this snapshot; nothing else on screen is showing
+      // the grid, so the paint, the input caret and the scrollbar can wait
+      // until the terminal view is asked for again.
+      this.options.onRender?.();
+      this.scheduleCursorBlink();
+      return;
+    }
     // A cursor that is not blinking right now must be drawn, never caught in an
     // off phase left behind by a blink that has since been turned off.
     if (!this.blinkEnabled()) this.cursorOn = true;
@@ -1584,6 +1653,7 @@ export class GhosttyTerminalSurface {
       this.updateScrollbar();
     }
     this.forceFullRender = false;
+    this.options.onRender?.();
     this.scheduleCursorBlink();
   }
 

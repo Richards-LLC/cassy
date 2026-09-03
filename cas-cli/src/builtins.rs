@@ -370,6 +370,21 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/release-notes/references/RUBRIC-template.md",
         content: include_str!("builtins/skills/release-notes/references/RUBRIC-template.md"),
     },
+    // mecha-cassy skill (cas-945f, GH #687): the default Slack transport for
+    // every harness. The MechaCassy hub holds the Slack bot credential
+    // server-side and exposes four tools over one authenticated MCP endpoint,
+    // so a Codex or Grok worker posts on the same footing as Claude. The skill
+    // owns channel resolution, the two-check preflight, ordered thread posting
+    // with 1s pacing, the POSTED receipt, and the env-only credential rules;
+    // release-notes still owns what the message says.
+    BuiltinFile {
+        path: "skills/mecha-cassy/SKILL.md",
+        content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/mecha-cassy/references/registration.md",
+        content: include_str!("builtins/skills/mecha-cassy/references/registration.md"),
+    },
     // cas-github-issues skill (cas-ff2f, GH #94): the recurring GitHub Issues
     // sweep — dedupe double-filings, verify-and-close fixed claims, task new
     // issues into the active epic (successor epic when none is open), unblock
@@ -720,6 +735,16 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/release-notes/references/RUBRIC-template.md",
         content: include_str!("builtins/codex/skills/release-notes/references/RUBRIC-template.md"),
+    },
+    // mecha-cassy skill (cas-945f, GH #687) — codex mirror. Byte-identical to
+    // the claude copy except for the harness tool prefix.
+    BuiltinFile {
+        path: "skills/mecha-cassy/SKILL.md",
+        content: include_str!("builtins/codex/skills/mecha-cassy/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/mecha-cassy/references/registration.md",
+        content: include_str!("builtins/codex/skills/mecha-cassy/references/registration.md"),
     },
     // cas-github-issues skill (cas-ff2f, GH #94) — codex mirror. Byte-identical
     // to the claude copy except for the harness tool prefix.
@@ -1091,6 +1116,16 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/release-notes/references/RUBRIC-template.md",
         content: include_str!("builtins/grok/skills/release-notes/references/RUBRIC-template.md"),
     },
+    // mecha-cassy skill (cas-945f, GH #687) — grok twin. Byte-identical to the
+    // claude copy except for the harness tool prefix.
+    BuiltinFile {
+        path: "skills/mecha-cassy/SKILL.md",
+        content: include_str!("builtins/grok/skills/mecha-cassy/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/mecha-cassy/references/registration.md",
+        content: include_str!("builtins/grok/skills/mecha-cassy/references/registration.md"),
+    },
     BuiltinFile {
         path: "skills/fallow/SKILL.md",
         content: include_str!("builtins/grok/skills/fallow/SKILL.md"),
@@ -1351,6 +1386,16 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/release-notes"),
         codex: Some("skills/release-notes"),
         grok: Some("skills/release-notes"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-945f (GH #687): the MechaCassy Slack transport. Parity is the
+        // whole point — before the hub, only the signed-in Claude profile had a
+        // Slack connector, so Codex and Grok workers had no transport at all.
+        id: "mecha-cassy",
+        claude: Some("skills/mecha-cassy"),
+        codex: Some("skills/mecha-cassy"),
+        grok: Some("skills/mecha-cassy"),
         note: "",
     },
     RequiredCapability {
@@ -4192,6 +4237,114 @@ This is the body content."#;
                 assert!(
                     template.content.to_lowercase().contains(&required.to_lowercase()),
                     "{label} RUBRIC-template.md missing required rule: {required:?}"
+                );
+            }
+        }
+    }
+
+    /// cas-945f (GH #687): the mecha-cassy Slack transport ships for every
+    /// harness, and both its files stay credential-free.
+    ///
+    /// The markers below are the operational load-bearing parts: without the
+    /// two-check preflight a worker posts into a channel it cannot read, without
+    /// the ordered `thread_ts` capture the replies land as stray top-level
+    /// messages, without the pacing rule the hub's one-per-second refusal reads
+    /// as a hard failure, and without the `ts: null` rule an upload gets retried
+    /// and duplicated. Three worker credential exposures on 2026-09-02 came from
+    /// the banned diagnostics, so those bans are asserted too.
+    #[test]
+    fn test_builtin_skills_contains_mecha_cassy_transport() {
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let skill = catalog
+                .iter()
+                .find(|b| b.path == "skills/mecha-cassy/SKILL.md")
+                .unwrap_or_else(|| {
+                    panic!("skills/mecha-cassy/SKILL.md missing from {label} catalog")
+                });
+            assert!(
+                is_managed_by_cas(skill.content),
+                "{label} mecha-cassy SKILL.md must be managed_by: cas"
+            );
+            for required in [
+                "name: mecha-cassy",
+                "https://mecha-cassy.vercel.app/mcp/slack",
+                // The exact four tools the authenticated tools/list must show.
+                "slack_post_message",
+                "slack_upload_file",
+                "slack_read_channel",
+                "slack_list_channels",
+                // Channel rule, draft-first, two-check preflight.
+                "^[a-z0-9-]+-internal$",
+                "docs/release-notes/<date>-<topic>-slack.md",
+                "Preflight, exactly two checks",
+                "`limit` ≤ 50",
+                // Ordered posting, pacing, upload rule.
+                "user_thread_ts",
+                "dev_thread_ts",
+                "one write per second",
+                "ts: null",
+                // Receipt block.
+                "## POSTED",
+                "permalink",
+                // The three failure classes.
+                "invalid_token",
+                "not_in_channel",
+                "Retry-After",
+                // Content contract inherited from the rubric.
+                "Was → Now",
+            ] {
+                assert!(
+                    skill.content.contains(required),
+                    "{label} mecha-cassy SKILL.md missing required marker: {required:?}"
+                );
+            }
+
+            let registration = catalog
+                .iter()
+                .find(|b| b.path == "skills/mecha-cassy/references/registration.md")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "skills/mecha-cassy/references/registration.md missing from \
+                         {label} catalog"
+                    )
+                });
+            for required in [
+                // All three harness registrations, by env reference only.
+                "[servers.mecha-cassy]",
+                "auth = \"env:MECHA_SLACK_TOKEN_CASSY_PROXY\"",
+                "x-vercel-protection-bypass = \"env:MECHA_VERCEL_BYPASS\"",
+                "[mcp_servers.mecha-cassy]",
+                "bearer_token_env_var",
+                "env_http_headers",
+                "\"type\": \"http\"",
+                "${MECHA_VERCEL_BYPASS}",
+                "at launch",
+            ] {
+                assert!(
+                    registration.content.contains(required),
+                    "{label} mecha-cassy registration.md missing required marker: {required:?}"
+                );
+            }
+
+            // Nothing token-shaped may ship, and the diagnostics that leaked
+            // secrets before must stay named as prohibitions, never as recipes.
+            for file in [skill, registration] {
+                for banned in ["xoxb-", "xoxp-", "xapp-", "Bearer sk-", "MECHA_CLIENT_TOKENS="] {
+                    assert!(
+                        !file.content.contains(banned),
+                        "{label} {} ships a token-shaped literal: {banned:?}",
+                        file.path
+                    );
+                }
+            }
+            for required_ban in ["`printenv`", "`curl -v`", "never values"] {
+                assert!(
+                    skill.content.contains(required_ban),
+                    "{label} mecha-cassy SKILL.md dropped credential rule: {required_ban:?}"
                 );
             }
         }

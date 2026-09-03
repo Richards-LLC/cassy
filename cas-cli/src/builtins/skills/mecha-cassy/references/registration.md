@@ -29,10 +29,8 @@ must name the hub routes itself.
 
 ```toml
 allowlist = [
-  "mecha-cassy.slack_list_channels",
-  "mecha-cassy.slack_post_message",
-  "mecha-cassy.slack_read_channel",
-  "mecha-cassy.slack_upload_file",
+  "mecha-cassy.mecha_read",
+  "mecha-cassy.mecha_post",
 ]
 
 [servers.mecha-cassy]
@@ -47,13 +45,13 @@ x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"
 Dispatch through the proxy:
 
 ```text
-mcp__cas__mcp_execute server=mecha-cassy tool=slack_read_channel args={"channel":"<name or ID>","limit":50}
+mcp__cas__mcp_execute server=mecha-cassy tool=mecha_read args={"channel":"<name>","since":"<RFC3339>","max_messages":50}
 ```
 
 The proxy resolves its bearer when `cas serve` starts, so a variable exported
 after startup stays invisible until the next restart. `mcp__cas__system
 action=proxy_health` is credential-free: the healthy record for `mecha-cassy`
-reports `tool_count=4` and no error code. `.cas/proxy_catalog.json` is a
+reports `tool_count=2` and no error code. `.cas/proxy_catalog.json` is a
 generated cache, not source configuration.
 
 ## Codex
@@ -99,7 +97,7 @@ another.
 ## Proxy-less one-shot
 
 A bounded `codex exec` or `claude -p` process with no live proxy uses the hub
-project's `scripts/slack-post.sh` with `post`, `upload`, `read`, or `channels`.
+project's `scripts/slack-post.sh` with `post`, `upload`, or `read`.
 It applies the same channel rule and exits 0 with a JSON receipt on stdout, 1
 on a Slack or API error, 2 on missing credentials or bad arguments, and 3 on an
 unallowlisted or non-member channel. Capture that JSON without shell tracing or
@@ -109,8 +107,7 @@ from a connected worker.
 ## Verify without leaking
 
 - Count tools, do not trust status. An authenticated `tools/list` showing
-  exactly `slack_list_channels`, `slack_post_message`, `slack_read_channel`,
-  and `slack_upload_file` is the proof; `Connected` is not.
+  exactly `mecha_read` and `mecha_post` is the proof; `Connected` is not.
 - A missing bearer must return HTTP 401 with no tool names. Separate an empty
   variable from a wrong one by recording header state only, as
   `Authorization: Bearer <set|unset>`.

@@ -4269,30 +4269,56 @@ This is the body content."#;
                 is_managed_by_cas(skill.content),
                 "{label} mecha-cassy SKILL.md must be managed_by: cas"
             );
+            // The tool contract is pinned to the single machine-readable
+            // source of truth rather than re-spelled here. When the hub
+            // renames a tool, `cas integrate mecha-cassy` and `cas doctor`
+            // change with MECHA_CASSY_TOOLS, and this assertion drags the
+            // prose along with them instead of letting the skill keep
+            // documenting a retired name (which is exactly how the
+            // 2026-09-03 slack_* -> mecha_* rename broke every consumer
+            // silently).
+            #[cfg(feature = "mcp-proxy")]
+            for tool in cmcp_core::config::MECHA_CASSY_TOOLS {
+                assert!(
+                    skill.content.contains(tool),
+                    "{label} mecha-cassy SKILL.md does not document hub tool {tool:?}; \
+                     the hub contract moved and the skill did not follow"
+                );
+            }
+            for retired in ["slack_post_message", "slack_upload_file", "slack_read_channel", "slack_list_channels"] {
+                assert!(
+                    !skill.content.contains(retired),
+                    "{label} mecha-cassy SKILL.md still documents retired tool {retired:?}; \
+                     calls to it are denied by policy"
+                );
+            }
+
             for required in [
                 "name: mecha-cassy",
                 "https://mecha-cassy.vercel.app/mcp/slack",
-                // The exact four tools the authenticated tools/list must show.
-                "slack_post_message",
-                "slack_upload_file",
-                "slack_read_channel",
-                "slack_list_channels",
                 // Channel rule, draft-first, two-check preflight.
                 "^[a-z0-9-]+-internal$",
                 "docs/release-notes/<date>-<topic>-slack.md",
                 "Preflight, exactly two checks",
-                "`limit` ≤ 50",
+                // `since` is not schema-required, but omitting it fails
+                // `pagination_exhausted` on any busy channel, so the skill
+                // must keep saying so.
+                "pagination_exhausted",
+                "max_messages",
                 // Ordered posting, pacing, upload rule.
-                "user_thread_ts",
-                "dev_thread_ts",
+                "user_thread_id",
+                "dev_thread_id",
+                "reply_to",
                 "one write per second",
-                "ts: null",
-                // Receipt block.
+                "content_encoding",
+                // Receipt block and the field that is actually returned.
                 "## POSTED",
+                "message_id",
                 "permalink",
-                // The three failure classes.
+                // Failure classes, keyed on the codes the hub returns.
                 "invalid_token",
-                "not_in_channel",
+                "not_member",
+                "size_cap_exceeded",
                 "Retry-After",
                 // Content contract inherited from the rubric.
                 "Was → Now",
@@ -4316,6 +4342,10 @@ This is the body content."#;
                 // All three harness registrations, by env reference only.
                 "[servers.mecha-cassy]",
                 "auth = \"env:MECHA_SLACK_TOKEN_CASSY_PROXY\"",
+                // The allowlist must name the live contract; a retired route
+                // is what produced "denied by policy" on every call.
+                "mecha-cassy.mecha_read",
+                "mecha-cassy.mecha_post",
                 "x-vercel-protection-bypass = \"env:MECHA_VERCEL_BYPASS\"",
                 "[mcp_servers.mecha-cassy]",
                 "bearer_token_env_var",

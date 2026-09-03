@@ -15,7 +15,17 @@ Endpoint `https://mecha-cassy.vercel.app/mcp/slack` exposes exactly:
 | `mecha_read` | `channel`; `since` (RFC3339), `max_messages` (≤ 500, default 200), `mentions_only`, `include_threads`, `include_files`, `max_files` (≤ 50), `max_file_bytes` (≤ 4194304), `max_bytes` (≤ 8388608) | `channel`, `messages[]`, `files[]`, `counts`, `complete` |
 | `mecha_post` | `channel`, `kind`, and the fields for that kind: `message` → `text`; `file` → `file{filename,content,content_encoding,title?}`, `initial_comment?`; `reaction` → `message_id`, `reaction`, `action`. `message` and `file` also take `reply_to`. | `kind`, `channel`, `message{message_id,thread_id,permalink}` |
 
-Every call answers `{"ok": true, "schema_version": 1, …}` or `{"ok": false, "error": {"code", "message", "retryable"}}`. `message_id` is the receipt a reply threads onto; there is no `ts` field and no separate upload tool.
+Every call answers `{"ok": true, "schema_version": 1, …}` or `{"ok": false, "error": {"code", "message", "retryable"}}`. There is no `ts` field and no separate upload tool.
+
+A `mecha_post` receipt looks like this, with a per-kind block alongside it:
+
+```json
+{"ok": true, "schema_version": 1, "kind": "message",
+ "channel": {"id": "C0…", "name": "cas-internal"},
+ "message": {"message_id": "…", "thread_id": "…", "permalink": "https://…"}}
+```
+
+`message_id` is the receipt a reply threads onto. A top-level message has `thread_id` equal to its own `message_id`; a reply carries the **parent's** `message_id` as its `thread_id`. Treat `permalink` as opaque — never assemble one by hand.
 
 ## Steps
 

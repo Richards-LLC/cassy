@@ -71,6 +71,7 @@ pub use me::{
 };
 pub use sync_queue::{
     EntityType, QueueHealth, QueuedSync, SyncOperation, SyncQueue,
+    QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QuarantinedRow,
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,
 };
 pub use syncer::{

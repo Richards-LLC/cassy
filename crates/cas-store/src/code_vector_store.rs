@@ -73,6 +73,39 @@ pub struct CodeVectorStats {
     pub failed: usize,
 }
 
+/// Coverage of the semantic code-vector corpus, measured against the symbols
+/// that are actually eligible for a vector.
+///
+/// [`CodeVectorStats`] counts queue rows and nothing else, so it cannot tell an
+/// idle corpus ("nothing left to embed") apart from a lost queue ("13k symbols
+/// with no vector and no row asking for one"). Both report zero pending. This
+/// type joins `code_vector_queue` to `code_symbols` so every eligible symbol is
+/// in exactly one bucket, and names the two inconsistencies that used to hide
+/// inside the queue-only numbers (cas-73e7 / GH #696).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodeVectorCoverage {
+    /// Symbols whose kind the drain embeds. The denominator, taken from the
+    /// symbol table rather than the queue, so it only moves when indexing does.
+    pub eligible: usize,
+    /// Eligible symbols with a `vectorized` queue row for their *current*
+    /// content hash — the drain's own completion condition.
+    pub vectorized: usize,
+    /// Eligible symbols still awaiting a vector: queued-pending, queued against
+    /// a stale hash, never queued at all, or failed-with-a-newer-hash.
+    pub pending: usize,
+    /// Eligible symbols whose current hash is recorded as `failed`. Retryable —
+    /// `list_pending` picks them up again — but reported separately because a
+    /// durable failure is not the same fact as work that has never been tried.
+    pub failed: usize,
+    /// Eligible symbols with no queue row whatsoever. Included in `pending`;
+    /// broken out because it means the *indexer* dropped them, not the drain.
+    pub unqueued: usize,
+    /// Queue rows pointing at a symbol that no longer exists (or is no longer
+    /// embeddable). The drain retires these when it reaches them; until then
+    /// they are queue rows that describe no real work.
+    pub orphaned: usize,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CodeIndexState {
     pub repository: String,
@@ -248,6 +281,96 @@ impl SqliteCodeVectorStore {
         Ok(stats)
     }
 
+    /// Coverage measured against the symbol table, not just the queue.
+    ///
+    /// Every eligible symbol lands in exactly one of `vectorized` / `failed` /
+    /// `pending`, so `pending` answers "how many symbols are still missing a
+    /// vector" instead of "how many rows happen to sit in the queue". Queue
+    /// rows with no live eligible symbol are reported as `orphaned` rather than
+    /// counted as work.
+    ///
+    /// Deliberately unscoped by repository: `code_vector_queue` has no
+    /// repository column, so scoping only the symbol side would misfile every
+    /// other repository's rows as orphaned. Both sides span the whole store.
+    pub fn coverage(&self) -> Result<CodeVectorCoverage> {
+        let conn = self.lock()?;
+        let kinds = cas_code::SymbolKind::embeddable_kind_names();
+        let queued: usize = conn
+            .query_row("SELECT COUNT(*) FROM code_vector_queue", [], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .max(0) as usize;
+
+        // The code store owns `code_symbols` and creates it on open. A store
+        // where structural indexing has never run has no symbol table at all;
+        // that is zero eligible symbols, and any queue row is then orphaned.
+        let symbols_table = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'code_symbols'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+        if symbols_table == 0 {
+            return Ok(CodeVectorCoverage {
+                orphaned: queued,
+                ..Default::default()
+            });
+        }
+
+        let placeholders = vec!["?"; kinds.len()].join(", ");
+        let (eligible, vectorized, failed, unqueued) = conn.query_row(
+            &format!(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN q.status = 'vectorized'
+                                          AND q.content_hash = s.content_hash
+                                     THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN q.status = 'failed'
+                                          AND q.content_hash = s.content_hash
+                                     THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN q.symbol_id IS NULL THEN 1 ELSE 0 END), 0)
+                 FROM code_symbols s
+                 LEFT JOIN code_vector_queue q ON q.symbol_id = s.id
+                 WHERE s.kind IN ({placeholders})"
+            ),
+            rusqlite::params_from_iter(kinds.iter()),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+
+        let orphaned: usize = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM code_vector_queue q
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM code_symbols s
+                         WHERE s.id = q.symbol_id AND s.kind IN ({placeholders})
+                     )"
+                ),
+                rusqlite::params_from_iter(kinds.iter()),
+                |row| row.get::<_, i64>(0),
+            )?
+            .max(0) as usize;
+
+        let eligible = eligible.max(0) as usize;
+        let vectorized = vectorized.max(0) as usize;
+        let failed = failed.max(0) as usize;
+        Ok(CodeVectorCoverage {
+            eligible,
+            vectorized,
+            failed,
+            pending: eligible.saturating_sub(vectorized).saturating_sub(failed),
+            unqueued: unqueued.max(0) as usize,
+            orphaned,
+        })
+    }
+
     pub fn record_scan(
         &self,
         repository: &str,
@@ -340,6 +463,132 @@ mod tests {
             content_hash: hash.into(),
             scope: "project".into(),
         }
+    }
+
+    /// Put `symbols` in the code store so `coverage()` has a denominator, the
+    /// same way the structural indexer would.
+    fn seed_symbols(root: &Path, symbols: &[CodeSymbol]) {
+        use crate::CodeStore;
+        let store = crate::sqlite_code_store::SqliteCodeStore::open(root).unwrap();
+        for symbol in symbols {
+            store.add_symbol(symbol).unwrap();
+        }
+    }
+
+    /// The GH #696 shape: the queue was emptied (daemon restart, retirement
+    /// storm) while thousands of symbols still have no vector. Queue-only stats
+    /// call that "0 pending" — a clean bill of health for a corpus with no
+    /// vectors at all.
+    #[test]
+    fn coverage_counts_symbols_with_no_queue_row_as_pending() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        let a = symbol("sym-1", "a", SymbolKind::Function);
+        let b = symbol("sym-2", "b", SymbolKind::Struct);
+        let ignored = symbol("sym-3", "c", SymbolKind::Import);
+        seed_symbols(root.path(), &[a, b, ignored]);
+
+        assert_eq!(store.stats().unwrap(), CodeVectorStats::default());
+        let coverage = store.coverage().unwrap();
+        assert_eq!(coverage.eligible, 2, "low-value kinds are not eligible");
+        assert_eq!(coverage.pending, 2);
+        assert_eq!(coverage.unqueued, 2);
+        assert_eq!(coverage.vectorized, 0);
+        assert_eq!(coverage.orphaned, 0);
+    }
+
+    #[test]
+    fn coverage_splits_vectorized_pending_and_failed_against_current_hashes() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        let done = symbol("sym-1", "a", SymbolKind::Function);
+        let waiting = symbol("sym-2", "b", SymbolKind::Struct);
+        let broken = symbol("sym-3", "c", SymbolKind::Trait);
+        seed_symbols(root.path(), &[done.clone(), waiting.clone(), broken.clone()]);
+        store
+            .sync_file_symbols(&[done, waiting, broken], &[])
+            .unwrap();
+        assert!(store.mark_vectorized("sym-1", "a").unwrap());
+        assert!(store.mark_failed("sym-3", "c", "provider refused").unwrap());
+
+        let coverage = store.coverage().unwrap();
+        assert_eq!(coverage.eligible, 3);
+        assert_eq!(coverage.vectorized, 1);
+        assert_eq!(coverage.pending, 1);
+        assert_eq!(coverage.failed, 1);
+        assert_eq!(coverage.unqueued, 0);
+        assert_eq!(coverage.orphaned, 0);
+    }
+
+    /// A `vectorized` row for a hash the symbol no longer has is not coverage:
+    /// the drain will re-embed it, so it belongs in `pending`.
+    #[test]
+    fn coverage_treats_a_stale_vectorized_row_as_pending() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        let first = symbol("sym-1", "a", SymbolKind::Function);
+        seed_symbols(root.path(), std::slice::from_ref(&first));
+        store
+            .sync_file_symbols(std::slice::from_ref(&first), &[])
+            .unwrap();
+        assert!(store.mark_vectorized("sym-1", "a").unwrap());
+
+        // The symbol was edited; the code store carries the new hash while the
+        // queue row still records the old one.
+        seed_symbols(root.path(), &[symbol("sym-1", "a2", SymbolKind::Function)]);
+
+        assert_eq!(store.stats().unwrap().vectorized, 1, "queue-only view");
+        let coverage = store.coverage().unwrap();
+        assert_eq!(coverage.vectorized, 0);
+        assert_eq!(coverage.pending, 1);
+        assert_eq!(coverage.unqueued, 0);
+    }
+
+    /// The inverse lie: queue rows outliving their symbols would report pending
+    /// work that no drain tick can ever complete.
+    #[test]
+    fn coverage_reports_queue_rows_without_a_symbol_as_orphaned() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        let ghost = symbol("sym-gone", "a", SymbolKind::Function);
+        store.sync_file_symbols(&[ghost], &[]).unwrap();
+        seed_symbols(root.path(), &[symbol("sym-1", "b", SymbolKind::Function)]);
+
+        assert_eq!(store.stats().unwrap().pending, 1, "queue-only view");
+        let coverage = store.coverage().unwrap();
+        assert_eq!(coverage.eligible, 1);
+        assert_eq!(coverage.pending, 1);
+        assert_eq!(coverage.unqueued, 1);
+        assert_eq!(coverage.orphaned, 1);
+    }
+
+    /// Two reads with no indexing and no drain in between must agree — the
+    /// stability GH #696 asks for.
+    #[test]
+    fn coverage_is_stable_across_repeated_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        let one = symbol("sym-1", "a", SymbolKind::Function);
+        let two = symbol("sym-2", "b", SymbolKind::Struct);
+        seed_symbols(root.path(), &[one.clone(), two.clone()]);
+        store.sync_file_symbols(&[one, two], &[]).unwrap();
+        assert!(store.mark_vectorized("sym-1", "a").unwrap());
+
+        let first = store.coverage().unwrap();
+        let second = store.coverage().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.eligible, 2);
+        assert_eq!(first.vectorized, 1);
+        assert_eq!(first.pending, 1);
+    }
+
+    /// A store where code indexing never ran has no `code_symbols` table. That
+    /// must read as "nothing eligible", not as an error or a panic.
+    #[test]
+    fn coverage_without_a_symbol_table_reports_no_eligible_work() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        assert_eq!(store.coverage().unwrap(), CodeVectorCoverage::default());
     }
 
     #[test]

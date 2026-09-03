@@ -123,6 +123,44 @@ impl fmt::Display for SymbolKind {
 }
 
 impl SymbolKind {
+    /// Every variant, in declaration order.
+    ///
+    /// Load-bearing for callers that must enumerate kinds *outside* Rust — the
+    /// vector-coverage join builds its SQL `IN (...)` list from
+    /// [`Self::embeddable_kind_names`], and a kind missing from this array
+    /// would silently drop real symbols out of the denominator. The
+    /// exhaustiveness test below fails to compile when a variant is added
+    /// without being listed here.
+    pub const ALL: &'static [SymbolKind] = &[
+        SymbolKind::Function,
+        SymbolKind::Method,
+        SymbolKind::Class,
+        SymbolKind::Struct,
+        SymbolKind::Enum,
+        SymbolKind::Trait,
+        SymbolKind::Interface,
+        SymbolKind::Module,
+        SymbolKind::Constant,
+        SymbolKind::Variable,
+        SymbolKind::Type,
+        SymbolKind::Import,
+        SymbolKind::Impl,
+        SymbolKind::Macro,
+    ];
+
+    /// Stored `code_symbols.kind` text for every kind the semantic drain embeds.
+    ///
+    /// The strings are the [`Display`](fmt::Display) form, which is exactly what
+    /// the code store writes, so a SQL comparison against this list matches the
+    /// same rows the drain would queue.
+    pub fn embeddable_kind_names() -> Vec<String> {
+        Self::ALL
+            .iter()
+            .filter(|kind| kind.should_embed())
+            .map(|kind| kind.to_string())
+            .collect()
+    }
+
     /// Returns true if this symbol kind is valuable enough to generate embeddings for.
     /// Low-value symbols (imports, variables, constants) are still indexed in BM25
     /// for keyword search, but skip the expensive embedding step.
@@ -541,6 +579,52 @@ mod tests {
             let parsed: Language = s.parse().unwrap();
             assert_eq!(lang, parsed);
         }
+    }
+
+    /// `SymbolKind::ALL` is what turns Rust's `should_embed` into a SQL kind
+    /// list. A variant missing from it would quietly shrink the vector-coverage
+    /// denominator, so assert it holds every kind exactly once. The match makes
+    /// the omission a compile error rather than a silent undercount.
+    #[test]
+    fn all_symbol_kinds_are_listed_once_and_round_trip() {
+        for kind in SymbolKind::ALL {
+            match kind {
+                SymbolKind::Function
+                | SymbolKind::Method
+                | SymbolKind::Class
+                | SymbolKind::Struct
+                | SymbolKind::Enum
+                | SymbolKind::Trait
+                | SymbolKind::Interface
+                | SymbolKind::Module
+                | SymbolKind::Constant
+                | SymbolKind::Variable
+                | SymbolKind::Type
+                | SymbolKind::Import
+                | SymbolKind::Impl
+                | SymbolKind::Macro => {}
+            }
+            let parsed: SymbolKind = kind.to_string().parse().unwrap();
+            assert_eq!(*kind, parsed);
+        }
+        let unique: std::collections::HashSet<_> = SymbolKind::ALL.iter().collect();
+        assert_eq!(unique.len(), SymbolKind::ALL.len());
+        assert_eq!(SymbolKind::ALL.len(), 14);
+    }
+
+    #[test]
+    fn embeddable_kind_names_are_the_stored_kind_text() {
+        let names = SymbolKind::embeddable_kind_names();
+        assert!(names.contains(&"function".to_string()));
+        assert!(names.contains(&"macro".to_string()));
+        assert!(!names.contains(&"import".to_string()));
+        assert_eq!(
+            names.len(),
+            SymbolKind::ALL
+                .iter()
+                .filter(|kind| kind.should_embed())
+                .count()
+        );
     }
 
     #[test]

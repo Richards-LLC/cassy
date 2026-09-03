@@ -1224,9 +1224,17 @@ fn foreign_rows_check_with_classifier_error(
         if evidence_count == purge_count {
             message.push_str(" — counts agree");
         } else if evidence_count > purge_count {
+            // GH #697 (cas-a869): the printed number must describe the list
+            // that follows it. This used to print `evidence_count -
+            // purge_count` and then list `retained_foreign_tasks`, a different
+            // set, so an operator read "cannot reach 4" above six ids and had
+            // no way to tell which number was wrong. When the two genuinely
+            // disagree, both are real and both are stated — neither stands in
+            // for the other.
             let gap = evidence_count - purge_count;
-            message.push_str(&format!(" — purge cannot reach {gap} evidence row(s)"));
-            if !analysis.retained_foreign_tasks.is_empty() {
+            let named = analysis.retained_foreign_tasks.len();
+            if named > 0 {
+                message.push_str(&format!(" — purge cannot reach {named} evidence row(s)"));
                 let retained = analysis
                     .retained_foreign_tasks
                     .iter()
@@ -1234,6 +1242,15 @@ fn foreign_rows_check_with_classifier_error(
                     .collect::<Vec<_>>()
                     .join(", ");
                 message.push_str(&format!(": {retained}"));
+                if named != gap {
+                    message.push_str(&format!(
+                        " (delete-set shortfall is {gap} row(s); the {named} named above are the rows purge identified and retained)"
+                    ));
+                }
+            } else {
+                message.push_str(&format!(
+                    " — purge cannot reach {gap} evidence row(s); none were individually identified"
+                ));
             }
         } else {
             message.push_str(&format!(
@@ -1933,10 +1950,29 @@ struct SymbolIndexState {
     eligible_files: usize,
     indexed_files: usize,
     failed_files: usize,
+    /// Symbols eligible for a vector, counted in `code_symbols` — the table the
+    /// indexer writes — not in the queue. A queue-derived denominator moves
+    /// whenever the queue is re-armed or lost, which is how two runs 80s apart
+    /// reported 13,545 and then 11,535 eligible (GH #696).
     vector_eligible: usize,
+    /// Eligible symbols whose *current* content hash is recorded vectorized:
+    /// the drain's own completion condition, so doctor and the drain cannot
+    /// disagree about what is done.
     vectorized: usize,
+    /// Eligible symbols still awaiting a vector, including those with no queue
+    /// row at all. Never a count of queue rows: an empty queue with unvectorized
+    /// symbols is 0 rows and N pending, and doctor must say N.
     vector_pending: usize,
     vector_failed: usize,
+    /// Eligible symbols the indexer never queued. Part of `vector_pending`,
+    /// surfaced separately because it indicts the indexer, not the drain.
+    vector_unqueued: usize,
+    /// Queue rows describing symbols that no longer exist — pending work that
+    /// no drain tick can complete.
+    vector_orphaned: usize,
+    /// Set when the current generation of the code-vector cache replaced an
+    /// older one. A reset that is named is not a reset that lies.
+    vector_rebuild: Option<crate::cloud::embeddings::CacheRebuild>,
     head_lag: Option<bool>,
     scan_error: Option<String>,
     /// Set when the state could not be read; reported instead of silently skipped.
@@ -1994,7 +2030,10 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
             };
         }
     };
-    let vectors = vector_store.stats().unwrap_or_default();
+    // Coverage, not queue rows: `stats()` reports what the queue happens to
+    // contain, which reads as "0 pending" for a store whose queue was emptied
+    // while thousands of symbols still have no vector (GH #696).
+    let vectors = vector_store.coverage().unwrap_or_default();
     let scan = vector_store.index_state(&repository).ok().flatten();
     let current_head = crate::daemon::indexing::resolve_repository(project_root)
         .0
@@ -2020,10 +2059,51 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         vectorized: vectors.vectorized,
         vector_pending: vectors.pending,
         vector_failed: vectors.failed,
+        vector_unqueued: vectors.unqueued,
+        vector_orphaned: vectors.orphaned,
+        vector_rebuild: crate::cloud::embeddings::KnowledgeVectorCache::code_cache_rebuild(
+            cas_root,
+        ),
         head_lag,
         scan_error: scan.and_then(|scan| scan.last_error),
         error: None,
     }
+}
+
+/// One rendering of the code-vector counters, shared by every branch of the
+/// symbol-index check.
+///
+/// All four figures come from [`cas_store::CodeVectorCoverage`], so the line is
+/// internally consistent by construction: `vectorized + pending + failed`
+/// always equals `eligible`. The trailing clauses exist because a bare set of
+/// counters cannot distinguish "the drain is behind" from "the queue lost its
+/// rows" from "the cache was rebuilt and everything is legitimately starting
+/// over" — and an operator reading a reset needs to be told which one it is.
+fn code_vector_summary(state: &SymbolIndexState) -> String {
+    let mut summary = format!(
+        "code vectors {}/{} vectorized, {} pending, {} failed",
+        state.vectorized, state.vector_eligible, state.vector_pending, state.vector_failed,
+    );
+    if state.vector_unqueued > 0 {
+        summary.push_str(&format!(
+            " ({} never queued — run `cas index code` to re-arm them)",
+            state.vector_unqueued
+        ));
+    }
+    if state.vector_orphaned > 0 {
+        summary.push_str(&format!(
+            "; {} queue row(s) name symbols that no longer exist",
+            state.vector_orphaned
+        ));
+    }
+    if let Some(rebuild) = &state.vector_rebuild {
+        summary.push_str(&format!(
+            "; vector index rebuilt at {} ({}), vectors regenerating",
+            rebuild.rebuilt_at.format("%Y-%m-%d %H:%M UTC"),
+            rebuild.reason,
+        ));
+    }
+    summary
 }
 
 fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc>) -> Check {
@@ -2053,12 +2133,19 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
         || file_lag > 0
         || state.head_lag == Some(true)
         || state.vector_failed > 0
+        // Symbols with no queue row, and queue rows with no symbol, are the two
+        // ways the semantic corpus goes quietly wrong. Both are reconciled by
+        // `cas index code`, which is what this branch already tells the
+        // operator to run.
+        || state.vector_unqueued > 0
+        || state.vector_orphaned > 0
     {
+        let vectors = code_vector_summary(&state);
         return Check {
             name,
             status: CheckStatus::Warning,
             message: format!(
-                "symbol index coverage is incomplete: {}/{} eligible file(s), {} file(s) lagging, {} file failure(s), HEAD {}; code vectors {}/{} vectorized, {} pending, {} failed{}. Run `cas index code` to reconcile now.",
+                "symbol index coverage is incomplete: {}/{} eligible file(s), {} file(s) lagging, {} file failure(s), HEAD {}; {vectors}{}. Run `cas index code` to reconcile now.",
                 state.indexed_files,
                 state.eligible_files,
                 file_lag,
@@ -2068,10 +2155,6 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
                     Some(false) => "current",
                     None => "unknown",
                 },
-                state.vectorized,
-                state.vector_eligible,
-                state.vector_pending,
-                state.vector_failed,
                 state
                     .scan_error
                     .as_deref()
@@ -2123,14 +2206,11 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
             status: CheckStatus::Ok,
             message: format!(
                 "{} file(s) from this project indexed ({} symbol(s) stored in total), newest \
-                 entry {}; code vectors {}/{} vectorized, {} pending, {} failed; HEAD {}",
+                 entry {}; {}; HEAD {}",
                 state.files,
                 state.symbols,
                 format_lag(lag_secs),
-                state.vectorized,
-                state.vector_eligible,
-                state.vector_pending,
-                state.vector_failed,
+                code_vector_summary(&state),
                 match state.head_lag {
                     Some(true) => "behind",
                     Some(false) => "current",
@@ -2159,6 +2239,13 @@ struct EmbeddingDrainState {
     /// is running at all. `None` means it has never completed a pass, which is
     /// a different fact from "there was nothing to do".
     last_attempt: Option<String>,
+    /// Units the provider refused, retired from the queue with the refusal
+    /// stored on the row. These are NOT pending: they are waiting on a
+    /// decision, not on a tick, and reporting them inside the backlog is how
+    /// a permanent refusal hides as an ordinary queue (GH #695).
+    quarantined: i64,
+    /// The provider's own words for the most recent refusal.
+    quarantine_error: Option<String>,
 }
 
 impl EmbeddingDrainState {
@@ -2190,6 +2277,12 @@ fn gather_embedding_drain_state(cas_root: &Path) -> EmbeddingDrainState {
             state.commits_pending = commits;
             state.docs_pending = docs;
         }
+        if let Ok((commits, docs)) = store.count_quarantined_embedding() {
+            state.quarantined = commits + docs;
+        }
+        if let Ok(error) = store.last_quarantined_embedding_error() {
+            state.quarantine_error = error;
+        }
         if let Ok(repo_root) = crate::history::repo_root_for(cas_root) {
             let repository = crate::history::repository_id(&repo_root);
             if let Ok(Some(ledger)) = store.index_state(&repository, SOURCE_EMBEDDINGS) {
@@ -2202,9 +2295,30 @@ fn gather_embedding_drain_state(cas_root: &Path) -> EmbeddingDrainState {
     state
 }
 
+/// One clause naming the refused units and how to re-arm them, or nothing.
+///
+/// Kept separate from the pending backlog in every branch: a quarantined unit
+/// is not draining on the next tick, and folding the two counts together is
+/// what let a permanent provider refusal read as an ordinary queue for three
+/// days (GH #695).
+fn quarantine_clause(state: &EmbeddingDrainState) -> String {
+    if state.quarantined == 0 {
+        return String::new();
+    }
+    let reason = match &state.quarantine_error {
+        Some(error) => format!(" — the provider said: {error}"),
+        None => String::new(),
+    };
+    format!(
+        "; {} unit(s) quarantined after the provider refused them{reason};          Run `cas history embed --retry-quarantined` once the cause is fixed",
+        state.quarantined
+    )
+}
+
 fn embedding_drain_check(state: EmbeddingDrainState) -> Check {
     let name = "embedding drain".to_string();
     let pending = state.total_pending();
+    let quarantined = quarantine_clause(&state);
 
     // A real failure outranks everything else: it is the reason the queue is
     // not moving, and it must never be summarised away as a backlog.
@@ -2213,7 +2327,7 @@ fn embedding_drain_check(state: EmbeddingDrainState) -> Check {
             name,
             status: CheckStatus::Warning,
             message: format!(
-                "last drain reported: {error} ({pending} unit(s) still awaiting a vector)"
+                "last drain reported: {error} ({pending} unit(s) still awaiting a vector){quarantined}"
             ),
         };
     }
@@ -2240,13 +2354,21 @@ fn embedding_drain_check(state: EmbeddingDrainState) -> Check {
     }
 
     if pending == 0 {
+        let drained = match &state.last_attempt {
+            Some(at) => format!("nothing pending (last drain {at})"),
+            None => "nothing pending".to_string(),
+        };
         return Check {
             name,
-            status: CheckStatus::Ok,
-            message: match &state.last_attempt {
-                Some(at) => format!("nothing pending (last drain {at})"),
-                None => "nothing pending".to_string(),
+            // An empty queue with refused units is not a clean bill of health:
+            // part of the corpus has no vector and never will until someone
+            // acts. Saying "nothing pending" alone would be true and useless.
+            status: if state.quarantined > 0 {
+                CheckStatus::Warning
+            } else {
+                CheckStatus::Ok
             },
+            message: format!("{drained}{quarantined}"),
         };
     }
 
@@ -2254,10 +2376,14 @@ fn embedding_drain_check(state: EmbeddingDrainState) -> Check {
     // job across ticks — say so, and say how deep it is.
     Check {
         name,
-        status: CheckStatus::Ok,
+        status: if state.quarantined > 0 {
+            CheckStatus::Warning
+        } else {
+            CheckStatus::Ok
+        },
         message: format!(
             "{pending} unit(s) queued ({} page(s), {} commit(s), {} doc(s)); the daemon drains \
-             them on its tick{}",
+             them on its tick{}{quarantined}",
             state.pages_pending,
             state.commits_pending,
             state.docs_pending,
@@ -2814,7 +2940,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn grouped_report_uses_sections_remediation_and_counted_summary() {
+    fn grouped_report_uses_sections_remediation_and_a_verbatim_summary() {
         let checks = vec![
             Check::new("database", CheckStatus::Ok, "SQLite database found"),
             Check::new("entries", CheckStatus::Ok, "1234567 entries accessible"),
@@ -2840,7 +2966,12 @@ mod tests {
         assert!(report.contains("[OK] entries"));
         assert!(report.contains("[WARN] search index"));
         assert!(report.contains("  → Run `cas index`"));
-        assert!(report.contains("1,234,567 entries accessible"));
+        // GH #697 (cas-a869): counts render verbatim. The digit-grouping
+        // pass that produced `1,234,567` here also produced `cas-7,791` and
+        // comma-riddled UUIDs on real reports, so it is gone rather than
+        // narrowed.
+        assert!(report.contains("1234567 entries accessible"));
+        assert!(!report.contains("1,234,567"));
         assert!(report.contains("2 ok · 1 warnings · 0 errors · 123ms"));
     }
 
@@ -3165,6 +3296,132 @@ mod tests {
     /// while two supervisors share one clone and either can reap the other's
     /// workers. The per-session verdicts must stay green (they are correct in
     /// isolation) and the cross-session pass must add the warning.
+    /// GH #697 (cas-a869): identifiers and timestamps must survive rendering
+    /// byte-for-byte. The report used to run a digit-grouping pass over the
+    /// whole rendered line, so `cas-7791` printed as `cas-7,791`, a UUID
+    /// became unpasteable, and an RFC3339 timestamp grew three commas — it
+    /// corrupted exactly the tokens an operator copies into the next command.
+    #[test]
+    fn rendered_messages_never_group_digits_inside_ids_uuids_or_timestamps() {
+        let check = Check {
+            name: "cross-project rows".to_string(),
+            status: CheckStatus::Warning,
+            message: "cas-7791 held by befc4155-89ca-4fb3-9b05-65323a4bf357 \
+                      recorded_at=2026-09-03T18:59:18.226617643+00:00 across 3240 rows"
+                .to_string(),
+        };
+
+        let rendered = full_message(&check);
+
+        assert!(
+            !rendered.contains(','),
+            "no separator may be injected anywhere in a rendered line: {rendered}"
+        );
+        assert!(rendered.contains("cas-7791"), "{rendered}");
+        assert!(
+            rendered.contains("befc4155-89ca-4fb3-9b05-65323a4bf357"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("2026-09-03T18:59:18.226617643+00:00"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("3240 rows"), "{rendered}");
+    }
+
+    /// The JSON surface renders through its own path, so pin it separately —
+    /// a machine reader is exactly who cannot tolerate `cas-7,791`.
+    #[test]
+    fn serialized_checks_keep_identifiers_verbatim() {
+        let checks = vec![Check {
+            name: "factory session".to_string(),
+            status: CheckStatus::Ok,
+            message: "supervisors: 1; noble-koala-5 (befc4155-89ca-4fb3-9b05-65323a4bf357)"
+                .to_string(),
+        }];
+
+        let serialized = serialize_checks(&checks);
+        let message = serialized[0]["message"].as_str().expect("message string");
+        assert_eq!(
+            message,
+            "supervisors: 1; noble-koala-5 (befc4155-89ca-4fb3-9b05-65323a4bf357)"
+        );
+    }
+
+    /// GH #697 defect (b): the line said "cannot reach 4 evidence row(s)" and
+    /// then listed six ids, because the number was an arithmetic gap over one
+    /// set while the ids came from another. The printed count must describe
+    /// the list actually printed.
+    #[test]
+    fn unreachable_row_count_matches_the_rows_it_lists() {
+        use crate::cli::cloud::{
+            PurgeDeleteSet, PurgeEntity, PurgeForeignAnalysis, PurgeRetainedTask,
+        };
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
+
+        let report = ForeignRowReport {
+            local_project: "gabber-studio".to_string(),
+            local_task_count: 900,
+            peers_compared: vec!["cas-src".to_string()],
+            foreign: (0..10)
+                .map(|index| ForeignRow {
+                    id: format!("cas-f{index:03}"),
+                    title: format!("Foreign row {index}"),
+                    closed: false,
+                    origin_project: None,
+                    home_project: "cas-src".to_string(),
+                    also_present_in: Vec::new(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        // Ten rows of evidence, six of which purge cannot reach, but a delete
+        // set of six — so the arithmetic gap (4) and the retained list (6)
+        // disagree. Both numbers are real; neither may stand in for the other.
+        let analysis = PurgeForeignAnalysis {
+            foreign_task_count: 10,
+            delete_set: PurgeDeleteSet {
+                tasks: (0..6)
+                    .map(|index| {
+                        PurgeEntity::with_evidence(
+                            "task",
+                            &format!("cas-d{index:03}"),
+                            "Deletable foreign row",
+                            "peer-evidence",
+                            "cas-src",
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            retained_foreign_tasks: (0..6)
+                .map(|index| PurgeRetainedTask {
+                    id: format!("cas-r{index:03}"),
+                    title: format!("Retained row {index}"),
+                    reason: "id collision".to_string(),
+                })
+                .collect(),
+            unattributed_task_count: 0,
+            collision_count: 0,
+        };
+
+        let check = foreign_rows_check(Ok(&report), Some(&analysis), 0);
+
+        let listed = check.message.matches("cas-r").count();
+        assert_eq!(listed, 6, "fixture must list six ids: {}", check.message);
+        assert!(
+            check.message.contains("purge cannot reach 6 evidence row(s)"),
+            "the printed count must describe the list it prints: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("cannot reach 4"),
+            "the arithmetic gap must not masquerade as the listed count: {}",
+            check.message
+        );
+    }
+
     /// GH #701 (cas-4342): the check has to say how many rows are
     /// unattributed, how many are already quarantined, and why collisions are
     /// excluded — the old wording stopped at "neither category is deletable",
@@ -4274,6 +4531,123 @@ mod tests {
         }
     }
 
+    /// GH #696: an empty queue with unvectorized symbols used to read as
+    /// "0/0 vectorized, 0 pending" and pass. Coverage puts those symbols in the
+    /// denominator, so doctor now names the hole and points at the fix.
+    #[test]
+    fn symbol_index_check_reports_symbols_that_were_never_queued() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            vector_eligible: 11_535,
+            vectorized: 0,
+            vector_pending: 11_535,
+            vector_unqueued: 11_535,
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "a corpus with no vectors and no queued work must not pass: {}",
+            check.message
+        );
+        for expected in [
+            "0/11535 vectorized",
+            "11535 pending",
+            "11535 never queued",
+            "cas index code",
+        ] {
+            assert!(
+                check.message.contains(expected),
+                "missing {expected}: {}",
+                check.message
+            );
+        }
+    }
+
+    /// The inverse lie: queue rows outliving their symbols are reported as
+    /// ghosts rather than folded into pending work.
+    #[test]
+    fn symbol_index_check_names_orphaned_queue_rows() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            vector_eligible: 900,
+            vectorized: 900,
+            vector_orphaned: 2_010,
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check
+                .message
+                .contains("2010 queue row(s) name symbols that no longer exist"),
+            "message: {}",
+            check.message
+        );
+    }
+
+    /// A reset that is named is not a reset that lies: after the vector cache
+    /// is rebuilt, the check says so instead of silently reporting that every
+    /// vector disappeared.
+    #[test]
+    fn symbol_index_check_labels_a_vector_cache_rebuild() {
+        let now = chrono::Utc::now();
+        let rebuilt_at = chrono::DateTime::parse_from_rfc3339("2026-09-03T19:18:50Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let state = SymbolIndexState {
+            vector_eligible: 11_535,
+            vectorized: 0,
+            vector_pending: 11_535,
+            vector_rebuild: Some(crate::cloud::embeddings::CacheRebuild {
+                rebuilt_at,
+                reason: "embedding model changed from p/m1 (3d) to p/m2 (4d)".into(),
+            }),
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        for expected in [
+            "vector index rebuilt at 2026-09-03 19:18 UTC",
+            "embedding model changed",
+            "vectors regenerating",
+        ] {
+            assert!(
+                check.message.contains(expected),
+                "missing {expected}: {}",
+                check.message
+            );
+        }
+    }
+
+    /// The acceptance shape from GH #696: nothing happened between two reads,
+    /// so the two messages must be identical — including the vector line.
+    #[test]
+    fn symbol_index_check_is_identical_across_two_reads_of_one_state() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            vector_eligible: 13_545,
+            vectorized: 603,
+            vector_pending: 12_942,
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let first = symbol_index_check(state.clone(), now);
+        let second = symbol_index_check(state, now);
+        assert_eq!(first.message, second.message);
+        assert!(
+            first.message.contains("603/13545 vectorized, 12942 pending"),
+            "message: {}",
+            first.message
+        );
+    }
+
     /// A freshly-indexed tree reports Ok with the counts, not a warning.
     #[test]
     fn symbol_index_check_ok_when_fresh() {
@@ -4398,6 +4772,66 @@ mod tests {
         // A backlog with a working drain is progress, not a fault.
         assert!(matches!(check.status, CheckStatus::Ok));
         assert!(check.message.contains("110"), "message: {}", check.message);
+    }
+
+    /// GH #695: refused units are reported apart from the backlog, name the
+    /// provider's reason, and carry the command that re-arms them. An empty
+    /// queue with refusals in it is not a clean bill of health.
+    #[test]
+    fn embedding_drain_check_separates_quarantined_units_from_the_backlog() {
+        let check = embedding_drain_check(EmbeddingDrainState {
+            capability: true,
+            commits_pending: 12,
+            quarantined: 5,
+            quarantine_error: Some(
+                "Embedding request rejected with status 502: {\"error\":\"Embedding provider returned 400\"}"
+                    .to_string(),
+            ),
+            last_attempt: Some("2026-09-03T21:00:00Z".to_string()),
+            ..Default::default()
+        });
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("12 unit(s) queued"), "{}", check.message);
+        assert!(
+            check.message.contains("5 unit(s) quarantined"),
+            "the refused units must not be folded into the backlog: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("provider returned 400"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cas history embed --retry-quarantined"),
+            "a count without a move is not actionable: {}",
+            check.message
+        );
+
+        // Drained to zero, but part of the corpus has no vector and never will
+        // until someone acts: that is a warning, not "nothing pending".
+        let drained = embedding_drain_check(EmbeddingDrainState {
+            capability: true,
+            quarantined: 2,
+            last_attempt: Some("2026-09-03T21:00:00Z".to_string()),
+            ..Default::default()
+        });
+        assert!(matches!(drained.status, CheckStatus::Warning));
+        assert!(drained.message.contains("nothing pending"), "{}", drained.message);
+        assert!(
+            drained.message.contains("2 unit(s) quarantined"),
+            "{}",
+            drained.message
+        );
+
+        // No refusals: the line stays exactly as it was.
+        let clean = embedding_drain_check(EmbeddingDrainState {
+            capability: true,
+            last_attempt: Some("2026-09-03T21:00:00Z".to_string()),
+            ..Default::default()
+        });
+        assert!(matches!(clean.status, CheckStatus::Ok));
+        assert!(!clean.message.contains("quarantined"), "{}", clean.message);
     }
 
     #[test]
@@ -4911,35 +5345,16 @@ fn check_claude_code_mcp(project_root: &Path) -> Check {
     }
 }
 
-fn format_counted_text(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut digits = String::new();
-    let flush = |result: &mut String, digits: &mut String| {
-        if digits.len() > 3 {
-            for (index, digit) in digits.chars().enumerate() {
-                if index > 0 && (digits.len() - index) % 3 == 0 {
-                    result.push(',');
-                }
-                result.push(digit);
-            }
-        } else {
-            result.push_str(digits);
-        }
-        digits.clear();
-    };
-
-    for ch in text.chars() {
-        if ch.is_ascii_digit() {
-            digits.push(ch);
-        } else {
-            flush(&mut result, &mut digits);
-            result.push(ch);
-        }
-    }
-    flush(&mut result, &mut digits);
-    result
-}
-
+/// Rendered report text is emitted verbatim (GH #697 / cas-a869).
+///
+/// A digit-grouping pass used to run over each finished line, with no way to
+/// know whether a digit run was a count or part of an identifier. It turned
+/// `cas-7791` into `cas-7,791`, made UUIDs and RFC3339 timestamps unpasteable,
+/// and so corrupted precisely the tokens an operator copies into the next
+/// command. Grouping was cosmetic; the corruption was not, so the pass is
+/// gone and counts render as plain integers. Do not reintroduce a
+/// post-processing pass over rendered lines — any future grouping must happen
+/// where the number is still a number, before it becomes prose.
 fn status_label(status: &CheckStatus, styled: bool) -> &'static str {
     if styled {
         match status {
@@ -4965,7 +5380,7 @@ fn status_name(status: &CheckStatus) -> &'static str {
 }
 
 fn full_message(check: &Check) -> String {
-    format_counted_text(&check.message)
+    check.message.clone()
 }
 
 fn serialize_checks(checks: &[Check]) -> Vec<serde_json::Value> {
@@ -4976,9 +5391,9 @@ fn serialize_checks(checks: &[Check]) -> Vec<serde_json::Value> {
             serde_json::json!({
                 "name": check.name,
                 "status": status_name(&check.status),
-                "message": format_counted_text(&message),
+                "message": message,
                 "group": check.group().json_name(),
-                "remediation": remediation.map(|text| format_counted_text(&text)),
+                "remediation": remediation,
             })
         })
         .collect()
@@ -5144,7 +5559,7 @@ fn render_report(
             );
             let available = width.saturating_sub(prefix.chars().count()).max(1);
             let (message, remediation) = check.parts();
-            let message_lines = wrap_report_text(&format_counted_text(&message), available);
+            let message_lines = wrap_report_text(&message, available);
             let hanging_indent = " ".repeat(prefix.chars().count());
             for (line_index, message_line) in message_lines.iter().enumerate() {
                 let line = if line_index == 0 {
@@ -5155,11 +5570,7 @@ fn render_report(
                 write_report_line(fmt, Some(&check.status), &line)?;
             }
             if let Some(remediation) = remediation {
-                fmt.write_muted(&format!(
-                    "  {} {}",
-                    Icons::ARROW_RIGHT,
-                    format_counted_text(&remediation)
-                ))?;
+                fmt.write_muted(&format!("  {} {}", Icons::ARROW_RIGHT, remediation))?;
                 fmt.newline()?;
             }
         }

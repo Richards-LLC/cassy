@@ -22,6 +22,7 @@ runner_unit_2="$repo_root/ops/systemd/cassy-actions-runner-2.service"
 runner_wrapper_2="$repo_root/ops/systemd/run-cassy-actions-runner-2.sh"
 runner_installer="$repo_root/scripts/install-cassy-actions-runner.sh"
 runner_isolation="$repo_root/scripts/check-cassy-actions-runner-isolation.sh"
+rust_setup="$repo_root/scripts/setup-cassy-actions-rust.sh"
 release_runner_trust="$repo_root/scripts/check-release-runner-trust.sh"
 stale_queue_watchdog="$repo_root/.github/workflows/stale-queued-run-watchdog.yml"
 stale_queue_script="$repo_root/scripts/cancel-stale-non-merge-group-queued-runs.sh"
@@ -155,7 +156,29 @@ require_text "$self_hosted_text" 'cargo nextest archive --workspace --archive-fi
 require_text "$self_hosted_text" 'TMPDIR: ${{ runner.temp }}' 'self-hosted pilot keeps large temporary files off tmpfs'
 require_absent "$self_hosted_text" 'cargo nextest run' 'self-hosted pilot leaves suite execution on hosted runners'
 require_absent "$self_hosted_text" '--partition' 'self-hosted pilot does not duplicate hosted shard execution'
+require_text "$self_hosted_text" './scripts/setup-cassy-actions-rust.sh' 'self-hosted pilot uses shared-home-safe Rust setup'
+require_absent "$self_hosted_text" 'dtolnay/rust-toolchain@stable' 'self-hosted pilot does not mutate shared rustup through an action'
 require_absent "$(<"$ruleset")" 'Self-hosted pilot' 'self-hosted pilot is not a required status check'
+
+if [[ -x "$rust_setup" ]]; then
+    printf 'ok   shared self-hosted Rust setup script is executable\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL shared self-hosted Rust setup script is executable\n'
+    fail=$((fail + 1))
+fi
+rust_setup_text="$(<"$rust_setup")"
+require_text "$rust_setup_text" 'flock -x 9' 'shared Rust setup serializes rustup mutation'
+require_text "$rust_setup_text" 'toolchain list' 'shared Rust setup checks the pre-provisioned toolchain first'
+require_text "$rust_setup_text" 'toolchain install stable --profile minimal' 'shared Rust setup repairs a missing toolchain under the lock'
+require_text "$rust_setup_text" 'RUSTUP_TOOLCHAIN=stable' 'shared Rust setup avoids changing the shared rustup default'
+
+for job in fast-validation-preflight fast-validation-suite-build fast-validation-docs; do
+    block="$(job_block "$job")"
+    require_text "$block" 'name: Set up shared self-hosted Rust toolchain' "$job uses the shared-home-safe Rust setup"
+    require_text "$block" 'run: ./scripts/setup-cassy-actions-rust.sh' "$job invokes the shared Rust setup helper"
+    require_absent "$block" 'dtolnay/rust-toolchain@stable' "$job does not mutate shared rustup through an action"
+done
 
 pilot_doc="$(<"$repo_root/docs/ci/self-hosted-runner-pilot.md")"
 require_text "$pilot_doc" 'restricted_to_workflows=false' 'runner-group policy permits synthetic merge-queue refs'

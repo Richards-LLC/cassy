@@ -22,12 +22,14 @@
     ],
     "skills/cas-cut-release/references/failure-log.md": [
       "24b4bb3f72ba8ee18adea937f848c5758add23fac2eae1f34b11f56f3e00f938",
+      "2fe090013d384fca34d5b0559319306f865ef2eb130c31e46217eb78e7b5650c",
       "4dec681b66cb8dddbbc0dfbab25eb80a90f38f40417c5eb41776792923e55f12",
       "763995dd3412a207d54938d9b29ab7d790d350ab660b7f2d0bd96a076f87879d",
       "a9b691135f21d9fafd027ba50acfe7dcb2fecbef3451100859e5c74ce62596fd",
       "ba51077aab05467327e66485660184b84540eeddcd7e56f2d71e212c821e2a7c",
       "ba70f5e94ada7cff4c5c5c8aabd16178ff0418e4c9b29e5ab5d8bab43c23b955",
-      "e1ccc5eda92ca476cbef0bdeea6f6c3fae31fa810f4607159a2e8a54640e88e5"
+      "e1ccc5eda92ca476cbef0bdeea6f6c3fae31fa810f4607159a2e8a54640e88e5",
+      "e436b22c7cf8899a0edc5eb256f772ee36d6ea0eacf97b162ccc6d7e37f58474"
     ],
     "skills/cas-dataviz/references/design-review.md": [
       "5d999e3a4c2be2e21cc1579bef4c2678fc4e515cbac044875c0207a13c1f1af7",
@@ -652,6 +654,11 @@
       "7ece7a47487081d2388604699ae444375fa032c92f5126e76f2f07e72a2f3321",
       "b42bbc3318f92149f812e204d3619a5139b688d28e24d31ecec4c061c3473287",
       "c470111e97c599d58446877f9a940e57353d825360ab64e19a0e268e50670f7e"
+    ],
+    "skills/mecha-cassy/references/registration.md": [
+      "13c57998c3276312221a40dd772b2e0903a70fd80c75ddcf32f711cae5b1c700",
+      "5291bb900c3528d7a27e2debc578a6e18beb8e3cfcca67d7e427a7c33edb0263",
+      "b4fb68231cb6ba66f571ecec9eacdf79a995472e50da3c9d986dd00665b6acff"
     ],
     "skills/release-notes/references/RUBRIC-template.md": [
       "1d114e9b6f61cefa40566ca0bdd20e6cde2c8c28c283c53ece11485231243e29",

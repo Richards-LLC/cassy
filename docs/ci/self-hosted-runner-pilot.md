@@ -130,7 +130,12 @@ Two listeners run as the non-login `cassy-actions` system account under
 `cassy-actions-runner.service` and `cassy-actions-runner-2.service`. Their
 checkouts, Cargo target directories, Rust toolchain, and sccache live under
 `/var/lib/cassy-actions`, never under `.cas` or the factory worktrees. The
-listeners share the read-only toolchain but not mutable build state:
+listeners share the read-only toolchain but not mutable build state. Every
+self-hosted workflow calls `scripts/setup-cassy-actions-rust.sh`: it takes a
+shared `flock` around the exceptional `rustup toolchain install` and otherwise
+only verifies the pre-provisioned stable toolchain, without changing the shared
+rustup default. This keeps concurrent merge-queue lanes safe even when the
+runner image needs a one-time toolchain repair:
 
 | Slot | Runner | Checkout | Cargo target | sccache | Port |
 | --- | --- | --- | --- | --- | ---: |

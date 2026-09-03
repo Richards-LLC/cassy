@@ -14,17 +14,24 @@ mandatory #cas-internal publication workflow. They are separate duties.**
 
 ## Transport ownership and worker handoff
 
-Run the runbook's cheap transport preflight before posting. For cas-src, the
-canonical route is the approved `pippenz@gmail.com` Claude profile's
-`claude.ai Slack` MCP, owned by the supervisor or an explicitly approved Claude
-posting owner. A `Connected` server listing is not a receipt; the read-only
-preflight must succeed before a post is attempted.
+**The default transport is the MechaCassy hub**, and the procedure for using it
+is the builtin [mecha-cassy](../cas-cli/src/builtins/skills/mecha-cassy/SKILL.md)
+skill: channel resolution, the two-check preflight, ordered thread posting with
+one-second pacing, the `## POSTED` receipt, and the env-only credential rules.
+The hub holds the Slack bot credential server-side, so any harness on any
+account posts as the same bot — a Codex or Grok worker posts directly instead of
+handing its draft back.
 
-Default Codex workers do not have a Slack transport. When a Codex worker reaches
-the release-notes duty, it saves the exact draft and hands the draft path,
-target channel, deploy target, and requested receipt back to the supervisor.
-The supervisor runs the canonical route and returns timestamps/permalinks for
-the worker to record. This is the designed path, not a failed fallback.
+The fallback is the approved `pippenz@gmail.com` Claude profile's
+`claude.ai Slack` MCP, owned by the supervisor or an explicitly approved Claude
+posting owner. Use it when the hub is unavailable; it cannot upload files and is
+bound to that one profile. Either way a `Connected` server listing is not a
+receipt: the read-only preflight must succeed before a post is attempted.
+
+When a worker genuinely has neither transport, it saves the exact draft and
+hands the draft path, target channel, deploy target, and requested receipt back
+to the supervisor, who posts and returns timestamps/permalinks for the worker to
+record. This is the designed path, not a failed fallback.
 
 If no approved transport passes preflight, leave the draft saved and report the
 duty blocked with the measured error. Do not post from an unapproved profile or

@@ -205,6 +205,13 @@ fn emit_worker_died_signals(
     summary: &OrphanRecoverySummary,
     reason: &str,
 ) {
+    // The maintenance callers operate on the generic agent registry.  A
+    // supervisor row expiring after a restart is not a worker death and must
+    // never create a self-directed critical relay (GH #678).
+    if agent.role != AgentRole::Worker {
+        return;
+    }
+
     let held = summary.held_task_ids.join(",");
     let recovered = summary.recovered_task_ids.join(",");
     let payload = serde_json::json!({
@@ -802,6 +809,35 @@ mod cas_3dcb_death_relay_tests {
         assert!(relays[0].prompt.contains("cas-active"));
         assert!(relays[0].prompt.contains("shutdown request"));
         assert_eq!(fixture.durable_notices(), 1);
+    }
+
+    #[test]
+    fn stale_supervisor_expiry_emits_no_worker_died_relay() {
+        let fixture = Fixture::new();
+        let supervisor = fixture
+            .agent_store
+            .get(&fixture.supervisor_id)
+            .expect("registered supervisor");
+
+        let summary = recover_worker_vanished(
+            &fixture.cas_root,
+            fixture.agent_store.as_ref(),
+            &supervisor,
+            &[],
+            "daemon maintenance: heartbeat stale",
+        );
+
+        assert!(summary.held_task_ids.is_empty());
+        assert!(summary.recovered_task_ids.is_empty());
+        assert!(
+            fixture.prompt_relays().is_empty(),
+            "supervisor expiry must not inject a worker_died relay back to itself"
+        );
+        assert_eq!(
+            fixture.durable_notices(),
+            0,
+            "supervisor expiry must not create a critical worker_died notification"
+        );
     }
 
     /// The 1,452-notices-for-one-agent class, proven at the emitter: however

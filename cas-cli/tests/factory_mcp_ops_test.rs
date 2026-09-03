@@ -2256,7 +2256,7 @@ async fn test_worker_status_dedupes_nested_identity_with_missing_worktree() {
     assert!(text.contains("Workers (1)"), "{text}");
     assert_eq!(text.matches("• knowledge-worker").count(), 1, "{text}");
     assert!(
-        text.contains("Filtered duplicate factory registration(s): 1"),
+        text.contains("Collapsed 1 superseded registry row(s) for: knowledge-worker"),
         "{text}"
     );
     assert!(text.contains("[missing-worktree]"), "{text}");

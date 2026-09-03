@@ -939,6 +939,14 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
         text.contains("Merged worktree"),
         "worktree_merge should report a successful merge.\nGot:\n{text}"
     );
+    assert!(
+        text.contains("Merge policy: merge proceeded because CI is advisory."),
+        "successful worktree_merge must state the advisory CI policy.\nGot:\n{text}"
+    );
+    assert!(
+        text.contains("gh endpoint queried:") && text.contains("CI SHA:"),
+        "worktree_merge CI diagnostics must name the endpoint and source SHA.\nGot:\n{text}"
+    );
 
     // The merge actually landed: content reachable from the checked-out repo.
     assert!(

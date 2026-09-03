@@ -1369,6 +1369,24 @@ impl FactoryDaemon {
                             );
                             continue;
                         }
+                        // GH #682: the event snapshot was read before this
+                        // loop. Re-read assignment state at the final direct
+                        // transport boundary so a task closed in that gap
+                        // cannot receive stale `task start` boilerplate.
+                        if let Some((task_id, status)) = super::delivery::assignment_terminal_status(
+                            self.app.cas_dir(),
+                            &prompt.text,
+                        ) {
+                            tracing::info!(
+                                target: "cas::coordination",
+                                stage = "suppress_terminal_assignment",
+                                target_agent = %prompt.target,
+                                task_id = %task_id,
+                                status = %status,
+                                "cas-2b0b: suppressed a direct assignment for a terminal task"
+                            );
+                            continue;
+                        }
                         // cas-ae6d (GH #100): a loss-intolerant prompt (today:
                         // the assignment wake-up) bound for a PTY pane that is
                         // not ready for injection goes to the durable

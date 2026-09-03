@@ -1,5 +1,6 @@
 use crate::AgentStore;
 use crate::agent_store::SqliteAgentStore;
+use crate::{DeliveryStage, PromptQueueStore, SqlitePromptQueueStore};
 use cas_types::{Agent, AgentRole, AgentStatus, AgentType, ClaimResult};
 use chrono::{Duration, Utc};
 use rusqlite::params;
@@ -181,6 +182,153 @@ fn test_agent_factory_session_update_none_preserves_existing_tag() {
         retrieved.factory_session.as_deref(),
         Some("session-original"),
         "update without struct session must preserve existing tag"
+    );
+}
+
+/// GH #677 / #678: a supervisor restart changes the factory session id but
+/// not the logical supervisor identity.  The new registration must adopt the
+/// still-running workers and retire the prior supervisor row in one store
+/// transition, otherwise every session-scoped coordination surface loses the
+/// worker and the old supervisor later expires as a pseudo-worker death.
+#[test]
+fn supervisor_reregistration_rehomes_workers_and_supersedes_the_old_row() {
+    let (temp, store) = create_test_store();
+
+    let mut original_supervisor = Agent::new(
+        "supervisor-session-1".to_string(),
+        "steady-fox-24".to_string(),
+    );
+    original_supervisor.role = AgentRole::Supervisor;
+    original_supervisor.factory_session = Some("factory-session-1".to_string());
+    store.register(&original_supervisor).unwrap();
+
+    let mut worker = Agent::new("worker-session".to_string(), "wild-cobra-45".to_string());
+    worker.role = AgentRole::Worker;
+    worker.agent_type = AgentType::Worker;
+    worker.factory_session = Some("factory-session-1".to_string());
+    store.register(&worker).unwrap();
+
+    let mut replacement_supervisor = Agent::new(
+        "supervisor-session-2".to_string(),
+        "steady-fox-24".to_string(),
+    );
+    replacement_supervisor.role = AgentRole::Supervisor;
+    replacement_supervisor.factory_session = Some("factory-session-2".to_string());
+    store.register(&replacement_supervisor).unwrap();
+
+    let active_supervisors = store
+        .list(Some(AgentStatus::Active))
+        .unwrap()
+        .into_iter()
+        .filter(|agent| agent.role == AgentRole::Supervisor && agent.name == "steady-fox-24")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        active_supervisors.len(),
+        1,
+        "a logical supervisor must have exactly one active registry row after restart"
+    );
+    assert_eq!(active_supervisors[0].id, "supervisor-session-2");
+    assert_eq!(
+        store.get("supervisor-session-1").unwrap().status,
+        AgentStatus::Shutdown,
+        "the prior supervisor row must be superseded, not left active to expire"
+    );
+
+    let rehomed_worker = store.get("worker-session").unwrap();
+    assert_eq!(
+        rehomed_worker.factory_session.as_deref(),
+        Some("factory-session-2"),
+        "a still-active worker must move with its logical supervisor"
+    );
+    assert!(
+        rehomed_worker.visible_to_factory_session(Some("factory-session-2")),
+        "worker_status, worker_activity, and delivery target discovery all use this visibility gate"
+    );
+
+    // Exercise the real session-scoped queue selector used by the factory
+    // daemon after it builds targets from the active registry roster.
+    let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+    queue.init().unwrap();
+    let message_id = queue
+        .enqueue_full(
+            "supervisor",
+            "wild-cobra-45",
+            "restart survived",
+            Some("factory-session-2"),
+            Some("restart reachability probe"),
+            None,
+        )
+        .unwrap();
+    let target_names = store
+        .list(Some(AgentStatus::Active))
+        .unwrap()
+        .into_iter()
+        .filter(|agent| {
+            agent.role == AgentRole::Worker
+                && agent.visible_to_factory_session(Some("factory-session-2"))
+        })
+        .map(|agent| agent.name)
+        .collect::<Vec<_>>();
+    let target_refs = target_names.iter().map(String::as_str).collect::<Vec<_>>();
+    let selected = queue
+        .peek_for_targets(&target_refs, Some("factory-session-2"), 10)
+        .unwrap();
+    assert_eq!(
+        selected.len(),
+        1,
+        "the restarted supervisor must still reach its worker"
+    );
+    assert_eq!(selected[0].id, message_id);
+    queue.mark_transport_delivered(message_id).unwrap();
+    assert_eq!(
+        queue
+            .message_delivery_report(message_id)
+            .unwrap()
+            .unwrap()
+            .stage,
+        DeliveryStage::Delivered,
+        "delivery must advance past awaiting_delivery"
+    );
+}
+
+#[test]
+fn distinct_supervisor_registration_does_not_steal_another_factorys_workers() {
+    let (_temp, store) = create_test_store();
+
+    let mut first_supervisor = Agent::new(
+        "supervisor-a-session".to_string(),
+        "supervisor-a".to_string(),
+    );
+    first_supervisor.role = AgentRole::Supervisor;
+    first_supervisor.factory_session = Some("factory-a".to_string());
+    store.register(&first_supervisor).unwrap();
+
+    let mut worker = Agent::new("worker-a-session".to_string(), "worker-a".to_string());
+    worker.role = AgentRole::Worker;
+    worker.factory_session = Some("factory-a".to_string());
+    store.register(&worker).unwrap();
+
+    let mut second_supervisor = Agent::new(
+        "supervisor-b-session".to_string(),
+        "supervisor-b".to_string(),
+    );
+    second_supervisor.role = AgentRole::Supervisor;
+    second_supervisor.factory_session = Some("factory-b".to_string());
+    store.register(&second_supervisor).unwrap();
+
+    assert_eq!(
+        store
+            .get("worker-a-session")
+            .unwrap()
+            .factory_session
+            .as_deref(),
+        Some("factory-a"),
+        "logical supervisor identity, not registration recency, owns worker re-homing"
+    );
+    assert_eq!(
+        store.get("supervisor-a-session").unwrap().status,
+        AgentStatus::Active,
+        "a differently named supervisor must not supersede the existing factory"
     );
 }
 

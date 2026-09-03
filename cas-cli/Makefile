@@ -214,6 +214,7 @@ test-scoped-selftest:
 test-ci-tiers:
 	cd .. && ./scripts/test-run-verified-tests.sh
 	cd .. && ./scripts/test-ci-test-tiers.sh
+	cd .. && ./scripts/test-self-hosted-rust-setup.sh
 	cd .. && ./scripts/test-release-publication-policy.sh
 	cd .. && ./scripts/test-release-published-receipt.sh
 	cd .. && ./scripts/test-release-latency-receipt.sh

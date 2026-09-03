@@ -337,11 +337,11 @@ jobs:
         with:
           cache-key: fast-validation
 
-      - name: Set up the isolated merge-queue runner
+      - name: Set up shared self-hosted Rust toolchain
         if: >-
           steps.classify-diff.outputs.rust-unaffected != 'true'
           && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
-        uses: dtolnay/rust-toolchain@stable
+        run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install Zig on the isolated merge-queue runner
         if: >-
@@ -458,11 +458,11 @@ jobs:
         with:
           cache-key: fast-validation-suite-archive
 
-      - name: Set up the isolated merge-queue runner
+      - name: Set up shared self-hosted Rust toolchain
         if: >-
           steps.classify-diff.outputs.rust-unaffected != 'true'
           && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
-        uses: dtolnay/rust-toolchain@stable
+        run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install Zig on the isolated merge-queue runner
         if: >-
@@ -698,11 +698,11 @@ jobs:
         with:
           cache-key: fast-validation-docs
 
-      - name: Set up the isolated merge-queue runner
+      - name: Set up shared self-hosted Rust toolchain
         if: >-
           steps.classify-diff.outputs.rust-unaffected != 'true'
           && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
-        uses: dtolnay/rust-toolchain@stable
+        run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install Zig on the isolated merge-queue runner
         if: >-

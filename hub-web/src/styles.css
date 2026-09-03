@@ -90,6 +90,10 @@
   --mobile-context-pill-width: 152px;
   /* Every control in the phone rail is at least this tall and wide. */
   --rail-item-min: 44px;
+  /* A landscape phone reads its attention count down the right edge, so that
+     column is sized by the labelled figure it has to hold, not by the 48px
+     square a portrait rail can use. */
+  --landscape-attention-rail-width: 80px;
   --attention-payload-max-height: 180px;
   --attention-motion-duration: 150ms;
   --chrome-motion-duration: 120ms;
@@ -1841,7 +1845,12 @@ fieldset {
   }
 }
 
-@media (max-width: 53rem) {
+/* The phone rule, kept identical to PHONE_MEDIA_QUERY in viewport.ts. A
+   width-only breakpoint is a narrow-window test, not a phone test: a rotated
+   Pixel 7 is 915px wide, cleared 53rem, and got the three-column desktop
+   console on a 412px-tall screen (report defect D5). The pointer clause keeps a
+   desktop with a short window out of here. */
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   /* Every drawer/attention combination must be listed: the desktop
      .shell.drawer-open.attention-collapsed rule is more specific than a bare
      .shell here, and a media query adds no specificity of its own. Losing that
@@ -2160,6 +2169,172 @@ fieldset {
   .pane-grid.pane-layout .move-later::after { content: "→"; font-size: var(--fs-md); }
   .pane-role { display: none; }
 }
+/* A phone on its side. The portrait stack spends the scarce axis on chrome: a
+   48px bottom rail plus an attention row leaves a 412px-tall screen with less
+   than half its height for the terminal. Landscape puts the chrome on the long
+   edges instead — machines left, attention right, both 48px — and gives the
+   terminal every remaining pixel of height. Panels open over it, never beside
+   it. This block follows the compact block deliberately: the two share
+   selectors at equal specificity, so order is what resolves them. */
+@media (max-height: 30rem) and (pointer: coarse) {
+  .shell,
+  .shell.attention-collapsed,
+  .shell.attention-expanded,
+  .shell.drawer-open,
+  .shell.drawer-open.attention-collapsed,
+  .shell.drawer-open.attention-expanded {
+    grid-template-columns: calc(var(--machine-rail-width) + env(safe-area-inset-left)) minmax(0, 1fr) calc(var(--landscape-attention-rail-width) + env(safe-area-inset-right));
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .shell.fleet-empty,
+  .shell.fleet-empty.attention-collapsed,
+  .shell.fleet-empty.attention-expanded {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .shell main { grid-column: 2; grid-row: 1; }
+
+  /* An unpaired Commander hides both rails, so its canvas owns the only column.
+     Leaving main in column 2 conjured an implicit second track and split a
+     915px screen into 467px of nothing and 448px of content. */
+  .shell.fleet-empty main,
+  .shell.fleet-empty.attention-collapsed main,
+  .shell.fleet-empty.attention-expanded main { grid-column: 1; }
+
+  .machine-navigation,
+  .shell.attention-expanded .machine-navigation {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  /* The rail is a column again, but it keeps the phone's 44px targets and drops
+     the labels: horizontal room is what landscape has, height is not. */
+  .machine-rail {
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    padding: var(--space-1);
+    padding-left: calc(var(--space-1) + env(safe-area-inset-left));
+    padding-right: var(--space-1);
+    padding-bottom: var(--space-1);
+  }
+
+  .machine-rail nav {
+    flex-direction: column;
+    gap: var(--space-1);
+    width: 100%;
+    height: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .machine-rail .commander-mark,
+  .machine-rail .machine-icon,
+  .machine-rail .pair-machine {
+    width: 100%;
+    padding: 0;
+  }
+
+  .machine-rail .pair-machine { margin: 0; }
+  .machine-rail .commander-mark-label,
+  .machine-rail .pair-machine-label,
+  .machine-rail .machine-icon .machine-name { display: none; }
+  .machine-rail .machine-icon .machine-initials { display: inline; }
+
+  /* Drawers open from the edge they belong to. A bottom sheet here would cover
+     the terminal it was opened to navigate. */
+  .machine-drawer {
+    inset: var(--space-2) auto var(--space-2) calc(var(--machine-rail-width) + var(--space-1) + env(safe-area-inset-left));
+    width: min(var(--machine-drawer-width), 60vw);
+    height: auto;
+    transform: translateX(calc(-1 * var(--space-3)));
+  }
+
+  .machine-navigation.drawer-open .machine-drawer { transform: translateX(0); }
+
+  /* The collapsed context panel is the right edge, mirroring the machine rail,
+     so the attention count and the composer keep a fixed home in both
+     orientations instead of floating over the terminal's corner. */
+  .context-panel.collapsed {
+    position: static;
+    grid-column: 3;
+    grid-row: 1;
+    /* The panel's own 48px rail track would leave the labelled count in a
+       column narrower than the label. Here the rail is the whole panel. */
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+    height: 100%;
+    padding-right: env(safe-area-inset-right);
+    background: var(--bg-panel);
+    overflow: visible;
+  }
+
+  .context-panel.collapsed .attention-rail {
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: var(--space-1);
+    width: 100%;
+    height: 100%;
+    padding: var(--space-1);
+  }
+
+  /* One labelled figure, kept labelled: the phone rail's whole point (D8) is
+     that a bare coloured number tells an operator nothing. */
+  .context-panel.collapsed .attention-rail-counts,
+  .context-panel.collapsed .mobile-message-toggle {
+    width: 100%;
+    min-height: var(--rail-item-min);
+    padding: 0 var(--space-1);
+    overflow: hidden;
+  }
+
+  .context-panel.collapsed .attention-summary-label {
+    overflow: hidden;
+    font-size: var(--fs-xs);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Expanded, it is a sheet over the terminal. Taking a row instead would leave
+     a 412px screen with a terminal the height of two lines. */
+  .context-panel:not(.collapsed) {
+    position: fixed;
+    z-index: 6;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: auto;
+    grid-column: auto;
+    grid-row: auto;
+    grid-template-rows: var(--space-10) minmax(0, 1fr);
+    width: min(var(--context-panel-width), 60vw);
+    height: 100dvh;
+    padding-right: env(safe-area-inset-right);
+    background: var(--bg-panel);
+  }
+
+  /* The header has 819px, not 1400: the chord trigger has no phone equivalent
+     and its width belongs to the two controls a thumb actually uses. Without
+     this the actions overflowed under the attention rail and Interrupt was
+     sliced in half. */
+  .command-palette-trigger { display: none; }
+  .session-header .actions { gap: var(--space-1); }
+  .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
+
+  /* Nothing is stacked above a bottom rail here, so the toast and the composer
+     stop reserving room for one. */
+  #toast { bottom: calc(var(--space-3) + env(safe-area-inset-bottom)); }
+  .message { padding-bottom: 0; }
+
+  /* A worker strip that keeps 40dvh of a 412px screen leaves the supervisor
+     terminal shorter than the strip below it. */
+  .pane-grid.pane-layout .secondary-pane-strip { max-height: 30dvh; }
+  .session-header { padding-inline: var(--space-1); }
+}
+
 @media (max-width: 500px) {
   .session-header { grid-template-columns: minmax(48px, 1fr) auto auto; }
   .session-header h1 { font-size: var(--fs-sm); }

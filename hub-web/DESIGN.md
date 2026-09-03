@@ -40,6 +40,8 @@ elevation:
   raised: "--bg-raised, no shadow"
   overlay: "--shadow-overlay only"
 breakpoints:
+  phone: "(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"
+  landscape_phone: "(max-height: 30rem) and (pointer: coarse)"
   compact: "max-width: 53rem"
 ---
 
@@ -85,7 +87,10 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - `.shell` exposes `--bg-root` through its 8px gaps; no full-height left/right column borders may recreate the old boxed grid.
 - `.session-header` is exactly 44px. The supervisor receives 65% of the pane grid and the worker strip 35%; collapsed worker bars are exactly 32px.
 - The collapsed attention region is the same 48px rail width, while the expanded operations panel occupies the 320px context column.
-- At `max-width: 53rem`, navigation becomes a 48px bottom rail, drawers open above it, and workers scroll horizontally below the readable supervisor terminal.
+- A phone is `(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)` — either axis too small for desktop chrome, driven by a finger. Width alone is a narrow-window test, not a phone test: a rotated Pixel 7 is 915px wide and would take the desktop grid onto a 412px-tall screen. The pointer clause keeps a mouse-driven desktop with a short window on the desktop layout. This exact string is `PHONE_MEDIA_QUERY` in `hub-web/src/viewport.ts`, and the stylesheet and every `matchMedia` call must use it, so rotation can never put the layout and the pane-mounting logic in different modes.
+- `compact` stays width-only and separate. It answers how many columns fit across a mount — the 80-column PTY floor and the transcript default — and a phone in landscape genuinely has the width for a wider grid.
+- In portrait, navigation becomes a 48px bottom rail, drawers open above it, and workers scroll horizontally below the readable supervisor terminal.
+- In landscape, the chrome moves to the long edges: machines on the left, the collapsed attention rail on the right, both 48px, each honouring its safe-area inset. The terminal keeps the full height, the machine drawer opens as a left sheet, and the expanded operations panel is a right-hand sheet over the terminal — never a row taken from it. The worker strip is capped at 30dvh there instead of 40dvh.
 - Every control in that rail — Machines, each machine chip, Pair, the attention summary, the message button — shares one container treatment at `--rail-item-min` (44px) on `--bg-raised` with `--radius-card`. The rail is one bar, so it may not mix bordered, filled, and bare controls in a single row.
 - The collapsed context pill floats over the rail: it stays transparent, clips its own contents, and lets its two controls carry the shared rail-item surface, so it never paints a second surface or spills across Pair.
 - At `max-width: 53rem` a pane defaults to the transcript reading view and its PTY is held at a floor of 80 columns; the canvas then sizes to that grid instead of the mount, and terminal view pans horizontally. Above the breakpoint nothing changes: no column floor, terminal view by default.

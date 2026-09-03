@@ -50,10 +50,6 @@ fn python3_available() -> bool {
 
 #[test]
 fn proxy_vercel_client_round_trip_against_fixture_mcp_server() {
-    // The binary installs this before dispatch (main.rs); this integration test
-    // builds a reqwest client without passing through main, and rustls refuses
-    // to pick a provider on its own ("No provider set").
-    let _ = rustls::crypto::ring::default_provider().install_default();
     if !python3_available() {
         eprintln!("python3 not on PATH — skipping fixture-spawned MCP test");
         return;

@@ -155,8 +155,10 @@ The page now has three render paths, chosen in `render()` by
   the palette/picker open flags, and the whole visible state of the pairing
   dialog.
 - **defer** — the signature changed while a form control inside the app has
-  focus. The rebuild is remembered and flushed on `focusout`, so a machine
-  appearing mid-sentence no longer takes the keyboard with it.
+  focus. The rebuild is remembered and flushed once focus has left every
+  editable control **and** the pointer gesture that moved it has delivered its
+  click, so a machine appearing mid-sentence no longer takes the keyboard with
+  it.
 
 Rules that keep this honest:
 
@@ -177,9 +179,35 @@ Rules that keep this honest:
   in its handlers, so a change of controller has to rebuild rather than leave a
   stale closure behind a live button.
 
+A deferred rebuild must never run inside a pointer gesture. Pointerdown moves
+focus off a field, `focusout` fires, and rebuilding there replaces the button
+under the finger before the browser dispatches the click — the tap then does
+nothing at all. That is what `DeferredRenderScheduler` in
+`src/deferred-render.ts` exists for: `focusout` releases the rebuild only when
+no gesture is in flight, and a gesture releases it through a macrotask, which
+the browser runs after the click. A microtask is not enough — the click is
+dispatched in the same task as the pointerup.
+
 The dialog re-open lines in `render()` stay. They are no longer load-bearing
 for heartbeats — a heartbeat never reaches them — but a genuine structural
 rebuild can still happen with a dialog open, and re-opening it is correct then.
+
+## Pairing cancellation
+
+Cancel **discards** the invitation. `cancelPendingPairing()` invalidates the
+in-flight operation, clears the pending-pairing store, resets the draft and
+says so in the dialog; re-opening the dialog afterwards offers the create-code
+flow, not the cancelled invitation, and states that pairing needs a fresh URL
+from `cas hub pair`.
+
+That is deliberate and is not a convenience decision. A pairing invitation is a
+one-time capability, and Cancel is the operator's way to say the request must
+not proceed — including the case where they cancel because the link went
+somewhere it should not have. The code already treats a storage-clear failure
+as a durable-blocking problem worth its own message; keeping a still-valid
+invitation retrievable after an explicit cancel would contradict that. A
+cancelled invitation is gone, and a new one costs one command on the machine.
+
 
 ## Streaming text on narrow viewports (D15)
 

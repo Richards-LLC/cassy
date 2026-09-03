@@ -27,6 +27,7 @@ import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
 import { TranscriptView } from "./transcript-view";
 import { applyLiveRegions, type LiveRegionView } from "./live-regions";
+import { DeferredRenderScheduler } from "./deferred-render";
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
@@ -59,7 +60,12 @@ const transcripts = new Map<string, TranscriptView>();
 // The shell is rebuilt only when its own inputs changed. A hub heartbeat
 // carries none of them, so it can no longer replace the composer mid-sentence.
 let lastShellSignature: string | undefined;
-let pendingShellRender = false;
+// setTimeout, not queueMicrotask: the click event a pointerup is about to
+// produce is dispatched in the same task, so only a macrotask lands after it.
+const deferredRender = new DeferredRenderScheduler({
+  render: () => render(),
+  afterGesture: (run) => window.setTimeout(run, 0),
+});
 let lastRailSignature: string | undefined;
 const sessionStates = new Map<string, SessionState>();
 // Shared data source for session drawers, status rows, pane tooltips, and the
@@ -1741,11 +1747,11 @@ function render(captureDraft = true): void {
   if (decision !== "shell") {
     // A deferred rebuild is owed to a structural change that arrived while the
     // operator was mid-sentence; it runs the moment the field is left.
-    if (decision === "defer") pendingShellRender = true;
+    if (decision === "defer") deferredRender.defer();
     renderRegions({ selected, session: selectedSession, status, connectionSnapshot, counts, liveRegions });
     return;
   }
-  pendingShellRender = false;
+  deferredRender.settled();
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
   const preservedGrid = terminalSessionKey && currentGrid?.dataset.sessionKey === terminalSessionKey ? currentGrid : undefined;
@@ -2396,16 +2402,20 @@ function scopeCeilingHint(grantedScopes: readonly Scope[] | undefined): string {
 function escapeHtml(value: string): string { const span = document.createElement("span"); span.textContent = value; return span.innerHTML; }
 function escapeAttr(value: string): string { return escapeHtml(value).replaceAll('"', "&quot;"); }
 
-// A rebuild deferred while the operator was mid-sentence runs the moment the
-// field is left, so a page that skipped one structural render never stays
-// stale. queueMicrotask lets focus land on its next target first: moving
-// between two inputs is still composing.
+// A rebuild deferred while the operator was mid-sentence runs once the field is
+// left AND the pointer gesture that left it has delivered its click. Rebuilding
+// on focusout alone deleted the button under the finger before the browser
+// dispatched the click, so the tap did nothing at all (cas-c142).
+app.addEventListener("pointerdown", () => deferredRender.gestureStarted(), true);
+app.addEventListener("pointerup", () => deferredRender.gestureEnded(), true);
+app.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);
 app.addEventListener("focusout", () => {
-  if (!pendingShellRender) return;
   queueMicrotask(() => {
+    // Moving between two fields is still composing; only a focus that has left
+    // every editable control releases the rebuild.
     const active = document.activeElement;
     if (isEditableElement(active) && app.contains(active)) return;
-    if (pendingShellRender) render();
+    deferredRender.focusLeft();
   });
 });
 

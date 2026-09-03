@@ -171,9 +171,17 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(regions).not.toContain("replaceChildren(");
 
     // The deferred rebuild has to be flushed, or a structural change that
-    // arrived mid-sentence would never land.
-    expect(main).toContain("pendingShellRender = true;");
+    // arrived mid-sentence would never land — but never mid-gesture, or it
+    // deletes the button under the finger before the click is dispatched
+    // (cas-c142).
+    expect(main).toContain("deferredRender.defer();");
     expect(main).toContain('app.addEventListener("focusout"');
+    expect(main).toContain('app.addEventListener("pointerdown", () => deferredRender.gestureStarted(), true);');
+    expect(main).toContain('app.addEventListener("pointerup", () => deferredRender.gestureEnded(), true);');
+    expect(main).toContain('app.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);');
+    // A microtask would still run before the click; the flush has to be a
+    // macrotask scheduled off the gesture ending.
+    expect(main).toContain("afterGesture: (run) => window.setTimeout(run, 0),");
   });
 
   it("keeps the live-region selectors and the shell markup on the same nodes", async () => {

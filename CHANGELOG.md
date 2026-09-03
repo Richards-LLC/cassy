@@ -40,6 +40,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 
 ### Added
+- Task rows that a past sync leak copied into the wrong project — rows nothing
+  on this machine can place — can now be put aside. `cas doctor
+  --fix-cloud-rows` shows exactly which rows it would set aside and changes
+  nothing until you add `--yes`; those rows then leave the ready queue and are
+  never sent to the cloud, while staying readable by id and restorable with
+  `--release-cloud-rows`. The rows themselves are untouched, so a later sync
+  cannot bring them back into view. `cas doctor` now reports how many rows are
+  unplaceable, how many are set aside, and how many share an id with a
+  different task — the last group is left alone on purpose, because those need
+  a new id rather than removal. (GH #701)
 - Two supervisors working the same checkout are now visible to each other.
   `cas doctor`, `worker_status` and every spawn receipt name both sessions and
   when each started, and say plainly that a reset, merge or shutdown from

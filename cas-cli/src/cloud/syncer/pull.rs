@@ -1883,8 +1883,57 @@ impl CloudSyncer {
             let _ = self.queue.set_metadata("last_pull_at", &pulled_at);
         }
 
+        self.reassert_quarantine();
+
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
+    }
+
+    /// Re-assert the local quarantine after a pull has written rows
+    /// (cas-4342 / GH #701).
+    ///
+    /// Hiding is computed from the ledger at read time, so a re-pulled row
+    /// cannot resurface on the board no matter how often its content is
+    /// rewritten — that part needs no work and is why the quarantine count
+    /// stays flat across pulls. What *can* drift is the push side: any code
+    /// path that enqueues on write would hand a quarantined row to the next
+    /// push, and a quarantine decision must never leave this machine. So the
+    /// invariant is enforced here rather than assumed, and what it removed is
+    /// logged instead of being silently swallowed.
+    ///
+    /// Deliberately infallible: a pull that succeeded must not be reported as
+    /// failed because a local suppression ledger could not be read.
+    fn reassert_quarantine(&self) {
+        let ids = match self.queue.quarantined_ids(crate::cloud::QUARANTINE_TASK) {
+            Ok(ids) if !ids.is_empty() => ids,
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(
+                    "[Cassy sync] could not read the local quarantine ledger after pull ({error}); \
+                     quarantined rows stay hidden but their push suppression was not re-checked"
+                );
+                return;
+            }
+        };
+
+        let mut dropped = 0usize;
+        for id in &ids {
+            match self
+                .queue
+                .drop_queued_pushes_for(crate::cloud::QUARANTINE_TASK, id)
+            {
+                Ok(count) => dropped += count,
+                Err(error) => tracing::warn!(
+                    "[Cassy sync] could not clear queued pushes for quarantined row {id}: {error}"
+                ),
+            }
+        }
+        if dropped > 0 {
+            tracing::info!(
+                "[Cassy sync] dropped {dropped} queued push(es) for {} quarantined row(s) after pull",
+                ids.len()
+            );
+        }
     }
 
     fn upsert_task(

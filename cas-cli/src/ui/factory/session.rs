@@ -6,7 +6,7 @@
 //! For unified session metadata (worker count, epic ID, etc.), use
 //! `cas_factory::SessionSummary` and `cas_factory::UnifiedSessionManager`.
 
-use crate::store::{find_cas_root_from, open_agent_store};
+use crate::store::{find_cas_root_from, find_cas_root_ignoring_env, open_agent_store};
 use crate::ui::factory::protocol::{AgentInfo, SessionMetadata};
 use cas_factory::{SessionState, SessionSummary, SessionType};
 use cas_types::{AgentStatus, AgentType};
@@ -287,6 +287,15 @@ pub struct SessionInfo {
     pub socket_exists: bool,
 }
 
+/// Whether an ambient `CAS_ROOT` may redirect a session's registry lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootOverride {
+    /// Single-project callers keep the process-wide override.
+    Honor,
+    /// Multi-project callers resolve from the session's own project directory.
+    Ignore,
+}
+
 impl SessionInfo {
     /// Check if this session can be attached to
     ///
@@ -304,19 +313,41 @@ impl SessionInfo {
 
     /// Get the names of live workers from the registry, falling back to the
     /// daemon roster when the session's registry cannot be read.
+    ///
+    /// An ambient `CAS_ROOT` wins here, matching every other single-project
+    /// caller in this process.
     pub fn worker_names(&self) -> Vec<String> {
-        self.live_registry_worker_names().unwrap_or_else(|| {
-            self.metadata
-                .workers
-                .iter()
-                .map(|w| w.name.clone())
-                .collect()
-        })
+        self.registry_worker_names(RootOverride::Honor)
     }
 
-    fn live_registry_worker_names(&self) -> Option<Vec<String>> {
+    /// The roster for a caller that serves several projects at once.
+    ///
+    /// The Commander hub lists every session on the machine, and the process
+    /// that launched it carries one project's `CAS_ROOT`. Honouring that
+    /// override would read a gabber-studio session's roster out of cas-src's
+    /// registry and report it as worker-less, so this resolution starts from
+    /// the session's own `project_dir`.
+    pub fn project_worker_names(&self) -> Vec<String> {
+        self.registry_worker_names(RootOverride::Ignore)
+    }
+
+    fn registry_worker_names(&self, override_policy: RootOverride) -> Vec<String> {
+        self.live_registry_worker_names(override_policy)
+            .unwrap_or_else(|| {
+                self.metadata
+                    .workers
+                    .iter()
+                    .map(|w| w.name.clone())
+                    .collect()
+            })
+    }
+
+    fn live_registry_worker_names(&self, override_policy: RootOverride) -> Option<Vec<String>> {
         let project_dir = self.metadata.project_dir.as_deref()?;
-        let cas_root = find_cas_root_from(Path::new(project_dir)).ok()?;
+        let cas_root = match override_policy {
+            RootOverride::Honor => find_cas_root_from(Path::new(project_dir)).ok()?,
+            RootOverride::Ignore => find_cas_root_ignoring_env(Path::new(project_dir)).ok()?,
+        };
         let agent_store = open_agent_store(&cas_root).ok()?;
         let agents = agent_store.list(None).ok()?;
 

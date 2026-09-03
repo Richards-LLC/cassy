@@ -1950,10 +1950,29 @@ struct SymbolIndexState {
     eligible_files: usize,
     indexed_files: usize,
     failed_files: usize,
+    /// Symbols eligible for a vector, counted in `code_symbols` — the table the
+    /// indexer writes — not in the queue. A queue-derived denominator moves
+    /// whenever the queue is re-armed or lost, which is how two runs 80s apart
+    /// reported 13,545 and then 11,535 eligible (GH #696).
     vector_eligible: usize,
+    /// Eligible symbols whose *current* content hash is recorded vectorized:
+    /// the drain's own completion condition, so doctor and the drain cannot
+    /// disagree about what is done.
     vectorized: usize,
+    /// Eligible symbols still awaiting a vector, including those with no queue
+    /// row at all. Never a count of queue rows: an empty queue with unvectorized
+    /// symbols is 0 rows and N pending, and doctor must say N.
     vector_pending: usize,
     vector_failed: usize,
+    /// Eligible symbols the indexer never queued. Part of `vector_pending`,
+    /// surfaced separately because it indicts the indexer, not the drain.
+    vector_unqueued: usize,
+    /// Queue rows describing symbols that no longer exist — pending work that
+    /// no drain tick can complete.
+    vector_orphaned: usize,
+    /// Set when the current generation of the code-vector cache replaced an
+    /// older one. A reset that is named is not a reset that lies.
+    vector_rebuild: Option<crate::cloud::embeddings::CacheRebuild>,
     head_lag: Option<bool>,
     scan_error: Option<String>,
     /// Set when the state could not be read; reported instead of silently skipped.
@@ -2011,7 +2030,10 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
             };
         }
     };
-    let vectors = vector_store.stats().unwrap_or_default();
+    // Coverage, not queue rows: `stats()` reports what the queue happens to
+    // contain, which reads as "0 pending" for a store whose queue was emptied
+    // while thousands of symbols still have no vector (GH #696).
+    let vectors = vector_store.coverage().unwrap_or_default();
     let scan = vector_store.index_state(&repository).ok().flatten();
     let current_head = crate::daemon::indexing::resolve_repository(project_root)
         .0
@@ -2037,10 +2059,51 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         vectorized: vectors.vectorized,
         vector_pending: vectors.pending,
         vector_failed: vectors.failed,
+        vector_unqueued: vectors.unqueued,
+        vector_orphaned: vectors.orphaned,
+        vector_rebuild: crate::cloud::embeddings::KnowledgeVectorCache::code_cache_rebuild(
+            cas_root,
+        ),
         head_lag,
         scan_error: scan.and_then(|scan| scan.last_error),
         error: None,
     }
+}
+
+/// One rendering of the code-vector counters, shared by every branch of the
+/// symbol-index check.
+///
+/// All four figures come from [`cas_store::CodeVectorCoverage`], so the line is
+/// internally consistent by construction: `vectorized + pending + failed`
+/// always equals `eligible`. The trailing clauses exist because a bare set of
+/// counters cannot distinguish "the drain is behind" from "the queue lost its
+/// rows" from "the cache was rebuilt and everything is legitimately starting
+/// over" — and an operator reading a reset needs to be told which one it is.
+fn code_vector_summary(state: &SymbolIndexState) -> String {
+    let mut summary = format!(
+        "code vectors {}/{} vectorized, {} pending, {} failed",
+        state.vectorized, state.vector_eligible, state.vector_pending, state.vector_failed,
+    );
+    if state.vector_unqueued > 0 {
+        summary.push_str(&format!(
+            " ({} never queued — run `cas index code` to re-arm them)",
+            state.vector_unqueued
+        ));
+    }
+    if state.vector_orphaned > 0 {
+        summary.push_str(&format!(
+            "; {} queue row(s) name symbols that no longer exist",
+            state.vector_orphaned
+        ));
+    }
+    if let Some(rebuild) = &state.vector_rebuild {
+        summary.push_str(&format!(
+            "; vector index rebuilt at {} ({}), vectors regenerating",
+            rebuild.rebuilt_at.format("%Y-%m-%d %H:%M UTC"),
+            rebuild.reason,
+        ));
+    }
+    summary
 }
 
 fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc>) -> Check {
@@ -2070,12 +2133,19 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
         || file_lag > 0
         || state.head_lag == Some(true)
         || state.vector_failed > 0
+        // Symbols with no queue row, and queue rows with no symbol, are the two
+        // ways the semantic corpus goes quietly wrong. Both are reconciled by
+        // `cas index code`, which is what this branch already tells the
+        // operator to run.
+        || state.vector_unqueued > 0
+        || state.vector_orphaned > 0
     {
+        let vectors = code_vector_summary(&state);
         return Check {
             name,
             status: CheckStatus::Warning,
             message: format!(
-                "symbol index coverage is incomplete: {}/{} eligible file(s), {} file(s) lagging, {} file failure(s), HEAD {}; code vectors {}/{} vectorized, {} pending, {} failed{}. Run `cas index code` to reconcile now.",
+                "symbol index coverage is incomplete: {}/{} eligible file(s), {} file(s) lagging, {} file failure(s), HEAD {}; {vectors}{}. Run `cas index code` to reconcile now.",
                 state.indexed_files,
                 state.eligible_files,
                 file_lag,
@@ -2085,10 +2155,6 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
                     Some(false) => "current",
                     None => "unknown",
                 },
-                state.vectorized,
-                state.vector_eligible,
-                state.vector_pending,
-                state.vector_failed,
                 state
                     .scan_error
                     .as_deref()
@@ -2140,14 +2206,11 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
             status: CheckStatus::Ok,
             message: format!(
                 "{} file(s) from this project indexed ({} symbol(s) stored in total), newest \
-                 entry {}; code vectors {}/{} vectorized, {} pending, {} failed; HEAD {}",
+                 entry {}; {}; HEAD {}",
                 state.files,
                 state.symbols,
                 format_lag(lag_secs),
-                state.vectorized,
-                state.vector_eligible,
-                state.vector_pending,
-                state.vector_failed,
+                code_vector_summary(&state),
                 match state.head_lag {
                     Some(true) => "behind",
                     Some(false) => "current",
@@ -4420,6 +4483,123 @@ mod tests {
                 check.message
             );
         }
+    }
+
+    /// GH #696: an empty queue with unvectorized symbols used to read as
+    /// "0/0 vectorized, 0 pending" and pass. Coverage puts those symbols in the
+    /// denominator, so doctor now names the hole and points at the fix.
+    #[test]
+    fn symbol_index_check_reports_symbols_that_were_never_queued() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            vector_eligible: 11_535,
+            vectorized: 0,
+            vector_pending: 11_535,
+            vector_unqueued: 11_535,
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "a corpus with no vectors and no queued work must not pass: {}",
+            check.message
+        );
+        for expected in [
+            "0/11535 vectorized",
+            "11535 pending",
+            "11535 never queued",
+            "cas index code",
+        ] {
+            assert!(
+                check.message.contains(expected),
+                "missing {expected}: {}",
+                check.message
+            );
+        }
+    }
+
+    /// The inverse lie: queue rows outliving their symbols are reported as
+    /// ghosts rather than folded into pending work.
+    #[test]
+    fn symbol_index_check_names_orphaned_queue_rows() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            vector_eligible: 900,
+            vectorized: 900,
+            vector_orphaned: 2_010,
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check
+                .message
+                .contains("2010 queue row(s) name symbols that no longer exist"),
+            "message: {}",
+            check.message
+        );
+    }
+
+    /// A reset that is named is not a reset that lies: after the vector cache
+    /// is rebuilt, the check says so instead of silently reporting that every
+    /// vector disappeared.
+    #[test]
+    fn symbol_index_check_labels_a_vector_cache_rebuild() {
+        let now = chrono::Utc::now();
+        let rebuilt_at = chrono::DateTime::parse_from_rfc3339("2026-09-03T19:18:50Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let state = SymbolIndexState {
+            vector_eligible: 11_535,
+            vectorized: 0,
+            vector_pending: 11_535,
+            vector_rebuild: Some(crate::cloud::embeddings::CacheRebuild {
+                rebuilt_at,
+                reason: "embedding model changed from p/m1 (3d) to p/m2 (4d)".into(),
+            }),
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        for expected in [
+            "vector index rebuilt at 2026-09-03 19:18 UTC",
+            "embedding model changed",
+            "vectors regenerating",
+        ] {
+            assert!(
+                check.message.contains(expected),
+                "missing {expected}: {}",
+                check.message
+            );
+        }
+    }
+
+    /// The acceptance shape from GH #696: nothing happened between two reads,
+    /// so the two messages must be identical — including the vector line.
+    #[test]
+    fn symbol_index_check_is_identical_across_two_reads_of_one_state() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            vector_eligible: 13_545,
+            vectorized: 603,
+            vector_pending: 12_942,
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let first = symbol_index_check(state.clone(), now);
+        let second = symbol_index_check(state, now);
+        assert_eq!(first.message, second.message);
+        assert!(
+            first.message.contains("603/13545 vectorized, 12942 pending"),
+            "message: {}",
+            first.message
+        );
     }
 
     /// A freshly-indexed tree reports Ok with the counts, not a warning.

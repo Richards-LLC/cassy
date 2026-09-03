@@ -8,6 +8,21 @@ Both values live in the machine's credentials file as
 environment by the login shell. Configurations below name those variables and
 never hold their values.
 
+## One command, once per machine
+
+`cas integrate mecha-cassy --label <MACHINE>` writes all three registrations
+below — a machine-scoped proxy registration under the user config directory
+that every project inherits, plus the Codex and Claude Code entries — refusing
+to claim success without an authenticated `tools/list` receipt. Re-running it
+is the refresh path, and `cas doctor`'s `mecha-cassy` row states whether this
+machine can post and what to do when it cannot. Setting up a new machine or a
+teammate: `docs/MECHA_CASSY_ONBOARDING.md`.
+
+The hand-written shapes below remain the reference for repairing a machine by
+hand or for a project that keeps its own `.cas/proxy.toml` — a project file
+**replaces** the machine allowlist rather than widening it, so such a project
+must name the hub routes itself.
+
 ## Cassy proxy — reaches every harness
 
 `.cas/proxy.toml`:

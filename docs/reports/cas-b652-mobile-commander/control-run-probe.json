@@ -1,0 +1,16 @@
+{
+  "probe": {
+    "found": true,
+    "tag": "DIV",
+    "rect": {
+      "w": 395,
+      "h": 594
+    },
+    "paneH": 627,
+    "hasAbortAny": true,
+    "ua": "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.6 Mobile Safari/537.36",
+    "dpr": 2.625000015713951,
+    "innerText": "fast-kestrel-6\n26s\nFind\nMake primary\nMove earlier\nMove later"
+  },
+  "consoleErrors": []
+}

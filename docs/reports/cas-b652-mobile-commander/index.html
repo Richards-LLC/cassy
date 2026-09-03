@@ -104,13 +104,13 @@ li{margin-bottom:6px}
   <p style="margin-top:12px">Three findings dominate everything else:</p>
   <ol style="margin-bottom:0">
     <li><b>Pairing fails on the first attempt for everyone who follows the runbook</b>, because the CLI mints a read-only invitation while the UI asks for six scopes. The error is the single word <code>unauthorized</code>, and the one-time invitation is burned. <a href="#d1">D1</a></li>
-    <li><b>The terminal is permanently blank.</b> <code>AbortSignal.any()</code> (Chrome 116+) is called with no feature detection, so every attach throws, the reconnect loop spins forever, and the "Connecting…" timer freezes at <code>0s</code>. <a href="#d3">D3</a></li>
+    <li><b>The terminal is permanently blank on this browser</b> — <code>AbortSignal.any()</code> (Chrome 116+) with no feature detection, so every attach throws and the "Connecting…" timer freezes at <code>0s</code> forever <a href="#d3">D3</a>. On a current engine it paints, and reveals the real complaint: <b>an 80-column agent TUI squeezed into ~46 columns</b>, where hanging indents collapse and continuations escape their gutter. <a href="#d15">D15</a></li>
     <li><b>The bottom rail is three different design languages in one 48px row</b> — a bordered button, a filled chip with a clipped status dot, a bare icon+label, and a colour seam where a second panel overlaps the rail. This is the "outlines are fucked up" complaint, and it is literally an outline. <a href="#d7">D7</a></li>
   </ol>
 </div>
 
 <div class="callout warn">
-  <p><b>Honesty note on the browser.</b> The AVD ships Chrome 113 (May 2023), not current stable. That is a real confound and I have flagged, per defect, which findings are engine-age artifacts and which are authored in <code>hub-web</code>. Two things make D3 worth fixing anyway: Android is exactly where stale Chrome and WebView builds survive, and the failure mode — a silent forever-spinner with the real error truncated three taps deep — is a <em>hub-web</em> choice, not a browser one. Every layout, spacing, contrast, and hierarchy defect below is CSS the project authored and reproduces at any engine version.</p>
+  <p><b>Honesty note on the browser — and the control run that settles it.</b> The AVD ships Chrome 113 (May 2023), not current stable. Rather than hand-wave that confound, the whole run was repeated on <b>Chrome 145 at a Pixel 7 device profile</b> (412×915 CSS px, DPR 2.625, mobile UA, touch) via Playwright against the same hub and the same session. Result: the terminal renders perfectly, so <a href="#d3">D3</a>'s blank pane <em>is</em> engine age — while its frozen timer, its buried truncated error and the total absence of unsupported-browser handling remain product bugs. Every other defect below reproduced identically on Chrome 145, and the bottom rail is measurably <em>worse</em> there. Section <a href="#control">2b</a> is the like-for-like comparison, and it is where Daniel's actual streaming-text complaint finally becomes visible.</p>
 </div>
 
 <!-- ============================================================= -->
@@ -207,7 +207,7 @@ li{margin-bottom:6px}
     <div><b>State:</b> attach to any session from Android Chrome 113.</div>
     <div><b>Evidence:</b> <code>27-streaming-portrait.mp4</code> (frames 20/200/400 all read <code>0s</code>), <code>34-attention-details.png</code>, hub audit log.</div>
     <div><b>Hypothesis:</b> three separate fixes — feature-detect or polyfill <code>AbortSignal.any</code> at <code>connection.ts:333</code>; drive the connecting overlay from a ticking clock so the 5s and 15s affordances can actually fire; surface an unsupported-browser banner instead of an infinite spinner.</div>
-    <div><b>Engine-independent:</b> the frozen timer and the buried, truncated error are. The <code>AbortSignal.any</code> throw needs a Chrome 116+ retest to confirm the terminal then paints.</div>
+    <div><b>Engine-independent:</b> the frozen timer and the buried, truncated error are. <b>Retest done —</b> on Chrome 145 at a Pixel 7 profile, <code>AbortSignal.any</code> exists, the console reports <b>zero</b> errors, and the terminal paints correctly (see <a href="#control">2b</a>). The blank pane is engine age; the silent forever-spinner around it is not.</div>
   </div>
   <div class="callout warn"><p><b>Ruled out.</b> <code>logcat</code> showed continuous <code>GL ERROR :GL_INVALID_VALUE : glFramebufferTexture2D</code> at ~10 Hz in portrait. That is swiftshader noise from the emulator's software GPU, not the cause: it stops entirely in landscape while the terminal stays equally blank in both orientations. I am not attributing the failure to canvas sizing.</p></div>
 </div>
@@ -311,6 +311,44 @@ li{margin-bottom:6px}
   <div><b>Engine-independent:</b> yes.</div></div>
 </div>
 
+<!-- ============================================================= -->
+<h2 id="control">2b · Control run: the same hub on Chrome 145</h2>
+
+<p>The emulator's Chrome 113 answers one question ("what does a real Android 14 phone with a stale browser do?") and confounds another ("which of these are CSS we wrote?"). So the entire run was repeated on a current engine: Playwright driving <b>Chrome 145.0.7632.6</b> with the <b>Pixel 7</b> device descriptor — 412×915 CSS px, DPR 2.625, touch, mobile user-agent — paired with its own fresh invitation and DPoP identity, attached to the same <code>cas-src-young-raven-93</code>, capturing 40 frames at 300 ms while the host session produced output.</p>
+
+<table>
+  <tr><th>Signal</th><th>Real Android 14 · Chrome 113</th><th>Pixel 7 profile · Chrome 145</th></tr>
+  <tr><td><code>AbortSignal.any</code> present</td><td>no</td><td>yes</td></tr>
+  <tr><td>Console errors</td><td>terminal attach throws, ×26 attention items</td><td><b>0</b></td></tr>
+  <tr><td>Terminal renders</td><td>never — permanent "Connecting… 0s"</td><td><b>yes, correctly</b></td></tr>
+  <tr><td>Terminal mount geometry</td><td>n/a (never mounted)</td><td>395 × 594 CSS px inside a 627px pane</td></tr>
+  <tr><td>Live updates during capture</td><td>none</td><td>9 of 39 frame transitions changed the terminal region</td></tr>
+  <tr><td>Bottom-rail defects</td><td>present</td><td><b>present and worse</b></td></tr>
+  <tr><td>Worker still a 32px stub</td><td>yes</td><td>yes</td></tr>
+</table>
+
+<div class="callout ok"><p><b>What this buys.</b> D3's blank pane is confirmed as engine age and can be de-escalated to "add feature detection and an unsupported-browser path". Everything else in the catalogue is confirmed as ours. And with a working terminal, the actual streaming-text complaint finally becomes visible — it was hiding behind the blank pane the whole time.</p></div>
+
+<div class="defect" id="d15">
+  <h3><span class="sev p0">P0</span> D15 — The streaming text problem: an 80-column agent TUI rendered at ~46 columns</h3>
+  <p>This is Daniel's original complaint, and on a working engine it is finally legible. Commander mounts the terminal at the pane's pixel width and reports that column count to the host, so the supervisor's TUI redraws itself for <b>~46 columns</b> — a little over half the width it was designed for. Every paragraph therefore soft-wraps, and the TUI's own layout arithmetic starts failing:</p>
+  <figure><img src="b2a-pw-terminal.png" alt="Terminal text wrapping defects on Chrome 145"><figcaption><b>13</b> · Supervisor pane, Chrome 145, Pixel 7 width. <span style="white-space:nowrap">(1)</span> a collapsed-message line wraps and its continuation <code>expand)</code> lands at <b>column 0</b> — outside the <code>›</code> gutter, left of every other line in the block. The hanging indent is lost, so the continuation reads as a new top-level item. <span style="white-space:nowrap">(2)</span> the widest line that fits is 45–46 characters; nearly every sentence in the pane is wrapped, and prose that was written to be scanned at 80 columns becomes a ragged column of fragments. <span style="white-space:nowrap">(3)</span> the <code>@supervisor</code> tag is painted on top of the input rule, with a stub of that rule left protruding to its right at the pane edge.</figcaption></figure>
+  <p>Note the asymmetry that makes this a layout bug rather than a font-size preference: bullet lines (<code>*</code>, <code>●</code>) keep their two-space continuation indent correctly, while the <code>›</code> collapsed-message lines lose theirs entirely. The wrap point is not being negotiated — the pane simply hands the host a narrow column and the host does its best.</p>
+  <div class="kv">
+    <div><b>State:</b> attach to any session at phone width on a working engine; supervisor pane, no interaction required.</div>
+    <div><b>Evidence:</b> <code>pw/s00–s39.png</code>, <code>b2a-pw-terminal.png</code>, <code>pw/probe.json</code> (mount 395×594 CSS px).</div>
+    <div><b>Hypothesis:</b> <code>terminal/ghostty/surface.ts:646</code> derives the grid from <code>mount.clientWidth/clientHeight</code> and <code>renderer.ts:89</code> computes <code>cols</code> by dividing by the glyph width; <code>DESIGN.md</code> clamps <code>--fs-terminal</code> to 12–16px. At 395 CSS px there is no font size that produces a usable column count — 12px still only buys ~50. The column count is not the tuning knob; the premise is. A phone needs a reflowed transcript view (word-wrapped at UI text size, not an ANSI grid), with the true terminal grid available on demand and horizontally scrollable.</div>
+    <div><b>Engine-independent:</b> yes — this is the layout, not the browser.</div>
+  </div>
+</div>
+
+<div class="defect" id="d7b">
+  <h3><span class="sev p1">P1</span> D7 confirmed — the bottom rail is worse on a current browser</h3>
+  <p>Like-for-like with figure 10, on Chrome 145:</p>
+  <figure class="wide"><img src="b1a-pw-rail.png" alt="Bottom rail on Chrome 145, annotated"><figcaption><b>14</b> · 2× zoom, Chrome 145, Pixel 7 width. <span style="white-space:nowrap">(1)</span> the <code>--line-strong</code> outline on <b>+ Pair</b> is now <em>clipped</em> — the collapsed context pill's background begins mid-border, so the rounded rectangle is sliced open on its right edge. <span style="white-space:nowrap">(2)</span> three unlabelled counts in three colours with two different badge treatments: red <code>6</code> and amber <code>3</code> get tinted circles, blue <code>91</code> gets nothing. <span style="white-space:nowrap">(3)</span> the machine chip is still truncated to two characters and its status dot is still clipped by the chip's own corner radius. <b>Machines</b> remains the only item in no container at all.</figcaption></figure>
+  <div class="kv"><div><b>Engine-independent:</b> confirmed on both engines. Nothing here is a rendering artifact — it is what the CSS asks for.</div></div>
+</div>
+
 <h3>Summary table</h3>
 <table>
   <tr><th>#</th><th>Defect</th><th>Sev</th><th>Suspected source</th><th>Engine-independent</th></tr>
@@ -328,6 +366,7 @@ li{margin-bottom:6px}
   <tr><td class="mono">D12</td><td><code>--text-lo</code> ≈2.4:1 used for controls</td><td>P2</td><td class="mono">styles.css / DESIGN.md</td><td>yes</td></tr>
   <tr><td class="mono">D13</td><td>Full-viewport dashed empty states</td><td>P3</td><td class="mono">empty-state markup</td><td>yes</td></tr>
   <tr><td class="mono">D14</td><td>No session restore on reopen</td><td>P2</td><td class="mono">storage.ts / main.ts</td><td>yes</td></tr>
+  <tr><td class="mono">D15</td><td>80-column agent TUI rendered at ~46 columns; hanging indents collapse</td><td>P0</td><td class="mono">surface.ts:646, renderer.ts:89</td><td>yes</td></tr>
 </table>
 
 <!-- ============================================================= -->
@@ -492,7 +531,7 @@ li{margin-bottom:6px}
   <h4>What it makes possible that today's UI cannot</h4>
   <ul>
     <li><b>Workers stop being second-class.</b> Today a worker is a 32px name (D6). Here a worker and a supervisor are the same card, and reaching the worker is a swipe, not a hunt for an unlabelled ★.</li>
-    <li><b>Readable output without a terminal grid.</b> A reflowing tail at UI text size is legible at arm's length; a 13px 80-column grid on a 411 CSS-px screen is not. The full terminal stays one tap away for when you genuinely need it.</li>
+    <li><b>Readable output without a terminal grid.</b> This is now the measured problem, not a preference: <a href="#d15">D15</a> shows the supervisor TUI redrawing itself at ~46 columns, where its own hanging indents collapse and continuations escape their gutter. A reflowing tail at UI text size is legible at arm's length; a 13px ANSI grid on a 395 CSS-px pane is not, at any font size the 12–16px clamp allows. The true terminal stays one tap away, horizontally scrollable, for when you genuinely need it.</li>
     <li><b>Actions land in the thumb arc.</b> <b>Interrupt</b> moves from the top-right corner (the single worst place on a phone, D3/fig 05) to the bottom of the card it belongs to.</li>
   </ul>
   <p><b>Cost:</b> the reflowing tail is a new render path — you cannot get it by restyling the Ghostty canvas, and it needs a server-side or client-side "last N logical lines" notion that survives ANSI.</p>
@@ -567,7 +606,7 @@ li{margin-bottom:6px}
   <p>They are not really three products; they are three answers to "what is the primary object", and the right composition is a stack:</p>
   <ul>
     <li><b>A (The Inbox) is the front door</b> because it is the only one that matches why someone picks up a phone at all, and because it is the only one that still works when the terminal renderer is broken — which, today, it entirely is (D3). It is also the direction that turns the existing attention model into the product's spine instead of a badge in the corner.</li>
-    <li><b>B (The Deck) is what you get when you tap a card.</b> "Show me true-panther" should land on that agent's card, swipeable to its peers. This retires the supervisor-65%/worker-35% split that makes workers unreachable on a phone (D6) and moves destructive actions out of the top-right corner.</li>
+    <li><b>B (The Deck) is what you get when you tap a card</b>, and <a href="#d15">D15</a> is its strongest argument: a reflowed transcript is the only way phone-width output becomes readable, because the column count is not a knob that can be turned far enough. "Show me true-panther" should land on that agent's card, swipeable to its peers. This retires the supervisor-65%/worker-35% split that makes workers unreachable on a phone (D6) and moves destructive actions out of the top-right corner.</li>
     <li><b>C (Voice) is not a fourth screen — it is the composer</b> for both. <code>speech-input.ts</code> already implements mic → transcript → review → send; promoting it from a button inside a bottom sheet to the persistent primary input, with an explicit confirm-target step, is the cheapest large win available and it sidesteps the keyboard catastrophe (D4) entirely.</li>
   </ul>
   <p><b>Sequencing.</b> Fix D3 and D1 first — they are blockers and neither is a design question. Then build A against the existing attention feed. Then B. Then promote C. A and B are mostly composition and CSS; C is the one that needs new backend surface, so it should not gate the first two.</p>
@@ -619,8 +658,23 @@ adb shell settings put system user_rotation 1      # landscape; 0 = portrait
 adb logcat -d -s chromium:*                        # surfaced the GL noise
 python3 -c "…PIL…"                                 # crops, 2× zoom, annotations</code></pre>
 
+<h3>Control run — Chrome 145 at a Pixel 7 profile</h3>
+<pre><code># playwright resolved from a sibling checkout; browsers already in ~/.cache/ms-playwright
+NODE_PATH=/home/pippenz/Petrastella/ozer/node_modules DISPLAY=:0 \
+PW_PAIR_URL="$(grep -o 'https://[^ ]*#pair=[^ ]*' pair-cli-6.txt)" node pw-capture.js
+
+# pw-capture.js, in short:
+#   chromium.launch({ headless: false })              # see note below
+#   newContext({ ...devices['Pixel 7'], recordVideo }) # 412x915, DPR 2.625, touch, mobile UA
+#   goto(pairUrl) -&gt; "Pair a machine" -&gt; fill label/operator -&gt; submit
+#   "Machines" -&gt; click session row -&gt; wait for attach
+#   40 x page.screenshot() at 300ms  (pw/s00..s39.png)
+#   evaluate() probe: mount geometry, typeof AbortSignal.any, UA, DPR, innerText
+#   setViewportSize(915x412) for the landscape frame</code></pre>
+<div class="callout warn"><p><b>Environment note, not a product defect.</b> Playwright's <em>headless shell</em> crashes the render process on this app at <code>domcontentloaded</code>, in every configuration tried (desktop and Pixel 7 viewports, with and without <code>--disable-dev-shm-usage</code>, <code>--disable-gpu</code>, <code>--use-gl=swiftshader</code>, and <code>--headless=new</code>). <code>https://example.com</code> loads fine in the same launcher, and headed Chromium on <code>:0</code> loads Commander fine. Recorded here because it would block any headless e2e or visual-regression suite against the hub, and because the likely culprit — the Ghostty WASM/canvas mount — is worth someone's ten minutes.</p></div>
+
 <h3>Retest recipe (to separate engine age from authored defects)</h3>
-<p>Re-run <a href="#d3">D3</a> on a browser with <code>AbortSignal.any</code>: a physical Android device on current Chrome, or an AVD image with a newer bundled Chrome, or Chrome DevTools device emulation at 411×914 / DPR 2.625. If the terminal paints, D3's first half is engine age and only the frozen timer and the buried truncated error remain as product bugs. <b>Every other defect in this report is authored CSS or markup and will reproduce on any engine.</b></p>
+<p><b>Done — see section <a href="#control">2b</a>.</b> The original recipe was: re-run <a href="#d3">D3</a> on a browser with <code>AbortSignal.any</code>: a physical Android device on current Chrome, or an AVD image with a newer bundled Chrome, or Chrome DevTools device emulation at 411×914 / DPR 2.625. The terminal paints, so D3's first half is engine age and only the frozen timer, the buried truncated error and the missing unsupported-browser path remain as product bugs. <b>Every other defect in this report is authored CSS or markup and will reproduce on any engine.</b></p>
 
 <h3>Screenshot index</h3>
 <table>
@@ -657,7 +711,13 @@ python3 -c "…PIL…"                                 # crops, 2× zoom, annota
   <tr><td class="mono">31-back-in-app.png · 32-reopen.png</td><td>Reopen: still paired, but back to "No session open"</td></tr>
   <tr><td class="mono">33-reattached.png</td><td>Re-attached for the recording</td></tr>
   <tr><td class="mono">34-attention-details.png</td><td><b>The diagnosis:</b> <code>AbortSignal.any is not a…</code> ×26</td></tr>
-  <tr><td class="mono">a1–a8-*.png</td><td>Annotated derivatives used as figures above</td></tr>
+  <tr><td class="mono">a1–a8-*.png</td><td>Annotated derivatives used as figures above (Chrome 113 run)</td></tr>
+  <tr><td class="mono">pw/p01–p09-*.png</td><td><b>Control run, Chrome 145 / Pixel 7:</b> load, pair dialog, form, paired, drawer, attached, post-stream, landscape</td></tr>
+  <tr><td class="mono">pw/s00–s39.png</td><td>Streaming capture, 40 frames at 300 ms</td></tr>
+  <tr><td class="mono">pw/video/*.webm</td><td>Playwright video of the whole control run</td></tr>
+  <tr><td class="mono">pw/probe.json</td><td>Mount geometry, <code>AbortSignal.any</code> presence, UA, DPR, console errors</td></tr>
+  <tr><td class="mono">b1a/b2a-pw-*.png</td><td>Annotated control-run figures (bottom rail, terminal wrap)</td></tr>
+  <tr><td class="mono">pw-capture.js · pw.log</td><td>Control-run script and its output</td></tr>
   <tr><td class="mono">emulator.log · pair-cli-output.txt</td><td>Raw boot log and CLI pairing output</td></tr>
 </table>
 

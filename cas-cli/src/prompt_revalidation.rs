@@ -93,9 +93,19 @@ fn first_task_id_token(text: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MergeRequestEnvelope {
     pub task_id: String,
+    /// The tip the request is about, resolved LIVE at compose time.
     pub branch_tip: String,
     pub target_branch: String,
     pub target_branch_tip: String,
+    /// The `factory_branch_anchor` recorded by the previous merge/close, when
+    /// it differs from `branch_tip` (cas-b17c / GH #703).
+    ///
+    /// Present only on drift, and never used to decide suppression — it is
+    /// carried so the supervisor can see that the worker has pushed past the
+    /// last merge rather than having to infer it. Optional with a serde
+    /// default so envelopes written by an older client still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_tip: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -543,6 +553,73 @@ pub(crate) fn select_unambiguous_merge_task<'a>(
     });
     let only = matches.next()?;
     matches.next().is_none().then_some(only)
+}
+
+/// The branch a task's merge request is about: the parked branch it was
+/// delivered on, else the worker's own `factory/<assignee>`.
+///
+/// Shared by the compose path and the queued-delivery path (cas-b17c) so the
+/// two cannot disagree about which branch to resolve.
+pub(crate) fn merge_request_branch(task: Option<&cas_types::Task>) -> Option<String> {
+    let task = task?;
+    task.deliverables
+        .parked_branch
+        .clone()
+        .or_else(|| task.assignee.as_ref().map(|name| format!("factory/{name}")))
+}
+
+/// Resolve the tip a merge request must actually be judged against
+/// (cas-b17c / GH #703).
+///
+/// The recorded `factory_branch_anchor` is evidence about the *previous* merge
+/// cycle, not about the branch now. Preferring it meant that after a merge at
+/// A, the commits B and C a worker pushed next were revalidated as A — A is an
+/// ancestor of the target with its content present, so the request was
+/// suppressed with "Merge already landed" and the worker was told an unmerged
+/// fix had shipped. That is the reported defect, and it is the one direction
+/// this check must never fail in.
+///
+/// So the tip is resolved live, from the branch itself: the remote ref
+/// (`refs/remotes/origin/<branch>`) and the local ref, whichever is newer — the
+/// one that has the other as an ancestor. If neither contains the other the
+/// branch has diverged and there is no single "the tip", so this returns the
+/// remote one and the caller's ancestor check decides on real evidence; if
+/// nothing resolves it returns `None`, and the caller must treat that as
+/// unverifiable rather than falling back to the anchor. The anchor is kept by
+/// callers only as a reported datum so the drift is visible.
+pub(crate) fn resolve_live_branch_tip(
+    repo_path: &Path,
+    branch: &str,
+    _recorded_anchor: Option<&str>,
+) -> Option<String> {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::{
+        git_commit_is_ancestor, resolve_branch_sha,
+    };
+
+    let remote = resolve_branch_sha(repo_path, &format!("refs/remotes/origin/{branch}"));
+    let local = resolve_branch_sha(repo_path, branch);
+
+    match (remote, local) {
+        (Some(remote), Some(local)) => {
+            if remote == local {
+                return Some(remote);
+            }
+            // Newer wins: the tip that already contains the other is the one a
+            // merge request is really about.
+            if git_commit_is_ancestor(repo_path, &local, &remote) {
+                Some(remote)
+            } else if git_commit_is_ancestor(repo_path, &remote, &local) {
+                Some(local)
+            } else {
+                // Diverged. Report the published side; the caller's ancestor
+                // and content checks then decide from evidence, and neither
+                // side can be declared integrated on the other's behalf.
+                Some(remote)
+            }
+        }
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    }
 }
 
 pub(crate) fn revalidate_merge_request(
@@ -1088,6 +1165,138 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    /// GH #703 (cas-b17c) — the reported defect, replayed.
+    ///
+    /// A merge lands at A, the worker pushes B, and the request for B was
+    /// suppressed as "already landed" because revalidation ran against the
+    /// recorded anchor A instead of the live branch tip. The tip under test
+    /// must be resolved live; the anchor is evidence about the previous cycle.
+    #[test]
+    fn a_commit_pushed_after_the_merge_is_revalidated_against_the_live_tip() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        git(repo.path(), &["init", "-b", "main"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "cas-test@example.invalid"],
+        );
+        git(repo.path(), &["config", "user.name", "Cassy Test"]);
+        std::fs::write(repo.path().join("base"), "base\n").expect("base file");
+        git(repo.path(), &["add", "base"]);
+        git(repo.path(), &["commit", "-m", "base"]);
+        git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
+        std::fs::write(repo.path().join("work"), "work\n").expect("work file");
+        git(repo.path(), &["add", "work"]);
+        git(repo.path(), &["commit", "-m", "first"]);
+        let anchor = git(repo.path(), &["rev-parse", "factory/test-worker"]);
+
+        // The supervisor merges A and records it as the branch anchor.
+        git(repo.path(), &["checkout", "main"]);
+        git(
+            repo.path(),
+            &["merge", "--no-ff", "factory/test-worker", "-m", "merge A"],
+        );
+
+        // The worker keeps working: B lands on the branch, unmerged.
+        git(repo.path(), &["checkout", "factory/test-worker"]);
+        std::fs::write(repo.path().join("more"), "more\n").expect("more file");
+        git(repo.path(), &["add", "more"]);
+        git(repo.path(), &["commit", "-m", "second"]);
+        let live_tip = git(repo.path(), &["rev-parse", "factory/test-worker"]);
+        assert_ne!(live_tip, anchor);
+
+        // The anchor still looks merged — this is why anchor-first suppressed
+        // the request.
+        assert!(matches!(
+            revalidate_merge_request(repo.path(), &anchor, "main"),
+            MergeRequestDecision::AlreadyIntegrated { .. }
+        ));
+
+        // The resolver must return the live tip, not the recorded anchor.
+        let resolved = resolve_live_branch_tip(
+            repo.path(),
+            "factory/test-worker",
+            Some(anchor.as_str()),
+        )
+        .expect("live tip resolves");
+        assert_eq!(resolved, live_tip);
+
+        // And the request for it is Pending, i.e. delivered.
+        assert!(matches!(
+            revalidate_merge_request(repo.path(), &resolved, "main"),
+            MergeRequestDecision::Pending { .. }
+        ));
+    }
+
+    /// Once B is merged too, suppression is correct again.
+    #[test]
+    fn the_live_tip_suppresses_only_after_it_is_actually_merged() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        git(repo.path(), &["init", "-b", "main"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "cas-test@example.invalid"],
+        );
+        git(repo.path(), &["config", "user.name", "Cassy Test"]);
+        std::fs::write(repo.path().join("base"), "base\n").expect("base file");
+        git(repo.path(), &["add", "base"]);
+        git(repo.path(), &["commit", "-m", "base"]);
+        git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
+        std::fs::write(repo.path().join("work"), "work\n").expect("work file");
+        git(repo.path(), &["add", "work"]);
+        git(repo.path(), &["commit", "-m", "first"]);
+        let anchor = git(repo.path(), &["rev-parse", "factory/test-worker"]);
+        std::fs::write(repo.path().join("more"), "more\n").expect("more file");
+        git(repo.path(), &["add", "more"]);
+        git(repo.path(), &["commit", "-m", "second"]);
+        git(repo.path(), &["checkout", "main"]);
+        git(
+            repo.path(),
+            &["merge", "--no-ff", "factory/test-worker", "-m", "merge B"],
+        );
+
+        let resolved =
+            resolve_live_branch_tip(repo.path(), "factory/test-worker", Some(anchor.as_str()))
+                .expect("live tip resolves");
+        assert!(matches!(
+            revalidate_merge_request(repo.path(), &resolved, "main"),
+            MergeRequestDecision::AlreadyIntegrated { .. }
+        ));
+    }
+
+    /// An anchor with no resolvable branch ref must never be treated as the
+    /// live tip: suppressing on it is how an unmerged fix gets told it landed.
+    #[test]
+    fn an_unresolvable_branch_ref_yields_no_live_tip_rather_than_the_anchor() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        git(repo.path(), &["init", "-b", "main"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "cas-test@example.invalid"],
+        );
+        git(repo.path(), &["config", "user.name", "Cassy Test"]);
+        std::fs::write(repo.path().join("base"), "base\n").expect("base file");
+        git(repo.path(), &["add", "base"]);
+        git(repo.path(), &["commit", "-m", "base"]);
+        let anchor = git(repo.path(), &["rev-parse", "main"]);
+
+        assert_eq!(
+            resolve_live_branch_tip(repo.path(), "factory/never-existed", Some(anchor.as_str())),
+            None,
+            "an absent branch must not fall back to the recorded anchor"
+        );
+        // With no live tip there is nothing to suppress on. The exact
+        // non-suppressing verdict does not matter — being told "already
+        // landed" for an unmerged fix is the one outcome this must never
+        // produce, so that is what the test pins.
+        assert!(
+            !matches!(
+                revalidate_merge_request(repo.path(), "factory/never-existed", "main"),
+                MergeRequestDecision::AlreadyIntegrated { .. }
+            ),
+            "an unresolvable branch must never be reported as integrated"
+        );
+    }
+
     #[test]
     fn merge_then_stale_request_is_suppressed_with_current_target_tip() {
         let repo = tempfile::tempdir().expect("temp repo");
@@ -1127,6 +1336,7 @@ mod tests {
             branch_tip: worker_tip,
             target_branch: "main".to_string(),
             target_branch_tip: target_tip,
+        anchor_tip: None,
         };
         assert_eq!(
             parse_merge_request_envelope(&attach_merge_request_envelope("please merge", &envelope)),
@@ -1253,6 +1463,7 @@ mod tests {
                 branch_tip: worker_tip.clone(),
                 target_branch: "main".to_string(),
                 target_branch_tip: enqueue_target_tip.clone(),
+            anchor_tip: None,
             },
         );
 
@@ -1281,6 +1492,7 @@ mod tests {
                 branch_tip: worker_tip,
                 target_branch: "main".to_string(),
                 target_branch_tip: delivery_target_tip,
+            anchor_tip: None,
             })
         );
     }
@@ -1336,6 +1548,7 @@ mod tests {
             branch_tip: "worker-tip".to_string(),
             target_branch: "main".to_string(),
             target_branch_tip: "base-tip".to_string(),
+        anchor_tip: None,
         }
     }
 

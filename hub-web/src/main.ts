@@ -1,5 +1,5 @@
 import "./styles.css";
-import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
+import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionCounts, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
@@ -14,6 +14,7 @@ import { exchangePendingPairing, PairingCleanupError, PairingExchangeError } fro
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
+import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
@@ -97,6 +98,11 @@ let messageDelivery: { session: string; target: string } | undefined;
 // to sit beside the composer: a toast is gone before a phone operator has
 // finished reading it, and a disabled button says nothing at all.
 let messageStatus: { session: string | undefined; text: string; tone: "info" | "error" } | undefined;
+
+// An engine cannot gain an API mid-session, so this is probed once. Saying so
+// in one line beats a "Connecting…" spinner that can never finish
+// (report cas-b652, defect D3).
+const browserNotice = unsupportedBrowserNotice(browserSupport());
 
 // One phone breakpoint shared by layout state, pane mounting, and pane tapping.
 function phoneLayout(): boolean { return window.matchMedia("(max-width: 850px)").matches; }
@@ -474,11 +480,14 @@ async function addAttention(machine: StoredMachine, session: string | undefined,
     kind,
     createdAt,
   }, content);
-  if (item.severity === "critical") newCriticalAttentionIds.add(item.id);
-  attention = [item, ...attention];
-  await attentionStore.put(item);
+  // One recurring failure is one entry: a retry loop used to write a row per
+  // attempt for the same outage (cas-b652 D3).
+  const merge = mergeAttentionItem(attention, item);
+  if (merge.stored.severity === "critical" && !merge.repeat) newCriticalAttentionIds.add(merge.stored.id);
+  attention = merge.items;
+  await attentionStore.put(merge.stored);
   render();
-  newCriticalAttentionIds.delete(item.id);
+  newCriticalAttentionIds.delete(merge.stored.id);
 }
 
 async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> {
@@ -787,7 +796,10 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       banner.setAttribute("role", "status");
       grid.prepend(banner);
     }
-    banner.textContent = `Disconnected ${view.elapsedSeconds}s ago — ${view.retryLabel} (attempt ${view.attempt})`;
+    // A fatal failure is not reconnecting, so the banner must not claim it is.
+    banner.textContent = snapshot.fatal === true
+      ? snapshot.reason ?? "This browser cannot reconnect to the terminal."
+      : `Disconnected ${view.elapsedSeconds}s ago — ${view.retryLabel} (attempt ${view.attempt})`;
     grid.classList.add("terminal-disconnected");
     return;
   }
@@ -796,17 +808,24 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   const placeholder = grid.querySelector<HTMLElement>(".empty");
   if (!placeholder) return;
   const view = connectingView(snapshot, now);
-  placeholder.className = "empty terminal-state terminal-connecting";
-  const spinner = document.createElement("span");
-  spinner.className = "connection-spinner";
-  spinner.setAttribute("aria-hidden", "true");
+  const fatal = snapshot.fatal === true;
+  placeholder.className = `empty terminal-state terminal-connecting${fatal ? " terminal-connect-failed" : ""}`;
   const title = document.createElement("p");
   title.className = "terminal-connecting-title";
-  title.textContent = `Connecting to ${session}…`;
-  const elapsed = document.createElement("time");
-  elapsed.className = "terminal-connecting-elapsed";
-  elapsed.textContent = view.elapsedLabel;
-  placeholder.replaceChildren(spinner, title, elapsed);
+  // A spinner and a rising counter over a failure that will never resolve is
+  // the D3 overlay: it reads as progress. State the outcome instead.
+  title.textContent = fatal ? `Cannot connect to ${session}` : `Connecting to ${session}…`;
+  if (fatal) {
+    placeholder.replaceChildren(title);
+  } else {
+    const spinner = document.createElement("span");
+    spinner.className = "connection-spinner";
+    spinner.setAttribute("aria-hidden", "true");
+    const elapsed = document.createElement("time");
+    elapsed.className = "terminal-connecting-elapsed";
+    elapsed.textContent = view.elapsedLabel;
+    placeholder.replaceChildren(spinner, title, elapsed);
+  }
   if (view.step) {
     const step = document.createElement("p");
     step.className = "terminal-connecting-step";
@@ -843,6 +862,8 @@ function syncConnectionViewTicker(): void {
   if (!selectedMachineId || !selectedSession || !connection) return;
   const snapshot = connection.attachSnapshot(selectedSession) ?? connection.snapshot();
   if (snapshot.phase === "live" && !snapshot.degraded) return;
+  // Nothing about a fatal state changes with time; a 1Hz repaint of it is noise.
+  if (snapshot.fatal === true) return;
   const machineId = selectedMachineId;
   const session = selectedSession;
   connectionViewTicker = window.setInterval(() => {
@@ -1619,7 +1640,8 @@ function render(captureDraft = true): void {
     surfaces.clear();
   }
   app.innerHTML = `
-    <div class="shell${machineDrawerOpen ? " drawer-open" : ""}${attentionPanelCollapsed ? " attention-collapsed" : " attention-expanded"}${fleetEmpty ? " fleet-empty" : ""}">
+    ${browserNotice ? `<p class="browser-unsupported" role="alert">${escapeHtml(browserNotice)}</p>` : ""}
+    <div class="shell${browserNotice ? " with-browser-notice" : ""}${machineDrawerOpen ? " drawer-open" : ""}${attentionPanelCollapsed ? " attention-collapsed" : " attention-expanded"}${fleetEmpty ? " fleet-empty" : ""}">
       <aside class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}" aria-label="Machines and sessions">
         <div class="machine-rail">
           <button id="machine-drawer-toggle" class="rail-control commander-mark" type="button" aria-label="Open machines and sessions" title="Machines and sessions" aria-expanded="${machineDrawerOpen}"><svg class="commander-mark-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg><span class="commander-mark-label">Machines</span></button>

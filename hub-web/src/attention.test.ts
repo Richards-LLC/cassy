@@ -10,6 +10,7 @@ import {
   dismissableInfoItems,
   groupAttention,
   machineEventAttention,
+  mergeAttentionItem,
   severityForEvent,
 } from "./attention";
 import { cycleAttentionGroup } from "./attention-view";
@@ -280,6 +281,49 @@ describe("Commander attention triage queue", () => {
     expect(cycleAttentionGroup(container, 1)?.id).toBe("second");
     expect(cycleAttentionGroup(container, -1)?.id).toBe("first");
     expect(focused).toEqual(["second", "first"]);
+  });
+
+  it("collapses a repeating failure into one stored entry instead of one per retry", () => {
+    // A machine retrying every second wrote 26 rows for one outage, inflating
+    // every badge and the local store with the same sentence (cas-b652 D3).
+    const first = item({ id: "a1", kind: "hub_disconnected", fingerprint: "soundwave:hub_disconnected", createdAt: "2026-08-15T02:30:00Z" });
+    let items = mergeAttentionItem([], first).items;
+    let merge = mergeAttentionItem(items, item({ id: "a2", kind: "hub_disconnected", fingerprint: "soundwave:hub_disconnected", createdAt: "2026-08-15T02:30:05Z", detail: "attempt 2" }));
+
+    expect(merge.repeat).toBe(true);
+    expect(merge.items).toHaveLength(1);
+    // The stored row keeps the original identity, so the local store is
+    // updated rather than grown.
+    expect(merge.stored.id).toBe("a1");
+    expect(merge.stored.repeatCount).toBe(2);
+    expect(merge.stored.firstSeenAt).toBe("2026-08-15T02:30:00Z");
+    expect(merge.stored.createdAt).toBe("2026-08-15T02:30:05Z");
+    expect(merge.stored.detail).toBe("attempt 2");
+    // One outage counts once in the badge, however many times it retried.
+    expect(attentionCounts(merge.items)).toEqual({ critical: 0, warning: 1, info: 0 });
+
+    // The repeat count survives into the card, so "this is still happening"
+    // is not lost by collapsing it.
+    merge = mergeAttentionItem(merge.items, item({ id: "a3", kind: "hub_disconnected", fingerprint: "soundwave:hub_disconnected", createdAt: "2026-08-15T02:30:09Z" }));
+    expect(merge.stored.repeatCount).toBe(3);
+    expect(coalesceAttention(merge.items)[0].count).toBe(3);
+  });
+
+  it("starts a new entry once the repeating one is acknowledged, or when it is a different failure", () => {
+    const acknowledged = item({ id: "a1", fingerprint: "soundwave:hub_disconnected", acknowledgedAt: "2026-08-15T02:31:00Z" });
+    const again = item({ id: "a2", fingerprint: "soundwave:hub_disconnected" });
+    const afterAck = mergeAttentionItem([acknowledged], again);
+    expect(afterAck.repeat).toBe(false);
+    expect(afterAck.items).toHaveLength(2);
+    expect(afterAck.stored.id).toBe("a2");
+
+    const other = mergeAttentionItem([item({ id: "a1", fingerprint: "soundwave:auth_loss" })], item({ id: "a2", fingerprint: "soundwave:hub_disconnected" }));
+    expect(other.items).toHaveLength(2);
+
+    // Without a fingerprint there is nothing to collapse on, so nothing is lost.
+    const unfingerprinted = mergeAttentionItem([item({ id: "a1" })], item({ id: "a2" }));
+    expect(unfingerprinted.repeat).toBe(false);
+    expect(unfingerprinted.items).toHaveLength(2);
   });
 
   it("gives an exited worker an actionable critical card without exposing the wire name", () => {

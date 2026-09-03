@@ -366,6 +366,33 @@ export function attentionCounts(items: readonly AttentionItem[]): AttentionCount
   return counts;
 }
 
+export interface AttentionSummary {
+  severity: AttentionSeverity | "clear";
+  total: number;
+  label: string;
+  description: string;
+}
+
+/**
+ * One labelled figure for the collapsed rail. Three bare numbers in three
+ * colours say nothing about what they count and force two badge treatments
+ * into a 48px row; the rail states the total and takes its colour from the
+ * worst outstanding severity, and the per-severity split stays in the panel.
+ */
+export function attentionSummary(counts: AttentionCounts): AttentionSummary {
+  const total = counts.critical + counts.warning + counts.info;
+  if (total === 0) {
+    return { severity: "clear", total: 0, label: "Clear", description: "Nothing needs attention" };
+  }
+  const severity: AttentionSeverity = counts.critical > 0 ? "critical" : counts.warning > 0 ? "warning" : "info";
+  return {
+    severity,
+    total,
+    label: `Needs ${total}`,
+    description: `${total} need attention: ${counts.critical} critical, ${counts.warning} warning, ${counts.info} info`,
+  };
+}
+
 export function dismissableInfoItems(items: readonly AttentionItem[]): AttentionItem[] {
   return items.filter((item) => !item.acknowledgedAt && severityForEvent(item.kind, item.severity) === "info");
 }

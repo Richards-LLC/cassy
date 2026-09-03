@@ -1838,6 +1838,9 @@ mod tests {
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn proxy_vercel_client_first_call_attempts_lazy_init() {
+        // reqwest needs the rustls CryptoProvider main.rs installs before dispatch;
+        // this test never passes through main.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         use super::mcp_proxy_client::ProxyVercelClient;
         let mut env = TestEnvGuard::temp_home();
         let xdg = env.home().join(".config");

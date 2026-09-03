@@ -336,6 +336,9 @@ mod tests {
 
     #[test]
     fn first_call_attempts_lazy_init_and_engine_stays_uninstalled_on_empty_config() {
+        // reqwest needs the rustls CryptoProvider main.rs installs before dispatch;
+        // this test never passes through main.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         // Hermetic env: no proxy.toml anywhere → load_merged returns
         // an empty servers map → ensure! fires BEFORE the engine is
         // installed into self.state. engine_constructed must remain

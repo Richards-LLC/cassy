@@ -27,6 +27,8 @@ A `mecha_post` receipt looks like this, with a per-kind block alongside it:
 
 `message_id` is the receipt a reply threads onto. A top-level message has `thread_id` equal to its own `message_id`; a reply carries the **parent's** `message_id` as its `thread_id`. Treat `permalink` as opaque — never assemble one by hand.
 
+How far each shape is proven, so you know what to re-check rather than trust: `kind: "message"` is confirmed against real release posts and re-read from the hub. `kind: "reaction"` is confirmed by an add/remove probe. `kind: "file"` is taken from the published input schema and the shared envelope — its per-kind block has not been observed, so treat the first upload of a release as the check, and report what it actually returns.
+
 ## Steps
 
 1. **Resolve the channel.** Read the rubric's channel name, ID, and branch→deploy-target mapping. Use `^[a-z0-9-]+-internal$` or an explicit allowlist ID. Pass the **name**, not the ID. A private name resolves only while the bot is a member; invite it and record the ID once. Done when the channel is named by the rubric.

@@ -489,8 +489,8 @@ async fn personal_push_keeps_itemized_invalid_revision_visible_in_queue_health()
     let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
 
     assert_eq!(
-        result.pushed_entries, 0,
-        "the batch reports its queue error"
+        result.pushed_entries, 1,
+        "the valid neighbour is still reported as pushed"
     );
     assert_eq!(result.errors.len(), 1);
     assert!(result.errors[0].contains("cas-invalid-entry"));
@@ -795,7 +795,10 @@ async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors()
     );
     let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
 
-    assert_eq!(result.pushed_entries, 0, "the batch reports its queue error");
+    // GH #668: a partially rejected batch reports both halves. The accepted
+    // neighbour is counted as pushed and the refusal is still an error, so a
+    // per-row rejection no longer erases the rows the cloud did write.
+    assert_eq!(result.pushed_entries, 1, "the accepted neighbour is reported");
     assert_eq!(result.errors.len(), 1);
     let remaining = queue.list_all(10).unwrap();
     assert_eq!(remaining.len(), 1);
@@ -1812,4 +1815,163 @@ async fn reconciliation_snapshot_tombstone_deletes_the_local_edge() {
             .unwrap()
             .is_some()
     );
+}
+
+/// GH #668: the deployed cloud returns per-row verdicts in a TOP-LEVEL `rows`
+/// array (verified against /api/sync/push on 2026-09-03). A row the cloud kept
+/// a newer version of leaves the queue and is reported as an acknowledgement,
+/// not as a failure.
+#[tokio::test]
+async fn top_level_rows_ack_lww_skips_and_park_rejections_by_reason() {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": {"inserted": 1, "updated": 0, "skipped": 2},
+            "rows": [
+                {"entity_type": "entries", "id": "entry-written", "outcome": "inserted"},
+                {"entity_type": "entries", "id": "entry-kept-newer", "outcome": "skipped_lww"},
+                {
+                    "entity_type": "entries",
+                    "id": "entry-refused",
+                    "outcome": "rejected",
+                    "reason": "project_mismatch"
+                }
+            ],
+            "canonical_id": "test-project"
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    for id in ["entry-written", "entry-kept-newer", "entry-refused"] {
+        queue
+            .enqueue(
+                EntityType::Entry,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}"}}"#)),
+            )
+            .unwrap();
+    }
+
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "test-project".to_string(),
+        temp.path(),
+    );
+    let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
+
+    assert_eq!(
+        result.skipped_lww_acked, 1,
+        "the LWW loss is an acknowledgement"
+    );
+    let remaining = queue.list_all(10).unwrap();
+    assert_eq!(remaining.len(), 1, "only the refused row is retained");
+    assert_eq!(remaining[0].entity_id, "entry-refused");
+    assert_eq!(
+        result
+            .remaining_backlog
+            .rejected_by_reason
+            .get("project_mismatch")
+            .copied(),
+        Some(1),
+        "the cloud's reason is persisted for reporting"
+    );
+    assert!(
+        result.remaining_backlog.failed_errors[0].contains("cas cloud link"),
+        "the diagnostic carries the remediation for its reason: {:?}",
+        result.remaining_backlog.failed_errors
+    );
+}
+
+/// A cloud build that answers with aggregate counts only must behave exactly as
+/// it did before per-row results existed.
+#[tokio::test]
+async fn responses_without_rows_keep_the_legacy_aggregate_behaviour() {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": {"inserted": 1, "updated": 0, "skipped": 1}
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    for id in ["entry-one", "entry-two"] {
+        queue
+            .enqueue(
+                EntityType::Entry,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}"}}"#)),
+            )
+            .unwrap();
+    }
+
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "test-project".to_string(),
+        temp.path(),
+    );
+    let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
+
+    assert!(result.errors.is_empty());
+    assert_eq!(result.pushed_entries, 2);
+    assert_eq!(
+        result.skipped_lww_acked, 1,
+        "an aggregate skip is still reported as a kept-newer row"
+    );
+    assert!(queue.list_all(10).unwrap().is_empty());
+    assert!(result.remaining_backlog.rejected_by_reason.is_empty());
+}
+
+/// Every reason the deployed cloud can return maps to a distinct, actionable
+/// remediation; an unknown reason says so instead of inventing a fix.
+#[test]
+fn every_push_reason_has_its_own_remediation() {
+    for reason in [
+        "project_mismatch",
+        "scope_mismatch",
+        "revision_conflict",
+        "version_gate",
+        "sync_limit_exceeded",
+    ] {
+        let hint = push_reason_hint(reason);
+        assert!(
+            !hint.starts_with("unrecognized"),
+            "{reason} must name its own repair"
+        );
+    }
+    assert!(push_reason_hint("brand_new_server_reason").starts_with("unrecognized"));
+    assert!(push_reason_is_permanent("project_mismatch"));
+    assert!(push_reason_is_permanent("SCOPE_MISMATCH"));
+    assert!(!push_reason_is_permanent("revision_conflict"));
 }

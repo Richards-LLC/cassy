@@ -8,12 +8,29 @@ use tracing::warn;
 
 use crate::cloud::sync_queue::PendingByType;
 use crate::cloud::syncer::{
-    CloudSyncer, PushBacklog, PushItemizedFailure, PushPlan, PushResponse, PushRowResult,
-    PushScope, SyncResult,
+    CloudSyncer, PushBacklog, PushItemizedFailure, PushPlan, PushResponse, PushRowOutcome,
+    PushRowResult, PushScope, SyncResult,
 };
 use crate::cloud::{QueuedSync, SyncOperation};
 use crate::error::CasError;
 use crate::types::Session;
+
+/// What one entity-typed batch actually settled.
+///
+/// The pushed count alone cannot distinguish a row the cloud wrote from a row
+/// it declined because it already held a newer version. Both leave the queue,
+/// but only the second must be reported as a kept-newer acknowledgement.
+#[derive(Debug, Default, Clone)]
+pub(super) struct PushBatchOutcome {
+    /// Rows removed from the queue (written, or acknowledged as LWW losses).
+    pub synced: usize,
+    /// Rows the cloud kept a newer version of.
+    pub skipped_lww: usize,
+    /// A refusal the server explained per row. This travels with the counts
+    /// rather than as `Err` so a partially rejected batch still reports the
+    /// rows it did settle instead of erasing them behind the first error.
+    pub error: Option<String>,
+}
 
 impl CloudSyncer {
     pub fn push(&self) -> Result<SyncResult, CasError> {
@@ -92,6 +109,7 @@ impl CloudSyncer {
         let start = Instant::now();
 
         self.requeue_version_gated_items()?;
+        result.requeued_after_upgrade = self.requeue_stale_client_failures()?;
 
         if !self.is_available() {
             return Ok(result);
@@ -170,7 +188,13 @@ impl CloudSyncer {
             ($field:ident, $items:expr, $label:literal, $error:literal) => {
                 if !$items.is_empty() {
                     match self.push_batch($items, $label, token) {
-                        Ok(count) => result.$field = count,
+                        Ok(outcome) => {
+                            result.$field = outcome.synced;
+                            result.skipped_lww_acked += outcome.skipped_lww;
+                            if let Some(error) = outcome.error {
+                                result.errors.push(format!(concat!($error, ": {}"), error));
+                            }
+                        }
                         Err(e) => result.errors.push(format!(concat!($error, ": {}"), e)),
                     }
                 }
@@ -263,6 +287,7 @@ impl CloudSyncer {
         target.pushed_agents += source.pushed_agents;
         target.pushed_worktrees += source.pushed_worktrees;
         target.pushed_task_dependencies += source.pushed_task_dependencies;
+        target.skipped_lww_acked += source.skipped_lww_acked;
         target.conflicts_resolved += source.conflicts_resolved;
         target.conflicts_resolved_local += source.conflicts_resolved_local;
         target.conflicts_resolved_remote += source.conflicts_resolved_remote;
@@ -291,6 +316,10 @@ impl CloudSyncer {
                 .pending_count_for_entity_type(scope.entity_type(), self.config.max_retries)?,
             failed,
             failed_errors,
+            rejected_by_reason: self.queue.rejected_reason_counts_for_entity_type(
+                scope.entity_type(),
+                self.config.max_retries,
+            )?,
         })
     }
 
@@ -352,7 +381,7 @@ impl CloudSyncer {
         entity_type: &str,
         raw_response: &str,
         rows: HashMap<String, PushRowResult>,
-        synced_count: &mut usize,
+        outcome: &mut PushBatchOutcome,
         skip_errors: &mut Vec<String>,
     ) {
         let mut rejected = Vec::new();
@@ -361,16 +390,23 @@ impl CloudSyncer {
                 .get(&item.entity_id)
                 .expect("row_results_for validates every queue identity");
             if row.acknowledges() {
+                if row.outcome == PushRowOutcome::SkippedLww {
+                    outcome.skipped_lww += 1;
+                }
                 let _ = self.queue.mark_synced(item.id);
-                *synced_count += 1;
+                outcome.synced += 1;
                 continue;
             }
 
             let reason = row.reason.as_deref().unwrap_or("unspecified");
             let diagnostic = format!(
-                "cloud rejected {entity_type} {}: reason={reason}; server response: {raw_response}",
-                item.entity_id
+                "cloud rejected {entity_type} {}: reason={reason} ({}); server response: {raw_response}",
+                item.entity_id,
+                crate::cloud::syncer::push_reason_hint(reason)
             );
+            let _ = self
+                .queue
+                .record_row_outcome(item.id, "rejected", Some(reason));
             if row.rejection_is_retryable() {
                 let _ = self.queue.mark_failed(item.id, &diagnostic);
             } else {
@@ -396,7 +432,7 @@ impl CloudSyncer {
         items: &[QueuedSync],
         entity_type: &str,
         token: &str,
-    ) -> Result<usize, CasError> {
+    ) -> Result<PushBatchOutcome, CasError> {
         // Separate upserts and deletes
         let upsert_items: Vec<&QueuedSync> = items
             .iter()
@@ -434,7 +470,7 @@ impl CloudSyncer {
             }
         }
 
-        let mut synced_count = 0;
+        let mut outcome = PushBatchOutcome::default();
         // A 2xx response that explicitly reports skipped rows is not a fully
         // successful push. Aggregate-only responses leave every row
         // indistinguishable, while itemized rejected/invalid rows identify
@@ -474,7 +510,7 @@ impl CloudSyncer {
                                     entity_type,
                                     &response.raw_body,
                                     rows,
-                                    &mut synced_count,
+                                    &mut outcome,
                                     &mut skip_errors,
                                 );
                                 continue;
@@ -548,8 +584,9 @@ impl CloudSyncer {
                                     );
                                     for item in &batch_items {
                                         let _ = self.queue.mark_synced(item.id);
-                                        synced_count += 1;
+                                        outcome.synced += 1;
                                     }
+                                    outcome.skipped_lww += skipped_count;
                                     continue;
                                 }
                                 Err(error) => {
@@ -608,12 +645,29 @@ impl CloudSyncer {
                                     } else {
                                         let _ = self.queue.mark_failed(item.id, &diagnostic);
                                     }
+                                    let _ = self.queue.record_row_outcome(
+                                        item.id,
+                                        "rejected",
+                                        Some(match failure {
+                                            PushItemizedFailure::Rejection(rejection) => {
+                                                rejection.reason.as_str()
+                                            }
+                                            PushItemizedFailure::Invalid(invalid) => {
+                                                invalid.reason.as_str()
+                                            }
+                                        }),
+                                    );
                                     failure_details.push(format!("{} ({reason})", item.entity_id));
                                 } else {
                                     let _ = self.queue.mark_synced(item.id);
-                                    synced_count += 1;
+                                    outcome.synced += 1;
                                 }
                             }
+                            // Skips the server did not itemize are benign LWW
+                            // losses: they were acknowledged above, so report
+                            // them as kept-newer rather than silent successes.
+                            outcome.skipped_lww +=
+                                skipped_count.saturating_sub(failure_details.len());
                             if !failure_details.is_empty() {
                                 skip_errors.push(format!(
                                     "cloud rejected {} of {} {entity_type} row(s): {}",
@@ -625,7 +679,7 @@ impl CloudSyncer {
                         } else {
                             for item in &batch_items {
                                 let _ = self.queue.mark_synced(item.id);
-                                synced_count += 1;
+                                outcome.synced += 1;
                             }
                         }
                     }
@@ -641,9 +695,7 @@ impl CloudSyncer {
             }
         }
 
-        if let Some(error) = skip_errors.into_iter().next() {
-            return Err(CasError::Other(error));
-        }
+        outcome.error = skip_errors.into_iter().next();
 
         // Send individual delete requests
         for item in deletes {
@@ -697,7 +749,7 @@ impl CloudSyncer {
             match response {
                 Ok(resp) if (200..300).contains(&resp.status()) => {
                     let _ = self.queue.mark_synced(item.id);
-                    synced_count += 1;
+                    outcome.synced += 1;
                 }
                 Ok(resp) => {
                     let status = resp.status();
@@ -709,7 +761,7 @@ impl CloudSyncer {
                 Err(ureq::Error::Status(404, _)) => {
                     // Already absent remotely is the desired final state.
                     let _ = self.queue.mark_synced(item.id);
-                    synced_count += 1;
+                    outcome.synced += 1;
                 }
                 Err(ureq::Error::Status(status, resp)) => {
                     let body = resp.into_string().unwrap_or_default();
@@ -725,7 +777,7 @@ impl CloudSyncer {
             }
         }
 
-        Ok(synced_count)
+        Ok(outcome)
     }
 
     /// Split upsert entries into sub-batches that each stay under max_payload_bytes.

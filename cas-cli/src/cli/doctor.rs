@@ -2403,23 +2403,93 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .collect::<Vec<_>>()
         .join(", ");
     let remediation = "Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.";
+    let rejections = cloud_queue_rejections(&conn);
 
-    if pending.is_empty() {
+    if pending.is_empty() && rejections.is_empty() {
         Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Ok,
             message: format!("0 queued content change(s) block purge-foreign; {remediation}"),
+        }
+    } else if pending.is_empty() {
+        Check {
+            name: "cloud sync queue".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "0 queued content change(s) block purge-foreign, but the cloud refused {} parked row(s): {}",
+                rejections.iter().map(|(_, count)| count).sum::<usize>(),
+                describe_queue_rejections(&rejections)
+            ),
         }
     } else {
         Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "{} queued content change(s) block purge-foreign ({breakdown}); {remediation}",
-                pending.len()
+                "{} queued content change(s) block purge-foreign ({breakdown}); {remediation}{}",
+                pending.len(),
+                if rejections.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " The cloud refused {} parked row(s): {}",
+                        rejections.iter().map(|(_, count)| count).sum::<usize>(),
+                        describe_queue_rejections(&rejections)
+                    )
+                }
             ),
         }
     }
+}
+
+/// Terminal queue rows the cloud itself refused, grouped by its reason.
+///
+/// A database written by a client that predates the per-row verdict columns
+/// simply reports nothing here: doctor must not turn a missing column into a
+/// warning about rejections that were never recorded.
+fn cloud_queue_rejections(conn: &rusqlite::Connection) -> Vec<(String, usize)> {
+    let has_columns: bool = conn
+        .query_row(
+            "SELECT COUNT(*) = 2 FROM pragma_table_info('sync_queue') WHERE name IN ('last_outcome', 'last_reason')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_columns {
+        return Vec::new();
+    }
+
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT COALESCE(NULLIF(TRIM(last_reason), ''), 'unspecified') AS reason, COUNT(*)
+         FROM sync_queue
+         WHERE last_outcome = 'rejected'
+         GROUP BY reason",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+    }) else {
+        return Vec::new();
+    };
+    let mut rejections = rows.filter_map(Result::ok).collect::<Vec<_>>();
+    rejections.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rejections
+}
+
+/// Name each refusal with the move that clears it. A reason without its
+/// remediation leaves an operator holding a count and no next step.
+fn describe_queue_rejections(rejections: &[(String, usize)]) -> String {
+    rejections
+        .iter()
+        .map(|(reason, count)| {
+            format!(
+                "{reason} ×{count} — {}",
+                crate::cloud::push_reason_hint(reason)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[cfg(feature = "mcp-proxy")]
@@ -3093,6 +3163,94 @@ mod tests {
             "{message}",
             message = check.message
         );
+    }
+
+    /// GH #668: doctor names each cloud refusal and its repair instead of
+    /// folding every parked row into one queue count. A legacy database with
+    /// no verdict columns must still read clean rather than warn.
+    #[test]
+    fn doctor_queue_check_names_cloud_rejections_by_reason_with_remediation() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_outcome TEXT,
+                last_reason TEXT,
+                failed_client_version TEXT
+            );
+            INSERT INTO sync_queue
+                (id, entity_type, entity_id, operation, created_at, retry_count, last_outcome, last_reason)
+            VALUES
+                (1, 'entry', 'entry-a', 'upsert', '2026-09-01T00:00:00Z', 5, 'rejected', 'project_mismatch'),
+                (2, 'entry', 'entry-b', 'upsert', '2026-09-01T00:00:01Z', 5, 'rejected', 'project_mismatch'),
+                (3, 'task', 'task-a', 'upsert', '2026-09-01T00:00:02Z', 5, NULL, NULL);
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check.message.contains("project_mismatch ×2"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cas cloud link"),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("×3"),
+            "a row with no cloud verdict is not a rejection: {}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn doctor_queue_check_is_quiet_on_databases_without_the_verdict_columns() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        assert!(!check.message.contains("refused"), "{}", check.message);
     }
 
     #[cfg(feature = "mcp-proxy")]

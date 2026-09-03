@@ -2250,6 +2250,9 @@ impl CloudSyncer {
             // combined result reports zero for them rather than guessing.
             pushed_knowledge_pages: 0,
             pulled_knowledge_pages: 0,
+            skipped_lww_acked: push_result.skipped_lww_acked + team_push_result.skipped_lww_acked,
+            requeued_after_upgrade: push_result.requeued_after_upgrade
+                + team_push_result.requeued_after_upgrade,
             pushed_entries: push_result.pushed_entries + team_push_result.pushed_entries,
             pushed_tasks: push_result.pushed_tasks + team_push_result.pushed_tasks,
             pushed_rules: push_result.pushed_rules + team_push_result.pushed_rules,

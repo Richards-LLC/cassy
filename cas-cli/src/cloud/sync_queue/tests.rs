@@ -818,3 +818,65 @@ fn test_team_coalesce_updates() {
     assert_eq!(pending.len(), 1);
     assert!(pending[0].payload.as_ref().unwrap().contains("v2"));
 }
+
+#[test]
+fn dependency_tombstone_ledger_keeps_the_newest_delete_and_prunes_by_retention() {
+    use chrono::{Duration, Utc};
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue = SyncQueue::open(temp.path()).unwrap();
+    queue.init().unwrap();
+
+    let entity_id = "cas-a:cas-b:blocks";
+    let older = Utc::now() - Duration::hours(5);
+    let newer = Utc::now() - Duration::hours(1);
+    queue
+        .record_dependency_tombstone(entity_id, "cas-a", "cas-b", "blocks", newer)
+        .unwrap();
+    // A replayed older delete must not roll the ledger backwards.
+    queue
+        .record_dependency_tombstone(entity_id, "cas-a", "cas-b", "blocks", older)
+        .unwrap();
+    assert_eq!(
+        queue
+            .dependency_tombstone(entity_id)
+            .unwrap()
+            .unwrap()
+            .timestamp(),
+        newer.timestamp()
+    );
+    assert_eq!(queue.dependency_tombstones().unwrap().len(), 1);
+
+    // A queued upsert for a tombstoned edge is dropped: the server refuses it
+    // anyway, so retrying it forever is pure noise.
+    queue
+        .enqueue(
+            EntityType::TaskDependency,
+            entity_id,
+            SyncOperation::Upsert,
+            Some("{}"),
+        )
+        .unwrap();
+    assert_eq!(queue.drop_queued_dependency_upsert(entity_id).unwrap(), 1);
+    assert!(queue.pending(10, 5).unwrap().is_empty());
+
+    // The cloud prunes tombstones after 90 days; the local ledger follows so it
+    // cannot suppress an edge the cloud has already forgotten.
+    queue
+        .record_dependency_tombstone(
+            "cas-c:cas-d:related",
+            "cas-c",
+            "cas-d",
+            "related",
+            Utc::now() - Duration::days(120),
+        )
+        .unwrap();
+    assert_eq!(queue.prune_dependency_tombstones(Utc::now()).unwrap(), 1);
+    assert!(queue.dependency_tombstone(entity_id).unwrap().is_some());
+    assert!(
+        queue
+            .dependency_tombstone("cas-c:cas-d:related")
+            .unwrap()
+            .is_none()
+    );
+}

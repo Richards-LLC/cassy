@@ -41,9 +41,6 @@ use cmcp_core::config::{
 use super::fs as ifs;
 use super::types::{IntegrationAction, IntegrationOutcome, IntegrationStatus, Platform};
 
-/// Label used when the operator names neither `--label` nor `--token-env`.
-pub const DEFAULT_LABEL: &str = "CASSY_PROXY";
-
 /// Where an operator is told to put the two values. Named in every remedy so
 /// the message is actionable without opening the onboarding doc.
 pub const CREDENTIALS_HINT: &str =

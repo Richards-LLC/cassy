@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+- A task with no recorded owner project can be started and claimed again. Such
+  a row was listed on the board and shown as this project's work, but `start`
+  and `claim` refused it as an "unassigned legacy row" with no field a worker
+  could set to repair it — which wedged a whole factory whose supervisor
+  process still ran a build that predated owner stamping. The row is now
+  adopted into the current project and the repair is written back, so later
+  ownership checks agree; `mine` lists it too. Rows owned by a *different*
+  project are still refused, and the refusal now spells out the supervisor
+  command that reassigns one. (GH #690)
+
 ## [3.14.0] - 2026-09-03
 
 ### Added

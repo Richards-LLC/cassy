@@ -1579,9 +1579,10 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
     let Some(current_project) = crate::cloud::resolve_canonical_id(cas_root) else {
         return Vec::new();
     };
+    let mut checks = registered_alias_checks(cas_root, &current_project);
     let db_path = cas_root.join("cas.db");
     if !db_path.is_file() {
-        return Vec::new();
+        return checks;
     }
     let conn = match rusqlite::Connection::open_with_flags(
         &db_path,
@@ -1589,11 +1590,12 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
     ) {
         Ok(conn) => conn,
         Err(error) => {
-            return vec![Check {
+            checks.push(Check {
                 name: "project aliases".to_string(),
                 status: CheckStatus::Warning,
                 message: format!("Could not inspect task project aliases: {error}"),
-            }];
+            });
+            return checks;
         }
     };
     let has_origin_project = conn
@@ -1605,7 +1607,7 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
         .map(|columns| columns.iter().any(|column| column == "origin_project"))
         .unwrap_or(false);
     if !has_origin_project {
-        return Vec::new();
+        return checks;
     }
 
     let mut stmt = match conn.prepare(
@@ -1615,43 +1617,80 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
     ) {
         Ok(stmt) => stmt,
         Err(error) => {
-            return vec![Check {
+            checks.push(Check {
                 name: "project aliases".to_string(),
                 status: CheckStatus::Warning,
                 message: format!("Could not inspect task project aliases: {error}"),
-            }];
+            });
+            return checks;
         }
     };
     let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
         Ok(rows) => rows,
         Err(error) => {
-            return vec![Check {
+            checks.push(Check {
                 name: "project aliases".to_string(),
                 status: CheckStatus::Warning,
                 message: format!("Could not inspect task project aliases: {error}"),
-            }];
+            });
+            return checks;
         }
     };
     let origins = rows.filter_map(Result::ok).collect::<Vec<_>>();
-    canonical_alias_counts(&origins, &current_project)
-        .into_iter()
-        .map(|(alias, count)| Check {
-            name: "project aliases".to_string(),
-            status: CheckStatus::Warning,
-            message: format!(
-                "{count} rows use alias `{alias}` of this project; run `cas cloud project \
-                 --adopt-aliases` to rewrite and enqueue them"
-            ),
-        })
-        .collect()
+    let registered = crate::cloud::project_aliases_from_config_toml(cas_root);
+    checks.extend(
+        canonical_alias_counts(&origins, &current_project, &registered)
+            .into_iter()
+            .map(|(alias, count)| Check {
+                name: "project aliases".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "{count} rows use alias `{alias}` of this project; run `cas cloud project \
+                     --adopt-aliases` to rewrite and enqueue them"
+                ),
+            }),
+    );
+    checks
 }
 
-fn canonical_alias_counts(origins: &[String], current_project: &str) -> BTreeMap<String, usize> {
+/// Report the cloud's per-project `aliases` record as mirrored into
+/// `.cas/config.toml` (GH #669), so a reader can see *why* rows spelled
+/// `ozer-health` are counted as this project's own rather than as foreign.
+fn registered_alias_checks(cas_root: &Path, current_project: &str) -> Vec<Check> {
+    let registered = crate::cloud::project_aliases_from_config_toml(cas_root);
+    if registered.is_empty() {
+        return Vec::new();
+    }
+    vec![Check {
+        name: "project aliases".to_string(),
+        status: CheckStatus::Ok,
+        message: format!(
+            "Cloud registry folds {} alias spelling(s) into `{current_project}`: {}. Rows \
+             carrying them are this project's own, not foreign.",
+            registered.len(),
+            registered.join(", ")
+        ),
+    }]
+}
+
+/// Count task rows whose persisted `origin_project` is a *different spelling*
+/// of the current project.
+///
+/// `registered` is the cloud's alias record for this project. Without it only
+/// the syntactic remote/bare-slug rule applies, which cannot see a renamed
+/// repository (`ozer-health` under `ozer`) — those rows would keep being
+/// counted as another project's (GH #669).
+fn canonical_alias_counts(
+    origins: &[String],
+    current_project: &str,
+    registered: &[String],
+) -> BTreeMap<String, usize> {
+    let mut class = registered.to_vec();
+    class.push(current_project.to_string());
     origins
         .iter()
         .filter(|origin| {
-            crate::cloud::canonical_project_id_with_pin(origin, Some(current_project))
-                .is_some_and(|canonical| canonical == current_project)
+            crate::cloud::project_ids_match_with_aliases(origin, current_project, &class)
                 && origin.trim() != current_project
         })
         .fold(BTreeMap::new(), |mut counts, origin| {
@@ -2389,23 +2428,93 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .collect::<Vec<_>>()
         .join(", ");
     let remediation = "Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.";
+    let rejections = cloud_queue_rejections(&conn);
 
-    if pending.is_empty() {
+    if pending.is_empty() && rejections.is_empty() {
         Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Ok,
             message: format!("0 queued content change(s) block purge-foreign; {remediation}"),
+        }
+    } else if pending.is_empty() {
+        Check {
+            name: "cloud sync queue".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "0 queued content change(s) block purge-foreign, but the cloud refused {} parked row(s): {}",
+                rejections.iter().map(|(_, count)| count).sum::<usize>(),
+                describe_queue_rejections(&rejections)
+            ),
         }
     } else {
         Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "{} queued content change(s) block purge-foreign ({breakdown}); {remediation}",
-                pending.len()
+                "{} queued content change(s) block purge-foreign ({breakdown}); {remediation}{}",
+                pending.len(),
+                if rejections.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " The cloud refused {} parked row(s): {}",
+                        rejections.iter().map(|(_, count)| count).sum::<usize>(),
+                        describe_queue_rejections(&rejections)
+                    )
+                }
             ),
         }
     }
+}
+
+/// Terminal queue rows the cloud itself refused, grouped by its reason.
+///
+/// A database written by a client that predates the per-row verdict columns
+/// simply reports nothing here: doctor must not turn a missing column into a
+/// warning about rejections that were never recorded.
+fn cloud_queue_rejections(conn: &rusqlite::Connection) -> Vec<(String, usize)> {
+    let has_columns: bool = conn
+        .query_row(
+            "SELECT COUNT(*) = 2 FROM pragma_table_info('sync_queue') WHERE name IN ('last_outcome', 'last_reason')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_columns {
+        return Vec::new();
+    }
+
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT COALESCE(NULLIF(TRIM(last_reason), ''), 'unspecified') AS reason, COUNT(*)
+         FROM sync_queue
+         WHERE last_outcome = 'rejected'
+         GROUP BY reason",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+    }) else {
+        return Vec::new();
+    };
+    let mut rejections = rows.filter_map(Result::ok).collect::<Vec<_>>();
+    rejections.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rejections
+}
+
+/// Name each refusal with the move that clears it. A reason without its
+/// remediation leaves an operator holding a count and no next step.
+fn describe_queue_rejections(rejections: &[(String, usize)]) -> String {
+    rejections
+        .iter()
+        .map(|(reason, count)| {
+            format!(
+                "{reason} ×{count} — {}",
+                crate::cloud::push_reason_hint(reason)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[cfg(feature = "mcp-proxy")]
@@ -3081,6 +3190,94 @@ mod tests {
         );
     }
 
+    /// GH #668: doctor names each cloud refusal and its repair instead of
+    /// folding every parked row into one queue count. A legacy database with
+    /// no verdict columns must still read clean rather than warn.
+    #[test]
+    fn doctor_queue_check_names_cloud_rejections_by_reason_with_remediation() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_outcome TEXT,
+                last_reason TEXT,
+                failed_client_version TEXT
+            );
+            INSERT INTO sync_queue
+                (id, entity_type, entity_id, operation, created_at, retry_count, last_outcome, last_reason)
+            VALUES
+                (1, 'entry', 'entry-a', 'upsert', '2026-09-01T00:00:00Z', 5, 'rejected', 'project_mismatch'),
+                (2, 'entry', 'entry-b', 'upsert', '2026-09-01T00:00:01Z', 5, 'rejected', 'project_mismatch'),
+                (3, 'task', 'task-a', 'upsert', '2026-09-01T00:00:02Z', 5, NULL, NULL);
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check.message.contains("project_mismatch ×2"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cas cloud link"),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("×3"),
+            "a row with no cloud verdict is not a rejection: {}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn doctor_queue_check_is_quiet_on_databases_without_the_verdict_columns() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        assert!(!check.message.contains("refused"), "{}", check.message);
+    }
+
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn doctor_proxy_stdio_check_names_missing_commands_and_passes_resolved_commands() {
@@ -3303,7 +3500,7 @@ mod tests {
             "github.com/other/pixel-hive".to_string(),
         ];
 
-        let counts = canonical_alias_counts(&origins, "gabber-studio");
+        let counts = canonical_alias_counts(&origins, "gabber-studio", &[]);
 
         assert_eq!(counts.get("GABBER-STUDIO"), Some(&1));
         assert_eq!(
@@ -3312,6 +3509,56 @@ mod tests {
         );
         assert!(!counts.contains_key("gabber-studio"));
         assert!(!counts.contains_key("github.com/other/pixel-hive"));
+    }
+
+    /// GH #669: a *renamed* repository shares no path segment with its
+    /// canonical id, so only the cloud's alias record can attribute it. Before
+    /// the record is consumed those rows are counted as another project's.
+    #[test]
+    fn alias_doctor_attributes_a_renamed_repository_only_through_the_registered_record() {
+        let origins = vec![
+            "ozer-health".to_string(),
+            "github.com/richards-llc/ozer-health".to_string(),
+            "penguinz".to_string(),
+        ];
+
+        let without_record = canonical_alias_counts(&origins, "ozer", &[]);
+        assert!(without_record.is_empty(), "got: {without_record:?}");
+
+        let registered = vec![
+            "ozer-health".to_string(),
+            "github.com/richards-llc/ozer-health".to_string(),
+        ];
+        let with_record = canonical_alias_counts(&origins, "ozer", &registered);
+        assert_eq!(with_record.get("ozer-health"), Some(&1));
+        assert_eq!(
+            with_record.get("github.com/richards-llc/ozer-health"),
+            Some(&1)
+        );
+        // `penguinz` is an unmapped legacy bucket: never folded in.
+        assert!(!with_record.contains_key("penguinz"));
+    }
+
+    #[test]
+    fn registered_alias_check_names_the_folded_spellings() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join("ozer/.cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        fs::write(
+            cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"ozer\"\naliases = [\"ozer-health\"]\n",
+        )
+        .unwrap();
+
+        let checks = registered_alias_checks(&cas_root, "ozer");
+
+        assert_eq!(checks.len(), 1);
+        assert!(matches!(checks[0].status, CheckStatus::Ok));
+        assert!(
+            checks[0].message.contains("ozer-health"),
+            "got: {}",
+            checks[0].message
+        );
     }
 
     #[test]

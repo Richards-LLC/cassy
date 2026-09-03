@@ -1,0 +1,731 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Commander on Mobile — Android field report &amp; redesign brief (cas-b652)</title>
+<style>
+:root{
+  --ink:#14181f; --ink-2:#3d4653; --ink-3:#6b7686; --rule:#dfe4ec; --rule-2:#eef1f6;
+  --paper:#ffffff; --wash:#f6f8fb; --crit:#b3261e; --warn:#8a5a00; --ok:#1f6f43; --link:#1a4fb4;
+  --mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --ui:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--wash);color:var(--ink);font-family:var(--ui);font-size:16px;line-height:1.6}
+.wrap{max-width:62rem;margin:0 auto;padding:0 20px 96px}
+header.masthead{background:var(--paper);border-bottom:1px solid var(--rule);padding:44px 0 34px;margin-bottom:34px}
+header.masthead .wrap{padding-bottom:0}
+.eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin:0 0 12px}
+h1{font-size:31px;line-height:1.22;margin:0 0 14px;letter-spacing:-.015em}
+.sub{font-size:17px;color:var(--ink-2);margin:0 0 22px;max-width:52rem}
+.meta{display:flex;flex-wrap:wrap;gap:8px 10px;font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
+.meta span{background:var(--wash);border:1px solid var(--rule);border-radius:999px;padding:4px 11px}
+h2{font-size:23px;margin:52px 0 6px;letter-spacing:-.01em;padding-top:14px;border-top:2px solid var(--ink);display:inline-block}
+h3{font-size:17.5px;margin:34px 0 8px}
+h4{font-size:14.5px;margin:20px 0 6px;color:var(--ink-2)}
+p{margin:0 0 14px}
+a{color:var(--link)}
+code{font-family:var(--mono);font-size:.885em;background:var(--rule-2);border-radius:3px;padding:1px 5px;word-break:break-word}
+pre{font-family:var(--mono);font-size:12.5px;line-height:1.55;background:#12161d;color:#e6eaf2;border-radius:8px;padding:16px 18px;overflow-x:auto;margin:0 0 16px}
+pre code{background:none;padding:0;color:inherit;font-size:inherit}
+.card{background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:22px 24px;margin:0 0 20px}
+.lede{background:var(--paper);border:1px solid var(--rule);border-left:5px solid var(--ink);border-radius:8px;padding:20px 24px;margin:0 0 26px}
+.lede p:last-child{margin-bottom:0}
+.callout{border-radius:8px;padding:14px 18px;margin:0 0 18px;font-size:15px}
+.callout.crit{background:#fdf0ef;border:1px solid #f2c7c3;border-left:5px solid var(--crit)}
+.callout.warn{background:#fdf7e8;border:1px solid #eedfb4;border-left:5px solid var(--warn)}
+.callout.ok{background:#eff8f2;border:1px solid #c3e2ce;border-left:5px solid var(--ok)}
+.callout p:last-child{margin-bottom:0}
+figure{margin:0 0 8px;background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:12px;break-inside:avoid}
+figure img{display:block;width:100%;height:auto;border-radius:6px;background:#0c0e13}
+figcaption{font-size:12.5px;color:var(--ink-3);margin-top:9px;line-height:1.5}
+figcaption b{color:var(--ink-2)}
+.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:14px;margin:0 0 22px}
+.shots.two{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.wide figure img{border-radius:6px}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:0 0 20px;background:var(--paper)}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+th{font-size:11.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);border-bottom:1.5px solid var(--ink-3)}
+td.mono,th.mono{font-family:var(--mono);font-size:12px}
+.defect{background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:20px 22px;margin:0 0 18px;break-inside:avoid}
+.defect > h3{margin-top:0;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.sev{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;padding:3px 9px;border-radius:999px;white-space:nowrap;position:relative;top:-2px}
+.sev.p0{background:var(--crit);color:#fff}
+.sev.p1{background:#f2c7c3;color:#7a1d16}
+.sev.p2{background:#eedfb4;color:#6b4600}
+.sev.p3{background:var(--rule-2);color:var(--ink-2)}
+.kv{font-size:13.5px;color:var(--ink-2);margin:10px 0 0;border-top:1px dashed var(--rule);padding-top:10px}
+.kv div{margin-bottom:5px}
+.kv b{color:var(--ink);font-weight:600}
+ul,ol{margin:0 0 15px;padding-left:22px}
+li{margin-bottom:6px}
+.dir{background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:24px;margin:0 0 22px}
+.dir h3{margin-top:0}
+.wire{background:#fbfcfe;border:1px solid var(--rule);border-radius:8px;padding:14px;margin:14px 0}
+.wire svg{display:block;width:100%;height:auto}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+@media (max-width:760px){.two-col{grid-template-columns:1fr}}
+.foot{font-size:13px;color:var(--ink-3);border-top:1px solid var(--rule);padding-top:18px;margin-top:44px}
+@media print{
+  body{background:#fff;font-size:11.5pt}
+  .wrap{max-width:none;padding:0}
+  header.masthead{padding:0 0 18px;margin-bottom:22px}
+  h2{page-break-after:avoid}
+  .defect,figure,.dir,.card{page-break-inside:avoid;border-color:#bbb}
+  pre{background:#f3f4f6;color:#111;border:1px solid #ccc}
+  a{color:#000;text-decoration:none}
+}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">Cassy Commander · field report · 2026-09-03</p>
+    <h1>Commander on a phone: what it actually looks like today, and what it should become</h1>
+    <p class="sub">A Pixel&nbsp;8 emulator was paired to the live <code>soundwave-linux</code> hub and driven through the real pairing flow, a real attached session, and a real streaming turn. This is what the screen showed — every claim below has a screenshot behind it — followed by three unconstrained directions for a phone-native Commander.</p>
+    <div class="meta">
+      <span>cas-b652</span>
+      <span>Pixel 8 · Android 14 (API 34)</span>
+      <span>1080×2400 @ 420dpi · DPR 2.625</span>
+      <span>Chrome 113.0.5672.136</span>
+      <span>Cassy hub 3.13.0</span>
+      <span>34 screenshots · 1 screen recording</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="lede">
+  <p><b>The one-sentence version.</b> A phone <em>can</em> pair to the hub, but only if someone with a terminal on the target machine already knows an undocumented flag — and once paired, the terminal never renders a single character, because <code>hub-web</code> calls a JavaScript API that this browser does not have and nothing anywhere tells you so.</p>
+  <p style="margin-top:12px">Three findings dominate everything else:</p>
+  <ol style="margin-bottom:0">
+    <li><b>Pairing fails on the first attempt for everyone who follows the runbook</b>, because the CLI mints a read-only invitation while the UI asks for six scopes. The error is the single word <code>unauthorized</code>, and the one-time invitation is burned. <a href="#d1">D1</a></li>
+    <li><b>The terminal is permanently blank on this browser</b> — <code>AbortSignal.any()</code> (Chrome 116+) with no feature detection, so every attach throws and the "Connecting…" timer freezes at <code>0s</code> forever <a href="#d3">D3</a>. On a current engine it paints, and reveals the real complaint: <b>an 80-column agent TUI squeezed into ~46 columns</b>, where hanging indents collapse and continuations escape their gutter. <a href="#d15">D15</a></li>
+    <li><b>The bottom rail is three different design languages in one 48px row</b> — a bordered button, a filled chip with a clipped status dot, a bare icon+label, and a colour seam where a second panel overlaps the rail. This is the "outlines are fucked up" complaint, and it is literally an outline. <a href="#d7">D7</a></li>
+  </ol>
+</div>
+
+<div class="callout warn">
+  <p><b>Honesty note on the browser — and the control run that settles it.</b> The AVD ships Chrome 113 (May 2023), not current stable. Rather than hand-wave that confound, the whole run was repeated on <b>Chrome 145 at a Pixel 7 device profile</b> (412×915 CSS px, DPR 2.625, mobile UA, touch) via Playwright against the same hub and the same session. Result: the terminal renders perfectly, so <a href="#d3">D3</a>'s blank pane <em>is</em> engine age — while its frozen timer, its buried truncated error and the total absence of unsupported-browser handling remain product bugs. Every other defect below reproduced identically on Chrome 145, and the bottom rail is measurably <em>worse</em> there. Section <a href="#control">2b</a> is the like-for-like comparison, and it is where Daniel's actual streaming-text complaint finally becomes visible.</p>
+</div>
+
+<!-- ============================================================= -->
+<h2 id="pairing">1 · Pairing walk-through</h2>
+
+<p>Nine screens, two dead ends, one success. Wall-clock from first page load to a paired device: <b>6 minutes</b>, of which roughly four were spent recovering from failures that a first-time user would not recover from at all.</p>
+
+<h3>Step 0 — the hub loads over the tailnet with no fiddling</h3>
+<p>Worth recording because the runbook implies it is hard: the emulator reached <code>https://soundwave-linux.tailf5a734.ts.net/</code> directly. Booting with <code>-dns-server 100.100.100.100</code> plus QEMU's user-mode NAT is enough — MagicDNS resolves and 100.x traffic routes out through the host's tailnet interface. No <code>adb reverse</code>, no proxy, no hosts file. Total DNS/network debugging time: zero.</p>
+
+<div class="shots">
+  <figure><img src="04-fleet-overview-unpaired.png" alt="Fleet overview empty state on a phone"><figcaption><b>01</b> · First load, unpaired. The empty state is a full-viewport dashed rectangle with a 3-line message floating in the middle of roughly 1,500 wasted pixels. On desktop this dashed box reads as a drop zone; on a phone it reads as a rendering error.</figcaption></figure>
+  <figure><img src="a7-autofocus.png" alt="Pairing dialog with keyboard covering it"><figcaption><b>02</b> · Tapping <b>Pair a machine</b>. The dialog autofocuses an <em>optional</em> email field, so the soft keyboard opens immediately <span style="white-space:nowrap">(2)</span> and scrolls the dialog's own title <span style="white-space:nowrap">(1)</span> off the top of the screen. You land on a modal whose heading you have never seen.</figcaption></figure>
+</div>
+
+<h3>Dead end 1 — "Create pairing code" does not work on this build</h3>
+<p>The in-page path — the only path a phone-only user has — answers <b>"The pairing service is unavailable."</b> The relay origin is absent from this bundle, so <code>relayOrigin</code> is falsy and <code>main.ts:1121</code> substitutes a disabled-reason paragraph. The message the user sees comes from <code>main.ts:1704</code> and does not say what to do instead.</p>
+
+<h3>Dead end 2 — the documented CLI path fails on the first try, for everyone</h3>
+<p>Running the runbook command verbatim on the target machine:</p>
+<pre><code>cas hub pair --origin https://soundwave-linux.tailf5a734.ts.net</code></pre>
+<p>prints a fragment URL and a QR code. Opening that URL on the phone, filling the form, and tapping <b>Pair</b> produces the word <code>unauthorized</code> and throws the invitation away. The cause is a default mismatch, documented in full as <a href="#d1">D1</a>: the CLI's <code>--scopes</code> default is read-only, the form pre-checks all six scopes.</p>
+
+<div class="shots">
+  <figure><img src="a6-unauthorized.png" alt="Pairing failed with unauthorized"><figcaption><b>03</b> · Pairing rejected. <span style="white-space:nowrap">(1)</span> the entire diagnosis is the raw wire token <code>unauthorized</code>, styled as a quiet hint rather than a failure. <span style="white-space:nowrap">(2)</span> the dialog has reverted to its pre-invitation state — the one-time code is consumed and there is no "try again" that works.</figcaption></figure>
+  <figure><img src="15-invitation-form-filled.png" alt="Invitation form filled in"><figcaption><b>04</b> · The invitation form after re-minting with explicit scopes. It renders the same six pre-checked boxes regardless of what the invitation actually granted — the UI never learns the invitation's ceiling, which is why it can only fail at submit time.</figcaption></figure>
+</div>
+
+<h3>Dead end 3 — the fragment URL silently does nothing if a tab is already open</h3>
+<p>An Android <code>VIEW</code> intent for a URL that differs from an open tab only by its <code>#fragment</code> lands on the <em>existing</em> tab. The SPA does not re-initialise, so <code>consumePairingFragment()</code> never runs, and because the pending-pairing store is <code>sessionStorage</code>-backed (<code>pending-pairing.ts:137</code>) the invitation is invisible to every other tab. The screen after "open the pairing link" is indistinguishable from the screen before it. I had to append a throwaway <code>?t=N</code> query to force a real navigation.</p>
+<p>Compounding it: <b>consuming a valid invitation does not open the pairing dialog.</b> Nothing in <code>main.ts</code> calls <code>showModal()</code> on <code>#pair-dialog</code> when a pending invitation exists (the only auto-open is the attention-item "repair" action at <code>main.ts:1504</code>). The user opens the link, sees the same empty state, and must guess that the answer is to tap <b>Pair a machine</b> a second time.</p>
+
+<h3>What actually worked</h3>
+<pre><code>cas hub pair --origin https://soundwave-linux.tailf5a734.ts.net \
+  --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt
+# then open  https://…ts.net/?t=4#pair=…&hub=…   (unique query forces a real load)
+# then tap "Pair a machine" again, fill Machine label + Operator label, tap Pair</code></pre>
+
+<div class="callout ok">
+  <p><b>Pairing succeeded and persists.</b> Audit log confirms <code>pairing_exchange · allowed</code> at 17:14:01Z followed by DPoP auth and <code>websocket_read · pane:read · allowed</code>. The device credential survives tab close and reopen — a later fresh tab was still paired.</p>
+</div>
+
+<div class="callout crit">
+  <p><b>The structural conclusion.</b> There is currently <em>no</em> path for a phone to pair itself. The in-page relay path is unavailable in this build; the CLI path requires a terminal on the target machine <em>and</em> knowledge of a flag that is not in the runbook. A phone is a second screen for a machine you already own, so a terminal is usually available — but "pair my phone" is a two-device, one-shot, ten-minute-expiry operation where every failure burns the invitation and reports one word.</p>
+</div>
+
+<table>
+  <caption style="text-align:left;font-size:12.5px;color:var(--ink-3);padding-bottom:8px">Friction ledger</caption>
+  <tr><th>Screen</th><th>Friction</th><th>Cost</th></tr>
+  <tr><td>Pair dialog opens</td><td>Autofocus on optional field pops keyboard, hides title</td><td>Disorienting; 1 extra tap to dismiss</td></tr>
+  <tr><td>Create pairing code</td><td>Relay unavailable; message offers no alternative</td><td>Dead end</td></tr>
+  <tr><td>Open fragment URL</td><td>Lands on existing tab; nothing happens</td><td>Invisible failure</td></tr>
+  <tr><td>After fragment loads</td><td>Dialog does not auto-open</td><td>User must re-tap and guess</td></tr>
+  <tr><td>Tap Pair</td><td><code>unauthorized</code>; invitation burned</td><td>Full restart, ~90 s</td></tr>
+  <tr><td>Form entry</td><td>Keyboard covers the Pair button while typing</td><td>Blind submit or extra dismiss</td></tr>
+</table>
+
+<!-- ============================================================= -->
+<h2 id="defects">2 · Defect catalogue</h2>
+<p>Fourteen defects, ordered by how much they cost a person holding a phone. Each entry names the state that produced it and the source file most likely responsible. <b>Nothing in <code>hub-web/</code> or <code>hub/</code> was modified</b> — these are hypotheses for a follow-up, not fixes.</p>
+
+<div class="defect" id="d1">
+  <h3><span class="sev p0">P0 · blocker</span> D1 — The documented pairing command cannot succeed against the default UI</h3>
+  <p><code>cas hub pair --origin X</code> defaults <code>--scopes</code> to <code>machine:read,session:read,pane:read</code>. The Commander form ships <code>DEFAULT_PAIRING_SCOPES</code> with all six pre-checked, including <code>pane:input</code>, <code>message:send</code>, <code>pane:interrupt</code>. The exchange therefore requests more than the invitation's ceiling, the hub returns 401, and the UI prints the bare wire token.</p>
+  <p>Confirmed in hub state, not inferred: the invitation minted at <code>2026-09-03T17:10:50Z</code> carries <code>max_scopes: [machine-read, session-read, pane-read]</code>, <code>failed_attempts: 1</code>, <code>consumed_at: null</code>.</p>
+  <div class="kv">
+    <div><b>State:</b> follow <code>docs/commander-fleet-runbook.md</code> verbatim, then submit the form unchanged.</div>
+    <div><b>Evidence:</b> <code>a6-unauthorized.png</code>, <code>~/.cas/hub/auth.json</code></div>
+    <div><b>Hypothesis:</b> <code>hub-web/src/main.ts:1115</code> (<code>scopeChecks(pairingDraft.scopes)</code>) never reconciles against the invitation's granted scopes; <code>cas hub pair</code>'s read-only default is a second, independent half of the same bug. Either make the form request only what was granted, or make the CLI default match the UI, or say which three boxes to uncheck.</div>
+    <div><b>Engine-independent:</b> yes.</div>
+  </div>
+</div>
+
+<div class="defect" id="d2">
+  <h3><span class="sev p1">P1</span> D2 — Failure messages are raw wire tokens with no recovery path</h3>
+  <p><code>unauthorized</code>. <code>The pairing service is unavailable.</code> Both render in <code>.pair-status</code>, a quiet low-contrast box that reads like a hint, not a failure — no icon, no <code>--state-crit</code> tint, no next step, and in the <code>unauthorized</code> case the dialog silently reverts and destroys the one-time invitation behind it.</p>
+  <div class="kv">
+    <div><b>State:</b> any pairing failure.</div>
+    <div><b>Hypothesis:</b> <code>hub-web/src/main.ts:1704</code> and <code>:525</code> assign the caught error's message straight to <code>pairingStatus</code>. <code>DESIGN.md</code> reserves <code>--state-crit</code> and a 2px rule for hard failures; this path uses neither.</div>
+    <div><b>Engine-independent:</b> yes.</div>
+  </div>
+</div>
+
+<div class="defect" id="d3">
+  <h3><span class="sev p0">P0 · blocker</span> D3 — The terminal never renders; the connect timer freezes at 0s</h3>
+  <p>Every pane, every orientation, both supervisor and worker: a black well and <code>Connecting to cas-src-young-raven-93… 0s</code>, forever. The WebSocket <em>is</em> authorised — the hub audit log shows <code>websocket_read · pane:read · allowed</code> — so this is a client-side throw, not an access failure.</p>
+  <p>The cause is legible only three taps deep in the attention panel: <b><code>Terminal attach failed for soundwave-linux.tailf5a734.ts.net: AbortSignal.any is not a…</code></b> ×26. <code>hub-web/src/connection.ts:333</code> calls <code>AbortSignal.any([this.eventAbort.signal, signal])</code>. That API shipped in Chrome/Edge 116, Firefox 124 and Safari 17.4; this browser is Chrome 113, so every attach throws <code>TypeError</code> and the reconnect loop spins.</p>
+  <p>The second half of the defect is the one that is engine-independent: <b>the connecting overlay's elapsed counter never advances.</b> <code>connection-state-view.ts:49–56</code> only reveals its diagnostic <code>step</code> at ≥5s and its <code>actionsAvailable</code> escape hatch at ≥15s. With the counter frozen the user reaches neither. Reproduced twice — frozen at <code>1s</code> while the pane header ticked to <code>28s</code>, and frozen at <code>0s</code> across an entire 20-second screen recording.</p>
+  <div class="shots">
+    <figure><img src="a2-frozen-timer.png" alt="Frozen connecting timer"><figcaption><b>05</b> · <span style="white-space:nowrap">(1)</span> pane header at 28s. <span style="white-space:nowrap">(2)</span> connect timer still says 1s. <span style="white-space:nowrap">(3)</span> destructive <b>Interrupt</b> in the top-right corner, the hardest point on the screen to reach with a thumb, and styled as bare red text while its neighbour gets a container. <span style="white-space:nowrap">(4)</span> four pane controls rendered as near-invisible <code>--text-lo</code> glyphs.</figcaption></figure>
+    <figure><img src="a3-truncated-error.png" alt="Truncated error in attention panel"><figcaption><b>06</b> · <span style="white-space:nowrap">(1)</span> the only real diagnostic in the product, truncated mid-word so the actionable half is unreachable. <span style="white-space:nowrap">(2)</span> the next attention group scrolls under the bottom rail. Note also that <b>Dismiss all info</b> and <b>Dismiss group</b> are visually louder than <b>Retry</b>.</figcaption></figure>
+  </div>
+  <div class="kv">
+    <div><b>State:</b> attach to any session from Android Chrome 113.</div>
+    <div><b>Evidence:</b> <code>27-streaming-portrait.mp4</code> (frames 20/200/400 all read <code>0s</code>), <code>34-attention-details.png</code>, hub audit log.</div>
+    <div><b>Hypothesis:</b> three separate fixes — feature-detect or polyfill <code>AbortSignal.any</code> at <code>connection.ts:333</code>; drive the connecting overlay from a ticking clock so the 5s and 15s affordances can actually fire; surface an unsupported-browser banner instead of an infinite spinner.</div>
+    <div><b>Engine-independent:</b> the frozen timer and the buried, truncated error are. <b>Retest done —</b> on Chrome 145 at a Pixel 7 profile, <code>AbortSignal.any</code> exists, the console reports <b>zero</b> errors, and the terminal paints correctly (see <a href="#control">2b</a>). The blank pane is engine age; the silent forever-spinner around it is not.</div>
+  </div>
+  <div class="callout warn"><p><b>Ruled out.</b> <code>logcat</code> showed continuous <code>GL ERROR :GL_INVALID_VALUE : glFramebufferTexture2D</code> at ~10 Hz in portrait. That is swiftshader noise from the emulator's software GPU, not the cause: it stops entirely in landscape while the terminal stays equally blank in both orientations. I am not attributing the failure to canvas sizing.</p></div>
+</div>
+
+<div class="defect" id="d4">
+  <h3><span class="sev p1">P1</span> D4 — With the keyboard open, every piece of navigation leaves the screen</h3>
+  <p>Portrait, keyboard up: the session header, the worker strip, the <b>Talk to supervisor</b> row and the entire bottom rail are gone. What remains is one black terminal well and a keyboard. There is no in-app way back — only the system Back button.</p>
+  <div class="shots two">
+    <figure><img src="a4-keyboard-crush.png" alt="Keyboard removes all chrome"><figcaption><b>07</b> · Portrait + keyboard. Every navigational affordance the app owns has been pushed out of the layout viewport.</figcaption></figure>
+    <figure><img src="24-landscape-keyboard-crush.png" alt="Landscape with keyboard leaves a sliver"><figcaption><b>08</b> · Landscape + keyboard. The application is compressed into a ~110px band between the omnibox and the keyboard — roughly 10% of the screen, showing two fragments of chrome and no content.</figcaption></figure>
+  </div>
+  <div class="kv">
+    <div><b>State:</b> focus any text input in portrait or landscape.</div>
+    <div><b>Hypothesis:</b> <code>styles.css</code> sizes <code>.shell</code> at <code>100dvh</code> and pads the rail with <code>env(safe-area-inset-bottom)</code>. Neither responds to the on-screen keyboard; the layout viewport shrinks and the rail goes with it. The <a href="https://developer.mozilla.org/docs/Web/API/VisualViewport">VisualViewport</a> API or <code>interactive-widget=resizes-content</code> is the usual answer, and the composer should own a keyboard-aware bottom inset.</div>
+    <div><b>Engine-independent:</b> yes.</div>
+  </div>
+</div>
+
+<div class="defect" id="d5">
+  <h3><span class="sev p2">P2</span> D5 — Landscape drops to the desktop grid on a 6-inch screen</h3>
+  <p>Rotating crosses the 53rem breakpoint, so a phone in landscape gets the full desktop composition: a 48px left machine rail, a right attention rail, a <code>⌘K</code> chip for a chord no phone can produce, and two terminals allocated ~250px of height each.</p>
+  <figure class="wide"><img src="a5-landscape.png" alt="Landscape desktop layout on a phone"><figcaption><b>09</b> · <span style="white-space:nowrap">(1)</span> a green (healthy) status dot next to the words <b>Status unavailable</b> — the dot and the label disagree. <span style="white-space:nowrap">(2)</span> the destructive <b>Interrupt</b> control clipped to a red sliver by the context column. <span style="white-space:nowrap">(3)</span> pane controls as <code>--text-lo</code> text labels at roughly 2.4:1 contrast — below WCAG AA for any text size.</figcaption></figure>
+  <div class="kv">
+    <div><b>State:</b> <code>settings put system user_rotation 1</code> with the keyboard closed.</div>
+    <div><b>Hypothesis:</b> the compact rules in <code>styles.css:1609</code> key on <code>max-width: 53rem</code> only. A landscape phone is wide but only ~410 CSS px tall; the breakpoint needs a height or <code>pointer: coarse</code> term, not just width. The green-dot/"unavailable" contradiction is a separate state-mapping bug in the connection summary.</div>
+    <div><b>Engine-independent:</b> yes.</div>
+  </div>
+</div>
+
+<div class="defect" id="d6">
+  <h3><span class="sev p1">P1</span> D6 — Workers, the thing you check a phone for, are a one-line stub</h3>
+  <p>On attach, the supervisor gets ~60% of the viewport and the worker collapses to a 32px bar showing a name and <code>now</code> — no output, no last line, no status. Promoting a worker to primary works and is the right escape hatch, but it costs a tap on an unlabelled ★ glyph and demotes the supervisor to the same 32px stub. You can never see both.</p>
+  <div class="kv">
+    <div><b>State:</b> attach to a session with one or more workers.</div>
+    <div><b>Hypothesis:</b> <code>styles.css:1861</code> onward sizes <code>.secondary-pane-strip .pane.collapsed</code> at <code>--space-10</code>. The comment there ("Workers cannot mount a terminal here") is an accurate description of the constraint and an accurate description of the problem: the compact layout budgets for one terminal, and picks the wrong one by default.</div>
+    <div><b>Engine-independent:</b> yes.</div>
+  </div>
+</div>
+
+<div class="defect" id="d7">
+  <h3><span class="sev p1">P1</span> D7 — The bottom rail is three design languages and a colour seam</h3>
+  <p>This is the "outlines on the bottom nav are fucked up" complaint, and it is literally an outline. In one 48px row:</p>
+  <figure class="wide"><img src="a1-bottom-rail.png" alt="Bottom rail defects, zoomed"><figcaption><b>10</b> · 2× zoom of the bottom rail. <span style="white-space:nowrap">(1)</span> <b>+ Pair</b> wears a 1px <code>--line-strong</code> border — the only outlined element in the rail, and a token <code>DESIGN.md</code> explicitly reserves for the focused-pane border ("do not use it as a decorative accent"). <span style="white-space:nowrap">(2)</span> the machine chip is a filled <code>--bg-raised</code> box truncated to two characters, taller than its neighbour, optically off-centre, with its amber status dot clipped at the corner. <span style="white-space:nowrap">(3)</span> a hard vertical seam where the collapsed context pill paints its own <code>--bg-panel</code> over the rail — two different background tones in one bar, with no border to explain the change. And <b>Machines</b> itself sits in no container at all.</figcaption></figure>
+  <div class="kv">
+    <div><b>State:</b> any paired phone-width view.</div>
+    <div><b>Hypothesis:</b> <code>styles.css:1662–1673</code> gives <code>.machine-rail .pair-machine</code> the <code>--line-strong</code> border; <code>styles.css:1749–1760</code> positions <code>.context-panel.collapsed</code> as a fixed pill over the rail with its own background. The rail reserves right-hand padding for that pill (<code>padding-right: calc(var(--mobile-context-pill-width) + …)</code>) but never unifies the two surfaces.</div>
+    <div><b>Engine-independent:</b> yes.</div>
+  </div>
+</div>
+
+<div class="defect" id="d8">
+  <h3><span class="sev p2">P2</span> D8 — Attention counts are unlabelled numbers in an 88px pill</h3>
+  <p>The rail's right end shows bare digits — <code>4</code>, then <code>11 2</code>, then <code>25 2</code>, then <code>27 2</code> — in amber and blue with no label, no icon and no unit. Two adjacent numbers in different colours read as one number. Over the session they climbed from 4 to 28 purely because a failing reconnect loop was minting one attention item per attempt (D3), so the badge was measuring its own bug.</p>
+  <div class="kv"><div><b>Hypothesis:</b> <code>.context-panel.collapsed .attention-count</code> at <code>styles.css:1789</code> strips to <code>--fs-xs</code> with <code>--line-width</code> padding. Severity should be a shape or an icon, not two adjacent tints of a number.</div>
+  <div><b>Engine-independent:</b> yes.</div></div>
+</div>
+
+<div class="defect" id="d9">
+  <h3><span class="sev p2">P2</span> D9 — The composer works, then tells you it does not</h3>
+  <p>The message sheet is the best-designed surface in the phone build: a real <b>Tap to talk</b> as the full-width primary action, <b>Keyboard</b> and <b>Send message</b> beneath, and the honest hint "Voice ready — tap the mic, review, then send." Then an amber line says <b>"Take control to enable terminal input, messages, and interrupts."</b> — after pairing with <code>message:send</code> granted. The capability and the mode gate are two different concepts presented as one.</p>
+  <figure><img src="a8-composer.png" alt="Message composer on a phone"><figcaption><b>11</b> · <span style="white-space:nowrap">(1)</span> two orphan glyphs (<code>›</code> and an envelope) on a bare row above the tabs, unlabelled and ungrouped. <span style="white-space:nowrap">(2)</span> the control gate, presented as a warning under a composer that looks ready. <span style="white-space:nowrap">(3)</span> the sheet takes ~45dvh, leaving the terminal a ~200px sliver.</figcaption></figure>
+  <div class="kv"><div><b>Hypothesis:</b> <code>styles.css:1836–1849</code> (<code>#message-mic</code> full width, <code>#message-keyboard</code> shown) is the composer; the OBSERVER→control transition lives in the session header, two surfaces away from where the user is typing. On a phone, "Take control" should be the composer's own primary affordance.</div>
+  <div><b>Engine-independent:</b> yes.</div></div>
+</div>
+
+<div class="defect" id="d10">
+  <h3><span class="sev p2">P2</span> D10 — A destructive action is the most prominent button in the machines drawer</h3>
+  <p><b>Remove selected machine</b> is the only full-width button in the drawer, rendered in <code>--state-crit</code> red, positioned directly above the bottom rail — the exact band a thumb rests in. Session rows above it, by contrast, have no tap affordance at all: no chevron, no divider, no row background. The destructive action is the most button-like thing on the screen.</p>
+  <figure><img src="19-machines-drawer.png" alt="Machines drawer"><figcaption><b>12</b> · The machines drawer. Note also the right-aligned <code>retrying …</code> status in <code>--text-lo</code>, and the drawer's top edge leaving a strip of the empty-state dashed border visible behind it.</figcaption></figure>
+  <div class="kv"><div><b>Hypothesis:</b> the drawer inherits desktop ordering; nothing in the compact block re-ranks it. Phone drawers should put destructive actions behind a disclosure, not at thumb height.</div>
+  <div><b>Engine-independent:</b> yes.</div></div>
+</div>
+
+<div class="defect" id="d11">
+  <h3><span class="sev p2">P2</span> D11 — Tap targets and text below platform minimums</h3>
+  <ul style="margin-bottom:0">
+    <li>Dialog actions (<b>Close</b>, <b>Pair</b>) are bare text runs roughly 40px tall — under Android's 48dp minimum. The disabled <b>Pair</b> has no container at all and is indistinguishable from body copy.</li>
+    <li>Pane controls compress to <code>--space-8</code> (32px) with <code>font-size:0</code> and a <code>::after</code> glyph (<code>styles.css:1888–1898</code>) — a 32px target inside a 32px header.</li>
+    <li><code>--fs-xs</code> (11px) is used for the session-header action buttons at <code>max-width:53rem</code>; at 420dpi that is small even before the <code>--text-lo</code> colour is applied.</li>
+  </ul>
+  <div class="kv"><div><b>Engine-independent:</b> yes.</div></div>
+</div>
+
+<div class="defect" id="d12">
+  <h3><span class="sev p2">P2</span> D12 — <code>--text-lo</code> as an interactive colour fails contrast</h3>
+  <p><code>--text-lo</code> (#5C6577) on <code>--bg-panel</code> (#151922) is roughly <b>2.4:1</b> — below WCAG AA's 4.5:1 for body text and below 3:1 for UI components. It is used for pane-control glyphs, timestamps, the <code>retrying …</code> machine status, unfocused pane chrome, and the "Move earlier / Move later" labels. Indoors on a desk this reads as restraint; on a phone at arm's length it reads as absent. Six of the fourteen defects here are partly a contrast problem.</p>
+  <div class="kv"><div><b>Hypothesis:</b> <code>DESIGN.md</code> assigns <code>--text-lo</code> to "timestamps, disabled metadata, and unfocused pane chrome". The compact layout then reuses it for <em>active</em> controls, which the token was never meant to carry.</div>
+  <div><b>Engine-independent:</b> yes.</div></div>
+</div>
+
+<div class="defect" id="d13">
+  <h3><span class="sev p3">P3</span> D13 — Empty states are giant dashed rectangles</h3>
+  <p>Both <b>No machine paired yet</b> and <b>No session open</b> draw a 1px dashed border around the entire content viewport with a three-line message centred in it. On a phone this is ~1,500px of empty ruled box. The dashed treatment communicates "drop something here" on desktop and "the page failed to load" on a phone.</p>
+  <div class="kv"><div><b>Engine-independent:</b> yes.</div></div>
+</div>
+
+<div class="defect" id="d14">
+  <h3><span class="sev p2">P2</span> D14 — Reopening the app always lands on "No session open"</h3>
+  <p>Close the tab, reopen the hub: paired, but back to the empty state. The app does not restore the last attached session. Getting back to what you were watching costs three taps every single time — and on a phone, "glance at the thing I was watching" is the dominant use case, not the exception.</p>
+  <div class="kv"><div><b>Hypothesis:</b> the device credential persists (localStorage/IndexedDB) but selection state does not. Last machine + last session are the two cheapest things to persist and the two highest-value on mobile.</div>
+  <div><b>Engine-independent:</b> yes.</div></div>
+</div>
+
+<!-- ============================================================= -->
+<h2 id="control">2b · Control run: the same hub on Chrome 145</h2>
+
+<p>The emulator's Chrome 113 answers one question ("what does a real Android 14 phone with a stale browser do?") and confounds another ("which of these are CSS we wrote?"). So the entire run was repeated on a current engine: Playwright driving <b>Chrome 145.0.7632.6</b> with the <b>Pixel 7</b> device descriptor — 412×915 CSS px, DPR 2.625, touch, mobile user-agent — paired with its own fresh invitation and DPoP identity, attached to the same <code>cas-src-young-raven-93</code>, capturing 40 frames at 300 ms while the host session produced output.</p>
+
+<table>
+  <tr><th>Signal</th><th>Real Android 14 · Chrome 113</th><th>Pixel 7 profile · Chrome 145</th></tr>
+  <tr><td><code>AbortSignal.any</code> present</td><td>no</td><td>yes</td></tr>
+  <tr><td>Console errors</td><td>terminal attach throws, ×26 attention items</td><td><b>0</b></td></tr>
+  <tr><td>Terminal renders</td><td>never — permanent "Connecting… 0s"</td><td><b>yes, correctly</b></td></tr>
+  <tr><td>Terminal mount geometry</td><td>n/a (never mounted)</td><td>395 × 594 CSS px inside a 627px pane</td></tr>
+  <tr><td>Live updates during capture</td><td>none</td><td>9 of 39 frame transitions changed the terminal region</td></tr>
+  <tr><td>Bottom-rail defects</td><td>present</td><td><b>present and worse</b></td></tr>
+  <tr><td>Worker still a 32px stub</td><td>yes</td><td>yes</td></tr>
+</table>
+
+<div class="callout ok"><p><b>What this buys.</b> D3's blank pane is confirmed as engine age and can be de-escalated to "add feature detection and an unsupported-browser path". Everything else in the catalogue is confirmed as ours. And with a working terminal, the actual streaming-text complaint finally becomes visible — it was hiding behind the blank pane the whole time.</p></div>
+
+<div class="defect" id="d15">
+  <h3><span class="sev p0">P0</span> D15 — The streaming text problem: an 80-column agent TUI rendered at ~46 columns</h3>
+  <p>This is Daniel's original complaint, and on a working engine it is finally legible. Commander mounts the terminal at the pane's pixel width and reports that column count to the host, so the supervisor's TUI redraws itself for <b>~46 columns</b> — a little over half the width it was designed for. Every paragraph therefore soft-wraps, and the TUI's own layout arithmetic starts failing:</p>
+  <figure><img src="b2a-pw-terminal.png" alt="Terminal text wrapping defects on Chrome 145"><figcaption><b>13</b> · Supervisor pane, Chrome 145, Pixel 7 width. <span style="white-space:nowrap">(1)</span> a collapsed-message line wraps and its continuation <code>expand)</code> lands at <b>column 0</b> — outside the <code>›</code> gutter, left of every other line in the block. The hanging indent is lost, so the continuation reads as a new top-level item. <span style="white-space:nowrap">(2)</span> the widest line that fits is 45–46 characters; nearly every sentence in the pane is wrapped, and prose that was written to be scanned at 80 columns becomes a ragged column of fragments. <span style="white-space:nowrap">(3)</span> the <code>@supervisor</code> tag is painted on top of the input rule, with a stub of that rule left protruding to its right at the pane edge.</figcaption></figure>
+  <p>Note the asymmetry that makes this a layout bug rather than a font-size preference: bullet lines (<code>*</code>, <code>●</code>) keep their two-space continuation indent correctly, while the <code>›</code> collapsed-message lines lose theirs entirely. The wrap point is not being negotiated — the pane simply hands the host a narrow column and the host does its best.</p>
+  <div class="kv">
+    <div><b>State:</b> attach to any session at phone width on a working engine; supervisor pane, no interaction required.</div>
+    <div><b>Evidence:</b> <code>pw/s00–s39.png</code>, <code>b2a-pw-terminal.png</code>, <code>pw/probe.json</code> (mount 395×594 CSS px).</div>
+    <div><b>Hypothesis:</b> <code>terminal/ghostty/surface.ts:646</code> derives the grid from <code>mount.clientWidth/clientHeight</code> and <code>renderer.ts:89</code> computes <code>cols</code> by dividing by the glyph width; <code>DESIGN.md</code> clamps <code>--fs-terminal</code> to 12–16px. At 395 CSS px there is no font size that produces a usable column count — 12px still only buys ~50. The column count is not the tuning knob; the premise is. A phone needs a reflowed transcript view (word-wrapped at UI text size, not an ANSI grid), with the true terminal grid available on demand and horizontally scrollable.</div>
+    <div><b>Engine-independent:</b> yes — this is the layout, not the browser.</div>
+  </div>
+</div>
+
+<div class="defect" id="d7b">
+  <h3><span class="sev p1">P1</span> D7 confirmed — the bottom rail is worse on a current browser</h3>
+  <p>Like-for-like with figure 10, on Chrome 145:</p>
+  <figure class="wide"><img src="b1a-pw-rail.png" alt="Bottom rail on Chrome 145, annotated"><figcaption><b>14</b> · 2× zoom, Chrome 145, Pixel 7 width. <span style="white-space:nowrap">(1)</span> the <code>--line-strong</code> outline on <b>+ Pair</b> is now <em>clipped</em> — the collapsed context pill's background begins mid-border, so the rounded rectangle is sliced open on its right edge. <span style="white-space:nowrap">(2)</span> three unlabelled counts in three colours with two different badge treatments: red <code>6</code> and amber <code>3</code> get tinted circles, blue <code>91</code> gets nothing. <span style="white-space:nowrap">(3)</span> the machine chip is still truncated to two characters and its status dot is still clipped by the chip's own corner radius. <b>Machines</b> remains the only item in no container at all.</figcaption></figure>
+  <div class="kv"><div><b>Engine-independent:</b> confirmed on both engines. Nothing here is a rendering artifact — it is what the CSS asks for.</div></div>
+</div>
+
+<h3>Summary table</h3>
+<table>
+  <tr><th>#</th><th>Defect</th><th>Sev</th><th>Suspected source</th><th>Engine-independent</th></tr>
+  <tr><td class="mono">D1</td><td>CLI scope default ≠ UI scope request → <code>unauthorized</code></td><td>P0</td><td class="mono">main.ts:1115 + cas hub pair</td><td>yes</td></tr>
+  <tr><td class="mono">D2</td><td>Raw wire errors, no recovery, invitation burned</td><td>P1</td><td class="mono">main.ts:1704, :525</td><td>yes</td></tr>
+  <tr><td class="mono">D3</td><td>Terminal never renders; connect timer frozen</td><td>P0</td><td class="mono">connection.ts:333, connection-state-view.ts:49</td><td>partly</td></tr>
+  <tr><td class="mono">D4</td><td>Keyboard removes all navigation</td><td>P1</td><td class="mono">styles.css 100dvh + env()</td><td>yes</td></tr>
+  <tr><td class="mono">D5</td><td>Landscape falls back to desktop grid</td><td>P2</td><td class="mono">styles.css:1609</td><td>yes</td></tr>
+  <tr><td class="mono">D6</td><td>Workers collapse to a 32px stub</td><td>P1</td><td class="mono">styles.css:1861</td><td>yes</td></tr>
+  <tr><td class="mono">D7</td><td>Bottom rail: stray outline, clipped chip, colour seam</td><td>P1</td><td class="mono">styles.css:1662, :1749</td><td>yes</td></tr>
+  <tr><td class="mono">D8</td><td>Unlabelled two-tone attention digits</td><td>P2</td><td class="mono">styles.css:1789</td><td>yes</td></tr>
+  <tr><td class="mono">D9</td><td>Composer ready, then gated by a warning</td><td>P2</td><td class="mono">styles.css:1836 + header mode</td><td>yes</td></tr>
+  <tr><td class="mono">D10</td><td>Destructive action at thumb height</td><td>P2</td><td class="mono">machine drawer markup</td><td>yes</td></tr>
+  <tr><td class="mono">D11</td><td>Sub-48dp targets, 11px labels</td><td>P2</td><td class="mono">styles.css:1888, :1727</td><td>yes</td></tr>
+  <tr><td class="mono">D12</td><td><code>--text-lo</code> ≈2.4:1 used for controls</td><td>P2</td><td class="mono">styles.css / DESIGN.md</td><td>yes</td></tr>
+  <tr><td class="mono">D13</td><td>Full-viewport dashed empty states</td><td>P3</td><td class="mono">empty-state markup</td><td>yes</td></tr>
+  <tr><td class="mono">D14</td><td>No session restore on reopen</td><td>P2</td><td class="mono">storage.ts / main.ts</td><td>yes</td></tr>
+  <tr><td class="mono">D15</td><td>80-column agent TUI rendered at ~46 columns; hanging indents collapse</td><td>P0</td><td class="mono">surface.ts:646, renderer.ts:89</td><td>yes</td></tr>
+</table>
+
+<!-- ============================================================= -->
+<h2 id="brief">3 · Redesign brief</h2>
+
+<div class="card">
+  <h3 style="margin-top:0">What is a phone actually for here?</h3>
+  <p>Today's phone build is the desktop console with the columns stacked. That inherits the desktop's premise — <em>you are sitting down to drive a fleet</em> — which is exactly the situation in which nobody reaches for a phone. The honest phone premise is different and much narrower:</p>
+  <p style="font-size:17px;color:var(--ink);border-left:4px solid var(--ink);padding-left:16px;margin:18px 0"><b>You are away from the desk. Something either needs you or it doesn't. If it does, you want to answer it in two taps and put the phone back in your pocket.</b></p>
+  <p>Everything follows from that. A terminal emulator is not the primary object on a phone — <em>the decision</em> is. Reading a 13px monospace grid on a 6-inch screen is a fallback, not a feature. And the product already has the raw materials: an attention model with severity and grouping, a voice composer (<code>speech-input.ts</code>) that works, per-worker status, and hub push connectivity. They are just arranged as a smaller desktop.</p>
+  <p style="margin-bottom:0">Three directions follow. They are not variations on the current layout; each starts from a different answer to "what is the primary object on this screen?"</p>
+</div>
+
+<!-- ---------------- Direction A ---------------- -->
+<div class="dir">
+  <h3>Direction A — <b>The Inbox</b>: attention is the app, terminals are an attachment</h3>
+  <p><b>Primary object:</b> an attention item. The home screen is not a fleet, not a session, not a terminal — it is a prioritised, grouped list of things that want a decision, newest and most severe first. Each card carries the machine, the agent, a one-line summary, the last 3–5 lines of relevant output as a quoted excerpt, and its actions inline: <b>Approve</b>, <b>Redirect</b>, <b>Interrupt</b>, <b>Snooze</b>. The terminal is reachable — "Open terminal" is on every card — but it is never where you start.</p>
+
+  <div class="wire">
+  <svg viewBox="0 0 720 300" role="img" aria-label="Wireframe: attention inbox with expandable action cards">
+    <style>
+      .f{fill:#fff;stroke:#8b94a4;stroke-width:1.2}
+      .fill{fill:#eef1f6;stroke:#8b94a4;stroke-width:1.2}
+      .dark{fill:#1a1f28;stroke:#1a1f28}
+      .t{font-family:Inter,sans-serif;font-size:9.5px;fill:#3d4653}
+      .tt{font-family:Inter,sans-serif;font-size:11px;font-weight:600;fill:#14181f}
+      .m{font-family:monospace;font-size:8.5px;fill:#6b7686}
+      .lbl{font-family:Inter,sans-serif;font-size:9px;fill:#8b94a4}
+      .btn{fill:#1a1f28}
+      .btxt{font-family:Inter,sans-serif;font-size:9px;fill:#fff}
+      .amber{fill:#e5b454}.crit{fill:#e5645e}.ok{fill:#4cc38a}
+    </style>
+    <!-- phone 1 -->
+    <rect x="8" y="8" width="200" height="284" rx="14" class="f"/>
+    <text x="22" y="30" class="tt">Needs you</text><text x="150" y="30" class="lbl">3</text>
+    <rect x="18" y="40" width="180" height="60" rx="8" class="fill"/>
+    <circle cx="30" cy="55" r="4" class="crit"/><text x="42" y="58" class="t">worker blocked · 2m</text>
+    <text x="24" y="72" class="tt">true-panther-81</text>
+    <text x="24" y="86" class="m">merge conflict in styles.css</text>
+    <rect x="18" y="106" width="180" height="60" rx="8" class="fill"/>
+    <circle cx="30" cy="121" r="4" class="amber"/><text x="42" y="124" class="t">awaiting approval · 9m</text>
+    <text x="24" y="138" class="tt">fast-kestrel-6</text>
+    <text x="24" y="152" class="m">merge factory/… into epic?</text>
+    <rect x="18" y="172" width="180" height="52" rx="8" class="fill"/>
+    <circle cx="30" cy="187" r="4" class="amber"/><text x="42" y="190" class="t">question · 14m</text>
+    <text x="24" y="204" class="tt">gentle-hawk-29</text>
+    <text x="22" y="248" class="lbl">Quiet · 4 running</text>
+    <rect x="18" y="256" width="180" height="26" rx="6" class="f"/>
+    <text x="24" y="273" class="m">▸ gabber-studio  ▸ cas-src</text>
+    <!-- arrow -->
+    <path d="M218 150 h32" stroke="#8b94a4" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+    <defs><marker id="ar" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#8b94a4"/></marker></defs>
+    <!-- phone 2: expanded card -->
+    <rect x="260" y="8" width="200" height="284" rx="14" class="f"/>
+    <text x="274" y="30" class="tt">true-panther-81</text>
+    <circle cx="440" cy="26" r="4" class="crit"/>
+    <rect x="270" y="40" width="180" height="76" rx="8" class="dark"/>
+    <text x="278" y="56" font-family="monospace" font-size="7.5" fill="#9aa3b5">CONFLICT (content): Merge</text>
+    <text x="278" y="68" font-family="monospace" font-size="7.5" fill="#9aa3b5">conflict in hub-web/src/</text>
+    <text x="278" y="80" font-family="monospace" font-size="7.5" fill="#9aa3b5">styles.css</text>
+    <text x="278" y="96" font-family="monospace" font-size="7.5" fill="#e5b454">Automatic merge failed;</text>
+    <text x="278" y="108" font-family="monospace" font-size="7.5" fill="#e5b454">fix conflicts then commit.</text>
+    <text x="274" y="132" class="lbl">Suggested</text>
+    <rect x="270" y="140" width="86" height="30" rx="7" class="btn"/><text x="286" y="159" class="btxt">Take ours</text>
+    <rect x="364" y="140" width="86" height="30" rx="7" class="f"/><text x="382" y="159" class="t">Take theirs</text>
+    <rect x="270" y="178" width="180" height="30" rx="7" class="f"/><text x="286" y="197" class="t">🎙  Redirect by voice</text>
+    <rect x="270" y="214" width="86" height="28" rx="7" class="f"/><text x="292" y="232" class="t">Snooze</text>
+    <rect x="364" y="214" width="86" height="28" rx="7" class="f"/><text x="386" y="232" class="t">Open term</text>
+    <text x="274" y="266" class="lbl">Swipe down to dismiss</text>
+    <!-- annotation -->
+    <text x="490" y="40" class="tt">Two taps, always</text>
+    <text x="490" y="58" class="t">Glance → card → action.</text>
+    <text x="490" y="72" class="t">The terminal is one</text>
+    <text x="490" y="86" class="t">optional tap deeper,</text>
+    <text x="490" y="100" class="t">never the entry point.</text>
+    <text x="490" y="130" class="tt">Quiet by default</text>
+    <text x="490" y="148" class="t">Healthy sessions collapse</text>
+    <text x="490" y="162" class="t">into one line. The screen</text>
+    <text x="490" y="176" class="t">is empty when nothing</text>
+    <text x="490" y="190" class="t">needs you — and that is</text>
+    <text x="490" y="204" class="t">the success state.</text>
+    <text x="490" y="234" class="tt">Push, not polling</text>
+    <text x="490" y="252" class="t">Web Push + PWA install</text>
+    <text x="490" y="266" class="t">turns the badge into a</text>
+    <text x="490" y="280" class="t">notification you act on.</text>
+  </svg>
+  </div>
+
+  <h4>What it makes possible that today's UI cannot</h4>
+  <ul>
+    <li><b>Answering without reading a terminal.</b> Today, deciding anything requires the terminal — which on this stack renders nothing at all (D3). An inbox with quoted excerpts degrades gracefully: even with a dead renderer, the decision is still makeable.</li>
+    <li><b>A real notification story.</b> Attention items already carry severity and grouping. Wired to Web Push on an installed PWA, the phone stops being a thing you open and becomes a thing that taps you on the shoulder — the only interaction model that fits "away from the desk".</li>
+    <li><b>An honest empty state.</b> "Nothing needs you" is the most valuable screen this product can show a person at dinner. Today that state is a dashed rectangle (D13).</li>
+  </ul>
+  <p><b>Cost:</b> the attention model must carry enough context to decide — a few lines of excerpt and a suggested action per item. That is a hub-side change, not just CSS.</p>
+</div>
+
+<!-- ---------------- Direction B ---------------- -->
+<div class="dir">
+  <h3>Direction B — <b>The Deck</b>: one agent per card, swipe between them</h3>
+  <p><b>Primary object:</b> an agent. One full-bleed card per agent — supervisor and every worker are peers — with horizontal swipe to move between them and a dot indicator for position. Each card is a self-contained unit: status, current activity, a live readable output tail sized to the phone (not a shrunken 80-column grid), and a fixed action bar at the bottom of the card. Vertical swipe moves between sessions.</p>
+
+  <div class="wire">
+  <svg viewBox="0 0 720 300" role="img" aria-label="Wireframe: swipeable agent deck">
+    <style>
+      .f2{fill:#fff;stroke:#8b94a4;stroke-width:1.2}
+      .fl2{fill:#eef1f6;stroke:#8b94a4;stroke-width:1.2}
+      .d2{fill:#1a1f28}
+      .t2{font-family:Inter,sans-serif;font-size:9.5px;fill:#3d4653}
+      .tt2{font-family:Inter,sans-serif;font-size:11px;font-weight:600;fill:#14181f}
+      .m2{font-family:monospace;font-size:8px;fill:#9aa3b5}
+      .l2{font-family:Inter,sans-serif;font-size:9px;fill:#8b94a4}
+      .bt2{font-family:Inter,sans-serif;font-size:9px;fill:#fff}
+    </style>
+    <!-- partial left card -->
+    <rect x="-30" y="20" width="60" height="260" rx="14" class="fl2"/>
+    <!-- main card -->
+    <rect x="40" y="8" width="210" height="284" rx="14" class="f2"/>
+    <circle cx="58" cy="30" r="4" fill="#4cc38a"/>
+    <text x="70" y="34" class="tt2">true-panther-81</text>
+    <text x="58" y="50" class="l2">WORKER · cas-src · running 4m</text>
+    <rect x="50" y="60" width="190" height="24" rx="6" class="fl2"/>
+    <text x="58" y="76" class="t2">▸ annotating screenshots</text>
+    <rect x="50" y="92" width="190" height="118" rx="8" class="d2"/>
+    <text x="58" y="108" class="m2">$ python3 annotate.py</text>
+    <text x="58" y="122" class="m2">a1-bottom-rail.png (2160,400)</text>
+    <text x="58" y="136" class="m2">a2-frozen-timer.png</text>
+    <text x="58" y="150" class="m2">a3-truncated-error.png</text>
+    <text x="58" y="164" class="m2">a4-keyboard-crush.png</text>
+    <text x="58" y="178" class="m2">a5-landscape.png</text>
+    <text x="58" y="192" font-family="monospace" font-size="8" fill="#4cc38a">▋ writing report…</text>
+    <text x="50" y="224" class="l2">tail · pinch to size · tap to expand</text>
+    <rect x="50" y="232" width="60" height="30" rx="7" class="d2"/><text x="62" y="251" class="bt2">🎙 Talk</text>
+    <rect x="115" y="232" width="60" height="30" rx="7" class="f2"/><text x="130" y="251" class="t2">Control</text>
+    <rect x="180" y="232" width="60" height="30" rx="7" class="f2"/><text x="192" y="251" class="t2">Interrupt</text>
+    <circle cx="128" cy="278" r="3" fill="#8b94a4"/><circle cx="140" cy="278" r="4" fill="#1a1f28"/><circle cx="152" cy="278" r="3" fill="#8b94a4"/><circle cx="164" cy="278" r="3" fill="#8b94a4"/>
+    <!-- partial right card -->
+    <rect x="260" y="20" width="60" height="260" rx="14" class="fl2"/>
+    <text x="268" y="44" class="l2">fast-</text><text x="268" y="56" class="l2">kestrel</text>
+    <!-- gestures -->
+    <path d="M275 150 h40" stroke="#8b94a4" stroke-width="1.4" fill="none" marker-end="url(#ar2)"/>
+    <path d="M145 300 v-8" stroke="#8b94a4" stroke-width="1.4" fill="none"/>
+    <defs><marker id="ar2" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#8b94a4"/></marker></defs>
+    <text x="350" y="40" class="tt2">Every agent is a peer</text>
+    <text x="350" y="58" class="t2">No supervisor/worker hierarchy</text>
+    <text x="350" y="72" class="t2">in the layout. Swipe ↔ between</text>
+    <text x="350" y="86" class="t2">agents, ↕ between sessions.</text>
+    <text x="350" y="116" class="tt2">Output sized for a thumb</text>
+    <text x="350" y="134" class="t2">A reflowing tail at 15–16px,</text>
+    <text x="350" y="148" class="t2">not an 80-column grid at 13px.</text>
+    <text x="350" y="162" class="t2">Pinch to trade lines for size.</text>
+    <text x="350" y="176" class="t2">Tap for the full terminal.</text>
+    <text x="350" y="206" class="tt2">Actions travel with the agent</text>
+    <text x="350" y="224" class="t2">Talk / Control / Interrupt are</text>
+    <text x="350" y="238" class="t2">on the card, in the thumb arc —</text>
+    <text x="350" y="252" class="t2">never in a top-right corner.</text>
+    <text x="350" y="276" class="t2">Fixes D6 (worker stub) and D3's</text>
+    <text x="350" y="290" class="t2">"only one terminal" constraint.</text>
+  </svg>
+  </div>
+
+  <h4>What it makes possible that today's UI cannot</h4>
+  <ul>
+    <li><b>Workers stop being second-class.</b> Today a worker is a 32px name (D6). Here a worker and a supervisor are the same card, and reaching the worker is a swipe, not a hunt for an unlabelled ★.</li>
+    <li><b>Readable output without a terminal grid.</b> This is now the measured problem, not a preference: <a href="#d15">D15</a> shows the supervisor TUI redrawing itself at ~46 columns, where its own hanging indents collapse and continuations escape their gutter. A reflowing tail at UI text size is legible at arm's length; a 13px ANSI grid on a 395 CSS-px pane is not, at any font size the 12–16px clamp allows. The true terminal stays one tap away, horizontally scrollable, for when you genuinely need it.</li>
+    <li><b>Actions land in the thumb arc.</b> <b>Interrupt</b> moves from the top-right corner (the single worst place on a phone, D3/fig 05) to the bottom of the card it belongs to.</li>
+  </ul>
+  <p><b>Cost:</b> the reflowing tail is a new render path — you cannot get it by restyling the Ghostty canvas, and it needs a server-side or client-side "last N logical lines" notion that survives ANSI.</p>
+</div>
+
+<!-- ---------------- Direction C ---------------- -->
+<div class="dir">
+  <h3>Direction C — <b>The Walkie-Talkie</b>: voice first, screen second</h3>
+  <p><b>Primary object:</b> a conversation. The app opens on a single push-to-talk control and a transcript. You hold, speak — "what's blocking true-panther?", "tell fast-kestrel to merge it", "interrupt the gabber worker" — and the response comes back as a short synthesised summary plus a card you can tap for detail. Routing (which agent, which session) is inferred from what you said and shown for confirmation before anything is sent. The terminal is a detail view you open deliberately.</p>
+
+  <div class="wire">
+  <svg viewBox="0 0 720 300" role="img" aria-label="Wireframe: voice-first commander">
+    <style>
+      .f3{fill:#fff;stroke:#8b94a4;stroke-width:1.2}
+      .fl3{fill:#eef1f6;stroke:#8b94a4;stroke-width:1.2}
+      .t3{font-family:Inter,sans-serif;font-size:9.5px;fill:#3d4653}
+      .tt3{font-family:Inter,sans-serif;font-size:11px;font-weight:600;fill:#14181f}
+      .l3{font-family:Inter,sans-serif;font-size:9px;fill:#8b94a4}
+      .m3{font-family:monospace;font-size:8px;fill:#6b7686}
+    </style>
+    <rect x="8" y="8" width="200" height="284" rx="14" class="f3"/>
+    <text x="22" y="30" class="tt3">Ask the fleet</text>
+    <rect x="18" y="40" width="180" height="34" rx="8" class="fl3"/>
+    <text x="26" y="54" class="l3">you</text>
+    <text x="26" y="68" class="t3">"what's blocking true-panther?"</text>
+    <rect x="18" y="82" width="180" height="58" rx="8" fill="#1a1f28"/>
+    <text x="26" y="96" font-family="Inter,sans-serif" font-size="8.5" fill="#9aa3b5">cassy</text>
+    <text x="26" y="110" font-family="Inter,sans-serif" font-size="9" fill="#e8ebf2">Merge conflict in styles.css.</text>
+    <text x="26" y="124" font-family="Inter,sans-serif" font-size="9" fill="#e8ebf2">Been waiting 4 minutes.</text>
+    <text x="26" y="136" font-family="Inter,sans-serif" font-size="8" fill="#6ca7f2">▸ show me</text>
+    <rect x="18" y="148" width="180" height="34" rx="8" class="fl3"/>
+    <text x="26" y="162" class="l3">you</text>
+    <text x="26" y="176" class="t3">"tell it to take ours and go"</text>
+    <rect x="18" y="190" width="180" height="42" rx="8" fill="#fdf7e8" stroke="#e5b454"/>
+    <text x="26" y="204" font-family="Inter,sans-serif" font-size="8.5" fill="#8a5a00">Confirm before sending</text>
+    <text x="26" y="218" class="m3">→ true-panther-81 · pane:input</text>
+    <text x="150" y="228" font-family="Inter,sans-serif" font-size="9" font-weight="600" fill="#1f6f43">Send</text>
+    <circle cx="108" cy="264" r="22" fill="#1a1f28"/>
+    <text x="101" y="270" font-size="14" fill="#fff">🎙</text>
+    <text x="70" y="292" class="l3">hold to talk</text>
+    <text x="250" y="40" class="tt3">Builds on what exists</text>
+    <text x="250" y="58" class="t3">speech-input.ts already does</text>
+    <text x="250" y="72" class="t3">mic → transcript → review →</text>
+    <text x="250" y="86" class="t3">send. This makes that loop the</text>
+    <text x="250" y="100" class="t3">whole app instead of one</text>
+    <text x="250" y="114" class="t3">button inside a bottom sheet.</text>
+    <text x="250" y="144" class="tt3">Solves the hardest phone problem</text>
+    <text x="250" y="162" class="t3">Typing a redirect on a phone is</text>
+    <text x="250" y="176" class="t3">miserable — and today the keyboard</text>
+    <text x="250" y="190" class="t3">also destroys the layout (D4).</text>
+    <text x="250" y="204" class="t3">Voice sidesteps both.</text>
+    <text x="250" y="234" class="tt3">Safety is explicit</text>
+    <text x="250" y="252" class="t3">Every mutating action shows its</text>
+    <text x="250" y="266" class="t3">target and scope and waits for a</text>
+    <text x="250" y="280" class="t3">tap. Speech never auto-executes.</text>
+  </svg>
+  </div>
+
+  <h4>What it makes possible that today's UI cannot</h4>
+  <ul>
+    <li><b>Hands-and-eyes-busy operation.</b> Walking, driving, cooking. No layout survives a keyboard on this screen (D4); voice never opens one.</li>
+    <li><b>Cross-session questions.</b> "Is anything blocked?" spans the whole fleet. There is no screen in the current product that answers that without visiting each session.</li>
+    <li><b>The one thing a phone is genuinely better at than a laptop.</b> Everything else on a phone is a compromise; talking is not.</li>
+  </ul>
+  <p><b>Cost:</b> the largest of the three. Needs intent routing, a summarisation path, and TTS, and it leans on <code>SpeechRecognition</code> support that varies by browser. It also inverts the trust model: an explicit confirm step for every mutating action is not optional.</p>
+</div>
+
+<!-- ---------------- Recommendation ---------------- -->
+<div class="card" style="border-left:5px solid var(--ink)">
+  <h3 style="margin-top:0">Recommendation</h3>
+  <p><b>Ship A as the phone's home screen, fold B in as its detail view, and treat C as the input method for both.</b></p>
+  <p>They are not really three products; they are three answers to "what is the primary object", and the right composition is a stack:</p>
+  <ul>
+    <li><b>A (The Inbox) is the front door</b> because it is the only one that matches why someone picks up a phone at all, and because it is the only one that still works when the terminal renderer is broken — which, today, it entirely is (D3). It is also the direction that turns the existing attention model into the product's spine instead of a badge in the corner.</li>
+    <li><b>B (The Deck) is what you get when you tap a card</b>, and <a href="#d15">D15</a> is its strongest argument: a reflowed transcript is the only way phone-width output becomes readable, because the column count is not a knob that can be turned far enough. "Show me true-panther" should land on that agent's card, swipeable to its peers. This retires the supervisor-65%/worker-35% split that makes workers unreachable on a phone (D6) and moves destructive actions out of the top-right corner.</li>
+    <li><b>C (Voice) is not a fourth screen — it is the composer</b> for both. <code>speech-input.ts</code> already implements mic → transcript → review → send; promoting it from a button inside a bottom sheet to the persistent primary input, with an explicit confirm-target step, is the cheapest large win available and it sidesteps the keyboard catastrophe (D4) entirely.</li>
+  </ul>
+  <p><b>Sequencing.</b> Fix D3 and D1 first — they are blockers and neither is a design question. Then build A against the existing attention feed. Then B. Then promote C. A and B are mostly composition and CSS; C is the one that needs new backend surface, so it should not gate the first two.</p>
+  <p style="margin-bottom:0"><b>What I would not do:</b> keep iterating on the compact media query. Every defect from D4 to D13 is a symptom of one decision — that the phone is the desktop with narrower columns. The 53rem block in <code>styles.css</code> is already 300 lines of careful, well-commented compensation for that premise, and the comments in it (<em>"Workers cannot mount a terminal here"</em>, <em>"the term stacks above its value instead of shredding it"</em>, <em>"OBS / Ctrl / Int made a first-time Pixel pass read like a debug toolbar"</em>) read as an accurate account of a layout arguing with itself. The phone needs its own composition, not a better argument.</p>
+</div>
+
+<!-- ============================================================= -->
+<h2 id="appendix">4 · Appendix</h2>
+
+<h3>Environment</h3>
+<table>
+  <tr><th>Item</th><th class="mono">Value</th></tr>
+  <tr><td>AVD</td><td class="mono">ozer_pixel_api34 · Android 14 (API 34) · google_apis</td></tr>
+  <tr><td>Emulator PID / log</td><td class="mono">372243 · emulator.log</td></tr>
+  <tr><td>Display</td><td class="mono">1080×2400 @ 420 dpi → DPR 2.625 → ~411×914 CSS px portrait</td></tr>
+  <tr><td>Browser</td><td class="mono">Chrome 113.0.5672.136 (bundled with the system image)</td></tr>
+  <tr><td>GPU</td><td class="mono">swiftshader_indirect (software)</td></tr>
+  <tr><td>Hub</td><td class="mono">cas 3.13.0 (ee619be) · pid 19952 · 127.0.0.1:4173 + :45743</td></tr>
+  <tr><td>Public origin</td><td class="mono">https://soundwave-linux.tailf5a734.ts.net/ (Tailscale Serve)</td></tr>
+  <tr><td>Session under test</td><td class="mono">cas-src-young-raven-93 · supervisor fast-kestrel-6 · worker true-panther-81</td></tr>
+  <tr><td>Breakpoint crossed</td><td class="mono">max-width: 53rem — portrait compact, landscape desktop</td></tr>
+</table>
+
+<h3>Commands run</h3>
+<pre><code># emulator, headless, tailnet DNS
+nohup ~/android-sdk/emulator/emulator -avd ozer_pixel_api34 \
+  -no-window -no-audio -gpu swiftshader_indirect -no-snapshot \
+  -dns-server 100.100.100.100 &gt; emulator.log 2&gt;&amp;1 &amp;
+
+# open the hub
+adb shell am start -a android.intent.action.VIEW \
+  -d 'https://soundwave-linux.tailf5a734.ts.net/' com.android.chrome
+
+# pairing — the default that FAILS (read-only ceiling vs six-scope request)
+cas hub pair --origin https://soundwave-linux.tailf5a734.ts.net
+
+# pairing — what actually works
+cas hub pair --origin https://soundwave-linux.tailf5a734.ts.net \
+  --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt
+# open the fragment URL with a UNIQUE query, or Chrome reuses a tab and drops it:
+#   https://…ts.net/?t=4#pair=…&amp;hub=…
+
+# evidence capture
+adb exec-out screencap -p &gt; NN-state.png
+adb shell screenrecord --time-limit 20 --bit-rate 6000000 /sdcard/s3.mp4
+adb pull /sdcard/s3.mp4
+adb shell settings put system accelerometer_rotation 0
+adb shell settings put system user_rotation 1      # landscape; 0 = portrait
+adb logcat -d -s chromium:*                        # surfaced the GL noise
+python3 -c "…PIL…"                                 # crops, 2× zoom, annotations</code></pre>
+
+<h3>Control run — Chrome 145 at a Pixel 7 profile</h3>
+<pre><code># playwright resolved from a sibling checkout; browsers already in ~/.cache/ms-playwright
+NODE_PATH=/home/pippenz/Petrastella/ozer/node_modules DISPLAY=:0 \
+PW_PAIR_URL="$(grep -o 'https://[^ ]*#pair=[^ ]*' pair-cli-6.txt)" node pw-capture.js
+
+# pw-capture.js, in short:
+#   chromium.launch({ headless: false })              # see note below
+#   newContext({ ...devices['Pixel 7'], recordVideo }) # 412x915, DPR 2.625, touch, mobile UA
+#   goto(pairUrl) -&gt; "Pair a machine" -&gt; fill label/operator -&gt; submit
+#   "Machines" -&gt; click session row -&gt; wait for attach
+#   40 x page.screenshot() at 300ms  (pw/s00..s39.png)
+#   evaluate() probe: mount geometry, typeof AbortSignal.any, UA, DPR, innerText
+#   setViewportSize(915x412) for the landscape frame</code></pre>
+<div class="callout warn"><p><b>Environment note, not a product defect.</b> Playwright's <em>headless shell</em> crashes the render process on this app at <code>domcontentloaded</code>, in every configuration tried (desktop and Pixel 7 viewports, with and without <code>--disable-dev-shm-usage</code>, <code>--disable-gpu</code>, <code>--use-gl=swiftshader</code>, and <code>--headless=new</code>). <code>https://example.com</code> loads fine in the same launcher, and headed Chromium on <code>:0</code> loads Commander fine. Recorded here because it would block any headless e2e or visual-regression suite against the hub, and because the likely culprit — the Ghostty WASM/canvas mount — is worth someone's ten minutes.</p></div>
+
+<h3>Retest recipe (to separate engine age from authored defects)</h3>
+<p><b>Done — see section <a href="#control">2b</a>.</b> The original recipe was: re-run <a href="#d3">D3</a> on a browser with <code>AbortSignal.any</code>: a physical Android device on current Chrome, or an AVD image with a newer bundled Chrome, or Chrome DevTools device emulation at 411×914 / DPR 2.625. The terminal paints, so D3's first half is engine age and only the frozen timer, the buried truncated error and the missing unsupported-browser path remain as product bugs. <b>Every other defect in this report is authored CSS or markup and will reproduce on any engine.</b></p>
+
+<h3>Screenshot index</h3>
+<table>
+  <tr><th class="mono">File</th><th>State</th></tr>
+  <tr><td class="mono">01-home.png</td><td>Emulator home screen, post-boot</td></tr>
+  <tr><td class="mono">02-chrome-first-load.png</td><td>Chrome first-run welcome</td></tr>
+  <tr><td class="mono">03-chrome-firstrun-2.png</td><td>Notification prompt; hub already rendering behind</td></tr>
+  <tr><td class="mono">04-fleet-overview-unpaired.png</td><td>Fleet overview, unpaired empty state</td></tr>
+  <tr><td class="mono">05-pair-dialog.png</td><td>Pair dialog, autofocus keyboard open</td></tr>
+  <tr><td class="mono">06-pair-dialog-nokbd.png</td><td>Pair dialog, keyboard dismissed</td></tr>
+  <tr><td class="mono">07-pairing-code.png</td><td>"The pairing service is unavailable."</td></tr>
+  <tr><td class="mono">08-pair-fragment-open.png</td><td>Fragment URL opened — nothing happened (tab reuse)</td></tr>
+  <tr><td class="mono">09-invitation-dialog.png</td><td>Dialog still says Pair is disabled</td></tr>
+  <tr><td class="mono">10-invitation-loaded.png</td><td>Fresh fragment loaded via unique query</td></tr>
+  <tr><td class="mono">11-invitation-dialog-open.png</td><td>Invitation form, keyboard covering lower half</td></tr>
+  <tr><td class="mono">12/13-invitation-form-top/bottom.png</td><td>Full invitation form, keyboard dismissed</td></tr>
+  <tr><td class="mono">14-keyboard-covers-pair-button.png</td><td>Typing the machine label; Pair button hidden</td></tr>
+  <tr><td class="mono">15-invitation-form-filled.png</td><td>Form complete, ready to submit</td></tr>
+  <tr><td class="mono">16-after-pair-submit.png</td><td><code>unauthorized</code>; invitation burned</td></tr>
+  <tr><td class="mono">17-fullscope-form.png / 17-fullscope-loaded.png</td><td>Re-minted full-scope invitation</td></tr>
+  <tr><td class="mono">18-paired.png · 18b-bottom-rail-zoom.png</td><td>Paired; bottom rail at 1× and 2×</td></tr>
+  <tr><td class="mono">19-machines-drawer.png</td><td>Machines drawer with session list</td></tr>
+  <tr><td class="mono">20/21-session-attached/connected.png</td><td>Attached; connect timer frozen at 1s vs header 28s</td></tr>
+  <tr><td class="mono">22-worker-expanded.png</td><td>Worker promoted to primary; still blank</td></tr>
+  <tr><td class="mono">23-after-output.png</td><td>After 3× 200-token output bursts — still blank</td></tr>
+  <tr><td class="mono">24-landscape-keyboard-crush.png</td><td>Landscape + keyboard; app in a ~110px band</td></tr>
+  <tr><td class="mono">25-landscape-nokbd.png</td><td>Landscape desktop grid on a phone</td></tr>
+  <tr><td class="mono">26-portrait-back.png</td><td>Rotated back to portrait</td></tr>
+  <tr><td class="mono">27-streaming-portrait.mp4</td><td><b>Screen recording, 20s</b> — live output streaming host-side, pane frozen on "Connecting… 0s"</td></tr>
+  <tr><td class="mono">27-frame-01/02.png</td><td>Frames 20 and 200 of the recording</td></tr>
+  <tr><td class="mono">28-after-stream.png</td><td>Keyboard open: all chrome gone, terminal solid black</td></tr>
+  <tr><td class="mono">29-message-composer.png</td><td>Voice/message composer sheet</td></tr>
+  <tr><td class="mono">30-attention-panel.png</td><td>Attention panel with the reconnect storm</td></tr>
+  <tr><td class="mono">31-back-in-app.png · 32-reopen.png</td><td>Reopen: still paired, but back to "No session open"</td></tr>
+  <tr><td class="mono">33-reattached.png</td><td>Re-attached for the recording</td></tr>
+  <tr><td class="mono">34-attention-details.png</td><td><b>The diagnosis:</b> <code>AbortSignal.any is not a…</code> ×26</td></tr>
+  <tr><td class="mono">a1–a8-*.png</td><td>Annotated derivatives used as figures above (Chrome 113 run)</td></tr>
+  <tr><td class="mono">pw/p01–p09-*.png</td><td><b>Control run, Chrome 145 / Pixel 7:</b> load, pair dialog, form, paired, drawer, attached, post-stream, landscape</td></tr>
+  <tr><td class="mono">pw/s00–s39.png</td><td>Streaming capture, 40 frames at 300 ms</td></tr>
+  <tr><td class="mono">pw/video/*.webm</td><td>Playwright video of the whole control run</td></tr>
+  <tr><td class="mono">pw/probe.json</td><td>Mount geometry, <code>AbortSignal.any</code> presence, UA, DPR, console errors</td></tr>
+  <tr><td class="mono">b1a/b2a-pw-*.png</td><td>Annotated control-run figures (bottom rail, terminal wrap)</td></tr>
+  <tr><td class="mono">pw-capture.js · pw.log</td><td>Control-run script and its output</td></tr>
+  <tr><td class="mono">emulator.log · pair-cli-output.txt</td><td>Raw boot log and CLI pairing output</td></tr>
+</table>
+
+<h3>Scope discipline</h3>
+<p>This was a no-code spike. No file under <code>hub-web/</code> or <code>hub/</code> was modified. No paired device was revoked or removed, and nothing under <code>~/.cas/hub/</code> was touched except through <code>cas hub pair</code>. The session driven for streaming evidence was this worker's own session, so no other operator's agent received injected input.</p>
+
+<p class="foot">cas-b652 · worker true-panther-81 · captured 2026-09-03 17:05–17:25 UTC on soundwave-linux. Every screenshot referenced above sits beside this file.</p>
+
+</div>
+</body>
+</html>

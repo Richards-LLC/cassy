@@ -291,6 +291,35 @@ function cardFingerprint(item: AttentionItem, content: AttentionContent): string
     ?? [item.machineId, item.session ?? "machine", normalizedKind(item.kind), content.headline, content.detail ?? "", content.cause ?? ""].join("\u001f").toLowerCase();
 }
 
+export interface AttentionMerge {
+  readonly items: AttentionItem[];
+  /** The row to persist: an existing entry updated in place, or the new one. */
+  readonly stored: AttentionItem;
+  readonly repeat: boolean;
+}
+
+/**
+ * One recurring failure is one entry. A retry loop used to append a row per
+ * attempt — 26 identical criticals for a single outage — which inflated every
+ * badge and the local store alike (report cas-b652, defect D3). Repeats update
+ * the live entry and carry a count; an acknowledged entry is left alone so the
+ * next occurrence is visibly new.
+ */
+export function mergeAttentionItem(items: readonly AttentionItem[], next: AttentionItem): AttentionMerge {
+  const existing = next.fingerprint
+    ? items.find((candidate) => !candidate.acknowledgedAt && candidate.fingerprint === next.fingerprint)
+    : undefined;
+  if (!existing) return { items: [next, ...items], stored: next, repeat: false };
+  const stored: AttentionItem = {
+    ...next,
+    id: existing.id,
+    firstSeenAt: existing.firstSeenAt ?? existing.createdAt,
+    seenAt: existing.seenAt,
+    repeatCount: (existing.repeatCount ?? 1) + 1,
+  };
+  return { items: [stored, ...items.filter((candidate) => candidate !== existing)], stored, repeat: true };
+}
+
 export function coalesceAttention(items: readonly AttentionItem[]): AttentionCard[] {
   const cards = new Map<string, AttentionCard>();
   for (const item of items.filter((candidate) => !candidate.acknowledgedAt)) {
@@ -298,11 +327,11 @@ export function coalesceAttention(items: readonly AttentionItem[]): AttentionCar
     const key = cardFingerprint(item, content);
     const existing = cards.get(key);
     if (!existing) {
-      cards.set(key, { key, content, items: [item], latest: item, count: 1 });
+      cards.set(key, { key, content, items: [item], latest: item, count: item.repeatCount ?? 1 });
       continue;
     }
     existing.items.push(item);
-    existing.count += 1;
+    existing.count += item.repeatCount ?? 1;
     if (item.createdAt > existing.latest.createdAt) {
       existing.latest = item;
       existing.content = content;
@@ -364,6 +393,33 @@ export function attentionCounts(items: readonly AttentionItem[]): AttentionCount
     if (!item.acknowledgedAt) counts[attentionContent(item).severity] += 1;
   }
   return counts;
+}
+
+export interface AttentionSummary {
+  severity: AttentionSeverity | "clear";
+  total: number;
+  label: string;
+  description: string;
+}
+
+/**
+ * One labelled figure for the collapsed rail. Three bare numbers in three
+ * colours say nothing about what they count and force two badge treatments
+ * into a 48px row; the rail states the total and takes its colour from the
+ * worst outstanding severity, and the per-severity split stays in the panel.
+ */
+export function attentionSummary(counts: AttentionCounts): AttentionSummary {
+  const total = counts.critical + counts.warning + counts.info;
+  if (total === 0) {
+    return { severity: "clear", total: 0, label: "Clear", description: "Nothing needs attention" };
+  }
+  const severity: AttentionSeverity = counts.critical > 0 ? "critical" : counts.warning > 0 ? "warning" : "info";
+  return {
+    severity,
+    total,
+    label: `Needs ${total}`,
+    description: `${total} need attention: ${counts.critical} critical, ${counts.warning} warning, ${counts.info} info`,
+  };
 }
 
 export function dismissableInfoItems(items: readonly AttentionItem[]): AttentionItem[] {

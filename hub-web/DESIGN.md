@@ -25,6 +25,8 @@ typography:
     terminal: "--fs-terminal 13px / 1.35 / 400–600"
     md: "--fs-md 15px / pane and section titles / 400–600"
     lg: "--fs-lg 18px / current session title only / 400–600"
+rail:
+  item: "--rail-item-min 44px / one container treatment for every phone-rail control"
 spacing:
   base: "4px"
   steps: ["4px", "8px", "12px", "16px", "20px", "24px", "32px", "40px"]
@@ -38,6 +40,8 @@ elevation:
   raised: "--bg-raised, no shadow"
   overlay: "--shadow-overlay only"
 breakpoints:
+  phone: "(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"
+  landscape_phone: "(max-height: 30rem) and (pointer: coarse)"
   compact: "max-width: 53rem"
 ---
 
@@ -72,6 +76,7 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - Use `--fs-xs` for uppercase eyebrows and badges with `--tracking-label`; use `--fs-sm` for secondary UI and card prose.
 - `--fs-base` is the default interactive scale; `--fs-md` is for pane/section titles; `--fs-lg` is the one current-session title scale.
 - Ghostty reads `--font-mono` and `--fs-terminal` at mount time; its size clamps to 12–16px and defaults to 13px at 1.35 line height.
+- The transcript reads at `--fs-md`/1.5 in `--font-mono`: it exists to be read at UI size, so it does not follow the `--fs-terminal` clamp. Its hanging indent is expressed in `ch`, which only lines up in the mono face.
 - Use `--weight-regular`, `--weight-medium`, or `--weight-semibold`. Weight above 600 is prohibited, including ANSI bold rendering.
 - Hierarchy comes from scale and text colour, not from heavier slabs or an extra display face.
 
@@ -82,7 +87,13 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - `.shell` exposes `--bg-root` through its 8px gaps; no full-height left/right column borders may recreate the old boxed grid.
 - `.session-header` is exactly 44px. The supervisor receives 65% of the pane grid and the worker strip 35%; collapsed worker bars are exactly 32px.
 - The collapsed attention region is the same 48px rail width, while the expanded operations panel occupies the 320px context column.
-- At `max-width: 53rem`, navigation becomes a 48px bottom rail, drawers open above it, and workers scroll horizontally below the readable supervisor terminal.
+- A phone is `(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)` — either axis too small for desktop chrome, driven by a finger. Width alone is a narrow-window test, not a phone test: a rotated Pixel 7 is 915px wide and would take the desktop grid onto a 412px-tall screen. The pointer clause keeps a mouse-driven desktop with a short window on the desktop layout. This exact string is `PHONE_MEDIA_QUERY` in `hub-web/src/viewport.ts`, and the stylesheet and every `matchMedia` call must use it, so rotation can never put the layout and the pane-mounting logic in different modes.
+- `compact` stays width-only and separate. It answers how many columns fit across a mount — the 80-column PTY floor and the transcript default — and a phone in landscape genuinely has the width for a wider grid.
+- In portrait, navigation becomes a 48px bottom rail, drawers open above it, and workers scroll horizontally below the readable supervisor terminal.
+- In landscape, the chrome moves to the long edges: machines on the left, the collapsed attention rail on the right, both 48px, each honouring its safe-area inset. The terminal keeps the full height, the machine drawer opens as a left sheet, and the expanded operations panel is a right-hand sheet over the terminal — never a row taken from it. The worker strip is capped at 30dvh there instead of 40dvh.
+- Every control in that rail — Machines, each machine chip, Pair, the attention summary, the message button — shares one container treatment at `--rail-item-min` (44px) on `--bg-raised` with `--radius-card`. The rail is one bar, so it may not mix bordered, filled, and bare controls in a single row.
+- The collapsed context pill floats over the rail: it stays transparent, clips its own contents, and lets its two controls carry the shared rail-item surface, so it never paints a second surface or spills across Pair.
+- At `max-width: 53rem` a pane defaults to the transcript reading view and its PTY is held at a floor of 80 columns; the canvas then sizes to that grid instead of the mount, and terminal view pans horizontally. Above the breakpoint nothing changes: no column floor, terminal view by default.
 - The selected session's `.talk-supervisor` action occupies its own 48px row immediately above the phone rail; it is never moved into the top-bar overflow or a drawer.
 - The phone message composer makes `#message-mic` the full-width first action, with Keyboard and explicit Send beneath it; desktop leaves the textarea keyboard-primary and keeps the mic secondary.
 - Compact pane-order controls use 24px geometry; primary buttons remain 40px high.
@@ -112,6 +123,8 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - Enriched session card: `.session-summary-title`, `.session-summary-description`, and `.phase-chip` consume the single server-broadcast summary. The machine codename remains a mono eyebrow; stale active descriptions dim after ten minutes. Testing/building use info text, blocked alone may use the warning tint, and idle recedes. Enrichment is per-machine, default off, and must plainly warn that redacted terminal transcript excerpts are sent to the configured model provider.
 - Header: `.session-header` in `hub-web/src/styles.css` and `render()` in `hub-web/src/main.ts`; only an active session receives `.toolbar-session-title` mono styling.
 - Terminal pane: `.pane`, `.pane.selected`, `.pane-header`, and `.terminal-mount`; the terminal canvas owns its independent ANSI palette.
+- Pane transcript: `.transcript`, `.transcript-line`, `.transcript-jump`, and `.pane-view-toggle`; the reflowed reading view of a pane, mono face at `--fs-md` over `--bg-terminal`, layered above the grid rather than replacing it. Colour comes from the same ANSI cells the canvas paints, so it stays outside the application palette.
+- Attention counts: `.attention-count` is one badge on `--bg-active` for every severity, and the collapsed phone rail shows the single labelled `.attention-summary` instead of three bare numbers; severity is carried by text colour and the dot, never by a fill only some severities receive.
 - Attention/status cards: `.attention-item` and `.status-row`; prose stays UI face while `.attention-group-label`, `.attention-ticket`, and `.status-identifier` isolate machine copy.
 - Primary button: `.primary`; it uses `--bg-active` because blue is state/focus, not a decorative call-to-action fill.
 - Pairing dialog: `dialog`, `.pair-flow`, `.pair-code`, and `.pair-details`; code, origins, URLs, and scopes are mono inside an otherwise UI-face flow.
@@ -119,6 +132,123 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - Inputs: `dialog input` and `.message textarea`; raised or terminal fills replace permanent one-pixel boxes, with focus-visible outline for keyboard state.
 - Terminal state: `.terminal-state`; warning tint is allowed because connection degradation is actionable state, and the retry remains a normal button.
 - Toast: `#toast`; it is an overlay, so it may use the one soft overlay shadow but no saturated fill.
+
+## Render model
+
+`render()` used to assign `app.innerHTML` on every hub push. A five-second
+status frame therefore destroyed and re-created every live control in the page:
+the composer was replaced six times and blurred six times inside ten seconds of
+typing, and on a phone each blur closes the soft keyboard. The pairing dialog
+and session picker carried re-open-after-render workarounds for the same
+reason.
+
+The page now has three render paths, chosen in `render()` by
+`renderDecision()` in `src/render-model.ts`:
+
+- **regions** — the default, and the only path a heartbeat can take. Nothing in
+  the shell is replaced; `renderRegions()` writes the new values into the nodes
+  that are already on screen.
+- **shell** — a full rebuild, taken only when `shellSignature()` changed. The
+  signature covers exactly what the shell markup interpolates structurally:
+  selected machine and session, the machine and session catalogs, drawer and
+  panel state, the context tab, supervisor and back targets, lease identity,
+  the palette/picker open flags, and the whole visible state of the pairing
+  dialog.
+- **defer** — the signature changed while a form control inside the app has
+  focus. The rebuild is remembered and flushed once focus has left every
+  editable control **and** the pointer gesture that moved it has delivered its
+  click, so a machine appearing mid-sentence no longer takes the keyboard with
+  it.
+
+Rules that keep this honest:
+
+- If a value appears in the shell markup, it belongs in `shellSignature()` or
+  in `applyLiveRegions()`. Adding it to neither is how a pane goes stale.
+- Per-heartbeat data — latency, attention counts, the status payload, message
+  status, the stale-age sentence — must never enter the signature. One
+  heartbeat-driven field there rebuilds the page every five seconds and undoes
+  all of this.
+- `applyLiveRegions()` may only write into existing nodes: no `innerHTML`, no
+  `createElement`, no `replaceChildren`. An invariant enforces it.
+- Anything a region re-creates (the machine rail, the drawer tree, the session
+  picker list) must bind its own handlers, because `bindEvents()` only runs on
+  a shell rebuild.
+- A region updater owns clearing its own container. The old code relied on the
+  rebuild handing it an empty one.
+- Lease identity is deliberately structural: `bindEvents()` captures the lease
+  in its handlers, so a change of controller has to rebuild rather than leave a
+  stale closure behind a live button.
+
+A deferred rebuild must never run inside a pointer gesture. Pointerdown moves
+focus off a field, `focusout` fires, and rebuilding there replaces the button
+under the finger before the browser dispatches the click — the tap then does
+nothing at all. That is what `DeferredRenderScheduler` in
+`src/deferred-render.ts` exists for: `focusout` releases the rebuild only when
+no gesture is in flight, and a gesture releases it through a macrotask, which
+the browser runs after the click. A microtask is not enough — the click is
+dispatched in the same task as the pointerup.
+
+The dialog re-open lines in `render()` stay. They are no longer load-bearing
+for heartbeats — a heartbeat never reaches them — but a genuine structural
+rebuild can still happen with a dialog open, and re-opening it is correct then.
+
+## Pairing cancellation
+
+Cancel **discards** the invitation. `cancelPendingPairing()` invalidates the
+in-flight operation, clears the pending-pairing store, resets the draft and
+says so in the dialog; re-opening the dialog afterwards offers the create-code
+flow, not the cancelled invitation, and states that pairing needs a fresh URL
+from `cas hub pair`.
+
+That is deliberate and is not a convenience decision. A pairing invitation is a
+one-time capability, and Cancel is the operator's way to say the request must
+not proceed — including the case where they cancel because the link went
+somewhere it should not have. The code already treats a storage-clear failure
+as a durable-blocking problem worth its own message; keeping a still-valid
+invitation retrievable after an explicit cancel would contradict that. A
+cancelled invitation is gone, and a new one costs one command on the machine.
+
+
+## Streaming text on narrow viewports (D15)
+
+A 395px mount measures roughly 46 columns, and Commander used to hand exactly
+that to the PTY. An 80-column agent TUI redrawn at half its width destroys its
+own layout before Commander sees a byte: hanging indents collapse to column 0,
+tags overrun the input rule, and every redraw reflows. Shrinking the font buys
+a handful of columns and fixes none of it.
+
+The fix has two halves.
+
+- **Geometry.** `GhosttyTerminalSurface.setMinimumColumns` puts a floor under
+  the columns reported to the PTY, applied by `main.ts` only below the compact
+  breakpoint. The canvas backing store then sizes to the grid rather than to the
+  mount, and `.terminal-mount` pans horizontally so "Show terminal" shows the
+  real 80-column grid instead of a squeezed one. The floor holds in both views,
+  so toggling never churns a PTY resize.
+- **Reading view.** `TranscriptView` renders the pane's logical lines as
+  wrapping text at UI size, with a per-line hanging indent so a wrap stays
+  inside its own gutter.
+
+**Seam decision — client-side, from the emulator snapshot.** The transcript is
+built in the browser from `GhosttySnapshot.rowData`, which already carries
+`isWrapContinuation` / `wrapsToNext` for soft wraps and per-cell colour, weight
+and decoration for ANSI styling. That is everything a reflow needs, so there is
+no hub-side "logical lines" projection and no new endpoint: a projection would
+mean running a second emulator over the same bytes on the hub and inventing a
+capability flag to negotiate it. `transcript.ts` holds the pure line model and
+`transcript-view.ts` the DOM; the view follows the surface's own render tick
+through the `onRender` callback rather than polling.
+
+Consequences worth knowing:
+
+- Transcript history is the emulator's scrollback, not a second buffer.
+  Reaching the top of the transcript pages the terminal viewport back; "Jump to
+  latest" returns it to the live tail.
+- While the transcript is visible the canvas paint is skipped
+  (`setCanvasPainting(false)`); the snapshot is still taken because the
+  transcript is read from it.
+- A tap on the transcript focuses the pane input, so the reading view never
+  costs the operator the keyboard.
 
 ## Do's & Don'ts
 

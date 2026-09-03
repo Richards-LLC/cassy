@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Direction B — The Deck · Commander phone mock-up (cas-6564)</title>
+<style>
+/* ============================================================
+   LAB CHROME
+   ============================================================ */
+:root{
+  --ink:#14181f; --ink-2:#3d4653; --ink-3:#6b7686; --rule:#dfe4ec; --rule-2:#eef1f6;
+  --paper:#ffffff; --wash:#f6f8fb; --warn-ink:#8a5a00; --warn-bg:#fdf7e8; --warn-line:#eedfb4;
+  --mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --ui:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--wash);color:var(--ink);font-family:var(--ui);font-size:16px;line-height:1.6}
+.wrap{max-width:74rem;margin:0 auto;padding:0 20px 80px}
+header.masthead{background:var(--paper);border-bottom:1px solid var(--rule);padding:34px 0 26px}
+header.masthead .wrap{padding-bottom:0}
+.eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin:0 0 10px}
+h1.lab-title{font-size:27px;line-height:1.2;margin:0 0 10px;letter-spacing:-.015em}
+.sub{font-size:16px;color:var(--ink-2);margin:0;max-width:56rem}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:26px 0 22px}
+.controls .grp{display:flex;flex-wrap:wrap;gap:6px;background:var(--paper);border:1px solid var(--rule);border-radius:999px;padding:5px}
+.tab{font:inherit;font-size:13px;font-family:var(--ui);border:0;background:transparent;color:var(--ink-2);
+     padding:7px 14px;border-radius:999px;cursor:pointer;white-space:nowrap}
+.tab:hover{background:var(--rule-2)}
+.tab[aria-pressed="true"]{background:var(--ink);color:#fff}
+.tab .num{font-family:var(--mono);font-size:11px;opacity:.62;margin-right:6px}
+.spacer{flex:1 1 auto}
+.stage{display:grid;grid-template-columns:minmax(0,auto) minmax(280px,1fr);gap:34px;align-items:start}
+body.wide .stage{grid-template-columns:1fr;justify-items:start}
+body.wide .readout{position:static;max-width:56rem}
+@media (max-width:1120px){.stage{grid-template-columns:1fr;justify-items:center}}
+.readout{background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:20px 22px;position:sticky;top:20px}
+.readout h2{font-size:17px;margin:0 0 6px}
+.readout p{font-size:14.5px;color:var(--ink-2);margin:0 0 12px}
+.readout .kv{font-family:var(--mono);font-size:12px;color:var(--ink-3);border-top:1px dashed var(--rule);padding-top:12px;margin-top:4px}
+.readout .kv div{margin-bottom:5px}
+.tagline{display:inline-block;font-family:var(--mono);font-size:11px;color:var(--warn-ink);
+  background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:999px;padding:3px 9px;margin:0 6px 6px 0}
+.tagline.client{color:#1f6f43;background:#eff8f2;border-color:#c3e2ce}
+.foot{font-size:13px;color:var(--ink-3);border-top:1px solid var(--rule);padding-top:16px;margin-top:40px}
+a{color:#1a4fb4}
+
+/* ============================================================
+   COMMANDER TOKENS — verbatim from hub-web/src/styles.css :root
+   ============================================================ */
+.screen{
+  --bg-root:#101318; --bg-panel:#151922; --bg-raised:#1B202B; --bg-terminal:#0C0E13;
+  --bg-hover:#222836; --bg-active:#2A3142;
+  --line-subtle:#232936; --line-strong:#38415A;
+  --text-hi:#E8EBF2; --text-mid:#9AA3B5; --text-lo:#5C6577;
+  --state-ok:#4CC38A; --state-warn:#E5B454; --state-crit:#E5645E; --state-info:#6CA7F2; --state-idle:#5C6577;
+  --tint-warn:rgba(229,180,84,.09); --tint-crit:rgba(229,100,94,.10);
+  --overlay-backdrop:color-mix(in srgb, var(--bg-terminal) 72%, transparent);
+  --shadow-overlay:0 24px 80px color-mix(in srgb, var(--bg-terminal) 72%, transparent);
+  --font-ui:Inter,ui-sans-serif,system-ui,sans-serif;
+  --font-mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,monospace;
+  --fs-xs:11px; --fs-sm:12.5px; --fs-base:13.5px; --fs-terminal:13px; --fs-md:15px; --fs-lg:18px;
+  --weight-regular:400; --weight-medium:500; --weight-semibold:600;
+  --tracking-label:.06em; --line-ui:1.4; --line-terminal:1.35;
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-5:20px;
+  --space-6:24px; --space-8:32px; --space-10:40px;
+  --radius-card:6px; --radius-pane:8px; --radius-pill:999px;
+  --line-width:1px; --state-rule-width:2px; --focus-ring-width:2px;
+  /* Terminal content keeps its own palette in both themes: machine output is
+     the deepest layer and the Ghostty ANSI data is independent of app tokens. */
+  --term-fg:#9AA3B5; --term-hi:#E8EBF2; --term-dim:#5C6577;
+  --term-ok:#4CC38A; --term-warn:#E5B454; --term-crit:#E5645E; --term-info:#6CA7F2;
+}
+.screen[data-theme="light"]{
+  --bg-root:#E9ECF2; --bg-panel:#F4F6FA; --bg-raised:#FFFFFF;
+  --bg-hover:#EBEEF4; --bg-active:#DDE3ED;
+  --line-subtle:#DCE1E9; --line-strong:#8E9AB4;
+  --text-hi:#151920; --text-mid:#576073; --text-lo:#7C8494;
+  --state-ok:#1F7A4D; --state-warn:#8A5A00; --state-crit:#B3352F; --state-info:#2456A6; --state-idle:#7C8494;
+  --tint-warn:rgba(138,90,0,.09); --tint-crit:rgba(179,53,47,.08);
+  --bg-terminal:#0C0E13;
+}
+
+/* ---------- device ---------- */
+.device{padding:20px;border-radius:46px;background:#171a20;box-shadow:0 28px 64px rgba(20,24,31,.30);
+        width:452px;transition:width .28s ease}
+.device.landscape{width:955px;border-radius:40px}
+.screen{width:412px;height:915px;border-radius:28px;overflow:hidden;position:relative;
+        background:var(--bg-root);color:var(--text-hi);
+        font-family:var(--font-ui);font-size:var(--fs-base);line-height:var(--line-ui);
+        display:flex;flex-direction:column;transition:width .28s ease,height .28s ease}
+.device.landscape .screen{width:915px;height:412px}
+.screen *{box-sizing:border-box}
+.screen button{font:inherit;color:inherit;border:0;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.grow{flex:1 1 auto;min-width:0}
+
+/* ---------- chrome ---------- */
+.sysbar{flex:none;height:28px;display:flex;align-items:center;justify-content:space-between;
+        padding:0 var(--space-4);font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-lo)}
+.sessionbar{flex:none;display:flex;align-items:center;gap:var(--space-2);
+            padding:var(--space-2) var(--space-4);background:var(--bg-panel)}
+.sessionbar .name{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-hi)}
+.sessionbar .hint{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-lo)}
+.conn{display:inline-flex;align-items:center;gap:var(--space-2);padding:var(--space-1) var(--space-2);
+      background:var(--bg-raised);border-radius:var(--radius-pill);
+      font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid)}
+.dot{width:var(--space-2);height:var(--space-2);border-radius:var(--radius-pill);background:var(--state-info);flex:none}
+.dot--ok{background:var(--state-ok)} .dot--crit{background:var(--state-crit)}
+.dot--warn{background:var(--state-warn)} .dot--idle{background:var(--state-idle)}
+
+/* ---------- deck ---------- */
+.deck{flex:1 1 auto;overflow:hidden;position:relative;padding:var(--space-3) 0;touch-action:pan-y}
+.track{display:flex;gap:var(--space-3);height:100%;padding:0 var(--space-4);
+       transition:transform .3s cubic-bezier(.22,.61,.36,1);will-change:transform}
+.card{flex:none;width:380px;height:100%;background:var(--bg-panel);border-radius:var(--radius-pane);
+      padding:var(--space-3);display:flex;flex-direction:column;gap:var(--space-3);overflow:hidden;
+      border:var(--line-width) solid transparent}
+.card.selected{border-color:var(--line-strong)}
+.device.landscape .card{width:520px}
+
+.id-row{display:flex;align-items:center;gap:var(--space-2);flex:none}
+.id-name{font-family:var(--font-mono);font-size:var(--fs-md);color:var(--text-hi)}
+.phase-chip{padding:var(--space-1) var(--space-2);background:var(--bg-raised);border-radius:var(--radius-pill);
+            font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid);text-transform:uppercase}
+.phase-running{color:var(--state-info)} .phase-blocked{color:var(--state-warn);background:var(--tint-warn)}
+.phase-idle{color:var(--state-idle)}
+.id-meta{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-lo);flex:none}
+.activity{flex:none;display:flex;align-items:center;gap:var(--space-2);padding:var(--space-2) var(--space-3);
+          background:var(--bg-raised);border-radius:var(--radius-card);font-size:var(--fs-sm);color:var(--text-mid)}
+.activity b{color:var(--text-hi);font-weight:var(--weight-medium)}
+
+/* ---------- the reflowed tail: the whole point of B ---------- */
+.tail{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;
+      background:var(--bg-terminal);border-radius:var(--radius-card);
+      padding:var(--space-3);display:grid;gap:var(--space-2);align-content:end}
+.tail::-webkit-scrollbar{width:0}
+.tail .ln{font-family:var(--font-mono);font-size:var(--fs-md);line-height:var(--line-terminal);
+          color:var(--term-fg);white-space:pre-wrap;overflow-wrap:anywhere;
+          padding-left:2ch;text-indent:-2ch}
+.tail .ln.mark-info{color:var(--term-hi)}
+.tail .ln .m{color:var(--term-info)}
+.tail .ln .m-ok{color:var(--term-ok)}
+.tail .ln .m-warn{color:var(--term-warn)}
+.tail .ln .m-crit{color:var(--term-crit)}
+.tail .ln.dim{color:var(--term-dim)}
+.tail .ln.cursor{color:var(--term-info)}
+.tail-meta{flex:none;display:flex;align-items:center;gap:var(--space-2);
+           font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-lo)}
+.tail-meta button{padding:var(--space-1) var(--space-2);background:var(--bg-raised);border-radius:var(--radius-card);
+                  font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid);min-height:32px}
+
+/* ---------- action bar, in the thumb arc ---------- */
+.cardbar{flex:none;display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:var(--space-2)}
+.btn{min-height:44px;padding:0 var(--space-2);background:var(--bg-raised);border-radius:var(--radius-card);
+     font-size:var(--fs-base);color:var(--text-hi);display:inline-flex;align-items:center;
+     justify-content:center;gap:var(--space-2);width:100%;text-decoration:none}
+.btn:active{background:var(--bg-hover)}
+.btn.primary{background:var(--bg-active);font-weight:var(--weight-medium)}
+
+/* ---------- dots ---------- */
+.dots{flex:none;display:flex;align-items:center;justify-content:center;gap:var(--space-2);
+      padding:var(--space-3) 0 var(--space-4);background:var(--bg-root)}
+.dots button{width:var(--space-6);height:var(--space-6);background:transparent;padding:0;
+             position:relative;border-radius:var(--radius-pill)}
+.dots button::after{content:"";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+                    width:var(--space-2);height:var(--space-2);border-radius:var(--radius-pill);
+                    background:var(--bg-active)}
+.dots button[aria-current="true"]::after{background:var(--text-mid);width:var(--space-5)}
+.dots .lbl{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-lo);margin-left:var(--space-2)}
+
+/* ---------- terminal sheet ---------- */
+.sheet{position:absolute;inset:0;display:none;background:var(--overlay-backdrop);align-items:flex-end;z-index:5}
+.screen[data-state="terminal"] .sheet{display:flex}
+.sheet-panel{width:100%;height:86%;background:var(--bg-terminal);
+             border-radius:var(--radius-pane) var(--radius-pane) 0 0;box-shadow:var(--shadow-overlay);
+             display:flex;flex-direction:column;overflow:hidden}
+.sheet-head{flex:none;height:32px;display:flex;align-items:center;gap:var(--space-2);padding:0 var(--space-3);
+            background:var(--bg-panel);font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-mid)}
+.sheet-head .x{margin-left:auto;min-height:24px;padding:0 var(--space-2);background:var(--bg-raised);
+               border-radius:var(--radius-card);font-size:var(--fs-xs)}
+.term{flex:1 1 auto;overflow:auto;padding:var(--space-3);
+      font-family:var(--font-mono);font-size:var(--fs-terminal);line-height:var(--line-terminal);
+      color:var(--term-fg);white-space:pre}
+.term b{color:var(--term-hi);font-weight:var(--weight-semibold)}
+.term .c-warn{color:var(--term-warn)} .term .c-crit{color:var(--term-crit)}
+.term .c-ok{color:var(--term-ok)} .term .c-info{color:var(--term-info)}
+.sheet-foot{flex:none;padding:var(--space-2) var(--space-3);background:var(--bg-panel);
+            font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-lo);
+            display:flex;gap:var(--space-2);align-items:center}
+
+/* ---------- needs-hub tag ---------- */
+.needs{display:inline-flex;align-items:center;gap:var(--space-1);
+       padding:var(--space-1) var(--space-2);background:var(--tint-warn);border-radius:var(--radius-pill);
+       font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--state-warn);line-height:var(--line-terminal)}
+.needs::before{content:"◆";font-size:9px}
+
+/* ---------- landscape reflow: identity left, tail right ---------- */
+.device.landscape .card{display:grid;grid-template-columns:minmax(0,240px) minmax(0,1fr);
+                        grid-template-rows:auto auto auto 1fr;gap:var(--space-2) var(--space-3);align-content:start}
+.device.landscape .id-row{grid-column:1;grid-row:1}
+.device.landscape .id-meta{grid-column:1;grid-row:2}
+.device.landscape .activity{grid-column:1;grid-row:3}
+.device.landscape .cardbar{grid-column:1;grid-row:4;grid-template-columns:1fr;align-content:end;gap:var(--space-2)}
+.device.landscape .tail{grid-column:2;grid-row:1 / span 4;min-height:0}
+.device.landscape .tail-meta{display:none}
+.device.landscape .dots{padding:var(--space-2) 0 var(--space-3)}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">cas-6564 · phone mock-up · direction B</p>
+    <h1 class="lab-title">The Deck — one agent per card, swipe between them</h1>
+    <p class="sub">Primary object: <b>an agent</b>. Supervisor and workers are peers. Drag the card sideways, or use the dots. The tail is a <b>reflowed</b> transcript at 15px — not an 80-column grid at 13px — which is the direct answer to defect <b>D15</b> in the field report.</p>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="controls">
+    <div class="grp" role="group" aria-label="States">
+      <button class="tab" data-goto="supervisor" aria-pressed="true"><span class="num">B1</span>Supervisor card</button>
+      <button class="tab" data-goto="worker" aria-pressed="false"><span class="num">B2</span>Swipe to a worker</button>
+      <button class="tab" data-goto="streaming" aria-pressed="false"><span class="num">B3</span>Tail streaming</button>
+      <button class="tab" data-goto="terminal" aria-pressed="false"><span class="num">B4</span>Full terminal</button>
+      <button class="tab" data-goto="landscape" aria-pressed="false"><span class="num">B5</span>Landscape</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="grp" role="group" aria-label="Theme">
+      <button class="tab" id="theme-dark" aria-pressed="true">Dark</button>
+      <button class="tab" id="theme-light" aria-pressed="false">Light</button>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="device" id="device">
+      <div class="screen" id="screen" data-state="supervisor" data-theme="dark">
+        <div class="sysbar"><span>18:24</span><span>LTE ▮▮▮ 86%</span></div>
+
+        <div class="sessionbar">
+          <span class="name">cas-src</span>
+          <span class="hint">▲▼ sessions</span>
+          <span class="grow"></span>
+          <span class="conn"><span class="dot dot--ok"></span>live · 38ms</span>
+        </div>
+
+        <div class="deck" id="deck">
+          <div class="track" id="track">
+
+            <!-- ===== card 0 · supervisor ===== -->
+            <div class="card selected">
+              <div class="id-row">
+                <span class="dot dot--ok"></span>
+                <span class="id-name">fast-kestrel-6</span>
+                <span class="grow"></span>
+                <span class="phase-chip phase-running">running</span>
+              </div>
+              <div class="id-meta">SUPERVISOR · cas-src · claude-opus-5 · 41m</div>
+              <div class="activity"><span>▸</span><b>assigning the mobile lanes</b></div>
+              <div class="tail" id="tail-supervisor">
+                <div class="ln"><span class="m">●</span> <b>Bash</b>(cas coordination worker_status)</div>
+                <div class="ln dim"><span class="m-ok">⎿</span> 5 workers · 4 running · 1 exited</div>
+                <div class="ln mark-info"><span class="m">●</span> Four lanes are live against the mobile brief. zen-eagle-20 owns the reflowed transcript (cas-dc93), brave-raven-22 the composer Enter key (cas-0d61), sharp-heron-50 session switching (cas-8b59), golden-parrot-30 the pairing scopes (cas-67b6).</div>
+                <div class="ln"><span class="m">●</span> <b>Update</b>(docs/reports/cas-6564-mobile-mockups/index.html)</div>
+                <div class="ln dim"><span class="m-ok">⎿</span> Wrote 214 lines</div>
+                <div class="ln cursor">▌ waiting on fair-hound-98 …</div>
+              </div>
+              <div class="tail-meta">
+                <span>tail · reflowed · 15px</span>
+                <span class="grow"></span>
+                <button data-toast="Pinch trades lines for size — 12–16px, the same clamp the terminal uses.">pinch to size</button>
+                <button data-goto="terminal">expand</button>
+              </div>
+              <div class="cardbar">
+                <a class="btn primary" href="c-voice.html">🎙 Talk</a>
+                <button class="btn" data-toast="Control transferred to this phone. The desktop keeps read-only view.">Control</button>
+                <button class="btn" data-toast="Interrupt sent to fast-kestrel-6">Interrupt</button>
+              </div>
+            </div>
+
+            <!-- ===== card 1 · zen-eagle-20 ===== -->
+            <div class="card">
+              <div class="id-row">
+                <span class="dot dot--crit"></span>
+                <span class="id-name">zen-eagle-20</span>
+                <span class="grow"></span>
+                <span class="phase-chip phase-blocked">exited</span>
+              </div>
+              <div class="id-meta">WORKER · cas-src · codex · cas-dc93 · 4m 12s</div>
+              <div class="activity"><span>▸</span><b>cargo check failed · code 101</b></div>
+              <div class="tail">
+                <div class="ln"><span class="m">●</span> <b>Bash</b>(cargo check -p cas --lib --tests)</div>
+                <div class="ln dim"><span class="m-ok">⎿</span> Checking cas v3.13.1 (…/worktrees/zen-eagle-20)</div>
+                <div class="ln"><span class="m-crit">error[E0599]</span>: no method named `reflow_tail` found for struct `TerminalTail` — hub-web/src/terminal/tail.rs:212:18</div>
+                <div class="ln mark-info"><span class="m">●</span> The reflow helper does not exist yet. Next step is to add TerminalTail::reflow_tail behind the existing tail buffer rather than touching the Ghostty adapter.</div>
+                <div class="ln"><span class="m-crit">▌</span> pane exited · code 101</div>
+              </div>
+              <div class="tail-meta">
+                <span>tail · reflowed · 15px</span>
+                <span class="grow"></span>
+                <button data-goto="terminal">expand</button>
+              </div>
+              <div class="cardbar">
+                <button class="btn primary" data-toast="Respawning zen-eagle-20 on cas-dc93">Respawn</button>
+                <a class="btn" href="a-inbox.html#expanded">Inbox</a>
+                <button class="btn" data-toast="Held. zen-eagle-20 will not be reassigned.">Hold</button>
+              </div>
+            </div>
+
+            <!-- ===== card 2 · brave-raven-22 ===== -->
+            <div class="card">
+              <div class="id-row">
+                <span class="dot dot--warn"></span>
+                <span class="id-name">brave-raven-22</span>
+                <span class="grow"></span>
+                <span class="phase-chip phase-blocked">awaiting merge</span>
+              </div>
+              <div class="id-meta">WORKER · cas-src · codex · cas-0d61 · 22m</div>
+              <div class="activity"><span>▸</span><b>branch pushed, waiting on the supervisor</b></div>
+              <div class="tail">
+                <div class="ln"><span class="m">●</span> <b>Bash</b>(git push -u origin factory/brave-raven-22)</div>
+                <div class="ln dim"><span class="m-ok">⎿</span> 3 files changed, 48 insertions(+), 12 deletions(-)</div>
+                <div class="ln mark-info"><span class="m">●</span> Enter now sends in the phone composer and Shift+Enter inserts a newline; the explicit Send button stays, because DESIGN.md forbids auto-send after dictation.</div>
+                <div class="ln"><span class="m-warn">⎿</span> merge request sent to fast-kestrel-6</div>
+              </div>
+              <div class="tail-meta"><span>tail · reflowed · 15px</span><span class="grow"></span><button data-goto="terminal">expand</button></div>
+              <div class="cardbar">
+                <button class="btn primary" data-toast="Merging factory/brave-raven-22 into the epic branch">Merge</button>
+                <a class="btn" href="c-voice.html">🎙 Talk</a>
+                <button class="btn" data-toast="Changes requested on cas-0d61">Changes</button>
+              </div>
+            </div>
+
+            <!-- ===== card 3 · sharp-heron-50 ===== -->
+            <div class="card">
+              <div class="id-row">
+                <span class="dot dot--ok"></span>
+                <span class="id-name">sharp-heron-50</span>
+                <span class="grow"></span>
+                <span class="phase-chip phase-running">running</span>
+              </div>
+              <div class="id-meta">WORKER · cas-src · codex · cas-8b59 · 18m</div>
+              <div class="activity"><span>▸</span><b>editing hub-web/src/main.ts</b></div>
+              <div class="tail">
+                <div class="ln"><span class="m">●</span> <b>Read</b>(hub-web/src/main.ts)</div>
+                <div class="ln dim"><span class="m-ok">⎿</span> 1 842 lines</div>
+                <div class="ln mark-info"><span class="m">●</span> There is no switcher on the phone at all: the session list lives in the machine drawer, which the bottom rail hides behind two taps. Adding a session row to the header is the smallest honest fix.</div>
+                <div class="ln cursor">▌ writing …</div>
+              </div>
+              <div class="tail-meta"><span>tail · reflowed · 15px</span><span class="grow"></span><button data-goto="terminal">expand</button></div>
+              <div class="cardbar">
+                <a class="btn primary" href="c-voice.html">🎙 Talk</a>
+                <button class="btn" data-toast="Control transferred to this phone.">Control</button>
+                <button class="btn" data-toast="Interrupt sent to sharp-heron-50">Interrupt</button>
+              </div>
+            </div>
+
+            <!-- ===== card 4 · golden-parrot-30 ===== -->
+            <div class="card">
+              <div class="id-row">
+                <span class="dot"></span>
+                <span class="id-name">golden-parrot-30</span>
+                <span class="grow"></span>
+                <span class="phase-chip">asked</span>
+              </div>
+              <div class="id-meta">WORKER · cas-src · codex · cas-67b6 · 14m</div>
+              <div class="activity"><span>▸</span><b>waiting on an answer</b></div>
+              <div class="tail">
+                <div class="ln mark-info"><span class="m">●</span> Should the pairing form request write scope, or refuse a read-only invitation outright and say so before the code is burned?</div>
+                <div class="ln dim"><span class="m-ok">⎿</span> blocked · 14m</div>
+              </div>
+              <div class="tail-meta"><span class="needs">needs hub: worker questions as first-class events</span></div>
+              <div class="cardbar">
+                <a class="btn primary" href="c-voice.html">🎙 Answer</a>
+                <button class="btn" data-toast="Refuse read-only invitations up front.">Refuse</button>
+                <button class="btn" data-toast="Request write scope.">Request</button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <div class="dots" id="dots">
+          <button data-index="0" aria-current="true" aria-label="fast-kestrel-6"></button>
+          <button data-index="1" aria-label="zen-eagle-20"></button>
+          <button data-index="2" aria-label="brave-raven-22"></button>
+          <button data-index="3" aria-label="sharp-heron-50"></button>
+          <button data-index="4" aria-label="golden-parrot-30"></button>
+          <span class="lbl" id="dot-label">1 / 5 · supervisor</span>
+        </div>
+
+        <!-- ===== terminal sheet ===== -->
+        <div class="sheet">
+          <div class="sheet-panel">
+            <div class="sheet-head">
+              <span id="sheet-name">fast-kestrel-6 · pane 0</span>
+              <button class="x" data-goto="back">Close</button>
+            </div>
+            <div class="term"><span class="c-info">●</span> <b>Bash</b>(cas coordination worker_status)
+  <span class="c-ok">⎿</span> Supervisors:
+       • fast-kestrel-6 (heartbeat: 2s ago)
+     Workers (5):
+       • fair-hound-98    claude-opus-5  cas-9570  running
+       • zen-eagle-20     codex          cas-dc93  <span class="c-crit">exited 101</span>
+       • brave-raven-22   codex          cas-0d61  <span class="c-warn">awaiting merge</span>
+       • sharp-heron-50   codex          cas-8b59  running
+       • golden-parrot-30 codex          cas-67b6  <span class="c-warn">blocked</span>
+<span class="c-info">●</span> Four lanes are live against the mobile brief. zen-eagle-20 owns the reflowed
+  transcript (cas-dc93), brave-raven-22 the composer Enter key (cas-0d61),
+  sharp-heron-50 session switching (cas-8b59), and golden-parrot-30 the pairing
+  scopes (cas-67b6).
+<span class="c-info">▌</span> waiting on fair-hound-98 …
+</div>
+            <div class="sheet-foot">
+              <span>80 cols · scroll →</span>
+              <span class="grow"></span>
+              <span class="needs">unchanged: this is today's Ghostty pane</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="readout">
+      <h2 id="ro-title">B1 · Supervisor card</h2>
+      <p id="ro-body">The supervisor is a card like any other. Talk / Control / Interrupt sit at the bottom of the card they belong to, in the thumb arc — not in the top-right corner.</p>
+      <div class="kv">
+        <div><b>Buildable today:</b> <span id="ro-cost">client only</span></div>
+        <div><b>Data:</b> <span id="ro-data">session panes · phase · liveness</span></div>
+      </div>
+      <div style="margin-top:14px" id="ro-tags"></div>
+      <p style="margin-top:16px;font-size:13px;color:var(--ink-3)">
+        <a href="index.html">← all three directions</a> · <a href="a-inbox.html">A · Inbox</a> · <a href="c-voice.html">C · Voice</a>
+      </p>
+    </div>
+  </div>
+
+  <p class="foot">
+    Drag the deck horizontally or use the dots. Agent names, models, task IDs and phases are the live
+    <code>soundwave-linux</code> fleet on 2026-09-03.
+  </p>
+</div>
+
+<script>
+(function () {
+  var screenEl = document.getElementById('screen');
+  var deviceEl = document.getElementById('device');
+  var trackEl = document.getElementById('track');
+  var dotsEl = document.getElementById('dots');
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.controls [data-goto]'));
+  var cards = Array.prototype.slice.call(trackEl.querySelectorAll('.card'));
+  var NAMES = ['fast-kestrel-6', 'zen-eagle-20', 'brave-raven-22', 'sharp-heron-50', 'golden-parrot-30'];
+  var ROLES = ['supervisor', 'worker', 'worker', 'worker', 'worker'];
+  var index = 0;
+  var streaming = false;
+  var streamTimer = null;
+  var previous = 'supervisor';
+
+  var READOUT = {
+    supervisor: {
+      title: 'B1 · Supervisor card',
+      body: 'The supervisor is a card like any other. Talk / Control / Interrupt sit at the bottom of the card they belong to, in the thumb arc — not in the top-right corner.',
+      cost: 'client only',
+      data: 'session panes · phase · liveness',
+      tags: '<span class="tagline client">client only · card layout, gestures, action bar</span>'
+    },
+    worker: {
+      title: 'B2 · Swipe to a worker',
+      body: 'A worker stops being a 32px name (D6). It is the same card, one swipe away, with its own task ID, its own model, and its own actions. Vertical swipe changes session.',
+      cost: 'client only',
+      data: 'pane list already broadcast per session',
+      tags: '<span class="tagline client">client only · peers, not a 35% strip</span>'
+    },
+    streaming: {
+      title: 'B3 · Output tail streaming',
+      body: 'Lines land as the agent writes them, reflowed to the card width with the hanging indent preserved. This is the one thing a 46-column ANSI grid cannot do at any font size in the 12–16px clamp.',
+      cost: 'needs hub data',
+      data: 'last N logical lines, ANSI-stripped, server-side',
+      tags: '<span class="tagline">needs hub · logical-line tail that survives ANSI</span><span class="tagline client">client only · reflow + animation</span>'
+    },
+    terminal: {
+      title: 'B4 · Full terminal, one tap away',
+      body: 'The real 80-column pane is still there, unchanged, as a sheet. Horizontal scroll is honest here because you asked for the grid.',
+      cost: 'client only',
+      data: 'existing Ghostty attach path',
+      tags: '<span class="tagline client">client only · existing pane in a sheet</span>'
+    },
+    landscape: {
+      title: 'B5 · Landscape',
+      body: '915×412. Identity and actions go left, the tail takes the width it was always asking for. No desktop grid appears at any point — the card just breathes sideways.',
+      cost: 'client only',
+      data: 'same card, one container query',
+      tags: '<span class="tagline client">client only · container query on the card</span>'
+    }
+  };
+
+  var STREAM_LINES = [
+    { cls: 'ln', html: '<span class="m">●</span> <b>Bash</b>(cas task notes id=cas-9570 note_type=progress)' },
+    { cls: 'ln dim', html: '<span class="m-ok">⎿</span> Added progress note to task cas-9570' },
+    { cls: 'ln mark-info', html: '<span class="m">●</span> fair-hound-98 has A and B on disk. I am holding the epic merge until the voice direction lands so the three ship as one artifact.' },
+    { cls: 'ln', html: '<span class="m">●</span> <b>Bash</b>(git -C .cas/worktrees/fair-hound-98 status --short)' },
+    { cls: 'ln dim', html: '<span class="m-ok">⎿</span> 4 files changed' },
+    { cls: 'ln cursor', html: '▌ waiting on fair-hound-98 …' }
+  ];
+
+  function setIndex(next, animate) {
+    index = Math.max(0, Math.min(cards.length - 1, next));
+    var step = cards[0].getBoundingClientRect().width + 12;
+    trackEl.style.transition = animate === false ? 'none' : '';
+    trackEl.style.transform = 'translateX(' + (-index * step) + 'px)';
+    cards.forEach(function (c, i) { c.classList.toggle('selected', i === index); });
+    Array.prototype.forEach.call(dotsEl.querySelectorAll('button'), function (b, i) {
+      b.setAttribute('aria-current', String(i === index));
+    });
+    document.getElementById('dot-label').textContent = (index + 1) + ' / ' + cards.length + ' · ' + ROLES[index];
+    document.getElementById('sheet-name').textContent = NAMES[index] + ' · pane ' + index;
+  }
+
+  function stopStream() {
+    streaming = false;
+    if (streamTimer) { clearInterval(streamTimer); streamTimer = null; }
+    var tail = document.getElementById('tail-supervisor');
+    Array.prototype.forEach.call(tail.querySelectorAll('.streamed'), function (n) { n.remove(); });
+    tail.querySelector('.cursor').style.display = '';
+  }
+
+  function startStream() {
+    stopStream();
+    streaming = true;
+    var tail = document.getElementById('tail-supervisor');
+    var cursor = tail.querySelector('.cursor');
+    cursor.style.display = 'none';
+    var i = 0;
+    streamTimer = setInterval(function () {
+      if (i >= STREAM_LINES.length) { clearInterval(streamTimer); streamTimer = null; i = 0; }
+      if (!STREAM_LINES[i]) return;
+      var line = document.createElement('div');
+      line.className = STREAM_LINES[i].cls + ' streamed';
+      line.innerHTML = STREAM_LINES[i].html;
+      line.style.opacity = '0';
+      tail.insertBefore(line, cursor);
+      requestAnimationFrame(function () { line.style.transition = 'opacity .25s'; line.style.opacity = '1'; });
+      tail.scrollTop = tail.scrollHeight;
+      i += 1;
+      if (i >= STREAM_LINES.length) { clearInterval(streamTimer); streamTimer = null; }
+    }, 850);
+  }
+
+  function goto(state) {
+    if (state === 'back') { state = previous === 'terminal' ? 'supervisor' : previous; }
+    if (!READOUT[state]) return;
+    if (state !== 'terminal') previous = state;
+    screenEl.setAttribute('data-state', state);
+    deviceEl.classList.toggle('landscape', state === 'landscape');
+    document.body.classList.toggle('wide', state === 'landscape');
+    tabs.forEach(function (t) { t.setAttribute('aria-pressed', String(t.dataset.goto === state)); });
+
+    if (state === 'worker') setIndex(1);
+    else if (state === 'supervisor' || state === 'streaming' || state === 'landscape') setIndex(0);
+    else setTimeout(function () { setIndex(index, false); }, 0);
+    if (state === 'landscape') setTimeout(function () { setIndex(index, false); }, 300);
+
+    if (state === 'streaming') startStream(); else stopStream();
+
+    var r = READOUT[state];
+    document.getElementById('ro-title').textContent = r.title;
+    document.getElementById('ro-body').textContent = r.body;
+    document.getElementById('ro-cost').textContent = r.cost;
+    document.getElementById('ro-data').textContent = r.data;
+    document.getElementById('ro-tags').innerHTML = r.tags;
+    if (location.hash.slice(1) !== state) history.replaceState(null, '', '#' + state);
+  }
+
+  dotsEl.addEventListener('click', function (event) {
+    var b = event.target.closest('button[data-index]');
+    if (b) setIndex(Number(b.dataset.index));
+  });
+
+  document.addEventListener('click', function (event) {
+    var target = event.target.closest('[data-goto]');
+    if (target) { event.preventDefault(); goto(target.dataset.goto); return; }
+    var toast = event.target.closest('[data-toast]');
+    if (toast) { event.preventDefault(); showToast(toast.dataset.toast); }
+  });
+
+  /* drag to swipe */
+  var startX = null, startIndex = 0;
+  var deck = document.getElementById('deck');
+  deck.addEventListener('pointerdown', function (e) { startX = e.clientX; startIndex = index; });
+  deck.addEventListener('pointerup', function (e) {
+    if (startX === null) return;
+    var delta = e.clientX - startX;
+    if (Math.abs(delta) > 40) setIndex(startIndex + (delta < 0 ? 1 : -1));
+    startX = null;
+  });
+  deck.addEventListener('pointercancel', function () { startX = null; });
+
+  var toastTimer = null;
+  function showToast(text) {
+    var el = document.getElementById('mock-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'mock-toast';
+      el.style.cssText = 'position:absolute;left:12px;right:12px;bottom:80px;z-index:9;' +
+        'padding:12px;border-radius:6px;background:var(--bg-raised);color:var(--text-hi);' +
+        'font-family:var(--font-mono);font-size:11px;box-shadow:var(--shadow-overlay);text-align:center';
+      screenEl.appendChild(el);
+    }
+    el.textContent = text;
+    el.style.opacity = '1';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.style.opacity = '0'; }, 1800);
+  }
+
+  function setTheme(theme) {
+    screenEl.setAttribute('data-theme', theme);
+    document.getElementById('theme-dark').setAttribute('aria-pressed', String(theme === 'dark'));
+    document.getElementById('theme-light').setAttribute('aria-pressed', String(theme === 'light'));
+  }
+  document.getElementById('theme-dark').addEventListener('click', function () { setTheme('dark'); });
+  document.getElementById('theme-light').addEventListener('click', function () { setTheme('light'); });
+
+  var params = new URLSearchParams(location.search);
+  if (params.get('theme') === 'light') setTheme('light');
+  window.addEventListener('hashchange', function () { goto(location.hash.slice(1) || 'supervisor'); });
+  goto(location.hash.slice(1) || 'supervisor');
+  setIndex(index, false);
+})();
+</script>
+</body>
+</html>

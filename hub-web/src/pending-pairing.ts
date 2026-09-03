@@ -110,8 +110,8 @@ export class PendingPairingStore {
     try { this.storage?.setItem(STORAGE_KEY, serialized); } catch { /* private storage can be denied */ }
   }
 
-  saveLegacy(token: string, hubId: string): PendingInvitation {
-    const invitation: PendingInvitation = { kind: "invitation", token, hubId };
+  saveLegacy(token: string, hubId: string, scopes?: readonly Scope[]): PendingInvitation {
+    const invitation: PendingInvitation = { kind: "invitation", token, hubId, ...(scopes?.length ? { scopes: [...scopes] } : {}) };
     this.save(invitation);
     return invitation;
   }

@@ -1,6 +1,7 @@
 import {
   attentionCounts,
   attentionPayload,
+  attentionSummary,
   groupAttention,
   relativeTime,
   type AttentionAction,
@@ -69,6 +70,26 @@ export function renderAttentionCounts(counts: AttentionCounts, compact = false):
     clear.textContent = "0";
     container.append(clear);
   }
+  return container;
+}
+
+/**
+ * The phone rail's single badge: a severity dot and one labelled figure. The
+ * desktop rail keeps the per-severity column; both live in the same button and
+ * the compact block chooses between them, so no media query reaches JavaScript.
+ */
+export function renderAttentionSummary(counts: AttentionCounts): HTMLSpanElement {
+  const summary = attentionSummary(counts);
+  const container = document.createElement("span");
+  container.className = `attention-summary attention-summary--${summary.severity}`;
+  // The button carries the accessible name; these are the visual form of it.
+  container.setAttribute("aria-hidden", "true");
+  const dot = document.createElement("span");
+  dot.className = `attention-dot attention-dot--${summary.severity}`;
+  const label = document.createElement("span");
+  label.className = "attention-summary-label";
+  label.textContent = summary.label;
+  container.append(dot, label);
   return container;
 }
 

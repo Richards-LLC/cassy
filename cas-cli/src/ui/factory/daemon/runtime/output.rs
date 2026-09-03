@@ -120,6 +120,16 @@ impl FactoryDaemon {
             .clients
             .values()
             .any(|c| c.view_mode == ClientViewMode::Full);
+        if !has_full {
+            // The dashboard that owned pane geometry is gone (cas-37f8), so the
+            // attached viewers now decide. Without this the last dashboard
+            // layout would keep a remote-only session pinned to a size no
+            // viewer asked for.
+            let pane_ids: Vec<String> = self.tui_pane_sizes.keys().cloned().collect();
+            for pane_id in pane_ids {
+                self.apply_effective_pane_size(&pane_id);
+            }
+        }
         if has_full {
             let (cols, rows) = self.dims_for_mode(ClientViewMode::Full);
             if cols > 0 && rows > 0 && (cols != self.cols || rows != self.rows) {

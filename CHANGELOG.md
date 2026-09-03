@@ -7,6 +7,46 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.14.0] - 2026-09-03
+
+### Added
+- Commander gets a session picker in the header and a back control: every
+  session on every paired machine is one tap away, and reopening the app
+  restores the last session instead of "No session open".
+- Commander on a phone shows a reflowed transcript of each pane at readable
+  text size, with the true 80-column terminal one tap away, instead of
+  squeezing an 80-column agent interface into a ~46-column grid.
+- A phone in landscape is treated as a phone: one shared detection rule for
+  the stylesheet and the layout logic, and a landscape arrangement with
+  full-height terminal and edge rails.
+- Clickable phone-sized mock-ups of three mobile Commander directions (Inbox,
+  Deck, Voice) and an Android field report are published under docs/reports.
+
+### Fixed
+- Remote Commander viewers can no longer shrink the operator's local console:
+  while the local dashboard is attached it owns each pane's PTY size, refused
+  viewer resizes are audited, and the viewer renders the authoritative size.
+- "Talk to the supervisor" sends on Enter and on the Send button, never renders
+  a disabled Send, and states the real reason when a message cannot go out,
+  including the exact `cas hub pair --scopes` command for a read-only device.
+- A default `cas hub pair` invitation pairs on the first attempt: the link
+  declares its scope ceiling, the form requests only what was granted, and
+  hub refusals are sentences with a next step instead of "unauthorized".
+- Opening a pairing link opens the pairing dialog (also in an already-open
+  tab), the optional email field no longer pops the keyboard, and the Pair
+  button stays reachable with the keyboard up.
+- The phone bottom rail is one bar: shared control treatment, no stray
+  focused-pane outline on Pair, no seam, readable machine chip, labelled
+  attention count, 44px tap targets.
+- Terminal attach degrades honestly on older browsers: AbortSignal.any is
+  feature-detected, the connecting timer advances so diagnostics appear, a
+  missing API is reported once with the minimum browser versions, and repeated
+  failures collapse into one attention entry.
+- Commander no longer rebuilds the whole page on every hub update, so the
+  message composer keeps focus (and a phone keeps its keyboard) while typing.
+- The hub session list reports each session's live worker roster from that
+  session's own project, instead of an empty list or the wrong project.
+
 ## [3.13.1] - 2026-09-03
 
 ### Changed

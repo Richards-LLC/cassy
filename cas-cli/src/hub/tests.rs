@@ -1394,6 +1394,71 @@ fn h2_pair_02_pairing_is_bound_persistent_single_use_and_fragment_only() {
     );
 }
 
+#[test]
+fn h2_pair_03_invitation_url_declares_the_scope_ceiling_it_minted() {
+    use chrono::Utc;
+
+    let temp = private_tempdir();
+    let now = Utc::now();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+
+    // Commander cannot request a scope this invitation does not grant unless the
+    // invitation says what it granted; without it the form guessed all six and
+    // every default `cas hub pair` failed its first exchange with a bare 401.
+    let read_only = auth
+        .mint_pairing(
+            "https://controller.example",
+            Scope::default_read_only(),
+            now,
+        )
+        .unwrap();
+    assert!(
+        read_only
+            .url
+            .ends_with("&scopes=machine-read,session-read,pane-read"),
+        "invitation url must declare its ceiling: {}",
+        read_only.url
+    );
+    assert!(read_only.url.contains("#pair="));
+    assert!(!read_only.url.contains('?'));
+
+    let control = auth
+        .mint_pairing(
+            "https://controller.example",
+            [
+                Scope::MachineRead,
+                Scope::SessionRead,
+                Scope::PaneRead,
+                Scope::PaneInput,
+                Scope::MessageSend,
+                Scope::PaneInterrupt,
+            ]
+            .into_iter()
+            .collect(),
+            now,
+        )
+        .unwrap();
+    assert!(
+        control.url.ends_with(
+            "&scopes=machine-read,session-read,pane-read,pane-input,message-send,pane-interrupt"
+        ),
+        "control invitation url must declare its ceiling: {}",
+        control.url
+    );
+
+    // The declared ceiling is exactly what the exchange enforces.
+    let declared = control
+        .url
+        .rsplit_once("&scopes=")
+        .map(|(_, scopes)| scopes.to_string())
+        .unwrap();
+    let parsed: std::collections::BTreeSet<Scope> = declared
+        .split(',')
+        .map(|scope| Scope::parse(scope).unwrap())
+        .collect();
+    assert_eq!(parsed, control.scopes);
+}
+
 #[tokio::test]
 async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
     use chrono::{Duration, Utc};
@@ -2167,4 +2232,154 @@ fn sign_dpop(
     let input = format!("{header}.{claims}");
     let signature: p256::ecdsa::Signature = signing.sign(input.as_bytes());
     format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+}
+
+/// `GET /v1/sessions` reported "0 workers" for a session running five, because
+/// the read model trusted the session file's `workers[]` — which the factory
+/// leaves empty — instead of the live roster the TUI already reads.
+#[test]
+fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() {
+    use crate::store::{AgentStore, SqliteAgentStore, init_cas_dir};
+    use crate::ui::factory::{SessionInfo, create_metadata};
+    use cas_types::{AgentRole, AgentStatus, AgentType};
+
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = init_cas_dir(project.path()).unwrap();
+    let session_name = "hub-roster-session";
+    // A hub serves every project on the machine at once, and the process that
+    // launched it carries one project's CAS_ROOT (the live hub on this machine
+    // runs with cas-src's). That override must not decide which registry a
+    // gabber-studio or mecha_cassy session's roster is read from.
+    let unrelated = tempfile::tempdir().unwrap();
+    let unrelated_root = init_cas_dir(unrelated.path()).unwrap();
+    env.set("CAS_ROOT", &unrelated_root);
+    let session = SessionInfo {
+        name: session_name.to_string(),
+        // Exactly what every session file on a live machine carries: no workers.
+        metadata: create_metadata(
+            session_name,
+            std::process::id(),
+            "supervisor-agent",
+            &[],
+            Some("cas-5d94"),
+            Some(project.path().to_str().unwrap()),
+            Some(4173),
+        ),
+        is_running: true,
+        socket_exists: true,
+    };
+
+    let agents = SqliteAgentStore::open(&cas_root).unwrap();
+    agents.init().unwrap();
+    for index in 0..5 {
+        let mut worker =
+            cas_types::Agent::new(format!("roster-worker-{index}"), format!("worker-{index}"));
+        worker.agent_type = AgentType::Worker;
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some(session_name.to_string());
+        agents.register(&worker).unwrap();
+    }
+
+    let mapped = hub_session(&session);
+    assert_eq!(mapped.workers.len(), 5, "five live workers must be reported");
+    assert_eq!(mapped.supervisor, "supervisor-agent");
+    assert_eq!(mapped.epic_id.as_deref(), Some("cas-5d94"));
+    assert_eq!(mapped.liveness, DaemonLiveness::Live);
+    // The roster carries agent names (what Commander shows), not agent ids.
+    let mut names = mapped.workers.clone();
+    names.sort();
+    assert_eq!(names, vec!["worker-0", "worker-1", "worker-2", "worker-3", "worker-4"]);
+
+    // A worker that has shut down or gone silent is not part of the roster.
+    let mut shutdown = agents.get("roster-worker-0").unwrap();
+    shutdown.status = AgentStatus::Shutdown;
+    agents.update(&shutdown).unwrap();
+    let mut stale = agents.get("roster-worker-1").unwrap();
+    stale.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(31);
+    agents.update(&stale).unwrap();
+    assert_eq!(hub_session(&session).workers.len(), 3);
+
+    // A session that genuinely runs no workers still reports zero, not a guess.
+    let empty_project = tempfile::tempdir().unwrap();
+    init_cas_dir(empty_project.path()).unwrap();
+    let empty = SessionInfo {
+        name: "hub-roster-empty".to_string(),
+        metadata: create_metadata(
+            "hub-roster-empty",
+            std::process::id(),
+            "supervisor-agent",
+            &[],
+            None,
+            Some(empty_project.path().to_str().unwrap()),
+            Some(4174),
+        ),
+        is_running: true,
+        socket_exists: true,
+    };
+    assert!(hub_session(&empty).workers.is_empty());
+
+    // With no registry to read, the daemon roster is still better than nothing.
+    let unreachable = SessionInfo {
+        name: "hub-roster-fallback".to_string(),
+        metadata: create_metadata(
+            "hub-roster-fallback",
+            std::process::id(),
+            "supervisor-agent",
+            &["fallback-worker".to_string()],
+            None,
+            None,
+            Some(4175),
+        ),
+        is_running: true,
+        socket_exists: true,
+    };
+    assert_eq!(hub_session(&unreachable).workers, vec!["fallback-worker"]);
+}
+
+
+// cas-37f8: a phone-sized viewer must never shrink the operator's dashboard.
+// The daemon answers a refused ResizePane with the authoritative geometry; the
+// hub turns that reply into an audit record for the device that asked.
+
+#[test]
+fn a_local_dashboard_authority_reply_is_recognised_as_a_refused_resize() {
+    let frame = serde_json::to_vec(&DaemonMessage::PaneSize {
+        pane_id: "worker-1".into(),
+        cols: 203,
+        rows: 44,
+        authority: crate::ui::factory::PaneSizeAuthority::LocalDashboard,
+    })
+    .expect("PaneSize frame");
+
+    assert_eq!(
+        super::server::refused_pane_resize(&frame),
+        Some(("worker-1".to_owned(), 203, 44))
+    );
+}
+
+#[test]
+fn a_viewer_authority_reply_is_not_a_refusal() {
+    let frame = serde_json::to_vec(&DaemonMessage::PaneSize {
+        pane_id: "worker-1".into(),
+        cols: 46,
+        rows: 33,
+        authority: crate::ui::factory::PaneSizeAuthority::Viewer,
+    })
+    .expect("PaneSize frame");
+
+    assert_eq!(super::server::refused_pane_resize(&frame), None);
+}
+
+#[test]
+fn ordinary_relay_traffic_is_never_parsed_as_a_resize_refusal() {
+    let output = serde_json::to_vec(&DaemonMessage::Output {
+        pane_id: "worker-1".into(),
+        data: b"\x1b[2J{\"PaneSize\"".to_vec(),
+    })
+    .expect("Output frame");
+
+    assert_eq!(super::server::refused_pane_resize(&output), None);
+    assert_eq!(super::server::refused_pane_resize(b""), None);
+    assert_eq!(super::server::refused_pane_resize(b"not json"), None);
 }

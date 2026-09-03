@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   attachElapsedSeconds,
   backoffDelay,
+  connectingAnchor,
   DEGRADED_AFTER_MISSED_HEARTBEATS,
   elapsedSeconds,
   RECONNECT_AFTER_MISSED_HEARTBEATS,
@@ -16,6 +17,24 @@ describe("Commander connection lifecycle contract", () => {
     expect(STAGE_TIMEOUT_MS).toEqual({ resolving: 3_000, dialing: 5_000, auth: 3_000, attaching: 3_000 });
     expect(DEGRADED_AFTER_MISSED_HEARTBEATS).toBe(2);
     expect(RECONNECT_AFTER_MISSED_HEARTBEATS).toBe(4);
+  });
+
+  it("carries one connecting anchor across retries and drops it once live", () => {
+    const failing: ConnectionSnapshot = {
+      phase: "backoff", stage: "attaching", since: 1_000, connectingSince: 1_000, attempt: 1, missedHeartbeats: 0, degraded: false,
+    };
+    // A retry keeps the original anchor, so the overlay clock advances.
+    expect(connectingAnchor(failing, "resolving", 9_000)).toBe(1_000);
+    expect(elapsedSeconds({ ...failing, since: 9_000 }, 16_000)).toBe(15);
+    // Reaching live, or idling, ends the stretch.
+    expect(connectingAnchor(failing, "live", 9_000)).toBeUndefined();
+    expect(connectingAnchor(failing, "idle", 9_000)).toBeUndefined();
+    // A fresh outage after a live period starts a new anchor at that moment.
+    const live: ConnectionSnapshot = { phase: "live", stage: "live", since: 5_000, attempt: 0, missedHeartbeats: 0, degraded: false };
+    expect(connectingAnchor(live, "dialing", 9_000)).toBe(9_000);
+    expect(connectingAnchor(undefined, "resolving", 9_000)).toBe(9_000);
+    // Without an anchor the reading falls back to the stage clock.
+    expect(elapsedSeconds({ ...live, phase: "failed", since: 9_000 }, 12_000)).toBe(3);
   });
 
   it("keeps latency absent until a heartbeat round trip measures it", async () => {

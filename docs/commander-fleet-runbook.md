@@ -93,7 +93,26 @@ On target machine B, bind the invitation to machine A's exact controller origin:
 cas hub pair --origin https://MACHINE-A.TAILNET.ts.net
 ```
 
-Open the printed fragment URL in the browser on device A and complete the pairing before its ten-minute expiry. The fragment is removed before networking. In browser developer tools, verify:
+That default grants read-only scopes: `machine:read,session:read,pane:read`. A
+read-only device can watch panes but cannot type into them, send a supervisor
+message, or interrupt an agent. To pair a device that controls, name the scopes:
+
+```sh
+cas hub pair --origin https://MACHINE-A.TAILNET.ts.net \
+  --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt
+```
+
+The invitation is a ceiling, not a request: the exchange refuses any scope the
+invitation did not grant, and the link carries its granted scopes so Commander
+ticks exactly those. Scopes cannot be widened after the fact — mint a new
+invitation with the scopes you want and open that link.
+
+Open the printed fragment URL in the browser on device A. Commander opens the
+pairing dialog with the granted scopes ticked and the rest disabled; confirm the
+hub URL and labels and complete the pairing before its ten-minute expiry. On
+Android, open the link in a new tab: a VIEW intent whose URL differs only by its
+`#fragment` lands on the existing tab, and the invitation is never consumed. The
+fragment is removed before networking. In browser developer tools, verify:
 
 1. pairing exchange goes directly to machine B's `https://...ts.net` origin;
 2. the session list succeeds only after DPoP authentication;

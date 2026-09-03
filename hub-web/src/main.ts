@@ -1,6 +1,6 @@
 import "./styles.css";
-import { applyAttentionEnrichment, attentionCounts, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
-import { cycleAttentionGroup, renderAttentionCounts, renderAttentionPanel } from "./attention-view";
+import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
+import { cycleAttentionGroup, renderAttentionCounts, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
 import { connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
@@ -1400,7 +1400,13 @@ function render(captureDraft = true): void {
       machineTree.append(pair);
     }
   }
-  document.querySelector("#attention-rail-counts")?.append(renderAttentionCounts(counts, true));
+  const railCounts = document.querySelector("#attention-rail-counts");
+  if (railCounts) {
+    // Both forms ship; the compact block picks one. The button owns the
+    // accessible name so the visuals can stay aria-hidden.
+    railCounts.setAttribute("aria-label", `Open attention. ${attentionSummary(counts).description}`);
+    railCounts.append(renderAttentionSummary(counts), renderAttentionCounts(counts, true));
+  }
   renderAttention(); renderStatus(status);
   if (selected && selectedSession && connectionSnapshot) renderConnectionSurface(selected.id, selectedSession, connectionSnapshot);
   syncConnectionViewTicker();
@@ -1445,7 +1451,9 @@ function machineRailButton(machine: StoredMachine): HTMLButtonElement {
   const button = document.createElement("button");
   button.className = `machine-icon ${machine.id === selectedMachineId ? "active" : ""}`;
   button.type = "button";
-  button.innerHTML = `<span>${escapeHtml(machineInitials(machine.label))}</span><i class="machine-state ${state}"></i>`;
+  // The dot leads so it can never be clipped by the chip's corner radius, and
+  // the phone shows the machine's actual name instead of two initials.
+  button.innerHTML = `<span class="machine-state ${state}"></span><span class="machine-initials">${escapeHtml(machineInitials(machine.label))}</span><span class="machine-name">${escapeHtml(machine.label)}</span>`;
   button.title = `${machine.label} · ${connectionLabel(snapshot)}`;
   button.setAttribute("aria-label", `${machine.label}, ${connectionLabel(snapshot)}`);
   button.onclick = () => selectMachine(machine);

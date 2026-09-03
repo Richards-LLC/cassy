@@ -568,6 +568,8 @@ impl DaemonInitPhase {
             dead_workers: std::collections::HashSet::new(),
             reported_unavailable_workers: std::collections::HashMap::new(),
             last_usage_limit_scan: None,
+        reported_auth_failed_workers: std::collections::HashMap::new(),
+        last_auth_failure_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
             last_idle_message_times: HashMap::new(),
             lifecycle_redelivery_attempts: HashMap::new(),

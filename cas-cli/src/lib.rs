@@ -37,6 +37,7 @@ pub mod daemon;
 pub mod duplicate_check;
 pub mod error;
 pub mod extraction;
+pub mod factory_auth_health;
 pub mod factory_context_reset;
 pub mod factory_isolation;
 pub mod factory_preflight;

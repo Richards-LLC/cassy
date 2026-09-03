@@ -1224,9 +1224,17 @@ fn foreign_rows_check_with_classifier_error(
         if evidence_count == purge_count {
             message.push_str(" — counts agree");
         } else if evidence_count > purge_count {
+            // GH #697 (cas-a869): the printed number must describe the list
+            // that follows it. This used to print `evidence_count -
+            // purge_count` and then list `retained_foreign_tasks`, a different
+            // set, so an operator read "cannot reach 4" above six ids and had
+            // no way to tell which number was wrong. When the two genuinely
+            // disagree, both are real and both are stated — neither stands in
+            // for the other.
             let gap = evidence_count - purge_count;
-            message.push_str(&format!(" — purge cannot reach {gap} evidence row(s)"));
-            if !analysis.retained_foreign_tasks.is_empty() {
+            let named = analysis.retained_foreign_tasks.len();
+            if named > 0 {
+                message.push_str(&format!(" — purge cannot reach {named} evidence row(s)"));
                 let retained = analysis
                     .retained_foreign_tasks
                     .iter()
@@ -1234,6 +1242,15 @@ fn foreign_rows_check_with_classifier_error(
                     .collect::<Vec<_>>()
                     .join(", ");
                 message.push_str(&format!(": {retained}"));
+                if named != gap {
+                    message.push_str(&format!(
+                        " (delete-set shortfall is {gap} row(s); the {named} named above are the rows purge identified and retained)"
+                    ));
+                }
+            } else {
+                message.push_str(&format!(
+                    " — purge cannot reach {gap} evidence row(s); none were individually identified"
+                ));
             }
         } else {
             message.push_str(&format!(
@@ -2814,7 +2831,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn grouped_report_uses_sections_remediation_and_counted_summary() {
+    fn grouped_report_uses_sections_remediation_and_a_verbatim_summary() {
         let checks = vec![
             Check::new("database", CheckStatus::Ok, "SQLite database found"),
             Check::new("entries", CheckStatus::Ok, "1234567 entries accessible"),
@@ -2840,7 +2857,12 @@ mod tests {
         assert!(report.contains("[OK] entries"));
         assert!(report.contains("[WARN] search index"));
         assert!(report.contains("  → Run `cas index`"));
-        assert!(report.contains("1,234,567 entries accessible"));
+        // GH #697 (cas-a869): counts render verbatim. The digit-grouping
+        // pass that produced `1,234,567` here also produced `cas-7,791` and
+        // comma-riddled UUIDs on real reports, so it is gone rather than
+        // narrowed.
+        assert!(report.contains("1234567 entries accessible"));
+        assert!(!report.contains("1,234,567"));
         assert!(report.contains("2 ok · 1 warnings · 0 errors · 123ms"));
     }
 
@@ -3165,6 +3187,132 @@ mod tests {
     /// while two supervisors share one clone and either can reap the other's
     /// workers. The per-session verdicts must stay green (they are correct in
     /// isolation) and the cross-session pass must add the warning.
+    /// GH #697 (cas-a869): identifiers and timestamps must survive rendering
+    /// byte-for-byte. The report used to run a digit-grouping pass over the
+    /// whole rendered line, so `cas-7791` printed as `cas-7,791`, a UUID
+    /// became unpasteable, and an RFC3339 timestamp grew three commas — it
+    /// corrupted exactly the tokens an operator copies into the next command.
+    #[test]
+    fn rendered_messages_never_group_digits_inside_ids_uuids_or_timestamps() {
+        let check = Check {
+            name: "cross-project rows".to_string(),
+            status: CheckStatus::Warning,
+            message: "cas-7791 held by befc4155-89ca-4fb3-9b05-65323a4bf357 \
+                      recorded_at=2026-09-03T18:59:18.226617643+00:00 across 3240 rows"
+                .to_string(),
+        };
+
+        let rendered = full_message(&check);
+
+        assert!(
+            !rendered.contains(','),
+            "no separator may be injected anywhere in a rendered line: {rendered}"
+        );
+        assert!(rendered.contains("cas-7791"), "{rendered}");
+        assert!(
+            rendered.contains("befc4155-89ca-4fb3-9b05-65323a4bf357"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("2026-09-03T18:59:18.226617643+00:00"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("3240 rows"), "{rendered}");
+    }
+
+    /// The JSON surface renders through its own path, so pin it separately —
+    /// a machine reader is exactly who cannot tolerate `cas-7,791`.
+    #[test]
+    fn serialized_checks_keep_identifiers_verbatim() {
+        let checks = vec![Check {
+            name: "factory session".to_string(),
+            status: CheckStatus::Ok,
+            message: "supervisors: 1; noble-koala-5 (befc4155-89ca-4fb3-9b05-65323a4bf357)"
+                .to_string(),
+        }];
+
+        let serialized = serialize_checks(&checks);
+        let message = serialized[0]["message"].as_str().expect("message string");
+        assert_eq!(
+            message,
+            "supervisors: 1; noble-koala-5 (befc4155-89ca-4fb3-9b05-65323a4bf357)"
+        );
+    }
+
+    /// GH #697 defect (b): the line said "cannot reach 4 evidence row(s)" and
+    /// then listed six ids, because the number was an arithmetic gap over one
+    /// set while the ids came from another. The printed count must describe
+    /// the list actually printed.
+    #[test]
+    fn unreachable_row_count_matches_the_rows_it_lists() {
+        use crate::cli::cloud::{
+            PurgeDeleteSet, PurgeEntity, PurgeForeignAnalysis, PurgeRetainedTask,
+        };
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
+
+        let report = ForeignRowReport {
+            local_project: "gabber-studio".to_string(),
+            local_task_count: 900,
+            peers_compared: vec!["cas-src".to_string()],
+            foreign: (0..10)
+                .map(|index| ForeignRow {
+                    id: format!("cas-f{index:03}"),
+                    title: format!("Foreign row {index}"),
+                    closed: false,
+                    origin_project: None,
+                    home_project: "cas-src".to_string(),
+                    also_present_in: Vec::new(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        // Ten rows of evidence, six of which purge cannot reach, but a delete
+        // set of six — so the arithmetic gap (4) and the retained list (6)
+        // disagree. Both numbers are real; neither may stand in for the other.
+        let analysis = PurgeForeignAnalysis {
+            foreign_task_count: 10,
+            delete_set: PurgeDeleteSet {
+                tasks: (0..6)
+                    .map(|index| {
+                        PurgeEntity::with_evidence(
+                            "task",
+                            &format!("cas-d{index:03}"),
+                            "Deletable foreign row",
+                            "peer-evidence",
+                            "cas-src",
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            retained_foreign_tasks: (0..6)
+                .map(|index| PurgeRetainedTask {
+                    id: format!("cas-r{index:03}"),
+                    title: format!("Retained row {index}"),
+                    reason: "id collision".to_string(),
+                })
+                .collect(),
+            unattributed_task_count: 0,
+            collision_count: 0,
+        };
+
+        let check = foreign_rows_check(Ok(&report), Some(&analysis), 0);
+
+        let listed = check.message.matches("cas-r").count();
+        assert_eq!(listed, 6, "fixture must list six ids: {}", check.message);
+        assert!(
+            check.message.contains("purge cannot reach 6 evidence row(s)"),
+            "the printed count must describe the list it prints: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("cannot reach 4"),
+            "the arithmetic gap must not masquerade as the listed count: {}",
+            check.message
+        );
+    }
+
     /// GH #701 (cas-4342): the check has to say how many rows are
     /// unattributed, how many are already quarantined, and why collisions are
     /// excluded — the old wording stopped at "neither category is deletable",
@@ -4911,35 +5059,16 @@ fn check_claude_code_mcp(project_root: &Path) -> Check {
     }
 }
 
-fn format_counted_text(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut digits = String::new();
-    let flush = |result: &mut String, digits: &mut String| {
-        if digits.len() > 3 {
-            for (index, digit) in digits.chars().enumerate() {
-                if index > 0 && (digits.len() - index) % 3 == 0 {
-                    result.push(',');
-                }
-                result.push(digit);
-            }
-        } else {
-            result.push_str(digits);
-        }
-        digits.clear();
-    };
-
-    for ch in text.chars() {
-        if ch.is_ascii_digit() {
-            digits.push(ch);
-        } else {
-            flush(&mut result, &mut digits);
-            result.push(ch);
-        }
-    }
-    flush(&mut result, &mut digits);
-    result
-}
-
+/// Rendered report text is emitted verbatim (GH #697 / cas-a869).
+///
+/// A digit-grouping pass used to run over each finished line, with no way to
+/// know whether a digit run was a count or part of an identifier. It turned
+/// `cas-7791` into `cas-7,791`, made UUIDs and RFC3339 timestamps unpasteable,
+/// and so corrupted precisely the tokens an operator copies into the next
+/// command. Grouping was cosmetic; the corruption was not, so the pass is
+/// gone and counts render as plain integers. Do not reintroduce a
+/// post-processing pass over rendered lines — any future grouping must happen
+/// where the number is still a number, before it becomes prose.
 fn status_label(status: &CheckStatus, styled: bool) -> &'static str {
     if styled {
         match status {
@@ -4965,7 +5094,7 @@ fn status_name(status: &CheckStatus) -> &'static str {
 }
 
 fn full_message(check: &Check) -> String {
-    format_counted_text(&check.message)
+    check.message.clone()
 }
 
 fn serialize_checks(checks: &[Check]) -> Vec<serde_json::Value> {
@@ -4976,9 +5105,9 @@ fn serialize_checks(checks: &[Check]) -> Vec<serde_json::Value> {
             serde_json::json!({
                 "name": check.name,
                 "status": status_name(&check.status),
-                "message": format_counted_text(&message),
+                "message": message,
                 "group": check.group().json_name(),
-                "remediation": remediation.map(|text| format_counted_text(&text)),
+                "remediation": remediation,
             })
         })
         .collect()
@@ -5144,7 +5273,7 @@ fn render_report(
             );
             let available = width.saturating_sub(prefix.chars().count()).max(1);
             let (message, remediation) = check.parts();
-            let message_lines = wrap_report_text(&format_counted_text(&message), available);
+            let message_lines = wrap_report_text(&message, available);
             let hanging_indent = " ".repeat(prefix.chars().count());
             for (line_index, message_line) in message_lines.iter().enumerate() {
                 let line = if line_index == 0 {
@@ -5155,11 +5284,7 @@ fn render_report(
                 write_report_line(fmt, Some(&check.status), &line)?;
             }
             if let Some(remediation) = remediation {
-                fmt.write_muted(&format!(
-                    "  {} {}",
-                    Icons::ARROW_RIGHT,
-                    format_counted_text(&remediation)
-                ))?;
+                fmt.write_muted(&format!("  {} {}", Icons::ARROW_RIGHT, remediation))?;
                 fmt.newline()?;
             }
         }

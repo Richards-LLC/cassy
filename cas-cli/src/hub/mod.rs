@@ -12,7 +12,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::ui::factory::{DaemonMessage, SessionManager};
+use crate::ui::factory::{DaemonMessage, SessionInfo, SessionManager};
 
 mod attention;
 mod auth;
@@ -485,43 +485,44 @@ pub trait SessionReadModel: Clone + Send + Sync + 'static {
 #[derive(Debug, Clone, Default)]
 pub struct LocalSessionReadModel;
 
+/// Project one discovered session onto the wire shape Commander consumes.
+///
+/// The roster comes from `SessionInfo::worker_names()` — the live agent
+/// registry, the same source the factory TUI counts — because the session file
+/// this metadata is read from carries an empty `workers[]` even for a session
+/// running five of them, which made every session report "0 workers".
+fn hub_session(session: &SessionInfo) -> HubSession {
+    HubSession {
+        name: session.name.clone(),
+        project_dir: session.metadata.project_dir.clone(),
+        supervisor: session.metadata.supervisor.name.clone(),
+        workers: session.project_worker_names(),
+        epic_id: session.metadata.epic_id.clone(),
+        ws_port: session.metadata.ws_port,
+        liveness: if !session.is_running {
+            DaemonLiveness::StaleMetadata
+        } else if session.metadata.ws_port.is_none() {
+            DaemonLiveness::MissingEndpoint
+        } else {
+            DaemonLiveness::Live
+        },
+        daemon_identity: session
+            .metadata
+            .daemon_pid_starttime
+            .map(|pid_starttime| DaemonIdentity {
+                session: session.name.clone(),
+                pid: session.metadata.daemon_pid,
+                pid_starttime,
+            }),
+    }
+}
+
 impl SessionReadModel for LocalSessionReadModel {
     fn list_sessions(&self) -> Result<Vec<HubSession>> {
         Ok(SessionManager::new()
             .list_sessions()?
-            .into_iter()
-            .map(|session| {
-                let daemon_identity =
-                    session
-                        .metadata
-                        .daemon_pid_starttime
-                        .map(|pid_starttime| DaemonIdentity {
-                            session: session.name.clone(),
-                            pid: session.metadata.daemon_pid,
-                            pid_starttime,
-                        });
-                HubSession {
-                    name: session.name,
-                    project_dir: session.metadata.project_dir,
-                    supervisor: session.metadata.supervisor.name,
-                    workers: session
-                        .metadata
-                        .workers
-                        .into_iter()
-                        .map(|worker| worker.name)
-                        .collect(),
-                    epic_id: session.metadata.epic_id,
-                    ws_port: session.metadata.ws_port,
-                    liveness: if !session.is_running {
-                        DaemonLiveness::StaleMetadata
-                    } else if session.metadata.ws_port.is_none() {
-                        DaemonLiveness::MissingEndpoint
-                    } else {
-                        DaemonLiveness::Live
-                    },
-                    daemon_identity,
-                }
-            })
+            .iter()
+            .map(hub_session)
             .collect())
     }
 }

@@ -1,4 +1,5 @@
 use crate::ui::factory::daemon::imports::*;
+use crate::ui::factory::daemon::runtime::pane_size::{PaneSizeDecision, decide_pane_size};
 use crate::ui::factory::protocol::{
     ClientMessage, DaemonMessage, FRAME_HEADER_SIZE, MAX_MESSAGE_SIZE, PaneInfo, PaneKind,
     SessionState, decode_length, encode_message,
@@ -373,7 +374,24 @@ impl FactoryDaemon {
                     client.pane_sizes.insert(actual.clone(), (cols, rows));
                 }
 
-                self.apply_effective_pane_size(&actual);
+                // A viewer's size is a request, not a command (cas-37f8): reply
+                // with the authoritative size whenever it differs so the client
+                // renders that instead of retrying.
+                if let Some(decision) = self.apply_effective_pane_size(&actual)
+                    && (decision.cols != cols || decision.rows != rows)
+                {
+                    let reply = DaemonMessage::PaneSize {
+                        pane_id: actual.clone(),
+                        cols: decision.cols,
+                        rows: decision.rows,
+                        authority: decision.authority,
+                    };
+                    if let Some(frame) = encode_frame(&reply)
+                        && let Some(client) = self.gui_clients.get_mut(&client_id)
+                    {
+                        queue_frame(client, &frame);
+                    }
+                }
             }
             ClientMessage::SpawnWorkers {
                 count,
@@ -613,69 +631,72 @@ impl FactoryDaemon {
         }
     }
 
+    /// The size the operator's local dashboard has allocated to this pane, or
+    /// `None` when no local dashboard is attached (headless / remote-only).
+    ///
+    /// `tui_pane_sizes` is a snapshot of the last local layout, so it outlives
+    /// the dashboard that produced it; the live full-mode client check is what
+    /// makes a remote-only session fall back to viewer-driven geometry
+    /// (cas-37f8).
+    pub(super) fn local_dashboard_pane_size(&self, pane_id: &str) -> Option<(u16, u16)> {
+        let dashboard_attached = self
+            .clients
+            .values()
+            .any(|client| client.view_mode == ClientViewMode::Full);
+        if !dashboard_attached {
+            return None;
+        }
+        self.tui_pane_sizes.get(pane_id).copied()
+    }
+
     /// Calculate and apply the effective size for a pane across all client types
-    /// (TUI, GUI, web). Uses the smallest dimensions so every viewer can display
-    /// the content without clipping.
-    pub(super) fn apply_effective_pane_size(&mut self, pane_id: &str) {
-        let mut min_cols = u16::MAX;
-        let mut min_rows = u16::MAX;
-        let mut found = false;
-
-        // TUI layout allocation
-        if let Some(&(cols, rows)) = self.tui_pane_sizes.get(pane_id) {
-            if cols > 0 && rows > 0 {
-                min_cols = min_cols.min(cols);
-                min_rows = min_rows.min(rows);
-                found = true;
-            }
-        }
-
-        // All GUI clients
+    /// (TUI, GUI, WebSocket/hub, relay web).
+    ///
+    /// While the operator's local dashboard is attached it owns the geometry:
+    /// remote viewers render the authoritative size on their side and can never
+    /// shrink the PTY (cas-37f8). With no dashboard attached, the smallest
+    /// viewer wins so every viewer can display the content without clipping.
+    pub(super) fn apply_effective_pane_size(&mut self, pane_id: &str) -> Option<PaneSizeDecision> {
+        let mut viewers: Vec<(u16, u16)> = Vec::new();
         for client in self.gui_clients.values() {
-            if let Some(&(cols, rows)) = client.pane_sizes.get(pane_id) {
-                if cols > 0 && rows > 0 {
-                    min_cols = min_cols.min(cols);
-                    min_rows = min_rows.min(rows);
-                    found = true;
-                }
+            if let Some(&size) = client.pane_sizes.get(pane_id) {
+                viewers.push(size);
             }
         }
-
-        // All WS clients
         for client in self.ws_clients.values() {
-            if let Some(&(cols, rows)) = client.pane_sizes.get(pane_id) {
-                if cols > 0 && rows > 0 {
-                    min_cols = min_cols.min(cols);
-                    min_rows = min_rows.min(rows);
-                    found = true;
-                }
+            if let Some(&size) = client.pane_sizes.get(pane_id) {
+                viewers.push(size);
             }
         }
-
-        // Web viewers
-        if let Some(&(cols, rows)) = self.web_pane_sizes.get(pane_id) {
-            if cols > 0 && rows > 0 {
-                min_cols = min_cols.min(cols);
-                min_rows = min_rows.min(rows);
-                found = true;
-            }
+        if let Some(&size) = self.web_pane_sizes.get(pane_id) {
+            viewers.push(size);
         }
 
-        if !found {
-            return;
+        let decision = decide_pane_size(self.local_dashboard_pane_size(pane_id), viewers)?;
+
+        if decision.refused_viewer_shrink {
+            tracing::info!(
+                pane = pane_id,
+                cols = decision.cols,
+                rows = decision.rows,
+                "refused a viewer's request to shrink pane below the local dashboard size"
+            );
         }
 
         if let Some(pane) = self.app.mux.get_mut(pane_id) {
-            if pane.cols() != min_cols || pane.rows() != min_rows {
-                let _ = pane.resize(min_rows, min_cols);
+            if pane.cols() != decision.cols || pane.rows() != decision.rows {
+                let _ = pane.resize(decision.rows, decision.cols);
                 tracing::info!(
-                    "Pane '{}' resized to {}x{} (effective minimum across all clients)",
+                    "Pane '{}' resized to {}x{} ({:?} authority)",
                     pane_id,
-                    min_cols,
-                    min_rows,
+                    decision.cols,
+                    decision.rows,
+                    decision.authority,
                 );
             }
         }
+
+        Some(decision)
     }
 
     /// Snapshot current mux pane sizes into tui_pane_sizes after a TUI layout resize.

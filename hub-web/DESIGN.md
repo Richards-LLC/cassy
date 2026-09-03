@@ -40,6 +40,8 @@ elevation:
   raised: "--bg-raised, no shadow"
   overlay: "--shadow-overlay only"
 breakpoints:
+  phone: "(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"
+  landscape_phone: "(max-height: 30rem) and (pointer: coarse)"
   compact: "max-width: 53rem"
 ---
 
@@ -85,7 +87,10 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - `.shell` exposes `--bg-root` through its 8px gaps; no full-height left/right column borders may recreate the old boxed grid.
 - `.session-header` is exactly 44px. The supervisor receives 65% of the pane grid and the worker strip 35%; collapsed worker bars are exactly 32px.
 - The collapsed attention region is the same 48px rail width, while the expanded operations panel occupies the 320px context column.
-- At `max-width: 53rem`, navigation becomes a 48px bottom rail, drawers open above it, and workers scroll horizontally below the readable supervisor terminal.
+- A phone is `(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)` — either axis too small for desktop chrome, driven by a finger. Width alone is a narrow-window test, not a phone test: a rotated Pixel 7 is 915px wide and would take the desktop grid onto a 412px-tall screen. The pointer clause keeps a mouse-driven desktop with a short window on the desktop layout. This exact string is `PHONE_MEDIA_QUERY` in `hub-web/src/viewport.ts`, and the stylesheet and every `matchMedia` call must use it, so rotation can never put the layout and the pane-mounting logic in different modes.
+- `compact` stays width-only and separate. It answers how many columns fit across a mount — the 80-column PTY floor and the transcript default — and a phone in landscape genuinely has the width for a wider grid.
+- In portrait, navigation becomes a 48px bottom rail, drawers open above it, and workers scroll horizontally below the readable supervisor terminal.
+- In landscape, the chrome moves to the long edges: machines on the left, the collapsed attention rail on the right, both 48px, each honouring its safe-area inset. The terminal keeps the full height, the machine drawer opens as a left sheet, and the expanded operations panel is a right-hand sheet over the terminal — never a row taken from it. The worker strip is capped at 30dvh there instead of 40dvh.
 - Every control in that rail — Machines, each machine chip, Pair, the attention summary, the message button — shares one container treatment at `--rail-item-min` (44px) on `--bg-raised` with `--radius-card`. The rail is one bar, so it may not mix bordered, filled, and bare controls in a single row.
 - The collapsed context pill floats over the rail: it stays transparent, clips its own contents, and lets its two controls carry the shared rail-item surface, so it never paints a second surface or spills across Pair.
 - At `max-width: 53rem` a pane defaults to the transcript reading view and its PTY is held at a floor of 80 columns; the canvas then sizes to that grid instead of the mount, and terminal view pans horizontally. Above the breakpoint nothing changes: no column floor, terminal view by default.
@@ -127,6 +132,54 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - Inputs: `dialog input` and `.message textarea`; raised or terminal fills replace permanent one-pixel boxes, with focus-visible outline for keyboard state.
 - Terminal state: `.terminal-state`; warning tint is allowed because connection degradation is actionable state, and the retry remains a normal button.
 - Toast: `#toast`; it is an overlay, so it may use the one soft overlay shadow but no saturated fill.
+
+## Render model
+
+`render()` used to assign `app.innerHTML` on every hub push. A five-second
+status frame therefore destroyed and re-created every live control in the page:
+the composer was replaced six times and blurred six times inside ten seconds of
+typing, and on a phone each blur closes the soft keyboard. The pairing dialog
+and session picker carried re-open-after-render workarounds for the same
+reason.
+
+The page now has three render paths, chosen in `render()` by
+`renderDecision()` in `src/render-model.ts`:
+
+- **regions** — the default, and the only path a heartbeat can take. Nothing in
+  the shell is replaced; `renderRegions()` writes the new values into the nodes
+  that are already on screen.
+- **shell** — a full rebuild, taken only when `shellSignature()` changed. The
+  signature covers exactly what the shell markup interpolates structurally:
+  selected machine and session, the machine and session catalogs, drawer and
+  panel state, the context tab, supervisor and back targets, lease identity,
+  the palette/picker open flags, and the whole visible state of the pairing
+  dialog.
+- **defer** — the signature changed while a form control inside the app has
+  focus. The rebuild is remembered and flushed on `focusout`, so a machine
+  appearing mid-sentence no longer takes the keyboard with it.
+
+Rules that keep this honest:
+
+- If a value appears in the shell markup, it belongs in `shellSignature()` or
+  in `applyLiveRegions()`. Adding it to neither is how a pane goes stale.
+- Per-heartbeat data — latency, attention counts, the status payload, message
+  status, the stale-age sentence — must never enter the signature. One
+  heartbeat-driven field there rebuilds the page every five seconds and undoes
+  all of this.
+- `applyLiveRegions()` may only write into existing nodes: no `innerHTML`, no
+  `createElement`, no `replaceChildren`. An invariant enforces it.
+- Anything a region re-creates (the machine rail, the drawer tree, the session
+  picker list) must bind its own handlers, because `bindEvents()` only runs on
+  a shell rebuild.
+- A region updater owns clearing its own container. The old code relied on the
+  rebuild handing it an empty one.
+- Lease identity is deliberately structural: `bindEvents()` captures the lease
+  in its handlers, so a change of controller has to rebuild rather than leave a
+  stale closure behind a live button.
+
+The dialog re-open lines in `render()` stay. They are no longer load-bearing
+for heartbeats — a heartbeat never reaches them — but a genuine structural
+rebuild can still happen with a dialog open, and re-opening it is correct then.
 
 ## Streaming text on narrow viewports (D15)
 

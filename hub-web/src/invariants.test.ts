@@ -1,7 +1,8 @@
 import { createHash, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HubConnectionSupervisor, type HubCallbacks } from "./connection";
+import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from "./connection";
+import { connectingView } from "./connection-state-view";
 import { createDeviceKey, dpopHeaders } from "./dpop";
 import { consumePairingFragment } from "./fragment";
 import type { StoredMachine } from "./types";
@@ -79,6 +80,48 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).toContain('if (focusWinner === "composer") queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus());');
   });
 
+  it("detects a phone from one definition, in both orientations", async () => {
+    const [main, css, design] = await Promise.all(["main.ts", "styles.css", "../DESIGN.md"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // A rotated Pixel 7 is 915px wide, so a width-only breakpoint handed a
+    // 412px-tall screen the three-column desktop console (report defect D5).
+    // CSS and JS must ask the identical question, or rotation puts the layout
+    // and the pane-mounting logic in different modes.
+    expect(main).toContain('import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";');
+    expect(main).toContain("function phoneLayout(): boolean { return window.matchMedia(PHONE_MEDIA_QUERY).matches; }");
+    expect(main).toContain("let attentionPanelCollapsed = window.matchMedia(PHONE_MEDIA_QUERY).matches;");
+    expect(main).toContain("function compactViewport(): boolean { return window.matchMedia(COMPACT_MEDIA_QUERY).matches; }");
+    // Every viewport question is asked with a shared query string, so no literal
+    // breakpoint can drift out of step with the stylesheet again.
+    expect(main).not.toContain("max-width: 850px");
+    expect(main).not.toContain('matchMedia("(max-width');
+    // Rotation flips the layout in CSS instantly; pane composition and the PTY
+    // column floor are decided in JS at render time and must follow it.
+    expect(main).toContain("for (const query of [PHONE_MEDIA_QUERY, COMPACT_MEDIA_QUERY]) {");
+    expect(main).toContain('window.matchMedia(query).addEventListener("change", () => render());');
+    expect(css).toContain("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {");
+    expect(css).toContain("@media (max-height: 30rem) and (pointer: coarse) {");
+    // The desktop hover-drawer rule must not reach a landscape phone either.
+    expect(css).toContain("@media (hover: hover) and (min-width: 53.0625rem) {");
+    expect(design).toContain("(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)");
+    expect(design).toContain("landscape");
+  });
+
+  it("gives a landscape phone the long edges and the full-height terminal", async () => {
+    const css = await readFile(new URL("styles.css", import.meta.url), "utf8");
+    const landscape = css.slice(css.indexOf("@media (max-height: 30rem) and (pointer: coarse) {"));
+    expect(landscape.length).toBeGreaterThan(0);
+    // One row: the terminal keeps every one of the 412 pixels it has, instead of
+    // giving a third of them to a bottom rail and an attention row.
+    expect(landscape).toContain("grid-template-rows: minmax(0, 1fr);");
+    expect(landscape).toContain(".shell main { grid-column: 2; grid-row: 1; }");
+    // The rail returns to a column on the long edge rather than eating height.
+    expect(landscape).toContain("  .machine-rail {\n    flex-direction: column;");
+    // An expanded panel floats over the terminal instead of taking a row from it.
+    expect(landscape).toContain("  .context-panel:not(.collapsed) {\n    position: fixed;");
+    expect(landscape).toContain("env(safe-area-inset-left)");
+    expect(landscape).toContain("env(safe-area-inset-right)");
+  });
+
   it("reports the outcome of sending a supervisor message", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     // A send with no outcome is indistinguishable from a lost one, and invites a
@@ -101,13 +144,81 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).toContain("const plan = planSupervisorSend(supervisorSendContext(text));");
   });
 
+  it("keeps a hub heartbeat off the shell rebuild path", async () => {
+    const [main, regions] = await Promise.all(["main.ts", "live-regions.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // A five-second status frame used to replace every live control in the
+    // page: the composer was re-created six times and blurred six times inside
+    // ten seconds of typing, and on a phone each blur closes the keyboard.
+    expect(main.match(/app\.innerHTML\s*=/g)).toHaveLength(1);
+    const decision = main.indexOf("const decision = renderDecision(");
+    const rebuild = main.indexOf("app.innerHTML =");
+    expect(decision).toBeGreaterThan(0);
+    expect(decision).toBeLessThan(rebuild);
+    // The regions path returns before the rebuild it is standing in for.
+    const guard = main.slice(decision, rebuild);
+    expect(guard).toContain('if (decision !== "shell") {');
+    expect(guard).toContain("renderRegions({");
+    expect(guard).toContain("return;");
+
+    // renderRegions and the updater it calls may only write into nodes that
+    // already exist; a single innerHTML there would restore the whole defect.
+    const body = main.slice(main.indexOf("function renderRegions(context: RegionContext): void {"));
+    const end = body.indexOf("\n}\n");
+    expect(end).toBeGreaterThan(0);
+    expect(body.slice(0, end)).not.toMatch(/\.innerHTML\s*=/);
+    expect(regions).not.toMatch(/\.innerHTML\s*=/);
+    expect(regions).not.toContain("createElement(");
+    expect(regions).not.toContain("replaceChildren(");
+
+    // The deferred rebuild has to be flushed, or a structural change that
+    // arrived mid-sentence would never land.
+    expect(main).toContain("pendingShellRender = true;");
+    expect(main).toContain('app.addEventListener("focusout"');
+  });
+
+  it("keeps the live-region selectors and the shell markup on the same nodes", async () => {
+    const [main, regions, fixture] = await Promise.all(
+      ["main.ts", "live-regions.ts", "live-regions.test.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")),
+    );
+    // The updater writes by selector into markup rendered somewhere else. A
+    // rename on either side would silently stop updating a region rather than
+    // fail, so both ends are pinned here.
+    const selectors = [...regions.matchAll(/(?:querySelector|closest)<[^>]*>\("([^"]+)"\)/g)].map((match) => match[1]!);
+    expect(selectors.length).toBeGreaterThan(8);
+    for (const selector of new Set(selectors)) {
+      // Every region the updater touches is exercised by its own fixture.
+      expect(fixture, `${selector} is missing from the live-regions fixture`).toContain(selector.replace(/^[.#]/, ""));
+    }
+    for (const marker of [
+      'class="connection-summary ',
+      'data-machine-latency="',
+      'class="connection-dot"',
+      'class="mode-badge ',
+      'id="lease"',
+      'class="control-action"',
+      'id="control-disabled-reason"',
+      'id="interrupt"',
+      'class="status-stale" role="status"',
+      'class="control-disabled-reason" role="note"',
+      'id="message-send"',
+      'id="message-status"',
+      'id="message-delivery"',
+    ]) expect(main, `${marker} left the shell template`).toContain(marker);
+  });
+
   it("never leaves the supervisor send button silently disabled", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     // A real `disabled` attribute swallows the tap: no event, no frame, no
     // reason. Observing operators concluded the feature was broken.
     expect(main).not.toContain('<button id="message-send" class="primary" ${!selected || !selectedSession || !supervisor || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>');
     expect(main).toContain('id="message-send"');
-    expect(main).toContain("${sendReason ? ` aria-disabled=\"true\" data-disabled-reason=\"${escapeAttr(sendReason)}\"` : \"\"}");
+    // The reason now reaches the button through the live-region updater, which
+    // must still state it with aria-disabled rather than the disabled property.
+    const regions = await readFile(new URL("live-regions.ts", import.meta.url), "utf8");
+    expect(main).toContain("...(sendReason ? { sendReason } : {}),");
+    expect(regions).toContain('setDisabledReason(root.querySelector<HTMLElement>("#message-send"), view.sendReason);');
+    expect(regions).toContain('element.setAttribute("aria-disabled", "true");');
+    expect(regions).not.toMatch(/\.disabled\s*=\s*true/);
     expect(main).toContain('<p id="message-status" class="message-status');
     expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error"): void {');
     expect(css).toContain(".message-status {");
@@ -327,7 +438,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain(".attention-item--critical");
     expect(css).toContain(".attention-item--enriching .attention-title::after");
     expect(css).toContain("prefers-reduced-motion: reduce");
-    expect(css).toContain("@media (max-width: 53rem)");
+    expect(css).toContain("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse)");
     expect(css).toContain("max-width: var(--mobile-attention-label-width)");
   });
 
@@ -385,7 +496,7 @@ describe("binding Cassy Commander browser invariants", () => {
     // compact layout has no focusable pane chrome of its own, so the whole
     // phone block must be free of it.
     expect(css).toContain(".pane.selected { border-color: var(--line-strong); }");
-    const compact = css.slice(css.indexOf("@media (max-width: 53rem)"));
+    const compact = css.slice(css.indexOf("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"));
     expect(compact).not.toContain("var(--line-strong)");
 
     // The collapsed pill floats over the rail, so it must not paint a second
@@ -411,7 +522,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain(".attention-count--critical { color: var(--state-crit); }");
     expect(css).toContain(".attention-count--info { color: var(--state-info); }");
     expect(view).toContain("export function renderAttentionSummary(");
-    expect(main).toContain("renderAttentionSummary(counts)");
+    expect(main).toContain("renderAttentionSummary(context.counts)");
   });
 
   it("keeps supervisor messaging reachable from the collapsed phone rail", async () => {
@@ -639,8 +750,22 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).toContain('machines.get(machineId)?.scopes.includes("pane-read")');
     expect(source).toContain("return !lease?.controller_label || lease.held_by_me");
     expect(source).toContain("if (becameGeometryOwner) resizeViewablePanes(machineId, session)");
-    expect(source).toContain("if (canResizePanes(machineId, session)) sendControl");
-    expect(source).toContain("{ ResizePane: { pane_id: pane.id, cols: surface.cols, rows: surface.rows } }");
+    expect(source).toContain("if (!canResizePanes(machineId, session)) return;");
+    expect(source).toContain("{ ResizePane: { pane_id: paneId, cols, rows } }");
+  });
+
+  // cas-37f8: a phone-sized viewer must never shrink the operator's console.
+  it("stops asking for a pane size once the local dashboard claims that pane", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain('const local = authority === "LocalDashboard";');
+    expect(source).toContain("if (!ownsPaneGeometry(machineId, session, paneId)) return;");
+    expect(source).toContain(
+      "surfaces.get(key)?.setAuthoritativeSize(local ? { cols, rows } : null)",
+    );
+    // Every ResizePane the viewer can send goes through the one suppression gate.
+    const sends = source.match(/ResizePane: \{/g) ?? [];
+    expect(sends).toHaveLength(1);
+    expect(source).toContain("onResize: (cols, rows) => requestPaneSize(machineId, session, pane.id, cols, rows)");
   });
 
   it("turns a reachable revoked hub into a terminal auth stop", async () => {
@@ -716,6 +841,109 @@ describe("binding Cassy Commander browser invariants", () => {
 
     await vi.waitFor(() => expect(supervisor.snapshot()).toMatchObject({ phase: "backoff", stage: "dialing" }));
     expect(callbacks.onAuthFailure).not.toHaveBeenCalled();
+    supervisor.stop();
+  });
+
+  it("degrades an unusable engine honestly instead of spinning at 0s", async () => {
+    const [connection, main, css] = await Promise.all(["connection.ts", "main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // The version floor that broke every attach on Chrome 113 is gone: the
+    // combined signal is built through a helper with a fallback.
+    expect(connection).toContain("signal: anySignal([this.eventAbort.signal, signal]),");
+    expect(connection).not.toContain("AbortSignal.any(");
+    // Fatal is declared, never inferred from TypeError — fetch rejects with
+    // TypeError on an ordinary network failure, which must keep retrying.
+    expect(connection).toContain("export class UnsupportedBrowserError extends Error {}");
+    expect(connection).toContain("if (unsupported) throw new UnsupportedBrowserError(unsupported);");
+    expect(connection).toContain("this.transition(\"failed\", stage, { reason: error.message, fatal: true });");
+    expect(connection).not.toContain("error instanceof TypeError");
+    // The connect clock survives the transitions that reset `since`.
+    expect(connection).toContain("connectingSince: connectingAnchor(this.lifecycle, phase, now),");
+    // One line naming the missing API and the minimum browsers.
+    expect(main).toContain("const browserNotice = unsupportedBrowserNotice(browserSupport());");
+    expect(main).toContain('<p class="browser-unsupported" role="alert">');
+    expect(css).toContain(".browser-unsupported {");
+    expect(css).toContain(".shell.with-browser-notice { height: calc(100dvh - var(--browser-notice-height)); }");
+    // No spinner, no rising counter, and no "reconnecting" claim over a
+    // failure that will never resolve.
+    expect(main).toContain("title.textContent = fatal ? `Cannot connect to ${session}` : `Connecting to ${session}…`;");
+    expect(main).toContain("if (snapshot.fatal === true) return;");
+    expect(main).toContain("? snapshot.reason ?? \"This browser cannot reconnect to the terminal.\"");
+    // One recurring failure is one attention entry, not one per retry.
+    expect(main).toContain("const merge = mergeAttentionItem(attention, item);");
+    expect(main).toContain("await attentionStore.put(merge.stored);");
+    expect(main).not.toContain("attention = [item, ...attention];\n  await attentionStore.put(item);");
+  });
+
+  it("fails an engine missing a transport API once, with the reason, instead of retrying it forever", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    const fetchMock = vi.fn(async () => ({ status: 200, ok: true, json: async () => ({}) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const timeout = (AbortSignal as unknown as { timeout?: unknown }).timeout;
+    Reflect.deleteProperty(AbortSignal as unknown as Record<string, unknown>, "timeout");
+    try {
+      const { privateKey, publicKey } = await createDeviceKey();
+      const machine = {
+        id: "machine", label: "Machine", baseUrl: "https://hub.example", deviceId: "device",
+        credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        scopes: ["pane-read"], publicKey, privateKey,
+      } satisfies StoredMachine;
+      const callbacks = {
+        onState: vi.fn(), onAttachState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+        onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+      } satisfies HubCallbacks;
+      const supervisor = new HubConnectionSupervisor(machine, callbacks);
+      const internals = supervisor as unknown as { desired: boolean; attachRetryTimers: Map<string, number> };
+      internals.desired = true;
+
+      await supervisor.attach("factory-a");
+
+      const snapshot = supervisor.attachSnapshot("factory-a");
+      expect(snapshot).toMatchObject({ phase: "failed", fatal: true });
+      expect(snapshot?.reason).toContain("AbortSignal.timeout");
+      expect(snapshot?.reason).toContain("Update to Chrome");
+      // The overlay states it and offers the escape hatch on the first frame.
+      expect(connectingView(snapshot!, Date.now())).toMatchObject({ step: snapshot?.reason, actionsAvailable: true });
+      // No retry is scheduled, and the failure is not misreported as revoked.
+      expect(internals.attachRetryTimers.size).toBe(0);
+      expect(callbacks.onSocketError).toHaveBeenCalledWith("factory-a", snapshot?.reason);
+      expect(callbacks.onSocketError).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(callbacks.onSocketError).toHaveBeenCalledTimes(1);
+      supervisor.stop();
+    } finally {
+      if (timeout !== undefined) Object.defineProperty(AbortSignal, "timeout", { value: timeout, configurable: true, writable: true });
+    }
+  });
+
+  it("keeps one connect clock running across machine retries so the 5s and 15s states appear", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
+    const { privateKey, publicKey } = await createDeviceKey();
+    const machine = {
+      id: "offline", label: "Offline", baseUrl: "https://offline.example", deviceId: "device",
+      credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      scopes: ["machine-read"], publicKey, privateKey,
+    } satisfies StoredMachine;
+    const states: ConnectionState[] = [];
+    const callbacks = {
+      onState: (state: ConnectionState) => states.push(state), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+    } satisfies HubCallbacks;
+    const supervisor = new HubConnectionSupervisor(machine, callbacks);
+    const startedAt = Date.now();
+    supervisor.start();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const latest = supervisor.snapshot();
+    // `since` is rewritten by every transition — that is what froze the
+    // overlay at 0s — while the connecting anchor holds the true start.
+    expect(latest.since).toBeGreaterThan(startedAt);
+    expect(latest.connectingSince).toBe(startedAt);
+    expect(connectingView(latest, Date.now())).toMatchObject({ actionsAvailable: true });
+    expect(connectingView(latest, Date.now()).elapsedSeconds).toBeGreaterThanOrEqual(15);
+    expect(states.filter((state) => state.connectingSince !== startedAt)).toHaveLength(0);
     supervisor.stop();
   });
 
@@ -808,7 +1036,7 @@ describe("binding Cassy Commander browser invariants", () => {
       connection.indexOf("this.callbacks.onSessionState(session, welcome.state, undefined, true)"),
     );
     expect(connection).not.toContain("welcome.scrollback, true");
-    expect(main).toContain('const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches');
+    expect(main).toContain("const collapsedOnPhone = phoneLayout() && secondaryOnPhone;");
     expect(main.indexOf("if (collapsedOnPhone) continue;")).toBeLessThan(
       main.indexOf("requestPaneKeyframe(session, pane.id)"),
     );

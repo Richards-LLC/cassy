@@ -7,6 +7,7 @@ mod delivery_matrix_tests;
 mod gui_client;
 mod lifecycle;
 mod output;
+pub(super) mod pane_size;
 mod queue_and_events;
 pub(super) mod relay;
 pub(super) mod session_summarizer;

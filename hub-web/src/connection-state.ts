@@ -5,6 +5,15 @@ export interface ConnectionSnapshot {
   phase: ConnectionPhase;
   stage: ConnectionStage;
   since: number;
+  /**
+   * Start of the uninterrupted not-live lifecycle, stable across retries.
+   * `since` is rewritten by every stage transition, so a machine that fails
+   * and retries every second reported "0s" forever and the connect overlay's
+   * 5s and 15s disclosures never fired (report cas-b652, defect D3).
+   */
+  connectingSince?: number;
+  /** A failure that retrying cannot fix; the UI must say so instead of spinning. */
+  fatal?: boolean;
   attempt: number;
   reason?: string;
   retryInMs?: number;
@@ -51,7 +60,17 @@ export function stageFailureDetail(stage: ConnectionStage, target: string, reaso
 }
 
 export function elapsedSeconds(snapshot: ConnectionSnapshot, now = Date.now()): number {
-  return Math.max(0, Math.floor((now - snapshot.since) / 1_000));
+  return Math.max(0, Math.floor((now - (snapshot.connectingSince ?? snapshot.since)) / 1_000));
+}
+
+/**
+ * The anchor a transition should carry forward: unchanged while the lifecycle
+ * stays out of live, cleared once it is live or idle.
+ */
+export function connectingAnchor(previous: ConnectionSnapshot | undefined, phase: ConnectionPhase, now: number): number | undefined {
+  if (phase === "live" || phase === "idle") return undefined;
+  const continuing = previous && previous.phase !== "live" && previous.phase !== "idle";
+  return continuing ? (previous.connectingSince ?? previous.since) : now;
 }
 
 export function attachElapsedSeconds(snapshot: AttachSnapshot, now = Date.now()): number {

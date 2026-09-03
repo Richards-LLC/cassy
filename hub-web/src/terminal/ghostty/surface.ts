@@ -532,6 +532,13 @@ export class GhosttyTerminalSurface {
   private resizeNotifyTimer: number | null = null;
   private originY = CONTENT_PADDING;
   private mountHeight = 0;
+  /**
+   * The PTY geometry the daemon says this pane really has, when this viewer is
+   * not the one that owns it (cas-37f8). While it is set the grid is pinned to
+   * it, the whole grid is scaled down to fit the mount, and no resize is
+   * reported upstream: a viewer renders the pane, it does not drive it.
+   */
+  private authoritativeGrid: { cols: number; rows: number } | null = null;
   private selectionEnd: { x: number; y: number } | null = null;
   private selectionAnchorScreen: { x: number; y: number } | null = null;
   private selectionEndScreen: { x: number; y: number } | null = null;
@@ -777,20 +784,38 @@ export class GhosttyTerminalSurface {
     this.applyFontMetrics();
   };
 
+  /**
+   * Pin this viewer to the pane's real PTY geometry, or release it back to
+   * measuring its own mount (cas-37f8).
+   */
+  setAuthoritativeSize(size: { cols: number; rows: number } | null): void {
+    const next = size && size.cols > 0 && size.rows > 0 ? { cols: size.cols, rows: size.rows } : null;
+    const current = this.authoritativeGrid;
+    if (next?.cols === current?.cols && next?.rows === current?.rows) return;
+    this.authoritativeGrid = next;
+    this.fit();
+  }
+
   fit(): boolean {
     if (this.disposed) return false;
     const width = this.mount.clientWidth;
     const height = this.mount.clientHeight;
     if (width <= 0 || height <= 0) return false;
     const ratio = window.devicePixelRatio || 1;
-    const grid = terminalGridSize(width, height, this.metrics, CONTENT_PADDING);
-    const cols = Math.max(grid.cols, this.minColumns);
-    // Below the column floor the canvas is wider than its mount; the mount pans
-    // horizontally so "Show terminal" reveals the real grid instead of a
-    // squeezed one.
+    const measured = terminalGridSize(width, height, this.metrics, CONTENT_PADDING);
+    // A pinned grid is the pane's real PTY geometry as the daemon reports it, so
+    // it outranks both the mount measurement and the phone column floor
+    // (cas-37f8): this viewer renders the pane, it does not size it.
+    const pinned = this.authoritativeGrid;
+    const cols = pinned ? pinned.cols : Math.max(measured.cols, this.minColumns);
+    const rows = pinned ? pinned.rows : measured.rows;
+    // A grid larger than its mount makes the canvas larger than its mount; the
+    // mount pans so "Show terminal" reveals the real grid instead of a squeezed
+    // one.
     const contentWidth = Math.max(width, cols * this.metrics.width + CONTENT_PADDING * 2);
+    const contentHeight = Math.max(height, rows * this.metrics.height + CONTENT_PADDING * 2);
     const pixelWidth = Math.max(1, Math.round(contentWidth * ratio));
-    const pixelHeight = Math.max(1, Math.round(height * ratio));
+    const pixelHeight = Math.max(1, Math.round(contentHeight * ratio));
     let shouldRender = false;
     // The DPR transform must be installed even when the target size happens to
     // equal the canvas default 300x150 backing store, so the first fit always
@@ -802,24 +827,28 @@ export class GhosttyTerminalSurface {
     ) {
       this.canvas.width = pixelWidth;
       this.canvas.height = pixelHeight;
-      // The stylesheet sizes the canvas to its mount; a grid wider than the
-      // mount has to state its own CSS width or the backing store would be
-      // squashed back into the phone's width.
+      // The stylesheet sizes the canvas to its mount; a grid larger than the
+      // mount has to state its own CSS size or the backing store would be
+      // squashed back into the phone's box.
       this.canvas.style.width = contentWidth > width ? `${contentWidth}px` : "";
+      this.canvas.style.height = contentHeight > height ? `${contentHeight}px` : "";
       this.context.setTransform(ratio, 0, 0, ratio, 0, 0);
       this.canvasConfigured = true;
       this.forceFullRender = true;
       this.scrollbarDirty = true;
       shouldRender = true;
     }
-    this.mountHeight = height;
+    this.mountHeight = contentHeight;
     // onResize is the only PTY resize channel, so the first successful fit must
     // notify even when the measured grid equals the 1x1 construction sentinel.
-    if (cols !== this.cols || grid.rows !== this.rows || !this.resizeNotified) {
+    if (cols !== this.cols || rows !== this.rows || !this.resizeNotified) {
       this.cols = cols;
-      this.rows = grid.rows;
-      this.core.resize(cols, grid.rows, this.metrics.width, this.metrics.height);
-      this.notifyResize();
+      this.rows = rows;
+      this.core.resize(cols, rows, this.metrics.width, this.metrics.height);
+      // A pinned grid came from the daemon, so reporting it back would be an
+      // echo, and reporting the mount's own measurement would be exactly the
+      // shrink the daemon just refused.
+      if (!pinned) this.notifyResize();
       this.forceFullRender = true;
       this.scrollbarDirty = true;
       shouldRender = true;

@@ -193,34 +193,62 @@ check_doctests() {
 # <repo>/.cas/worktrees/<name>, so the main checkout is always an ancestor.
 #
 # On 2026-09-03 that made three hermetic proxy tests fail during the v3.14.0
-# gate; the suite is now immune (TestEnvGuard pins CAS_ROOT inside its temp
-# HOME, cas-4ccc), and this check is the tripwire for the next reader of
-# ancestor config: it names the exact file rather than leaving someone to
-# rediscover it by moving files aside one at a time.
+# gate. The suite is now immune (TestEnvGuard pins CAS_ROOT inside its temp
+# HOME, cas-4ccc); this row covers whatever does not use that guard.
 #
-# Reports, never mutates: the file belongs to the operator's machine, and a
-# release gate must not delete or rename their MCP configuration.
-check_ancestor_proxy_config() {
-    local probe found=0
+# The gate neutralizes rather than refuses: a release must not be blocked by the
+# operator's own MCP configuration, and telling a human to move their files
+# aside is how the original hour was lost. `CAS_ROOT` is the loader's documented
+# override and wins ahead of both the worktree mapping and the ancestor walk, so
+# pointing it at an empty directory makes the ancestor file unreachable for
+# every child process. The file is named in the receipt either way, and never
+# touched.
+ancestor_proxy_config_files() {
+    local probe files=()
     probe="$(cd "$repo_root" && pwd -P)"
     while [[ "$probe" != "/" && -n "$probe" ]]; do
-        if [[ -s "$probe/.cas/proxy.toml" ]]; then
-            # The repo's own store is the expected home for a project proxy
-            # config; only a store ABOVE the worktree is the leak.
-            if [[ "$probe/.cas" != "$repo_root/.cas" ]]; then
-                printf 'ancestor .cas/proxy.toml is visible to this worktree: %s\n' \
-                    "$probe/.cas/proxy.toml"
-                found=1
-            fi
+        if [[ -s "$probe/.cas/proxy.toml" && "$probe/.cas" != "$repo_root/.cas" ]]; then
+            files+=("$probe/.cas/proxy.toml")
         fi
         probe="$(dirname "$probe")"
     done
-    if (( found )); then
-        printf 'Tests that resolve project config by ancestor walk can read it.\n'
-        printf 'Either move it aside for the gate run, or confirm the affected\n'
-        printf 'tests pin CAS_ROOT (TestEnvGuard::temp_home does since cas-4ccc).\n'
+    (( ${#files[@]} )) && printf '%s\n' "${files[@]}"
+    return 0
+}
+
+neutralize_ancestor_proxy_config() {
+    local files=()
+    while IFS= read -r line; do [[ -n "$line" ]] && files+=("$line"); done \
+        < <(ancestor_proxy_config_files)
+    (( ${#files[@]} )) || return 0
+
+    hermetic_cas_root="$tmp_dir/hermetic-cas-root"
+    mkdir -p "$hermetic_cas_root"
+    export CAS_ROOT="$hermetic_cas_root"
+    local file
+    for file in "${files[@]}"; do
+        printf 'note: ancestor .cas/proxy.toml visible to this worktree: %s\n' "$file"
+    done
+    printf 'note: running with CAS_ROOT=%s so ancestor-walking tests cannot read it\n' \
+        "$hermetic_cas_root"
+}
+
+check_ancestor_proxy_config() {
+    local files=()
+    while IFS= read -r line; do [[ -n "$line" ]] && files+=("$line"); done \
+        < <(ancestor_proxy_config_files)
+    if (( ${#files[@]} == 0 )); then
+        printf 'no ancestor .cas/proxy.toml above this worktree\n'
+        return 0
+    fi
+    # Present, so the override must be in force and itself empty.
+    if [[ -z "${CAS_ROOT:-}" || ! -d "${CAS_ROOT:-}" || -s "${CAS_ROOT:-}/proxy.toml" ]]; then
+        printf 'ancestor .cas/proxy.toml is readable and CAS_ROOT is not pinned to an empty root: %s\n' \
+            "${files[*]}"
         return 1
     fi
+    printf 'neutralized %s ancestor proxy.toml file(s) with CAS_ROOT=%s: %s\n' \
+        "${#files[@]}" "$CAS_ROOT" "${files[*]}"
     return 0
 }
 
@@ -440,6 +468,7 @@ check_working_tree() {
 printf '=== CAS RELEASE GATE RECEIPT ===\n'
 printf 'version: %s\n' "$version"
 printf 'repository: %s\n' "$repo_root"
+neutralize_ancestor_proxy_config
 
 run_check failure-log \
     "parse $failure_log_rel; every entry maps to a gate check id or manual:" \

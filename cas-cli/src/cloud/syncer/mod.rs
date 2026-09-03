@@ -16,7 +16,7 @@ mod knowledge;
 pub use knowledge::{
     KNOWLEDGE_ENTITY, KnowledgePageRecord, KnowledgePullReport, knowledge_share_scope,
 };
-mod pull;
+pub(crate) mod pull;
 pub(crate) use pull::{SyncWarningSummary, collect_sync_warnings, entity_matches_project};
 mod push;
 mod team_push;
@@ -382,7 +382,6 @@ impl SyncConflict {
             self.action,
         );
     }
-
 }
 
 /// Configuration for CloudSyncer

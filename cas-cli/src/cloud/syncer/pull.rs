@@ -188,7 +188,10 @@ fn row_attribution<'a>(raw: &'a serde_json::Value) -> Option<(&'a str, &'static 
         .map(|scope| (scope, "project_id"))
 }
 
-fn task_dependency_matches_project(raw: &serde_json::Value, current_project_id: &str) -> bool {
+pub(crate) fn task_dependency_matches_project(
+    raw: &serde_json::Value,
+    current_project_id: &str,
+) -> bool {
     let edge_id = raw
         .get("id")
         .or_else(|| raw.get("entity_id"))
@@ -2151,9 +2154,7 @@ impl CloudSyncer {
 
         // Use configured conflict resolution strategy for team sync
         let strategy = self.config.team_conflict_resolution;
-        tracing::debug!(
-            "[Cassy sync] Starting team pull: team={team_id} strategy={strategy:?}"
-        );
+        tracing::debug!("[Cassy sync] Starting team pull: team={team_id} strategy={strategy:?}");
 
         // Use the caller-supplied project ID for client-side validation.
         // (cas-53d5: previously resolved internally via
@@ -2575,7 +2576,10 @@ mod tests {
             "id": "a:b:parent-child",
             "project_id": "gabber-studio"
         });
-        assert!(task_dependency_matches_project(&legacy_edge, "gabber-studio"));
+        assert!(task_dependency_matches_project(
+            &legacy_edge,
+            "gabber-studio"
+        ));
 
         // An empty or whitespace origin is not an assertion of ownership.
         let blank = json!({

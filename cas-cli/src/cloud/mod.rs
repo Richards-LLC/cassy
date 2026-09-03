@@ -27,6 +27,8 @@ pub mod embeddings;
 // M7 (cas-db6e): the daemon-tick drain that keeps every corpus embedded without
 // anyone running `cas cloud sync`.
 pub mod embed_drain;
+/// GH #701: refuse to mint a cloud identity for a throwaway checkout.
+pub mod ephemeral_project;
 pub(crate) mod me;
 /// GH #669: consume the cloud's per-project `aliases` record so alias-scoped
 /// rows are attributed to their canonical project instead of counted foreign.
@@ -51,6 +53,7 @@ pub use config::{
     resolve_canonical_id_with_source, set_canonical_id_in_config_toml,
     set_project_aliases_in_config_toml, should_adopt_canonical_id, store_login_credentials,
 };
+pub use ephemeral_project::{ProjectDurability, classify_project_root};
 pub use project_aliases::{
     ProjectAliasRecord, fetch_project_alias_record, refresh_project_alias_record,
     select_alias_record,

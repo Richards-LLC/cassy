@@ -831,6 +831,56 @@ main {
   background: var(--bg-terminal);
 }
 
+/* The reading view of a pane: the emulator's logical lines reflowed at UI text
+   size. It covers the grid rather than replacing it, so "Show terminal" is a
+   class toggle and never a remount. */
+.transcript {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-2);
+  color: var(--text-hi);
+  background: var(--bg-terminal);
+  font-family: var(--font-mono);
+  /* One step above the terminal's own clamp: the reading view exists to be
+     read at UI size, not to fit more columns. */
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  -webkit-text-size-adjust: none;
+}
+
+.transcript-line {
+  margin: 0;
+  /* pre-wrap keeps the leading whitespace a TUI uses for structure; the
+     per-line hanging indent is set inline from the line's own gutter. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 4;
+}
+
+.transcript-line.blank { min-height: .6em; }
+
+.transcript-jump {
+  position: sticky;
+  bottom: 0;
+  display: block;
+  min-height: 44px;
+  margin: var(--space-2) auto 0;
+  padding: 0 var(--space-4);
+  color: var(--text-hi);
+  background: var(--bg-raised);
+  border: var(--line-width) solid var(--line-strong);
+  border-radius: var(--radius-card);
+  font-size: var(--fs-sm);
+}
+
+.transcript-jump[hidden] { display: none; }
+
+.terminal-mount.transcript-active .t3-ghostty-canvas { visibility: hidden; }
+
 .terminal-search {
   position: absolute;
   z-index: 4;
@@ -2097,6 +2147,13 @@ fieldset {
     font-size: 0;
   }
 
+  /* A compact viewport holds the PTY at 80 columns, so the true grid is wider
+     than the mount and pans instead of being redrawn at half its width. */
+  .terminal-mount { overflow-x: auto; }
+  .terminal-mount.transcript-active { overflow-x: hidden; }
+
+  .pane-grid.pane-layout .pane-view-toggle[data-view="transcript"]::after { content: "▦"; font-size: var(--fs-md); }
+  .pane-grid.pane-layout .pane-view-toggle[data-view="terminal"]::after { content: "≡"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .pane-search::after { content: "⌕"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .make-primary::after { content: "★"; font-size: var(--fs-sm); }
   .pane-grid.pane-layout .move-earlier::after { content: "←"; font-size: var(--fs-md); }

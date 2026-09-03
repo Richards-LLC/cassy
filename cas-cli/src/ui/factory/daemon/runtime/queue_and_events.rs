@@ -9105,6 +9105,7 @@ mod tests {
             "cosmic-crow-41",
             "cas-aee6",
             "awaiting_merge lifecycle",
+            cas_mux::SupervisorCli::Claude,
         )
         .unwrap();
 
@@ -9130,6 +9131,42 @@ mod tests {
             prompts[0].prompt.contains("action=start"),
             "the brief must tell the worker how to pick the task up: {}",
             prompts[0].prompt
+        );
+    }
+
+    /// GH #682: a Codex worker reads the `cs` MCP server namespace. Spawn-time
+    /// assignment boilerplate must follow the registered worker harness rather
+    /// than the supervisor's default Claude namespace.
+    #[test]
+    fn registration_preassignment_brief_uses_codex_worker_namespace() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "codex-worker",
+            "cas-2b0b-namespace",
+            "harness-aware assignment",
+            cas_mux::SupervisorCli::Codex,
+        )
+        .unwrap();
+
+        let prompt = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap()
+            .pop()
+            .expect("spawn brief")
+            .prompt;
+        assert!(
+            prompt.contains("mcp__cs__task action=show")
+                && prompt.contains("mcp__cs__task action=start"),
+            "Codex spawn briefs must use the worker's mcp__cs__ namespace: {prompt}"
+        );
+        assert!(
+            !prompt.contains("mcp__cas__task"),
+            "Codex spawn briefs must not leak Claude's namespace: {prompt}"
         );
     }
 

@@ -1221,6 +1221,30 @@ mod tests {
         );
     }
 
+    /// GH #682: a direct director delivery and a durable wake-time flush share
+    /// the same fresh task-state lookup. A task can close after event
+    /// revalidation but before either transport writes the assignment.
+    #[test]
+    fn terminal_assignment_is_suppressed_at_the_final_transport_boundary() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let task_id = "cas-2b0b-final";
+        let mut task = cas_types::Task::new(task_id.to_string(), "closed before delivery".into());
+        task.status = cas_types::TaskStatus::Closed;
+        task_store.add(&task).unwrap();
+
+        let prompt = format!(
+            "You have been assigned a new task:\nTask ID: {task_id}\nStart working: \
+             mcp__cs__task action=start id={task_id}\nThen send an ACK to supervisor."
+        );
+        assert_eq!(
+            assignment_terminal_status(&cas_dir, &prompt),
+            Some((task_id.to_string(), cas_types::TaskStatus::Closed)),
+            "both direct delivery and wake-time queue flush must suppress the stale start instruction"
+        );
+    }
+
     fn director_data_fixture() -> crate::ui::factory::director::DirectorData {
         crate::ui::factory::director::DirectorData {
             ready_tasks: vec![],

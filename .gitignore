@@ -45,6 +45,12 @@ node_modules/
 /.claude/skills/*
 /.codex/skills/
 
+# Synced project rules — rendered by `cas update --sync` from the rule store.
+/.claude/rules/
+
+# Per-developer harness config — hook matchers and permissions are local.
+/.claude/settings.json
+
 # Codex/agent rollout session logs — debugging artifacts, not source
 docs/requests/**/*.codex-rollout*.jsonl
 docs/requests/artifacts/

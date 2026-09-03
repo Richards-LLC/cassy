@@ -7,6 +7,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.13.0] - 2026-09-03
+
+### Added
+- The MechaCassy Slack transport gives every harness a shared, fail-closed way
+  to publish release notes with channel checks, paced threads, receipts, and
+  environment-only credentials.
+
+### Changed
+- Supervisor identity now survives restarts cleanly: live workers remain
+  reachable, old same-name sessions retire safely, and task-free worker deaths
+  no longer create misleading supervisor warnings (GH #677, GH #678).
+- Task creation now detects meaningful overlap in descriptions and shared
+  file, line, function, or slug identifiers instead of relying on title words
+  alone (GH #679).
+- Worktree merge diagnostics now identify the exact check-runs endpoint and
+  source SHA, classify missing or failed checks, and state the advisory merge
+  policy (GH #680).
+- Assignment briefs are rechecked at delivery time so closed or cancelled work
+  is not re-delivered, and each worker receives the tool namespace for its
+  harness (GH #682).
+- The generated code map is refreshed so repository navigation reflects the
+  assembled release tree.
+
 ## [3.12.1] - 2026-09-02
 
 ### Added

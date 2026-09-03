@@ -1,12 +1,12 @@
 import "./styles.css";
-import { applyAttentionEnrichment, attentionCounts, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
-import { cycleAttentionGroup, renderAttentionCounts, renderAttentionPanel } from "./attention-view";
+import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
+import { cycleAttentionGroup, renderAttentionCounts, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
 import { connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
-import { consumePairingFragment } from "./fragment";
+import { consumePairingFragment, watchPairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
 import { pairingCleanupFailureUpdate, pairingStorageClearFailureMessage } from "./pairing-cleanup";
@@ -227,8 +227,26 @@ async function boot(): Promise<void> {
   restoreTarget = restoredMachineId && lastSelection?.session ? lastSelection : undefined;
   render();
   for (const machine of machines.values()) ensureConnection(machine);
+  // An invitation that arrived in the URL is the whole reason this page was
+  // opened. Rendering the same empty state behind it leaves the operator
+  // guessing that they must tap "Pair a machine" again.
+  if (pendingPairing) openPairDialog();
   resumePairingPoll();
 }
+
+function openPairDialog(): void {
+  const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+  if (dialog && !dialog.open) dialog.showModal();
+}
+
+// Android hands a pairing URL that differs only by #fragment to the tab that is
+// already open, so boot-time consumption alone drops the invitation in silence.
+watchPairingFragment(window, pendingPairingStore, (fragment) => {
+  pendingPairing = fragment;
+  pairingStatus = "";
+  render();
+  openPairDialog();
+});
 
 function createConnection(machine: StoredMachine): HubConnectionSupervisor {
   return new HubConnectionSupervisor(machine, {
@@ -1177,12 +1195,12 @@ function pairDialogMarkup(): string {
     const hubUrl = pendingPairing.hubUrl;
     const origin = pendingPairing.controllerOrigin;
     const scopes = pendingPairing.scopes;
-    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && scopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Hub</dt><dd>${escapeHtml(hubUrl)}</dd></div><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${scopes.map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Hub URL<input name="url" type="url" required value="${escapeAttr(pairingDraft.hubUrl)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes)}</fieldset>`}<label>Device label<input name="device" required value="${escapeAttr(pairingDraft.deviceLabel)}"></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
+    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && scopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Hub</dt><dd>${escapeHtml(hubUrl)}</dd></div><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${scopes.map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Hub URL<input name="url" type="url" required autofocus value="${escapeAttr(pairingDraft.hubUrl)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes)}</fieldset>`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
   }
   const relayAction = relayOrigin
     ? `<button id="pair-create" type="button" class="primary" ${pairingCreateInFlight ? "disabled" : ""}>${pairingCreateInFlight ? "Creating…" : "Create pairing code"}</button>`
     : '<p class="pairing-disabled-reason">Page-initiated pairing is unavailable because this Cassy Commander build has no reviewed relay origin.</p>';
-  return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Create a ten-minute code, then verify the exact Cassy Commander origin and approve the requested read and control scopes on the target machine.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${pendingPairing ? "" : '<p class="pairing-disabled-reason">Pair is disabled until you open a pairing URL generated by <code>cas hub pair</code> on the machine.</p>'}<button type="button" ${pendingPairing ? "" : "disabled"}>Pair</button>${relayAction}</div></section></dialog>`;
+  return `<dialog id="pair-dialog"><section class="pair-flow" tabindex="-1" autofocus><h2>Pair this machine</h2><p>Create a ten-minute code, then verify the exact Cassy Commander origin and approve the requested read and control scopes on the target machine.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${pendingPairing ? "" : '<p class="pairing-disabled-reason">Pair is disabled until you open a pairing URL generated by <code>cas hub pair</code> on the machine.</p>'}<button type="button" ${pendingPairing ? "" : "disabled"}>Pair</button>${relayAction}</div></section></dialog>`;
 }
 
 // A phone sentence takes longer to type than the heartbeat render interval, so
@@ -1484,7 +1502,13 @@ function render(captureDraft = true): void {
     }
   }
   renderSessionPicker();
-  document.querySelector("#attention-rail-counts")?.append(renderAttentionCounts(counts, true));
+  const railCounts = document.querySelector("#attention-rail-counts");
+  if (railCounts) {
+    // Both forms ship; the compact block picks one. The button owns the
+    // accessible name so the visuals can stay aria-hidden.
+    railCounts.setAttribute("aria-label", `Open attention. ${attentionSummary(counts).description}`);
+    railCounts.append(renderAttentionSummary(counts), renderAttentionCounts(counts, true));
+  }
   renderAttention(); renderStatus(status);
   if (selected && selectedSession && connectionSnapshot) renderConnectionSurface(selected.id, selectedSession, connectionSnapshot);
   syncConnectionViewTicker();
@@ -1530,7 +1554,9 @@ function machineRailButton(machine: StoredMachine): HTMLButtonElement {
   const button = document.createElement("button");
   button.className = `machine-icon ${machine.id === selectedMachineId ? "active" : ""}`;
   button.type = "button";
-  button.innerHTML = `<span>${escapeHtml(machineInitials(machine.label))}</span><i class="machine-state ${state}"></i>`;
+  // The dot leads so it can never be clipped by the chip's corner radius, and
+  // the phone shows the machine's actual name instead of two initials.
+  button.innerHTML = `<span class="machine-state ${state}"></span><span class="machine-initials">${escapeHtml(machineInitials(machine.label))}</span><span class="machine-name">${escapeHtml(machine.label)}</span>`;
   button.title = `${machine.label} · ${connectionLabel(snapshot)}`;
   button.setAttribute("aria-label", `${machine.label}, ${connectionLabel(snapshot)}`);
   button.onclick = () => selectMachine(machine);

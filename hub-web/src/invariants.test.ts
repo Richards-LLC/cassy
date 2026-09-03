@@ -289,6 +289,89 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain("max-width: var(--mobile-attention-label-width)");
   });
 
+  it("opens the pairing dialog for an invitation instead of leaving the user on the empty state", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+
+    // A consumed fragment used to render the same "No machine paired yet"
+    // screen, so the only signal that the invitation arrived was that nothing
+    // visibly changed.
+    expect(main).toContain("function openPairDialog(): void {");
+    expect(main).toContain("if (pendingPairing) openPairDialog();");
+    // And a fragment delivered to an already-open tab must still be consumed.
+    expect(main).toContain("watchPairingFragment(window, pendingPairingStore, (fragment) => {");
+
+    // The soft keyboard belongs to a field the operator chose to fill. Focusing
+    // an optional email on open pops it and scrolls the title off the screen.
+    expect(main).toContain('<section class="pair-flow" tabindex="-1" autofocus>');
+    expect(main).not.toContain('<input id="pair-email" type="email" autofocus');
+    expect(main).toContain('<input name="url" type="url" required autofocus');
+    expect(main).toContain('<input name="device" required autofocus');
+
+    // With the keyboard up the dialog can be 300px tall: the fields scroll and
+    // the action row does not, so Pair stays reachable.
+    expect(css).toContain("dialog[open] {\n  display: flex;");
+    expect(css).toContain("  max-height: min(88dvh, 720px);");
+    expect(css).toContain("  position: sticky;\n  bottom: 0;");
+
+    expect(css).toContain('.pair-flow[tabindex="-1"]:focus-visible { outline: none; }');
+
+    // D13: a sized card, not a full-viewport dashed rectangle.
+    expect(css).toContain(".empty-pane-slot {\n  place-self: center;");
+    expect(css).toContain("  width: min(var(--terminal-state-width), 100%);");
+    expect(css).not.toContain("border: var(--line-width) dashed var(--line-strong);");
+  });
+
+  it("D7 gives every control in the phone rail one container treatment", async () => {
+    const [main, css, view, design] = await Promise.all(
+      ["main.ts", "styles.css", "attention-view.ts", "../DESIGN.md"]
+        .map((path) => readFile(new URL(path, import.meta.url), "utf8")),
+    );
+
+    // One rule, one surface, one radius, one minimum target for Machines, each
+    // machine chip, Pair, the attention summary and the envelope. Three
+    // container treatments in one 48px row is the defect, not a style choice.
+    expect(css).toContain("--rail-item-min: 44px");
+    expect(css).toContain(`  .machine-rail .commander-mark,
+  .machine-rail .machine-icon,
+  .machine-rail .pair-machine,
+  .context-panel.collapsed .attention-rail-counts,
+  .context-panel.collapsed .mobile-message-toggle {`);
+    expect(css).toContain("    min-width: var(--rail-item-min);\n    min-height: var(--rail-item-min);");
+    expect(design).toContain("--rail-item-min");
+
+    // --line-strong is the focused-pane border. Pair is not a pane, and the
+    // compact layout has no focusable pane chrome of its own, so the whole
+    // phone block must be free of it.
+    expect(css).toContain(".pane.selected { border-color: var(--line-strong); }");
+    const compact = css.slice(css.indexOf("@media (max-width: 53rem)"));
+    expect(compact).not.toContain("var(--line-strong)");
+
+    // The collapsed pill floats over the rail, so it must not paint a second
+    // surface there: the seam in fig a1 is --bg-raised over --bg-panel.
+    expect(css).toContain(`  .context-panel,
+  .context-panel.collapsed {
+    position: fixed;`);
+    expect(css).toContain("    background: var(--color-transparent);\n    overflow: hidden;");
+    expect(css).toContain(".context-panel.collapsed .attention-rail {\n    display: flex;");
+
+    // The machine chip carries a readable name on a phone and an unclipped
+    // status dot, instead of two initials with the dot on the corner radius.
+    expect(main).toContain('<span class="machine-state ${state}"></span><span class="machine-initials">');
+    expect(main).toContain('<span class="machine-name">');
+    expect(css).toContain(".machine-icon .machine-name { display: none; }");
+    expect(css).toContain("  .machine-rail .machine-icon .machine-initials { display: none; }");
+    expect(css).toContain("  .machine-rail .machine-icon .machine-name {");
+    expect(css).toContain("  .machine-rail .machine-icon .machine-state { position: static; }");
+
+    // D8: one badge treatment. State lives in the text and the dot, never in a
+    // fill that only two of the three severities receive.
+    expect(css).not.toContain(".attention-count--critical { color: var(--state-crit); background: var(--tint-crit); }");
+    expect(css).toContain(".attention-count--critical { color: var(--state-crit); }");
+    expect(css).toContain(".attention-count--info { color: var(--state-info); }");
+    expect(view).toContain("export function renderAttentionSummary(");
+    expect(main).toContain("renderAttentionSummary(counts)");
+  });
+
   it("keeps supervisor messaging reachable from the collapsed phone rail", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     expect(main).toContain('id="mobile-message-toggle"');
@@ -297,10 +380,10 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).toContain("attentionPanelCollapsed = false;");
     expect(css).toContain(".mobile-message-toggle { display: none; }");
     expect(css).toContain(".mobile-message-toggle {");
-    // The collapsed pill holds two 48px cells on one row. A rail sized for fewer
-    // cells than it renders pushes the envelope off the bottom of the viewport.
-    expect(css).toContain("--mobile-context-pill-width: 96px");
-    expect(css).toContain("grid-template-columns: repeat(2, var(--machine-rail-width))");
+    // The collapsed pill holds the attention summary and the envelope on one
+    // row. A pill narrower than the two rail items it renders lets the summary
+    // overflow left across the Pair button (D7/fig b1a).
+    expect(css).toContain("--mobile-context-pill-width: 152px");
     expect(css).toContain(".context-panel.collapsed .attention-rail .rail-control { display: none; }");
     expect(css).toContain("padding-right: calc(var(--mobile-context-pill-width) + var(--space-1))");
     // Tapping the envelope must land on the composer it advertises.

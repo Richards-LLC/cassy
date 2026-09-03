@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   attentionContent,
   attentionCounts,
+  attentionSummary,
   applyAttentionEnrichment,
   coalesceAttention,
   createAttentionItem,
@@ -237,6 +238,29 @@ describe("Commander attention triage queue", () => {
     ];
 
     expect(dismissableInfoItems(events).map((event) => event.id)).toEqual(["info"]);
+  });
+
+  it("summarises the counts into one labelled badge for the phone rail", () => {
+    // D8: three unlabelled numbers in three colours is not a readable rail.
+    // The rail states what the number means and takes its colour from the worst
+    // outstanding severity; the per-severity split lives one tap away.
+    expect(attentionSummary({ critical: 6, warning: 3, info: 91 })).toEqual({
+      severity: "critical",
+      total: 100,
+      label: "Needs 100",
+      description: "100 need attention: 6 critical, 3 warning, 91 info",
+    });
+    expect(attentionSummary({ critical: 0, warning: 3, info: 91 }).severity).toBe("warning");
+    expect(attentionSummary({ critical: 0, warning: 0, info: 91 }).severity).toBe("info");
+  });
+
+  it("says the fleet is clear instead of printing a nought", () => {
+    expect(attentionSummary({ critical: 0, warning: 0, info: 0 })).toEqual({
+      severity: "clear",
+      total: 0,
+      label: "Clear",
+      description: "Nothing needs attention",
+    });
   });
 
   it("cycles rendered attention group toggles in either direction", () => {

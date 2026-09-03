@@ -86,8 +86,10 @@
   --mobile-pane-min-width: 260px;
   --mobile-attention-label-width: 156px;
   --mobile-header-chip-width: 72px;
-  /* Collapsed phone context pill: one attention cell plus one message cell. */
-  --mobile-context-pill-width: 96px;
+  /* Collapsed phone context pill: the attention summary plus one message cell. */
+  --mobile-context-pill-width: 152px;
+  /* Every control in the phone rail is at least this tall and wide. */
+  --rail-item-min: 44px;
   --attention-payload-max-height: 180px;
   --attention-motion-duration: 150ms;
   --chrome-motion-duration: 120ms;
@@ -284,6 +286,10 @@ pre { font-family: var(--font-mono); }
   right: var(--space-1);
   bottom: var(--space-1);
 }
+
+/* The desktop rail is 48px of initials; the machine's full name belongs to the
+   phone rail and the drawer, where there is room to read it. */
+.machine-icon .machine-name { display: none; }
 
 /* These classes are the lifecycle phases the supervisor actually emits
    (idle, resolving, dialing, auth, attaching, live, backoff, failed, degraded).
@@ -878,16 +884,19 @@ main {
 .t3-ghostty-scrollbar { display: none; }
 .empty { place-self: center; color: var(--text-mid); }
 
+/* D13: a dashed rectangle the size of the viewport reads as a broken region.
+   The same words in a sized card read as a screen waiting for one decision. */
 .empty-pane-slot {
-  place-self: stretch;
+  place-self: center;
   display: grid;
+  width: min(var(--terminal-state-width), 100%);
   align-content: center;
   justify-items: center;
-  gap: var(--space-2);
-  margin: var(--space-2);
-  padding: var(--space-4);
+  gap: var(--space-3);
+  margin: var(--space-4);
+  padding: var(--space-5);
   color: var(--text-mid);
-  border: var(--line-width) dashed var(--line-strong);
+  background: var(--bg-raised);
   border-radius: var(--radius-pane);
   font-size: var(--fs-sm);
   text-align: center;
@@ -1087,10 +1096,30 @@ main {
   text-align: center;
 }
 
-.attention-count--critical { color: var(--state-crit); background: var(--tint-crit); }
-.attention-count--warning { color: var(--state-warn); background: var(--tint-warn); }
-.attention-count--info { color: var(--state-info); background: var(--bg-raised); }
-.attention-count--clear { color: var(--text-lo); background: var(--bg-raised); }
+/* One badge, one surface. Tinting only critical and warning gave the rail two
+   badge treatments and left the info figure floating on the bar with none. */
+.attention-count { background: var(--bg-active); }
+.attention-count--critical { color: var(--state-crit); }
+.attention-count--warning { color: var(--state-warn); }
+.attention-count--info { color: var(--state-info); }
+.attention-count--clear { color: var(--text-lo); }
+
+/* The rail's single labelled figure. Desktop keeps the per-severity column. */
+.attention-summary { display: none; }
+
+.attention-summary-label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.attention-summary--critical .attention-summary-label { color: var(--state-crit); }
+.attention-summary--warning .attention-summary-label { color: var(--state-warn); }
+.attention-summary--info .attention-summary-label { color: var(--text-hi); }
+.attention-summary--clear .attention-summary-label { color: var(--text-mid); }
+.attention-dot--info { background: var(--state-info); }
+.attention-dot--clear { background: var(--state-idle); }
 
 .attention-dismiss-info,
 .attention-dismiss-group {
@@ -1520,12 +1549,24 @@ main {
 
 dialog {
   width: min(var(--dialog-width), calc(100vw - var(--space-6)));
+  /* A soft keyboard can leave a phone barely 300px of viewport. Bounding the
+     dialog lets its fields scroll instead of pushing the primary action off
+     the bottom of the screen. */
+  max-height: min(88dvh, 720px);
   padding: var(--space-4);
   color: inherit;
   background: var(--bg-raised);
   border: 0;
   border-radius: var(--radius-pane);
   box-shadow: var(--shadow-overlay);
+}
+
+/* Scoped to [open]: an unscoped display would override the user-agent
+   `dialog:not([open]) { display: none }` and paint every closed dialog. */
+dialog[open] {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 dialog::backdrop { background: var(--overlay-backdrop); }
@@ -1548,10 +1589,19 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .palette-command small, .palette-empty { color: var(--text-lo); }
 .palette-command small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* The flow is focused only so the dialog opens on its title instead of a text
+   field. It is not tab-reachable, so it must not draw the keyboard focus ring
+   that belongs to real controls. */
+.pair-flow[tabindex="-1"]:focus-visible { outline: none; }
+
 dialog form,
 .pair-flow {
   display: grid;
+  min-height: 0;
   gap: var(--space-3);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  align-content: start;
 }
 
 dialog h2,
@@ -1595,12 +1645,18 @@ fieldset {
   font-size: var(--fs-sm);
 }
 
+/* The action row rides the bottom of the scrolling field list, so Pair is
+   reachable with the keyboard up instead of hiding under it. */
 .dialog-actions {
+  position: sticky;
+  bottom: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
+  padding-top: var(--space-2);
+  background: var(--bg-raised);
 }
 
 /* Action labels are single-line commitments; they must not fold into columns. */
@@ -1734,42 +1790,61 @@ fieldset {
 
   .machine-rail nav {
     flex-direction: row;
+    align-items: center;
+    gap: var(--space-2);
     width: auto;
-    height: var(--space-10);
+    height: 100%;
     overflow-x: auto;
     overflow-y: hidden;
   }
 
-  .machine-rail .pair-machine {
+  /* D7: one container treatment for the whole bar. Machines, every machine
+     chip, Pair, the attention summary and the envelope share this height,
+     padding, radius and surface, and none of them borrows --line-strong —
+     that token is the focused-pane border, and Pair is not a pane. */
+  .machine-rail .commander-mark,
+  .machine-rail .machine-icon,
+  .machine-rail .pair-machine,
+  .context-panel.collapsed .attention-rail-counts,
+  .context-panel.collapsed .mobile-message-toggle {
     display: inline-flex;
-    flex-direction: row;
+    flex: 0 0 auto;
     align-items: center;
-    gap: var(--space-1);
-    min-width: 44px;
-    min-height: 44px;
-    margin: 0 var(--space-2) 0 auto;
-    padding: 0 var(--space-3);
+    justify-content: center;
+    gap: var(--space-2);
+    width: auto;
+    min-width: var(--rail-item-min);
+    min-height: var(--rail-item-min);
+    padding: 0 var(--space-2);
     color: var(--text-hi);
     background: var(--bg-raised);
-    border: var(--line-width) solid var(--line-strong);
+    border: 0;
     border-radius: var(--radius-card);
     font-size: var(--fs-sm);
     font-weight: var(--weight-medium);
   }
-  .machine-rail .pair-machine-label { display: inline; margin-left: var(--space-1); }
 
-  .machine-rail .commander-mark {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: var(--space-1);
-    width: auto;
-    min-width: 44px;
-    min-height: 44px;
-    padding: 0 var(--space-2);
-    font-size: var(--fs-sm);
-  }
+  .machine-rail .pair-machine { margin: 0 var(--space-2) 0 auto; }
+  .machine-rail .pair-machine-label { display: inline; }
   .machine-rail .commander-mark-label { display: inline; }
+  .machine-rail .machine-icon.active { background: var(--bg-active); }
+  .machine-rail .machine-icon .machine-initials { display: none; }
+
+  .machine-rail .machine-icon .machine-name {
+    display: inline;
+    max-width: 9ch;
+    overflow: hidden;
+    color: var(--text-mid);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .machine-rail .machine-icon.active .machine-name { color: var(--text-hi); }
+
+  /* Inline, so the chip's corner radius cannot slice the status dot (fig a1). */
+  .machine-rail .machine-icon .machine-state { position: static; }
 
   .machine-drawer {
     position: fixed;
@@ -1847,49 +1922,49 @@ fieldset {
     display: grid;
     width: var(--mobile-context-pill-width);
     height: var(--machine-rail-width);
-    overflow: visible;
+    /* The collapsed pill floats over the rail. It must not paint a second
+       surface there — the seam in fig a1 is --bg-raised over --bg-panel — and
+       it must not spill its contents left across Pair (fig b1a). */
+    background: var(--color-transparent);
+    overflow: hidden;
   }
 
-  /* Both collapsed cells stay on one row inside the pill: attention counts open
-     the panel, so the chevron would only duplicate a target the thumb needs. */
+  /* Both collapsed cells stay on one row inside the pill: the attention summary
+     opens the panel, so the chevron would only duplicate a target the thumb
+     needs. Each cell carries the shared rail-item surface, so the pill reads as
+     two more controls on one bar rather than a panel laid over it. */
   .context-panel.collapsed .attention-rail {
-    display: grid;
-    grid-template-columns: repeat(2, var(--machine-rail-width));
-    gap: 0;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-1);
     width: var(--mobile-context-pill-width);
     height: var(--machine-rail-width);
-    padding: 0;
+    padding: 0 var(--space-1);
+    background: var(--color-transparent);
   }
 
   .context-panel.collapsed .attention-rail .rail-control { display: none; }
 
-  .context-panel.collapsed .attention-rail-counts {
-    width: var(--machine-rail-width);
-    min-height: var(--machine-rail-width);
-    padding: 0;
+  /* One labelled figure on the phone; the per-severity column stays on desktop. */
+  .context-panel.collapsed .attention-summary {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
   }
+
+  .context-panel.collapsed .attention-counts--compact { display: none; }
 
   .mobile-message-toggle {
-    display: grid;
-    place-items: center;
-    width: var(--machine-rail-width);
-    min-height: var(--machine-rail-width);
-    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 var(--space-2);
     color: var(--text-hi);
     background: var(--bg-raised);
+    border-radius: var(--radius-card);
     font-size: var(--fs-md);
-  }
-
-  .context-panel.collapsed .attention-counts--compact {
-    display: flex;
-    flex-direction: row;
-    gap: var(--line-width);
-  }
-
-  .context-panel.collapsed .attention-count {
-    min-width: var(--space-4);
-    padding: var(--line-width) var(--line-width);
-    font-size: var(--fs-xs);
   }
 
   .context-panel:not(.collapsed) {

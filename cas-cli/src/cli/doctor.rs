@@ -2,7 +2,8 @@
 
 use clap::Args;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
@@ -232,6 +233,7 @@ impl CheckGroup {
                 Self::Config
             }
             "integrations" | "mecha-cassy" => Self::Integrations,
+            "user skills" => Self::Config,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -309,6 +311,184 @@ const EXPECTED_TABLES: &[&str] = &[
     "code_vector_queue",
     "code_index_state",
 ];
+
+// ---------------------------------------------------------------------------
+// Stray user-level skills (cas-332f)
+// ---------------------------------------------------------------------------
+
+/// Skills that were once hand-installed into a user skills directory and are
+/// now owned by a builtin. Each entry names the builtin that supersedes it.
+///
+/// This list exists because [`crate::builtins::prune_stale_cas_skill_dirs`]
+/// only ever removes `cas-*` directories, so a hand-installed skill without
+/// that prefix is never written by `cas update` **and** never pruned by it —
+/// it simply persists forever, unreachable by any test in this repo. That is
+/// exactly how `mecha-cassy-post` kept documenting a retired hub tool contract
+/// after every in-repo copy had been corrected.
+const RETIRED_USER_SKILLS: &[(&str, &str)] = &[("mecha-cassy-post", "mecha-cassy")];
+
+/// Why a user-level skill directory should not be on this machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StrayReason {
+    /// Retired in favour of the named builtin, which now owns the contract.
+    RetiredBy(&'static str),
+    /// Carries the `managed_by: cas` marker but is not in the builtin catalog,
+    /// so `cas update` will never refresh it again.
+    OrphanedManagedCopy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StrayUserSkill {
+    name: String,
+    path: PathBuf,
+    reason: StrayReason,
+}
+
+/// Decide a single skill directory's fate from its name and `SKILL.md` body.
+///
+/// A user skill that merely shares a name with a builtin is **not** flagged:
+/// that is the normal case for a builtin projected into the user directory,
+/// and calling it a shadow would make this check cry wolf on every machine.
+fn classify_user_skill(
+    name: &str,
+    content: &str,
+    builtin_skill_names: &std::collections::HashSet<String>,
+) -> Option<StrayReason> {
+    if let Some((_, superseded_by)) = RETIRED_USER_SKILLS.iter().find(|(n, _)| *n == name) {
+        return Some(StrayReason::RetiredBy(superseded_by));
+    }
+    if crate::builtins::is_managed_by_cas(content) && !builtin_skill_names.contains(name) {
+        return Some(StrayReason::OrphanedManagedCopy);
+    }
+    None
+}
+
+/// Skill names one catalog ships, taken from the embedded catalog rather than
+/// from disk, so the comparison is against what this binary would actually
+/// write.
+///
+/// Per-catalog and not merged: each harness gets its own set. Codex ships
+/// skills Claude does not (`cas-codex-supervisor-checklist`), so comparing a
+/// `~/.codex/skills` directory against the Claude catalog reports a perfectly
+/// current builtin as an orphan.
+fn catalog_skill_names(catalog: &[crate::builtins::BuiltinFile]) -> std::collections::HashSet<String> {
+    catalog
+        .iter()
+        .filter_map(|file| file.path.strip_prefix("skills/"))
+        .filter_map(|rest| rest.split('/').next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Scan the given user skills directories. Results are deduplicated by
+/// **canonical** path: several Claude account directories symlink a single
+/// shared `skills/` directory, so a naive walk reports the same file three
+/// times and an operator "fixes" one file over and over.
+fn scan_user_skill_dirs(targets: &[(PathBuf, std::collections::HashSet<String>)]) -> Vec<StrayUserSkill> {
+    let mut seen = std::collections::HashSet::new();
+    let mut strays = Vec::new();
+    for (dir, builtin_skill_names) in targets {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let skill_file = path.join("SKILL.md");
+            let canonical = skill_file
+                .canonicalize()
+                .unwrap_or_else(|_| skill_file.clone());
+            if !seen.insert(canonical) {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let content = fs::read_to_string(&skill_file).unwrap_or_default();
+            if let Some(reason) = classify_user_skill(name, &content, builtin_skill_names) {
+                strays.push(StrayUserSkill {
+                    name: name.to_string(),
+                    path: skill_file,
+                    reason,
+                });
+            }
+        }
+    }
+    strays.sort_by(|a, b| a.path.cmp(&b.path));
+    strays
+}
+
+/// Every user-level skills directory this machine might carry.
+///
+/// `cas update --user` writes into `~/.claude`, `~/.codex` and `~/.grok`, and
+/// a Claude install may additionally use per-account directories selected by
+/// `CLAUDE_CONFIG_DIR`. Several of those commonly symlink one shared
+/// `skills/`, which [`scan_user_skill_dirs`] deduplicates.
+fn user_skill_scan_targets() -> Vec<(PathBuf, std::collections::HashSet<String>)> {
+    let claude = catalog_skill_names(crate::builtins::BUILTIN_SKILLS);
+    let codex = catalog_skill_names(crate::builtins::CODEX_BUILTIN_SKILLS);
+    let grok = catalog_skill_names(crate::builtins::GROK_BUILTIN_SKILLS);
+
+    let mut targets = Vec::new();
+    if let Some(configured) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        targets.push((PathBuf::from(configured).join("skills"), claude.clone()));
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        targets.push((home.join(".claude").join("skills"), claude.clone()));
+        targets.push((home.join(".codex").join("skills"), codex));
+        targets.push((home.join(".grok").join("skills"), grok));
+        // Per-account Claude profiles (`~/.claude-alt`, `~/.claude-<email>`).
+        if let Ok(entries) = fs::read_dir(&home) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".claude-"))
+                {
+                    targets.push((path.join("skills"), claude.clone()));
+                }
+            }
+        }
+    }
+    targets
+}
+
+/// Render the scan as a doctor row. Warning, never Error: a stale skill misleads
+/// an agent but breaks nothing on its own, and the fix is a deletion the
+/// operator must make deliberately.
+fn stray_user_skills_check(strays: &[StrayUserSkill]) -> Check {
+    if strays.is_empty() {
+        return Check::new(
+            "user skills",
+            CheckStatus::Ok,
+            "no stale or orphaned user-level skills",
+        );
+    }
+    let detail = strays
+        .iter()
+        .map(|stray| match &stray.reason {
+            StrayReason::RetiredBy(builtin) => {
+                format!("{} (retired; {builtin} owns it now)", stray.path.display())
+            }
+            StrayReason::OrphanedManagedCopy => {
+                format!("{} (managed_by: cas but no longer a builtin)", stray.path.display())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Check::new(
+        "user skills",
+        CheckStatus::Warning,
+        format!(
+            "{} stale user-level skill file(s) no `cas update` will ever refresh: {detail}. \
+             Review then delete the directory",
+            strays.len()
+        ),
+    )
+}
 
 /// Pure schema verdict so the missing-table path is exercised directly in
 /// tests rather than inferred from a source-code string.
@@ -1131,6 +1311,21 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     recorder.mark("mechacassy hub", &checks);
+
+    // Check 13c: stale user-level skills (cas-332f). `cas update` only prunes
+    // `cas-*` directories, so a hand-installed skill without that prefix is
+    // never refreshed and never removed — it just keeps giving an agent stale
+    // instructions that no test in this repo can reach.
+    checks.push(stray_user_skills_check(&scan_user_skill_dirs(
+        &user_skill_scan_targets(),
+    )));
+
+    // Its own phase: this check walks user-level skill directories on disk,
+    // which is a different cost from the hub probe before it and from the
+    // canonical-id queries after it. Folding it into either would misattribute
+    // whichever one later shows up as slow.
+    recorder.mark("user skills", &checks);
+
     // Check 14: cloud canonical id — which bucket this project syncs into,
     // and whether any other known local project lands in the same bucket
     // (cas-f699 / GH #134).
@@ -2105,6 +2300,8 @@ struct SymbolIndexState {
     eligible_files: usize,
     indexed_files: usize,
     failed_files: usize,
+    skipped_files: usize,
+    skipped_detail: Option<String>,
     /// Symbols eligible for a vector, counted in `code_symbols` — the table the
     /// indexer writes — not in the queue. A queue-derived denominator moves
     /// whenever the queue is re-armed or lost, which is how two runs 80s apart
@@ -2210,6 +2407,8 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         eligible_files: scan.as_ref().map(|scan| scan.eligible_files).unwrap_or(0),
         indexed_files: scan.as_ref().map(|scan| scan.indexed_files).unwrap_or(0),
         failed_files: scan.as_ref().map(|scan| scan.failed_files).unwrap_or(0),
+        skipped_files: scan.as_ref().map(|scan| scan.skipped_files).unwrap_or(0),
+        skipped_detail: scan.as_ref().and_then(|scan| scan.skipped_detail.clone()),
         vector_eligible: vectors.eligible,
         vectorized: vectors.vectorized,
         vector_pending: vectors.pending,
@@ -2223,6 +2422,27 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         scan_error: scan.and_then(|scan| scan.last_error),
         error: None,
     }
+}
+
+/// The skipped-files clause, or empty when nothing was skipped.
+///
+/// GH #698: skipped files are named, and deliberately carry NO remediation.
+/// They are excluded from the eligible denominator precisely because no rerun
+/// can change them, and printing "run `cas index code`" beside them is how the
+/// old warning trained operators to ignore doctor.
+fn skipped_files_clause(state: &SymbolIndexState) -> String {
+    if state.skipped_files == 0 {
+        return String::new();
+    }
+    let detail = state
+        .skipped_detail
+        .as_deref()
+        .map(|detail| format!(" ({detail})"))
+        .unwrap_or_default();
+    format!(
+        " {} file(s) skipped as undecodable and excluded from the eligible count{detail};          no action needed — converting them to UTF-8 is the only way to index them.",
+        state.skipped_files
+    )
 }
 
 /// One rendering of the code-vector counters, shared by every branch of the
@@ -2315,7 +2535,7 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
                     .as_deref()
                     .map(|error| format!("; last error: {error}"))
                     .unwrap_or_default(),
-            ),
+            ) + &skipped_files_clause(&state),
         };
     }
 
@@ -2371,7 +2591,7 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
                     Some(false) => "current",
                     None => "unknown",
                 }
-            ),
+            ) + &skipped_files_clause(&state),
         }
     }
 }
@@ -4690,6 +4910,154 @@ mod tests {
             crate::cli::integrate::doctor::DoctorSeverity::Ok
         ));
         assert!(rows[0].message.contains("no integrations configured"));
+    }
+
+    // -----------------------------------------------------------------
+    // Stale user-level skills (cas-332f)
+    // -----------------------------------------------------------------
+
+    fn claude_names() -> std::collections::HashSet<String> {
+        catalog_skill_names(crate::builtins::BUILTIN_SKILLS)
+    }
+
+    fn write_skill(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let skill_dir = dir.join(name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        let file = skill_dir.join("SKILL.md");
+        fs::write(&file, body).unwrap();
+        file
+    }
+
+    /// A retired skill is named even though it carries no `managed_by: cas`
+    /// marker — which is the whole point, since the marker-based pruner is
+    /// exactly what failed to see `mecha-cassy-post` for its entire life.
+    #[test]
+    fn retired_user_skill_is_reported_with_the_builtin_that_replaced_it() {
+        let dir = TempDir::new().unwrap();
+        let skills = dir.path().join("skills");
+        let retired = write_skill(
+            &skills,
+            "mecha-cassy-post",
+            "---\nname: mecha-cassy-post\n---\n\nPost release notes.\n",
+        );
+
+        let strays = scan_user_skill_dirs(&[(skills, claude_names())]);
+        assert_eq!(
+            strays,
+            vec![StrayUserSkill {
+                name: "mecha-cassy-post".to_string(),
+                path: retired,
+                reason: StrayReason::RetiredBy("mecha-cassy"),
+            }]
+        );
+
+        let check = stray_user_skills_check(&strays);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("mecha-cassy-post"), "{}", check.message);
+        assert!(check.message.contains("mecha-cassy owns it now"), "{}", check.message);
+        assert_eq!(check.group(), CheckGroup::Config);
+        // The guidance must reach doctor's remediation column, not stay buried.
+        assert!(check.parts().1.is_some(), "{:?}", check.parts());
+    }
+
+    /// A builtin projected into the user directory is the normal case and must
+    /// never be flagged, or this check cries wolf on every machine.
+    #[test]
+    fn a_current_builtin_present_at_user_scope_is_not_a_stray() {
+        let dir = TempDir::new().unwrap();
+        let skills = dir.path().join("skills");
+        let builtin_name = claude_names()
+            .into_iter()
+            .next()
+            .expect("catalog ships at least one skill");
+        write_skill(
+            &skills,
+            &builtin_name,
+            "---\nname: x\nmanaged_by: cas\n---\n\nbody\n",
+        );
+        // An unrelated hand-written skill with no cas marker is the user's own
+        // business and is also left alone.
+        write_skill(&skills, "my-own-notes", "---\nname: my-own-notes\n---\n");
+
+        let strays = scan_user_skill_dirs(&[(skills, claude_names())]);
+        assert!(strays.is_empty(), "{strays:?}");
+        assert!(matches!(
+            stray_user_skills_check(&strays).status,
+            CheckStatus::Ok
+        ));
+    }
+
+    /// A directory carrying `managed_by: cas` that the catalog no longer ships
+    /// will never be refreshed again, so it is reported even though its name is
+    /// not on the retired list.
+    #[test]
+    fn orphaned_managed_copy_is_reported_even_without_a_cas_prefix() {
+        let dir = TempDir::new().unwrap();
+        let skills = dir.path().join("skills");
+        write_skill(
+            &skills,
+            "some-retired-builtin",
+            "---\nname: some-retired-builtin\nmanaged_by: cas\n---\n\nbody\n",
+        );
+
+        let strays = scan_user_skill_dirs(&[(skills, claude_names())]);
+        assert_eq!(strays.len(), 1, "{strays:?}");
+        assert_eq!(strays[0].reason, StrayReason::OrphanedManagedCopy);
+        assert!(
+            stray_user_skills_check(&strays)
+                .message
+                .contains("no longer a builtin")
+        );
+    }
+
+    /// Codex ships skills Claude does not. Comparing a `~/.codex/skills`
+    /// directory against the Claude catalog reported the perfectly current
+    /// `cas-codex-supervisor-checklist` as an orphan on a real machine, so the
+    /// catalog must be chosen per harness.
+    #[test]
+    fn a_codex_only_builtin_is_not_an_orphan_against_the_codex_catalog() {
+        let dir = TempDir::new().unwrap();
+        let skills = dir.path().join("skills");
+        write_skill(
+            &skills,
+            "cas-codex-supervisor-checklist",
+            "---\nname: cas-codex-supervisor-checklist\nmanaged_by: cas\n---\n",
+        );
+
+        let codex = catalog_skill_names(crate::builtins::CODEX_BUILTIN_SKILLS);
+        assert!(
+            codex.contains("cas-codex-supervisor-checklist"),
+            "fixture assumes this ships in the Codex catalog"
+        );
+        assert!(
+            scan_user_skill_dirs(&[(skills.clone(), codex)]).is_empty(),
+            "a current Codex builtin must not be flagged"
+        );
+        // …and the same directory judged against the wrong catalog is exactly
+        // the false positive this guards against.
+        assert_eq!(scan_user_skill_dirs(&[(skills, claude_names())]).len(), 1);
+    }
+
+    /// Several Claude account directories symlink one shared `skills/`. A naive
+    /// walk reports the same file once per account and an operator "fixes" the
+    /// same file repeatedly; the scan must dedupe by canonical path.
+    #[test]
+    fn a_skills_directory_shared_by_symlink_is_reported_once() {
+        let dir = TempDir::new().unwrap();
+        let real = dir.path().join("real-account").join("skills");
+        write_skill(
+            &real,
+            "mecha-cassy-post",
+            "---\nname: mecha-cassy-post\n---\n",
+        );
+        let linked = dir.path().join("linked-account-skills");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        #[cfg(not(unix))]
+        return;
+
+        let strays = scan_user_skill_dirs(&[(real.clone(), claude_names()), (linked, claude_names())]);
+        assert_eq!(strays.len(), 1, "symlinked duplicate double-counted: {strays:?}");
     }
 
     /// `cas-8fad`: the machine-scoped MechaCassy row must land in the

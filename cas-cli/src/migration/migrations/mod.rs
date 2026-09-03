@@ -229,6 +229,7 @@ mod m250_quarantined_rows;
 mod m251_sync_revisions;
 mod m252_sync_conflicts_add_revisions;
 mod m253_history_embedding_error;
+mod m254_code_index_skipped_files;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -494,6 +495,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m251_sync_revisions::MIGRATION,
     m252_sync_conflicts_add_revisions::MIGRATION,
     m253_history_embedding_error::MIGRATION,
+    m254_code_index_skipped_files::MIGRATION,
 ];
 
 #[cfg(test)]

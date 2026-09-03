@@ -8,6 +8,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [Unreleased]
 
 ### Fixed
+- A merge request for work pushed after an earlier merge reaches the
+  supervisor instead of being answered with "Merge already landed". The check
+  compared the branch position recorded at the *previous* merge, so every
+  commit after it looked merged; it now resolves the branch's live tip and
+  suppresses only when that tip is genuinely in the target with its content
+  present. When the recorded position and the live tip disagree, both are
+  reported so the drift is visible rather than inferred. (GH #703)
+
+### Fixed
 - `cas doctor` prints task ids, agent UUIDs and timestamps exactly as they are,
   so they can be copied straight into the next command. A digit-grouping pass
   ran over each finished line with no way to tell a count from an identifier,

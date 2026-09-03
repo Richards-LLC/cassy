@@ -226,4 +226,9 @@ pub struct CodeIndexResult {
     pub symbols_indexed: usize,
     /// Errors encountered
     pub errors: Vec<String>,
+    /// Files deliberately not indexed because their bytes are not decodable
+    /// source text, with the reason. GH #698: these are NOT failures — a
+    /// failure implies a retry could succeed, and re-reading the same bytes
+    /// never will, which is what made the doctor warning permanent.
+    pub skipped: Vec<(std::path::PathBuf, String)>,
 }

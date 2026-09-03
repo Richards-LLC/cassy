@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS code_index_state (
     eligible_files INTEGER NOT NULL DEFAULT 0,
     indexed_files INTEGER NOT NULL DEFAULT 0,
     failed_files INTEGER NOT NULL DEFAULT 0,
+    skipped_files INTEGER NOT NULL DEFAULT 0,
+    skipped_detail TEXT,
     last_head TEXT,
     last_scan_at TEXT NOT NULL,
     last_error TEXT
@@ -53,6 +55,8 @@ pub const CODE_VECTOR_SCHEMA_STATEMENTS: &[&str] = &[
         eligible_files INTEGER NOT NULL DEFAULT 0,
         indexed_files INTEGER NOT NULL DEFAULT 0,
         failed_files INTEGER NOT NULL DEFAULT 0,
+        skipped_files INTEGER NOT NULL DEFAULT 0,
+        skipped_detail TEXT,
         last_head TEXT,
         last_scan_at TEXT NOT NULL,
         last_error TEXT
@@ -112,6 +116,12 @@ pub struct CodeIndexState {
     pub eligible_files: usize,
     pub indexed_files: usize,
     pub failed_files: usize,
+    /// Files excluded from the eligible denominator because their bytes are
+    /// not decodable source text. Kept apart from `failed_files` so a rerun
+    /// cannot resurrect a warning that no retry could ever clear (GH #698).
+    pub skipped_files: usize,
+    /// Human-readable "path: reason" list for the skipped files.
+    pub skipped_detail: Option<String>,
     pub last_head: Option<String>,
     pub last_scan_at: String,
     pub last_error: Option<String>,
@@ -371,12 +381,15 @@ impl SqliteCodeVectorStore {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_scan(
         &self,
         repository: &str,
         eligible_files: usize,
         indexed_files: usize,
         failed_files: usize,
+        skipped_files: usize,
+        skipped_detail: Option<&str>,
         last_head: Option<&str>,
         last_error: Option<&str>,
     ) -> Result<()> {
@@ -384,12 +397,14 @@ impl SqliteCodeVectorStore {
         conn.execute(
             "INSERT INTO code_index_state
                  (repository, eligible_files, indexed_files, failed_files,
-                  last_head, last_scan_at, last_error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                  skipped_files, skipped_detail, last_head, last_scan_at, last_error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(repository) DO UPDATE SET
                  eligible_files = excluded.eligible_files,
                  indexed_files = excluded.indexed_files,
                  failed_files = excluded.failed_files,
+                 skipped_files = excluded.skipped_files,
+                 skipped_detail = excluded.skipped_detail,
                  last_head = excluded.last_head,
                  last_scan_at = excluded.last_scan_at,
                  last_error = excluded.last_error",
@@ -398,6 +413,8 @@ impl SqliteCodeVectorStore {
                 eligible_files as i64,
                 indexed_files as i64,
                 failed_files as i64,
+                skipped_files as i64,
+                skipped_detail,
                 last_head,
                 Utc::now().to_rfc3339(),
                 last_error,
@@ -410,7 +427,7 @@ impl SqliteCodeVectorStore {
         let conn = self.lock()?;
         conn.query_row(
             "SELECT repository, eligible_files, indexed_files, failed_files,
-                    last_head, last_scan_at, last_error
+                    skipped_files, skipped_detail, last_head, last_scan_at, last_error
              FROM code_index_state WHERE repository = ?1",
             params![repository],
             |row| {
@@ -419,9 +436,11 @@ impl SqliteCodeVectorStore {
                     eligible_files: row.get::<_, i64>(1)?.max(0) as usize,
                     indexed_files: row.get::<_, i64>(2)?.max(0) as usize,
                     failed_files: row.get::<_, i64>(3)?.max(0) as usize,
-                    last_head: row.get(4)?,
-                    last_scan_at: row.get(5)?,
-                    last_error: row.get(6)?,
+                    skipped_files: row.get::<_, i64>(4)?.max(0) as usize,
+                    skipped_detail: row.get(5)?,
+                    last_head: row.get(6)?,
+                    last_scan_at: row.get(7)?,
+                    last_error: row.get(8)?,
                 })
             },
         )

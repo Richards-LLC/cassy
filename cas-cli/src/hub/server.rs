@@ -23,7 +23,7 @@ use super::{
     ProxyFrameKind, Scope, SessionCatalog, SessionReadModel, TransportSecurity, ViewerRecvError,
     required_scope,
 };
-use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution};
+use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, PaneSizeAuthority};
 
 const MACHINE_PROTOCOL_VERSION: u32 = 2;
 const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
@@ -689,6 +689,7 @@ async fn proxy_socket(
         tokio::select! {
             frame = viewer.recv() => match frame {
                 Ok(frame) => {
+                    audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
                         break;
                     }
@@ -966,6 +967,57 @@ struct MachineClientEnvelope {
     ping: Option<u64>,
 }
 
+/// A daemon reply saying the operator's local dashboard owns this pane's
+/// geometry, so the viewer's `ResizePane` was refused (cas-37f8).
+///
+/// The prefix check keeps this off the hot relay path: `DaemonMessage` is an
+/// externally tagged enum, so only a `PaneSize` frame is ever parsed.
+pub(super) fn refused_pane_resize(bytes: &[u8]) -> Option<(String, u16, u16)> {
+    if !bytes.starts_with(br#"{"PaneSize""#) {
+        return None;
+    }
+    match serde_json::from_slice::<DaemonMessage>(bytes).ok()? {
+        DaemonMessage::PaneSize {
+            pane_id,
+            cols,
+            rows,
+            authority: PaneSizeAuthority::LocalDashboard,
+        } => Some((pane_id, cols, rows)),
+        _ => None,
+    }
+}
+
+/// Record a refused viewer resize in the hub audit log, attributed to the
+/// device that asked for it.
+fn audit_refused_pane_resize(
+    auth: &Option<(AuthStore, AuthContext)>,
+    session: &str,
+    bytes: &[u8],
+) {
+    let Some((store, context)) = auth.as_ref() else {
+        return;
+    };
+    let Some((pane_id, cols, rows)) = refused_pane_resize(bytes) else {
+        return;
+    };
+    tracing::info!(
+        session,
+        pane = %pane_id,
+        cols,
+        rows,
+        device = %context.device_label,
+        "refused a Commander viewer's pane resize: the local dashboard owns this geometry"
+    );
+    let _ = store.audit(
+        Some(context),
+        "refused",
+        "websocket_pane_resize",
+        Some(Scope::PaneRead),
+        Some(session),
+        chrono::Utc::now(),
+    );
+}
+
 fn machine_binary_frame(session: &str, frame: &ProxyFrame) -> anyhow::Result<Option<Vec<u8>>> {
     let (kind, pane_id, payload) = match frame.kind {
         ProxyFrameKind::Output => {
@@ -1055,6 +1107,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
         tokio::select! {
             outgoing = outbound_rx.recv() => match outgoing {
                 Some(MachineOutbound::Frame { session, frame }) => {
+                    audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     let result = match machine_binary_frame(&session, &frame) {
                         Ok(Some(bytes)) => sink.send(Message::Binary(bytes.into())).await,
                         Ok(None) => {

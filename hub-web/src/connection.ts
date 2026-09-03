@@ -38,6 +38,7 @@ export interface HubCallbacks {
   onOutput(session: string, paneId: string, data: Uint8Array): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
   onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
+  onPaneSize?(session: string, paneId: string, cols: number, rows: number, authority: string): void;
   onFlowControlReset?(session: string): void;
   onScrollbackPage?(session: string, page: Record<string, any>): void;
   onSocketError(session: string, detail: string): void;
@@ -942,6 +943,9 @@ export class HubConnectionSupervisor {
       const keyframe = message.PaneKeyframe;
       this.keyframeRequests.delete(`${session}:${keyframe.pane_id}`);
       this.callbacks.onPaneKeyframe(session, keyframe.pane_id, new Uint8Array(keyframe.ansi));
+    } else if (message.PaneSize) {
+      const size = message.PaneSize;
+      this.callbacks.onPaneSize?.(session, size.pane_id, size.cols, size.rows, String(size.authority));
     } else if (message.ScrollbackPage) {
       this.callbacks.onScrollbackPage?.(session, message.ScrollbackPage);
     } else if (message.StateUpdate) {

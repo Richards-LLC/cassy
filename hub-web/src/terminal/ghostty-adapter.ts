@@ -63,6 +63,7 @@ export async function createGhosttyTerminalSurface(
     },
     write(data) { surface.write(decoder.decode(data, { stream: true })); },
     setControlMode(enabled) { surface.setControlMode(enabled); },
+    setAuthoritativeSize(size) { surface.setAuthoritativeSize(size); },
     setMinimumColumns(columns) { surface.setMinimumColumns(columns); },
     setCanvasPainting(enabled) { surface.setCanvasPainting(enabled); },
     focus() { surface.focus(); },

@@ -457,7 +457,25 @@ impl FactoryDaemon {
                 if let Some(client) = self.ws_clients.get_mut(&client_id) {
                     client.pane_sizes.insert(actual.clone(), (cols, rows));
                 }
-                self.apply_effective_pane_size(&actual);
+                // The size a viewer asks for is a request, not a command: while
+                // the operator's dashboard is attached it owns the geometry.
+                // Tell the viewer the authoritative size so it renders that
+                // instead of retrying the resize (cas-37f8).
+                if let Some(decision) = self.apply_effective_pane_size(&actual)
+                    && (decision.cols != cols || decision.rows != rows)
+                {
+                    let reply = DaemonMessage::PaneSize {
+                        pane_id: actual.clone(),
+                        cols: decision.cols,
+                        rows: decision.rows,
+                        authority: decision.authority,
+                    };
+                    if let Some(frame) = ws_encode(&reply)
+                        && let Some(client) = self.ws_clients.get_mut(&client_id)
+                    {
+                        let _ = client.sink.feed(frame).now_or_never();
+                    }
+                }
             }
             ClientMessage::SpawnWorkers {
                 count,

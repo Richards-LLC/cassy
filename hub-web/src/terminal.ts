@@ -8,6 +8,11 @@ export interface TerminalSurface {
   readonly transcript: TranscriptSource;
   write(data: Uint8Array): void;
   setControlMode(enabled: boolean): void;
+  /**
+   * Pin the surface to the pane's real PTY geometry, or pass null to let it
+   * measure its own mount again (cas-37f8).
+   */
+  setAuthoritativeSize(size: { cols: number; rows: number } | null): void;
   /** Floor on the columns handed to the PTY, independent of the CSS width. */
   setMinimumColumns(columns: number): void;
   /** Painting the hidden grid is skipped while the transcript is the visible view. */

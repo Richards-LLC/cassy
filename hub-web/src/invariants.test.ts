@@ -682,8 +682,22 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).toContain('machines.get(machineId)?.scopes.includes("pane-read")');
     expect(source).toContain("return !lease?.controller_label || lease.held_by_me");
     expect(source).toContain("if (becameGeometryOwner) resizeViewablePanes(machineId, session)");
-    expect(source).toContain("if (canResizePanes(machineId, session)) sendControl");
-    expect(source).toContain("{ ResizePane: { pane_id: pane.id, cols: surface.cols, rows: surface.rows } }");
+    expect(source).toContain("if (!canResizePanes(machineId, session)) return;");
+    expect(source).toContain("{ ResizePane: { pane_id: paneId, cols, rows } }");
+  });
+
+  // cas-37f8: a phone-sized viewer must never shrink the operator's console.
+  it("stops asking for a pane size once the local dashboard claims that pane", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain('const local = authority === "LocalDashboard";');
+    expect(source).toContain("if (!ownsPaneGeometry(machineId, session, paneId)) return;");
+    expect(source).toContain(
+      "surfaces.get(key)?.setAuthoritativeSize(local ? { cols, rows } : null)",
+    );
+    // Every ResizePane the viewer can send goes through the one suppression gate.
+    const sends = source.match(/ResizePane: \{/g) ?? [];
+    expect(sends).toHaveLength(1);
+    expect(source).toContain("onResize: (cols, rows) => requestPaneSize(machineId, session, pane.id, cols, rows)");
   });
 
   it("turns a reachable revoked hub into a terminal auth stop", async () => {

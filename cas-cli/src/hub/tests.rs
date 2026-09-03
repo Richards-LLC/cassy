@@ -2233,3 +2233,49 @@ fn sign_dpop(
     let signature: p256::ecdsa::Signature = signing.sign(input.as_bytes());
     format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
 }
+
+// cas-37f8: a phone-sized viewer must never shrink the operator's dashboard.
+// The daemon answers a refused ResizePane with the authoritative geometry; the
+// hub turns that reply into an audit record for the device that asked.
+
+#[test]
+fn a_local_dashboard_authority_reply_is_recognised_as_a_refused_resize() {
+    let frame = serde_json::to_vec(&DaemonMessage::PaneSize {
+        pane_id: "worker-1".into(),
+        cols: 203,
+        rows: 44,
+        authority: crate::ui::factory::PaneSizeAuthority::LocalDashboard,
+    })
+    .expect("PaneSize frame");
+
+    assert_eq!(
+        super::server::refused_pane_resize(&frame),
+        Some(("worker-1".to_owned(), 203, 44))
+    );
+}
+
+#[test]
+fn a_viewer_authority_reply_is_not_a_refusal() {
+    let frame = serde_json::to_vec(&DaemonMessage::PaneSize {
+        pane_id: "worker-1".into(),
+        cols: 46,
+        rows: 33,
+        authority: crate::ui::factory::PaneSizeAuthority::Viewer,
+    })
+    .expect("PaneSize frame");
+
+    assert_eq!(super::server::refused_pane_resize(&frame), None);
+}
+
+#[test]
+fn ordinary_relay_traffic_is_never_parsed_as_a_resize_refusal() {
+    let output = serde_json::to_vec(&DaemonMessage::Output {
+        pane_id: "worker-1".into(),
+        data: b"\x1b[2J{\"PaneSize\"".to_vec(),
+    })
+    .expect("Output frame");
+
+    assert_eq!(super::server::refused_pane_resize(&output), None);
+    assert_eq!(super::server::refused_pane_resize(b""), None);
+    assert_eq!(super::server::refused_pane_resize(b"not json"), None);
+}

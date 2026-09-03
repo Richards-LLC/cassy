@@ -21,6 +21,8 @@ import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promoteP
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
+import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
+import { TranscriptView } from "./transcript-view";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 const pendingPairingStore = pendingPairingStoreFor(window);
@@ -45,6 +47,7 @@ const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
 const surfaces = new Map<string, TerminalSurface>();
+const transcripts = new Map<string, TranscriptView>();
 const sessionStates = new Map<string, SessionState>();
 // Shared data source for session drawers, status rows, pane tooltips, and the
 // Cmd+K integration lane. Values are produced once by the daemon.
@@ -97,6 +100,63 @@ let messageStatus: { session: string | undefined; text: string; tone: "info" | "
 
 // One phone breakpoint shared by layout state, pane mounting, and pane tapping.
 function phoneLayout(): boolean { return window.matchMedia("(max-width: 850px)").matches; }
+
+// The compact breakpoint from DESIGN.md, which is also where a mount stops
+// being able to measure a usable agent-TUI grid.
+function compactViewport(): boolean { return window.matchMedia("(max-width: 53rem)").matches; }
+
+/**
+ * Columns handed to the PTY on a compact viewport. A 395px mount measures ~46
+ * columns, and an 80-column agent TUI redrawn at that width loses its hanging
+ * indents before Commander ever sees the bytes; the floor is what the reflowed
+ * transcript then reads back. Desktop keeps the mount's own measurement.
+ */
+const COMPACT_MINIMUM_COLUMNS = 80;
+
+function paneViewMode(selectedKey: string): TranscriptViewMode {
+  const storage = paneLayoutStorage();
+  const stored = storage ? loadTranscriptView(storage, selectedKey) : undefined;
+  return stored ?? defaultTranscriptView(window.innerWidth);
+}
+
+function setPaneViewMode(selectedKey: string, view: TranscriptViewMode): void {
+  const storage = paneLayoutStorage();
+  if (storage) saveTranscriptView(storage, selectedKey, view);
+  const state = sessionStates.get(selectedKey);
+  const [machineId, session] = [selectedMachineId, selectedSession];
+  if (state && machineId && session) void renderSessionState(machineId, session, state);
+}
+
+/**
+ * Applies the reading view to one mounted pane: the transcript owns the mount
+ * while it is active, and the grid keeps rendering underneath it only when it
+ * is the thing on screen.
+ */
+function releaseSurface(key: string, surface: TerminalSurface): void {
+  transcripts.get(key)?.dispose();
+  transcripts.delete(key);
+  surface.dispose();
+  surfaces.delete(key);
+}
+
+function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface, view: TranscriptViewMode): void {
+  surface.setMinimumColumns(compactViewport() ? COMPACT_MINIMUM_COLUMNS : 0);
+  const active = view === "transcript";
+  mount.classList.toggle("transcript-active", active);
+  surface.setCanvasPainting(!active);
+  let transcript = transcripts.get(key);
+  if (active && !transcript) {
+    transcript = new TranscriptView(document, surface.transcript);
+    transcripts.set(key, transcript);
+  }
+  if (!active) {
+    transcript?.dispose();
+    transcripts.delete(key);
+    return;
+  }
+  if (transcript && transcript.element.parentElement !== mount) mount.append(transcript.element);
+  transcript?.update();
+}
 
 function sessionKey(machineId: string, session: string): string { return `${machineId}:${session}`; }
 function paneKey(machineId: string, session: string, pane: string): string { return `${machineId}:${session}:${pane}`; }
@@ -895,8 +955,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   if (visiblePanes.length === 0) {
     for (const [key, surface] of surfaces) {
       if (!key.startsWith(`${machineId}:${session}:`)) continue;
-      surface.dispose();
-      surfaces.delete(key);
+      releaseSurface(key, surface);
     }
     const empty = document.createElement("div");
     empty.className = "empty empty-pane-slot";
@@ -933,7 +992,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     grid.replaceChildren(primarySlot, secondaryStrip);
   }
   for (const [key, surface] of surfaces) {
-    if (key.startsWith(`${machineId}:${session}:`) && !active.has(key.split(":").at(-1)!)) { surface.dispose(); surfaces.delete(key); }
+    if (key.startsWith(`${machineId}:${session}:`) && !active.has(key.split(":").at(-1)!)) releaseSurface(key, surface);
   }
   const panesById = new Map(visiblePanes.map((pane) => [pane.id, pane]));
   // Re-inserting a card blurs whatever it contains, so panes are only moved when
@@ -982,6 +1041,9 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         void renderSessionState(machineId, session, state);
       };
       controls.append(
+        button("Show terminal", "pane-view-toggle", () => {
+          setPaneViewMode(selectedKey, paneViewMode(selectedKey) === "transcript" ? "terminal" : "transcript");
+        }),
         button("Find", "pane-search", () => { focusPane(machineId, session, pane.id); openTerminalSearch(); }),
         button("Make primary", "make-primary", () => updateLayout((current) => promotePane(current, pane.id))),
         button("Move earlier", "move-earlier", () => updateLayout((current) => movePane(current, pane.id, -1))),
@@ -1047,19 +1109,32 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (makePrimary) makePrimary.disabled = pane.id === layout.primaryPaneId;
     if (moveEarlier) moveEarlier.disabled = pane.id === layout.primaryPaneId || position <= 1;
     if (moveLater) moveLater.disabled = pane.id === layout.primaryPaneId || position === layout.paneIds.length - 1;
+    const paneView = paneViewMode(selectedKey);
+    const viewToggle = card.querySelector<HTMLButtonElement>(".pane-view-toggle");
+    if (viewToggle) {
+      const label = paneView === "transcript" ? "Show terminal" : "Show transcript";
+      viewToggle.textContent = label;
+      viewToggle.setAttribute("aria-label", label);
+      viewToggle.title = paneView === "transcript"
+        ? "Show the true terminal grid"
+        : "Read this pane as reflowed text";
+      viewToggle.dataset.view = paneView;
+    }
     placePane(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip, card);
     const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches && secondaryOnPhone;
     const existingSurface = surfaces.get(key);
     existingSurface?.setControlMode(leases.get(selectedKey)?.held_by_me === true);
     if (existingSurface && (collapsedOnPhone || existingSurface.element !== mount || !existingSurface.element.isConnected)) {
-      existingSurface.dispose();
-      surfaces.delete(key);
+      releaseSurface(key, existingSurface);
     }
     if (collapsedOnPhone) continue;
     if (!surfaces.has(key)) {
       const surface = await createTerminalSurface(mount, {
         onData: (data) => { if (canControl(machineId, session, "pane-input")) sendControl(machineId, session, { Input: { pane_id: pane.id, data: [...data] } }); },
         onResize: (cols, rows) => { if (canResizePanes(machineId, session)) sendControl(machineId, session, { ResizePane: { pane_id: pane.id, cols, rows } }); },
+        // The transcript is a reading of the same frame the grid just rendered,
+        // so it follows the emulator's own tick instead of polling it.
+        onRender: () => transcripts.get(key)?.update(),
       });
       const currentMount = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane.id)}"] .terminal-mount`);
       if (selectedMachineId !== machineId || selectedSession !== session || !mount.isConnected || currentMount !== mount) {
@@ -1068,9 +1143,14 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       }
       surfaces.set(key, surface);
       surface.setControlMode(leases.get(selectedKey)?.held_by_me === true);
+      // The floor goes in before the replay: scrollback written at the mount's
+      // own narrow grid would only have to be reflowed again.
+      surface.setMinimumColumns(compactViewport() ? COMPACT_MINIMUM_COLUMNS : 0);
       const buffered = paneBuffers.get(key);
       if (buffered) surface.write(new Uint8Array(buffered));
     }
+    const mounted = surfaces.get(key);
+    if (mounted) applyPaneView(key, mount, mounted, paneView);
     if (authoritativeSessions.has(selectedKey) && !paneKeyframesReady.has(key)) {
       connections.get(machineId)?.requestPaneKeyframe(session, pane.id);
     }

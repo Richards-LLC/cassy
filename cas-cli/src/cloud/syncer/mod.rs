@@ -84,6 +84,12 @@ pub struct SyncResult {
     pub pulled_commit_links: usize,
     /// Number of task dependency edges pulled
     pub pulled_task_dependencies: usize,
+    /// Number of local dependency edges removed by a cloud deletion tombstone.
+    pub deleted_task_dependencies: usize,
+    /// Number of local edges a tombstone kept out of the push queue. These are
+    /// edges another machine deleted; re-pushing them is the resurrection this
+    /// client exists to prevent.
+    pub skipped_task_dependencies_by_tombstone: usize,
     /// Number of local task dependency edges queued for cloud healing.
     pub healed_task_dependencies_to_cloud: usize,
     /// Number of task dependency edges materialized from the cloud during
@@ -225,13 +231,29 @@ impl SyncResult {
     /// Render the one-line dependency healing receipt when reconciliation did
     /// work. A quiet no-op is intentional for steady-state pulls.
     pub fn dependency_heal_summary(&self) -> Option<String> {
-        (self.healed_task_dependencies_to_cloud > 0 || self.healed_task_dependencies_from_cloud > 0)
+        (self.healed_task_dependencies_to_cloud > 0
+            || self.healed_task_dependencies_from_cloud > 0
+            || self.deleted_task_dependencies > 0
+            || self.skipped_task_dependencies_by_tombstone > 0)
             .then(|| {
-                format!(
+                let mut parts = vec![format!(
                     "healed {} edge(s) to cloud, {} from cloud",
                     self.healed_task_dependencies_to_cloud,
                     self.healed_task_dependencies_from_cloud
-                )
+                )];
+                if self.deleted_task_dependencies > 0 {
+                    parts.push(format!(
+                        "{} deleted by tombstone",
+                        self.deleted_task_dependencies
+                    ));
+                }
+                if self.skipped_task_dependencies_by_tombstone > 0 {
+                    parts.push(format!(
+                        "{} skipped by tombstone",
+                        self.skipped_task_dependencies_by_tombstone
+                    ));
+                }
+                parts.join(", ")
             })
     }
 

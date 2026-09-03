@@ -1404,3 +1404,412 @@ async fn team_pull_foreign_open_row_cannot_reopen_local_owner_close() {
         TaskStatus::Closed
     );
 }
+
+// ---------------------------------------------------------------------------
+// GH #640 client half (cas-cf1f): deletion tombstones and snapshot-scoped heal.
+//
+// The cloud's `task_dependencies` collection is filtered by `since` exactly
+// like every other entity, so an incremental envelope is NOT a statement about
+// which edges the cloud holds. Diffing the full local edge set against it made
+// every untouched local edge look cloud-missing and re-queued it on every pull
+// (measured on this host: 1,371 rows enqueued by a single pull). Reconciliation
+// therefore runs only against a complete snapshot, and received tombstones are
+// persisted so a later local push cannot resurrect a deleted edge.
+// ---------------------------------------------------------------------------
+
+const TOMBSTONE_TEAM: &str = "team-cas-cf1f";
+
+fn dependency_tombstone_fixture(
+    dependency: &crate::types::Dependency,
+    project_id: &str,
+    deleted_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    // Shape pinned by petra-stella-cloud PR #60: the live row is updated in
+    // place, so a tombstone keeps from_id/to_id/dep_type/created_at and adds
+    // `deleted`/`deleted_at` while `updated_at` becomes the delete time.
+    let mut raw = team_dependency_fixture(dependency, project_id, None);
+    raw["deleted"] = serde_json::json!(true);
+    raw["deleted_at"] = serde_json::json!(deleted_at.to_rfc3339());
+    raw["updated_at"] = serde_json::json!(deleted_at.to_rfc3339());
+    raw
+}
+
+struct DependencyPullFixture {
+    _temp: tempfile::TempDir,
+    result: SyncResult,
+    task_store: Arc<dyn TaskStore>,
+    queue: Arc<SyncQueue>,
+    _server: wiremock::MockServer,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn pull_team_dependency_scenario(
+    project_id: &str,
+    local_tasks: Vec<Task>,
+    local_dependencies: Vec<crate::types::Dependency>,
+    envelope_edges: Vec<serde_json::Value>,
+    snapshot_edges: Option<Vec<serde_json::Value>>,
+    expected_snapshot_calls: u64,
+    watermark: Option<&str>,
+    reconciled_at: Option<&str>,
+    ledger: Vec<(String, chrono::DateTime<chrono::Utc>)>,
+) -> DependencyPullFixture {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig};
+    use crate::store::{
+        open_rule_store_local, open_skill_store_local, open_store_local, open_task_store_local,
+    };
+    use tempfile::TempDir;
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let envelope = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "entries": [],
+        "tasks": [],
+        "rules": [],
+        "skills": [],
+        "task_dependencies": envelope_edges,
+        "pulled_at": "2026-09-03T18:00:00Z",
+        "team_id": TOMBSTONE_TEAM,
+        "status": "ok",
+    }));
+    // The incremental envelope and the reconciliation snapshot are separate
+    // requests with disjoint matchers, so a test can prove which one ran.
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TOMBSTONE_TEAM}/sync/pull")))
+        .and(query_param("project_id", project_id))
+        .and(query_param_is_missing("types"))
+        .respond_with(envelope)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TOMBSTONE_TEAM}/sync/pull")))
+        .and(query_param("types", "task_dependencies"))
+        .and(query_param_is_missing("since"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "task_dependencies": snapshot_edges.clone().unwrap_or_default(),
+                "pulled_at": "2026-09-03T18:00:00Z",
+                "team_id": TOMBSTONE_TEAM,
+                "status": "ok",
+            })),
+        )
+        .expect(expected_snapshot_calls)
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    if let Some(watermark) = watermark {
+        queue
+            .set_metadata(
+                &format!("last_team_pull_at_{TOMBSTONE_TEAM}_{project_id}"),
+                watermark,
+            )
+            .unwrap();
+    }
+    if let Some(reconciled_at) = reconciled_at {
+        queue
+            .set_metadata(
+                &format!("last_dependency_reconcile_at_{TOMBSTONE_TEAM}_{project_id}"),
+                reconciled_at,
+            )
+            .unwrap();
+    }
+    let store = open_store_local(temp.path()).unwrap();
+    let task_store = open_task_store_local(temp.path()).unwrap();
+    for task in local_tasks {
+        task_store.add(&task).unwrap();
+    }
+    for dependency in &local_dependencies {
+        task_store.add_dependency(dependency).unwrap();
+    }
+    for (entity_id, deleted_at) in ledger {
+        let mut parts = entity_id.splitn(3, ':');
+        let from_id = parts.next().unwrap_or_default().to_string();
+        let to_id = parts.next().unwrap_or_default().to_string();
+        let dep_type = parts.next().unwrap_or_default().to_string();
+        queue
+            .record_dependency_tombstone(&entity_id, &from_id, &to_id, &dep_type, deleted_at)
+            .unwrap();
+    }
+    let rule_store = open_rule_store_local(temp.path()).unwrap();
+    let skill_store = open_skill_store_local(temp.path()).unwrap();
+    let syncer = CloudSyncer::new(
+        Arc::clone(&queue),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+    );
+    let result = syncer
+        .pull_team(
+            TOMBSTONE_TEAM,
+            project_id,
+            store.as_ref(),
+            task_store.as_ref(),
+            rule_store.as_ref(),
+            skill_store.as_ref(),
+        )
+        .unwrap();
+
+    DependencyPullFixture {
+        _temp: temp,
+        result,
+        task_store,
+        queue,
+        _server: server,
+    }
+}
+
+#[tokio::test]
+async fn pulled_tombstone_deletes_the_local_edge_and_pins_it() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-to".to_string(), "to".to_string());
+    let mut local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::ParentChild);
+    local.created_at = chrono::Utc::now() - chrono::Duration::hours(4);
+    let deleted_at = chrono::Utc::now() - chrono::Duration::hours(1);
+    let tombstone = dependency_tombstone_fixture(&local, project_id, deleted_at);
+
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from.clone(), to],
+        vec![local.clone()],
+        vec![tombstone],
+        None,
+        0,
+        None,
+        None,
+        Vec::new(),
+    )
+    .await;
+
+    assert!(
+        fixture.result.errors.is_empty(),
+        "unexpected errors: {:?}",
+        fixture.result.errors
+    );
+    assert_eq!(fixture.result.deleted_task_dependencies, 1);
+    assert!(
+        fixture
+            .task_store
+            .get_dependencies(&from.id)
+            .unwrap()
+            .is_empty(),
+        "the tombstoned edge must be gone locally"
+    );
+    let recorded = fixture
+        .queue
+        .dependency_tombstone("cas-cf1f-from:cas-cf1f-to:parent-child")
+        .unwrap()
+        .expect("the tombstone must be persisted so a later push cannot resurrect the edge");
+    assert_eq!(recorded.timestamp(), deleted_at.timestamp());
+    assert!(
+        fixture
+            .queue
+            .pending_for_team(TOMBSTONE_TEAM, 10, 5)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn heal_never_repushes_an_edge_a_recorded_tombstone_deleted() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-stale-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-stale-to".to_string(), "to".to_string());
+    let mut local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+    local.created_at = chrono::Utc::now() - chrono::Duration::days(2);
+    let entity_id = "cas-cf1f-stale-from:cas-cf1f-stale-to:blocks".to_string();
+
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from.clone(), to],
+        vec![local],
+        Vec::new(),
+        None,
+        0,
+        None,
+        None,
+        vec![(entity_id, chrono::Utc::now() - chrono::Duration::hours(6))],
+    )
+    .await;
+
+    assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 0);
+    assert_eq!(fixture.result.skipped_task_dependencies_by_tombstone, 1);
+    assert!(
+        fixture
+            .queue
+            .pending_for_team(TOMBSTONE_TEAM, 10, 5)
+            .unwrap()
+            .is_empty(),
+        "a tombstoned edge must never be queued back to the cloud"
+    );
+    assert!(
+        fixture
+            .task_store
+            .get_dependencies(&from.id)
+            .unwrap()
+            .is_empty(),
+        "the local edge converges to deleted rather than lingering unsynced"
+    );
+}
+
+#[tokio::test]
+async fn heal_pushes_an_edge_recreated_after_its_tombstone() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-readd-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-readd-to".to_string(), "to".to_string());
+    let mut local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+    local.created_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let entity_id = "cas-cf1f-readd-from:cas-cf1f-readd-to:blocks".to_string();
+
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from.clone(), to],
+        vec![local],
+        Vec::new(),
+        None,
+        0,
+        None,
+        None,
+        vec![(
+            entity_id.clone(),
+            chrono::Utc::now() - chrono::Duration::hours(3),
+        )],
+    )
+    .await;
+
+    assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 1);
+    assert_eq!(fixture.result.skipped_task_dependencies_by_tombstone, 0);
+    let pending = fixture.queue.pending_for_team(TOMBSTONE_TEAM, 10, 5).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].entity_id, entity_id);
+    assert!(
+        fixture.queue.dependency_tombstone(&entity_id).unwrap().is_none(),
+        "a newer local edge retires its tombstone"
+    );
+    assert_eq!(
+        fixture.task_store.get_dependencies(&from.id).unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn incremental_pull_does_not_reheal_edges_outside_the_since_window() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-churn-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-churn-to".to_string(), "to".to_string());
+    let local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::ParentChild);
+
+    // Watermarked pull, reconciliation already done minutes ago: the partial
+    // envelope must not be mistaken for the cloud's full edge set.
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from, to],
+        vec![local],
+        Vec::new(),
+        Some(Vec::new()),
+        0,
+        Some("2026-09-03T17:48:41.321Z"),
+        Some(&(chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339()),
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 0);
+    assert!(
+        fixture
+            .queue
+            .pending_for_team(TOMBSTONE_TEAM, 10, 5)
+            .unwrap()
+            .is_empty(),
+        "an incremental envelope must never re-queue the local edge set"
+    );
+}
+
+#[tokio::test]
+async fn incremental_pull_reconciles_against_the_full_snapshot_when_due() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-due-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-due-to".to_string(), "to".to_string());
+    let local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from, to],
+        vec![local],
+        Vec::new(),
+        Some(Vec::new()),
+        1,
+        Some("2026-09-03T17:48:41.321Z"),
+        Some(&(chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339()),
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 1);
+    let pending = fixture.queue.pending_for_team(TOMBSTONE_TEAM, 10, 5).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].entity_id, "cas-cf1f-due-from:cas-cf1f-due-to:blocks");
+}
+
+#[tokio::test]
+async fn reconciliation_snapshot_tombstone_deletes_the_local_edge() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-snap-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-snap-to".to_string(), "to".to_string());
+    let mut local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+    local.created_at = chrono::Utc::now() - chrono::Duration::days(1);
+    let tombstone = dependency_tombstone_fixture(
+        &local,
+        project_id,
+        chrono::Utc::now() - chrono::Duration::hours(2),
+    );
+
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from.clone(), to],
+        vec![local],
+        Vec::new(),
+        Some(vec![tombstone]),
+        1,
+        Some("2026-09-03T17:48:41.321Z"),
+        None,
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(fixture.result.deleted_task_dependencies, 1);
+    assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 0);
+    assert!(
+        fixture
+            .task_store
+            .get_dependencies(&from.id)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .queue
+            .dependency_tombstone("cas-cf1f-snap-from:cas-cf1f-snap-to:blocks")
+            .unwrap()
+            .is_some()
+    );
+}

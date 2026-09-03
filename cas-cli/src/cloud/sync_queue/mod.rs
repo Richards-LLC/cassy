@@ -12,6 +12,7 @@ use std::sync::Mutex;
 
 use crate::error::CasError;
 
+mod dependency_tombstones;
 mod maintenance;
 mod metadata;
 mod queue_ops;
@@ -21,6 +22,9 @@ mod stats;
 mod tests;
 mod types;
 
+pub use dependency_tombstones::{
+    TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,
+};
 pub use types::{
     EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncConflictRecord,
     SyncOperation,
@@ -61,6 +65,9 @@ impl SyncQueue {
     pub fn init(&self) -> Result<(), CasError> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(schema::SCHEMA)?;
+        for statement in TASK_DEPENDENCY_TOMBSTONE_STATEMENTS {
+            conn.execute_batch(statement)?;
+        }
 
         // Migration: add team_id column if missing (for existing databases)
         self.migrate_team_id(&conn)?;

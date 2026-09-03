@@ -2613,6 +2613,10 @@ pub struct SyncSummary {
     pub healed_task_dependencies_from_cloud: usize,
     pub team_healed_task_dependencies_to_cloud: usize,
     pub team_healed_task_dependencies_from_cloud: usize,
+    /// Local edges removed because the cloud carried a deletion tombstone.
+    pub deleted_task_dependencies: usize,
+    /// Local edges a tombstone kept out of the push queue.
+    pub skipped_task_dependencies_by_tombstone: usize,
     pub team_errors: Vec<String>,
     pub team_push_attention: usize,
 }
@@ -2674,6 +2678,9 @@ impl SyncSummary {
             healed_task_dependencies_from_cloud: result.healed_task_dependencies_from_cloud,
             team_healed_task_dependencies_to_cloud: 0,
             team_healed_task_dependencies_from_cloud: 0,
+            deleted_task_dependencies: result.deleted_task_dependencies,
+            skipped_task_dependencies_by_tombstone: result
+                .skipped_task_dependencies_by_tombstone,
             team_errors: Vec::new(),
             team_push_attention: 0,
         }
@@ -2724,6 +2731,9 @@ impl SyncSummary {
             healed_task_dependencies_from_cloud: result.healed_task_dependencies_from_cloud,
             team_healed_task_dependencies_to_cloud: 0,
             team_healed_task_dependencies_from_cloud: 0,
+            deleted_task_dependencies: result.deleted_task_dependencies,
+            skipped_task_dependencies_by_tombstone: result
+                .skipped_task_dependencies_by_tombstone,
             team_errors: Vec::new(),
             team_push_attention: 0,
         }
@@ -2754,6 +2764,8 @@ impl SyncSummary {
             team.healed_task_dependencies_to_cloud;
         self.team_healed_task_dependencies_from_cloud +=
             team.healed_task_dependencies_from_cloud;
+        self.deleted_task_dependencies += team.deleted_task_dependencies;
+        self.skipped_task_dependencies_by_tombstone += team.skipped_task_dependencies_by_tombstone;
         self.team_errors.extend(team.errors.clone());
         if team.is_push() {
             self.team_push_attention += team.errors.len();
@@ -2905,12 +2917,30 @@ pub(crate) fn render_sync_summary(
             if !team_count_details.is_empty() {
                 details.push(format!("team {}", team_count_details.join(", ")));
             }
-            let healed = summary.healed_task_dependencies_to_cloud
-                + summary.healed_task_dependencies_from_cloud
-                + summary.team_healed_task_dependencies_to_cloud
+            // Name what actually happened to edges. "healed" alone read as
+            // churn when the same thousands re-queued on every pull (cas-cf1f).
+            let pushed_edges = summary.healed_task_dependencies_to_cloud
+                + summary.team_healed_task_dependencies_to_cloud;
+            let pulled_edges = summary.healed_task_dependencies_from_cloud
                 + summary.team_healed_task_dependencies_from_cloud;
-            if healed > 0 {
-                details.push(format!("{healed} edges healed"));
+            let mut edge_details = Vec::new();
+            if pushed_edges > 0 {
+                edge_details.push(format!("{pushed_edges} pushed"));
+            }
+            if pulled_edges > 0 {
+                edge_details.push(format!("{pulled_edges} pulled"));
+            }
+            if summary.deleted_task_dependencies > 0 {
+                edge_details.push(format!("{} deleted", summary.deleted_task_dependencies));
+            }
+            if summary.skipped_task_dependencies_by_tombstone > 0 {
+                edge_details.push(format!(
+                    "{} skipped (tombstoned)",
+                    summary.skipped_task_dependencies_by_tombstone
+                ));
+            }
+            if !edge_details.is_empty() {
+                details.push(format!("edges {}", edge_details.join(", ")));
             }
             if summary.knowledge_pushed > 0
                 || summary.knowledge_pulled > 0
@@ -3267,6 +3297,9 @@ fn execute_push_with_output(
                 "conflicts_resolved_remote": result.conflicts_resolved_remote,
                 "healed_task_dependencies_to_cloud": result.healed_task_dependencies_to_cloud,
                 "healed_task_dependencies_from_cloud": result.healed_task_dependencies_from_cloud,
+                "deleted_task_dependencies": result.deleted_task_dependencies,
+                "skipped_task_dependencies_by_tombstone":
+                    result.skipped_task_dependencies_by_tombstone,
                 "errors": result.concise_errors(),
         });
         if let Some(backlog) = &team_backlog {
@@ -3475,6 +3508,9 @@ fn execute_pull_with_output(
                         pull_result.healed_task_dependencies_to_cloud,
                     "healed_task_dependencies_from_cloud":
                         pull_result.healed_task_dependencies_from_cloud,
+                    "deleted_task_dependencies": pull_result.deleted_task_dependencies,
+                    "skipped_task_dependencies_by_tombstone":
+                        pull_result.skipped_task_dependencies_by_tombstone,
                     "errors": &pull_result.errors,
             });
             if !pull_result.task_status_transitions.is_empty() {
@@ -4107,6 +4143,9 @@ fn team_push_json(
             "conflicts_resolved_remote": result.conflicts_resolved_remote,
             "healed_task_dependencies_to_cloud": result.healed_task_dependencies_to_cloud,
             "healed_task_dependencies_from_cloud": result.healed_task_dependencies_from_cloud,
+            "deleted_task_dependencies": result.deleted_task_dependencies,
+            "skipped_task_dependencies_by_tombstone":
+                result.skipped_task_dependencies_by_tombstone,
             "total_pushed": result.total_pushed(),
             "duration_ms": result.duration_ms,
             "errors": errors,
@@ -4386,6 +4425,9 @@ fn team_pull_json(
             "conflicts_resolved_remote": result.conflicts_resolved_remote,
             "healed_task_dependencies_to_cloud": result.healed_task_dependencies_to_cloud,
             "healed_task_dependencies_from_cloud": result.healed_task_dependencies_from_cloud,
+            "deleted_task_dependencies": result.deleted_task_dependencies,
+            "skipped_task_dependencies_by_tombstone":
+                result.skipped_task_dependencies_by_tombstone,
             "duration_ms": result.duration_ms,
             "errors": errors,
         }
@@ -6333,7 +6375,32 @@ mod team_cmd_tests {
 
         assert_eq!(
             tf.output(),
-            "[OK] Pull complete · 3 entries · 12 conflicts resolved · team 2 entries, 1 task · 16 edges healed · team + personal\n"
+            "[OK] Pull complete · 3 entries · 12 conflicts resolved · team 2 entries, 1 task · edges 6 pushed, 10 pulled · team + personal\n"
+        );
+    }
+
+    /// `cas update` has to name what happened to edges: a bare "healed" count
+    /// could not distinguish real convergence from the repeat churn cas-cf1f
+    /// fixed, and a tombstoned edge that was deliberately NOT pushed is a
+    /// different event from one that was.
+    #[test]
+    fn sync_summary_names_edge_deletes_and_tombstone_skips() {
+        let summary = SyncSummary::pull(
+            &crate::cloud::SyncResult {
+                healed_task_dependencies_to_cloud: 2,
+                deleted_task_dependencies: 3,
+                skipped_task_dependencies_by_tombstone: 4,
+                ..Default::default()
+            },
+            false,
+        );
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(120);
+
+        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+
+        assert_eq!(
+            tf.output(),
+            "[OK] Pull complete · nothing newer · edges 2 pushed, 3 deleted, 4 skipped (tombstoned) · personal only\n"
         );
     }
 

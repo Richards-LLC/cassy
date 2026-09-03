@@ -78,6 +78,51 @@ describe("live regions and node identity", () => {
   });
 });
 
+describe("ten seconds of heartbeats, measured the way the defect was", () => {
+  /**
+   * mighty-raven-39's instrument: a MutationObserver over the app container
+   * counting how often #message-text is a different node, plus a blur counter
+   * on whichever node is current. Against the old render() it read 6 and 6.
+   */
+  it("counts zero composer replacements and zero blurs across a typing window", () => {
+    const composer = root.querySelector<HTMLTextAreaElement>("#message-text")!;
+    let replacements = 0;
+    let blurs = 0;
+    let current: Element | null = composer;
+    composer.addEventListener("blur", () => { blurs += 1; });
+    const observer = new MutationObserver(() => {
+      const node = root.querySelector("#message-text");
+      if (node && node !== current) {
+        replacements += 1;
+        current = node;
+      }
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    composer.focus();
+
+    // Two heartbeats a second for ten seconds, with the operator typing
+    // through all of them.
+    for (let beat = 0; beat < 20; beat += 1) {
+      composer.value += "a";
+      applyLiveRegions(root, {
+        connection: { state: beat % 3 === 0 ? "degraded" : "live", title: "hub", latencyText: `${30 + beat}ms` },
+        mode: { badge: beat % 5 === 0 ? "OBSERVER" : "CONTROL", compact: "CTL" },
+        controlAction: { label: "Release control" },
+        ...(beat % 4 === 0 ? { staleNotice: "Not live — reconnecting." } : {}),
+      });
+    }
+    observer.takeRecords();
+    observer.disconnect();
+
+    expect(replacements).toBe(0);
+    expect(blurs).toBe(0);
+    expect(document.activeElement).toBe(composer);
+    expect(composer.value).toHaveLength(20);
+    // The regions kept moving the whole time — this is not a frozen page.
+    expect(root.querySelector("[data-machine-latency]")!.textContent).toBe("49ms");
+  });
+});
+
 describe("live region values", () => {
   it("writes the connection state, title and latency in place", () => {
     applyLiveRegions(root, live);

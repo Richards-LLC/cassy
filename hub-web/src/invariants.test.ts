@@ -133,6 +133,36 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).toContain('app.addEventListener("focusout"');
   });
 
+  it("keeps the live-region selectors and the shell markup on the same nodes", async () => {
+    const [main, regions, fixture] = await Promise.all(
+      ["main.ts", "live-regions.ts", "live-regions.test.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")),
+    );
+    // The updater writes by selector into markup rendered somewhere else. A
+    // rename on either side would silently stop updating a region rather than
+    // fail, so both ends are pinned here.
+    const selectors = [...regions.matchAll(/(?:querySelector|closest)<[^>]*>\("([^"]+)"\)/g)].map((match) => match[1]!);
+    expect(selectors.length).toBeGreaterThan(8);
+    for (const selector of new Set(selectors)) {
+      // Every region the updater touches is exercised by its own fixture.
+      expect(fixture, `${selector} is missing from the live-regions fixture`).toContain(selector.replace(/^[.#]/, ""));
+    }
+    for (const marker of [
+      'class="connection-summary ',
+      'data-machine-latency="',
+      'class="connection-dot"',
+      'class="mode-badge ',
+      'id="lease"',
+      'class="control-action"',
+      'id="control-disabled-reason"',
+      'id="interrupt"',
+      'class="status-stale" role="status"',
+      'class="control-disabled-reason" role="note"',
+      'id="message-send"',
+      'id="message-status"',
+      'id="message-delivery"',
+    ]) expect(main, `${marker} left the shell template`).toContain(marker);
+  });
+
   it("never leaves the supervisor send button silently disabled", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     // A real `disabled` attribute swallows the tap: no event, no frame, no

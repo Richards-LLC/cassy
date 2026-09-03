@@ -1265,6 +1265,8 @@ impl CloudSyncer {
             &discarded_row_json,
             "owner",
             "owner_wins",
+            None,
+            None,
         )?;
         Ok(())
     }
@@ -1380,6 +1382,8 @@ impl CloudSyncer {
             &discarded_row_json,
             "local",
             "terminal_status_guard",
+            None,
+            None,
         )?;
         tracing::warn!(
             task_id = %local.id,
@@ -1398,6 +1402,32 @@ impl CloudSyncer {
         winner_side: &str,
         strategy: &str,
     ) -> Result<(), CasError> {
+        self.journal_local_overwrite_with_revisions(
+            entity_type,
+            entity_id,
+            local,
+            winner_side,
+            strategy,
+            None,
+        )
+    }
+
+    /// Journal a discarded local row together with the revisions that settled
+    /// the conflict.
+    ///
+    /// The revisions are read back from the conflict log this pull just wrote,
+    /// so the journal row and the logged decision cannot disagree. A conflict
+    /// resolved on the timestamp path records `NULL` revisions, which is how an
+    /// operator tells the two regimes apart when auditing.
+    fn journal_local_overwrite_with_revisions<T: serde::Serialize>(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        local: &T,
+        winner_side: &str,
+        strategy: &str,
+        revisions: Option<(Option<i64>, Option<i64>)>,
+    ) -> Result<(), CasError> {
         if self
             .queue
             .has_pending_entity_change(entity_type, entity_id)?
@@ -1405,15 +1435,36 @@ impl CloudSyncer {
             let json = serde_json::to_string(local).map_err(|error| {
                 CasError::Other(format!("Could not serialize sync conflict: {error}"))
             })?;
+            let (local_revision, remote_revision) = revisions
+                .unwrap_or_else(|| self.logged_revisions(entity_type.as_str(), entity_id));
             self.queue.record_conflict(
                 entity_type.as_str(),
                 entity_id,
                 &json,
                 winner_side,
                 strategy,
+                local_revision,
+                remote_revision,
             )?;
         }
         Ok(())
+    }
+
+    /// The revisions recorded by the most recent decision for this row.
+    fn logged_revisions(&self, entity_type: &str, entity_id: &str) -> (Option<i64>, Option<i64>) {
+        self.conflict_log
+            .lock()
+            .ok()
+            .and_then(|conflicts| {
+                conflicts
+                    .iter()
+                    .rev()
+                    .find(|conflict| {
+                        conflict.entity_type == entity_type && conflict.entity_id == entity_id
+                    })
+                    .map(|conflict| (conflict.local_revision, conflict.remote_revision))
+            })
+            .unwrap_or((None, None))
     }
 
     /// Fetch a project-scoped pull envelope without applying it to local
@@ -1537,6 +1588,7 @@ impl CloudSyncer {
         commit_link_store: &dyn CommitLinkStore,
     ) -> Result<SyncResult, CasError> {
         self.clear_conflict_log();
+        self.clear_incoming_revisions();
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -1572,6 +1624,14 @@ impl CloudSyncer {
                 continue;
             }
             let remote_updated_at = pulled_entry_updated_at(&raw_entry);
+            let entry_revision = crate::cloud::wire_revision(&raw_entry);
+            let entry_revision_id = raw_entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            if let Some(id) = &entry_revision_id {
+                self.note_incoming_revision(EntityType::Entry, id, &raw_entry);
+            }
             let remote_entry: Entry = match deserialize_pulled_entity(raw_entry, "entry") {
                 Ok(e) => e,
                 Err(e) => {
@@ -1584,6 +1644,9 @@ impl CloudSyncer {
             match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_entries += 1;
+                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
+                        let _ = self.queue.record_revision(EntityType::Entry, id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -1605,6 +1668,10 @@ impl CloudSyncer {
             // close — apply it authoritatively rather than via the
             // timestamp-gated upsert.
             let web_close = is_web_close_tombstone(&raw_task);
+            let task_revision = crate::cloud::wire_revision(&raw_task);
+            if let Some(id) = raw_task.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Task, id, &raw_task);
+            }
             render_task_proposal_provenance(&mut raw_task);
             let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
@@ -1643,6 +1710,11 @@ impl CloudSyncer {
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_tasks += 1;
+                    if let Some(revision) = task_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Task, &remote_task.id, revision);
+                    }
                     if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
                         result.task_status_transitions.push(TaskStatusTransition {
                             task_id: remote_task.id,
@@ -1683,6 +1755,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_rule, &current_project_id, "rule") {
                 continue;
             }
+            let rule_revision = crate::cloud::wire_revision(&raw_rule);
+            if let Some(id) = raw_rule.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Rule, id, &raw_rule);
+            }
             let remote_rule: Rule = match deserialize_pulled_entity(raw_rule, "rule") {
                 Ok(r) => r,
                 Err(e) => {
@@ -1690,9 +1766,15 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let remote_rule_id = remote_rule.id.clone();
             match self.upsert_rule(rule_store, remote_rule) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_rules += 1;
+                    if let Some(revision) = rule_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Rule, &remote_rule_id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -1708,6 +1790,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_skill, &current_project_id, "skill") {
                 continue;
             }
+            let skill_revision = crate::cloud::wire_revision(&raw_skill);
+            if let Some(id) = raw_skill.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Skill, id, &raw_skill);
+            }
             let remote_skill: Skill = match deserialize_pulled_entity(raw_skill, "skill") {
                 Ok(s) => s,
                 Err(e) => {
@@ -1715,9 +1801,15 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let remote_skill_id = remote_skill.id.clone();
             match self.upsert_skill(skill_store, remote_skill) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_skills += 1;
+                    if let Some(revision) = skill_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Skill, &remote_skill_id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -1949,7 +2041,12 @@ impl CloudSyncer {
                     self.record_terminal_regression_conflict(&local, &task)?;
                     return Ok(UpsertResult::Skipped);
                 }
-                if task.updated_at > local.updated_at {
+                if self.remote_supersedes_local(
+                    EntityType::Task,
+                    &task.id,
+                    local.updated_at,
+                    task.updated_at,
+                ) {
                     let notes_differ = local.notes != task.notes;
                     self.journal_local_overwrite(
                         EntityType::Task,
@@ -2013,7 +2110,12 @@ impl CloudSyncer {
     fn upsert_skill(&self, store: &dyn SkillStore, skill: Skill) -> Result<UpsertResult, CasError> {
         match store.get(&skill.id) {
             Ok(local) => {
-                if skill.updated_at > local.updated_at {
+                if self.remote_supersedes_local(
+                    EntityType::Skill,
+                    &skill.id,
+                    local.updated_at,
+                    skill.updated_at,
+                ) {
                     self.journal_local_overwrite(
                         EntityType::Skill,
                         &skill.id,
@@ -2440,6 +2542,7 @@ impl CloudSyncer {
         skill_store: &dyn SkillStore,
     ) -> Result<SyncResult, CasError> {
         self.clear_conflict_log();
+        self.clear_incoming_revisions();
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -2513,6 +2616,14 @@ impl CloudSyncer {
                 continue;
             }
             let remote_updated_at = pulled_entry_updated_at(&raw_entry);
+            let entry_revision = crate::cloud::wire_revision(&raw_entry);
+            let entry_revision_id = raw_entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            if let Some(id) = &entry_revision_id {
+                self.note_incoming_revision(EntityType::Entry, id, &raw_entry);
+            }
             let remote_entry: Entry = match deserialize_pulled_entity(raw_entry, "entry") {
                 Ok(e) => e,
                 Err(e) => {
@@ -2525,6 +2636,9 @@ impl CloudSyncer {
             match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_entries += 1;
+                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
+                        let _ = self.queue.record_revision(EntityType::Entry, id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -2549,6 +2663,10 @@ impl CloudSyncer {
         for mut raw_task in raw_tasks {
             render_task_proposal_provenance(&mut raw_task);
             let wire_is_owner = task_wire_is_owner(&raw_task, current_project_id);
+            let team_task_revision = crate::cloud::wire_revision(&raw_task);
+            if let Some(id) = raw_task.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Task, id, &raw_task);
+            }
             let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
@@ -2577,6 +2695,11 @@ impl CloudSyncer {
             ) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_tasks += 1;
+                    if let Some(revision) = team_task_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Task, &remote_task.id, revision);
+                    }
                     if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
                         result.task_status_transitions.push(TaskStatusTransition {
                             task_id: remote_task.id,
@@ -2617,6 +2740,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_rule, &current_project_id, "rule") {
                 continue;
             }
+            let rule_revision = crate::cloud::wire_revision(&raw_rule);
+            if let Some(id) = raw_rule.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Rule, id, &raw_rule);
+            }
             let remote_rule: Rule = match deserialize_pulled_entity(raw_rule, "rule") {
                 Ok(r) => r,
                 Err(e) => {
@@ -2624,9 +2751,15 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let remote_rule_id = remote_rule.id.clone();
             match self.upsert_rule_with_strategy(rule_store, remote_rule, strategy) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_rules += 1;
+                    if let Some(revision) = rule_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Rule, &remote_rule_id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -2642,6 +2775,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_skill, &current_project_id, "skill") {
                 continue;
             }
+            let skill_revision = crate::cloud::wire_revision(&raw_skill);
+            if let Some(id) = raw_skill.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Skill, id, &raw_skill);
+            }
             let remote_skill: Skill = match deserialize_pulled_entity(raw_skill, "skill") {
                 Ok(s) => s,
                 Err(e) => {
@@ -2649,9 +2786,15 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let remote_skill_id = remote_skill.id.clone();
             match self.upsert_skill_with_strategy(skill_store, remote_skill, strategy) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_skills += 1;
+                    if let Some(revision) = skill_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Skill, &remote_skill_id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();

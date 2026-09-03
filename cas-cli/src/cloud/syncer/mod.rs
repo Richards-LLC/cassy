@@ -385,6 +385,10 @@ pub struct SyncConflict {
     pub local_updated: chrono::DateTime<chrono::Utc>,
     /// Remote timestamp
     pub remote_updated: chrono::DateTime<chrono::Utc>,
+    /// Server revision this client last observed for the local row.
+    pub local_revision: Option<i64>,
+    /// Server revision carried by the incoming row.
+    pub remote_revision: Option<i64>,
     /// How it was resolved
     pub resolution: ConflictResolution,
     /// Action taken
@@ -394,15 +398,40 @@ pub struct SyncConflict {
 impl SyncConflict {
     /// Log this conflict for debugging without writing directly to stderr.
     pub fn log(&self) {
+        // Name the revisions when they exist: with revisions in play the
+        // timestamps alone can look like the wrong side won, and that is
+        // exactly the reading this feature exists to correct.
+        let render = |revision: Option<i64>| {
+            revision.map_or_else(|| "-".to_string(), |revision| revision.to_string())
+        };
         tracing::debug!(
-            "[Cassy sync] Conflict resolved: {} {} local={} remote={} strategy={:?} action={:?}",
+            "[Cassy sync] Conflict resolved: {} {} local={} remote={} rev_local={} rev_remote={} strategy={:?} action={:?}",
             self.entity_type,
             self.entity_id,
             self.local_updated.format("%H:%M:%S"),
             self.remote_updated.format("%H:%M:%S"),
+            render(self.local_revision),
+            render(self.remote_revision),
             self.resolution,
             self.action,
         );
+    }
+
+    /// Whether the winner was chosen by revision rather than by clock.
+    pub fn decided_by_revision(&self) -> bool {
+        matches!(
+            (self.local_revision, self.remote_revision),
+            (Some(local), Some(remote)) if local != remote
+        ) && self.resolution == ConflictResolution::KeepRecent
+    }
+
+    /// Journal strategy label, so an audit can tell the two regimes apart.
+    pub fn strategy_label(&self) -> &'static str {
+        if self.decided_by_revision() {
+            "revision"
+        } else {
+            self.resolution.as_str()
+        }
     }
 
 }
@@ -541,7 +570,9 @@ impl CloudSyncer {
         &self.queue
     }
 
-    /// Resolve a sync conflict using the given strategy
+    /// Resolve a sync conflict using the given strategy.
+    ///
+    /// Revision-free callers keep the historical timestamp behaviour exactly.
     fn resolve_conflict(
         &self,
         entity_type: &str,
@@ -550,17 +581,60 @@ impl CloudSyncer {
         remote_time: chrono::DateTime<chrono::Utc>,
         strategy: ConflictResolution,
     ) -> ConflictAction {
+        self.resolve_conflict_with_revisions(
+            entity_type,
+            entity_id,
+            local_time,
+            remote_time,
+            None,
+            None,
+            strategy,
+        )
+    }
+
+    /// Resolve a sync conflict, preferring the server's per-row revisions over
+    /// either machine's clock.
+    ///
+    /// Revisions are server-owned and monotonic, so when both sides carry one
+    /// they are the truth about which row is newer and the timestamps are not
+    /// consulted at all — that is what stops a machine with a wrong clock from
+    /// silently winning or losing. When the revisions are equal, or when either
+    /// side has none (a row this client has never pulled, or a cloud build that
+    /// does not send them), the original timestamp comparison runs unchanged.
+    ///
+    /// `RemoteWins`/`LocalWins` are explicit operator choices and stay
+    /// authoritative: revisions only arbitrate the "keep whichever is newer"
+    /// question that `KeepRecent` asks.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_conflict_with_revisions(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        local_time: chrono::DateTime<chrono::Utc>,
+        remote_time: chrono::DateTime<chrono::Utc>,
+        local_revision: Option<i64>,
+        remote_revision: Option<i64>,
+        strategy: ConflictResolution,
+    ) -> ConflictAction {
         let action = match strategy {
             ConflictResolution::RemoteWins => ConflictAction::UseRemote,
             ConflictResolution::LocalWins => ConflictAction::UseLocal,
             ConflictResolution::KeepRecent => {
-                if remote_time > local_time {
-                    ConflictAction::UseRemote
-                } else if local_time > remote_time {
-                    ConflictAction::UseLocal
-                } else {
-                    // Same timestamp, skip to avoid unnecessary writes
-                    ConflictAction::Skip
+                match (local_revision, remote_revision) {
+                    (Some(local), Some(remote)) if remote > local => ConflictAction::UseRemote,
+                    (Some(local), Some(remote)) if local > remote => ConflictAction::UseLocal,
+                    // Equal revisions mean the same server state; fall through
+                    // so an unpushed local edit can still be recognised.
+                    _ => {
+                        if remote_time > local_time {
+                            ConflictAction::UseRemote
+                        } else if local_time > remote_time {
+                            ConflictAction::UseLocal
+                        } else {
+                            // Same timestamp, skip to avoid unnecessary writes
+                            ConflictAction::Skip
+                        }
+                    }
                 }
             }
         };
@@ -571,6 +645,8 @@ impl CloudSyncer {
             entity_id: entity_id.to_string(),
             local_updated: local_time,
             remote_updated: remote_time,
+            local_revision,
+            remote_revision,
             resolution: strategy,
             action,
         };

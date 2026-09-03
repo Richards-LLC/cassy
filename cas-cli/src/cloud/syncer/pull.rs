@@ -1203,6 +1203,8 @@ impl CloudSyncer {
             &discarded_row_json,
             "owner",
             "owner_wins",
+            None,
+            None,
         )?;
         Ok(())
     }
@@ -1318,6 +1320,8 @@ impl CloudSyncer {
             &discarded_row_json,
             "local",
             "terminal_status_guard",
+            None,
+            None,
         )?;
         tracing::warn!(
             task_id = %local.id,
@@ -1336,6 +1340,32 @@ impl CloudSyncer {
         winner_side: &str,
         strategy: &str,
     ) -> Result<(), CasError> {
+        self.journal_local_overwrite_with_revisions(
+            entity_type,
+            entity_id,
+            local,
+            winner_side,
+            strategy,
+            None,
+        )
+    }
+
+    /// Journal a discarded local row together with the revisions that settled
+    /// the conflict.
+    ///
+    /// The revisions are read back from the conflict log this pull just wrote,
+    /// so the journal row and the logged decision cannot disagree. A conflict
+    /// resolved on the timestamp path records `NULL` revisions, which is how an
+    /// operator tells the two regimes apart when auditing.
+    fn journal_local_overwrite_with_revisions<T: serde::Serialize>(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        local: &T,
+        winner_side: &str,
+        strategy: &str,
+        revisions: Option<(Option<i64>, Option<i64>)>,
+    ) -> Result<(), CasError> {
         if self
             .queue
             .has_pending_entity_change(entity_type, entity_id)?
@@ -1343,15 +1373,36 @@ impl CloudSyncer {
             let json = serde_json::to_string(local).map_err(|error| {
                 CasError::Other(format!("Could not serialize sync conflict: {error}"))
             })?;
+            let (local_revision, remote_revision) = revisions
+                .unwrap_or_else(|| self.logged_revisions(entity_type.as_str(), entity_id));
             self.queue.record_conflict(
                 entity_type.as_str(),
                 entity_id,
                 &json,
                 winner_side,
                 strategy,
+                local_revision,
+                remote_revision,
             )?;
         }
         Ok(())
+    }
+
+    /// The revisions recorded by the most recent decision for this row.
+    fn logged_revisions(&self, entity_type: &str, entity_id: &str) -> (Option<i64>, Option<i64>) {
+        self.conflict_log
+            .lock()
+            .ok()
+            .and_then(|conflicts| {
+                conflicts
+                    .iter()
+                    .rev()
+                    .find(|conflict| {
+                        conflict.entity_type == entity_type && conflict.entity_id == entity_id
+                    })
+                    .map(|conflict| (conflict.local_revision, conflict.remote_revision))
+            })
+            .unwrap_or((None, None))
     }
 
     /// Fetch a project-scoped pull envelope without applying it to local

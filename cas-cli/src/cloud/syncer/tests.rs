@@ -72,6 +72,8 @@ fn conflict_recording_tracks_directional_counts_and_details() {
         entity_id: "local-wins".to_string(),
         local_updated: now,
         remote_updated: now,
+        local_revision: None,
+        remote_revision: None,
         resolution: ConflictResolution::KeepRecent,
         action: ConflictAction::UseLocal,
     });
@@ -80,6 +82,8 @@ fn conflict_recording_tracks_directional_counts_and_details() {
         entity_id: "remote-wins".to_string(),
         local_updated: now,
         remote_updated: now,
+        local_revision: None,
+        remote_revision: None,
         resolution: ConflictResolution::RemoteWins,
         action: ConflictAction::UseRemote,
     });
@@ -179,6 +183,8 @@ fn test_sync_conflict_creation() {
         entity_id: "test-123".to_string(),
         local_updated: Utc::now(),
         remote_updated: Utc::now(),
+        local_revision: None,
+        remote_revision: None,
         resolution: ConflictResolution::RemoteWins,
         action: ConflictAction::UseRemote,
     };
@@ -1812,4 +1818,230 @@ async fn reconciliation_snapshot_tombstone_deletes_the_local_edge() {
             .unwrap()
             .is_some()
     );
+}
+
+// ---------------------------------------------------------------------------
+// cas-c32f: revision-based conflict resolution.
+//
+// The cloud owns a monotonic per-row `revision` and increments it on every
+// accepted write, so it is the only trustworthy answer to "which side is
+// newer". Comparing it BEFORE `updated_at` is what stops a machine with a
+// wrong clock from silently winning or losing a conflict. When either side has
+// no revision the timestamp path must behave exactly as it always did.
+// ---------------------------------------------------------------------------
+
+fn revision_syncer() -> (tempfile::TempDir, CloudSyncer) {
+    use crate::cloud::{CloudConfig, CloudSyncerConfig};
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let syncer = CloudSyncer::new(
+        queue,
+        CloudConfig {
+            endpoint: "https://cloud.invalid".to_string(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+    );
+    (temp, syncer)
+}
+
+#[tokio::test]
+async fn a_slow_clock_cannot_lose_a_conflict_it_wins_on_revision() {
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    // Local machine's clock is an hour behind, but it holds the newer server
+    // revision. Under pure timestamp LWW the remote row would win and the
+    // local edit would be silently discarded.
+    let action = syncer.resolve_conflict_with_revisions(
+        "task",
+        "cas-c32f-slow-clock",
+        now - chrono::Duration::hours(1),
+        now,
+        Some(9),
+        Some(8),
+        ConflictResolution::KeepRecent,
+    );
+    assert_eq!(action, ConflictAction::UseLocal);
+
+    let conflicts = syncer.take_conflict_log();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].local_revision, Some(9));
+    assert_eq!(conflicts[0].remote_revision, Some(8));
+    assert!(conflicts[0].decided_by_revision());
+    assert_eq!(conflicts[0].strategy_label(), "revision");
+}
+
+#[tokio::test]
+async fn a_fast_clock_cannot_win_a_conflict_it_loses_on_revision() {
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    // The mirror image: the local clock runs an hour ahead, but the remote row
+    // carries the newer revision and must win anyway.
+    let action = syncer.resolve_conflict_with_revisions(
+        "task",
+        "cas-c32f-fast-clock",
+        now + chrono::Duration::hours(1),
+        now,
+        Some(3),
+        Some(4),
+        ConflictResolution::KeepRecent,
+    );
+    assert_eq!(action, ConflictAction::UseRemote);
+    assert!(syncer.take_conflict_log()[0].decided_by_revision());
+}
+
+#[tokio::test]
+async fn revision_ten_beats_revision_nine() {
+    // Guards the wire format: `revision` arrives as a decimal STRING, so a
+    // lexicographic comparison would rank "9" above "10" and invert every
+    // conflict from a row's tenth edit onward.
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    let action = syncer.resolve_conflict_with_revisions(
+        "task",
+        "cas-c32f-ten",
+        now,
+        now - chrono::Duration::minutes(1),
+        crate::cloud::parse_wire_revision(Some(&serde_json::json!("9"))),
+        crate::cloud::parse_wire_revision(Some(&serde_json::json!("10"))),
+        ConflictResolution::KeepRecent,
+    );
+    assert_eq!(action, ConflictAction::UseRemote);
+}
+
+#[tokio::test]
+async fn equal_revisions_fall_through_to_the_timestamp_comparison() {
+    // Equal revisions mean both sides descend from the same server state, so
+    // an unpushed local edit must still be recognisable by its timestamp.
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    let action = syncer.resolve_conflict_with_revisions(
+        "task",
+        "cas-c32f-equal",
+        now,
+        now - chrono::Duration::minutes(5),
+        Some(4),
+        Some(4),
+        ConflictResolution::KeepRecent,
+    );
+    assert_eq!(action, ConflictAction::UseLocal);
+    let conflict = &syncer.take_conflict_log()[0];
+    assert!(!conflict.decided_by_revision());
+    assert_eq!(conflict.strategy_label(), "timestamp_lww");
+}
+
+#[tokio::test]
+async fn a_missing_revision_on_either_side_keeps_the_timestamp_path_unchanged() {
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    let older = now - chrono::Duration::hours(1);
+
+    // Backward compatibility: a row this client has never pulled, or a cloud
+    // build that does not send revisions, must resolve exactly as before —
+    // including when the side WITHOUT a revision is the one that wins.
+    for (local_revision, remote_revision) in
+        [(None, None), (Some(9), None), (None, Some(9))]
+    {
+        assert_eq!(
+            syncer.resolve_conflict_with_revisions(
+                "task",
+                "cas-c32f-compat",
+                older,
+                now,
+                local_revision,
+                remote_revision,
+                ConflictResolution::KeepRecent,
+            ),
+            ConflictAction::UseRemote,
+            "newer remote timestamp must win when revisions are incomplete"
+        );
+        assert_eq!(
+            syncer.resolve_conflict_with_revisions(
+                "task",
+                "cas-c32f-compat",
+                now,
+                older,
+                local_revision,
+                remote_revision,
+                ConflictResolution::KeepRecent,
+            ),
+            ConflictAction::UseLocal,
+            "newer local timestamp must win when revisions are incomplete"
+        );
+        assert_eq!(
+            syncer.resolve_conflict_with_revisions(
+                "task",
+                "cas-c32f-compat",
+                now,
+                now,
+                local_revision,
+                remote_revision,
+                ConflictResolution::KeepRecent,
+            ),
+            ConflictAction::Skip,
+            "identical timestamps must still skip the write"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_explicit_operator_strategy_outranks_the_revisions() {
+    // RemoteWins/LocalWins are deliberate operator choices, not a guess about
+    // which row is newer, so revisions must not override them.
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    assert_eq!(
+        syncer.resolve_conflict_with_revisions(
+            "task",
+            "cas-c32f-operator",
+            now,
+            now,
+            Some(99),
+            Some(1),
+            ConflictResolution::RemoteWins,
+        ),
+        ConflictAction::UseRemote
+    );
+    assert_eq!(
+        syncer.resolve_conflict_with_revisions(
+            "task",
+            "cas-c32f-operator",
+            now,
+            now,
+            Some(1),
+            Some(99),
+            ConflictResolution::LocalWins,
+        ),
+        ConflictAction::UseLocal
+    );
+    for conflict in syncer.take_conflict_log() {
+        assert!(!conflict.decided_by_revision());
+    }
+}
+
+#[tokio::test]
+async fn the_revision_ledger_is_monotonic_and_scoped_per_entity_type() {
+    use crate::cloud::EntityType;
+
+    let (_temp, syncer) = revision_syncer();
+    let queue = syncer.queue();
+    queue.record_revision(EntityType::Task, "cas-c32f-led", 5).unwrap();
+    // A replayed older envelope must not roll the ledger backwards: the base
+    // revision we send later is what decides whether our push is accepted.
+    queue.record_revision(EntityType::Task, "cas-c32f-led", 3).unwrap();
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), Some(5));
+    queue.record_revision(EntityType::Task, "cas-c32f-led", 6).unwrap();
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), Some(6));
+
+    // The same id under another entity type is an independent row.
+    assert_eq!(queue.revision(EntityType::Entry, "cas-c32f-led").unwrap(), None);
+    queue.record_revision(EntityType::Entry, "cas-c32f-led", 2).unwrap();
+    assert_eq!(queue.revision(EntityType::Entry, "cas-c32f-led").unwrap(), Some(2));
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), Some(6));
+
+    queue.clear_revision(EntityType::Task, "cas-c32f-led").unwrap();
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), None);
 }

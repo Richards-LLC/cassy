@@ -142,6 +142,11 @@ impl SyncQueue {
     }
 
     /// Persist a full local row before a pull replaces or merges it.
+    ///
+    /// `local_revision`/`remote_revision` are the server revisions the decision
+    /// was made on. Both are `None` when the conflict was settled on the
+    /// timestamp path, which is a real and legitimate state — an operator
+    /// auditing the journal has to be able to tell the two regimes apart.
     pub fn record_conflict(
         &self,
         entity_type: &str,
@@ -149,11 +154,13 @@ impl SyncQueue {
         discarded_row_json: &str,
         winner_side: &str,
         strategy: &str,
+        local_revision: Option<i64>,
+        remote_revision: Option<i64>,
     ) -> Result<(), CasError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sync_conflicts (entity_type, entity_id, discarded_row_json, winner_side, strategy, resolved_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![entity_type, entity_id, discarded_row_json, winner_side, strategy, Utc::now().to_rfc3339()],
+            "INSERT INTO sync_conflicts (entity_type, entity_id, discarded_row_json, winner_side, strategy, resolved_at, local_revision, remote_revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![entity_type, entity_id, discarded_row_json, winner_side, strategy, Utc::now().to_rfc3339(), local_revision, remote_revision],
         )?;
         Ok(())
     }
@@ -175,7 +182,7 @@ impl SyncQueue {
     pub fn list_conflicts(&self, limit: usize) -> Result<Vec<SyncConflictRecord>, CasError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, entity_type, entity_id, discarded_row_json, winner_side, strategy, resolved_at FROM sync_conflicts ORDER BY id DESC LIMIT ?1",
+            "SELECT id, entity_type, entity_id, discarded_row_json, winner_side, strategy, resolved_at, local_revision, remote_revision FROM sync_conflicts ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
             Ok(SyncConflictRecord {
@@ -186,6 +193,8 @@ impl SyncQueue {
                 winner_side: row.get(4)?,
                 strategy: row.get(5)?,
                 resolved_at: row.get(6)?,
+                local_revision: row.get(7)?,
+                remote_revision: row.get(8)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)

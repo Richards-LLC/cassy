@@ -70,8 +70,9 @@ pub use me::{
     FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner, teams_cache_stale,
 };
 pub use sync_queue::{
-    EntityType, QueueHealth, QueuedSync, SyncOperation, SyncQueue,
+    EntityType, QueueHealth, QueuedSync, SYNC_REVISION_STATEMENTS, SyncOperation, SyncQueue,
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,
+    parse_wire_revision, wire_revision,
 };
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,

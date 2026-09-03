@@ -199,6 +199,10 @@ pub struct SyncConflictRecord {
     pub winner_side: String,
     pub strategy: String,
     pub resolved_at: String,
+    /// Server revisions the decision was made on; `None` when the conflict was
+    /// settled by timestamp because one side had no revision.
+    pub local_revision: Option<i64>,
+    pub remote_revision: Option<i64>,
 }
 
 /// Pending items grouped by entity type

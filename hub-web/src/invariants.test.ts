@@ -444,6 +444,56 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).not.toContain('class="sessions"');
   });
 
+  it("puts a session picker and a back control in the primary chrome on both layouts", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // The session name in the header is the switch. It is the only chrome that
+    // is always visible on a phone, where the ⌘K palette is display:none.
+    expect(main).toContain('id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog"');
+    expect(main).toContain('<dialog id="session-picker" class="command-palette session-picker">');
+    expect(main).toContain('document.querySelector<HTMLButtonElement>("#session-picker-toggle")!.onclick = openSessionPicker;');
+    expect(main).toContain('if (back) back.onclick = goBack;');
+    expect(main).toContain('backTarget ? `<button id="session-back" class="session-back"');
+    // Every session the hub exposes, with its role and status — a bare animal
+    // name does not distinguish one supervisor from another.
+    expect(main).toContain("const role = entry.supervisor ? `${entry.role} ${entry.supervisor}` : entry.role;");
+    expect(main).toContain('[role, workers, entry.status].filter(Boolean).join(" · ")');
+    // The hub reports an empty worker list for sessions that plainly have
+    // workers, so the count is omitted rather than stated as zero.
+    expect(main).toContain("const workers = entry.workerCount > 0 ?");
+    expect(main).toContain('if (entry.current) button.setAttribute("aria-current", "true");');
+    // A five-second heartbeat render must not close the picker mid-choice.
+    expect(main).toContain('if (sessionPickerOpen) document.querySelector<HTMLDialogElement>("#session-picker")?.showModal();');
+    expect(css).toContain(".session-identity {");
+    expect(css).toContain(".session-back {");
+    expect(css).toContain('.session-picker-entry[aria-current="true"]');
+    expect(css).toContain(".session-back { width: var(--space-10); }");
+  });
+
+  it("routes every navigation through one recorded selection and restores the last session on reopen", async () => {
+    const main = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // One trail: a machine pick, a session open, an attention jump, and a
+    // pairing all record the same way, so back and restore never disagree.
+    expect(main).toContain("function commitSelection(next: SessionSelection): void {");
+    expect(main).toContain("selection = selectSelection(selection, next);");
+    expect(main).toContain("saveStoredSelection(selectionStorage(), next);");
+    expect(main).toContain("commitSelection({ machineId: machine.id });");
+    expect(main).toContain("commitSelection({ machineId, session });");
+    // Back re-attaches without recording a new step forward.
+    expect(main).toContain("selection = goBackSelection(selection);");
+    expect(main).toContain("if (previous.session) void attachSelectedSession(previous.machineId, previous.session);");
+    // D14: reopening landed on "No session open" because boot only restored a
+    // machine. The session is claimed against the hub's own list.
+    expect(main).toContain("const lastSelection = loadStoredSelection(selectionStorage());");
+    expect(main).toContain("restoreTarget = restoredMachineId && lastSelection?.session ? lastSelection : undefined;");
+    expect(main).toContain("restoreLastSession(machine.id, items);");
+    expect(main).toContain("const session = restorableSession(restoreTarget, machineId, items);");
+    expect(main).toContain("if (selectedSession !== undefined) return;");
+    // A removed machine must not survive in the back stack or in storage.
+    expect(main).toContain("selection = forgetMachine(selection, selected.id);");
+    expect(main).toContain("clearStoredSelection(selectionStorage());");
+    expect(main).not.toContain("selectedMachineId = machines.keys().next().value; selectedSession = undefined;");
+  });
+
   it("captures both legacy and relay pairing drafts before a background render replaces markup", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source.indexOf("if (captureDraft) capturePairingDraft();")).toBeLessThan(source.indexOf("app.innerHTML ="));

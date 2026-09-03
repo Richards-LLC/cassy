@@ -548,6 +548,91 @@ main {
 
 .session-header h1.toolbar-session-title { font-family: var(--font-mono); }
 
+/* Where you are, and the way back out of it, sit together at the start of the
+   header: the same two controls on a desktop and under a thumb. */
+.session-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.session-back {
+  flex: 0 0 auto;
+  display: inline-flex;
+  width: var(--space-8);
+  min-height: var(--space-8);
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--text-mid);
+  background: var(--bg-raised);
+  border: none;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-lg);
+  line-height: 1;
+}
+
+.session-picker-toggle {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  min-height: var(--space-8);
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-1);
+  color: inherit;
+  background: var(--color-transparent);
+  border: none;
+  border-radius: var(--radius-card);
+  font: inherit;
+}
+
+/* The caret is the only sign that the session name is a control, so the name
+   yields width to it rather than pushing it out of the clipped header. */
+.session-picker-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-picker-caret {
+  flex: 0 0 auto;
+  color: var(--text-lo);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+}
+
+.picker-machine {
+  margin: var(--space-2) 0 0;
+  color: var(--text-lo);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.session-picker-entry {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.session-picker-entry .session-name { grid-column: 1; font-size: var(--fs-base); }
+.session-picker-entry .session-meta { grid-column: 1 / -1; color: var(--text-lo); font-size: var(--fs-xs); }
+.session-picker-entry .session-summary-title { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-sm); }
+.session-picker-entry .phase-chip { grid-column: 1; justify-self: start; }
+.session-picker-entry[aria-current="true"] { background: var(--bg-active); }
+
+.session-picker-current {
+  grid-column: 2;
+  grid-row: 1;
+  color: var(--state-info);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-label);
+}
+
 .machine-chip,
 .mode-badge,
 .connection-summary {
@@ -1709,6 +1794,11 @@ fieldset {
   }
 
   .session-header h1 { font-size: var(--fs-md); }
+
+  /* Switching session and stepping back are the two phone gestures this header
+     exists for, so they get the widest targets in it. */
+  .session-back { width: var(--space-10); }
+  .session-picker-toggle { padding-right: var(--space-2); }
 
   .machine-chip { display: none; }
 

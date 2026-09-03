@@ -64,11 +64,13 @@ and do not claim success without its receipt.
    Save the PID; watch kill -0 <pid> and a done marker, and kill by PID only.
    Do not use pkill -f. Watch the Release workflow without foreground polling.
 9. Verify published assets with scripts/release-published-receipt.sh
-   --write-draft and scripts/release-latency-receipt.sh. Post the configured
-   supervisor session's Slack route (never assume an email/profile): User
-   top-level then one reply, then Dev top-level then one reply. Write POSTED
-   only with ts and permalink for all four messages. Tell the operator when
-   publishing occurs and report a timeline naming the blocking step.
+   --write-draft and scripts/release-latency-receipt.sh. Post through the
+   mecha-cassy skill, the default Slack transport for every harness; fall back
+   to the configured supervisor session's Slack route only when the hub is
+   unavailable, and never assume an email/profile. Order is User top-level then
+   one reply, then Dev top-level then one reply. Write POSTED only with ts and
+   permalink for all four messages. Tell the operator when publishing occurs
+   and report a timeline naming the blocking step.
 10. Run cas update on the host and verify cas --version and cas hub. Carry the
     POSTED receipt into the next prep commit. Close the epic only after the
     merge commit receipt and stranded-branch inspection; if sibling lanes

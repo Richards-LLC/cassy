@@ -15,7 +15,9 @@ use crate::error::CasError;
 mod dependency_tombstones;
 mod maintenance;
 mod metadata;
+mod quarantine;
 mod queue_ops;
+mod revisions;
 mod schema;
 mod stats;
 #[cfg(test)]
@@ -25,6 +27,8 @@ mod types;
 pub use dependency_tombstones::{
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,
 };
+pub use quarantine::{QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QuarantinedRow};
+pub use revisions::{SYNC_REVISION_STATEMENTS, parse_wire_revision, wire_revision};
 pub use types::{
     EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncConflictRecord,
     SyncOperation,
@@ -65,12 +69,19 @@ impl SyncQueue {
     pub fn init(&self) -> Result<(), CasError> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(schema::SCHEMA)?;
-        for statement in TASK_DEPENDENCY_TOMBSTONE_STATEMENTS {
+        for statement in TASK_DEPENDENCY_TOMBSTONE_STATEMENTS
+            .iter()
+            .chain(SYNC_REVISION_STATEMENTS.iter())
+        {
+            conn.execute_batch(statement)?;
+        }
+        for statement in QUARANTINED_ROW_STATEMENTS {
             conn.execute_batch(statement)?;
         }
 
         // Migration: add team_id column if missing (for existing databases)
         self.migrate_team_id(&conn)?;
+        self.migrate_conflict_revisions(&conn)?;
 
         // Migration: add the per-row cloud verdict columns. This runs after the
         // team_id migration because that path can rebuild sync_queue from an

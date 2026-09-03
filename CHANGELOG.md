@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+- `cas doctor` prints task ids, agent UUIDs and timestamps exactly as they are,
+  so they can be copied straight into the next command. A digit-grouping pass
+  ran over each finished line with no way to tell a count from an identifier,
+  turning `cas-7791` into `cas-7,791`, making UUIDs unpasteable and adding
+  three commas to a timestamp; counts now print as plain integers instead.
+  The cross-project row line also said "cannot reach 4 rows" while listing six
+  — the number now describes the list it prints, and when the delete-set
+  shortfall genuinely differs from the rows named, both numbers are stated.
+  (GH #697)
+
 ## [3.15.0] - 2026-09-03
 
 ### Added
@@ -40,6 +51,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 
 ### Added
+- Task rows that a past sync leak copied into the wrong project — rows nothing
+  on this machine can place — can now be put aside. `cas doctor
+  --fix-cloud-rows` shows exactly which rows it would set aside and changes
+  nothing until you add `--yes`; those rows then leave the ready queue and are
+  never sent to the cloud, while staying readable by id and restorable with
+  `--release-cloud-rows`. The rows themselves are untouched, so a later sync
+  cannot bring them back into view. `cas doctor` now reports how many rows are
+  unplaceable, how many are set aside, and how many share an id with a
+  different task — the last group is left alone on purpose, because those need
+  a new id rather than removal. (GH #701)
 - Two supervisors working the same checkout are now visible to each other.
   `cas doctor`, `worker_status` and every spawn receipt name both sessions and
   when each started, and say plainly that a reset, merge or shutdown from

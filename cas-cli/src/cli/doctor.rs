@@ -34,6 +34,26 @@ pub struct DoctorArgs {
     /// 4-hex task ids collide across projects.
     #[arg(long)]
     pub foreign_rows: bool,
+
+    /// Quarantine this project's unattributed task rows (cas-4342 / GH #701):
+    /// rows replicated here by the `cas-ed15` pull leak whose home project
+    /// cannot be established from any database on this host. Quarantine is
+    /// local and reversible — the row is hidden from the board and never
+    /// pushed, but is left byte-for-byte intact and stays readable by id.
+    ///
+    /// Reports the plan and changes nothing unless `--yes` is also passed.
+    #[arg(long)]
+    pub fix_cloud_rows: bool,
+
+    /// Release every locally quarantined row (the reverse of
+    /// `--fix-cloud-rows`). Reports the plan; applies only with `--yes`.
+    #[arg(long)]
+    pub release_cloud_rows: bool,
+
+    /// Apply the reported `--fix-cloud-rows` / `--release-cloud-rows` plan
+    /// instead of only printing it.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 struct Check {
@@ -1002,6 +1022,9 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             ),
             (Err(_), _) => (None, None),
         };
+        if args.fix_cloud_rows || args.release_cloud_rows {
+            return run_cloud_row_quarantine(&cas_root, report, args, cli);
+        }
         if args.foreign_rows {
             return output_foreign_rows_detail(
                 report,
@@ -1012,13 +1035,20 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
         checks.push(cloud_queue_check(&cas_root));
         checks.extend(sync_warning_checks(&sync_warnings));
+        // Quarantine is local state, so an unreadable ledger reports zero
+        // rather than failing the whole check: the check's job is to describe
+        // contamination, not to depend on the remedy's bookkeeping.
+        let quarantined_count = crate::cloud::SyncQueue::open(&cas_root)
+            .and_then(|queue| queue.quarantined_count(crate::cloud::QUARANTINE_TASK))
+            .unwrap_or(0);
         let foreign_check = match purge_analysis_error.as_deref() {
             Some(error) => foreign_rows_check_with_classifier_error(
                 report.as_ref(),
                 purge_analysis.as_ref(),
                 Some(error),
+                quarantined_count,
             ),
-            None => foreign_rows_check(report.as_ref(), purge_analysis.as_ref()),
+            None => foreign_rows_check(report.as_ref(), purge_analysis.as_ref(), quarantined_count),
         };
         checks.push(foreign_check);
     } else if args.foreign_rows {
@@ -1158,14 +1188,16 @@ fn legacy_versioned_search_index_check(cas_root: &Path) -> Option<Check> {
 fn foreign_rows_check(
     report: Result<&crate::cli::foreign_rows::ForeignRowReport, &anyhow::Error>,
     purge_analysis: Option<&crate::cli::cloud::PurgeForeignAnalysis>,
+    quarantined_count: usize,
 ) -> Check {
-    foreign_rows_check_with_classifier_error(report, purge_analysis, None)
+    foreign_rows_check_with_classifier_error(report, purge_analysis, None, quarantined_count)
 }
 
 fn foreign_rows_check_with_classifier_error(
     report: Result<&crate::cli::foreign_rows::ForeignRowReport, &anyhow::Error>,
     purge_analysis: Option<&crate::cli::cloud::PurgeForeignAnalysis>,
     purge_analysis_error: Option<&str>,
+    quarantined_count: usize,
 ) -> Check {
     let report = match report {
         Ok(report) => report,
@@ -1192,9 +1224,17 @@ fn foreign_rows_check_with_classifier_error(
         if evidence_count == purge_count {
             message.push_str(" — counts agree");
         } else if evidence_count > purge_count {
+            // GH #697 (cas-a869): the printed number must describe the list
+            // that follows it. This used to print `evidence_count -
+            // purge_count` and then list `retained_foreign_tasks`, a different
+            // set, so an operator read "cannot reach 4" above six ids and had
+            // no way to tell which number was wrong. When the two genuinely
+            // disagree, both are real and both are stated — neither stands in
+            // for the other.
             let gap = evidence_count - purge_count;
-            message.push_str(&format!(" — purge cannot reach {gap} evidence row(s)"));
-            if !analysis.retained_foreign_tasks.is_empty() {
+            let named = analysis.retained_foreign_tasks.len();
+            if named > 0 {
+                message.push_str(&format!(" — purge cannot reach {named} evidence row(s)"));
                 let retained = analysis
                     .retained_foreign_tasks
                     .iter()
@@ -1202,6 +1242,15 @@ fn foreign_rows_check_with_classifier_error(
                     .collect::<Vec<_>>()
                     .join(", ");
                 message.push_str(&format!(": {retained}"));
+                if named != gap {
+                    message.push_str(&format!(
+                        " (delete-set shortfall is {gap} row(s); the {named} named above are the rows purge identified and retained)"
+                    ));
+                }
+            } else {
+                message.push_str(&format!(
+                    " — purge cannot reach {gap} evidence row(s); none were individually identified"
+                ));
             }
         } else {
             message.push_str(&format!(
@@ -1210,12 +1259,18 @@ fn foreign_rows_check_with_classifier_error(
             ));
         }
         if analysis.unattributed_task_count > 0 || analysis.collision_count > 0 {
+            // Deliberately no longer says "neither category is deletable" and
+            // stops there: unattributed rows now have a reversible local
+            // remedy, and the remediation clause below states it (cas-4342).
             message.push_str(&format!(
-                ". purge excludes {} unattributed task row(s) and {} id collision(s); neither category is deletable",
+                ". purge excludes {} unattributed task row(s) and {} id collision(s) — deleting either would destroy real work",
                 analysis.unattributed_task_count,
                 analysis.collision_count
             ));
         }
+    }
+    if let Some(remediation) = cloud_row_remediation_summary(report, quarantined_count) {
+        message.push_str(&remediation);
     }
     if let Some(error) = purge_analysis_error {
         message.push_str(&format!(
@@ -1262,6 +1317,169 @@ fn foreign_rows_check_with_classifier_error(
 }
 
 /// `cas doctor --foreign-rows`: the full read-only contamination listing.
+/// Rows this project would quarantine: unattributed and not already closed.
+///
+/// A closed unattributed row is not lying to anyone — it is not in a ready
+/// queue and nobody is going to pick it up — so quarantining it would be churn
+/// with no operator benefit. Collisions are deliberately absent: a collision
+/// means two rows share an id while their titles *differ*, so the peer row is
+/// no evidence about the local one, and hiding a row that may be this
+/// project's real work is exactly the harm GH #133 documented. Those need an
+/// id rekey, which is a separate, non-destructive piece of work.
+pub(crate) fn quarantine_candidates(
+    report: &crate::cli::foreign_rows::ForeignRowReport,
+) -> Vec<&crate::cli::foreign_rows::UnattributedRow> {
+    report
+        .unattributed
+        .iter()
+        .filter(|row| !row.closed)
+        .collect()
+}
+
+/// One sentence of remediation state for the `cross-project rows` check:
+/// how many rows are unattributed, how many are already quarantined, and why
+/// collisions are excluded.
+pub(crate) fn cloud_row_remediation_summary(
+    report: &crate::cli::foreign_rows::ForeignRowReport,
+    quarantined: usize,
+) -> Option<String> {
+    if report.unattributed.is_empty() && report.collisions.is_empty() && quarantined == 0 {
+        return None;
+    }
+    let mut message = String::new();
+    if !report.unattributed.is_empty() || quarantined > 0 {
+        message.push_str(&format!(
+            ". unattributed: {} row(s) ({} open), {quarantined} quarantined locally — quarantined rows are hidden from the board and never pushed, and the row itself is untouched (`cas doctor --fix-cloud-rows --yes` to quarantine the open ones, `--release-cloud-rows --yes` to reverse)",
+            report.unattributed.len(),
+            report.unattributed_open(),
+        ));
+    }
+    if !report.collisions.is_empty() {
+        message.push_str(&format!(
+            ". id collisions: {} — two rows sharing an id whose titles differ, so a peer row is not evidence about the local row; these are neither deletable nor quarantinable and need an id rekey (GH #133)",
+            report.collisions.len()
+        ));
+    }
+    Some(message)
+}
+
+/// `cas doctor --fix-cloud-rows` / `--release-cloud-rows`.
+///
+/// Report-then-apply: without `--yes` this prints exactly what it would change
+/// and touches nothing, because the operator is being asked to accept a
+/// judgement about rows whose owner nobody can name.
+fn run_cloud_row_quarantine(
+    cas_root: &Path,
+    report: anyhow::Result<crate::cli::foreign_rows::ForeignRowReport>,
+    args: &DoctorArgs,
+    cli: &Cli,
+) -> anyhow::Result<()> {
+    let report = report?;
+    let queue = crate::cloud::SyncQueue::open(cas_root)?;
+    queue.init()?;
+    let already = queue.quarantined_ids(crate::cloud::QUARANTINE_TASK)?;
+
+    let (action, planned): (&str, Vec<(String, String)>) = if args.release_cloud_rows {
+        (
+            "release",
+            queue
+                .quarantined_rows(crate::cloud::QUARANTINE_TASK)?
+                .into_iter()
+                .map(|row| (row.entity_id, row.reason))
+                .collect(),
+        )
+    } else {
+        (
+            "quarantine",
+            quarantine_candidates(&report)
+                .into_iter()
+                .filter(|row| !already.contains(&row.id))
+                .map(|row| (row.id.clone(), row.title.clone()))
+                .collect(),
+        )
+    };
+
+    let applied = if args.yes {
+        let mut applied = 0usize;
+        for (id, _) in &planned {
+            let changed = if args.release_cloud_rows {
+                queue.release_quarantined_row(crate::cloud::QUARANTINE_TASK, id)?
+            } else {
+                queue.quarantine_row(
+                    crate::cloud::QUARANTINE_TASK,
+                    id,
+                    "unattributed cloud row (cas doctor --fix-cloud-rows)",
+                )?
+            };
+            if changed {
+                applied += 1;
+            }
+        }
+        Some(applied)
+    } else {
+        None
+    };
+    let quarantined_now = queue.quarantined_count(crate::cloud::QUARANTINE_TASK)?;
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "action": action,
+                "applied": applied.is_some(),
+                "planned": planned.iter().map(|(id, detail)| serde_json::json!({
+                    "id": id,
+                    "detail": detail,
+                })).collect::<Vec<_>>(),
+                "planned_count": planned.len(),
+                "changed_count": applied,
+                "quarantined_before": already.len(),
+                "quarantined_after": quarantined_now,
+                "unattributed_total": report.unattributed.len(),
+                "unattributed_open": report.unattributed_open(),
+                "id_collisions": report.collisions.len(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    let theme = ActiveTheme::default();
+    let mut out = std::io::stdout();
+    let mut fmt = Formatter::stdout(&mut out, theme);
+    fmt.subheading(&format!("cloud rows — {action}"))?;
+    fmt.write_muted(&"─".repeat(50))?;
+    fmt.newline()?;
+    fmt.write_muted(&format!(
+        "project `{}`: {} unattributed row(s) ({} open), {} already quarantined, {} id collision(s) excluded (they need an id rekey, not a purge)",
+        report.local_project,
+        report.unattributed.len(),
+        report.unattributed_open(),
+        already.len(),
+        report.collisions.len(),
+    ))?;
+    fmt.newline()?;
+
+    for (id, detail) in planned.iter().take(20) {
+        fmt.write_muted(&format!("  {id}  {detail}"))?;
+        fmt.newline()?;
+    }
+    if planned.len() > 20 {
+        fmt.write_muted(&format!("  … and {} more", planned.len() - 20))?;
+        fmt.newline()?;
+    }
+
+    match applied {
+        Some(changed) => fmt.success(&format!(
+            "{action}d {changed} row(s); {quarantined_now} row(s) now quarantined. Quarantine is local state: it is reapplied to no row and survives every pull, because the pull never writes this ledger."
+        ))?,
+        None => fmt.warning(&format!(
+            "DRY RUN — nothing changed. {} row(s) would be {action}d; re-run with --yes to apply.",
+            planned.len()
+        ))?,
+    }
+    Ok(())
+}
+
 fn output_foreign_rows_detail(
     report: anyhow::Result<crate::cli::foreign_rows::ForeignRowReport>,
     purge_analysis: Option<&crate::cli::cloud::PurgeForeignAnalysis>,
@@ -2613,7 +2831,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn grouped_report_uses_sections_remediation_and_counted_summary() {
+    fn grouped_report_uses_sections_remediation_and_a_verbatim_summary() {
         let checks = vec![
             Check::new("database", CheckStatus::Ok, "SQLite database found"),
             Check::new("entries", CheckStatus::Ok, "1234567 entries accessible"),
@@ -2639,7 +2857,12 @@ mod tests {
         assert!(report.contains("[OK] entries"));
         assert!(report.contains("[WARN] search index"));
         assert!(report.contains("  → Run `cas index`"));
-        assert!(report.contains("1,234,567 entries accessible"));
+        // GH #697 (cas-a869): counts render verbatim. The digit-grouping
+        // pass that produced `1,234,567` here also produced `cas-7,791` and
+        // comma-riddled UUIDs on real reports, so it is gone rather than
+        // narrowed.
+        assert!(report.contains("1234567 entries accessible"));
+        assert!(!report.contains("1,234,567"));
         assert!(report.contains("2 ok · 1 warnings · 0 errors · 123ms"));
     }
 
@@ -2964,6 +3187,252 @@ mod tests {
     /// while two supervisors share one clone and either can reap the other's
     /// workers. The per-session verdicts must stay green (they are correct in
     /// isolation) and the cross-session pass must add the warning.
+    /// GH #697 (cas-a869): identifiers and timestamps must survive rendering
+    /// byte-for-byte. The report used to run a digit-grouping pass over the
+    /// whole rendered line, so `cas-7791` printed as `cas-7,791`, a UUID
+    /// became unpasteable, and an RFC3339 timestamp grew three commas — it
+    /// corrupted exactly the tokens an operator copies into the next command.
+    #[test]
+    fn rendered_messages_never_group_digits_inside_ids_uuids_or_timestamps() {
+        let check = Check {
+            name: "cross-project rows".to_string(),
+            status: CheckStatus::Warning,
+            message: "cas-7791 held by befc4155-89ca-4fb3-9b05-65323a4bf357 \
+                      recorded_at=2026-09-03T18:59:18.226617643+00:00 across 3240 rows"
+                .to_string(),
+        };
+
+        let rendered = full_message(&check);
+
+        assert!(
+            !rendered.contains(','),
+            "no separator may be injected anywhere in a rendered line: {rendered}"
+        );
+        assert!(rendered.contains("cas-7791"), "{rendered}");
+        assert!(
+            rendered.contains("befc4155-89ca-4fb3-9b05-65323a4bf357"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("2026-09-03T18:59:18.226617643+00:00"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("3240 rows"), "{rendered}");
+    }
+
+    /// The JSON surface renders through its own path, so pin it separately —
+    /// a machine reader is exactly who cannot tolerate `cas-7,791`.
+    #[test]
+    fn serialized_checks_keep_identifiers_verbatim() {
+        let checks = vec![Check {
+            name: "factory session".to_string(),
+            status: CheckStatus::Ok,
+            message: "supervisors: 1; noble-koala-5 (befc4155-89ca-4fb3-9b05-65323a4bf357)"
+                .to_string(),
+        }];
+
+        let serialized = serialize_checks(&checks);
+        let message = serialized[0]["message"].as_str().expect("message string");
+        assert_eq!(
+            message,
+            "supervisors: 1; noble-koala-5 (befc4155-89ca-4fb3-9b05-65323a4bf357)"
+        );
+    }
+
+    /// GH #697 defect (b): the line said "cannot reach 4 evidence row(s)" and
+    /// then listed six ids, because the number was an arithmetic gap over one
+    /// set while the ids came from another. The printed count must describe
+    /// the list actually printed.
+    #[test]
+    fn unreachable_row_count_matches_the_rows_it_lists() {
+        use crate::cli::cloud::{
+            PurgeDeleteSet, PurgeEntity, PurgeForeignAnalysis, PurgeRetainedTask,
+        };
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
+
+        let report = ForeignRowReport {
+            local_project: "gabber-studio".to_string(),
+            local_task_count: 900,
+            peers_compared: vec!["cas-src".to_string()],
+            foreign: (0..10)
+                .map(|index| ForeignRow {
+                    id: format!("cas-f{index:03}"),
+                    title: format!("Foreign row {index}"),
+                    closed: false,
+                    origin_project: None,
+                    home_project: "cas-src".to_string(),
+                    also_present_in: Vec::new(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        // Ten rows of evidence, six of which purge cannot reach, but a delete
+        // set of six — so the arithmetic gap (4) and the retained list (6)
+        // disagree. Both numbers are real; neither may stand in for the other.
+        let analysis = PurgeForeignAnalysis {
+            foreign_task_count: 10,
+            delete_set: PurgeDeleteSet {
+                tasks: (0..6)
+                    .map(|index| {
+                        PurgeEntity::with_evidence(
+                            "task",
+                            &format!("cas-d{index:03}"),
+                            "Deletable foreign row",
+                            "peer-evidence",
+                            "cas-src",
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            retained_foreign_tasks: (0..6)
+                .map(|index| PurgeRetainedTask {
+                    id: format!("cas-r{index:03}"),
+                    title: format!("Retained row {index}"),
+                    reason: "id collision".to_string(),
+                })
+                .collect(),
+            unattributed_task_count: 0,
+            collision_count: 0,
+        };
+
+        let check = foreign_rows_check(Ok(&report), Some(&analysis), 0);
+
+        let listed = check.message.matches("cas-r").count();
+        assert_eq!(listed, 6, "fixture must list six ids: {}", check.message);
+        assert!(
+            check.message.contains("purge cannot reach 6 evidence row(s)"),
+            "the printed count must describe the list it prints: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("cannot reach 4"),
+            "the arithmetic gap must not masquerade as the listed count: {}",
+            check.message
+        );
+    }
+
+    /// GH #701 (cas-4342): the check has to say how many rows are
+    /// unattributed, how many are already quarantined, and why collisions are
+    /// excluded — the old wording stopped at "neither category is deletable",
+    /// which left the operator with a count and no move.
+    #[test]
+    fn cross_project_check_reports_quarantine_counts_and_the_collision_rekey_recommendation() {
+        use crate::cli::foreign_rows::{ForeignRowReport, IdCollision, UnattributedRow};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 900,
+            peers_compared: vec!["gabber-studio".to_string()],
+            unattributed: vec![
+                UnattributedRow {
+                    id: "cas-u001".to_string(),
+                    title: "Open replica nobody can place".to_string(),
+                    closed: false,
+                    present_in: vec!["gabber-studio".to_string()],
+                },
+                UnattributedRow {
+                    id: "cas-u002".to_string(),
+                    title: "Finished replica".to_string(),
+                    closed: true,
+                    present_in: vec!["gabber-studio".to_string()],
+                },
+            ],
+            collisions: vec![IdCollision {
+                id: "cas-c001".to_string(),
+                local_title: "Real local work".to_string(),
+                other_project: "gabber-studio".to_string(),
+                other_title: "A different real task".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let check = foreign_rows_check(Ok(&report), None, 1);
+
+        assert!(
+            check.message.contains("unattributed: 2 row(s) (1 open), 1 quarantined locally"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cas doctor --fix-cloud-rows --yes"),
+            "the reversible remedy must be named: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("--release-cloud-rows"),
+            "the reversal must be named too: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("id collisions: 1") && check.message.contains("id rekey"),
+            "collisions must carry the rekey recommendation, not a purge: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("neither category is deletable"),
+            "the pre-remediation wording must be gone: {}",
+            check.message
+        );
+    }
+
+    /// A clean project must not grow a remediation clause it does not need.
+    #[test]
+    fn cross_project_check_stays_silent_about_quarantine_when_there_is_nothing_to_quarantine() {
+        use crate::cli::foreign_rows::ForeignRowReport;
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 12,
+            peers_compared: vec!["gabber-studio".to_string()],
+            ..Default::default()
+        };
+        let check = foreign_rows_check(Ok(&report), None, 0);
+        assert!(
+            !check.message.contains("quarantined locally"),
+            "{}",
+            check.message
+        );
+    }
+
+    /// Only open unattributed rows are candidates: a closed one is not in
+    /// anybody's ready queue, and a collision must never be hidden.
+    #[test]
+    fn quarantine_candidates_are_open_unattributed_rows_only() {
+        use crate::cli::foreign_rows::{ForeignRowReport, IdCollision, UnattributedRow};
+
+        let report = ForeignRowReport {
+            unattributed: vec![
+                UnattributedRow {
+                    id: "cas-open".to_string(),
+                    title: "Open replica".to_string(),
+                    closed: false,
+                    present_in: Vec::new(),
+                },
+                UnattributedRow {
+                    id: "cas-closed".to_string(),
+                    title: "Closed replica".to_string(),
+                    closed: true,
+                    present_in: Vec::new(),
+                },
+            ],
+            collisions: vec![IdCollision {
+                id: "cas-collide".to_string(),
+                local_title: "Real local work".to_string(),
+                other_project: "gabber-studio".to_string(),
+                other_title: "Different task, same id".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let ids: Vec<&str> = quarantine_candidates(&report)
+            .into_iter()
+            .map(|row| row.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["cas-open"]);
+    }
+
     #[test]
     fn two_live_supervisor_sessions_add_an_overlap_warning_beside_green_session_checks() {
         use crate::types::AgentRole;
@@ -3068,7 +3537,7 @@ mod tests {
         };
         let _ = DbSnapshot::default(); // keep the public snapshot type exercised
 
-        let check = foreign_rows_check(Ok(&report), None);
+        let check = foreign_rows_check(Ok(&report), None, 0);
 
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(
@@ -3143,7 +3612,7 @@ mod tests {
             collision_count: 0,
         };
 
-        let check = foreign_rows_check(Ok(&report), Some(&analysis));
+        let check = foreign_rows_check(Ok(&report), Some(&analysis), 0);
 
         assert!(
             check.message.contains("foreign evidence: 2"),
@@ -3178,7 +3647,7 @@ mod tests {
             ..Default::default()
         };
 
-        let check = foreign_rows_check(Ok(&report), None);
+        let check = foreign_rows_check(Ok(&report), None, 0);
 
         assert!(matches!(check.status, CheckStatus::Ok));
         // An Ok row that just said "clean" would be indistinguishable from a
@@ -3210,7 +3679,7 @@ mod tests {
         // Same reassuring-zero failure mode as the canonical-id registry row:
         // a scan that could not run must not render as "no contamination".
         let err = anyhow::anyhow!("disk I/O error");
-        let check = foreign_rows_check(Err(&err), None);
+        let check = foreign_rows_check(Err(&err), None, 0);
 
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("SKIPPED"), "{}", check.message);
@@ -3538,7 +4007,7 @@ mod tests {
             ..Default::default()
         };
 
-        let check = foreign_rows_check(Ok(&report), None);
+        let check = foreign_rows_check(Ok(&report), None, 0);
 
         // Clean against what could be read, but partial coverage is not a
         // clean bill of health.
@@ -4590,35 +5059,16 @@ fn check_claude_code_mcp(project_root: &Path) -> Check {
     }
 }
 
-fn format_counted_text(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut digits = String::new();
-    let flush = |result: &mut String, digits: &mut String| {
-        if digits.len() > 3 {
-            for (index, digit) in digits.chars().enumerate() {
-                if index > 0 && (digits.len() - index) % 3 == 0 {
-                    result.push(',');
-                }
-                result.push(digit);
-            }
-        } else {
-            result.push_str(digits);
-        }
-        digits.clear();
-    };
-
-    for ch in text.chars() {
-        if ch.is_ascii_digit() {
-            digits.push(ch);
-        } else {
-            flush(&mut result, &mut digits);
-            result.push(ch);
-        }
-    }
-    flush(&mut result, &mut digits);
-    result
-}
-
+/// Rendered report text is emitted verbatim (GH #697 / cas-a869).
+///
+/// A digit-grouping pass used to run over each finished line, with no way to
+/// know whether a digit run was a count or part of an identifier. It turned
+/// `cas-7791` into `cas-7,791`, made UUIDs and RFC3339 timestamps unpasteable,
+/// and so corrupted precisely the tokens an operator copies into the next
+/// command. Grouping was cosmetic; the corruption was not, so the pass is
+/// gone and counts render as plain integers. Do not reintroduce a
+/// post-processing pass over rendered lines — any future grouping must happen
+/// where the number is still a number, before it becomes prose.
 fn status_label(status: &CheckStatus, styled: bool) -> &'static str {
     if styled {
         match status {
@@ -4644,7 +5094,7 @@ fn status_name(status: &CheckStatus) -> &'static str {
 }
 
 fn full_message(check: &Check) -> String {
-    format_counted_text(&check.message)
+    check.message.clone()
 }
 
 fn serialize_checks(checks: &[Check]) -> Vec<serde_json::Value> {
@@ -4655,9 +5105,9 @@ fn serialize_checks(checks: &[Check]) -> Vec<serde_json::Value> {
             serde_json::json!({
                 "name": check.name,
                 "status": status_name(&check.status),
-                "message": format_counted_text(&message),
+                "message": message,
                 "group": check.group().json_name(),
-                "remediation": remediation.map(|text| format_counted_text(&text)),
+                "remediation": remediation,
             })
         })
         .collect()
@@ -4823,7 +5273,7 @@ fn render_report(
             );
             let available = width.saturating_sub(prefix.chars().count()).max(1);
             let (message, remediation) = check.parts();
-            let message_lines = wrap_report_text(&format_counted_text(&message), available);
+            let message_lines = wrap_report_text(&message, available);
             let hanging_indent = " ".repeat(prefix.chars().count());
             for (line_index, message_line) in message_lines.iter().enumerate() {
                 let line = if line_index == 0 {
@@ -4834,11 +5284,7 @@ fn render_report(
                 write_report_line(fmt, Some(&check.status), &line)?;
             }
             if let Some(remediation) = remediation {
-                fmt.write_muted(&format!(
-                    "  {} {}",
-                    Icons::ARROW_RIGHT,
-                    format_counted_text(&remediation)
-                ))?;
+                fmt.write_muted(&format!("  {} {}", Icons::ARROW_RIGHT, remediation))?;
                 fmt.newline()?;
             }
         }

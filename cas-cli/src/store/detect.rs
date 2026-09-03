@@ -374,7 +374,22 @@ fn open_task_store_base(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
     let origin_project = crate::cloud::resolve_canonical_id(cas_dir);
     let store = SqliteTaskStore::open_with_origin_project(cas_dir, origin_project.as_deref())?;
     store.init()?;
-    let base_store: Arc<dyn TaskStore> = Arc::new(store);
+    let mut base_store: Arc<dyn TaskStore> = Arc::new(store);
+
+    // cas-4342 (GH #701): rows quarantined by `cas doctor --fix-cloud-rows`
+    // are hidden from every list surface here, at the one seam they all share,
+    // rather than at each board caller. Innermost on purpose: the wrappers
+    // above must see the same board the operator does. A ledger that cannot be
+    // opened simply hides nothing — a suppression must never be able to take
+    // the whole task store down with it.
+    if let Ok(queue) = crate::cloud::SyncQueue::open(cas_dir) {
+        let queue = Arc::new(queue);
+        if queue.quarantined_count(crate::cloud::QUARANTINE_TASK).is_ok() {
+            base_store = Arc::new(crate::store::QuarantineFilteringTaskStore::new(
+                base_store, queue,
+            ));
+        }
+    }
 
     if has_notifier() && config.notifications_enabled() {
         Ok(Arc::new(NotifyingTaskStore::new(

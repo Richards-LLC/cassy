@@ -1873,29 +1873,35 @@ impl HistoryStore for SqliteHistoryStore {
 
         // --- Edge 1: the exact anchor. The high-confidence figure IS this one.
         if has_tasks {
+            // The anchors are materialized once and joined, rather than being
+            // recomputed inside a correlated `EXISTS` per commit. The
+            // correlated form parses every task's `deliverables` JSON once per
+            // (commit, task) pair: on the GH #700 store — 8,509 commits,
+            // 4,465 tasks, kilobyte payloads — that single query measured
+            // 77.6s, and `cas doctor` spent 121s of 126s in this function.
+            // Same rows, same count, 0.02s (cas-ba01).
             let mut stmt = conn.prepare(
-                "SELECT c.sha FROM history_commits c
-                  WHERE c.repository = ?1
-                    AND EXISTS (
-                        SELECT 1 FROM tasks t
-                         WHERE json_extract(t.deliverables, '$.factory_branch_anchor') = c.sha
-                    )",
+                "WITH anchors AS (
+                     SELECT DISTINCT
+                            json_extract(deliverables, '$.factory_branch_anchor') AS anchor
+                       FROM tasks
+                      WHERE json_extract(deliverables, '$.factory_branch_anchor') IS NOT NULL
+                 )
+                 SELECT c.sha FROM history_commits c
+                   JOIN anchors a ON a.anchor = c.sha
+                  WHERE c.repository = ?1",
             )?;
             let anchored: Vec<String> = stmt
                 .query_map(params![repository], |row| row.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
-            let anchor_total: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM tasks
-                  WHERE json_extract(deliverables, '$.factory_branch_anchor') IS NOT NULL",
-                [],
-                |row| row.get(0),
-            )?;
-            let anchor_distinct: i64 = conn.query_row(
-                "SELECT COUNT(DISTINCT json_extract(deliverables, '$.factory_branch_anchor'))
+            // One pass over `tasks` for both figures, for the same reason.
+            let (anchor_total, anchor_distinct): (i64, i64) = conn.query_row(
+                "SELECT COUNT(*),
+                        COUNT(DISTINCT json_extract(deliverables, '$.factory_branch_anchor'))
                    FROM tasks
                   WHERE json_extract(deliverables, '$.factory_branch_anchor') IS NOT NULL",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             high_confidence = Some(anchored.len() as i64);
             by_method.push((LINK_METHOD_FACTORY_ANCHOR.to_string(), anchored.len() as i64));
@@ -3990,6 +3996,63 @@ mod tests {
         assert_eq!(
             cov.by_method,
             vec![(LINK_METHOD_FACTORY_ANCHOR.to_string(), 1)]
+        );
+    }
+
+    /// GH #700 / cas-ba01: the anchor edge used to be a correlated
+    /// `EXISTS (SELECT 1 FROM tasks WHERE json_extract(...) = c.sha)`, which
+    /// evaluates `json_extract` once per (commit, task) pair. On the reporting
+    /// store — 8,509 commits and 4,465 tasks — that one query measured 77.6s,
+    /// and `cas doctor` spent 121s of its 126s inside this call.
+    ///
+    /// The budget is 1s for 4M pairs. The rewritten shape does this in
+    /// milliseconds, and the old one is measured below the assertion, so the
+    /// margin is against machine speed, not against the defect.
+    #[test]
+    fn provenance_coverage_stays_linear_in_tasks_not_commits_times_tasks() {
+        let (_t, store) = store();
+        let commits: Vec<HistoryCommit> = (0..2_000)
+            .map(|i| commit(&format!("{i:040x}")))
+            .collect();
+        {
+            let conn = store.lock();
+            conn.execute_batch(
+                "CREATE TABLE tasks (id TEXT PRIMARY KEY, deliverables TEXT NOT NULL DEFAULT '{}');",
+            )
+            .unwrap();
+            conn.execute_batch("BEGIN").unwrap();
+            // Real `deliverables` payloads are kilobytes of receipts, and the
+            // cost of the old shape was one JSON parse of that payload per
+            // (commit, task) pair. A synthetic store with two-field payloads
+            // does not reproduce the defect.
+            let filler = "x".repeat(2_000);
+            for i in 0..2_000 {
+                conn.execute(
+                    "INSERT INTO tasks (id, deliverables)
+                     VALUES (?1, json_object('factory_branch_anchor', ?2, 'notes', ?3))",
+                    params![format!("cas-{i}"), format!("{i:040x}"), filler],
+                )
+                .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+        }
+        let tip = commits.last().unwrap().sha.clone();
+        store.commit_batch("/repo", &commits, &[], &tip, true).unwrap();
+
+        let started = std::time::Instant::now();
+        let cov = store.provenance_coverage("/repo").unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(cov.total_commits, 2_000);
+        assert_eq!(
+            cov.high_confidence_linked,
+            Some(2_000),
+            "every commit has an anchoring task"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(1_000),
+            "provenance coverage took {elapsed:?} for 2,000 commits x 2,000 tasks — the anchor \
+             edge is quadratic again"
         );
     }
 

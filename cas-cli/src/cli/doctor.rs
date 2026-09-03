@@ -62,6 +62,125 @@ struct Check {
     message: String,
 }
 
+/// Wall time attributed to one check (cas-ba01 / GH #700).
+///
+/// `doctor` is a sequence of blocks that push checks onto one vector, so the
+/// unit that can honestly be measured is the block, not the individual check.
+/// When a block emits several checks they all carry the block's duration and
+/// `shared` is set, because claiming the same 60 seconds three times over
+/// without saying so would be a worse lie than the missing timing this fixes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CheckTiming {
+    phase: String,
+    duration: Duration,
+    /// How many checks this phase produced. `1` means the duration is this
+    /// check's alone.
+    checks_in_phase: usize,
+}
+
+impl CheckTiming {
+    fn shared(&self) -> bool {
+        self.checks_in_phase > 1
+    }
+
+    /// `(1.2s)`, or `(1.2s for 3 checks)` when the phase is shared.
+    fn label(&self) -> String {
+        if self.shared() {
+            format!(
+                "({} for {} checks)",
+                duration_label(self.duration),
+                self.checks_in_phase
+            )
+        } else {
+            format!("({})", duration_label(self.duration))
+        }
+    }
+}
+
+/// One measured block of `execute`, including blocks that produced no check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Phase {
+    label: String,
+    duration: Duration,
+    checks: usize,
+}
+
+/// Stopwatch over `execute`'s sequential blocks.
+///
+/// Deliberately not a closure-wrapping API: `execute` is one long imperative
+/// function with early returns, and threading every block through a closure
+/// would restructure code this task has no business restructuring. `mark` is
+/// called after a block and attributes the time since the previous mark to
+/// whatever checks appeared in that window.
+struct PhaseRecorder {
+    last: Instant,
+    phases: Vec<Phase>,
+    /// One entry per check, in check order.
+    per_check: Vec<CheckTiming>,
+}
+
+impl PhaseRecorder {
+    fn new() -> Self {
+        Self::new_at(Instant::now())
+    }
+
+    /// Start the clock at an explicit instant so timing behaviour can be
+    /// asserted exactly instead of with a tolerance window.
+    fn new_at(start: Instant) -> Self {
+        Self {
+            last: start,
+            phases: Vec::new(),
+            per_check: Vec::new(),
+        }
+    }
+
+    /// Close the current block, attributing its elapsed time to the checks
+    /// pushed since the last `mark`.
+    fn mark(&mut self, label: &str, checks: &[Check]) {
+        self.mark_at(label, checks, Instant::now())
+    }
+
+    fn mark_at(&mut self, label: &str, checks: &[Check], now: Instant) {
+        let duration = now.saturating_duration_since(self.last);
+        self.last = now;
+        let new_checks = checks.len().saturating_sub(self.per_check.len());
+        self.phases.push(Phase {
+            label: label.to_string(),
+            duration,
+            checks: new_checks,
+        });
+        for _ in 0..new_checks {
+            self.per_check.push(CheckTiming {
+                phase: label.to_string(),
+                duration,
+                checks_in_phase: new_checks,
+            });
+        }
+    }
+
+    fn per_check(&self) -> &[CheckTiming] {
+        &self.per_check
+    }
+
+    /// Phases that produced no check still spent real time; a slowest-phase
+    /// table that dropped them could not account for the total.
+    fn phases(&self) -> &[Phase] {
+        &self.phases
+    }
+
+    /// Phases worth naming, slowest first.
+    fn slowest(&self, threshold: Duration, limit: usize) -> Vec<&Phase> {
+        let mut phases: Vec<&Phase> = self
+            .phases
+            .iter()
+            .filter(|phase| phase.duration >= threshold)
+            .collect();
+        phases.sort_by(|a, b| b.duration.cmp(&a.duration));
+        phases.truncate(limit);
+        phases
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckGroup {
     Store,
@@ -290,6 +409,10 @@ fn factory_supervisor_checks(agents: &[crate::types::Agent]) -> Vec<Check> {
 pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     let started = Instant::now();
     let mut checks = Vec::new();
+    // GH #700: doctor took 76s across 30 checks with no way to tell which one
+    // spent it. Every block below closes with a `mark`, so `--verbose` and
+    // `--json` can name the cost instead of leaving the operator to guess.
+    let mut recorder = PhaseRecorder::new();
     let mut resolved_cas_root = cas_root.map(Path::to_path_buf);
 
     if args.fix && cli.json && resolved_cas_root.is_none() {
@@ -373,6 +496,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    recorder.mark("startup", &checks);
     // Check 1: .cas directory exists
     let cas_root = match resolved_cas_root {
         Some(path) => {
@@ -399,6 +523,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     };
 
+    recorder.mark("cas directory", &checks);
     // Check 2: Store type and database
     let store_type = detect_store_type(&cas_root);
     match store_type {
@@ -428,6 +553,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    recorder.mark("store and database", &checks);
     // Check 3: Schema migrations
     match check_migrations(&cas_root) {
         Ok(status) => {
@@ -458,6 +584,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    recorder.mark("schema migrations", &checks);
     // Check 3a: Undelivered supervisor lifecycle relays (cas-7787, GH #160).
     //
     // A relay that dies without transport is a factory failure that used to
@@ -539,6 +666,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }),
     }
 
+    recorder.mark("supervisor relays", &checks);
     // Check 3a-ii: messages the factory keeps failing to hand over
     // (cas-94a1, GH #169).
     //
@@ -594,6 +722,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    recorder.mark("message handoff", &checks);
     // Check 3b: Schema details (tables and columns). An unreadable schema is a
     // warning, not a skipped check: silence here would look exactly like all
     // required tables being present.
@@ -606,6 +735,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }),
     }
 
+    recorder.mark("schema tables", &checks);
     // Check 4: Store can be opened
     match open_store(&cas_root) {
         Ok(store) => match store.list() {
@@ -633,6 +763,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    recorder.mark("store open", &checks);
     // Check 4: Search index
     checks.push(legacy_search_index_check(&cas_root));
     if let Some(check) = legacy_versioned_search_index_check(&cas_root) {
@@ -667,6 +798,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         });
     }
 
+    recorder.mark("search index", &checks);
     // Check 4b: symbol index lag (cas-499c).
     //
     // The daemon only indexes code while it is idle (operator ruling: that gate stays), so on a
@@ -677,6 +809,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         chrono::Utc::now(),
     ));
 
+    recorder.mark("symbol index", &checks);
     // Check 4c: the embedding drain (EPIC cas-6212 / cas-db6e, M7).
     //
     // The drain runs on a daemon tick, so its failures have no command output to
@@ -687,6 +820,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         &cas_root,
     )));
 
+    recorder.mark("embedding drain", &checks);
     // Check 4d: the structural git-history index (EPIC cas-6212 / cas-35b8,
     // spec §10.1 — "never silently stale").
     //
@@ -697,6 +831,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // measured provenance coverage the answers are only as good as.
     checks.push(history_index_check(gather_history_index_state(&cas_root)));
 
+    recorder.mark("history index", &checks);
     // Check 5: Config
     match Config::load(&cas_root) {
         Ok(config) => {
@@ -725,6 +860,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     #[cfg(feature = "mcp-proxy")]
     checks.push(proxy_stdio_commands_check(&cas_root));
 
+    recorder.mark("config and proxy", &checks);
     // Check 6: Sync target
     let config = Config::load(&cas_root).unwrap_or_default();
     if config.sync.enabled {
@@ -755,6 +891,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    recorder.mark("sync target", &checks);
     // Check 7: Memory statistics by type
     if let Ok(store) = open_store(&cas_root) {
         if let Ok(entries) = store.list() {
@@ -810,6 +947,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    recorder.mark("memory statistics", &checks);
     // Check 8: Rule status check
     if let Ok(rule_store) = open_rule_store(&cas_root) {
         if let Ok(rules) = rule_store.list() {
@@ -850,6 +988,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    recorder.mark("rule status", &checks);
     // Check 9: Task health check
     if let Ok(task_store) = open_task_store(&cas_root) {
         if let Ok(tasks) = task_store.list(None) {
@@ -908,6 +1047,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    recorder.mark("task health", &checks);
     // Check 10: Vector store / embeddings
     let vectors_path = cas_root.join("vectors.hnsw");
     if vectors_path.exists() {
@@ -924,6 +1064,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         });
     }
 
+    recorder.mark("vector store", &checks);
     // Check 11: Models directory
     let models_path = cas_root.join("models");
     if models_path.exists() {
@@ -940,11 +1081,13 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    recorder.mark("models directory", &checks);
     // Check 12: Claude Code MCP configuration
     let project_root = cas_root.parent().unwrap_or(Path::new("."));
     let mcp_check = check_claude_code_mcp(project_root);
     checks.push(mcp_check);
 
+    recorder.mark("mcp config", &checks);
     // Check 13: Integration ID staleness (vercel/neon/github)
     // ------------------------------------------------------------------
     // Phase 3 / cas-3efe: surface stale platform IDs without the user
@@ -961,6 +1104,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         });
     }
 
+    recorder.mark("integrations", &checks);
     // Check 13b: MechaCassy hub reachability (cas-8fad). Machine-scoped, so
     // it is not part of `integration_checks` (which walks per-project keep
     // blocks). Unlike the platform rows this one *can* be an Error: a missing
@@ -986,6 +1130,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    recorder.mark("mechacassy hub", &checks);
     // Check 14: cloud canonical id — which bucket this project syncs into,
     // and whether any other known local project lands in the same bucket
     // (cas-f699 / GH #134).
@@ -995,6 +1140,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     ));
     checks.extend(canonical_alias_checks(&cas_root));
 
+    recorder.mark("canonical id", &checks);
     // Check 15: residual cross-project contamination from the cas-ed15 pull
     // leak (cas-fc6fa / GH #133). Read-only comparison of this project's task
     // rows against every other known project database on the host, keyed on
@@ -1059,7 +1205,16 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         );
     }
 
-    output_checks(&checks, cli, started.elapsed(), Some(&cas_root))
+    recorder.mark("foreign rows and cloud queue", &checks);
+
+    output_checks_timed(
+        &checks,
+        recorder.per_check(),
+        recorder.phases(),
+        cli,
+        started.elapsed(),
+        Some(&cas_root),
+    )
 }
 
 /// The `cas doctor --fix` legacy-index repair step, as one renderable Check.
@@ -2953,6 +3108,8 @@ mod tests {
 
         let report = render_report_plain(
             &checks,
+            &[],
+            &[],
             "example/project",
             "3.10.1",
             std::time::Duration::from_millis(123),
@@ -2989,6 +3146,8 @@ mod tests {
 
         let report = render_report_plain(
             &checks,
+            &[],
+            &[],
             "example/project",
             "3.10.1",
             Duration::from_millis(1),
@@ -3019,6 +3178,8 @@ mod tests {
 
         let report = render_report_plain(
             &checks,
+            &[],
+            &[],
             "example/project",
             "3.10.1",
             Duration::from_millis(1),
@@ -3044,6 +3205,8 @@ mod tests {
 
         let expected = render_report_plain(
             &checks,
+            &[],
+            &[],
             "example/project",
             "3.10.1",
             Duration::from_millis(1),
@@ -3054,6 +3217,8 @@ mod tests {
             assert_eq!(
                 render_report_plain(
                     &checks,
+                    &[],
+                    &[],
                     "example/project",
                     "3.10.1",
                     Duration::from_millis(1),
@@ -3074,12 +3239,194 @@ mod tests {
             "coverage incomplete; Run `cas index code`",
         )];
 
-        let json = serialize_checks(&checks);
+        let json = serialize_checks(&checks, &[]);
         assert_eq!(json[0]["name"], "symbol index");
         assert_eq!(json[0]["status"], "warning");
         assert_eq!(json[0]["message"], "coverage incomplete");
         assert_eq!(json[0]["group"], "indexes");
         assert_eq!(json[0]["remediation"], "Run `cas index code`");
+        assert!(
+            json[0].get("duration_ms").is_none(),
+            "an unmeasured check must not claim a duration: {}",
+            json[0]
+        );
+    }
+
+    /// GH #700: 30 checks, 76 seconds, and no way to tell which check spent it.
+    /// The recorder attributes a block's wall time to the checks that block
+    /// produced.
+    #[test]
+    fn phase_recorder_attributes_each_block_to_the_checks_it_produced() {
+        let mut checks = Vec::new();
+        let start = Instant::now();
+        let mut recorder = PhaseRecorder::new_at(start);
+
+        checks.push(Check::new("database", CheckStatus::Ok, "found"));
+        recorder.mark_at("store", &checks, start + Duration::from_millis(10));
+
+        checks.push(Check::new("foreign rows", CheckStatus::Ok, "clean"));
+        recorder.mark_at("foreign rows", &checks, start + Duration::from_secs(62));
+
+        let timings = recorder.per_check();
+        assert_eq!(timings.len(), checks.len());
+        assert_eq!(timings[0].phase, "store");
+        assert_eq!(timings[0].duration, Duration::from_millis(10));
+        assert_eq!(timings[1].phase, "foreign rows");
+        assert_eq!(
+            timings[1].duration,
+            Duration::from_secs(62) - Duration::from_millis(10),
+            "each phase is measured from the previous mark, not from the start"
+        );
+        assert!(!timings[1].shared());
+    }
+
+    /// A block that emits several checks cannot claim its whole cost for each
+    /// one silently — the shared label says so out loud.
+    #[test]
+    fn phase_recorder_marks_a_shared_phase_and_keeps_empty_phases() {
+        let mut checks = Vec::new();
+        let start = Instant::now();
+        let mut recorder = PhaseRecorder::new_at(start);
+
+        recorder.mark_at("migrations", &checks, start + Duration::from_millis(5));
+        checks.push(Check::new("a", CheckStatus::Ok, "ok"));
+        checks.push(Check::new("b", CheckStatus::Ok, "ok"));
+        recorder.mark_at("integrations", &checks, start + Duration::from_secs(9));
+
+        let timings = recorder.per_check();
+        assert_eq!(timings.len(), 2);
+        assert!(timings[0].shared() && timings[1].shared());
+        assert_eq!(timings[0].checks_in_phase, 2);
+        assert_eq!(timings[0].label(), "(9.0s for 2 checks)");
+
+        let phases = recorder.phases();
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0].label, "migrations");
+        assert_eq!(
+            phases[0].checks, 0,
+            "a phase that produced no check still spent time and must be kept"
+        );
+        assert_eq!(
+            recorder
+                .slowest(Duration::from_millis(100), 5)
+                .iter()
+                .map(|phase| phase.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["integrations"],
+            "slowest() ranks by duration and drops phases under the threshold"
+        );
+    }
+
+    /// The operator-facing half: `--verbose` must print the duration beside
+    /// the check, and the slowest phases as a table.
+    #[test]
+    fn verbose_report_prints_per_check_durations_and_a_slowest_phase_table() {
+        let checks = vec![
+            Check::new("database", CheckStatus::Ok, "SQLite database found"),
+            Check::new("foreign rows", CheckStatus::Warning, "12 peer databases"),
+        ];
+        let timings = vec![
+            CheckTiming {
+                phase: "store".into(),
+                duration: Duration::from_millis(12),
+                checks_in_phase: 1,
+            },
+            CheckTiming {
+                phase: "foreign rows".into(),
+                duration: Duration::from_secs(62),
+                checks_in_phase: 1,
+            },
+        ];
+        let phases = vec![
+            Phase {
+                label: "store".into(),
+                duration: Duration::from_millis(12),
+                checks: 1,
+            },
+            Phase {
+                label: "foreign rows".into(),
+                duration: Duration::from_secs(62),
+                checks: 1,
+            },
+        ];
+
+        let report = render_report_plain(
+            &checks,
+            &timings,
+            &phases,
+            "example/project",
+            "3.15.0",
+            Duration::from_secs(62),
+            true,
+            100,
+        );
+
+        assert!(
+            report.contains("(62.0s)"),
+            "the slow check must carry its duration: {report}"
+        );
+        assert!(
+            report.contains("slowest"),
+            "verbose must rank the phases: {report}"
+        );
+        let table_line = report
+            .lines()
+            .find(|line| line.contains("foreign rows") && line.contains("62.0s"))
+            .unwrap_or_default();
+        assert!(
+            !table_line.is_empty(),
+            "the slowest phase must be named with its cost: {report}"
+        );
+    }
+
+    /// Timing is diagnostic detail, not the default report's business.
+    #[test]
+    fn non_verbose_report_stays_free_of_timing_noise() {
+        let checks = vec![Check::new("database", CheckStatus::Ok, "found")];
+        let timings = vec![CheckTiming {
+            phase: "store".into(),
+            duration: Duration::from_secs(62),
+            checks_in_phase: 1,
+        }];
+        let phases = vec![Phase {
+            label: "store".into(),
+            duration: Duration::from_secs(62),
+            checks: 1,
+        }];
+
+        let report = render_report_plain(
+            &checks,
+            &timings,
+            &phases,
+            "example/project",
+            "3.15.0",
+            Duration::from_secs(62),
+            false,
+            100,
+        );
+        assert!(!report.contains("slowest"), "report: {report}");
+        assert!(!report.contains("(62.0s)"), "report: {report}");
+    }
+
+    /// Automation reads JSON, and a per-check duration there is what makes a
+    /// regression in doctor's own cost detectable in CI.
+    #[test]
+    fn json_carries_the_measured_duration_and_phase_per_check() {
+        let checks = vec![Check::new("foreign rows", CheckStatus::Ok, "clean")];
+        let timings = vec![CheckTiming {
+            phase: "foreign rows".into(),
+            duration: Duration::from_millis(62_100),
+            checks_in_phase: 2,
+        }];
+
+        let json = serialize_checks(&checks, &timings);
+        assert_eq!(json[0]["duration_ms"], 62_100);
+        assert_eq!(json[0]["phase"], "foreign rows");
+        assert_eq!(
+            json[0]["duration_shared"], true,
+            "a shared phase duration must be labelled as shared: {}",
+            json[0]
+        );
     }
 
     /// cas-25a9 AC1, behaviourally: `cas doctor --fix` against a held lock must
@@ -3340,7 +3687,7 @@ mod tests {
                 .to_string(),
         }];
 
-        let serialized = serialize_checks(&checks);
+        let serialized = serialize_checks(&checks, &[]);
         let message = serialized[0]["message"].as_str().expect("message string");
         assert_eq!(
             message,
@@ -5383,18 +5730,37 @@ fn full_message(check: &Check) -> String {
     check.message.clone()
 }
 
-fn serialize_checks(checks: &[Check]) -> Vec<serde_json::Value> {
+/// Serialize the checks, adding the measured duration where one exists.
+///
+/// `timings` is positional: entry `i` measures check `i`. An unmeasured check
+/// (an early return before the recorder ran) omits the fields rather than
+/// reporting a zero, because "not measured" and "took no time" are different
+/// facts and automation must be able to tell them apart.
+fn serialize_checks(checks: &[Check], timings: &[CheckTiming]) -> Vec<serde_json::Value> {
     checks
         .iter()
-        .map(|check| {
+        .enumerate()
+        .map(|(index, check)| {
             let (message, remediation) = check.parts();
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "name": check.name,
                 "status": status_name(&check.status),
                 "message": message,
                 "group": check.group().json_name(),
                 "remediation": remediation,
-            })
+            });
+            if let (Some(timing), Some(object)) = (timings.get(index), value.as_object_mut()) {
+                object.insert(
+                    "duration_ms".to_string(),
+                    serde_json::json!(timing.duration.as_millis() as u64),
+                );
+                object.insert("phase".to_string(), serde_json::json!(timing.phase));
+                object.insert(
+                    "duration_shared".to_string(),
+                    serde_json::json!(timing.shared()),
+                );
+            }
+            value
         })
         .collect()
 }
@@ -5491,9 +5857,15 @@ fn write_ok_section_line(
     write_report_line(fmt, Some(&CheckStatus::Ok), &line)
 }
 
+/// Phases faster than this are noise in the slowest-phase table; the table
+/// exists to point at the one check that spent the minute (GH #700).
+const SLOW_PHASE_THRESHOLD: Duration = Duration::from_millis(100);
+
 fn render_report(
     fmt: &mut Formatter<'_>,
     checks: &[Check],
+    timings: &[CheckTiming],
+    phases: &[Phase],
     canonical_id: &str,
     version: &str,
     elapsed: Duration,
@@ -5580,14 +5952,52 @@ fn render_report(
         fmt.newline()?;
         fmt.write_bold("verbose")?;
         fmt.newline()?;
-        for check in checks {
+        for (index, check) in checks.iter().enumerate() {
+            let timing = timings
+                .get(index)
+                .map(|timing| format!(" {}", timing.label()))
+                .unwrap_or_default();
             let line = format!(
-                "{} {}: {}",
+                "{} {}: {}{timing}",
                 status_label(&check.status, fmt.is_styled()),
                 check.name,
                 full_message(check)
             );
             write_report_line(fmt, Some(&check.status), &line)?;
+        }
+
+        // The per-check line answers "how long did this take"; the table
+        // answers the question GH #700 actually asked, which is "which one is
+        // eating the minute". Ranking is over phases, including any that
+        // produced no check, so the times still add up to the total.
+        let mut slowest: Vec<&Phase> = phases
+            .iter()
+            .filter(|phase| phase.duration >= SLOW_PHASE_THRESHOLD)
+            .collect();
+        slowest.sort_by(|a, b| b.duration.cmp(&a.duration));
+        slowest.truncate(10);
+        if !slowest.is_empty() {
+            fmt.newline()?;
+            fmt.write_bold("slowest phases")?;
+            fmt.newline()?;
+            let label_width = slowest
+                .iter()
+                .map(|phase| phase.label.chars().count())
+                .max()
+                .unwrap_or(0);
+            for phase in slowest {
+                write_report_line(
+                    fmt,
+                    None,
+                    &format!(
+                        "  {:<label_width$}  {:>8}  {} check(s)",
+                        phase.label,
+                        duration_label(phase.duration),
+                        phase.checks,
+                        label_width = label_width
+                    ),
+                )?;
+            }
         }
     }
 
@@ -5615,8 +6025,11 @@ fn render_report(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn render_report_plain(
     checks: &[Check],
+    timings: &[CheckTiming],
+    phases: &[Phase],
     canonical_id: &str,
     version: &str,
     elapsed: Duration,
@@ -5631,7 +6044,17 @@ fn render_report_plain(
             ActiveTheme::default(),
             width,
         );
-        render_report(&mut fmt, checks, canonical_id, version, elapsed, verbose).unwrap();
+        render_report(
+            &mut fmt,
+            checks,
+            timings,
+            phases,
+            canonical_id,
+            version,
+            elapsed,
+            verbose,
+        )
+        .unwrap();
     }
     String::from_utf8(output).expect("doctor report is UTF-8")
 }
@@ -5642,8 +6065,22 @@ fn output_checks(
     elapsed: Duration,
     cas_root: Option<&Path>,
 ) -> anyhow::Result<()> {
+    output_checks_timed(checks, &[], &[], cli, elapsed, cas_root)
+}
+
+fn output_checks_timed(
+    checks: &[Check],
+    timings: &[CheckTiming],
+    phases: &[Phase],
+    cli: &Cli,
+    elapsed: Duration,
+    cas_root: Option<&Path>,
+) -> anyhow::Result<()> {
     if cli.json {
-        println!("{}", serde_json::to_string(&serialize_checks(checks))?);
+        println!(
+            "{}",
+            serde_json::to_string(&serialize_checks(checks, timings))?
+        );
         return Ok(());
     }
 
@@ -5655,6 +6092,8 @@ fn output_checks(
     render_report(
         &mut fmt,
         checks,
+        timings,
+        phases,
         &canonical_id,
         env!("CARGO_PKG_VERSION"),
         elapsed,

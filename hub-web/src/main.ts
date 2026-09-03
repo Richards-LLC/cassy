@@ -23,6 +23,8 @@ import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadSt
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
 import { TranscriptView } from "./transcript-view";
+import { applyLiveRegions, type LiveRegionView } from "./live-regions";
+import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 const pendingPairingStore = pendingPairingStoreFor(window);
@@ -48,6 +50,11 @@ const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
 const surfaces = new Map<string, TerminalSurface>();
 const transcripts = new Map<string, TranscriptView>();
+// The shell is rebuilt only when its own inputs changed. A hub heartbeat
+// carries none of them, so it can no longer replace the composer mid-sentence.
+let lastShellSignature: string | undefined;
+let pendingShellRender = false;
+let lastRailSignature: string | undefined;
 const sessionStates = new Map<string, SessionState>();
 // Shared data source for session drawers, status rows, pane tooltips, and the
 // Cmd+K integration lane. Values are produced once by the daemon.
@@ -1571,13 +1578,14 @@ function render(captureDraft = true): void {
   const staleStatusTail = staleStatusAge === undefined
     ? ""
     : ` Showing the last state received ${staleStatusAge === "now" ? "just now" : `${staleStatusAge} ago`}.`;
-  const staleStatusNotice = statusIsStale
-    ? `<p class="status-stale" role="status">Not live — reconnecting.${escapeHtml(staleStatusTail)}</p>`
-    : "";
+  // The sentence, not the element: the element is always in the shell so a
+  // heartbeat can fill or empty it without rebuilding the status section.
+  const staleStatusText = statusIsStale ? `Not live — reconnecting.${staleStatusTail}` : undefined;
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
   const connectionState = connectionClass(connectionSnapshot);
   const connectionText = selected ? connectionLabel(connectionSnapshot) : "idle";
   const latency = machineConnectionSnapshot?.latencyMs;
+  const latencyText = latency === undefined ? "Status unavailable" : `${latency}ms`;
   const counts = attentionCounts(attention);
   const infoItems = dismissableInfoItems(attention);
   // With no paired machine and no event to inspect, the canvas is the only
@@ -1604,6 +1612,62 @@ function render(captureDraft = true): void {
   const sessionPickerLabel = sessionCount === 0
     ? "Switch session — no sessions listed yet"
     : `Switch session — ${sessionCount} available`;
+  const liveRegions: LiveRegionView = {
+    ...(selected ? {
+      connection: { state: connectionState, title: compatibility ?? connectionText, latencyText },
+      mode: { badge: mode, compact: lease?.held_by_me ? "CTL" : "OBS" },
+    } : {}),
+    ...(showSessionControls ? {
+      controlAction: { label: controlActionLabel, ...(takeControlReason ? { disabledReason: takeControlReason } : {}) },
+    } : {}),
+    ...(interruptReason ? { interruptReason } : {}),
+    ...(staleStatusText ? { staleNotice: staleStatusText } : {}),
+    ...(controlReason ? { controlReason } : {}),
+    ...(sendReason ? { sendReason } : {}),
+    ...(composerStatus ? { messageStatus: { text: composerStatus.text, error: composerStatus.tone === "error" } } : {}),
+    ...(delivery ? { delivery: `Message sent to ${delivery.target}` } : {}),
+  };
+  const signature = shellSignature({
+    machineId: selectedMachineId,
+    session: selectedSession,
+    // Label as well as id: a credential refresh can rename a machine, and the
+    // header chip and rail read that label.
+    machineIds: [...machines.values()].map((machine) => `${machine.id}:${machine.label}`),
+    sessionKeys: [...machines.keys()].flatMap((id) => (sessions.get(id) ?? []).map((item) => `${id}/${item.name}`)),
+    catalogLoaded: machineCatalogLoaded,
+    drawerOpen: machineDrawerOpen,
+    attentionCollapsed: attentionPanelCollapsed,
+    contextTab: activeContextTab,
+    fleetEmpty,
+    supervisor,
+    backLabel: backTarget ? backText : undefined,
+    compatibility,
+    leaseHeldByMe: lease?.held_by_me === true,
+    leaseController: lease?.controller_label,
+    controlDisabled: controlActionDisabled,
+    commandPaletteOpen,
+    sessionPickerOpen,
+    pairingView: [
+      pendingPairing?.kind ?? "",
+      // The invitation form and the relay code render different dialogs, and
+      // both identify the request the operator is looking at.
+      pendingPairing?.kind === "relay-request" ? pendingPairing.userCode : pendingPairing?.token ?? "",
+      pendingPairing?.expiresAt ?? "",
+      pairingStatus,
+      pairingExchangeInFlight ? "in-flight" : "",
+    ].join("|"),
+  });
+  const active = document.activeElement;
+  const composing = isEditableElement(active) && app.contains(active);
+  const decision = renderDecision({ signatureChanged: signature !== lastShellSignature, composing });
+  if (decision !== "shell") {
+    // A deferred rebuild is owed to a structural change that arrived while the
+    // operator was mid-sentence; it runs the moment the field is left.
+    if (decision === "defer") pendingShellRender = true;
+    renderRegions({ selected, session: selectedSession, status, connectionSnapshot, counts, liveRegions });
+    return;
+  }
+  pendingShellRender = false;
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
   const preservedGrid = terminalSessionKey && currentGrid?.dataset.sessionKey === terminalSessionKey ? currentGrid : undefined;
@@ -1639,7 +1703,7 @@ function render(captureDraft = true): void {
             ${backTarget ? `<button id="session-back" class="session-back" type="button" aria-label="${escapeAttr(backText)}" title="${escapeAttr(backText)}"><span aria-hidden="true">‹</span></button>` : ""}
             <h1 class="${selectedSession ? "toolbar-session-title" : ""}"><button id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="${sessionPickerOpen}" aria-label="${escapeAttr(sessionPickerLabel)}" title="${escapeAttr(sessionPickerLabel)}"><span class="session-picker-name">${escapeHtml(selectedSession ?? "Fleet overview")}</span><span class="session-picker-caret" aria-hidden="true">▾</span></button></h1>
           </div>
-          ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latency === undefined ? "Status unavailable" : `${latency}ms`}</span></span>` : ""}
+          ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
           <div class="actions">${sessionCommands ? '<button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button>' : ""}${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button>` : ""}</div>
         </header>
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : emptyCanvasMarkup()}</div></section>
@@ -1657,7 +1721,7 @@ function render(captureDraft = true): void {
             <button type="button" role="tab" data-context-tab="status" aria-selected="${activeContextTab === "status"}">Workers &amp; Tasks</button>
           </div>
           <section id="attention-panel" class="context-tab" data-context-content="attention" ${activeContextTab === "attention" ? "" : "hidden"}></section>
-          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}>${staleStatusNotice}<div id="status-view"></div><div class="message"><h2>Talk to ${escapeHtml(supervisor ?? "supervisor")}</h2><textarea id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary"${sendReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(sendReason)}"` : ""}>Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-status" class="message-status${composerStatus?.tone === "error" ? " error" : ""}" role="status" ${composerStatus ? "" : "hidden"}>${composerStatus ? escapeHtml(composerStatus.text) : ""}</p><p id="message-delivery" class="message-delivery" role="status" ${delivery ? "" : "hidden"}>${delivery ? `Message sent to ${escapeHtml(delivery.target)}` : ""}</p></div></section>
+          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><p class="status-stale" role="status" hidden></p><div id="status-view"></div><div class="message"><h2>Talk to ${escapeHtml(supervisor ?? "supervisor")}</h2><textarea id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-status" class="message-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div></section>
         </div>
       </aside>
     </div>
@@ -1685,42 +1749,8 @@ function render(captureDraft = true): void {
   if (focusWinner === "terminal") queueMicrotask(() => activePaneContext()?.surface.focus());
   restoreMessageDraft();
   if (focusWinner === "composer") queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus());
-  const machineRail = document.querySelector("#machine-rail-list")!;
-  const machineTree = document.querySelector("#machine-tree")!;
-  for (const machine of machines.values()) {
-    machineRail.append(machineRailButton(machine));
-    machineTree.append(machineTreeGroup(machine));
-  }
-  if (!machineCatalogLoaded || machines.size === 0) {
-    const message = document.createElement("p");
-    message.className = "drawer-empty";
-    message.setAttribute("role", "status");
-    // Naming a control beats naming a glyph, and the machine being paired is the
-    // one running the sessions — not the device holding this page.
-    message.textContent = machineCatalogLoaded
-      ? "No machines paired yet. Pair the machine your sessions run on."
-      : "Loading paired machines…";
-    machineTree.append(message);
-    if (machineCatalogLoaded) {
-      const pair = document.createElement("button");
-      pair.id = "drawer-pair";
-      pair.type = "button";
-      pair.className = "primary drawer-pair";
-      pair.textContent = "Pair a machine";
-      machineTree.append(pair);
-    }
-  }
-  renderSessionPicker();
-  const railCounts = document.querySelector("#attention-rail-counts");
-  if (railCounts) {
-    // Both forms ship; the compact block picks one. The button owns the
-    // accessible name so the visuals can stay aria-hidden.
-    railCounts.setAttribute("aria-label", `Open attention. ${attentionSummary(counts).description}`);
-    railCounts.append(renderAttentionSummary(counts), renderAttentionCounts(counts, true));
-  }
-  renderAttention(); renderStatus(status);
-  if (selected && selectedSession && connectionSnapshot) renderConnectionSurface(selected.id, selectedSession, connectionSnapshot);
-  syncConnectionViewTicker();
+  lastRailSignature = undefined;
+  lastShellSignature = signature;
   bindEvents(selected, lease);
   if (commandPaletteOpen) {
     document.querySelector<HTMLDialogElement>("#command-palette")?.showModal();
@@ -1729,11 +1759,95 @@ function render(captureDraft = true): void {
   // A five-second heartbeat render must not slam the picker shut mid-choice.
   if (sessionPickerOpen) document.querySelector<HTMLDialogElement>("#session-picker")?.showModal();
   if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
-  if (selected && selectedSession) {
-    const state = sessionStates.get(sessionKey(selected.id, selectedSession));
-    if (state) queueMicrotask(() => void renderSessionState(selected.id, selectedSession!, state));
+  renderRegions({ selected, session: selectedSession, status, connectionSnapshot, counts, liveRegions });
+}
+
+interface RegionContext {
+  readonly selected: StoredMachine | undefined;
+  readonly session: string | undefined;
+  readonly status: Record<string, unknown> | undefined;
+  readonly connectionSnapshot: ConnectionState | undefined;
+  readonly counts: ReturnType<typeof attentionCounts>;
+  readonly liveRegions: LiveRegionView;
+}
+
+/**
+ * Everything a hub push can change, applied to the shell that is already on
+ * screen. This runs on every render — after a rebuild, and instead of one.
+ */
+function renderRegions(context: RegionContext): void {
+  renderMachineNavigation();
+  renderSessionPicker();
+  const railCounts = document.querySelector("#attention-rail-counts");
+  if (railCounts) {
+    // Both forms ship; the compact block picks one. The button owns the
+    // accessible name so the visuals can stay aria-hidden.
+    railCounts.setAttribute("aria-label", `Open attention. ${attentionSummary(context.counts).description}`);
+    railCounts.replaceChildren(renderAttentionSummary(context.counts), renderAttentionCounts(context.counts, true));
+  }
+  renderAttention();
+  renderStatus(context.status);
+  applyLiveRegions(app, context.liveRegions);
+  if (context.selected && context.session && context.connectionSnapshot) {
+    renderConnectionSurface(context.selected.id, context.session, context.connectionSnapshot);
+  }
+  syncConnectionViewTicker();
+  if (context.selected && context.session) {
+    const machineId = context.selected.id;
+    const session = context.session;
+    const state = sessionStates.get(sessionKey(machineId, session));
+    if (state) queueMicrotask(() => void renderSessionState(machineId, session, state));
   }
   syncPairingCountdown();
+}
+
+/**
+ * The rail and the drawer tree are rebuilt nodes, so they are only rebuilt when
+ * something they show actually moved — otherwise a heartbeat would blur a
+ * machine row the operator is on.
+ */
+function renderMachineNavigation(): void {
+  const machineRail = document.querySelector("#machine-rail-list");
+  const machineTree = document.querySelector("#machine-tree");
+  if (!machineRail || !machineTree) return;
+  const signature = [
+    machineCatalogLoaded ? "loaded" : "loading",
+    ...[...machines.values()].map((machine) => [
+      machine.id,
+      machine.label,
+      connectionClass(connectionStates.get(machine.id)),
+      connectionLabel(connectionStates.get(machine.id)),
+      (sessions.get(machine.id) ?? []).map((item) => item.name).join(","),
+    ].join("|")),
+  ].join("~");
+  if (signature === lastRailSignature) return;
+  lastRailSignature = signature;
+  machineRail.replaceChildren();
+  machineTree.replaceChildren();
+  for (const machine of machines.values()) {
+    machineRail.append(machineRailButton(machine));
+    machineTree.append(machineTreeGroup(machine));
+  }
+  if (machineCatalogLoaded && machines.size > 0) return;
+  const message = document.createElement("p");
+  message.className = "drawer-empty";
+  message.setAttribute("role", "status");
+  // Naming a control beats naming a glyph, and the machine being paired is the
+  // one running the sessions — not the device holding this page.
+  message.textContent = machineCatalogLoaded
+    ? "No machines paired yet. Pair the machine your sessions run on."
+    : "Loading paired machines…";
+  machineTree.append(message);
+  if (!machineCatalogLoaded) return;
+  const pair = document.createElement("button");
+  pair.id = "drawer-pair";
+  pair.type = "button";
+  pair.className = "primary drawer-pair";
+  pair.textContent = "Pair a machine";
+  // bindEvents only runs on a shell rebuild, and this node can be re-created by
+  // a region update, so it carries its own handler.
+  pair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")!.showModal();
+  machineTree.append(pair);
 }
 
 function compatibilityWarning(machineId: string): string | undefined {
@@ -1841,6 +1955,7 @@ function renderSessionPicker(): void {
     list.replaceChildren(empty);
     return;
   }
+  list.replaceChildren();
   let renderedMachineId: string | undefined;
   for (const entry of entries) {
     if (entry.machineId !== renderedMachineId) {
@@ -1909,6 +2024,9 @@ async function performAttentionAction(item: AttentionItem, action: AttentionActi
 
 function renderStatus(status?: Record<string, unknown>): void {
   const container = document.querySelector("#status-view")!;
+  // Region updates run against a container the shell rebuild is no longer
+  // clearing for them, so this owns its own emptying.
+  container.replaceChildren();
   if (!status) { container.textContent = "Open a session for push-refreshed status."; return; }
   const summary = selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) : undefined;
   if (summary) {
@@ -2181,6 +2299,19 @@ function scopeChecks(selectedScopes: readonly Scope[]): string {
 
 function escapeHtml(value: string): string { const span = document.createElement("span"); span.textContent = value; return span.innerHTML; }
 function escapeAttr(value: string): string { return escapeHtml(value).replaceAll('"', "&quot;"); }
+
+// A rebuild deferred while the operator was mid-sentence runs the moment the
+// field is left, so a page that skipped one structural render never stays
+// stale. queueMicrotask lets focus land on its next target first: moving
+// between two inputs is still composing.
+app.addEventListener("focusout", () => {
+  if (!pendingShellRender) return;
+  queueMicrotask(() => {
+    const active = document.activeElement;
+    if (isEditableElement(active) && app.contains(active)) return;
+    if (pendingShellRender) render();
+  });
+});
 
 window.addEventListener("keydown", globalShortcut, true);
 render(false);

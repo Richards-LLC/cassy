@@ -1394,6 +1394,71 @@ fn h2_pair_02_pairing_is_bound_persistent_single_use_and_fragment_only() {
     );
 }
 
+#[test]
+fn h2_pair_03_invitation_url_declares_the_scope_ceiling_it_minted() {
+    use chrono::Utc;
+
+    let temp = private_tempdir();
+    let now = Utc::now();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+
+    // Commander cannot request a scope this invitation does not grant unless the
+    // invitation says what it granted; without it the form guessed all six and
+    // every default `cas hub pair` failed its first exchange with a bare 401.
+    let read_only = auth
+        .mint_pairing(
+            "https://controller.example",
+            Scope::default_read_only(),
+            now,
+        )
+        .unwrap();
+    assert!(
+        read_only
+            .url
+            .ends_with("&scopes=machine-read,session-read,pane-read"),
+        "invitation url must declare its ceiling: {}",
+        read_only.url
+    );
+    assert!(read_only.url.contains("#pair="));
+    assert!(!read_only.url.contains('?'));
+
+    let control = auth
+        .mint_pairing(
+            "https://controller.example",
+            [
+                Scope::MachineRead,
+                Scope::SessionRead,
+                Scope::PaneRead,
+                Scope::PaneInput,
+                Scope::MessageSend,
+                Scope::PaneInterrupt,
+            ]
+            .into_iter()
+            .collect(),
+            now,
+        )
+        .unwrap();
+    assert!(
+        control.url.ends_with(
+            "&scopes=machine-read,session-read,pane-read,pane-input,message-send,pane-interrupt"
+        ),
+        "control invitation url must declare its ceiling: {}",
+        control.url
+    );
+
+    // The declared ceiling is exactly what the exchange enforces.
+    let declared = control
+        .url
+        .rsplit_once("&scopes=")
+        .map(|(_, scopes)| scopes.to_string())
+        .unwrap();
+    let parsed: std::collections::BTreeSet<Scope> = declared
+        .split(',')
+        .map(|scope| Scope::parse(scope).unwrap())
+        .collect();
+    assert_eq!(parsed, control.scopes);
+}
+
 #[tokio::test]
 async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
     use chrono::{Duration, Utc};

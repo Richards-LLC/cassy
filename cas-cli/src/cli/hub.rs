@@ -905,6 +905,21 @@ fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
             "Pair Commander before {}",
             invitation.expires_at.to_rfc3339()
         );
+        println!(
+            "Scopes: {}",
+            invitation
+                .scopes
+                .iter()
+                .map(|scope| scope.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if !invitation.scopes.contains(&Scope::PaneInput) {
+            println!(
+                "Read-only. To type into panes, send messages, and interrupt, re-run with:\n  cas hub pair --origin {} --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt",
+                args.origin
+            );
+        }
         println!("{}", invitation.url);
         let code = qrcode::QrCode::new(invitation.url.as_bytes())?;
         println!(

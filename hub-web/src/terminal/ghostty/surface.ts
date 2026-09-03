@@ -2,6 +2,7 @@ import { isMacPlatform } from "../../lib/utils";
 import { collectWrappedTerminalLinkLine, extractTerminalLinks } from "../../terminal-links";
 import {
   GhosttyTerminalCore,
+  type GhosttyRow,
   type GhosttyScrollbar,
   type GhosttySnapshot,
   type GhosttyTheme,
@@ -492,6 +493,8 @@ export interface GhosttyTerminalSurfaceOptions {
   readonly onCopy: (text: string) => void;
   readonly beforeKey: (event: KeyboardEvent) => boolean;
   readonly onLinkActivate: (text: string, event: MouseEvent) => void;
+  /** Fires after every painted or skipped frame, so a reflowed view can follow the grid. */
+  readonly onRender?: () => void;
 }
 
 export class GhosttyTerminalSurface {
@@ -536,8 +539,6 @@ export class GhosttyTerminalSurface {
    * reported upstream: a viewer renders the pane, it does not drive it.
    */
   private authoritativeGrid: { cols: number; rows: number } | null = null;
-  /** Scale applied to the canvas so a pinned grid fits the mount. */
-  private renderScale = 1;
   private selectionEnd: { x: number; y: number } | null = null;
   private selectionAnchorScreen: { x: number; y: number } | null = null;
   private selectionEndScreen: { x: number; y: number } | null = null;
@@ -564,6 +565,11 @@ export class GhosttyTerminalSurface {
   private controlMode = false;
   private resizeNotified = false;
   private canvasConfigured = false;
+  // A phone's CSS width would hand an 80-column agent TUI a ~46-column grid.
+  // The floor decouples the PTY geometry from the mount, and the canvas then
+  // sizes to the grid rather than the mount so the true columns stay intact.
+  private minColumns = 0;
+  private canvasPainting = true;
   private theme: GhosttyTheme;
   private readonly suppressedKeyCodes = new Set<string>();
   private pasteShortcutToken = 0;
@@ -790,44 +796,26 @@ export class GhosttyTerminalSurface {
     this.fit();
   }
 
-  /**
-   * The scale a pinned grid needs so that `cols x rows` cells fit inside the
-   * mount. Never magnifies: a grid that already fits is drawn at 1:1 and the
-   * slack becomes letterbox.
-   */
-  private scaleForGrid(
-    grid: { cols: number; rows: number },
-    width: number,
-    height: number,
-  ): number {
-    const neededWidth = CONTENT_PADDING * 2 + grid.cols * this.metrics.width;
-    const neededHeight = CONTENT_PADDING * 2 + grid.rows * this.metrics.height;
-    const scale = Math.min(width / neededWidth, height / neededHeight);
-    return Number.isFinite(scale) && scale > 0 ? Math.min(1, scale) : 1;
-  }
-
   fit(): boolean {
     if (this.disposed) return false;
-    const mountWidth = this.mount.clientWidth;
-    const mountHeight = this.mount.clientHeight;
-    if (mountWidth <= 0 || mountHeight <= 0) return false;
-    const pinned = this.authoritativeGrid;
-    const scale = pinned ? this.scaleForGrid(pinned, mountWidth, mountHeight) : 1;
-    // The canvas keeps drawing in unscaled cell units; CSS shrinks the finished
-    // surface, so the renderer, the metrics and the grid all stay untouched.
-    const width = mountWidth / scale;
-    const height = mountHeight / scale;
-    if (scale !== this.renderScale) {
-      this.renderScale = scale;
-      this.canvas.style.transformOrigin = "top left";
-      this.canvas.style.transform = scale === 1 ? "" : `scale(${scale})`;
-      this.canvas.style.width = scale === 1 ? "" : `${width}px`;
-      this.canvas.style.height = scale === 1 ? "" : `${height}px`;
-      this.forceFullRender = true;
-    }
+    const width = this.mount.clientWidth;
+    const height = this.mount.clientHeight;
+    if (width <= 0 || height <= 0) return false;
     const ratio = window.devicePixelRatio || 1;
-    const pixelWidth = Math.max(1, Math.round(width * ratio));
-    const pixelHeight = Math.max(1, Math.round(height * ratio));
+    const measured = terminalGridSize(width, height, this.metrics, CONTENT_PADDING);
+    // A pinned grid is the pane's real PTY geometry as the daemon reports it, so
+    // it outranks both the mount measurement and the phone column floor
+    // (cas-37f8): this viewer renders the pane, it does not size it.
+    const pinned = this.authoritativeGrid;
+    const cols = pinned ? pinned.cols : Math.max(measured.cols, this.minColumns);
+    const rows = pinned ? pinned.rows : measured.rows;
+    // A grid larger than its mount makes the canvas larger than its mount; the
+    // mount pans so "Show terminal" reveals the real grid instead of a squeezed
+    // one.
+    const contentWidth = Math.max(width, cols * this.metrics.width + CONTENT_PADDING * 2);
+    const contentHeight = Math.max(height, rows * this.metrics.height + CONTENT_PADDING * 2);
+    const pixelWidth = Math.max(1, Math.round(contentWidth * ratio));
+    const pixelHeight = Math.max(1, Math.round(contentHeight * ratio));
     let shouldRender = false;
     // The DPR transform must be installed even when the target size happens to
     // equal the canvas default 300x150 backing store, so the first fit always
@@ -839,20 +827,24 @@ export class GhosttyTerminalSurface {
     ) {
       this.canvas.width = pixelWidth;
       this.canvas.height = pixelHeight;
+      // The stylesheet sizes the canvas to its mount; a grid larger than the
+      // mount has to state its own CSS size or the backing store would be
+      // squashed back into the phone's box.
+      this.canvas.style.width = contentWidth > width ? `${contentWidth}px` : "";
+      this.canvas.style.height = contentHeight > height ? `${contentHeight}px` : "";
       this.context.setTransform(ratio, 0, 0, ratio, 0, 0);
       this.canvasConfigured = true;
       this.forceFullRender = true;
       this.scrollbarDirty = true;
       shouldRender = true;
     }
-    const grid = pinned ?? terminalGridSize(width, height, this.metrics, CONTENT_PADDING);
-    this.mountHeight = height;
+    this.mountHeight = contentHeight;
     // onResize is the only PTY resize channel, so the first successful fit must
     // notify even when the measured grid equals the 1x1 construction sentinel.
-    if (grid.cols !== this.cols || grid.rows !== this.rows || !this.resizeNotified) {
-      this.cols = grid.cols;
-      this.rows = grid.rows;
-      this.core.resize(grid.cols, grid.rows, this.metrics.width, this.metrics.height);
+    if (cols !== this.cols || rows !== this.rows || !this.resizeNotified) {
+      this.cols = cols;
+      this.rows = rows;
+      this.core.resize(cols, rows, this.metrics.width, this.metrics.height);
       // A pinned grid came from the daemon, so reporting it back would be an
       // echo, and reporting the mount's own measurement would be exactly the
       // shrink the daemon just refused.
@@ -923,12 +915,8 @@ export class GhosttyTerminalSurface {
     if (!viewportEnd) return null;
     const bounds = this.canvas.getBoundingClientRect();
     return {
-      right:
-        bounds.left
-        + (CONTENT_PADDING + (viewportEnd.x + 1) * this.metrics.width) * this.renderScale,
-      bottom:
-        bounds.top
-        + (this.originY + (viewportEnd.y + 1) * this.metrics.height) * this.renderScale,
+      right: bounds.left + CONTENT_PADDING + (viewportEnd.x + 1) * this.metrics.width,
+      bottom: bounds.top + this.originY + (viewportEnd.y + 1) * this.metrics.height,
     };
   }
 
@@ -944,6 +932,50 @@ export class GhosttyTerminalSurface {
     // Selection highlights span rows Ghostty may not mark dirty for this change.
     this.forceFullRender = true;
     this.requestRender();
+  }
+
+  /**
+   * Floor on the columns handed to the PTY. A phone mount measures ~46 columns
+   * at the smallest legible glyph, which is half the width an agent TUI lays
+   * out for; the transcript view reads the resulting 80-column lines back and
+   * reflows them, so the floor is what keeps hanging indents intact.
+   */
+  setMinimumColumns(columns: number): void {
+    const next = Math.max(0, Math.floor(columns));
+    if (this.disposed || next === this.minColumns) return;
+    this.minColumns = next;
+    this.fit();
+  }
+
+  /**
+   * Skips the canvas paint while a reflowed transcript is the visible view.
+   * The snapshot is still taken — the transcript is built from it — but a
+   * hidden grid is not worth a full canvas repaint on every streamed frame.
+   */
+  setCanvasPainting(enabled: boolean): void {
+    if (this.disposed || enabled === this.canvasPainting) return;
+    this.canvasPainting = enabled;
+    if (!enabled) return;
+    this.forceFullRender = true;
+    this.scrollbarDirty = true;
+    this.requestRender();
+  }
+
+  /** Rows of the last rendered frame, with their soft-wrap flags. */
+  snapshotRows(): readonly GhosttyRow[] {
+    return this.snapshot?.rowData ?? [];
+  }
+
+  /** Whether scrollback exists above the current viewport. */
+  hasScrollbackAbove(): boolean {
+    const state = this.readScrollbarState();
+    return state !== null && state.offset > 0;
+  }
+
+  /** Moves the viewport by whole rows; negative goes back into scrollback. */
+  scrollRows(deltaRows: number): void {
+    if (this.disposed) return;
+    this.scrollViewport(deltaRows);
   }
 
   scrollToBottom(): void {
@@ -1594,6 +1626,14 @@ export class GhosttyTerminalSurface {
       this.frame = 0;
     }
     this.snapshot = this.core.snapshot();
+    if (!this.canvasPainting) {
+      // The transcript reads this snapshot; nothing else on screen is showing
+      // the grid, so the paint, the input caret and the scrollbar can wait
+      // until the terminal view is asked for again.
+      this.options.onRender?.();
+      this.scheduleCursorBlink();
+      return;
+    }
     // A cursor that is not blinking right now must be drawn, never caught in an
     // off phase left behind by a blink that has since been turned off.
     if (!this.blinkEnabled()) this.cursorOn = true;
@@ -1642,6 +1682,7 @@ export class GhosttyTerminalSurface {
       this.updateScrollbar();
     }
     this.forceFullRender = false;
+    this.options.onRender?.();
     this.scheduleCursorBlink();
   }
 
@@ -1682,22 +1723,8 @@ export class GhosttyTerminalSurface {
     this.inputTop = top;
   }
 
-  /**
-   * Client coordinates remapped into the canvas's own unscaled drawing space,
-   * so cell hit-testing keeps working while a pinned grid is scaled down.
-   */
-  private canvasSpace(clientX: number, clientY: number): { bounds: DOMRect; clientX: number; clientY: number } {
+  private cellAt(clientX: number, clientY: number): { x: number; y: number } {
     const bounds = this.canvas.getBoundingClientRect();
-    if (this.renderScale === 1) return { bounds, clientX, clientY };
-    return {
-      bounds,
-      clientX: bounds.left + (clientX - bounds.left) / this.renderScale,
-      clientY: bounds.top + (clientY - bounds.top) / this.renderScale,
-    };
-  }
-
-  private cellAt(pointerX: number, pointerY: number): { x: number; y: number } {
-    const { bounds, clientX, clientY } = this.canvasSpace(pointerX, pointerY);
     return {
       x: Math.max(
         0,
@@ -1718,11 +1745,10 @@ export class GhosttyTerminalSurface {
 
   private linkAt(clientX: number, clientY: number): TerminalLinkWithRange | null {
     if (!this.snapshot) return null;
-    const space = this.canvasSpace(clientX, clientY);
     const cell = terminalGridCellAt({
-      bounds: space.bounds,
-      clientX: space.clientX,
-      clientY: space.clientY,
+      bounds: this.canvas.getBoundingClientRect(),
+      clientX,
+      clientY,
       cols: this.cols,
       rows: this.rows,
       metrics: this.metrics,
@@ -1769,7 +1795,7 @@ export class GhosttyTerminalSurface {
     button: number | null,
     event: MouseEvent,
   ): void {
-    const { bounds, clientX, clientY } = this.canvasSpace(event.clientX, event.clientY);
+    const bounds = this.canvas.getBoundingClientRect();
     const data = this.core.encodeMouse({
       action,
       button,
@@ -1778,19 +1804,16 @@ export class GhosttyTerminalSurface {
         (event.ctrlKey ? 1 << 1 : 0) |
         (event.altKey ? 1 << 2 : 0) |
         (event.metaKey ? 1 << 3 : 0),
-      x: Math.max(0, clientX - bounds.left),
-      y: Math.max(0, clientY - bounds.top),
-      screenWidth: bounds.width / this.renderScale,
-      screenHeight: bounds.height / this.renderScale,
+      x: Math.max(0, event.clientX - bounds.left),
+      y: Math.max(0, event.clientY - bounds.top),
+      screenWidth: bounds.width,
+      screenHeight: bounds.height,
       cellWidth: this.metrics.width,
       cellHeight: this.metrics.height,
       paddingLeft: CONTENT_PADDING,
       paddingRight: CONTENT_PADDING,
       paddingTop: this.originY,
-      paddingBottom: Math.max(
-        0,
-        bounds.height / this.renderScale - this.originY - this.rows * this.metrics.height,
-      ),
+      paddingBottom: Math.max(0, bounds.height - this.originY - this.rows * this.metrics.height),
       anyButtonPressed: event.buttons !== 0,
     });
     if (data.length > 0) this.options.onData(data);

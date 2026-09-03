@@ -32,6 +32,10 @@ pub struct PushBacklog {
     pub failed: usize,
     /// Operator-facing diagnostics from retained failed rows.
     pub failed_errors: Vec<String>,
+    /// Terminal rows the cloud explicitly rejected, grouped by its reason.
+    /// These are a subset of `failed`: the remainder are transport or payload
+    /// failures that never received a per-row verdict.
+    pub rejected_by_reason: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -64,6 +68,14 @@ pub struct SyncResult {
     pub pushed_task_dependencies: usize,
     /// Number of distilled knowledge pages pushed (T5)
     pub pushed_knowledge_pages: usize,
+    /// Rows the cloud kept a newer version of and the client therefore removed
+    /// from the queue. These are successful outcomes, not failures: reporting
+    /// them separately is what stops a benign LWW loss reading as "rows
+    /// failed".
+    pub skipped_lww_acked: usize,
+    /// Terminal rows requeued once because only an older client build had
+    /// parked them.
+    pub requeued_after_upgrade: usize,
     /// Number of entries pulled
     pub pulled_entries: usize,
     /// Number of tasks pulled
@@ -514,6 +526,22 @@ impl CloudSyncer {
         Ok(requeued)
     }
 
+    /// Give rows that only an older client build parked one fresh attempt.
+    ///
+    /// This is the general form of the version-gate requeue: a row parked by
+    /// a 429 storm, a transport failure, or a server refusal an older client
+    /// could not classify is not evidence that this build cannot push it.
+    /// Permanent per-row rejections are excluded by the queue itself.
+    pub(crate) fn requeue_stale_client_failures(&self) -> Result<usize, CasError> {
+        let requeued = self
+            .queue
+            .requeue_stale_client_failures(env!("CARGO_PKG_VERSION"), self.config.max_retries)?;
+        if requeued > 0 {
+            tracing::debug!("requeued {requeued} item(s) parked by an older client build");
+        }
+        Ok(requeued)
+    }
+
     /// Get the sync queue
     pub fn queue(&self) -> &SyncQueue {
         &self.queue
@@ -809,6 +837,43 @@ impl PushRowResult {
                 | "rate_limited"
                 | "timeout"
         )
+    }
+}
+
+/// Whether a cloud rejection reason describes a condition no client retry can
+/// repair. Permanent reasons must survive a client upgrade: requeueing them
+/// only replays the same refusal and hides the row's real diagnosis.
+pub(crate) fn push_reason_is_permanent(reason: &str) -> bool {
+    matches!(
+        reason.trim().to_ascii_lowercase().as_str(),
+        "project_mismatch" | "scope_mismatch"
+    )
+}
+
+/// The operator-facing next step for one cloud rejection reason.
+///
+/// Reporting a rejection without the repair leaves an operator with a count
+/// and no move; an unknown reason is named honestly rather than guessed at.
+pub fn push_reason_hint(reason: &str) -> &'static str {
+    match reason.trim().to_ascii_lowercase().as_str() {
+        "project_mismatch" => {
+            "another project already owns this id in the cloud; re-link with `cas cloud link`, then `cas cloud queue --retry-reason project_mismatch`"
+        }
+        "scope_mismatch" => {
+            "the cloud row belongs to a different sync scope (personal vs team); push it from the owning scope, then `cas cloud queue --retry-reason scope_mismatch`"
+        }
+        "revision_conflict" | "invalid_revision" => {
+            "the cloud holds a newer revision; run `cas cloud pull`, then `cas cloud queue --retry`"
+        }
+        "version_gate" => {
+            "this build is below the cloud's minimum client version; upgrade cas — the rows requeue themselves on the first push after the upgrade"
+        }
+        "sync_limit_exceeded" => {
+            "the plan entity quota is exhausted; raise the plan limit or prune synced entities, then `cas cloud queue --retry`"
+        }
+        _ => {
+            "unrecognized cloud reason; inspect `cas cloud queue --verbose` and report the diagnostic"
+        }
     }
 }
 

@@ -64,9 +64,9 @@ pub use me::{
 pub use sync_queue::{EntityType, QueueHealth, QueuedSync, SyncOperation, SyncQueue};
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,
-    KnowledgePageRecord, KnowledgePullReport, PushPlan, PushScope, SyncConflict, SyncResult,
-    TaskStatusTransition, TeamMemoriesResponse, TeamProject, TeamProjectsResponse,
-    knowledge_share_scope,
+    KnowledgePageRecord, KnowledgePullReport, PushBacklog, PushPlan, PushScope, SyncConflict,
+    SyncResult, TaskStatusTransition, TeamMemoriesResponse, TeamProject, TeamProjectsResponse,
+    knowledge_share_scope, push_reason_hint,
 };
 pub(crate) use syncer::{SyncWarningSummary, collect_sync_warnings, entity_matches_project};
 pub use team_registration::{

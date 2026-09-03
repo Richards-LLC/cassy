@@ -2615,6 +2615,13 @@ pub struct SyncSummary {
     pub team_healed_task_dependencies_from_cloud: usize,
     pub team_errors: Vec<String>,
     pub team_push_attention: usize,
+    /// Rows the cloud kept a newer version of and the client acknowledged.
+    /// Reported apart from failures: nothing is lost and nothing needs a retry.
+    pub skipped_lww: usize,
+    /// Terminal rows the cloud explicitly refused, grouped by its reason.
+    pub rejected_by_reason: BTreeMap<String, usize>,
+    /// Terminal rows this build requeued once because an older client parked them.
+    pub requeued_after_upgrade: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2676,6 +2683,9 @@ impl SyncSummary {
             team_healed_task_dependencies_from_cloud: 0,
             team_errors: Vec::new(),
             team_push_attention: 0,
+            skipped_lww: result.skipped_lww_acked,
+            rejected_by_reason: result.remaining_backlog.rejected_by_reason.clone(),
+            requeued_after_upgrade: result.requeued_after_upgrade,
         }
     }
 
@@ -2726,6 +2736,9 @@ impl SyncSummary {
             team_healed_task_dependencies_from_cloud: 0,
             team_errors: Vec::new(),
             team_push_attention: 0,
+            skipped_lww: 0,
+            rejected_by_reason: BTreeMap::new(),
+            requeued_after_upgrade: 0,
         }
     }
 
@@ -2755,6 +2768,11 @@ impl SyncSummary {
         self.team_healed_task_dependencies_from_cloud +=
             team.healed_task_dependencies_from_cloud;
         self.team_errors.extend(team.errors.clone());
+        self.skipped_lww += team.skipped_lww;
+        for (reason, count) in &team.rejected_by_reason {
+            *self.rejected_by_reason.entry(reason.clone()).or_default() += count;
+        }
+        self.requeued_after_upgrade += team.requeued_after_upgrade;
         if team.is_push() {
             self.team_push_attention += team.errors.len();
         }
@@ -2847,6 +2865,25 @@ fn concise_push_failure(error: &str) -> String {
         }
     }
     message
+}
+
+/// Render the cloud's own rejection reasons, most frequent first.
+///
+/// A reason is the actionable half of a refusal; a bare count is not. The
+/// label stays compact for the one-line receipt and the caller decides how
+/// many remediation hints to spend space on.
+fn rejection_reason_labels(summary: &SyncSummary) -> Vec<(String, usize)> {
+    let mut reasons = summary
+        .rejected_by_reason
+        .iter()
+        .map(|(reason, count)| (reason.clone(), *count))
+        .collect::<Vec<_>>();
+    reasons.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    reasons
+}
+
+fn rejected_total(summary: &SyncSummary) -> usize {
+    summary.rejected_by_reason.values().sum()
 }
 
 fn grouped_push_failures(summary: &SyncSummary, verbose: bool) -> Vec<(String, usize)> {
@@ -3004,16 +3041,43 @@ pub(crate) fn render_sync_summary(
                         format!("{} batches", summary.batches),
                         format!("{} pending", summary.pending),
                     ];
+                    if summary.skipped_lww > 0 {
+                        parts.push(format!("{} kept newer by cloud", summary.skipped_lww));
+                    }
                     let team_counts = summary_count_labels(&summary.team_counts);
                     if !team_counts.is_empty() {
                         parts.push(format!("team {}", team_counts.join(", ")));
                     }
                     fmt.success(&format!("Push complete · {}", parts.join(" · ")))?;
                 } else {
+                    let reasons = rejection_reason_labels(summary);
+                    let rejected = rejected_total(summary);
+                    // Rejected rows are a named subset of the terminal count;
+                    // reporting both totals separately keeps "failed" honest
+                    // about what the cloud never explained.
                     let failed = summary
                         .failed
-                        .max(groups.iter().map(|(_, count)| *count).sum::<usize>());
+                        .max(groups.iter().map(|(_, count)| *count).sum::<usize>())
+                        .saturating_sub(rejected);
                     let mut parts = Vec::new();
+                    if summary.skipped_lww > 0 {
+                        parts.push(format!("{} kept newer by cloud", summary.skipped_lww));
+                    }
+                    if rejected > 0 {
+                        let named = reasons
+                            .iter()
+                            .take(3)
+                            .map(|(reason, count)| format!("{reason} ×{count}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        parts.push(format!("{rejected} rejected by cloud ({named})"));
+                        if let Some((reason, _)) = reasons.first() {
+                            parts.push(format!(
+                                "{reason}: {}",
+                                crate::cloud::push_reason_hint(reason)
+                            ));
+                        }
+                    }
                     if failed > 0 {
                         let failures = groups
                             .iter()
@@ -3058,6 +3122,27 @@ pub(crate) fn render_sync_summary(
                     summary.failed + team_failed
                 ))?;
                 fmt.newline()?;
+                if summary.skipped_lww > 0 {
+                    fmt.write_raw(&format!(
+                        "    kept newer by cloud (acknowledged, removed from queue): {}",
+                        summary.skipped_lww
+                    ))?;
+                    fmt.newline()?;
+                }
+                if summary.requeued_after_upgrade > 0 {
+                    fmt.write_raw(&format!(
+                        "    requeued after client upgrade: {}",
+                        summary.requeued_after_upgrade
+                    ))?;
+                    fmt.newline()?;
+                }
+                for (reason, count) in rejection_reason_labels(summary) {
+                    fmt.write_raw(&format!(
+                        "    rejected by cloud: {count} row(s) reason={reason} — {}",
+                        crate::cloud::push_reason_hint(&reason)
+                    ))?;
+                    fmt.newline()?;
+                }
                 for (key, count) in &summary.counts {
                     fmt.write_raw(&format!("    {key}: {count} pushed"))?;
                     fmt.newline()?;
@@ -6376,6 +6461,89 @@ mod team_cmd_tests {
             tf.output(),
             "[OK] Push complete · 2 batches · 0 pending\n"
         );
+    }
+
+    /// GH #668: the receipt distinguishes what the cloud kept newer from what
+    /// it refused, and names the repair for the leading reason. "N rows failed"
+    /// stays reserved for failures the cloud never explained.
+    #[test]
+    fn sync_summary_separates_lww_skips_from_named_cloud_rejections() {
+        let mut backlog = crate::cloud::PushBacklog {
+            pending: 4,
+            failed: 3,
+            ..Default::default()
+        };
+        backlog
+            .rejected_by_reason
+            .insert("project_mismatch".to_string(), 2);
+        backlog
+            .rejected_by_reason
+            .insert("revision_conflict".to_string(), 1);
+        let summary = SyncSummary::push(
+            &crate::cloud::SyncResult {
+                batches_run: 1,
+                skipped_lww_acked: 7,
+                remaining_backlog: backlog,
+                ..Default::default()
+            },
+            crate::cloud::PushScope::All,
+            None,
+        );
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(400);
+
+        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+
+        let output = tf.output();
+        assert!(output.contains("7 kept newer by cloud"), "{output}");
+        assert!(
+            output.contains("3 rejected by cloud (project_mismatch ×2, revision_conflict ×1)"),
+            "{output}"
+        );
+        assert!(output.contains("cas cloud link"), "{output}");
+        assert!(
+            !output.contains("rows failed"),
+            "every terminal row here has a named reason: {output}"
+        );
+    }
+
+    /// Verbose output spends a line per reason so each refusal carries its own
+    /// remediation, and reports the post-upgrade requeue it performed.
+    #[test]
+    fn verbose_push_summary_lists_each_rejection_reason_with_its_remediation() {
+        let mut backlog = crate::cloud::PushBacklog {
+            pending: 0,
+            failed: 1,
+            ..Default::default()
+        };
+        backlog
+            .rejected_by_reason
+            .insert("scope_mismatch".to_string(), 1);
+        let summary = SyncSummary::push(
+            &crate::cloud::SyncResult {
+                batches_run: 1,
+                skipped_lww_acked: 2,
+                requeued_after_upgrade: 705,
+                remaining_backlog: backlog,
+                ..Default::default()
+            },
+            crate::cloud::PushScope::All,
+            None,
+        );
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(400);
+
+        render_sync_summary(&mut tf.fmt(), &summary, true).unwrap();
+
+        let output = tf.output();
+        assert!(output.contains("kept newer by cloud"), "{output}");
+        assert!(
+            output.contains("requeued after client upgrade: 705"),
+            "{output}"
+        );
+        assert!(
+            output.contains("rejected by cloud: 1 row(s) reason=scope_mismatch"),
+            "{output}"
+        );
+        assert!(output.contains("push it from the owning scope"), "{output}");
     }
 
     #[test]

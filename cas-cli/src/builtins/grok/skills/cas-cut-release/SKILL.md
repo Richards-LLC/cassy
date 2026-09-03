@@ -92,9 +92,13 @@ and do not claim success without its receipt.
    succeeds; save the matching `gh run list --workflow release.yml --limit 20
    --json databaseId,headSha,status,conclusion` row and successful conclusion;
    run `release-published-receipt.sh --write-draft` and
-   `release-latency-receipt.sh`; use mecha-cassy's approved route and save four
-   Slack POSTED entries with timestamp and permalink; then save `cas update`,
-   `cas --version`, and `cas hub` proof under `EVIDENCE_DIR`.
+   `release-latency-receipt.sh`; use MechaCassy's default `cas-internal` channel
+   name for preflight and posts, retaining `C0B44GUKDK2` only for receipt
+   verification, and save four Slack POSTED entries with timestamp and
+   permalink. If a live Cassy proxy lacks the new registration, use the direct
+   configured mecha-cassy MCP or approved bounded one-shot route; do not retry
+   `cas`/`mcp_execute` after its authenticated-session rejection. Save `cas
+   update`, `cas --version`, and `cas hub` proof under `EVIDENCE_DIR`.
 10. Carry the POSTED receipt into the next prep commit. Close only after the
     merge receipt and stranded-branch inspection; if sibling lanes rewrote
     delivered files, use `stranded_branch_override` with proof on main.

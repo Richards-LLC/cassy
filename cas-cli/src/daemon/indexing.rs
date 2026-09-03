@@ -396,8 +396,22 @@ pub fn index_code_files_with(
             continue;
         }
 
-        let content = match std::fs::read_to_string(file_path) {
-            Ok(content) => content,
+        // GH #698: read bytes and decode, rather than demanding UTF-8 up front.
+        // A BOM-marked UTF-16 file is ordinary source text; treating it as an
+        // index failure made `cas index code` unable to ever clear the warning
+        // it printed as the remedy.
+        let content = match std::fs::read(file_path) {
+            Ok(bytes) => match crate::daemon::source_text::decode_source(&bytes) {
+                Ok(content) => content,
+                Err(reason) => {
+                    // Skipped, not failed: no retry of these bytes can succeed,
+                    // so counting it as a failure would warn forever.
+                    result
+                        .skipped
+                        .push((file_path.clone(), reason.as_str().to_string()));
+                    continue;
+                }
+            },
             Err(error) => {
                 result
                     .errors
@@ -596,7 +610,18 @@ pub fn reconcile_code_tree(
             )
         });
     }
+    // The eligible denominator must exclude files we skipped: leaving them in
+    // makes `eligible - indexed` count them as failures on every scan, which is
+    // exactly the permanent warning GH #698 reports.
+    let skipped_paths: HashSet<PathBuf> = result
+        .skipped
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect();
     for file in files {
+        if skipped_paths.contains(file) {
+            continue;
+        }
         let (root, repository) = resolve_repository(file);
         let file_id = code_store.generate_file_id_for(&repository, &file.to_string_lossy());
         by_repo
@@ -643,6 +668,15 @@ pub fn reconcile_code_tree(
             .len()
             .saturating_sub(current_indexed)
             .saturating_add(retirement_errors);
+        // Skips belong to the repository whose tree they were found in, so a
+        // multi-repo scan does not report one repo's undecodable files against
+        // another's coverage.
+        let repo_skipped: Vec<String> = result
+            .skipped
+            .iter()
+            .filter(|(path, _)| path.starts_with(&repo_root))
+            .map(|(path, reason)| format!("{}: {reason}", path.display()))
+            .collect();
         let scan_error = (!result.errors.is_empty()).then(|| {
             result
                 .errors
@@ -658,6 +692,8 @@ pub fn reconcile_code_tree(
                 current_ids.len(),
                 current_indexed,
                 failed_files,
+                repo_skipped.len(),
+                (!repo_skipped.is_empty()).then(|| repo_skipped.join("; ")).as_deref(),
                 head_commit(&repo_root).as_deref(),
                 scan_error.as_deref(),
             )

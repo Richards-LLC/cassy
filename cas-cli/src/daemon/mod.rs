@@ -22,6 +22,7 @@ pub mod indexing;
 pub mod relevance;
 mod maintenance;
 mod observation;
+pub(crate) mod source_text;
 #[cfg(test)]
 mod tests;
 mod types;

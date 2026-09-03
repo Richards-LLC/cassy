@@ -2138,6 +2138,8 @@ struct SymbolIndexState {
     eligible_files: usize,
     indexed_files: usize,
     failed_files: usize,
+    skipped_files: usize,
+    skipped_detail: Option<String>,
     /// Symbols eligible for a vector, counted in `code_symbols` — the table the
     /// indexer writes — not in the queue. A queue-derived denominator moves
     /// whenever the queue is re-armed or lost, which is how two runs 80s apart
@@ -2243,6 +2245,8 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         eligible_files: scan.as_ref().map(|scan| scan.eligible_files).unwrap_or(0),
         indexed_files: scan.as_ref().map(|scan| scan.indexed_files).unwrap_or(0),
         failed_files: scan.as_ref().map(|scan| scan.failed_files).unwrap_or(0),
+        skipped_files: scan.as_ref().map(|scan| scan.skipped_files).unwrap_or(0),
+        skipped_detail: scan.as_ref().and_then(|scan| scan.skipped_detail.clone()),
         vector_eligible: vectors.eligible,
         vectorized: vectors.vectorized,
         vector_pending: vectors.pending,
@@ -2256,6 +2260,27 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         scan_error: scan.and_then(|scan| scan.last_error),
         error: None,
     }
+}
+
+/// The skipped-files clause, or empty when nothing was skipped.
+///
+/// GH #698: skipped files are named, and deliberately carry NO remediation.
+/// They are excluded from the eligible denominator precisely because no rerun
+/// can change them, and printing "run `cas index code`" beside them is how the
+/// old warning trained operators to ignore doctor.
+fn skipped_files_clause(state: &SymbolIndexState) -> String {
+    if state.skipped_files == 0 {
+        return String::new();
+    }
+    let detail = state
+        .skipped_detail
+        .as_deref()
+        .map(|detail| format!(" ({detail})"))
+        .unwrap_or_default();
+    format!(
+        " {} file(s) skipped as undecodable and excluded from the eligible count{detail};          no action needed — converting them to UTF-8 is the only way to index them.",
+        state.skipped_files
+    )
 }
 
 /// One rendering of the code-vector counters, shared by every branch of the
@@ -2348,7 +2373,7 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
                     .as_deref()
                     .map(|error| format!("; last error: {error}"))
                     .unwrap_or_default(),
-            ),
+            ) + &skipped_files_clause(&state),
         };
     }
 
@@ -2404,7 +2429,7 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
                     Some(false) => "current",
                     None => "unknown",
                 }
-            ),
+            ) + &skipped_files_clause(&state),
         }
     }
 }

@@ -91,6 +91,8 @@ const RELATED_RECALL_LIMIT: usize = 3;
 const RELATED_RECALL_CHAR_CAP: usize = 1_200;
 const EPIC_PLANNING_RACE_WINDOW: chrono::Duration = chrono::Duration::minutes(10);
 const DUPLICATE_TITLE_SIMILARITY_THRESHOLD: f64 = 0.7;
+const DUPLICATE_DESCRIPTION_SIMILARITY_THRESHOLD: f64 = 0.2;
+const MIN_SHARED_DISTINCTIVE_IDENTIFIERS: usize = 2;
 
 fn no_code_external_ref_guidance(task: &Task) -> &'static str {
     if task.execution_note.as_deref() == Some("no-code") {
@@ -130,20 +132,142 @@ fn title_similarity(left: &str, right: &str) -> f64 {
     left.intersection(&right).count() as f64 / union as f64
 }
 
-fn open_task_title_overlap(
+fn description_terms(description: &str) -> std::collections::HashSet<String> {
+    description
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|term| term.len() > 2)
+        .collect()
+}
+
+fn description_similarity(left: &str, right: &str) -> f64 {
+    let left = description_terms(left);
+    let right = description_terms(right);
+    let union = left.union(&right).count();
+    if union == 0 {
+        return 0.0;
+    }
+    left.intersection(&right).count() as f64 / union as f64
+}
+
+fn distinctive_identifier_terms(text: &str) -> std::collections::HashSet<String> {
+    let mut identifiers = std::collections::HashSet::new();
+
+    let add_quoted = |value: &str, identifiers: &mut std::collections::HashSet<String>| {
+        let value = value.trim();
+        if value.len() >= 3
+            && value
+                .chars()
+                .all(|character| character.is_alphanumeric() || ".-_/".contains(character))
+        {
+            identifiers.insert(value.to_string());
+        }
+    };
+    let mut quote = None;
+    let mut quoted = String::new();
+    for character in text.chars() {
+        match quote {
+            Some(delimiter) if character == delimiter => {
+                add_quoted(&quoted, &mut identifiers);
+                quoted.clear();
+                quote = None;
+            }
+            Some(_) => quoted.push(character),
+            None if character == '\'' || character == '"' => {
+                quote = Some(character);
+            }
+            None => {}
+        }
+    }
+
+    for raw in text.split_whitespace() {
+        let token = raw
+            .trim_matches(|character: char| {
+                !character.is_alphanumeric() && !"._/\\:-".contains(character)
+            })
+            .trim_end_matches(['.', ',', ';', ':']);
+        if token.len() < 3 {
+            continue;
+        }
+        let has_path_marker = token.contains('.') || token.contains('/') || token.contains('\\');
+        let mut added_file_line_references = false;
+        if let Some((file, lines)) = token.split_once(':') {
+            let line_numbers = lines.split('/').collect::<Vec<_>>();
+            if !file.is_empty()
+                && line_numbers
+                    .iter()
+                    .all(|line| !line.is_empty() && line.chars().all(|c| c.is_ascii_digit()))
+            {
+                for line in line_numbers {
+                    identifiers.insert(format!("{file}:{line}"));
+                }
+                added_file_line_references = true;
+            }
+        }
+        let has_camel_case = token
+            .chars()
+            .skip(1)
+            .any(|character| character.is_ascii_uppercase());
+        let has_snake_case = token.contains('_');
+        if !added_file_line_references && (has_path_marker || has_camel_case || has_snake_case) {
+            identifiers.insert(token.to_string());
+        }
+    }
+
+    identifiers
+}
+
+fn task_similarity(
+    title: &str,
+    description: &str,
+    existing_title: &str,
+    existing_description: &str,
+) -> Option<(f64, Vec<String>)> {
+    let title_score = title_similarity(title, existing_title);
+    let candidate_identifiers = distinctive_identifier_terms(description);
+    let existing_identifiers = distinctive_identifier_terms(existing_description);
+    let mut shared_identifiers = candidate_identifiers
+        .into_iter()
+        .filter(|candidate| {
+            existing_identifiers
+                .iter()
+                .any(|existing| candidate.eq_ignore_ascii_case(existing))
+        })
+        .collect::<Vec<_>>();
+    shared_identifiers.sort_unstable();
+    if title_score >= DUPLICATE_TITLE_SIMILARITY_THRESHOLD {
+        return Some((title_score, shared_identifiers));
+    }
+
+    let description_score = description_similarity(description, existing_description);
+    if shared_identifiers.len() >= MIN_SHARED_DISTINCTIVE_IDENTIFIERS
+        && description_score >= DUPLICATE_DESCRIPTION_SIMILARITY_THRESHOLD
+    {
+        // Distinctive identifiers are intentionally weighted above generic
+        // prose: two shared identifiers plus a modest description overlap are
+        // enough to surface a likely twin, while common wording alone is not.
+        let identifier_score = (shared_identifiers.len().min(4) as f64) / 4.0;
+        let score = (description_score * 0.4 + identifier_score * 0.6).min(1.0);
+        return Some((score, shared_identifiers));
+    }
+
+    None
+}
+
+fn open_task_similarity(
     task_store: &dyn cas_store::TaskStore,
     title: &str,
-) -> Result<Option<(String, String, f64)>, String> {
+    description: &str,
+) -> Result<Option<(String, String, f64, Vec<String>)>, String> {
     let best = task_store
         .list(None)
         .map_err(|error| error.to_string())?
         .into_iter()
         .filter(|task| !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled))
-        .map(|task| {
-            let score = title_similarity(title, &task.title);
-            (task.id, task.title, score)
+        .filter_map(|task| {
+            task_similarity(title, description, &task.title, &task.description)
+                .map(|(score, identifiers)| (task.id, task.title, score, identifiers))
         })
-        .filter(|(_, _, score)| *score >= DUPLICATE_TITLE_SIMILARITY_THRESHOLD)
         .max_by(|left, right| left.2.total_cmp(&right.2));
     Ok(best)
 }
@@ -334,21 +458,32 @@ impl CasCore {
                 }
             }
 
-            if let Some((existing_id, existing_title, score)) =
-                open_task_title_overlap(task_store.as_ref(), &req.title).map_err(|error| {
-                    McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
-                        data: None,
-                    }
-                })?
-            {
+            if let Some((existing_id, existing_title, score, identifiers)) = open_task_similarity(
+                task_store.as_ref(),
+                &req.title,
+                req.description.as_deref().unwrap_or_default(),
+            )
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
+                data: None,
+            })? {
+                let identifier_note = if identifiers.is_empty() {
+                    String::new()
+                } else {
+                    format!("; overlapping identifiers: {}", identifiers.join(", "))
+                };
+                let overlap_subject = if identifiers.is_empty() {
+                    "title"
+                } else {
+                    "task"
+                };
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
-                        "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this title \\
-                         at {:.0}%. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
-                        score * 100.0
+                        "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \\
+                         at {:.0}%{identifier_note}. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
+                        score * 100.0,
                     )),
                     data: None,
                 });

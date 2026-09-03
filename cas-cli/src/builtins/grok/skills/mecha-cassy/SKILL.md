@@ -72,4 +72,6 @@ Configurations carry environment-variable names only. Never print, log, or commi
 
 This transport changes nothing about the message: **Was → Now** for every item, no ticket labels or agent/factory/process narration, and one punch per top-level message with its detail in one reply.
 
-Set this machine up once with `cas integrate mecha-cassy` (see [references/registration.md](references/registration.md)), then dispatch from a Cassy-connected harness with `cas__mcp_execute`.
+Set this machine up once with `cas integrate mecha-cassy` (see [references/registration.md](references/registration.md)), then dispatch from a Cassy-connected harness with `cas__mcp_execute`. A bounded one-shot process with no live proxy uses the proxy-less route in that same reference instead.
+
+This skill is the whole posting contract. If a machine still carries a separate user-level `mecha-cassy-post` skill, it is a stale copy from before this was a builtin: delete it and use this one, because nothing tests a skill that lives outside the repo.

@@ -26,6 +26,12 @@ fn cas_cmd(dir: &Path) -> Command {
     // how long a redacted path happens to be before redaction.
     cmd.env("COLUMNS", "4000");
     cmd.env_remove("CAS_ROOT");
+    // HOME is redirected above, but a harness account directory is selected by
+    // its own variable and would otherwise point back at the host, making any
+    // check that inspects user-level harness state (doctor's "user skills"
+    // row) depend on whose machine ran the test.
+    cmd.env_remove("CLAUDE_CONFIG_DIR");
+    cmd.env_remove("CODEX_HOME");
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }

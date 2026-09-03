@@ -172,6 +172,84 @@ fn preflight_codex_config_dir(raw: &str) -> Result<(), String> {
     }
 }
 
+/// Bound on the account probes run before a spawn cuts a worktree. Two
+/// harnesses at two seconds each is the worst case, and a spawn that waits
+/// that long still beats a worker that heartbeats for half an hour without
+/// ever taking a turn.
+const ACCOUNT_PREFLIGHT_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Refuse a spawn whose harness account is logged out, before any worktree is
+/// cut (cas-8a55).
+///
+/// `preflight_codex_config_dir` proves an `auth.json` exists; it cannot prove
+/// the credential inside it still works. In the incident this exists for the
+/// file was present and the refresh token behind it had been revoked, so four
+/// worktrees were cut, four workers registered, and every first turn died in
+/// about a second.
+///
+/// Only an affirmative `Unavailable` refuses. `Unknown` — no CLI on PATH, a
+/// probe that timed out, a harness with no account plumbing — must not block a
+/// spawn: a preflight that fails closed on its own unreliability would ground
+/// the factory over a slow binary.
+fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
+    let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
+    preflight_account_auth_with(specs, |cli, account_dir| {
+        crate::capability::probe_account_auth(cli, account_dir, deadline)
+    })
+}
+
+/// Probe-injected core of [`preflight_account_auth`], so the refusal policy is
+/// testable without a CLI on PATH.
+fn preflight_account_auth_with(
+    specs: &[cas_mux::WorkerSpec],
+    probe: impl Fn(cas_mux::SupervisorCli, Option<&str>) -> cas_factory::CapabilityEvidence,
+) -> Result<(), String> {
+    let mut seen: std::collections::BTreeSet<(cas_mux::SupervisorCli, Option<String>)> =
+        std::collections::BTreeSet::new();
+    for spec in specs {
+        if !account_dir_supported(spec.cli) {
+            continue;
+        }
+        // The account a worker will actually use: its own override first, the
+        // requesting supervisor's captured account otherwise.
+        let account_dir = spec
+            .config_dir
+            .clone()
+            .or_else(|| spec.requester_config_dir.clone())
+            .map(|dir| dir.trim().to_string())
+            .filter(|dir| !dir.is_empty());
+        if !seen.insert((spec.cli, account_dir.clone())) {
+            continue;
+        }
+        let evidence = probe(spec.cli, account_dir.as_deref());
+        if evidence.availability != cas_factory::CapabilityAvailability::Unavailable {
+            continue;
+        }
+        let account = account_dir
+            .as_deref()
+            .map_or_else(|| default_account_label(spec.cli), str::to_string);
+        let reason = evidence
+            .reason
+            .unwrap_or_else(|| "the account probe reported it unavailable".to_string());
+        return Err(format!(
+            "spawn refused: the {} account at {account} is not usable — {reason}. {} \
+             No worktree was created and no task was assigned.",
+            spec.cli.backend().name(),
+            crate::factory_auth_health::auth_failure_remedy(spec.cli, account_dir.as_deref()),
+        ));
+    }
+    Ok(())
+}
+
+/// What to call the account when the caller named no directory.
+fn default_account_label(cli: cas_mux::SupervisorCli) -> String {
+    match cli {
+        cas_mux::SupervisorCli::Codex => "the default CODEX_HOME (~/.codex)".to_string(),
+        cas_mux::SupervisorCli::Claude => "the default Claude configuration directory".to_string(),
+        other => format!("the default {} account", other.backend().name()),
+    }
+}
+
 /// Heartbeat age at which a worker is considered **stale** and becomes
 /// eligible for the opportunistic prune in `factory_worker_status`.
 ///
@@ -1886,6 +1964,11 @@ impl CasService {
                 ));
             }
         }
+        // cas-8a55: the last gate before this request becomes worktrees. A
+        // logged-out account is refused here, by name, instead of producing
+        // workers that register, take their task and die on the first turn
+        // while still heartbeating.
+        preflight_account_auth(&specs).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
         for notice in notices.iter().chain(config_dir_warnings.iter()) {
             tracing::warn!(target: "cas::factory", "{notice}");
         }
@@ -7719,6 +7802,61 @@ pub(crate) fn worker_usage_limit_evidence(
     codex_rollout_usage_limit_evidence(rollout.as_deref(), cli)
 }
 
+/// Account health read from the worker's own transcript.
+///
+/// The sibling of [`worker_usage_limit_evidence`] for the failure that hides
+/// even better than an exhausted account: a harness that cannot authenticate
+/// ends its first turn in about a second and then heartbeats forever, so the
+/// worker reads as live, assigned and merely slow (cas-8a55).
+pub(crate) fn worker_auth_failure_evidence(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> crate::factory_auth_health::AuthFailureEvidence {
+    use crate::factory_auth_health::AuthFailureEvidence;
+    let cli = worker_cli_from_agent(agent);
+    let Some(transcript) = worker_transcript_path_for_agent(cas_root, agent) else {
+        return AuthFailureEvidence::Unavailable;
+    };
+    let Some(tail) = read_transcript_tail(&transcript) else {
+        return AuthFailureEvidence::Unavailable;
+    };
+    match cli {
+        cas_mux::SupervisorCli::Codex => {
+            crate::factory_auth_health::codex_rollout_auth_failure(&tail)
+        }
+        cas_mux::SupervisorCli::Claude => {
+            crate::factory_auth_health::claude_transcript_auth_failure(&tail)
+        }
+        // Harnesses without a transcript reader must not be reported as
+        // failing on evidence nobody collected.
+        _ => AuthFailureEvidence::Unavailable,
+    }
+}
+
+/// The account directory a worker was actually spawned against, which is what
+/// a remedy has to name on a host running several of them.
+pub(crate) fn worker_account_dir(agent: &cas_types::Agent) -> Option<String> {
+    agent
+        .metadata
+        .get("worker_account_dir")
+        .map(|dir| dir.trim().to_string())
+        .filter(|dir| !dir.is_empty())
+}
+
+/// Bounded tail read shared by the transcript scanners. A transcript can grow
+/// without limit; the terminal records that matter are always at its end.
+fn read_transcript_tail(path: &std::path::Path) -> Option<String> {
+    const TAIL_BYTES: u64 = 256 * 1024;
+    let metadata = std::fs::metadata(path).ok()?;
+    let start = metadata.len().saturating_sub(TAIL_BYTES);
+    let mut file = std::fs::File::open(path).ok()?;
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = String::new();
+    file.read_to_string(&mut tail).ok()?;
+    Some(tail)
+}
+
 fn codex_rollout_reports_usage_limit(
     rollout: Option<&std::path::Path>,
     cli: cas_mux::SupervisorCli,
@@ -8877,6 +9015,107 @@ mod spawn_lifecycle_tests {
 
     fn render(rows: &[SpawnLifecycle]) -> String {
         format_spawn_lifecycle_section(rows, chrono::Utc::now())
+    }
+
+    fn spec_for(cli: cas_mux::SupervisorCli, config_dir: Option<&str>) -> cas_mux::WorkerSpec {
+        cas_mux::WorkerSpec {
+            name: None,
+            cli,
+            model: None,
+            effort: None,
+            config_dir: config_dir.map(str::to_string),
+            requester_config_dir: None,
+            requester_secure_storage_dir: None,
+        }
+    }
+
+    fn evidence(availability: cas_factory::CapabilityAvailability, reason: &str) -> cas_factory::CapabilityEvidence {
+        let mut evidence = cas_factory::CapabilityEvidence::new(availability, 0);
+        evidence.reason = Some(reason.to_string());
+        evidence
+    }
+
+    #[test]
+    fn a_logged_out_account_refuses_the_spawn_by_name_before_any_worktree_exists() {
+        let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex-alt"))];
+        let error = preflight_account_auth_with(&specs, |_, _| {
+            evidence(
+                cas_factory::CapabilityAvailability::Unavailable,
+                "Codex login status reports no authenticated account",
+            )
+        })
+        .expect_err("a logged-out account must refuse the spawn");
+        assert!(error.contains("~/.codex-alt"), "{error}");
+        assert!(error.contains("codex login"), "{error}");
+        assert!(error.contains("No worktree was created"), "{error}");
+        assert!(
+            error.contains("no authenticated account"),
+            "the probe's own reason must survive: {error}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_default_account_when_the_caller_named_none() {
+        let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, None)];
+        let error = preflight_account_auth_with(&specs, |_, _| {
+            evidence(
+                cas_factory::CapabilityAvailability::Unavailable,
+                "logged out",
+            )
+        })
+        .expect_err("refusal expected");
+        assert!(error.contains("~/.codex"), "{error}");
+    }
+
+    #[test]
+    fn an_unreadable_probe_never_blocks_a_spawn() {
+        // No CLI on PATH, a probe that timed out, or a harness with no account
+        // plumbing is absence of evidence. A preflight that failed closed on
+        // its own unreliability would ground the factory over a slow binary.
+        let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex"))];
+        assert!(
+            preflight_account_auth_with(&specs, |_, _| {
+                evidence(
+                    cas_factory::CapabilityAvailability::Unknown,
+                    "Codex login status probe timed out",
+                )
+            })
+            .is_ok()
+        );
+        assert!(
+            preflight_account_auth_with(&specs, |_, _| {
+                evidence(cas_factory::CapabilityAvailability::Available, "logged in")
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn each_distinct_account_is_probed_once_and_harnesses_without_accounts_are_skipped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let specs = vec![
+            spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex")),
+            spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex")),
+            spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex-alt")),
+            spec_for(cas_mux::SupervisorCli::Claude, Some("~/.claude")),
+            spec_for(cas_mux::SupervisorCli::Grok, None),
+        ];
+        preflight_account_auth_with(&specs, |cli, _| {
+            assert_ne!(
+                cli,
+                cas_mux::SupervisorCli::Grok,
+                "a harness with no account plumbing must not be probed"
+            );
+            calls.fetch_add(1, Ordering::SeqCst);
+            evidence(cas_factory::CapabilityAvailability::Available, "logged in")
+        })
+        .expect("healthy accounts pass");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "four Codex/Claude specs across three distinct accounts must cost three probes"
+        );
     }
 
     #[test]
@@ -12285,6 +12524,46 @@ effort = "high"
             }
         }
         assert_eq!(got, Some(sessions.join(rel)));
+    }
+
+    /// cas-8a55: the seam between the pure scanner and a registered worker.
+    #[test]
+    fn a_registered_codex_worker_whose_first_turn_was_unauthorized_reads_as_an_account_failure() {
+        // The seam between the pure scanner and a real registered worker: the
+        // agent's spawn-time CODEX_HOME has to reach the rollout, and the
+        // rollout's terminal turn has to reach the supervisor as evidence.
+        let clone = "/tmp/cas-8a55-unauthorized-worker";
+        let rel = "2026/09/03/rollout-2026-09-03T14-12-58-unauthorized.jsonl";
+        let (account_home, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
+        let account_dir = account_home.path().to_str().expect("utf-8 account home");
+        let rollout = sessions.join(rel);
+        let mut contents = std::fs::read_to_string(&rollout).expect("fixture rollout");
+        contents.push_str(
+            "\n{\"timestamp\":\"2026-09-03T14:13:01.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":null,\"error\":{\"message\":\"Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\",\"codex_error_info\":\"unauthorized\"}}}\n",
+        );
+        std::fs::write(&rollout, contents).expect("write rollout");
+
+        let mut agent = cas_types::Agent::new(
+            "codex-zen-eagle-20-session".to_string(),
+            "zen-eagle-20".to_string(),
+        );
+        agent
+            .metadata
+            .insert("worker_cli".to_string(), "codex".to_string());
+        agent
+            .metadata
+            .insert("clone_path".to_string(), clone.to_string());
+        agent
+            .metadata
+            .insert("worker_account_dir".to_string(), account_dir.to_string());
+
+        let evidence = worker_auth_failure_evidence(account_home.path(), &agent);
+        let crate::factory_auth_health::AuthFailureEvidence::Failed { message, .. } = evidence
+        else {
+            panic!("a revoked-token first turn must read as an account failure: {evidence:?}");
+        };
+        assert!(message.contains("refresh token was revoked"), "{message}");
+        assert_eq!(worker_account_dir(&agent).as_deref(), Some(account_dir));
     }
 
     /// cas-66fd: the supervisor normally runs under its own (often default)

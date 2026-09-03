@@ -248,6 +248,13 @@ pub struct FactoryDaemon {
     reported_unavailable_workers: std::collections::HashMap<String, String>,
     /// Last bounded rollout scan for terminal harness availability evidence.
     last_usage_limit_scan: Option<Instant>,
+    /// cas-8a55: workers whose harness refused a turn for an account reason
+    /// (revoked Codex token, expired Claude session). Agent id -> evidence
+    /// occurrence, so the supervisor is told once per failure rather than once
+    /// per scan, and a re-authenticated worker can be reported again later.
+    reported_auth_failed_workers: std::collections::HashMap<String, String>,
+    /// Last bounded transcript scan for harness account failures.
+    last_auth_failure_scan: Option<Instant>,
     /// In-flight spawns cancelled by a shutdown that targeted that specific
     /// generation. Entries are consumed when the matching spawn task finishes.
     cancelled_spawns: std::collections::HashSet<String>,

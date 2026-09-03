@@ -189,6 +189,33 @@ pub fn probe_key_presence(
     }
 }
 
+/// Account-only probe for one harness, with no binary-version or model
+/// context (cas-8a55).
+///
+/// `probe_harness` answers "can this route run", which needs a version probe
+/// and a lane receipt. Spawn asks a narrower question — is the account this
+/// worker would use logged in — and asking it before cutting a worktree is
+/// what turns a half-hour of silent, assigned-but-dead workers into a refusal
+/// the operator can act on. Harnesses without account plumbing return
+/// `Unknown` rather than a verdict, because absence of a probe is not evidence
+/// of a bad account.
+pub(crate) fn probe_account_auth(
+    cli: cas_mux::SupervisorCli,
+    account_dir: Option<&str>,
+    deadline: Deadline,
+) -> CapabilityEvidence {
+    let now_ms = cas_factory::CapabilitySnapshot::now_ms();
+    match cli {
+        cas_mux::SupervisorCli::Claude => probe_claude_auth(account_dir, now_ms, deadline),
+        cas_mux::SupervisorCli::Codex => probe_codex_auth(account_dir, now_ms, deadline),
+        _ => unknown(
+            now_ms,
+            "harness has no account probe",
+            "No account preflight is defined for this harness.",
+        ),
+    }
+}
+
 fn probe_claude_auth(
     account_dir: Option<&str>,
     now_ms: u64,

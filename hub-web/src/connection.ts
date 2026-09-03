@@ -1,6 +1,9 @@
+import { anySignal } from "./abort-signals";
+import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { dpopHeaders } from "./dpop";
 import {
   backoffDelay,
+  connectingAnchor,
   DEGRADED_AFTER_MISSED_HEARTBEATS,
   HEARTBEAT_INTERVAL_MS,
   RECONNECT_AFTER_MISSED_HEARTBEATS,
@@ -42,6 +45,19 @@ export interface HubCallbacks {
 
 class AuthenticationError extends Error {
   constructor(readonly kind: AuthFailureKind, message: string) { super(message); }
+}
+
+/**
+ * A browser that lacks an API this build needs cannot be fixed by trying
+ * again, so it is failed once with the reason on screen instead of retried
+ * forever behind a "Connecting…" spinner (report cas-b652, defect D3).
+ * Deliberately not inferred from TypeError: fetch rejects with TypeError on an
+ * ordinary network failure, which must keep retrying.
+ */
+export class UnsupportedBrowserError extends Error {}
+
+function unsupportedBrowserReason(): string | undefined {
+  return unsupportedBrowserNotice(browserSupport(undefined, "transport"));
 }
 
 export class HubConnectionSupervisor {
@@ -128,10 +144,12 @@ export class HubConnectionSupervisor {
   }
 
   private transition(phase: ConnectionPhase, stage: ConnectionStage, update: Partial<ConnectionSnapshot> = {}): void {
+    const now = Date.now();
     this.lifecycle = {
       phase,
       stage,
-      since: Date.now(),
+      since: now,
+      connectingSince: connectingAnchor(this.lifecycle, phase, now),
       attempt: this.attempt,
       missedHeartbeats: this.missedHeartbeats,
       degraded: this.missedHeartbeats >= DEGRADED_AFTER_MISSED_HEARTBEATS,
@@ -167,6 +185,8 @@ export class HubConnectionSupervisor {
     if (!this.desired) return;
     let stage = this.resumeStage;
     try {
+      const unsupported = unsupportedBrowserReason();
+      if (unsupported) throw new UnsupportedBrowserError(unsupported);
       if (stage === "resolving") {
         this.transition("resolving", "resolving");
         await this.withStageTimeout("resolving", async () => { new URL(this.machine.baseUrl); });
@@ -197,6 +217,11 @@ export class HubConnectionSupervisor {
       if (this.desired) throw new Error("hub event stream closed");
     } catch (error) {
       if (!this.desired) return;
+      if (error instanceof UnsupportedBrowserError) {
+        this.stopHeartbeat();
+        this.transition("failed", stage, { reason: error.message, fatal: true });
+        return;
+      }
       if (error instanceof DOMException && error.name === "AbortError") {
         if (this.missedHeartbeats < RECONNECT_AFTER_MISSED_HEARTBEATS) return;
         error = new Error(`${this.missedHeartbeats} consecutive heartbeats missed`);
@@ -330,7 +355,9 @@ export class HubConnectionSupervisor {
     const path = "/v1/events";
     const response = await fetch(new URL(path, this.machine.baseUrl), {
       headers: await dpopHeaders(this.machine, "GET", path),
-      signal: AbortSignal.any([this.eventAbort.signal, signal]),
+      // AbortSignal.any is Chrome 116+; calling it bare took the whole event
+      // stream out on older engines (cas-b652 D3).
+      signal: anySignal([this.eventAbort.signal, signal]),
       cache: "no-store",
       credentials: "omit",
     });
@@ -427,6 +454,8 @@ export class HubConnectionSupervisor {
 
   private async openAttach(session: string): Promise<void> {
     if (!this.desired) return;
+    const unsupported = unsupportedBrowserReason();
+    if (unsupported) throw new UnsupportedBrowserError(unsupported);
     this.desiredSessions.add(session);
     const retryTimer = this.attachRetryTimers.get(session);
     if (retryTimer !== undefined) {
@@ -631,6 +660,14 @@ export class HubConnectionSupervisor {
 
   private async handleAttachFailure(session: string, error: unknown): Promise<void> {
     if (!this.desired) return;
+    // Checked before the reachability probe, which would otherwise report a
+    // missing browser API as a revoked pairing.
+    if (error instanceof UnsupportedBrowserError) {
+      const stage = this.attachLifecycles.get(session)?.stage ?? "attaching";
+      this.transitionAttach(session, "failed", stage, { reason: error.message, fatal: true });
+      this.callbacks.onSocketError(session, error.message);
+      return;
+    }
     if (error instanceof AuthenticationError) {
       this.transitionAttach(session, "failed", "auth", { reason: error.message, authFailure: error.kind });
       this.blockAuthentication(error.kind, error.message, session);

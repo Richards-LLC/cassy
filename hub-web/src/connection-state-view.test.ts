@@ -52,8 +52,48 @@ describe("Commander designed connection states", () => {
     });
   });
 
+  it("keeps the machine-level clock running across retry transitions", () => {
+    // D3: every transition rewrites `since`, so a machine that fails and
+    // retries every second reported "0s" forever and the 5s and 15s
+    // disclosures never fired.
+    const machine: ConnectionSnapshotView = {
+      phase: "backoff",
+      stage: "attaching",
+      since: startedAt + 15_800,
+      connectingSince: startedAt,
+      attempt: 6,
+      missedHeartbeats: 0,
+      degraded: false,
+      reason: "Terminal attach failed for hub.example: AbortSignal.any is not a function",
+    };
+    expect(elapsedSeconds(machine, startedAt + 16_000)).toBe(16);
+    expect(connectingView(machine, startedAt + 16_000)).toMatchObject({
+      elapsedLabel: "16s",
+      step: "Terminal attach failed for hub.example: AbortSignal.any is not a function",
+      actionsAvailable: true,
+    });
+  });
+
+  it("shows a non-retryable failure and its escape hatch immediately, not after 15s", () => {
+    // Waiting 15 seconds to reveal an error that can never resolve itself is
+    // 15 seconds of lying about progress.
+    const fatal = snapshot({ phase: "failed", fatal: true, reason: "This browser cannot open the terminal stream." });
+    expect(connectingView(fatal, startedAt + 200)).toEqual({
+      elapsedSeconds: 0,
+      elapsedLabel: "0s",
+      step: "This browser cannot open the terminal stream.",
+      actionsAvailable: true,
+    });
+  });
+
   it("formats long-running attempts without introducing another state clock", () => {
     expect(connectingView(snapshot(), startedAt + 72_000).elapsedLabel).toBe("1m 12s");
+  });
+
+  it("promises no next attempt on a retained frame when nothing is retrying", () => {
+    const fatal = snapshot({ phase: "failed", fatal: true, attempt: 2, retryInMs: 4_000 });
+    expect(disconnectedView(fatal, startedAt + 4_000).retryLabel).toBe("not retrying");
+    expect(shouldRetainDisconnectedFrame(fatal)).toBe(true);
   });
 
   it("uses lifecycle attempt and retry data for a retained disconnected frame", () => {

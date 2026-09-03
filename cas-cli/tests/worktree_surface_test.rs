@@ -2727,14 +2727,20 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
     let mut env = test_env();
     let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     // Unique base_path under the temp parent so parallel/rerun tests don't
-    // collide on a shared /tmp/custom-worktree-loc path.
-    let unique = format!(
-        "custom-wt-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    // collide on a shared /tmp/custom-worktree-loc path. GH #704: owned by a
+    // TempDir so the directory is removed when the test ends — the hand-named
+    // variant leaked 63 `custom-wt-*` directories into the operator's tmpfs.
+    let base_parent = repo.root.parent().expect("temp repo has a parent");
+    let base_dir = tempfile::Builder::new()
+        .prefix("custom-wt-")
+        .tempdir_in(base_parent)
+        .expect("create custom base_path under the temp parent");
+    let unique = base_dir
+        .path()
+        .file_name()
+        .expect("tempdir has a name")
+        .to_string_lossy()
+        .into_owned();
     std::fs::write(
         cas_root.join("config.toml"),
         format!("[worktrees]\nenabled = false\nbase_path = \"{unique}\"\n"),

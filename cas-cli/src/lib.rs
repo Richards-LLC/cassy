@@ -68,6 +68,7 @@ mod skill_validation;
 pub mod store;
 pub mod sync;
 pub mod telemetry;
+pub mod temp_hygiene;
 pub mod test_paths;
 pub mod tracing;
 pub mod ui;

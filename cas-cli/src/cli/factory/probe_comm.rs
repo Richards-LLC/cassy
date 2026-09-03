@@ -329,9 +329,7 @@ pub(crate) fn run_probe_comm_with_parent(
 
     let run_root = match cas_root {
         Some(path) => path,
-        None => std::env::temp_dir()
-            .join(format!("cas-probe-comm-{}", uuid::Uuid::new_v4()))
-            .join(".cas"),
+        None => generated_scratch_root_path().join(".cas"),
     };
     guard_active_parent_root(&run_root, parent_cas_root, allow_active_cas_root)?;
     fs::create_dir_all(&run_root)
@@ -1091,6 +1089,11 @@ fn composed_evidence_stage(
     }
 }
 
+/// Location of a probe-generated disposable Cassy root.
+fn generated_scratch_root_path() -> PathBuf {
+    std::env::temp_dir().join(format!("cas-probe-comm-{}", uuid::Uuid::new_v4()))
+}
+
 fn guard_active_parent_root(
     run_root: &Path,
     parent_cas_root: Option<&Path>,
@@ -1474,6 +1477,102 @@ mod tests {
         let config = base_config(dir_output, temp.path().join(".cas"));
         let err = run_probe_comm(config).expect_err("directory output path should fail");
         assert!(err.to_string().contains("jsonl output path"));
+    }
+
+    /// GH #704: the probe leaked 1,242 `cas-probe-comm-*` roots into a
+    /// 32 GB tmpfs `/tmp` before it filled and broke every live session.
+    /// A run that generates its own root must take it with it.
+    #[test]
+    fn generated_scratch_root_is_removed_after_a_successful_run() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let temp = tempfile::tempdir().unwrap();
+            let before = probe_root_snapshot(home);
+            let mut config = base_config(temp.path().join("probe.jsonl"), temp.path().join(".cas"));
+            config.cas_root = None;
+
+            run_probe_comm(config).expect("happy path should pass");
+
+            assert_eq!(
+                probe_root_snapshot(home),
+                before,
+                "probe-comm must not leave its generated root behind"
+            );
+        });
+    }
+
+    #[test]
+    fn generated_scratch_root_is_removed_after_a_failed_run() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let temp = tempfile::tempdir().unwrap();
+            let before = probe_root_snapshot(home);
+            let mut config = base_config(temp.path().join("probe.jsonl"), temp.path().join(".cas"));
+            config.cas_root = None;
+            config.failure = Some(ProbeFailure::Transport {
+                scenario: "urgent".to_string(),
+                message_id: "urgent-0".to_string(),
+            });
+
+            run_probe_comm(config).expect_err("injected transport failure should fail the run");
+
+            assert_eq!(
+                probe_root_snapshot(home),
+                before,
+                "the failure path must clean up too"
+            );
+        });
+    }
+
+    /// The default lives on disk (`~/.cas/scratch/<name>`), not in RAM.
+    #[test]
+    fn generated_scratch_root_defaults_under_home_cas_scratch() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let root = generated_scratch_root_path();
+            assert!(
+                root.starts_with(home.join(".cas").join("scratch")),
+                "generated root {} should live under ~/.cas/scratch",
+                root.display()
+            );
+            assert!(
+                root.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("cas-probe-comm-"),
+                "generated root should stay identifiable: {}",
+                root.display()
+            );
+        });
+    }
+
+    /// An operator-supplied root is theirs: never removed.
+    #[test]
+    fn explicit_cas_root_is_left_in_place() {
+        let temp = tempfile::tempdir().unwrap();
+        let explicit = temp.path().join("mine").join(".cas");
+        let config = base_config(temp.path().join("probe.jsonl"), explicit.clone());
+
+        run_probe_comm(config).expect("happy path should pass");
+
+        assert!(
+            explicit.exists(),
+            "an explicit --cas-root must survive the run"
+        );
+    }
+
+    /// Every `cas-probe-comm-*` directory in the two places a generated root
+    /// could land: the scratch base under HOME (current) and `$TMPDIR`
+    /// (pre-fix). Compared before/after a run so pre-existing strays on the
+    /// host cannot make the assertion lie in either direction.
+    fn probe_root_snapshot(home: &std::path::Path) -> std::collections::BTreeSet<PathBuf> {
+        [home.join(".cas").join("scratch"), std::env::temp_dir()]
+            .into_iter()
+            .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().starts_with("cas-probe-comm-"))
+                    .unwrap_or(false)
+            })
+            .collect()
     }
 
     #[test]

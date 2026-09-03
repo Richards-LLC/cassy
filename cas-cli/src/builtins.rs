@@ -4333,7 +4333,13 @@ This is the body content."#;
             // Nothing token-shaped may ship, and the diagnostics that leaked
             // secrets before must stay named as prohibitions, never as recipes.
             for file in [skill, registration] {
-                for banned in ["xoxb-", "xoxp-", "xapp-", "Bearer sk-", "MECHA_CLIENT_TOKENS="] {
+                for banned in [
+                    "xoxb-",
+                    "xoxp-",
+                    "xapp-",
+                    "Bearer sk-",
+                    "MECHA_CLIENT_TOKENS=",
+                ] {
                     assert!(
                         !file.content.contains(banned),
                         "{label} {} ships a token-shaped literal: {banned:?}",
@@ -4347,6 +4353,31 @@ This is the body content."#;
                     "{label} mecha-cassy SKILL.md dropped credential rule: {required_ban:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_builtin_mecha_cassy_skill_body_under_12kb() {
+        const MAX_BYTES: usize = 12 * 1024;
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let skill = catalog
+                .iter()
+                .find(|b| b.path == "skills/mecha-cassy/SKILL.md")
+                .unwrap_or_else(|| panic!("skills/mecha-cassy/SKILL.md missing from {label}"));
+            assert!(
+                skill.content.len() <= MAX_BYTES,
+                "{label} mecha-cassy SKILL.md is {} bytes, over the {MAX_BYTES}-byte limit",
+                skill.content.len()
+            );
+            assert!(
+                skill.content.lines().count() <= 80,
+                "{label} mecha-cassy SKILL.md has {} lines, over the ~80-line authoring target",
+                skill.content.lines().count()
+            );
         }
     }
 

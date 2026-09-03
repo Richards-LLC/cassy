@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+- `cas doctor` prints task ids, agent UUIDs and timestamps exactly as they are,
+  so they can be copied straight into the next command. A digit-grouping pass
+  ran over each finished line with no way to tell a count from an identifier,
+  turning `cas-7791` into `cas-7,791`, making UUIDs unpasteable and adding
+  three commas to a timestamp; counts now print as plain integers instead.
+  The cross-project row line also said "cannot reach 4 rows" while listing six
+  — the number now describes the list it prints, and when the delete-set
+  shortfall genuinely differs from the rows named, both numbers are stated.
+  (GH #697)
+
 ## [3.15.0] - 2026-09-03
 
 ### Added

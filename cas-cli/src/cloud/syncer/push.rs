@@ -37,6 +37,20 @@ impl CloudSyncer {
         self.push_scoped(PushScope::All)
     }
 
+    /// `Some(message)` when this checkout is a scratch/probe root that must not
+    /// push (GH #701). Resolution failure yields `None`: an unclassifiable root
+    /// syncs, because blocking a real project is the expensive mistake.
+    fn ephemeral_project_refusal(&self) -> Option<String> {
+        let cas_root = crate::store::find_cas_root().ok()?;
+        let verdict = crate::cloud::classify_project_root(&cas_root);
+        let project_id = self
+            .push_project_canonical_id
+            .clone()
+            .or_else(crate::cloud::get_project_canonical_id)
+            .unwrap_or_else(|| cas_root.display().to_string());
+        verdict.explain(&project_id)
+    }
+
     /// Describe the exact next queue batch without mutating it.
     pub fn plan_push(&self, scope: PushScope) -> Result<PushPlan, CasError> {
         let batch_limit = self.config.batch_size.max(1);
@@ -112,6 +126,15 @@ impl CloudSyncer {
         result.requeued_after_upgrade = self.requeue_stale_client_failures()?;
 
         if !self.is_available() {
+            return Ok(result);
+        }
+
+        // GH #701: a throwaway checkout must not mint a cloud identity and
+        // push into the account's shared buckets. Declining is a no-op, not a
+        // failure — the queue is left intact so a later `cas cloud project
+        // set` drains it.
+        if let Some(refusal) = self.ephemeral_project_refusal() {
+            warn!("[Cassy sync] {refusal}");
             return Ok(result);
         }
 
@@ -375,6 +398,58 @@ impl CloudSyncer {
         }
     }
 
+    /// Declare the base revision this upsert is built on.
+    ///
+    /// Sent as a decimal string, the wire form the server parses. When this
+    /// client has never observed a revision for the row the key is OMITTED
+    /// entirely — that is what selects the server's timestamp-LWW compatibility
+    /// path. A placeholder would be actively harmful: the server drops a row
+    /// whose revision it cannot parse, and a fabricated "0" against an existing
+    /// row is a guaranteed conflict.
+    fn with_base_revision(
+        &self,
+        item: &QueuedSync,
+        mut payload: serde_json::Value,
+    ) -> serde_json::Value {
+        let Some(object) = payload.as_object_mut() else {
+            return payload;
+        };
+        // Never let a stale body-embedded revision reach the server; the base
+        // is ours to declare, from the ledger only.
+        object.remove("revision");
+        if let Ok(Some(revision)) = self.queue.revision(item.entity_type, &item.entity_id) {
+            object.insert(
+                "revision".to_string(),
+                serde_json::Value::String(revision.to_string()),
+            );
+        }
+        payload
+    }
+
+    /// Store the revisions the server echoed for accepted rows, and drop a base
+    /// this push proved stale.
+    fn settle_revision_receipts(&self, entity_type: &str, response: &super::PushResponse) {
+        let Some(entity) = crate::cloud::EntityType::from_collection_key(entity_type) else {
+            return;
+        };
+        for (id, revision) in response.accepted_revisions_for(entity_type) {
+            let _ = self.queue.record_revision(entity, &id, revision);
+        }
+        for (id, current_revision) in response.revision_conflicts_for(entity_type) {
+            // Our base lost the race. Forget it rather than replacing it with
+            // the server's current revision: pretending we have seen that row
+            // would let the next push overwrite a change we never looked at.
+            // The next pull records the real revision and resolves the row.
+            let _ = self.queue.clear_revision(entity, &id);
+            tracing::debug!(
+                entity_type = entity_type,
+                entity_id = %id,
+                server_revision = ?current_revision,
+                "cloud rejected a stale base revision; dropped the local base and left the row queued"
+            );
+        }
+    }
+
     fn settle_personal_row_results(
         &self,
         batch_items: &[&QueuedSync],
@@ -455,7 +530,7 @@ impl CloudSyncer {
         for item in &upsert_items {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
-                    Ok(v) => upsert_entries.push((*item, v)),
+                    Ok(v) => upsert_entries.push((*item, self.with_base_revision(item, v))),
                     Err(_) => {
                         let _ = self
                             .queue
@@ -487,6 +562,9 @@ impl CloudSyncer {
 
                 match self.push_sub_batch(values, entity_type, token) {
                     Ok(response) => {
+                        // Independent of how rows settle: a revision receipt is
+                        // the server telling us what it now holds.
+                        self.settle_revision_receipts(entity_type, &response);
                         // Defensive cross-check against the server-side
                         // `ON CONFLICT DO UPDATE ... WHERE false` silent-skip
                         // path (cas-0bdc / cas-d656): an aggregate skipped

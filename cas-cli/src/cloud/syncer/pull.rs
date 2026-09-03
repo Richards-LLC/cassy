@@ -159,21 +159,65 @@ impl TaskDependencyRecord {
     }
 }
 
-fn task_dependency_matches_project(raw: &serde_json::Value, current_project_id: &str) -> bool {
-    let project_field = raw
-        .get("project_canonical_id")
+/// The row's own statement of which project it belongs to.
+///
+/// `origin_project` is written by the client that created the row and travels
+/// with it. It is the only field on a pulled row that survives replication
+/// intact — see [`row_attribution`].
+fn row_origin_project(raw: &serde_json::Value) -> Option<&str> {
+    raw.get("origin_project")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+}
+
+/// Which project a pulled row actually belongs to (GH #701).
+///
+/// # Why `origin_project` outranks the scope stamp
+///
+/// The cloud stamps every row it returns with `project_id = <the scope you
+/// asked for>`, so that field says nothing about ownership — it is an echo of
+/// the request. Measured on this account 2026-09-03:
+/// `GET /api/sync/pull?project_id=richards-llc-accounting` returns **1** task
+/// and **3,002** task-dependency rows, and all 3,002 are stamped
+/// `project_id: "richards-llc-accounting"` while carrying
+/// `origin_project: "cas-src"`. Reading the stamp first — which is what this
+/// client did — admits every one of them, which is the inflow behind the
+/// foreign-row growth in GH #701 (1,772 → 1,862 rows across 9 → 12 projects,
+/// three of them ephemeral probes).
+///
+/// So attribution reads `origin_project` **first**, and falls back to the scope
+/// stamp only when the row does not carry one. That fallback is load-bearing,
+/// not laziness: rows written before `origin_project` existed have no origin,
+/// and rejecting those would silently drop real history instead of fixing the
+/// leak.
+///
+/// Comparison runs through `project_ids_match`, so a legacy spelling folded by
+/// the cloud's alias record (GH #669) is still recognized as this project's own.
+fn row_attribution<'a>(raw: &'a serde_json::Value) -> Option<(&'a str, &'static str)> {
+    if let Some(origin) = row_origin_project(raw) {
+        return Some((origin, "origin_project"));
+    }
+    raw.get("project_canonical_id")
         .or_else(|| raw.get("project_id"))
-        .or_else(|| raw.get("origin_project"));
+        .and_then(serde_json::Value::as_str)
+        .map(|scope| (scope, "project_id"))
+}
+
+pub(crate) fn task_dependency_matches_project(
+    raw: &serde_json::Value,
+    current_project_id: &str,
+) -> bool {
     let edge_id = raw
         .get("id")
         .or_else(|| raw.get("entity_id"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("<unknown>");
-    match project_field.and_then(serde_json::Value::as_str) {
-        Some(project) if project_ids_match(project, current_project_id) => true,
-        Some(project) => {
+    match row_attribution(raw) {
+        Some((project, _)) if project_ids_match(project, current_project_id) => true,
+        Some((project, field)) => {
             tracing::debug!(
-                "[Cassy sync] WARNING: skipping task dependency '{edge_id}' from foreign project '{project}' (expected '{current_project_id}')"
+                "[Cassy sync] WARNING: skipping task dependency '{edge_id}' from foreign project '{project}' (by {field}; expected '{current_project_id}')"
             );
             false
         }
@@ -207,12 +251,10 @@ fn remote_dependency_state(
 ) -> RemoteDependencyState {
     let mut state = RemoteDependencyState::default();
     for raw in raw_dependencies {
-        let project_matches = raw
-            .get("project_canonical_id")
-            .or_else(|| raw.get("project_id"))
-            .or_else(|| raw.get("origin_project"))
-            .and_then(serde_json::Value::as_str)
-            == Some(current_project_id);
+        // Same origin-first attribution as the ingest guard (GH #701): the
+        // healer must not resurrect an edge the guard just refused.
+        let project_matches =
+            row_attribution(raw).is_some_and(|(project, _)| project == current_project_id);
         if !project_matches {
             continue;
         }
@@ -871,14 +913,34 @@ pub(crate) fn entity_matches_project(
     current_project_id: &str,
     entity_kind: &str,
 ) -> bool {
-    // Check both field names the server might use
-    let project_field = raw
-        .get("project_canonical_id")
-        .or_else(|| raw.get("project_id"));
     let entity_id = raw
         .get("id")
         .and_then(|value| value.as_str())
         .unwrap_or("<unknown>");
+
+    // GH #701: the row's own `origin_project` outranks the server's scope
+    // stamp. See `row_attribution` for the measurement that forced this — the
+    // stamp is an echo of the requested scope, so reading it first admits
+    // every replicated row as native.
+    if let Some(origin) = row_origin_project(raw) {
+        if project_ids_match(origin, current_project_id) {
+            return true;
+        }
+        record_project_warning(
+            entity_kind,
+            origin,
+            &format!(
+                "skipping {entity_kind} '{entity_id}' — origin project '{origin}' is not \
+                 '{current_project_id}' (the row was replicated into this scope)"
+            ),
+        );
+        return false;
+    }
+
+    // Check both field names the server might use
+    let project_field = raw
+        .get("project_canonical_id")
+        .or_else(|| raw.get("project_id"));
 
     match project_field {
         None => {
@@ -1203,6 +1265,8 @@ impl CloudSyncer {
             &discarded_row_json,
             "owner",
             "owner_wins",
+            None,
+            None,
         )?;
         Ok(())
     }
@@ -1318,6 +1382,8 @@ impl CloudSyncer {
             &discarded_row_json,
             "local",
             "terminal_status_guard",
+            None,
+            None,
         )?;
         tracing::warn!(
             task_id = %local.id,
@@ -1336,6 +1402,32 @@ impl CloudSyncer {
         winner_side: &str,
         strategy: &str,
     ) -> Result<(), CasError> {
+        self.journal_local_overwrite_with_revisions(
+            entity_type,
+            entity_id,
+            local,
+            winner_side,
+            strategy,
+            None,
+        )
+    }
+
+    /// Journal a discarded local row together with the revisions that settled
+    /// the conflict.
+    ///
+    /// The revisions are read back from the conflict log this pull just wrote,
+    /// so the journal row and the logged decision cannot disagree. A conflict
+    /// resolved on the timestamp path records `NULL` revisions, which is how an
+    /// operator tells the two regimes apart when auditing.
+    fn journal_local_overwrite_with_revisions<T: serde::Serialize>(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        local: &T,
+        winner_side: &str,
+        strategy: &str,
+        revisions: Option<(Option<i64>, Option<i64>)>,
+    ) -> Result<(), CasError> {
         if self
             .queue
             .has_pending_entity_change(entity_type, entity_id)?
@@ -1343,15 +1435,36 @@ impl CloudSyncer {
             let json = serde_json::to_string(local).map_err(|error| {
                 CasError::Other(format!("Could not serialize sync conflict: {error}"))
             })?;
+            let (local_revision, remote_revision) = revisions
+                .unwrap_or_else(|| self.logged_revisions(entity_type.as_str(), entity_id));
             self.queue.record_conflict(
                 entity_type.as_str(),
                 entity_id,
                 &json,
                 winner_side,
                 strategy,
+                local_revision,
+                remote_revision,
             )?;
         }
         Ok(())
+    }
+
+    /// The revisions recorded by the most recent decision for this row.
+    fn logged_revisions(&self, entity_type: &str, entity_id: &str) -> (Option<i64>, Option<i64>) {
+        self.conflict_log
+            .lock()
+            .ok()
+            .and_then(|conflicts| {
+                conflicts
+                    .iter()
+                    .rev()
+                    .find(|conflict| {
+                        conflict.entity_type == entity_type && conflict.entity_id == entity_id
+                    })
+                    .map(|conflict| (conflict.local_revision, conflict.remote_revision))
+            })
+            .unwrap_or((None, None))
     }
 
     /// Fetch a project-scoped pull envelope without applying it to local
@@ -1475,6 +1588,7 @@ impl CloudSyncer {
         commit_link_store: &dyn CommitLinkStore,
     ) -> Result<SyncResult, CasError> {
         self.clear_conflict_log();
+        self.clear_incoming_revisions();
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -1510,6 +1624,14 @@ impl CloudSyncer {
                 continue;
             }
             let remote_updated_at = pulled_entry_updated_at(&raw_entry);
+            let entry_revision = crate::cloud::wire_revision(&raw_entry);
+            let entry_revision_id = raw_entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            if let Some(id) = &entry_revision_id {
+                self.note_incoming_revision(EntityType::Entry, id, &raw_entry);
+            }
             let remote_entry: Entry = match deserialize_pulled_entity(raw_entry, "entry") {
                 Ok(e) => e,
                 Err(e) => {
@@ -1522,6 +1644,9 @@ impl CloudSyncer {
             match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_entries += 1;
+                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
+                        let _ = self.queue.record_revision(EntityType::Entry, id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -1543,6 +1668,10 @@ impl CloudSyncer {
             // close — apply it authoritatively rather than via the
             // timestamp-gated upsert.
             let web_close = is_web_close_tombstone(&raw_task);
+            let task_revision = crate::cloud::wire_revision(&raw_task);
+            if let Some(id) = raw_task.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Task, id, &raw_task);
+            }
             render_task_proposal_provenance(&mut raw_task);
             let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
@@ -1581,6 +1710,11 @@ impl CloudSyncer {
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_tasks += 1;
+                    if let Some(revision) = task_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Task, &remote_task.id, revision);
+                    }
                     if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
                         result.task_status_transitions.push(TaskStatusTransition {
                             task_id: remote_task.id,
@@ -1621,6 +1755,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_rule, &current_project_id, "rule") {
                 continue;
             }
+            let rule_revision = crate::cloud::wire_revision(&raw_rule);
+            if let Some(id) = raw_rule.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Rule, id, &raw_rule);
+            }
             let remote_rule: Rule = match deserialize_pulled_entity(raw_rule, "rule") {
                 Ok(r) => r,
                 Err(e) => {
@@ -1628,9 +1766,15 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let remote_rule_id = remote_rule.id.clone();
             match self.upsert_rule(rule_store, remote_rule) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_rules += 1;
+                    if let Some(revision) = rule_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Rule, &remote_rule_id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -1646,6 +1790,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_skill, &current_project_id, "skill") {
                 continue;
             }
+            let skill_revision = crate::cloud::wire_revision(&raw_skill);
+            if let Some(id) = raw_skill.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Skill, id, &raw_skill);
+            }
             let remote_skill: Skill = match deserialize_pulled_entity(raw_skill, "skill") {
                 Ok(s) => s,
                 Err(e) => {
@@ -1653,9 +1801,15 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let remote_skill_id = remote_skill.id.clone();
             match self.upsert_skill(skill_store, remote_skill) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_skills += 1;
+                    if let Some(revision) = skill_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Skill, &remote_skill_id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -1821,8 +1975,57 @@ impl CloudSyncer {
             let _ = self.queue.set_metadata("last_pull_at", &pulled_at);
         }
 
+        self.reassert_quarantine();
+
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
+    }
+
+    /// Re-assert the local quarantine after a pull has written rows
+    /// (cas-4342 / GH #701).
+    ///
+    /// Hiding is computed from the ledger at read time, so a re-pulled row
+    /// cannot resurface on the board no matter how often its content is
+    /// rewritten — that part needs no work and is why the quarantine count
+    /// stays flat across pulls. What *can* drift is the push side: any code
+    /// path that enqueues on write would hand a quarantined row to the next
+    /// push, and a quarantine decision must never leave this machine. So the
+    /// invariant is enforced here rather than assumed, and what it removed is
+    /// logged instead of being silently swallowed.
+    ///
+    /// Deliberately infallible: a pull that succeeded must not be reported as
+    /// failed because a local suppression ledger could not be read.
+    fn reassert_quarantine(&self) {
+        let ids = match self.queue.quarantined_ids(crate::cloud::QUARANTINE_TASK) {
+            Ok(ids) if !ids.is_empty() => ids,
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(
+                    "[Cassy sync] could not read the local quarantine ledger after pull ({error}); \
+                     quarantined rows stay hidden but their push suppression was not re-checked"
+                );
+                return;
+            }
+        };
+
+        let mut dropped = 0usize;
+        for id in &ids {
+            match self
+                .queue
+                .drop_queued_pushes_for(crate::cloud::QUARANTINE_TASK, id)
+            {
+                Ok(count) => dropped += count,
+                Err(error) => tracing::warn!(
+                    "[Cassy sync] could not clear queued pushes for quarantined row {id}: {error}"
+                ),
+            }
+        }
+        if dropped > 0 {
+            tracing::info!(
+                "[Cassy sync] dropped {dropped} queued push(es) for {} quarantined row(s) after pull",
+                ids.len()
+            );
+        }
     }
 
     fn upsert_task(
@@ -1838,7 +2041,12 @@ impl CloudSyncer {
                     self.record_terminal_regression_conflict(&local, &task)?;
                     return Ok(UpsertResult::Skipped);
                 }
-                if task.updated_at > local.updated_at {
+                if self.remote_supersedes_local(
+                    EntityType::Task,
+                    &task.id,
+                    local.updated_at,
+                    task.updated_at,
+                ) {
                     let notes_differ = local.notes != task.notes;
                     self.journal_local_overwrite(
                         EntityType::Task,
@@ -1902,7 +2110,12 @@ impl CloudSyncer {
     fn upsert_skill(&self, store: &dyn SkillStore, skill: Skill) -> Result<UpsertResult, CasError> {
         match store.get(&skill.id) {
             Ok(local) => {
-                if skill.updated_at > local.updated_at {
+                if self.remote_supersedes_local(
+                    EntityType::Skill,
+                    &skill.id,
+                    local.updated_at,
+                    skill.updated_at,
+                ) {
                     self.journal_local_overwrite(
                         EntityType::Skill,
                         &skill.id,
@@ -2329,6 +2542,7 @@ impl CloudSyncer {
         skill_store: &dyn SkillStore,
     ) -> Result<SyncResult, CasError> {
         self.clear_conflict_log();
+        self.clear_incoming_revisions();
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -2387,9 +2601,7 @@ impl CloudSyncer {
 
         // Use configured conflict resolution strategy for team sync
         let strategy = self.config.team_conflict_resolution;
-        tracing::debug!(
-            "[Cassy sync] Starting team pull: team={team_id} strategy={strategy:?}"
-        );
+        tracing::debug!("[Cassy sync] Starting team pull: team={team_id} strategy={strategy:?}");
 
         // Use the caller-supplied project ID for client-side validation.
         // (cas-53d5: previously resolved internally via
@@ -2404,6 +2616,14 @@ impl CloudSyncer {
                 continue;
             }
             let remote_updated_at = pulled_entry_updated_at(&raw_entry);
+            let entry_revision = crate::cloud::wire_revision(&raw_entry);
+            let entry_revision_id = raw_entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            if let Some(id) = &entry_revision_id {
+                self.note_incoming_revision(EntityType::Entry, id, &raw_entry);
+            }
             let remote_entry: Entry = match deserialize_pulled_entity(raw_entry, "entry") {
                 Ok(e) => e,
                 Err(e) => {
@@ -2416,6 +2636,9 @@ impl CloudSyncer {
             match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_entries += 1;
+                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
+                        let _ = self.queue.record_revision(EntityType::Entry, id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -2440,6 +2663,10 @@ impl CloudSyncer {
         for mut raw_task in raw_tasks {
             render_task_proposal_provenance(&mut raw_task);
             let wire_is_owner = task_wire_is_owner(&raw_task, current_project_id);
+            let team_task_revision = crate::cloud::wire_revision(&raw_task);
+            if let Some(id) = raw_task.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Task, id, &raw_task);
+            }
             let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
@@ -2468,6 +2695,11 @@ impl CloudSyncer {
             ) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_tasks += 1;
+                    if let Some(revision) = team_task_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Task, &remote_task.id, revision);
+                    }
                     if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
                         result.task_status_transitions.push(TaskStatusTransition {
                             task_id: remote_task.id,
@@ -2508,6 +2740,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_rule, &current_project_id, "rule") {
                 continue;
             }
+            let rule_revision = crate::cloud::wire_revision(&raw_rule);
+            if let Some(id) = raw_rule.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Rule, id, &raw_rule);
+            }
             let remote_rule: Rule = match deserialize_pulled_entity(raw_rule, "rule") {
                 Ok(r) => r,
                 Err(e) => {
@@ -2515,9 +2751,15 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let remote_rule_id = remote_rule.id.clone();
             match self.upsert_rule_with_strategy(rule_store, remote_rule, strategy) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_rules += 1;
+                    if let Some(revision) = rule_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Rule, &remote_rule_id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -2533,6 +2775,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_skill, &current_project_id, "skill") {
                 continue;
             }
+            let skill_revision = crate::cloud::wire_revision(&raw_skill);
+            if let Some(id) = raw_skill.get("id").and_then(serde_json::Value::as_str) {
+                self.note_incoming_revision(EntityType::Skill, id, &raw_skill);
+            }
             let remote_skill: Skill = match deserialize_pulled_entity(raw_skill, "skill") {
                 Ok(s) => s,
                 Err(e) => {
@@ -2540,9 +2786,15 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let remote_skill_id = remote_skill.id.clone();
             match self.upsert_skill_with_strategy(skill_store, remote_skill, strategy) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_skills += 1;
+                    if let Some(revision) = skill_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Skill, &remote_skill_id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -2579,7 +2831,8 @@ mod tests {
     use super::{
         PROPOSAL_PROVENANCE_BEGIN, PROPOSAL_PROVENANCE_END, PULL_PATH, SyncWarningSummary,
         build_scoped_pull_url_with, collect_sync_warnings, deserialize_pulled_entity,
-        entity_matches_project, render_task_proposal_provenance, task_dependency_matches_project,
+        entity_matches_project, remote_dependency_state, render_task_proposal_provenance,
+        task_dependency_matches_project,
     };
     use crate::types::{Entry, Task};
     use serde_json::json;
@@ -2759,6 +3012,105 @@ mod tests {
                  &project_id=github.com%2Fowner%2Frepo"
             )
         );
+    }
+
+    /// GH #701, the measured shape. The cloud stamps `project_id` with the
+    /// scope you asked for, so a row replicated into this project's bucket
+    /// looks native by that field alone. Its `origin_project` still names the
+    /// project that wrote it, and that is what attribution must read.
+    #[test]
+    fn a_replicated_row_is_refused_on_its_origin_despite_a_native_scope_stamp() {
+        // Verbatim shape of a row from
+        // GET /api/sync/pull?project_id=richards-llc-accounting (2026-09-03):
+        // 3,002 of these came back, every one stamped with the requested scope.
+        let edge = json!({
+            "id": "cas-0074:cas-3648:parent-child",
+            "from_id": "cas-0074",
+            "to_id": "cas-3648",
+            "dep_type": "parent-child",
+            "origin_project": "cas-src",
+            "project_id": "richards-llc-accounting",
+            "team_id": null
+        });
+
+        assert!(
+            !task_dependency_matches_project(&edge, "richards-llc-accounting"),
+            "a cas-src edge replicated into the accounting scope must not be ingested"
+        );
+        assert!(
+            task_dependency_matches_project(&edge, "cas-src"),
+            "the same edge is native when cas-src pulls it"
+        );
+
+        let task = json!({
+            "id": "cas-1234",
+            "title": "a cas-src task",
+            "origin_project": "cas-src",
+            "project_id": "gabber-studio"
+        });
+        assert!(!entity_matches_project(&task, "gabber-studio", "task"));
+        assert!(entity_matches_project(&task, "cas-src", "task"));
+    }
+
+    /// The fallback is load-bearing: rows written before `origin_project`
+    /// existed carry no origin, and rejecting those would drop real history
+    /// rather than fix the leak.
+    #[test]
+    fn a_row_without_an_origin_still_falls_back_to_the_scope_stamp() {
+        let legacy = json!({ "id": "e-001", "project_id": "gabber-studio" });
+        assert!(entity_matches_project(&legacy, "gabber-studio", "entry"));
+
+        let legacy_edge = json!({
+            "id": "a:b:parent-child",
+            "project_id": "gabber-studio"
+        });
+        assert!(task_dependency_matches_project(
+            &legacy_edge,
+            "gabber-studio"
+        ));
+
+        // An empty or whitespace origin is not an assertion of ownership.
+        let blank = json!({
+            "id": "e-002",
+            "origin_project": "   ",
+            "project_id": "gabber-studio"
+        });
+        assert!(entity_matches_project(&blank, "gabber-studio", "entry"));
+    }
+
+    /// Attribution runs through the same alias-aware predicate as everything
+    /// else (GH #669), so a legacy spelling of *this* project is still native.
+    #[test]
+    fn an_origin_spelled_as_a_known_alias_of_this_project_is_still_native() {
+        let row = json!({
+            "id": "t-1",
+            "origin_project": "git@GitHub.com:Richards-LLC/gabber-studio.git",
+            "project_id": "gabber-studio"
+        });
+        assert!(entity_matches_project(&row, "gabber-studio", "task"));
+    }
+
+    /// The healer reads the same attribution as the guard, or it would
+    /// resurrect edges the guard just refused.
+    #[test]
+    fn the_dependency_healer_ignores_rows_the_ingest_guard_refuses() {
+        let raw = vec![
+            json!({
+                "id": "a:b:parent-child", "from_id": "a", "to_id": "b",
+                "dep_type": "parent-child", "created_at": "2026-01-01T00:00:00Z",
+                "origin_project": "cas-src", "project_id": "gabber-studio"
+            }),
+            json!({
+                "id": "c:d:parent-child", "from_id": "c", "to_id": "d",
+                "dep_type": "parent-child", "created_at": "2026-01-01T00:00:00Z",
+                "origin_project": "gabber-studio", "project_id": "gabber-studio"
+            }),
+        ];
+
+        let state = remote_dependency_state(&raw, "gabber-studio");
+
+        assert_eq!(state.live.len(), 1, "only the native edge survives");
+        assert!(state.live.contains_key("c:d:parent-child"));
     }
 
     #[test]

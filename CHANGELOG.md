@@ -8,6 +8,67 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [Unreleased]
 
 ### Fixed
+- `cas doctor` prints task ids, agent UUIDs and timestamps exactly as they are,
+  so they can be copied straight into the next command. A digit-grouping pass
+  ran over each finished line with no way to tell a count from an identifier,
+  turning `cas-7791` into `cas-7,791`, making UUIDs unpasteable and adding
+  three commas to a timestamp; counts now print as plain integers instead.
+  The cross-project row line also said "cannot reach 4 rows" while listing six
+  — the number now describes the list it prints, and when the delete-set
+  shortfall genuinely differs from the rows named, both numbers are stated.
+  (GH #697)
+
+## [3.15.0] - 2026-09-03
+
+### Added
+- `cas integrate mecha-cassy` sets up MechaCassy on a machine in one command:
+  a machine-level proxy registration that every project inherits, Claude Code
+  and Codex entries by environment-variable name, and an authenticated tool
+  list as the receipt; `cas doctor` gains a mecha-cassy row and a credential
+  script handles the one human step. Onboarding doc for teammates.
+- Cloud sync consumes the per-row push outcomes the cloud now returns: rows
+  the cloud kept newer are acknowledged, rejections are held with their reason
+  and a remedy, and `cas update` / `cas doctor` say which is which. Terminal
+  failures parked by an older client are requeued once after upgrade.
+- Cloud sync consumes dependency deletion tombstones: a removed dependency
+  edge propagates to every machine and cannot be resurrected, and the
+  "N edges healed" churn on every pull is gone (reconciliation runs against a
+  complete snapshot at most every six hours).
+- `cas doctor`, worker status and the spawn receipt warn when two live
+  supervisor sessions share one clone path (GH #699).
+
+### Fixed
+- Tasks whose owner project was never recorded can be started and claimed
+  again: they are adopted into the current project instead of refused as an
+  "unassigned legacy row" (GH #690).
+- Client project-identity canonicalization now matches the cloud's rule
+  exactly (case-insensitive `.git` on every shape), consumes the cloud's alias
+  record, and a parity audit script reports per-project convergence (GH #669).
+- Pull attribution reads a row's origin project before the server's scope
+  stamp, so another project's rows are no longer ingested as this project's;
+  throwaway checkouts no longer mint a cloud identity on push (GH #701).
+- Migration cursor fixtures follow the new tombstone ledger migration.
+
+
+### Added
+- Task rows that a past sync leak copied into the wrong project — rows nothing
+  on this machine can place — can now be put aside. `cas doctor
+  --fix-cloud-rows` shows exactly which rows it would set aside and changes
+  nothing until you add `--yes`; those rows then leave the ready queue and are
+  never sent to the cloud, while staying readable by id and restorable with
+  `--release-cloud-rows`. The rows themselves are untouched, so a later sync
+  cannot bring them back into view. `cas doctor` now reports how many rows are
+  unplaceable, how many are set aside, and how many share an id with a
+  different task — the last group is left alone on purpose, because those need
+  a new id rather than removal. (GH #701)
+- Two supervisors working the same checkout are now visible to each other.
+  `cas doctor`, `worker_status` and every spawn receipt name both sessions and
+  when each started, and say plainly that a reset, merge or shutdown from
+  either can reap the other's workers. Previously each session checked out
+  green on its own and the newer supervisor was shown only itself, with an
+  empty worker roster it had every reason to believe. (GH #699)
+
+### Fixed
 - A task with no recorded owner project can be started and claimed again. Such
   a row was listed on the board and shown as this project's work, but `start`
   and `claim` refused it as an "unassigned legacy row" with no field a worker

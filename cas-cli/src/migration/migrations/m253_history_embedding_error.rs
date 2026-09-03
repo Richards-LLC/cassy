@@ -27,7 +27,7 @@
 use crate::migration::{Migration, Subsystem};
 
 pub const MIGRATION: Migration = Migration {
-    id: 250,
+    id: 253,
     name: "history_embedding_error",
     subsystem: Subsystem::Code,
     description:

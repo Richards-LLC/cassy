@@ -861,6 +861,24 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    /// Every migration from `first` upward, minus the ids a fixture has already
+    /// recorded.
+    ///
+    /// Derived from the registry rather than written out: these guards are
+    /// about the *cursor* — a false ledger entry must order all later work
+    /// behind it — not about which ids exist this week. Spelling the list
+    /// literally made every one of them fail the moment a migration was added
+    /// (m249-m252 left all three red), which trains readers to ignore them.
+    /// The property still bites: a cursor that skipped or reordered anything
+    /// would not match this sequence.
+    fn pending_ids_from(first: u32, already_recorded: &[u32]) -> Vec<u32> {
+        MIGRATIONS
+            .iter()
+            .map(|migration| migration.id)
+            .filter(|id| *id >= first && !already_recorded.contains(id))
+            .collect()
+    }
+
     fn prepare_v225_knowledge_gap(home: &Path, stranded_later_ledger: bool) -> PathBuf {
         let project = home.join(if stranded_later_ledger {
             "stranded-v225"
@@ -1061,7 +1079,10 @@ mod tests {
         assert_eq!(pages[0].origin_project_id, None);
 
         let status = check_migrations(cas_dir).unwrap();
-        assert_eq!(status.current_version, 248);
+        assert_eq!(
+            status.current_version,
+            MIGRATIONS.last().expect("registry is never empty").id
+        );
         assert!(status.pending.is_empty());
         let second = run_migrations(cas_dir, false).unwrap();
         assert_eq!(second.applied_count, 0, "repeated open must be idempotent");
@@ -1083,7 +1104,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248],
+                pending_ids_from(225, &[]),
                 "recorded m225 and missing m226 must order all later work behind them"
             );
 
@@ -1167,7 +1188,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248]
+                pending_ids_from(225, &[227, 228, 229])
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();
@@ -1206,7 +1227,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248]
+                pending_ids_from(225, &[226])
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();

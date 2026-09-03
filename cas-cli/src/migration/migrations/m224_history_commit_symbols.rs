@@ -206,7 +206,7 @@ CREATE TABLE IF NOT EXISTS history_index_state (
         // Every later migration that touches these tables belongs in the
         // upgrade path too, or this guard compares a partially-migrated store
         // against a fresh one and fails for the wrong reason.
-        for statement in super::super::m250_history_embedding_error::MIGRATION.up {
+        for statement in super::super::m253_history_embedding_error::MIGRATION.up {
             if statement.contains("history_commits") {
                 upgraded.execute_batch(statement).unwrap();
             }

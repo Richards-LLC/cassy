@@ -142,6 +142,8 @@ fn conflict_journal_retains_the_discarded_row_and_prunes_by_age() {
             r#"{\"id\":\"cas-conflict\",\"notes\":\"local note\"}"#,
             "remote",
             "timestamp_lww",
+            None,
+            None,
         )
         .unwrap();
 

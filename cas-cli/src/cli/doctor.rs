@@ -34,6 +34,26 @@ pub struct DoctorArgs {
     /// 4-hex task ids collide across projects.
     #[arg(long)]
     pub foreign_rows: bool,
+
+    /// Quarantine this project's unattributed task rows (cas-4342 / GH #701):
+    /// rows replicated here by the `cas-ed15` pull leak whose home project
+    /// cannot be established from any database on this host. Quarantine is
+    /// local and reversible — the row is hidden from the board and never
+    /// pushed, but is left byte-for-byte intact and stays readable by id.
+    ///
+    /// Reports the plan and changes nothing unless `--yes` is also passed.
+    #[arg(long)]
+    pub fix_cloud_rows: bool,
+
+    /// Release every locally quarantined row (the reverse of
+    /// `--fix-cloud-rows`). Reports the plan; applies only with `--yes`.
+    #[arg(long)]
+    pub release_cloud_rows: bool,
+
+    /// Apply the reported `--fix-cloud-rows` / `--release-cloud-rows` plan
+    /// instead of only printing it.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 struct Check {
@@ -493,11 +513,25 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // Every active factory session needs exactly one live durable supervisor
     // row. Otherwise logical handoffs and verification recovery have nowhere
     // to route even while the supervisor pane itself exists.
-    match open_agent_store(&cas_root)
-        .and_then(|store| Ok(store.list(None)?))
-        .map(|agents| factory_supervisor_checks(&agents))
-    {
-        Ok(session_checks) => checks.extend(session_checks),
+    match open_agent_store(&cas_root).and_then(|store| Ok(store.list(None)?)) {
+        Ok(agents) => {
+            checks.extend(factory_supervisor_checks(&agents));
+            // The per-session checks above each pass in isolation while two
+            // supervisors quietly share one clone's `.cas/` state, which is
+            // exactly the reap-the-other's-workers hazard (GH #699). Cross
+            // the sessions and say so.
+            if let Some(warning) = crate::factory_supervisor_overlap::shared_clone_warning(
+                &agents,
+                &cas_root,
+                chrono::Utc::now(),
+            ) {
+                checks.push(Check {
+                    name: "factory session overlap".to_string(),
+                    status: CheckStatus::Warning,
+                    message: warning,
+                });
+            }
+        }
         Err(error) => checks.push(Check {
             name: "factory supervisors".to_string(),
             status: CheckStatus::Warning,
@@ -988,6 +1022,9 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             ),
             (Err(_), _) => (None, None),
         };
+        if args.fix_cloud_rows || args.release_cloud_rows {
+            return run_cloud_row_quarantine(&cas_root, report, args, cli);
+        }
         if args.foreign_rows {
             return output_foreign_rows_detail(
                 report,
@@ -998,13 +1035,20 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
         checks.push(cloud_queue_check(&cas_root));
         checks.extend(sync_warning_checks(&sync_warnings));
+        // Quarantine is local state, so an unreadable ledger reports zero
+        // rather than failing the whole check: the check's job is to describe
+        // contamination, not to depend on the remedy's bookkeeping.
+        let quarantined_count = crate::cloud::SyncQueue::open(&cas_root)
+            .and_then(|queue| queue.quarantined_count(crate::cloud::QUARANTINE_TASK))
+            .unwrap_or(0);
         let foreign_check = match purge_analysis_error.as_deref() {
             Some(error) => foreign_rows_check_with_classifier_error(
                 report.as_ref(),
                 purge_analysis.as_ref(),
                 Some(error),
+                quarantined_count,
             ),
-            None => foreign_rows_check(report.as_ref(), purge_analysis.as_ref()),
+            None => foreign_rows_check(report.as_ref(), purge_analysis.as_ref(), quarantined_count),
         };
         checks.push(foreign_check);
     } else if args.foreign_rows {
@@ -1144,14 +1188,16 @@ fn legacy_versioned_search_index_check(cas_root: &Path) -> Option<Check> {
 fn foreign_rows_check(
     report: Result<&crate::cli::foreign_rows::ForeignRowReport, &anyhow::Error>,
     purge_analysis: Option<&crate::cli::cloud::PurgeForeignAnalysis>,
+    quarantined_count: usize,
 ) -> Check {
-    foreign_rows_check_with_classifier_error(report, purge_analysis, None)
+    foreign_rows_check_with_classifier_error(report, purge_analysis, None, quarantined_count)
 }
 
 fn foreign_rows_check_with_classifier_error(
     report: Result<&crate::cli::foreign_rows::ForeignRowReport, &anyhow::Error>,
     purge_analysis: Option<&crate::cli::cloud::PurgeForeignAnalysis>,
     purge_analysis_error: Option<&str>,
+    quarantined_count: usize,
 ) -> Check {
     let report = match report {
         Ok(report) => report,
@@ -1178,9 +1224,17 @@ fn foreign_rows_check_with_classifier_error(
         if evidence_count == purge_count {
             message.push_str(" — counts agree");
         } else if evidence_count > purge_count {
+            // GH #697 (cas-a869): the printed number must describe the list
+            // that follows it. This used to print `evidence_count -
+            // purge_count` and then list `retained_foreign_tasks`, a different
+            // set, so an operator read "cannot reach 4" above six ids and had
+            // no way to tell which number was wrong. When the two genuinely
+            // disagree, both are real and both are stated — neither stands in
+            // for the other.
             let gap = evidence_count - purge_count;
-            message.push_str(&format!(" — purge cannot reach {gap} evidence row(s)"));
-            if !analysis.retained_foreign_tasks.is_empty() {
+            let named = analysis.retained_foreign_tasks.len();
+            if named > 0 {
+                message.push_str(&format!(" — purge cannot reach {named} evidence row(s)"));
                 let retained = analysis
                     .retained_foreign_tasks
                     .iter()
@@ -1188,6 +1242,15 @@ fn foreign_rows_check_with_classifier_error(
                     .collect::<Vec<_>>()
                     .join(", ");
                 message.push_str(&format!(": {retained}"));
+                if named != gap {
+                    message.push_str(&format!(
+                        " (delete-set shortfall is {gap} row(s); the {named} named above are the rows purge identified and retained)"
+                    ));
+                }
+            } else {
+                message.push_str(&format!(
+                    " — purge cannot reach {gap} evidence row(s); none were individually identified"
+                ));
             }
         } else {
             message.push_str(&format!(
@@ -1196,12 +1259,18 @@ fn foreign_rows_check_with_classifier_error(
             ));
         }
         if analysis.unattributed_task_count > 0 || analysis.collision_count > 0 {
+            // Deliberately no longer says "neither category is deletable" and
+            // stops there: unattributed rows now have a reversible local
+            // remedy, and the remediation clause below states it (cas-4342).
             message.push_str(&format!(
-                ". purge excludes {} unattributed task row(s) and {} id collision(s); neither category is deletable",
+                ". purge excludes {} unattributed task row(s) and {} id collision(s) — deleting either would destroy real work",
                 analysis.unattributed_task_count,
                 analysis.collision_count
             ));
         }
+    }
+    if let Some(remediation) = cloud_row_remediation_summary(report, quarantined_count) {
+        message.push_str(&remediation);
     }
     if let Some(error) = purge_analysis_error {
         message.push_str(&format!(
@@ -1248,6 +1317,169 @@ fn foreign_rows_check_with_classifier_error(
 }
 
 /// `cas doctor --foreign-rows`: the full read-only contamination listing.
+/// Rows this project would quarantine: unattributed and not already closed.
+///
+/// A closed unattributed row is not lying to anyone — it is not in a ready
+/// queue and nobody is going to pick it up — so quarantining it would be churn
+/// with no operator benefit. Collisions are deliberately absent: a collision
+/// means two rows share an id while their titles *differ*, so the peer row is
+/// no evidence about the local one, and hiding a row that may be this
+/// project's real work is exactly the harm GH #133 documented. Those need an
+/// id rekey, which is a separate, non-destructive piece of work.
+pub(crate) fn quarantine_candidates(
+    report: &crate::cli::foreign_rows::ForeignRowReport,
+) -> Vec<&crate::cli::foreign_rows::UnattributedRow> {
+    report
+        .unattributed
+        .iter()
+        .filter(|row| !row.closed)
+        .collect()
+}
+
+/// One sentence of remediation state for the `cross-project rows` check:
+/// how many rows are unattributed, how many are already quarantined, and why
+/// collisions are excluded.
+pub(crate) fn cloud_row_remediation_summary(
+    report: &crate::cli::foreign_rows::ForeignRowReport,
+    quarantined: usize,
+) -> Option<String> {
+    if report.unattributed.is_empty() && report.collisions.is_empty() && quarantined == 0 {
+        return None;
+    }
+    let mut message = String::new();
+    if !report.unattributed.is_empty() || quarantined > 0 {
+        message.push_str(&format!(
+            ". unattributed: {} row(s) ({} open), {quarantined} quarantined locally — quarantined rows are hidden from the board and never pushed, and the row itself is untouched (`cas doctor --fix-cloud-rows --yes` to quarantine the open ones, `--release-cloud-rows --yes` to reverse)",
+            report.unattributed.len(),
+            report.unattributed_open(),
+        ));
+    }
+    if !report.collisions.is_empty() {
+        message.push_str(&format!(
+            ". id collisions: {} — two rows sharing an id whose titles differ, so a peer row is not evidence about the local row; these are neither deletable nor quarantinable and need an id rekey (GH #133)",
+            report.collisions.len()
+        ));
+    }
+    Some(message)
+}
+
+/// `cas doctor --fix-cloud-rows` / `--release-cloud-rows`.
+///
+/// Report-then-apply: without `--yes` this prints exactly what it would change
+/// and touches nothing, because the operator is being asked to accept a
+/// judgement about rows whose owner nobody can name.
+fn run_cloud_row_quarantine(
+    cas_root: &Path,
+    report: anyhow::Result<crate::cli::foreign_rows::ForeignRowReport>,
+    args: &DoctorArgs,
+    cli: &Cli,
+) -> anyhow::Result<()> {
+    let report = report?;
+    let queue = crate::cloud::SyncQueue::open(cas_root)?;
+    queue.init()?;
+    let already = queue.quarantined_ids(crate::cloud::QUARANTINE_TASK)?;
+
+    let (action, planned): (&str, Vec<(String, String)>) = if args.release_cloud_rows {
+        (
+            "release",
+            queue
+                .quarantined_rows(crate::cloud::QUARANTINE_TASK)?
+                .into_iter()
+                .map(|row| (row.entity_id, row.reason))
+                .collect(),
+        )
+    } else {
+        (
+            "quarantine",
+            quarantine_candidates(&report)
+                .into_iter()
+                .filter(|row| !already.contains(&row.id))
+                .map(|row| (row.id.clone(), row.title.clone()))
+                .collect(),
+        )
+    };
+
+    let applied = if args.yes {
+        let mut applied = 0usize;
+        for (id, _) in &planned {
+            let changed = if args.release_cloud_rows {
+                queue.release_quarantined_row(crate::cloud::QUARANTINE_TASK, id)?
+            } else {
+                queue.quarantine_row(
+                    crate::cloud::QUARANTINE_TASK,
+                    id,
+                    "unattributed cloud row (cas doctor --fix-cloud-rows)",
+                )?
+            };
+            if changed {
+                applied += 1;
+            }
+        }
+        Some(applied)
+    } else {
+        None
+    };
+    let quarantined_now = queue.quarantined_count(crate::cloud::QUARANTINE_TASK)?;
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "action": action,
+                "applied": applied.is_some(),
+                "planned": planned.iter().map(|(id, detail)| serde_json::json!({
+                    "id": id,
+                    "detail": detail,
+                })).collect::<Vec<_>>(),
+                "planned_count": planned.len(),
+                "changed_count": applied,
+                "quarantined_before": already.len(),
+                "quarantined_after": quarantined_now,
+                "unattributed_total": report.unattributed.len(),
+                "unattributed_open": report.unattributed_open(),
+                "id_collisions": report.collisions.len(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    let theme = ActiveTheme::default();
+    let mut out = std::io::stdout();
+    let mut fmt = Formatter::stdout(&mut out, theme);
+    fmt.subheading(&format!("cloud rows — {action}"))?;
+    fmt.write_muted(&"─".repeat(50))?;
+    fmt.newline()?;
+    fmt.write_muted(&format!(
+        "project `{}`: {} unattributed row(s) ({} open), {} already quarantined, {} id collision(s) excluded (they need an id rekey, not a purge)",
+        report.local_project,
+        report.unattributed.len(),
+        report.unattributed_open(),
+        already.len(),
+        report.collisions.len(),
+    ))?;
+    fmt.newline()?;
+
+    for (id, detail) in planned.iter().take(20) {
+        fmt.write_muted(&format!("  {id}  {detail}"))?;
+        fmt.newline()?;
+    }
+    if planned.len() > 20 {
+        fmt.write_muted(&format!("  … and {} more", planned.len() - 20))?;
+        fmt.newline()?;
+    }
+
+    match applied {
+        Some(changed) => fmt.success(&format!(
+            "{action}d {changed} row(s); {quarantined_now} row(s) now quarantined. Quarantine is local state: it is reapplied to no row and survives every pull, because the pull never writes this ledger."
+        ))?,
+        None => fmt.warning(&format!(
+            "DRY RUN — nothing changed. {} row(s) would be {action}d; re-run with --yes to apply.",
+            planned.len()
+        ))?,
+    }
+    Ok(())
+}
+
 fn output_foreign_rows_detail(
     report: anyhow::Result<crate::cli::foreign_rows::ForeignRowReport>,
     purge_analysis: Option<&crate::cli::cloud::PurgeForeignAnalysis>,
@@ -1718,10 +1950,29 @@ struct SymbolIndexState {
     eligible_files: usize,
     indexed_files: usize,
     failed_files: usize,
+    /// Symbols eligible for a vector, counted in `code_symbols` — the table the
+    /// indexer writes — not in the queue. A queue-derived denominator moves
+    /// whenever the queue is re-armed or lost, which is how two runs 80s apart
+    /// reported 13,545 and then 11,535 eligible (GH #696).
     vector_eligible: usize,
+    /// Eligible symbols whose *current* content hash is recorded vectorized:
+    /// the drain's own completion condition, so doctor and the drain cannot
+    /// disagree about what is done.
     vectorized: usize,
+    /// Eligible symbols still awaiting a vector, including those with no queue
+    /// row at all. Never a count of queue rows: an empty queue with unvectorized
+    /// symbols is 0 rows and N pending, and doctor must say N.
     vector_pending: usize,
     vector_failed: usize,
+    /// Eligible symbols the indexer never queued. Part of `vector_pending`,
+    /// surfaced separately because it indicts the indexer, not the drain.
+    vector_unqueued: usize,
+    /// Queue rows describing symbols that no longer exist — pending work that
+    /// no drain tick can complete.
+    vector_orphaned: usize,
+    /// Set when the current generation of the code-vector cache replaced an
+    /// older one. A reset that is named is not a reset that lies.
+    vector_rebuild: Option<crate::cloud::embeddings::CacheRebuild>,
     head_lag: Option<bool>,
     scan_error: Option<String>,
     /// Set when the state could not be read; reported instead of silently skipped.
@@ -1779,7 +2030,10 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
             };
         }
     };
-    let vectors = vector_store.stats().unwrap_or_default();
+    // Coverage, not queue rows: `stats()` reports what the queue happens to
+    // contain, which reads as "0 pending" for a store whose queue was emptied
+    // while thousands of symbols still have no vector (GH #696).
+    let vectors = vector_store.coverage().unwrap_or_default();
     let scan = vector_store.index_state(&repository).ok().flatten();
     let current_head = crate::daemon::indexing::resolve_repository(project_root)
         .0
@@ -1805,10 +2059,51 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         vectorized: vectors.vectorized,
         vector_pending: vectors.pending,
         vector_failed: vectors.failed,
+        vector_unqueued: vectors.unqueued,
+        vector_orphaned: vectors.orphaned,
+        vector_rebuild: crate::cloud::embeddings::KnowledgeVectorCache::code_cache_rebuild(
+            cas_root,
+        ),
         head_lag,
         scan_error: scan.and_then(|scan| scan.last_error),
         error: None,
     }
+}
+
+/// One rendering of the code-vector counters, shared by every branch of the
+/// symbol-index check.
+///
+/// All four figures come from [`cas_store::CodeVectorCoverage`], so the line is
+/// internally consistent by construction: `vectorized + pending + failed`
+/// always equals `eligible`. The trailing clauses exist because a bare set of
+/// counters cannot distinguish "the drain is behind" from "the queue lost its
+/// rows" from "the cache was rebuilt and everything is legitimately starting
+/// over" — and an operator reading a reset needs to be told which one it is.
+fn code_vector_summary(state: &SymbolIndexState) -> String {
+    let mut summary = format!(
+        "code vectors {}/{} vectorized, {} pending, {} failed",
+        state.vectorized, state.vector_eligible, state.vector_pending, state.vector_failed,
+    );
+    if state.vector_unqueued > 0 {
+        summary.push_str(&format!(
+            " ({} never queued — run `cas index code` to re-arm them)",
+            state.vector_unqueued
+        ));
+    }
+    if state.vector_orphaned > 0 {
+        summary.push_str(&format!(
+            "; {} queue row(s) name symbols that no longer exist",
+            state.vector_orphaned
+        ));
+    }
+    if let Some(rebuild) = &state.vector_rebuild {
+        summary.push_str(&format!(
+            "; vector index rebuilt at {} ({}), vectors regenerating",
+            rebuild.rebuilt_at.format("%Y-%m-%d %H:%M UTC"),
+            rebuild.reason,
+        ));
+    }
+    summary
 }
 
 fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc>) -> Check {
@@ -1838,12 +2133,19 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
         || file_lag > 0
         || state.head_lag == Some(true)
         || state.vector_failed > 0
+        // Symbols with no queue row, and queue rows with no symbol, are the two
+        // ways the semantic corpus goes quietly wrong. Both are reconciled by
+        // `cas index code`, which is what this branch already tells the
+        // operator to run.
+        || state.vector_unqueued > 0
+        || state.vector_orphaned > 0
     {
+        let vectors = code_vector_summary(&state);
         return Check {
             name,
             status: CheckStatus::Warning,
             message: format!(
-                "symbol index coverage is incomplete: {}/{} eligible file(s), {} file(s) lagging, {} file failure(s), HEAD {}; code vectors {}/{} vectorized, {} pending, {} failed{}. Run `cas index code` to reconcile now.",
+                "symbol index coverage is incomplete: {}/{} eligible file(s), {} file(s) lagging, {} file failure(s), HEAD {}; {vectors}{}. Run `cas index code` to reconcile now.",
                 state.indexed_files,
                 state.eligible_files,
                 file_lag,
@@ -1853,10 +2155,6 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
                     Some(false) => "current",
                     None => "unknown",
                 },
-                state.vectorized,
-                state.vector_eligible,
-                state.vector_pending,
-                state.vector_failed,
                 state
                     .scan_error
                     .as_deref()
@@ -1908,14 +2206,11 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
             status: CheckStatus::Ok,
             message: format!(
                 "{} file(s) from this project indexed ({} symbol(s) stored in total), newest \
-                 entry {}; code vectors {}/{} vectorized, {} pending, {} failed; HEAD {}",
+                 entry {}; {}; HEAD {}",
                 state.files,
                 state.symbols,
                 format_lag(lag_secs),
-                state.vectorized,
-                state.vector_eligible,
-                state.vector_pending,
-                state.vector_failed,
+                code_vector_summary(&state),
                 match state.head_lag {
                     Some(true) => "behind",
                     Some(false) => "current",
@@ -2645,7 +2940,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn grouped_report_uses_sections_remediation_and_counted_summary() {
+    fn grouped_report_uses_sections_remediation_and_a_verbatim_summary() {
         let checks = vec![
             Check::new("database", CheckStatus::Ok, "SQLite database found"),
             Check::new("entries", CheckStatus::Ok, "1234567 entries accessible"),
@@ -2671,7 +2966,12 @@ mod tests {
         assert!(report.contains("[OK] entries"));
         assert!(report.contains("[WARN] search index"));
         assert!(report.contains("  → Run `cas index`"));
-        assert!(report.contains("1,234,567 entries accessible"));
+        // GH #697 (cas-a869): counts render verbatim. The digit-grouping
+        // pass that produced `1,234,567` here also produced `cas-7,791` and
+        // comma-riddled UUIDs on real reports, so it is gone rather than
+        // narrowed.
+        assert!(report.contains("1234567 entries accessible"));
+        assert!(!report.contains("1,234,567"));
         assert!(report.contains("2 ok · 1 warnings · 0 errors · 123ms"));
     }
 
@@ -2992,6 +3292,320 @@ mod tests {
         assert!(checks[0].message.contains("supervisors: 1"));
     }
 
+    /// GH #699: this is the reported shape — every per-session check is green
+    /// while two supervisors share one clone and either can reap the other's
+    /// workers. The per-session verdicts must stay green (they are correct in
+    /// isolation) and the cross-session pass must add the warning.
+    /// GH #697 (cas-a869): identifiers and timestamps must survive rendering
+    /// byte-for-byte. The report used to run a digit-grouping pass over the
+    /// whole rendered line, so `cas-7791` printed as `cas-7,791`, a UUID
+    /// became unpasteable, and an RFC3339 timestamp grew three commas — it
+    /// corrupted exactly the tokens an operator copies into the next command.
+    #[test]
+    fn rendered_messages_never_group_digits_inside_ids_uuids_or_timestamps() {
+        let check = Check {
+            name: "cross-project rows".to_string(),
+            status: CheckStatus::Warning,
+            message: "cas-7791 held by befc4155-89ca-4fb3-9b05-65323a4bf357 \
+                      recorded_at=2026-09-03T18:59:18.226617643+00:00 across 3240 rows"
+                .to_string(),
+        };
+
+        let rendered = full_message(&check);
+
+        assert!(
+            !rendered.contains(','),
+            "no separator may be injected anywhere in a rendered line: {rendered}"
+        );
+        assert!(rendered.contains("cas-7791"), "{rendered}");
+        assert!(
+            rendered.contains("befc4155-89ca-4fb3-9b05-65323a4bf357"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("2026-09-03T18:59:18.226617643+00:00"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("3240 rows"), "{rendered}");
+    }
+
+    /// The JSON surface renders through its own path, so pin it separately —
+    /// a machine reader is exactly who cannot tolerate `cas-7,791`.
+    #[test]
+    fn serialized_checks_keep_identifiers_verbatim() {
+        let checks = vec![Check {
+            name: "factory session".to_string(),
+            status: CheckStatus::Ok,
+            message: "supervisors: 1; noble-koala-5 (befc4155-89ca-4fb3-9b05-65323a4bf357)"
+                .to_string(),
+        }];
+
+        let serialized = serialize_checks(&checks);
+        let message = serialized[0]["message"].as_str().expect("message string");
+        assert_eq!(
+            message,
+            "supervisors: 1; noble-koala-5 (befc4155-89ca-4fb3-9b05-65323a4bf357)"
+        );
+    }
+
+    /// GH #697 defect (b): the line said "cannot reach 4 evidence row(s)" and
+    /// then listed six ids, because the number was an arithmetic gap over one
+    /// set while the ids came from another. The printed count must describe
+    /// the list actually printed.
+    #[test]
+    fn unreachable_row_count_matches_the_rows_it_lists() {
+        use crate::cli::cloud::{
+            PurgeDeleteSet, PurgeEntity, PurgeForeignAnalysis, PurgeRetainedTask,
+        };
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
+
+        let report = ForeignRowReport {
+            local_project: "gabber-studio".to_string(),
+            local_task_count: 900,
+            peers_compared: vec!["cas-src".to_string()],
+            foreign: (0..10)
+                .map(|index| ForeignRow {
+                    id: format!("cas-f{index:03}"),
+                    title: format!("Foreign row {index}"),
+                    closed: false,
+                    origin_project: None,
+                    home_project: "cas-src".to_string(),
+                    also_present_in: Vec::new(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        // Ten rows of evidence, six of which purge cannot reach, but a delete
+        // set of six — so the arithmetic gap (4) and the retained list (6)
+        // disagree. Both numbers are real; neither may stand in for the other.
+        let analysis = PurgeForeignAnalysis {
+            foreign_task_count: 10,
+            delete_set: PurgeDeleteSet {
+                tasks: (0..6)
+                    .map(|index| {
+                        PurgeEntity::with_evidence(
+                            "task",
+                            &format!("cas-d{index:03}"),
+                            "Deletable foreign row",
+                            "peer-evidence",
+                            "cas-src",
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            retained_foreign_tasks: (0..6)
+                .map(|index| PurgeRetainedTask {
+                    id: format!("cas-r{index:03}"),
+                    title: format!("Retained row {index}"),
+                    reason: "id collision".to_string(),
+                })
+                .collect(),
+            unattributed_task_count: 0,
+            collision_count: 0,
+        };
+
+        let check = foreign_rows_check(Ok(&report), Some(&analysis), 0);
+
+        let listed = check.message.matches("cas-r").count();
+        assert_eq!(listed, 6, "fixture must list six ids: {}", check.message);
+        assert!(
+            check.message.contains("purge cannot reach 6 evidence row(s)"),
+            "the printed count must describe the list it prints: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("cannot reach 4"),
+            "the arithmetic gap must not masquerade as the listed count: {}",
+            check.message
+        );
+    }
+
+    /// GH #701 (cas-4342): the check has to say how many rows are
+    /// unattributed, how many are already quarantined, and why collisions are
+    /// excluded — the old wording stopped at "neither category is deletable",
+    /// which left the operator with a count and no move.
+    #[test]
+    fn cross_project_check_reports_quarantine_counts_and_the_collision_rekey_recommendation() {
+        use crate::cli::foreign_rows::{ForeignRowReport, IdCollision, UnattributedRow};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 900,
+            peers_compared: vec!["gabber-studio".to_string()],
+            unattributed: vec![
+                UnattributedRow {
+                    id: "cas-u001".to_string(),
+                    title: "Open replica nobody can place".to_string(),
+                    closed: false,
+                    present_in: vec!["gabber-studio".to_string()],
+                },
+                UnattributedRow {
+                    id: "cas-u002".to_string(),
+                    title: "Finished replica".to_string(),
+                    closed: true,
+                    present_in: vec!["gabber-studio".to_string()],
+                },
+            ],
+            collisions: vec![IdCollision {
+                id: "cas-c001".to_string(),
+                local_title: "Real local work".to_string(),
+                other_project: "gabber-studio".to_string(),
+                other_title: "A different real task".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let check = foreign_rows_check(Ok(&report), None, 1);
+
+        assert!(
+            check.message.contains("unattributed: 2 row(s) (1 open), 1 quarantined locally"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cas doctor --fix-cloud-rows --yes"),
+            "the reversible remedy must be named: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("--release-cloud-rows"),
+            "the reversal must be named too: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("id collisions: 1") && check.message.contains("id rekey"),
+            "collisions must carry the rekey recommendation, not a purge: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("neither category is deletable"),
+            "the pre-remediation wording must be gone: {}",
+            check.message
+        );
+    }
+
+    /// A clean project must not grow a remediation clause it does not need.
+    #[test]
+    fn cross_project_check_stays_silent_about_quarantine_when_there_is_nothing_to_quarantine() {
+        use crate::cli::foreign_rows::ForeignRowReport;
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 12,
+            peers_compared: vec!["gabber-studio".to_string()],
+            ..Default::default()
+        };
+        let check = foreign_rows_check(Ok(&report), None, 0);
+        assert!(
+            !check.message.contains("quarantined locally"),
+            "{}",
+            check.message
+        );
+    }
+
+    /// Only open unattributed rows are candidates: a closed one is not in
+    /// anybody's ready queue, and a collision must never be hidden.
+    #[test]
+    fn quarantine_candidates_are_open_unattributed_rows_only() {
+        use crate::cli::foreign_rows::{ForeignRowReport, IdCollision, UnattributedRow};
+
+        let report = ForeignRowReport {
+            unattributed: vec![
+                UnattributedRow {
+                    id: "cas-open".to_string(),
+                    title: "Open replica".to_string(),
+                    closed: false,
+                    present_in: Vec::new(),
+                },
+                UnattributedRow {
+                    id: "cas-closed".to_string(),
+                    title: "Closed replica".to_string(),
+                    closed: true,
+                    present_in: Vec::new(),
+                },
+            ],
+            collisions: vec![IdCollision {
+                id: "cas-collide".to_string(),
+                local_title: "Real local work".to_string(),
+                other_project: "gabber-studio".to_string(),
+                other_title: "Different task, same id".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let ids: Vec<&str> = quarantine_candidates(&report)
+            .into_iter()
+            .map(|row| row.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["cas-open"]);
+    }
+
+    #[test]
+    fn two_live_supervisor_sessions_add_an_overlap_warning_beside_green_session_checks() {
+        use crate::types::AgentRole;
+        let agents = vec![
+            factory_agent(
+                "sup-incumbent",
+                "noble-koala-5",
+                "gabber-gentle-hawk-71",
+                AgentRole::Supervisor,
+            ),
+            factory_agent(
+                "sup-newcomer",
+                "gentle-falcon-66",
+                "gabber-witty-panda-98",
+                AgentRole::Supervisor,
+            ),
+        ];
+
+        let checks = factory_supervisor_checks(&agents);
+        assert_eq!(checks.len(), 2);
+        let rendered: Vec<String> = checks
+            .iter()
+            .map(|check| format!("{}: {}", check.name, check.message))
+            .collect();
+        assert!(
+            checks.iter().all(|c| matches!(c.status, CheckStatus::Ok)),
+            "each session alone is well-formed: {rendered:?}"
+        );
+
+        let warning = crate::factory_supervisor_overlap::shared_clone_warning(
+            &agents,
+            Path::new("/home/pippenz/Petrastella/gabber-studio/.cas"),
+            chrono::Utc::now(),
+        )
+        .expect("two live supervisor sessions on one clone must warn");
+        assert!(warning.contains("2 live supervisors share this clone"));
+        assert!(warning.contains("/home/pippenz/Petrastella/gabber-studio"));
+        assert!(warning.contains("gabber-gentle-hawk-71/noble-koala-5"));
+        assert!(warning.contains("gabber-witty-panda-98/gentle-falcon-66"));
+        assert!(warning.contains("reap the other's workers"));
+    }
+
+    #[test]
+    fn one_live_supervisor_session_adds_no_overlap_warning() {
+        use crate::types::AgentRole;
+        let agents = vec![
+            factory_agent(
+                "sup-a",
+                "supervisor-a",
+                "factory-a",
+                AgentRole::Supervisor,
+            ),
+            factory_agent("worker-a", "worker-a", "factory-a", AgentRole::Worker),
+        ];
+        assert!(
+            crate::factory_supervisor_overlap::shared_clone_warning(
+                &agents,
+                Path::new("/repo/.cas"),
+                chrono::Utc::now(),
+            )
+            .is_none()
+        );
+    }
+
     // ── cas-f699 / GH #134: canonical-id doctor rows ─────────────────────
 
     // ── cas-fc6fa / GH #133: cross-project contamination doctor row ──────
@@ -3032,7 +3646,7 @@ mod tests {
         };
         let _ = DbSnapshot::default(); // keep the public snapshot type exercised
 
-        let check = foreign_rows_check(Ok(&report), None);
+        let check = foreign_rows_check(Ok(&report), None, 0);
 
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(
@@ -3107,7 +3721,7 @@ mod tests {
             collision_count: 0,
         };
 
-        let check = foreign_rows_check(Ok(&report), Some(&analysis));
+        let check = foreign_rows_check(Ok(&report), Some(&analysis), 0);
 
         assert!(
             check.message.contains("foreign evidence: 2"),
@@ -3142,7 +3756,7 @@ mod tests {
             ..Default::default()
         };
 
-        let check = foreign_rows_check(Ok(&report), None);
+        let check = foreign_rows_check(Ok(&report), None, 0);
 
         assert!(matches!(check.status, CheckStatus::Ok));
         // An Ok row that just said "clean" would be indistinguishable from a
@@ -3174,7 +3788,7 @@ mod tests {
         // Same reassuring-zero failure mode as the canonical-id registry row:
         // a scan that could not run must not render as "no contamination".
         let err = anyhow::anyhow!("disk I/O error");
-        let check = foreign_rows_check(Err(&err), None);
+        let check = foreign_rows_check(Err(&err), None, 0);
 
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("SKIPPED"), "{}", check.message);
@@ -3502,7 +4116,7 @@ mod tests {
             ..Default::default()
         };
 
-        let check = foreign_rows_check(Ok(&report), None);
+        let check = foreign_rows_check(Ok(&report), None, 0);
 
         // Clean against what could be read, but partial coverage is not a
         // clean bill of health.
@@ -3915,6 +4529,123 @@ mod tests {
                 check.message
             );
         }
+    }
+
+    /// GH #696: an empty queue with unvectorized symbols used to read as
+    /// "0/0 vectorized, 0 pending" and pass. Coverage puts those symbols in the
+    /// denominator, so doctor now names the hole and points at the fix.
+    #[test]
+    fn symbol_index_check_reports_symbols_that_were_never_queued() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            vector_eligible: 11_535,
+            vectorized: 0,
+            vector_pending: 11_535,
+            vector_unqueued: 11_535,
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "a corpus with no vectors and no queued work must not pass: {}",
+            check.message
+        );
+        for expected in [
+            "0/11535 vectorized",
+            "11535 pending",
+            "11535 never queued",
+            "cas index code",
+        ] {
+            assert!(
+                check.message.contains(expected),
+                "missing {expected}: {}",
+                check.message
+            );
+        }
+    }
+
+    /// The inverse lie: queue rows outliving their symbols are reported as
+    /// ghosts rather than folded into pending work.
+    #[test]
+    fn symbol_index_check_names_orphaned_queue_rows() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            vector_eligible: 900,
+            vectorized: 900,
+            vector_orphaned: 2_010,
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check
+                .message
+                .contains("2010 queue row(s) name symbols that no longer exist"),
+            "message: {}",
+            check.message
+        );
+    }
+
+    /// A reset that is named is not a reset that lies: after the vector cache
+    /// is rebuilt, the check says so instead of silently reporting that every
+    /// vector disappeared.
+    #[test]
+    fn symbol_index_check_labels_a_vector_cache_rebuild() {
+        let now = chrono::Utc::now();
+        let rebuilt_at = chrono::DateTime::parse_from_rfc3339("2026-09-03T19:18:50Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let state = SymbolIndexState {
+            vector_eligible: 11_535,
+            vectorized: 0,
+            vector_pending: 11_535,
+            vector_rebuild: Some(crate::cloud::embeddings::CacheRebuild {
+                rebuilt_at,
+                reason: "embedding model changed from p/m1 (3d) to p/m2 (4d)".into(),
+            }),
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        for expected in [
+            "vector index rebuilt at 2026-09-03 19:18 UTC",
+            "embedding model changed",
+            "vectors regenerating",
+        ] {
+            assert!(
+                check.message.contains(expected),
+                "missing {expected}: {}",
+                check.message
+            );
+        }
+    }
+
+    /// The acceptance shape from GH #696: nothing happened between two reads,
+    /// so the two messages must be identical — including the vector line.
+    #[test]
+    fn symbol_index_check_is_identical_across_two_reads_of_one_state() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            vector_eligible: 13_545,
+            vectorized: 603,
+            vector_pending: 12_942,
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let first = symbol_index_check(state.clone(), now);
+        let second = symbol_index_check(state, now);
+        assert_eq!(first.message, second.message);
+        assert!(
+            first.message.contains("603/13545 vectorized, 12942 pending"),
+            "message: {}",
+            first.message
+        );
     }
 
     /// A freshly-indexed tree reports Ok with the counts, not a warning.
@@ -4614,35 +5345,16 @@ fn check_claude_code_mcp(project_root: &Path) -> Check {
     }
 }
 
-fn format_counted_text(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut digits = String::new();
-    let flush = |result: &mut String, digits: &mut String| {
-        if digits.len() > 3 {
-            for (index, digit) in digits.chars().enumerate() {
-                if index > 0 && (digits.len() - index) % 3 == 0 {
-                    result.push(',');
-                }
-                result.push(digit);
-            }
-        } else {
-            result.push_str(digits);
-        }
-        digits.clear();
-    };
-
-    for ch in text.chars() {
-        if ch.is_ascii_digit() {
-            digits.push(ch);
-        } else {
-            flush(&mut result, &mut digits);
-            result.push(ch);
-        }
-    }
-    flush(&mut result, &mut digits);
-    result
-}
-
+/// Rendered report text is emitted verbatim (GH #697 / cas-a869).
+///
+/// A digit-grouping pass used to run over each finished line, with no way to
+/// know whether a digit run was a count or part of an identifier. It turned
+/// `cas-7791` into `cas-7,791`, made UUIDs and RFC3339 timestamps unpasteable,
+/// and so corrupted precisely the tokens an operator copies into the next
+/// command. Grouping was cosmetic; the corruption was not, so the pass is
+/// gone and counts render as plain integers. Do not reintroduce a
+/// post-processing pass over rendered lines — any future grouping must happen
+/// where the number is still a number, before it becomes prose.
 fn status_label(status: &CheckStatus, styled: bool) -> &'static str {
     if styled {
         match status {
@@ -4668,7 +5380,7 @@ fn status_name(status: &CheckStatus) -> &'static str {
 }
 
 fn full_message(check: &Check) -> String {
-    format_counted_text(&check.message)
+    check.message.clone()
 }
 
 fn serialize_checks(checks: &[Check]) -> Vec<serde_json::Value> {
@@ -4679,9 +5391,9 @@ fn serialize_checks(checks: &[Check]) -> Vec<serde_json::Value> {
             serde_json::json!({
                 "name": check.name,
                 "status": status_name(&check.status),
-                "message": format_counted_text(&message),
+                "message": message,
                 "group": check.group().json_name(),
-                "remediation": remediation.map(|text| format_counted_text(&text)),
+                "remediation": remediation,
             })
         })
         .collect()
@@ -4847,7 +5559,7 @@ fn render_report(
             );
             let available = width.saturating_sub(prefix.chars().count()).max(1);
             let (message, remediation) = check.parts();
-            let message_lines = wrap_report_text(&format_counted_text(&message), available);
+            let message_lines = wrap_report_text(&message, available);
             let hanging_indent = " ".repeat(prefix.chars().count());
             for (line_index, message_line) in message_lines.iter().enumerate() {
                 let line = if line_index == 0 {
@@ -4858,11 +5570,7 @@ fn render_report(
                 write_report_line(fmt, Some(&check.status), &line)?;
             }
             if let Some(remediation) = remediation {
-                fmt.write_muted(&format!(
-                    "  {} {}",
-                    Icons::ARROW_RIGHT,
-                    format_counted_text(&remediation)
-                ))?;
+                fmt.write_muted(&format!("  {} {}", Icons::ARROW_RIGHT, remediation))?;
                 fmt.newline()?;
             }
         }

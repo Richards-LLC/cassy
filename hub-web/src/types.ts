@@ -90,6 +90,10 @@ export interface AttentionItem {
   enrichmentPending?: boolean;
   enrichedAt?: string;
   createdAt: string;
+  /** Set when repeats collapse into this entry: when it was first seen. */
+  firstSeenAt?: string;
+  /** Occurrences collapsed into this entry; absent means one. */
+  repeatCount?: number;
   seenAt?: string;
   acknowledgedAt?: string;
 }

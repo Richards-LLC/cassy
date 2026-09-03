@@ -94,6 +94,7 @@
      column is sized by the labelled figure it has to hold, not by the 48px
      square a portrait rail can use. */
   --landscape-attention-rail-width: 80px;
+  --browser-notice-height: 32px;
   --attention-payload-max-height: 180px;
   --attention-motion-duration: 150ms;
   --chrome-motion-duration: 120ms;
@@ -175,6 +176,23 @@ pre { font-family: var(--font-mono); }
   overflow: hidden;
   background: var(--bg-root);
 }
+
+/* An engine that cannot run this build says so in one line above the shell,
+   instead of leaving the operator with a terminal that never connects. */
+.browser-unsupported {
+  display: flex;
+  min-height: var(--browser-notice-height);
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  color: var(--state-warn);
+  background: var(--tint-warn);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+
+.shell.with-browser-notice { height: calc(100dvh - var(--browser-notice-height)); }
 
 .shell.attention-collapsed {
   grid-template-columns: var(--machine-rail-width) minmax(0, 1fr) var(--machine-rail-width);

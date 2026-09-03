@@ -104,7 +104,8 @@ pub use notification::{Notifier, NotifyBackend, NotifyConfig};
 pub(crate) use protocol::COMMANDER_REPLAY_BYTES_PER_PANE;
 pub use protocol::{
     ClientMessage, DaemonMessage, MessageAttribution, PROTOCOL_VERSION, PaneBootstrap, PaneInfo,
-    PaneKind, ProtocolCapability, SessionMetadata, SessionState, daemon_capabilities,
+    PaneKind, PaneSizeAuthority, ProtocolCapability, SessionMetadata, SessionState,
+    daemon_capabilities,
 };
 pub use renderer::{FactoryViewMode, MissionControlFocus};
 pub use session::{

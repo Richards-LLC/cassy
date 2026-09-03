@@ -1,7 +1,8 @@
 import { createHash, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HubConnectionSupervisor, type HubCallbacks } from "./connection";
+import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from "./connection";
+import { connectingView } from "./connection-state-view";
 import { createDeviceKey, dpopHeaders } from "./dpop";
 import { consumePairingFragment } from "./fragment";
 import type { StoredMachine } from "./types";
@@ -749,8 +750,22 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).toContain('machines.get(machineId)?.scopes.includes("pane-read")');
     expect(source).toContain("return !lease?.controller_label || lease.held_by_me");
     expect(source).toContain("if (becameGeometryOwner) resizeViewablePanes(machineId, session)");
-    expect(source).toContain("if (canResizePanes(machineId, session)) sendControl");
-    expect(source).toContain("{ ResizePane: { pane_id: pane.id, cols: surface.cols, rows: surface.rows } }");
+    expect(source).toContain("if (!canResizePanes(machineId, session)) return;");
+    expect(source).toContain("{ ResizePane: { pane_id: paneId, cols, rows } }");
+  });
+
+  // cas-37f8: a phone-sized viewer must never shrink the operator's console.
+  it("stops asking for a pane size once the local dashboard claims that pane", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain('const local = authority === "LocalDashboard";');
+    expect(source).toContain("if (!ownsPaneGeometry(machineId, session, paneId)) return;");
+    expect(source).toContain(
+      "surfaces.get(key)?.setAuthoritativeSize(local ? { cols, rows } : null)",
+    );
+    // Every ResizePane the viewer can send goes through the one suppression gate.
+    const sends = source.match(/ResizePane: \{/g) ?? [];
+    expect(sends).toHaveLength(1);
+    expect(source).toContain("onResize: (cols, rows) => requestPaneSize(machineId, session, pane.id, cols, rows)");
   });
 
   it("turns a reachable revoked hub into a terminal auth stop", async () => {
@@ -826,6 +841,109 @@ describe("binding Cassy Commander browser invariants", () => {
 
     await vi.waitFor(() => expect(supervisor.snapshot()).toMatchObject({ phase: "backoff", stage: "dialing" }));
     expect(callbacks.onAuthFailure).not.toHaveBeenCalled();
+    supervisor.stop();
+  });
+
+  it("degrades an unusable engine honestly instead of spinning at 0s", async () => {
+    const [connection, main, css] = await Promise.all(["connection.ts", "main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // The version floor that broke every attach on Chrome 113 is gone: the
+    // combined signal is built through a helper with a fallback.
+    expect(connection).toContain("signal: anySignal([this.eventAbort.signal, signal]),");
+    expect(connection).not.toContain("AbortSignal.any(");
+    // Fatal is declared, never inferred from TypeError — fetch rejects with
+    // TypeError on an ordinary network failure, which must keep retrying.
+    expect(connection).toContain("export class UnsupportedBrowserError extends Error {}");
+    expect(connection).toContain("if (unsupported) throw new UnsupportedBrowserError(unsupported);");
+    expect(connection).toContain("this.transition(\"failed\", stage, { reason: error.message, fatal: true });");
+    expect(connection).not.toContain("error instanceof TypeError");
+    // The connect clock survives the transitions that reset `since`.
+    expect(connection).toContain("connectingSince: connectingAnchor(this.lifecycle, phase, now),");
+    // One line naming the missing API and the minimum browsers.
+    expect(main).toContain("const browserNotice = unsupportedBrowserNotice(browserSupport());");
+    expect(main).toContain('<p class="browser-unsupported" role="alert">');
+    expect(css).toContain(".browser-unsupported {");
+    expect(css).toContain(".shell.with-browser-notice { height: calc(100dvh - var(--browser-notice-height)); }");
+    // No spinner, no rising counter, and no "reconnecting" claim over a
+    // failure that will never resolve.
+    expect(main).toContain("title.textContent = fatal ? `Cannot connect to ${session}` : `Connecting to ${session}…`;");
+    expect(main).toContain("if (snapshot.fatal === true) return;");
+    expect(main).toContain("? snapshot.reason ?? \"This browser cannot reconnect to the terminal.\"");
+    // One recurring failure is one attention entry, not one per retry.
+    expect(main).toContain("const merge = mergeAttentionItem(attention, item);");
+    expect(main).toContain("await attentionStore.put(merge.stored);");
+    expect(main).not.toContain("attention = [item, ...attention];\n  await attentionStore.put(item);");
+  });
+
+  it("fails an engine missing a transport API once, with the reason, instead of retrying it forever", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    const fetchMock = vi.fn(async () => ({ status: 200, ok: true, json: async () => ({}) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const timeout = (AbortSignal as unknown as { timeout?: unknown }).timeout;
+    Reflect.deleteProperty(AbortSignal as unknown as Record<string, unknown>, "timeout");
+    try {
+      const { privateKey, publicKey } = await createDeviceKey();
+      const machine = {
+        id: "machine", label: "Machine", baseUrl: "https://hub.example", deviceId: "device",
+        credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        scopes: ["pane-read"], publicKey, privateKey,
+      } satisfies StoredMachine;
+      const callbacks = {
+        onState: vi.fn(), onAttachState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+        onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+      } satisfies HubCallbacks;
+      const supervisor = new HubConnectionSupervisor(machine, callbacks);
+      const internals = supervisor as unknown as { desired: boolean; attachRetryTimers: Map<string, number> };
+      internals.desired = true;
+
+      await supervisor.attach("factory-a");
+
+      const snapshot = supervisor.attachSnapshot("factory-a");
+      expect(snapshot).toMatchObject({ phase: "failed", fatal: true });
+      expect(snapshot?.reason).toContain("AbortSignal.timeout");
+      expect(snapshot?.reason).toContain("Update to Chrome");
+      // The overlay states it and offers the escape hatch on the first frame.
+      expect(connectingView(snapshot!, Date.now())).toMatchObject({ step: snapshot?.reason, actionsAvailable: true });
+      // No retry is scheduled, and the failure is not misreported as revoked.
+      expect(internals.attachRetryTimers.size).toBe(0);
+      expect(callbacks.onSocketError).toHaveBeenCalledWith("factory-a", snapshot?.reason);
+      expect(callbacks.onSocketError).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(callbacks.onSocketError).toHaveBeenCalledTimes(1);
+      supervisor.stop();
+    } finally {
+      if (timeout !== undefined) Object.defineProperty(AbortSignal, "timeout", { value: timeout, configurable: true, writable: true });
+    }
+  });
+
+  it("keeps one connect clock running across machine retries so the 5s and 15s states appear", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
+    const { privateKey, publicKey } = await createDeviceKey();
+    const machine = {
+      id: "offline", label: "Offline", baseUrl: "https://offline.example", deviceId: "device",
+      credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      scopes: ["machine-read"], publicKey, privateKey,
+    } satisfies StoredMachine;
+    const states: ConnectionState[] = [];
+    const callbacks = {
+      onState: (state: ConnectionState) => states.push(state), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+    } satisfies HubCallbacks;
+    const supervisor = new HubConnectionSupervisor(machine, callbacks);
+    const startedAt = Date.now();
+    supervisor.start();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const latest = supervisor.snapshot();
+    // `since` is rewritten by every transition — that is what froze the
+    // overlay at 0s — while the connecting anchor holds the true start.
+    expect(latest.since).toBeGreaterThan(startedAt);
+    expect(latest.connectingSince).toBe(startedAt);
+    expect(connectingView(latest, Date.now())).toMatchObject({ actionsAvailable: true });
+    expect(connectingView(latest, Date.now()).elapsedSeconds).toBeGreaterThanOrEqual(15);
+    expect(states.filter((state) => state.connectingSince !== startedAt)).toHaveLength(0);
     supervisor.stop();
   });
 

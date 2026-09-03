@@ -48,11 +48,14 @@ export function formatElapsed(seconds: number): string {
 
 export function connectingView(snapshot: ConnectionSnapshotView, now = Date.now()): ConnectingView {
   const elapsed = elapsedSeconds(snapshot, now);
+  // A failure retrying cannot fix has nothing to disclose progressively: say
+  // what broke and offer the escape hatch on the first frame.
+  const fatal = snapshot.fatal === true;
   return {
     elapsedSeconds: elapsed,
     elapsedLabel: formatElapsed(elapsed),
-    step: elapsed >= 5 ? snapshot.reason ?? STAGE_COPY[snapshot.stage] : undefined,
-    actionsAvailable: elapsed >= 15,
+    step: fatal || elapsed >= 5 ? snapshot.reason ?? STAGE_COPY[snapshot.stage] : undefined,
+    actionsAvailable: fatal || elapsed >= 15,
   };
 }
 
@@ -62,7 +65,10 @@ export function disconnectedView(snapshot: ConnectionSnapshotView, now = Date.no
   return {
     elapsedSeconds: elapsed,
     attempt: Math.max(1, snapshot.attempt),
-    retryLabel: retrySeconds === undefined ? "reconnecting" : `reconnecting in ${retrySeconds}s`,
+    // A failure retrying cannot fix has no next attempt to promise.
+    retryLabel: snapshot.fatal === true
+      ? "not retrying"
+      : retrySeconds === undefined ? "reconnecting" : `reconnecting in ${retrySeconds}s`,
   };
 }
 

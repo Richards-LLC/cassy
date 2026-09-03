@@ -1,5 +1,5 @@
 import "./styles.css";
-import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
+import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionCounts, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
@@ -15,6 +15,7 @@ import { PairingOperationCoordinator, commitPairingResult } from "./pairing-oper
 import { PAIRING_SCOPES, pairCommand, preselectedScopes, scopeChoices, scopeLabel, ungrantedScopes } from "./pairing-scopes";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
+import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
@@ -109,6 +110,11 @@ let messageDelivery: { session: string; target: string } | undefined;
 // to sit beside the composer: a toast is gone before a phone operator has
 // finished reading it, and a disabled button says nothing at all.
 let messageStatus: { session: string | undefined; text: string; tone: "info" | "error" } | undefined;
+
+// An engine cannot gain an API mid-session, so this is probed once. Saying so
+// in one line beats a "Connecting…" spinner that can never finish
+// (report cas-b652, defect D3).
+const browserNotice = unsupportedBrowserNotice(browserSupport());
 
 // One phone definition shared by the stylesheet, layout state, pane mounting
 // and pane tapping — see viewport.ts. Rotation must not put the CSS and this
@@ -387,6 +393,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       paneBuffers.set(key, [...data]);
       surfaces.get(key)?.write(data);
     },
+    onPaneSize: (session, pane, cols, rows, authority) => {
+      applyPaneAuthority(machine.id, session, pane, cols, rows, authority);
+    },
     onFlowControlReset: (session) => {
       const prefix = `${sessionKey(machine.id, session)}:`;
       for (const key of paneKeyframesReady) {
@@ -489,11 +498,14 @@ async function addAttention(machine: StoredMachine, session: string | undefined,
     kind,
     createdAt,
   }, content);
-  if (item.severity === "critical") newCriticalAttentionIds.add(item.id);
-  attention = [item, ...attention];
-  await attentionStore.put(item);
+  // One recurring failure is one entry: a retry loop used to write a row per
+  // attempt for the same outage (cas-b652 D3).
+  const merge = mergeAttentionItem(attention, item);
+  if (merge.stored.severity === "critical" && !merge.repeat) newCriticalAttentionIds.add(merge.stored.id);
+  attention = merge.items;
+  await attentionStore.put(merge.stored);
   render();
-  newCriticalAttentionIds.delete(item.id);
+  newCriticalAttentionIds.delete(merge.stored.id);
 }
 
 async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> {
@@ -811,7 +823,10 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       banner.setAttribute("role", "status");
       grid.prepend(banner);
     }
-    banner.textContent = `Disconnected ${view.elapsedSeconds}s ago — ${view.retryLabel} (attempt ${view.attempt})`;
+    // A fatal failure is not reconnecting, so the banner must not claim it is.
+    banner.textContent = snapshot.fatal === true
+      ? snapshot.reason ?? "This browser cannot reconnect to the terminal."
+      : `Disconnected ${view.elapsedSeconds}s ago — ${view.retryLabel} (attempt ${view.attempt})`;
     grid.classList.add("terminal-disconnected");
     return;
   }
@@ -820,17 +835,24 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   const placeholder = grid.querySelector<HTMLElement>(".empty");
   if (!placeholder) return;
   const view = connectingView(snapshot, now);
-  placeholder.className = "empty terminal-state terminal-connecting";
-  const spinner = document.createElement("span");
-  spinner.className = "connection-spinner";
-  spinner.setAttribute("aria-hidden", "true");
+  const fatal = snapshot.fatal === true;
+  placeholder.className = `empty terminal-state terminal-connecting${fatal ? " terminal-connect-failed" : ""}`;
   const title = document.createElement("p");
   title.className = "terminal-connecting-title";
-  title.textContent = `Connecting to ${session}…`;
-  const elapsed = document.createElement("time");
-  elapsed.className = "terminal-connecting-elapsed";
-  elapsed.textContent = view.elapsedLabel;
-  placeholder.replaceChildren(spinner, title, elapsed);
+  // A spinner and a rising counter over a failure that will never resolve is
+  // the D3 overlay: it reads as progress. State the outcome instead.
+  title.textContent = fatal ? `Cannot connect to ${session}` : `Connecting to ${session}…`;
+  if (fatal) {
+    placeholder.replaceChildren(title);
+  } else {
+    const spinner = document.createElement("span");
+    spinner.className = "connection-spinner";
+    spinner.setAttribute("aria-hidden", "true");
+    const elapsed = document.createElement("time");
+    elapsed.className = "terminal-connecting-elapsed";
+    elapsed.textContent = view.elapsedLabel;
+    placeholder.replaceChildren(spinner, title, elapsed);
+  }
   if (view.step) {
     const step = document.createElement("p");
     step.className = "terminal-connecting-step";
@@ -867,6 +889,8 @@ function syncConnectionViewTicker(): void {
   if (!selectedMachineId || !selectedSession || !connection) return;
   const snapshot = connection.attachSnapshot(selectedSession) ?? connection.snapshot();
   if (snapshot.phase === "live" && !snapshot.degraded) return;
+  // Nothing about a fatal state changes with time; a 1Hz repaint of it is noise.
+  if (snapshot.fatal === true) return;
   const machineId = selectedMachineId;
   const session = selectedSession;
   connectionViewTicker = window.setInterval(() => {
@@ -943,13 +967,45 @@ async function loadLease(machineId: string, session: string): Promise<void> {
   } catch { /* legacy hub may not expose lease status */ }
 }
 
+/**
+ * The pane geometry the daemon says is authoritative, per pane (cas-37f8).
+ * `local` means the operator's dashboard owns the PTY: this viewer renders
+ * that size and must stop asking for its own.
+ */
+const paneAuthority = new Map<string, { cols: number; rows: number; local: boolean }>();
+
+function applyPaneAuthority(
+  machineId: string,
+  session: string,
+  paneId: string,
+  cols: number,
+  rows: number,
+  authority: string,
+): void {
+  const key = paneKey(machineId, session, paneId);
+  const local = authority === "LocalDashboard";
+  paneAuthority.set(key, { cols, rows, local });
+  surfaces.get(key)?.setAuthoritativeSize(local ? { cols, rows } : null);
+}
+
+/** A viewer whose pane is owned by the local dashboard never asks again. */
+function ownsPaneGeometry(machineId: string, session: string, paneId: string): boolean {
+  return paneAuthority.get(paneKey(machineId, session, paneId))?.local !== true;
+}
+
+function requestPaneSize(machineId: string, session: string, paneId: string, cols: number, rows: number): void {
+  if (!canResizePanes(machineId, session)) return;
+  if (!ownsPaneGeometry(machineId, session, paneId)) return;
+  sendControl(machineId, session, { ResizePane: { pane_id: paneId, cols, rows } });
+}
+
 function resizeViewablePanes(machineId: string, session: string): void {
   if (!canResizePanes(machineId, session)) return;
   const state = sessionStates.get(sessionKey(machineId, session));
   if (!state) return;
   for (const pane of state.panes.filter((candidate) => candidate.kind !== "Director")) {
     const surface = surfaces.get(paneKey(machineId, session, pane.id));
-    if (surface) sendControl(machineId, session, { ResizePane: { pane_id: pane.id, cols: surface.cols, rows: surface.rows } });
+    if (surface) requestPaneSize(machineId, session, pane.id, surface.cols, surface.rows);
   }
 }
 
@@ -1155,7 +1211,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (!surfaces.has(key)) {
       const surface = await createTerminalSurface(mount, {
         onData: (data) => { if (canControl(machineId, session, "pane-input")) sendControl(machineId, session, { Input: { pane_id: pane.id, data: [...data] } }); },
-        onResize: (cols, rows) => { if (canResizePanes(machineId, session)) sendControl(machineId, session, { ResizePane: { pane_id: pane.id, cols, rows } }); },
+        onResize: (cols, rows) => requestPaneSize(machineId, session, pane.id, cols, rows),
         // The transcript is a reading of the same frame the grid just rendered,
         // so it follows the emulator's own tick instead of polling it.
         onRender: () => transcripts.get(key)?.update(),
@@ -1170,6 +1226,11 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       // The floor goes in before the replay: scrollback written at the mount's
       // own narrow grid would only have to be reflowed again.
       surface.setMinimumColumns(compactViewport() ? COMPACT_MINIMUM_COLUMNS : 0);
+      // A pane the operator's dashboard already claimed is pinned before the
+      // replay too, so the buffer is never written at a grid that is about to
+      // change (cas-37f8).
+      const authority = paneAuthority.get(key);
+      if (authority?.local) surface.setAuthoritativeSize({ cols: authority.cols, rows: authority.rows });
       const buffered = paneBuffers.get(key);
       if (buffered) surface.write(new Uint8Array(buffered));
     }
@@ -1700,7 +1761,8 @@ function render(captureDraft = true): void {
     surfaces.clear();
   }
   app.innerHTML = `
-    <div class="shell${machineDrawerOpen ? " drawer-open" : ""}${attentionPanelCollapsed ? " attention-collapsed" : " attention-expanded"}${fleetEmpty ? " fleet-empty" : ""}">
+    ${browserNotice ? `<p class="browser-unsupported" role="alert">${escapeHtml(browserNotice)}</p>` : ""}
+    <div class="shell${browserNotice ? " with-browser-notice" : ""}${machineDrawerOpen ? " drawer-open" : ""}${attentionPanelCollapsed ? " attention-collapsed" : " attention-expanded"}${fleetEmpty ? " fleet-empty" : ""}">
       <aside class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}" aria-label="Machines and sessions">
         <div class="machine-rail">
           <button id="machine-drawer-toggle" class="rail-control commander-mark" type="button" aria-label="Open machines and sessions" title="Machines and sessions" aria-expanded="${machineDrawerOpen}"><svg class="commander-mark-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg><span class="commander-mark-label">Machines</span></button>

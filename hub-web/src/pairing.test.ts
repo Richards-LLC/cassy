@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
-import { consumePairingFragment } from "./fragment";
+import { consumePairingFragment, watchPairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
 import { pairingCleanupFailureUpdate, pairingStorageClearFailureMessage } from "./pairing-cleanup";
@@ -238,6 +238,68 @@ describe("wire-v1 reverse pairing", () => {
     expect(replacement).toBe("/");
     expect(replacement).not.toContain(token);
     expect(new PendingPairingStore(storage).load()).toMatchObject({ token, hubId: "machine-uuid" });
+  });
+
+  it("consumes a pairing fragment delivered to an already-open tab", () => {
+    // Android sends a VIEW intent for a URL that differs only by #fragment to
+    // the tab that is already open. Nothing navigates, the SPA never re-inits,
+    // and the one-time invitation is dropped without a word.
+    const token = "A".repeat(43);
+    const store = new PendingPairingStore(new MemoryStorage());
+    const listeners = new Map<string, () => void>();
+    const location = { hash: "", pathname: "/", search: "" } as Location;
+    const history = { replaceState: () => { location.hash = ""; } } as unknown as History;
+    const seen: string[] = [];
+    const stop = watchPairingFragment(
+      {
+        location,
+        history,
+        addEventListener: (type: string, listener: () => void) => { listeners.set(type, listener); },
+        removeEventListener: (type: string) => { listeners.delete(type); },
+      },
+      store,
+      (fragment) => { seen.push(fragment.hubId); },
+    );
+
+    expect([...listeners.keys()].sort()).toEqual(["focus", "hashchange", "pageshow", "visibilitychange"]);
+
+    location.hash = `#pair=${token}&hub=machine-uuid`;
+    listeners.get("hashchange")!();
+    expect(seen).toEqual(["machine-uuid"]);
+    // The capability is one-time: a second event on the scrubbed URL is a no-op.
+    listeners.get("hashchange")!();
+    expect(seen).toEqual(["machine-uuid"]);
+
+    // A tab restored from the back-forward cache re-checks on foreground.
+    location.hash = `#pair=${token}&hub=second-machine`;
+    listeners.get("visibilitychange")!();
+    expect(seen).toEqual(["machine-uuid", "second-machine"]);
+
+    stop();
+    expect(listeners.size).toBe(0);
+  });
+
+  it("leaves an unrelated fragment alone while watching for pairing URLs", () => {
+    const location = { hash: "#attention", pathname: "/", search: "" } as Location;
+    let replaced = false;
+    const history = { replaceState: () => { replaced = true; } } as unknown as History;
+    const listeners = new Map<string, () => void>();
+    const seen: unknown[] = [];
+    watchPairingFragment(
+      {
+        location,
+        history,
+        addEventListener: (type: string, listener: () => void) => { listeners.set(type, listener); },
+        removeEventListener: () => { /* not exercised here */ },
+      },
+      new PendingPairingStore(new MemoryStorage()),
+      (fragment) => { seen.push(fragment); },
+    );
+    listeners.get("focus")!();
+    expect(seen).toEqual([]);
+    // Re-checking on every foreground must not rewrite a hash it does not own.
+    expect(replaced).toBe(false);
+    expect(location.hash).toBe("#attention");
   });
 
   it("scrubs a malformed legacy capability even when it cannot be persisted", () => {

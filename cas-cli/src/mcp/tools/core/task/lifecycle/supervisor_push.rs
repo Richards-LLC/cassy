@@ -1900,13 +1900,16 @@ mod tests {
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
         agents.init().unwrap();
 
-        let mut live = agent_in_session("live-id", "sup", AgentRole::Supervisor, "sess");
+        // Keep names ordered opposite to registration recency so this still
+        // proves the liveness rank rather than the legacy name tiebreak. The
+        // store now retires active same-name supervisors on registration.
+        let mut live = agent_in_session("live-id", "z-sup", AgentRole::Supervisor, "sess");
         live.registered_at = chrono::Utc::now() - chrono::Duration::minutes(10);
         live.status = AgentStatus::Active;
         agents.register(&live).unwrap();
 
         let mut newer_dead =
-            agent_in_session("newer-dead-id", "sup", AgentRole::Supervisor, "sess");
+            agent_in_session("newer-dead-id", "a-sup", AgentRole::Supervisor, "sess");
         newer_dead.registered_at = chrono::Utc::now();
         newer_dead.status = AgentStatus::Shutdown;
         agents.register(&newer_dead).unwrap();

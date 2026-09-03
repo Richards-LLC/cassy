@@ -41,6 +41,7 @@ pub mod factory_auth_health;
 pub mod factory_context_reset;
 pub mod factory_isolation;
 pub mod factory_preflight;
+pub mod factory_supervisor_overlap;
 pub mod factory_target_cache;
 pub mod fs_space;
 pub mod gh_graphql;

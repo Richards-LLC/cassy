@@ -78,6 +78,11 @@ impl SyncQueue {
         self.migrate_team_id(&conn)?;
         self.migrate_conflict_revisions(&conn)?;
 
+        // Migration: add the per-row cloud verdict columns. This runs after the
+        // team_id migration because that path can rebuild sync_queue from an
+        // explicit legacy column list.
+        self.migrate_row_outcomes(&conn)?;
+
         Ok(())
     }
 }

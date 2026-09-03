@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "description": "Origin-project histogram of live /api/sync/pull payloads, captured for GH #701. Each entry counts rows by their `origin_project` while every row was stamped project_id=<scope>. `null` means the row predates the origin_project field and must keep falling back to the scope stamp.",
+  "endpoint": "https://petra-stella-cloud.vercel.app/api/sync/pull",
+  "captured_at": "2026-09-03T21:22:04.949776Z",
+  "scopes": [
+    {
+      "project_id": "gabber-studio",
+      "entities": {
+        "entries": {
+          "total": 1411,
+          "project_id_stamps": [
+            "gabber-studio"
+          ],
+          "origin_project": {
+            "null": 1411
+          }
+        },
+        "tasks": {
+          "total": 545,
+          "project_id_stamps": [
+            "gabber-studio"
+          ],
+          "origin_project": {
+            "null": 420,
+            "cas-src": 7,
+            "gabber-studio": 118
+          }
+        },
+        "skills": {
+          "total": 1,
+          "project_id_stamps": [
+            "gabber-studio"
+          ],
+          "origin_project": {
+            "null": 1
+          }
+        },
+        "task_dependencies": {
+          "total": 4757,
+          "project_id_stamps": [
+            "gabber-studio"
+          ],
+          "origin_project": {
+            "cas-src": 1524,
+            "gabber-studio": 2271,
+            "github.com/richards-llc/mecha-cassy": 6,
+            "ozer": 956
+          }
+        }
+      }
+    },
+    {
+      "project_id": "cas-src",
+      "entities": {
+        "entries": {
+          "total": 1447,
+          "project_id_stamps": [
+            "cas-src"
+          ],
+          "origin_project": {
+            "null": 1447
+          }
+        },
+        "tasks": {
+          "total": 657,
+          "project_id_stamps": [
+            "cas-src"
+          ],
+          "origin_project": {
+            "null": 476,
+            "cas-src": 178,
+            "gabber-studio": 1,
+            "pulse-card": 2
+          }
+        },
+        "rules": {
+          "total": 2,
+          "project_id_stamps": [
+            "cas-src"
+          ],
+          "origin_project": {
+            "null": 2
+          }
+        },
+        "task_dependencies": {
+          "total": 3533,
+          "project_id_stamps": [
+            "cas-src"
+          ],
+          "origin_project": {
+            "cas-src": 2562,
+            "ozer": 971
+          }
+        }
+      }
+    },
+    {
+      "project_id": "richards-llc-accounting",
+      "entities": {
+        "entries": {
+          "total": 3,
+          "project_id_stamps": [
+            "richards-llc-accounting"
+          ],
+          "origin_project": {
+            "null": 3
+          }
+        },
+        "tasks": {
+          "total": 1,
+          "project_id_stamps": [
+            "richards-llc-accounting"
+          ],
+          "origin_project": {
+            "null": 1
+          }
+        },
+        "task_dependencies": {
+          "total": 3002,
+          "project_id_stamps": [
+            "richards-llc-accounting"
+          ],
+          "origin_project": {
+            "cas-src": 3002
+          }
+        }
+      }
+    }
+  ]
+}

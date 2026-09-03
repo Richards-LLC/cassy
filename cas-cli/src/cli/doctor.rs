@@ -92,7 +92,7 @@ impl CheckGroup {
             "configuration" | "mcp config" | "mcp stdio upstreams" | "sync target" | "models" => {
                 Self::Config
             }
-            "integrations" => Self::Integrations,
+            "integrations" | "mecha-cassy" => Self::Integrations,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -493,11 +493,25 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // Every active factory session needs exactly one live durable supervisor
     // row. Otherwise logical handoffs and verification recovery have nowhere
     // to route even while the supervisor pane itself exists.
-    match open_agent_store(&cas_root)
-        .and_then(|store| Ok(store.list(None)?))
-        .map(|agents| factory_supervisor_checks(&agents))
-    {
-        Ok(session_checks) => checks.extend(session_checks),
+    match open_agent_store(&cas_root).and_then(|store| Ok(store.list(None)?)) {
+        Ok(agents) => {
+            checks.extend(factory_supervisor_checks(&agents));
+            // The per-session checks above each pass in isolation while two
+            // supervisors quietly share one clone's `.cas/` state, which is
+            // exactly the reap-the-other's-workers hazard (GH #699). Cross
+            // the sessions and say so.
+            if let Some(warning) = crate::factory_supervisor_overlap::shared_clone_warning(
+                &agents,
+                &cas_root,
+                chrono::Utc::now(),
+            ) {
+                checks.push(Check {
+                    name: "factory session overlap".to_string(),
+                    status: CheckStatus::Warning,
+                    message: warning,
+                });
+            }
+        }
         Err(error) => checks.push(Check {
             name: "factory supervisors".to_string(),
             status: CheckStatus::Warning,
@@ -925,6 +939,31 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             },
             message: row.message,
         });
+    }
+
+    // Check 13b: MechaCassy hub reachability (cas-8fad). Machine-scoped, so
+    // it is not part of `integration_checks` (which walks per-project keep
+    // blocks). Unlike the platform rows this one *can* be an Error: a missing
+    // variable, a rejected bearer, or a drifted tool contract each mean the
+    // next release post will fail, and each has an exact remedy.
+    #[cfg(feature = "mcp-proxy")]
+    {
+        let project_proxy = cas_root.join("proxy.toml");
+        if let Some(row) = crate::cli::integrate::mecha_cassy::doctor_row_from_env(
+            project_proxy.is_file().then_some(project_proxy.as_path()),
+        ) {
+            checks.push(Check {
+                name: "mecha-cassy".to_string(),
+                status: match row.severity {
+                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Ok => CheckStatus::Ok,
+                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Warning => {
+                        CheckStatus::Warning
+                    }
+                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Error => CheckStatus::Error,
+                },
+                message: row.message,
+            });
+        }
     }
 
     // Check 14: cloud canonical id — which bucket this project syncs into,
@@ -2403,23 +2442,93 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .collect::<Vec<_>>()
         .join(", ");
     let remediation = "Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.";
+    let rejections = cloud_queue_rejections(&conn);
 
-    if pending.is_empty() {
+    if pending.is_empty() && rejections.is_empty() {
         Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Ok,
             message: format!("0 queued content change(s) block purge-foreign; {remediation}"),
+        }
+    } else if pending.is_empty() {
+        Check {
+            name: "cloud sync queue".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "0 queued content change(s) block purge-foreign, but the cloud refused {} parked row(s): {}",
+                rejections.iter().map(|(_, count)| count).sum::<usize>(),
+                describe_queue_rejections(&rejections)
+            ),
         }
     } else {
         Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "{} queued content change(s) block purge-foreign ({breakdown}); {remediation}",
-                pending.len()
+                "{} queued content change(s) block purge-foreign ({breakdown}); {remediation}{}",
+                pending.len(),
+                if rejections.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " The cloud refused {} parked row(s): {}",
+                        rejections.iter().map(|(_, count)| count).sum::<usize>(),
+                        describe_queue_rejections(&rejections)
+                    )
+                }
             ),
         }
     }
+}
+
+/// Terminal queue rows the cloud itself refused, grouped by its reason.
+///
+/// A database written by a client that predates the per-row verdict columns
+/// simply reports nothing here: doctor must not turn a missing column into a
+/// warning about rejections that were never recorded.
+fn cloud_queue_rejections(conn: &rusqlite::Connection) -> Vec<(String, usize)> {
+    let has_columns: bool = conn
+        .query_row(
+            "SELECT COUNT(*) = 2 FROM pragma_table_info('sync_queue') WHERE name IN ('last_outcome', 'last_reason')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_columns {
+        return Vec::new();
+    }
+
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT COALESCE(NULLIF(TRIM(last_reason), ''), 'unspecified') AS reason, COUNT(*)
+         FROM sync_queue
+         WHERE last_outcome = 'rejected'
+         GROUP BY reason",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+    }) else {
+        return Vec::new();
+    };
+    let mut rejections = rows.filter_map(Result::ok).collect::<Vec<_>>();
+    rejections.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rejections
+}
+
+/// Name each refusal with the move that clears it. A reason without its
+/// remediation leaves an operator holding a count and no next step.
+fn describe_queue_rejections(rejections: &[(String, usize)]) -> String {
+    rejections
+        .iter()
+        .map(|(reason, count)| {
+            format!(
+                "{reason} ×{count} — {}",
+                crate::cloud::push_reason_hint(reason)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[cfg(feature = "mcp-proxy")]
@@ -2851,6 +2960,74 @@ mod tests {
         assert!(checks[0].message.contains("supervisors: 1"));
     }
 
+    /// GH #699: this is the reported shape — every per-session check is green
+    /// while two supervisors share one clone and either can reap the other's
+    /// workers. The per-session verdicts must stay green (they are correct in
+    /// isolation) and the cross-session pass must add the warning.
+    #[test]
+    fn two_live_supervisor_sessions_add_an_overlap_warning_beside_green_session_checks() {
+        use crate::types::AgentRole;
+        let agents = vec![
+            factory_agent(
+                "sup-incumbent",
+                "noble-koala-5",
+                "gabber-gentle-hawk-71",
+                AgentRole::Supervisor,
+            ),
+            factory_agent(
+                "sup-newcomer",
+                "gentle-falcon-66",
+                "gabber-witty-panda-98",
+                AgentRole::Supervisor,
+            ),
+        ];
+
+        let checks = factory_supervisor_checks(&agents);
+        assert_eq!(checks.len(), 2);
+        let rendered: Vec<String> = checks
+            .iter()
+            .map(|check| format!("{}: {}", check.name, check.message))
+            .collect();
+        assert!(
+            checks.iter().all(|c| matches!(c.status, CheckStatus::Ok)),
+            "each session alone is well-formed: {rendered:?}"
+        );
+
+        let warning = crate::factory_supervisor_overlap::shared_clone_warning(
+            &agents,
+            Path::new("/home/pippenz/Petrastella/gabber-studio/.cas"),
+            chrono::Utc::now(),
+        )
+        .expect("two live supervisor sessions on one clone must warn");
+        assert!(warning.contains("2 live supervisors share this clone"));
+        assert!(warning.contains("/home/pippenz/Petrastella/gabber-studio"));
+        assert!(warning.contains("gabber-gentle-hawk-71/noble-koala-5"));
+        assert!(warning.contains("gabber-witty-panda-98/gentle-falcon-66"));
+        assert!(warning.contains("reap the other's workers"));
+    }
+
+    #[test]
+    fn one_live_supervisor_session_adds_no_overlap_warning() {
+        use crate::types::AgentRole;
+        let agents = vec![
+            factory_agent(
+                "sup-a",
+                "supervisor-a",
+                "factory-a",
+                AgentRole::Supervisor,
+            ),
+            factory_agent("worker-a", "worker-a", "factory-a", AgentRole::Worker),
+        ];
+        assert!(
+            crate::factory_supervisor_overlap::shared_clone_warning(
+                &agents,
+                Path::new("/repo/.cas"),
+                chrono::Utc::now(),
+            )
+            .is_none()
+        );
+    }
+
     // ── cas-f699 / GH #134: canonical-id doctor rows ─────────────────────
 
     // ── cas-fc6fa / GH #133: cross-project contamination doctor row ──────
@@ -3093,6 +3270,94 @@ mod tests {
             "{message}",
             message = check.message
         );
+    }
+
+    /// GH #668: doctor names each cloud refusal and its repair instead of
+    /// folding every parked row into one queue count. A legacy database with
+    /// no verdict columns must still read clean rather than warn.
+    #[test]
+    fn doctor_queue_check_names_cloud_rejections_by_reason_with_remediation() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_outcome TEXT,
+                last_reason TEXT,
+                failed_client_version TEXT
+            );
+            INSERT INTO sync_queue
+                (id, entity_type, entity_id, operation, created_at, retry_count, last_outcome, last_reason)
+            VALUES
+                (1, 'entry', 'entry-a', 'upsert', '2026-09-01T00:00:00Z', 5, 'rejected', 'project_mismatch'),
+                (2, 'entry', 'entry-b', 'upsert', '2026-09-01T00:00:01Z', 5, 'rejected', 'project_mismatch'),
+                (3, 'task', 'task-a', 'upsert', '2026-09-01T00:00:02Z', 5, NULL, NULL);
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check.message.contains("project_mismatch ×2"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cas cloud link"),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("×3"),
+            "a row with no cloud verdict is not a rejection: {}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn doctor_queue_check_is_quiet_on_databases_without_the_verdict_columns() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        assert!(!check.message.contains("refused"), "{}", check.message);
     }
 
     #[cfg(feature = "mcp-proxy")]
@@ -3500,6 +3765,27 @@ mod tests {
             crate::cli::integrate::doctor::DoctorSeverity::Ok
         ));
         assert!(rows[0].message.contains("no integrations configured"));
+    }
+
+    /// `cas-8fad`: the machine-scoped MechaCassy row must land in the
+    /// Integrations group (not the Store catch-all) and its "Run `cas integrate
+    /// mecha-cassy`" guidance must split into doctor's remediation column
+    /// rather than staying buried in the diagnostic text.
+    #[test]
+    fn mecha_cassy_row_groups_under_integrations_and_exposes_its_remedy() {
+        let check = Check::new(
+            "mecha-cassy",
+            CheckStatus::Warning,
+            "not registered on this machine (/tmp/config.toml has no mecha-cassy server). \
+             Run `cas integrate mecha-cassy`",
+        );
+        assert_eq!(check.group(), CheckGroup::Integrations);
+        let (message, remediation) = check.parts();
+        assert!(message.contains("not registered on this machine"), "{message}");
+        assert_eq!(
+            remediation.as_deref(),
+            Some("Run `cas integrate mecha-cassy`")
+        );
     }
 
     /// `cas-3efe`: a github SKILL.md with a recorded OWNER/REPO that doesn't

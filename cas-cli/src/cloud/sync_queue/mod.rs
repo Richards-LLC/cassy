@@ -15,6 +15,7 @@ use crate::error::CasError;
 mod dependency_tombstones;
 mod maintenance;
 mod metadata;
+mod quarantine;
 mod queue_ops;
 mod revisions;
 mod schema;
@@ -26,6 +27,7 @@ mod types;
 pub use dependency_tombstones::{
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,
 };
+pub use quarantine::{QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QuarantinedRow};
 pub use revisions::{SYNC_REVISION_STATEMENTS, parse_wire_revision, wire_revision};
 pub use types::{
     EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncConflictRecord,
@@ -71,6 +73,9 @@ impl SyncQueue {
             .iter()
             .chain(SYNC_REVISION_STATEMENTS.iter())
         {
+            conn.execute_batch(statement)?;
+        }
+        for statement in QUARANTINED_ROW_STATEMENTS {
             conn.execute_batch(statement)?;
         }
 

@@ -8,7 +8,7 @@
 use crate::migration::{Migration, Subsystem};
 
 pub const MIGRATION: Migration = Migration {
-    id: 251,
+    id: 252,
     name: "sync_conflicts_add_revisions",
     subsystem: Subsystem::Tasks,
     description: "Record local and remote revisions on journaled sync conflicts (cas-c32f)",

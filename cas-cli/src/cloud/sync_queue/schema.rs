@@ -50,7 +50,7 @@ impl SyncQueue {
     ///
     /// `CREATE TABLE IF NOT EXISTS` cannot widen a table that already exists,
     /// so a store created before cas-c32f would otherwise fail every conflict
-    /// insert until migration 251 happened to run. The queue owns these writes,
+    /// insert until migration 252 happened to run. The queue owns these writes,
     /// so it repairs its own schema rather than depending on migration order.
     pub(super) fn migrate_conflict_revisions(&self, conn: &Connection) -> Result<(), CasError> {
         for column in ["local_revision", "remote_revision"] {

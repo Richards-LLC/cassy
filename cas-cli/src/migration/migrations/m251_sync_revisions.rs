@@ -8,7 +8,7 @@ use crate::cloud::SYNC_REVISION_STATEMENTS;
 use crate::migration::{Migration, Subsystem};
 
 pub const MIGRATION: Migration = Migration {
-    id: 250,
+    id: 251,
     name: "sync_revisions",
     subsystem: Subsystem::Tasks,
     description: "Track server-owned per-row sync revisions for conflict resolution (cas-c32f)",

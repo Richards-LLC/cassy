@@ -8127,3 +8127,114 @@ async fn cas99d2_inbox_poll_marks_redelivered_rows_gh127() {
         "a first delivery must not be marked as a repeat: {fresh_header}"
     );
 }
+
+// =============================================================================
+// GH #699: two live supervisor sessions sharing one clone
+// =============================================================================
+
+/// The reported hazard: a second supervisor starts on the same checkout, and
+/// `worker_status` shows the caller only itself under Supervisors while the
+/// incumbent's fleet is one `reset`/`shutdown_workers` away from being reaped.
+#[tokio::test]
+async fn gh_699_worker_status_names_the_other_live_supervisor_on_this_clone() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "noble-koala-5"),
+        ("CAS_FACTORY_SESSION", "gabber-gentle-hawk-71"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor_in_session("noble-koala-5", "gabber-gentle-hawk-71");
+    env.register_supervisor_in_session("gentle-falcon-66", "gabber-witty-panda-98");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("worker_status"),
+    );
+
+    assert!(
+        text.contains("gentle-falcon-66"),
+        "the other live supervisor must be named, not filtered out by session scoping: {text}"
+    );
+    assert!(
+        text.contains("live supervisors share this clone"),
+        "the shared-clone hazard must be stated: {text}"
+    );
+    assert!(
+        text.contains("reap the other's workers"),
+        "the consequence must be stated: {text}"
+    );
+}
+
+/// The ordinary single-supervisor factory must stay quiet — a warning every
+/// supervisor sees on every poll is a warning nobody reads.
+#[tokio::test]
+async fn gh_699_worker_status_stays_quiet_with_one_live_supervisor() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "noble-koala-5"),
+        ("CAS_FACTORY_SESSION", "gabber-gentle-hawk-71"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor_in_session("noble-koala-5", "gabber-gentle-hawk-71");
+    env.register_worker_in_session("zen-newt-93", "gabber-gentle-hawk-71");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("worker_status"),
+    );
+
+    assert!(
+        !text.contains("share this clone"),
+        "one supervisor is not an overlap: {text}"
+    );
+}
+
+/// Spawn preflight says it before the workers exist, rather than after one of
+/// them is reaped by the other supervisor.
+#[tokio::test]
+async fn gh_699_spawn_preflight_warns_when_a_second_supervisor_shares_the_clone() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "noble-koala-5"),
+        ("CAS_FACTORY_SESSION", "gabber-gentle-hawk-71"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor_in_session("noble-koala-5", "gabber-gentle-hawk-71");
+    env.register_supervisor_in_session("gentle-falcon-66", "gabber-witty-panda-98");
+
+    let task_store = env.task_store();
+    let task_id = task_store.generate_id().expect("generate_id");
+    task_store
+        .add(&Task::new(task_id.clone(), "Standalone".to_string()))
+        .expect("add task");
+
+    let mut req = factory_req("spawn_workers");
+    req.worker_names = Some("swift-fox".to_string());
+    req.task_id = Some(task_id);
+    req.cli = Some("claude".to_string());
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(req))
+            .await
+            .expect("spawn must still be allowed, only warned about"),
+    );
+
+    assert!(
+        text.contains("SHARED-CLONE SUPERVISOR OVERLAP"),
+        "the spawn receipt must name the overlap: {text}"
+    );
+    assert!(
+        text.contains("gabber-witty-panda-98/gentle-falcon-66"),
+        "the receipt must name the other supervisor session: {text}"
+    );
+    assert_eq!(
+        env.spawn_queue().peek(10).expect("peek").len(),
+        1,
+        "the warning must not ground the spawn"
+    );
+}

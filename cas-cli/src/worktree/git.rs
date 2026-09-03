@@ -10,9 +10,9 @@ use thiserror::Error;
 use crate::hooks::handlers::session_hygiene::{PorcelainEntry, porcelain_status};
 use crate::types::GitContext;
 
-mod branch_ops;
+pub(crate) mod branch_ops;
 
-pub use branch_ops::TargetPushOutcome;
+pub use branch_ops::{TargetPushOutcome, TargetReconcile};
 
 /// Errors that can occur during git operations
 #[derive(Debug, Error)]

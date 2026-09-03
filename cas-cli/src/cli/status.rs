@@ -41,9 +41,12 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
     let project_root = cas_root.parent().unwrap_or(std::path::Path::new("."));
     let (repo_root, repository) = crate::daemon::indexing::resolve_repository(project_root);
     let vector_store = cas_store::SqliteCodeVectorStore::open(cas_root).ok();
+    // Same coverage source as `cas doctor` (cas-73e7): queue-row counts made
+    // `cas status --json` and the doctor line disagree with each other, and both
+    // disagree with the symbols that actually lack vectors.
     let code_vectors = vector_store
         .as_ref()
-        .and_then(|store| store.stats().ok())
+        .and_then(|store| store.coverage().ok())
         .unwrap_or_default();
     let code_scan = vector_store
         .as_ref()
@@ -108,6 +111,8 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
                 "vectorized": code_vectors.vectorized,
                 "pending": code_vectors.pending,
                 "failed": code_vectors.failed,
+                "unqueued": code_vectors.unqueued,
+                "orphaned_queue_rows": code_vectors.orphaned,
             },
             "sync_enabled": config.sync.enabled && !Config::is_sync_disabled()
         });
@@ -145,11 +150,18 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
             fmt.field(
                 "  Code vectors",
                 &format!(
-                    "{}/{} vectorized, {} pending, {} failed",
+                    "{}/{} vectorized, {} pending, {} failed{}",
                     code_vectors.vectorized,
                     code_vectors.eligible,
                     code_vectors.pending,
-                    code_vectors.failed
+                    code_vectors.failed,
+                    // Pending that nothing has asked for is a different fact
+                    // from pending that is queued and waiting its turn.
+                    if code_vectors.unqueued > 0 {
+                        format!(" ({} never queued)", code_vectors.unqueued)
+                    } else {
+                        String::new()
+                    }
                 ),
             )?;
         }

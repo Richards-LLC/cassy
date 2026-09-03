@@ -92,7 +92,7 @@ impl CheckGroup {
             "configuration" | "mcp config" | "mcp stdio upstreams" | "sync target" | "models" => {
                 Self::Config
             }
-            "integrations" => Self::Integrations,
+            "integrations" | "mecha-cassy" => Self::Integrations,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -925,6 +925,31 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             },
             message: row.message,
         });
+    }
+
+    // Check 13b: MechaCassy hub reachability (cas-8fad). Machine-scoped, so
+    // it is not part of `integration_checks` (which walks per-project keep
+    // blocks). Unlike the platform rows this one *can* be an Error: a missing
+    // variable, a rejected bearer, or a drifted tool contract each mean the
+    // next release post will fail, and each has an exact remedy.
+    #[cfg(feature = "mcp-proxy")]
+    {
+        let project_proxy = cas_root.join("proxy.toml");
+        if let Some(row) = crate::cli::integrate::mecha_cassy::doctor_row_from_env(
+            project_proxy.is_file().then_some(project_proxy.as_path()),
+        ) {
+            checks.push(Check {
+                name: "mecha-cassy".to_string(),
+                status: match row.severity {
+                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Ok => CheckStatus::Ok,
+                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Warning => {
+                        CheckStatus::Warning
+                    }
+                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Error => CheckStatus::Error,
+                },
+                message: row.message,
+            });
+        }
     }
 
     // Check 14: cloud canonical id — which bucket this project syncs into,
@@ -3411,6 +3436,27 @@ mod tests {
             crate::cli::integrate::doctor::DoctorSeverity::Ok
         ));
         assert!(rows[0].message.contains("no integrations configured"));
+    }
+
+    /// `cas-8fad`: the machine-scoped MechaCassy row must land in the
+    /// Integrations group (not the Store catch-all) and its "Run `cas integrate
+    /// mecha-cassy`" guidance must split into doctor's remediation column
+    /// rather than staying buried in the diagnostic text.
+    #[test]
+    fn mecha_cassy_row_groups_under_integrations_and_exposes_its_remedy() {
+        let check = Check::new(
+            "mecha-cassy",
+            CheckStatus::Warning,
+            "not registered on this machine (/tmp/config.toml has no mecha-cassy server). \
+             Run `cas integrate mecha-cassy`",
+        );
+        assert_eq!(check.group(), CheckGroup::Integrations);
+        let (message, remediation) = check.parts();
+        assert!(message.contains("not registered on this machine"), "{message}");
+        assert_eq!(
+            remediation.as_deref(),
+            Some("Run `cas integrate mecha-cassy`")
+        );
     }
 
     /// `cas-3efe`: a github SKILL.md with a recorded OWNER/REPO that doesn't

@@ -347,8 +347,8 @@ pub struct MechaCassyReport {
     pub allowlist: Vec<String>,
     pub harnesses: Vec<HarnessEntry>,
     pub probe: ProbeOutcome,
-    /// Set when the hub's live tool list disagrees with the allowlist.
-    pub drift: Option<String>,
+    /// How the hub's live tool list disagrees with the allowlist, if at all.
+    pub drift: ToolDrift,
     /// Exact next command or edit, when the operator must do something.
     pub remedy: Option<String>,
 }
@@ -367,7 +367,7 @@ impl MechaCassyReport {
                 self.registration,
                 WriteState::Written | WriteState::AlreadyCurrent
             )
-            && self.drift.is_none()
+            && self.drift.is_empty()
             && matches!(&self.probe, ProbeOutcome::Tools { .. })
     }
 }
@@ -376,45 +376,79 @@ impl MechaCassyReport {
 // Core
 // ---------------------------------------------------------------------------
 
+/// Two very different disagreements between the hub and the allowlist.
+///
+/// They are kept apart because their consequences differ. A tool the hub
+/// offers that no route admits means **every call to it is denied by policy**
+/// — the release post fails. An allowlisted name the hub no longer offers is
+/// **inert**: dispatch of the live tools still works, the entry is merely
+/// stale. Collapsing the two would either cry wolf over harmless clutter or
+/// bury a genuine outage inside a cosmetic one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct ToolDrift {
+    /// Live hub tools with no allowlist route. Blocks dispatch.
+    pub unallowlisted: Vec<String>,
+    /// Allowlisted routes the hub no longer offers. Inert but stale.
+    pub retired: Vec<String>,
+}
+
+impl ToolDrift {
+    pub fn is_empty(&self) -> bool {
+        self.unallowlisted.is_empty() && self.retired.is_empty()
+    }
+
+    /// True when something the operator needs is unreachable right now.
+    pub fn blocks_dispatch(&self) -> bool {
+        !self.unallowlisted.is_empty()
+    }
+
+    pub fn describe(&self, live: &[String], allowlisted: &[String]) -> String {
+        let mut parts = Vec::new();
+        if !self.unallowlisted.is_empty() {
+            parts.push(format!(
+                "hub offers un-allowlisted {} — calls to it are denied by policy",
+                self.unallowlisted.join(", ")
+            ));
+        }
+        if !self.retired.is_empty() {
+            parts.push(format!(
+                "allowlist still names retired {}",
+                self.retired.join(", ")
+            ));
+        }
+        format!(
+            "hub tool contract drifted: {} (hub: [{}]; allowlist: [{}])",
+            parts.join("; "),
+            sorted_unique(live).join(", "),
+            sorted_unique(allowlisted).join(", ")
+        )
+    }
+}
+
+fn sorted_unique(values: &[String]) -> Vec<&str> {
+    let mut out: Vec<&str> = values.iter().map(String::as_str).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// Compare the hub's live tool list against the routes the registration
-/// admits. Order-insensitive; the message names both sides so the operator can
-/// see a rename (the `slack_*` → `mecha_*` case) rather than a bare mismatch.
-pub fn tool_drift(allowlisted: &[String], live: &[String]) -> Option<String> {
-    let mut expected: Vec<&str> = allowlisted.iter().map(String::as_str).collect();
-    let mut actual: Vec<&str> = live.iter().map(String::as_str).collect();
-    expected.sort_unstable();
-    expected.dedup();
-    actual.sort_unstable();
-    actual.dedup();
-    if expected == actual {
-        return None;
+/// admits. Order-insensitive, so re-ordering a file is never reported as drift.
+pub fn tool_drift(allowlisted: &[String], live: &[String]) -> ToolDrift {
+    let expected = sorted_unique(allowlisted);
+    let actual = sorted_unique(live);
+    ToolDrift {
+        unallowlisted: actual
+            .iter()
+            .filter(|tool| !expected.contains(tool))
+            .map(|tool| (*tool).to_string())
+            .collect(),
+        retired: expected
+            .iter()
+            .filter(|tool| !actual.contains(tool))
+            .map(|tool| (*tool).to_string())
+            .collect(),
     }
-    let missing: Vec<&str> = actual
-        .iter()
-        .filter(|tool| !expected.contains(tool))
-        .copied()
-        .collect();
-    let retired: Vec<&str> = expected
-        .iter()
-        .filter(|tool| !actual.contains(tool))
-        .copied()
-        .collect();
-    let mut parts = Vec::new();
-    if !missing.is_empty() {
-        parts.push(format!("hub offers un-allowlisted {}", missing.join(", ")));
-    }
-    if !retired.is_empty() {
-        parts.push(format!(
-            "allowlist names retired {}",
-            retired.join(", ")
-        ));
-    }
-    Some(format!(
-        "hub tool contract drifted: {} (hub: [{}]; allowlist: [{}])",
-        parts.join("; "),
-        actual.join(", "),
-        expected.join(", ")
-    ))
 }
 
 /// Run the integration. Pure with respect to its seams: every filesystem
@@ -509,9 +543,15 @@ pub fn run(
         probe.list_tools(&args.url, &token_env, &bypass_env)
     };
 
-    let drift = match &probe_outcome {
-        ProbeOutcome::Tools { tools } => tool_drift(&allowlist, tools),
-        _ => None,
+    // After a successful write the allowlist is exactly the constant, so any
+    // drift here means the hub itself moved — worth reporting either way.
+    let (drift, drift_message) = match &probe_outcome {
+        ProbeOutcome::Tools { tools } => {
+            let drift = tool_drift(&allowlist, tools);
+            let message = (!drift.is_empty()).then(|| drift.describe(tools, &allowlist));
+            (drift, message)
+        }
+        _ => (ToolDrift::default(), None),
     };
 
     let remedy = build_remedy(
@@ -520,7 +560,7 @@ pub fn run(
         &bypass_env,
         bypass_env_state,
         &probe_outcome,
-        drift.as_deref(),
+        drift_message.as_deref(),
     );
 
     Ok(MechaCassyReport {
@@ -868,22 +908,35 @@ pub fn doctor_row(
     }
 
     match probe.list_tools(MECHA_CASSY_MCP_URL, &token_env, &bypass_env) {
-        ProbeOutcome::Tools { tools } => match tool_drift(&allowlist, &tools) {
-            None => DoctorRow {
-                severity: DoctorSeverity::Ok,
-                message: format!(
-                    "registered ({token_env} set, {bypass_env} set); hub answered with {} tool(s): {}",
-                    tools.len(),
-                    tools.join(", ")
-                ),
-            },
-            Some(drift) => DoctorRow {
-                severity: DoctorSeverity::Error,
-                message: format!(
-                    "{drift}. Run `cas integrate mecha-cassy` to rewrite the allowlist"
-                ),
-            },
-        },
+        ProbeOutcome::Tools { tools } => {
+            let drift = tool_drift(&allowlist, &tools);
+            if drift.is_empty() {
+                DoctorRow {
+                    severity: DoctorSeverity::Ok,
+                    message: format!(
+                        "registered ({token_env} set, {bypass_env} set); hub answered with {} tool(s): {}",
+                        tools.len(),
+                        tools.join(", ")
+                    ),
+                }
+            } else {
+                DoctorRow {
+                    // A hub tool nothing admits is a live outage; a stale entry
+                    // for a tool the hub retired is only clutter, so it must
+                    // not turn `cas doctor` red for a machine that can post
+                    // perfectly well right now.
+                    severity: if drift.blocks_dispatch() {
+                        DoctorSeverity::Error
+                    } else {
+                        DoctorSeverity::Warning
+                    },
+                    message: format!(
+                        "{}. Run `cas integrate mecha-cassy` to rewrite the allowlist",
+                        drift.describe(&tools, &allowlist)
+                    ),
+                }
+            }
+        }
         ProbeOutcome::Unauthorized => DoctorRow {
             severity: DoctorSeverity::Error,
             message: format!(
@@ -919,7 +972,7 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
         println!("{}", serde_json::to_string_pretty(&report)?);
     }
 
-    let status = if !report.credentials_ready() || report.drift.is_some() {
+    let status = if !report.credentials_ready() || !report.drift.is_empty() {
         IntegrationStatus::Stale
     } else {
         match (&report.probe, report.registration) {
@@ -1305,20 +1358,41 @@ mod tests {
 
     #[test]
     fn drift_names_both_the_retired_and_the_new_tool() {
-        let drift = tool_drift(
-            &["slack_post_message".to_string(), "slack_read_channel".to_string()],
-            &["mecha_post".to_string(), "mecha_read".to_string()],
-        )
-        .expect("renamed contract must be drift");
-        assert!(drift.contains("mecha_post"), "{drift}");
-        assert!(drift.contains("slack_post_message"), "{drift}");
-
+        // A full rename is both halves at once, and it blocks dispatch.
+        let allowlist = vec![
+            "slack_post_message".to_string(),
+            "slack_read_channel".to_string(),
+        ];
+        let live = vec!["mecha_post".to_string(), "mecha_read".to_string()];
+        let drift = tool_drift(&allowlist, &live);
+        assert_eq!(drift.unallowlisted, vec!["mecha_post", "mecha_read"]);
         assert_eq!(
+            drift.retired,
+            vec!["slack_post_message", "slack_read_channel"]
+        );
+        assert!(drift.blocks_dispatch());
+        let described = drift.describe(&live, &allowlist);
+        assert!(described.contains("denied by policy"), "{described}");
+        assert!(described.contains("slack_post_message"), "{described}");
+
+        // A stale leftover next to the live routes is NOT an outage: every hub
+        // tool is still admitted, so this must not block dispatch.
+        let cluttered = vec![
+            "mecha_read".to_string(),
+            "mecha_post".to_string(),
+            "slack_upload_file".to_string(),
+        ];
+        let stale = tool_drift(&cluttered, &live);
+        assert!(stale.unallowlisted.is_empty());
+        assert_eq!(stale.retired, vec!["slack_upload_file"]);
+        assert!(!stale.blocks_dispatch());
+
+        assert!(
             tool_drift(
                 &["mecha_read".to_string(), "mecha_post".to_string()],
-                &["mecha_post".to_string(), "mecha_read".to_string()],
-            ),
-            None,
+                &live,
+            )
+            .is_empty(),
             "order must not be treated as drift"
         );
     }
@@ -1396,6 +1470,37 @@ mod tests {
         assert_eq!(row.severity, DoctorSeverity::Error);
         assert!(row.message.contains("mecha_broadcast"), "{row:?}");
         assert!(row.message.contains("cas integrate mecha-cassy"), "{row:?}");
+    }
+
+    /// A machine whose project file still lists the retired `slack_*` names
+    /// alongside the live ones can post today: every hub tool is admitted. It
+    /// must read amber, not red — otherwise `cas doctor` reports an outage
+    /// where there is only clutter.
+    #[test]
+    fn doctor_is_amber_not_red_for_stale_entries_that_still_admit_every_hub_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            ..Default::default()
+        };
+        run(&args, &paths, &env, &FakeProbe(live_tools())).unwrap();
+
+        let project = dir.path().join("proxy.toml");
+        std::fs::write(
+            &project,
+            "allowlist = [\"mecha-cassy.mecha_read\", \"mecha-cassy.mecha_post\", \
+             \"mecha-cassy.slack_upload_file\"]\n",
+        )
+        .unwrap();
+
+        let row = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
+        assert_eq!(row.severity, DoctorSeverity::Warning, "{row:?}");
+        assert!(row.message.contains("slack_upload_file"), "{row:?}");
+        assert!(!row.message.contains("denied by policy"), "{row:?}");
     }
 
     #[test]

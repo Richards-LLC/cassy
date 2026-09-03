@@ -314,14 +314,16 @@ fn deliver_worker_task_brief(
     worker_name: &str,
     task_id: &str,
     task_title: &str,
+    worker_cli: cas_mux::SupervisorCli,
 ) -> anyhow::Result<i64> {
     let queue = open_prompt_queue_store(cas_dir)?;
     let summary = format!("Assigned task: {task_id}");
+    let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
     let mut message = format!(
         "You were spawned for task {task_id} — \"{task_title}\" — and it is assigned to \
          you now.\n\
-         Start with `mcp__cas__task action=show id={task_id}`, then \
-         `mcp__cas__task action=start id={task_id}` before you change any code."
+         Start with `{worker_prefix}task action=show id={task_id}`, then \
+         `{worker_prefix}task action=start id={task_id}` before you change any code."
     );
     append_workspace_contract_brief(cas_dir, worker_name, task_id, &mut message);
     if let Some(clone_path) = open_agent_store(cas_dir)
@@ -2165,6 +2167,7 @@ impl FactoryDaemon {
                     worker,
                     task_id,
                     &title,
+                    self.app.harness_for(worker),
                 ) {
                     Ok(_) => detail.push_str(" Task brief delivered to the worker."),
                     Err(e) => {
@@ -3257,19 +3260,12 @@ impl FactoryDaemon {
             // shared transport boundary instead of injecting stale work.
             // Unreadable/missing tasks fail open; only Closed/Cancelled is
             // positive evidence that the instruction is unsafe.
-            if let Some(task_id) =
-                crate::prompt_revalidation::assignment_solicited_task_id(&queued.prompt)
-                && let Ok(store) = crate::store::open_task_store_local(self.app.cas_dir())
-                && let Ok(task) = store.get(&task_id)
-                && crate::prompt_revalidation::assignment_targets_terminal_task(
-                    &queued.prompt,
-                    task.status,
-                )
-                .is_some()
+            if let Some((task_id, status)) =
+                super::delivery::assignment_terminal_status(self.app.cas_dir(), &queued.prompt)
             {
                 let detail = format!(
                     "withdrawn before transport: assignment for {task_id} is stale because the task is {}",
-                    task.status
+                    status
                 );
                 let _ = queue.mark_superseded(queued.id, &detail);
                 self.forget_row_delivery_state(queued.id);
@@ -3278,7 +3274,7 @@ impl FactoryDaemon {
                     stage = "suppress_terminal_assignment",
                     prompt_id = queued.id,
                     task_id = %task_id,
-                    status = %task.status,
+                    status = %status,
                     "cas-8aee: suppressed a queued assignment/start instruction for a terminal task"
                 );
                 continue;
@@ -6361,6 +6357,7 @@ mod tests {
             "worker-1",
             "cas-5890",
             "wake the worker",
+            cas_mux::SupervisorCli::Claude,
         )
         .unwrap();
 
@@ -9105,6 +9102,7 @@ mod tests {
             "cosmic-crow-41",
             "cas-aee6",
             "awaiting_merge lifecycle",
+            cas_mux::SupervisorCli::Claude,
         )
         .unwrap();
 
@@ -9130,6 +9128,42 @@ mod tests {
             prompts[0].prompt.contains("action=start"),
             "the brief must tell the worker how to pick the task up: {}",
             prompts[0].prompt
+        );
+    }
+
+    /// GH #682: a Codex worker reads the `cs` MCP server namespace. Spawn-time
+    /// assignment boilerplate must follow the registered worker harness rather
+    /// than the supervisor's default Claude namespace.
+    #[test]
+    fn registration_preassignment_brief_uses_codex_worker_namespace() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "codex-worker",
+            "cas-2b0b-namespace",
+            "harness-aware assignment",
+            cas_mux::SupervisorCli::Codex,
+        )
+        .unwrap();
+
+        let prompt = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap()
+            .pop()
+            .expect("spawn brief")
+            .prompt;
+        assert!(
+            prompt.contains("mcp__cs__task action=show")
+                && prompt.contains("mcp__cs__task action=start"),
+            "Codex spawn briefs must use the worker's mcp__cs__ namespace: {prompt}"
+        );
+        assert!(
+            !prompt.contains("mcp__cas__task"),
+            "Codex spawn briefs must not leak Claude's namespace: {prompt}"
         );
     }
 
@@ -9166,6 +9200,7 @@ mod tests {
             "path-worker",
             "cas-stale-path",
             "stale artifact path",
+            cas_mux::SupervisorCli::Claude,
         )
         .unwrap();
         deliver_worker_task_brief(
@@ -9174,6 +9209,7 @@ mod tests {
             "path-worker",
             "cas-clean-path",
             "clean artifact path",
+            cas_mux::SupervisorCli::Claude,
         )
         .unwrap();
 
@@ -9242,6 +9278,7 @@ mod tests {
             "node-worker",
             "cas-node",
             "Node worktree fixture",
+            cas_mux::SupervisorCli::Claude,
         )
         .unwrap();
 

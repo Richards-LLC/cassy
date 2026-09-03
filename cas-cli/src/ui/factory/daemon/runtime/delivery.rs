@@ -289,6 +289,23 @@ pub(crate) fn needs_durable_followup(delivered: bool, durable: bool) -> bool {
     durable && !delivered
 }
 
+/// Read the task state immediately before an assignment-like prompt crosses a
+/// transport boundary. Event revalidation happens earlier in the lifecycle
+/// tick, so the task may close in the gap before a direct Teams-inbox/PTY
+/// write or a durable queue wake-time flush. Missing or unreadable state is
+/// uncertainty and deliberately delivers; only positive terminal evidence
+/// suppresses the stale `task start` imperative.
+pub(crate) fn assignment_terminal_status(
+    cas_dir: &Path,
+    prompt: &str,
+) -> Option<(String, cas_types::TaskStatus)> {
+    let task_id = crate::prompt_revalidation::assignment_solicited_task_id(prompt)?;
+    let store = crate::store::open_task_store_local(cas_dir).ok()?;
+    let task = store.get(&task_id).ok()?;
+    crate::prompt_revalidation::assignment_targets_terminal_task(prompt, task.status)
+        .map(|task_id| (task_id, task.status))
+}
+
 /// cas-ae6d: hand a director prompt to the durable `prompt_queue` so the
 /// readiness-gated, retrying queue lane delivers it instead of the one-shot
 /// director lane. Returns the queue row id.
@@ -1218,6 +1235,30 @@ mod tests {
             queued[0].prompt.contains("action=start"),
             "the queued wake-up must tell the worker how to pick the task up: {}",
             queued[0].prompt
+        );
+    }
+
+    /// GH #682: a direct director delivery and a durable wake-time flush share
+    /// the same fresh task-state lookup. A task can close after event
+    /// revalidation but before either transport writes the assignment.
+    #[test]
+    fn terminal_assignment_is_suppressed_at_the_final_transport_boundary() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let task_id = "cas-2b0b";
+        let mut task = cas_types::Task::new(task_id.to_string(), "closed before delivery".into());
+        task.status = cas_types::TaskStatus::Closed;
+        task_store.add(&task).unwrap();
+
+        let prompt = format!(
+            "You have been assigned a new task:\nTask ID: {task_id}\nStart working: \
+             mcp__cs__task action=start id={task_id}\nThen send an ACK to supervisor."
+        );
+        assert_eq!(
+            assignment_terminal_status(&cas_dir, &prompt),
+            Some((task_id.to_string(), cas_types::TaskStatus::Closed)),
+            "both direct delivery and wake-time queue flush must suppress the stale start instruction"
         );
     }
 

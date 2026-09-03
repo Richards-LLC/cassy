@@ -79,6 +79,48 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).toContain('if (focusWinner === "composer") queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus());');
   });
 
+  it("detects a phone from one definition, in both orientations", async () => {
+    const [main, css, design] = await Promise.all(["main.ts", "styles.css", "../DESIGN.md"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // A rotated Pixel 7 is 915px wide, so a width-only breakpoint handed a
+    // 412px-tall screen the three-column desktop console (report defect D5).
+    // CSS and JS must ask the identical question, or rotation puts the layout
+    // and the pane-mounting logic in different modes.
+    expect(main).toContain('import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";');
+    expect(main).toContain("function phoneLayout(): boolean { return window.matchMedia(PHONE_MEDIA_QUERY).matches; }");
+    expect(main).toContain("let attentionPanelCollapsed = window.matchMedia(PHONE_MEDIA_QUERY).matches;");
+    expect(main).toContain("function compactViewport(): boolean { return window.matchMedia(COMPACT_MEDIA_QUERY).matches; }");
+    // Every viewport question is asked with a shared query string, so no literal
+    // breakpoint can drift out of step with the stylesheet again.
+    expect(main).not.toContain("max-width: 850px");
+    expect(main).not.toContain('matchMedia("(max-width');
+    // Rotation flips the layout in CSS instantly; pane composition and the PTY
+    // column floor are decided in JS at render time and must follow it.
+    expect(main).toContain("for (const query of [PHONE_MEDIA_QUERY, COMPACT_MEDIA_QUERY]) {");
+    expect(main).toContain('window.matchMedia(query).addEventListener("change", () => render());');
+    expect(css).toContain("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {");
+    expect(css).toContain("@media (max-height: 30rem) and (pointer: coarse) {");
+    // The desktop hover-drawer rule must not reach a landscape phone either.
+    expect(css).toContain("@media (hover: hover) and (min-width: 53.0625rem) {");
+    expect(design).toContain("(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)");
+    expect(design).toContain("landscape");
+  });
+
+  it("gives a landscape phone the long edges and the full-height terminal", async () => {
+    const css = await readFile(new URL("styles.css", import.meta.url), "utf8");
+    const landscape = css.slice(css.indexOf("@media (max-height: 30rem) and (pointer: coarse) {"));
+    expect(landscape.length).toBeGreaterThan(0);
+    // One row: the terminal keeps every one of the 412 pixels it has, instead of
+    // giving a third of them to a bottom rail and an attention row.
+    expect(landscape).toContain("grid-template-rows: minmax(0, 1fr);");
+    expect(landscape).toContain(".shell main { grid-column: 2; grid-row: 1; }");
+    // The rail returns to a column on the long edge rather than eating height.
+    expect(landscape).toContain("  .machine-rail {\n    flex-direction: column;");
+    // An expanded panel floats over the terminal instead of taking a row from it.
+    expect(landscape).toContain("  .context-panel:not(.collapsed) {\n    position: fixed;");
+    expect(landscape).toContain("env(safe-area-inset-left)");
+    expect(landscape).toContain("env(safe-area-inset-right)");
+  });
+
   it("reports the outcome of sending a supervisor message", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     // A send with no outcome is indistinguishable from a lost one, and invites a
@@ -327,7 +369,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain(".attention-item--critical");
     expect(css).toContain(".attention-item--enriching .attention-title::after");
     expect(css).toContain("prefers-reduced-motion: reduce");
-    expect(css).toContain("@media (max-width: 53rem)");
+    expect(css).toContain("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse)");
     expect(css).toContain("max-width: var(--mobile-attention-label-width)");
   });
 
@@ -385,7 +427,7 @@ describe("binding Cassy Commander browser invariants", () => {
     // compact layout has no focusable pane chrome of its own, so the whole
     // phone block must be free of it.
     expect(css).toContain(".pane.selected { border-color: var(--line-strong); }");
-    const compact = css.slice(css.indexOf("@media (max-width: 53rem)"));
+    const compact = css.slice(css.indexOf("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"));
     expect(compact).not.toContain("var(--line-strong)");
 
     // The collapsed pill floats over the rail, so it must not paint a second
@@ -822,7 +864,7 @@ describe("binding Cassy Commander browser invariants", () => {
       connection.indexOf("this.callbacks.onSessionState(session, welcome.state, undefined, true)"),
     );
     expect(connection).not.toContain("welcome.scrollback, true");
-    expect(main).toContain('const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches');
+    expect(main).toContain("const collapsedOnPhone = phoneLayout() && secondaryOnPhone;");
     expect(main.indexOf("if (collapsedOnPhone) continue;")).toBeLessThan(
       main.indexOf("requestPaneKeyframe(session, pane.id)"),
     );

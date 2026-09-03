@@ -4399,6 +4399,29 @@ async fn test_gc_report_names_dangling_primary_node_modules_link() {
     assert!(text.contains("package-manager install"), "{text}");
 }
 
+/// GH #704: the operator had no way to see 1,242 leaked `cas-probe-comm-*`
+/// roots before `/tmp` hit 100%. `gc_report` now names the stale Cassy-shaped
+/// temp roots (read-only; it never deletes them).
+#[tokio::test]
+async fn test_gc_report_lists_stale_temp_roots_without_deleting_them() {
+    let env = FactoryTestEnv::new();
+
+    let report = env
+        .service
+        .factory(Parameters(factory_req("gc_report")))
+        .await
+        .expect("gc report");
+    let text = get_text(&report);
+    assert!(
+        text.contains("Stale Cassy temp roots under"),
+        "gc_report must surface the $TMPDIR inventory: {text}"
+    );
+    assert!(
+        text.contains(&std::env::temp_dir().display().to_string()),
+        "the inventory must name the directory it scanned: {text}"
+    );
+}
+
 #[tokio::test]
 async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
     let env = FactoryTestEnv::new();

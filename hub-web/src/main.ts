@@ -21,6 +21,7 @@ import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promoteP
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
+import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
 import { TranscriptView } from "./transcript-view";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
@@ -84,7 +85,7 @@ let pairingCreateInFlight = false;
 let pairingExchangeInFlight = false;
 let pairingDraft = createPairingDraft(location.origin);
 let machineDrawerOpen = false;
-let attentionPanelCollapsed = window.matchMedia("(max-width: 850px)").matches;
+let attentionPanelCollapsed = window.matchMedia(PHONE_MEDIA_QUERY).matches;
 let activeContextTab: "attention" | "status" = "attention";
 let commandPaletteOpen = false;
 let speechCapability: SpeechInputCapability | undefined;
@@ -98,12 +99,15 @@ let messageDelivery: { session: string; target: string } | undefined;
 // finished reading it, and a disabled button says nothing at all.
 let messageStatus: { session: string | undefined; text: string; tone: "info" | "error" } | undefined;
 
-// One phone breakpoint shared by layout state, pane mounting, and pane tapping.
-function phoneLayout(): boolean { return window.matchMedia("(max-width: 850px)").matches; }
+// One phone definition shared by the stylesheet, layout state, pane mounting
+// and pane tapping — see viewport.ts. Rotation must not put the CSS and this
+// logic in different modes, which a width-only breakpoint guaranteed it would.
+function phoneLayout(): boolean { return window.matchMedia(PHONE_MEDIA_QUERY).matches; }
+
 
 // The compact breakpoint from DESIGN.md, which is also where a mount stops
 // being able to measure a usable agent-TUI grid.
-function compactViewport(): boolean { return window.matchMedia("(max-width: 53rem)").matches; }
+function compactViewport(): boolean { return window.matchMedia(COMPACT_MEDIA_QUERY).matches; }
 
 /**
  * Columns handed to the PTY on a compact viewport. A 395px mount measures ~46
@@ -1121,7 +1125,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       viewToggle.dataset.view = paneView;
     }
     placePane(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip, card);
-    const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches && secondaryOnPhone;
+    const collapsedOnPhone = phoneLayout() && secondaryOnPhone;
     const existingSurface = surfaces.get(key);
     existingSurface?.setControlMode(leases.get(selectedKey)?.held_by_me === true);
     if (existingSurface && (collapsedOnPhone || existingSurface.element !== mount || !existingSurface.element.isConnected)) {
@@ -2183,5 +2187,13 @@ function escapeHtml(value: string): string { const span = document.createElement
 function escapeAttr(value: string): string { return escapeHtml(value).replaceAll('"', "&quot;"); }
 
 window.addEventListener("keydown", globalShortcut, true);
+// Rotation changes the layout in CSS instantly, but which panes mount a
+// terminal, whether the worker strip is collapsed and the PTY column floor are
+// all decided in JS at render time. Without this, a phone turned on its side
+// kept the composition it was mounted with until some hub event happened to
+// redraw it.
+for (const query of [PHONE_MEDIA_QUERY, COMPACT_MEDIA_QUERY]) {
+  window.matchMedia(query).addEventListener("change", () => render());
+}
 render(false);
 void boot();

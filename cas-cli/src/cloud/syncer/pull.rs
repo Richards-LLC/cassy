@@ -1418,6 +1418,49 @@ impl CloudSyncer {
         Ok((body, project_id))
     }
 
+    /// Mirror the cloud's per-project `aliases` record into
+    /// `.cas/config.toml` and drop the cached alias class so the ingest guard
+    /// picks it up on this same pull (GH #669).
+    ///
+    /// Deliberately infallible: identity refresh is an optimization of
+    /// *attribution*, never a precondition for syncing rows.
+    fn refresh_project_alias_record(&self) {
+        let Ok(cas_root) = crate::store::find_cas_root() else {
+            return;
+        };
+        let Some(token) = self.cloud_config.token.as_deref() else {
+            return;
+        };
+        let Some(project_id) = self
+            .push_project_canonical_id
+            .clone()
+            .or_else(crate::cloud::get_project_canonical_id)
+        else {
+            return;
+        };
+        match crate::cloud::refresh_project_alias_record(
+            &cas_root,
+            &self.cloud_config.endpoint,
+            token,
+            &project_id,
+            self.config.timeout,
+        ) {
+            Ok(aliases) if !aliases.is_empty() => {
+                crate::cloud::invalidate_cached_project_alias_class();
+                tracing::debug!(
+                    "[Cassy sync] project `{project_id}` has {} registered alias(es): {}",
+                    aliases.len(),
+                    aliases.join(", ")
+                );
+            }
+            Ok(_) => crate::cloud::invalidate_cached_project_alias_class(),
+            Err(e) => tracing::warn!(
+                "[Cassy sync] could not refresh the project alias record for \
+                 `{project_id}` ({e}); keeping the cached record"
+            ),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn pull(
         &self,
@@ -1438,6 +1481,13 @@ impl CloudSyncer {
         if !self.is_available() {
             return Ok(result);
         }
+
+        // GH #669: refresh the per-project `aliases` record before the ingest
+        // guard runs, so rows the server folded into this project's canonical
+        // bucket are attributed here instead of skipped as foreign. Failure is
+        // logged and the previously cached record is kept — an unreachable
+        // identity endpoint must not fail a pull.
+        self.refresh_project_alias_record();
 
         // Get last pull timestamp
         let since = self.queue.get_metadata("last_pull_at")?;

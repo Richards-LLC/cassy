@@ -28,6 +28,9 @@ pub mod embeddings;
 // anyone running `cas cloud sync`.
 pub mod embed_drain;
 pub(crate) mod me;
+/// GH #669: consume the cloud's per-project `aliases` record so alias-scoped
+/// rows are attributed to their canonical project instead of counted foreign.
+pub mod project_aliases;
 mod sync_queue;
 mod syncer;
 pub mod task_proposals;
@@ -41,11 +44,16 @@ pub use config::{
     TeamInfo, TeamScopeAdoption, adopt_team_scope_for_configs, canonical_id_from_cas_root,
     canonical_id_from_config_toml, canonical_project_id, canonical_project_id_with_pin,
     clear_login_credentials, derive_canonical_id_from_git_remote, detect_canonical_id_collisions,
-    get_project_canonical_id, invalidate_cached_project_id, maybe_adopt_team_scope,
-    maybe_mark_personal_scope_notice, normalize_project_canonical_id,
-    normalized_git_remote_for_push, personal_scope_notice_for_configs, project_ids_match,
-    resolve_canonical_id, resolve_canonical_id_with_source, set_canonical_id_in_config_toml,
-    should_adopt_canonical_id, store_login_credentials,
+    get_project_canonical_id, invalidate_cached_project_alias_class, invalidate_cached_project_id,
+    maybe_adopt_team_scope, maybe_mark_personal_scope_notice, normalize_project_canonical_id,
+    normalized_git_remote_for_push, personal_scope_notice_for_configs, project_aliases_from_config_toml,
+    project_ids_match, project_ids_match_with_aliases, resolve_canonical_id,
+    resolve_canonical_id_with_source, set_canonical_id_in_config_toml,
+    set_project_aliases_in_config_toml, should_adopt_canonical_id, store_login_credentials,
+};
+pub use project_aliases::{
+    ProjectAliasRecord, fetch_project_alias_record, refresh_project_alias_record,
+    select_alias_record,
 };
 pub(crate) use config::{
     default_endpoint, is_acceptable_endpoint, normalize_git_remote_url, user_level_cloud_json_path,

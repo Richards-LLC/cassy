@@ -800,17 +800,20 @@ impl CasService {
                     }
                 }
             {
-                let branch = task
-                    .deliverables
-                    .parked_branch
-                    .clone()
-                    .or_else(|| task.assignee.as_ref().map(|name| format!("factory/{name}")));
+                let branch = crate::prompt_revalidation::merge_request_branch(Some(&task));
+                // cas-b17c (GH #703): revalidate against the LIVE branch tip.
+                // This used to prefer `factory_branch_anchor`, which records
+                // the previous merge — so a commit pushed after that merge was
+                // judged as the already-merged sha and the request was
+                // suppressed with "Merge already landed". The anchor is kept
+                // only as a reported datum so the drift is visible downstream.
+                let recorded_anchor = task.deliverables.factory_branch_anchor.clone();
                 if let Some(branch) = branch
-                    && let Some(branch_tip) = task
-                        .deliverables
-                        .factory_branch_anchor
-                        .clone()
-                        .or_else(|| resolve_branch_sha(&repo.repo_root, &branch))
+                    && let Some(branch_tip) = crate::prompt_revalidation::resolve_live_branch_tip(
+                        &repo.repo_root,
+                        &branch,
+                        recorded_anchor.as_deref(),
+                    )
                 {
                     match revalidate_merge_request(
                         &repo.repo_root,
@@ -830,6 +833,11 @@ impl CasService {
                                 &message,
                                 &MergeRequestEnvelope {
                                     task_id: task.id,
+                                    // Live tip; the anchor rides along only
+                                    // when it disagrees, so the supervisor
+                                    // sees the drift instead of inferring it.
+                                    anchor_tip: recorded_anchor
+                                        .filter(|anchor| anchor != &branch_tip),
                                     branch_tip,
                                     target_branch: repo.target_branch,
                                     target_branch_tip: target_tip,

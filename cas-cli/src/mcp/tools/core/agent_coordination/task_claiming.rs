@@ -16,7 +16,23 @@ impl CasCore {
             data: None,
         })?;
 
-        super::super::task::ensure_task_origin(&task, &self.cas_root, "claim")?;
+        // cas-a0d2: adopt an unattributed row into this project. Unlike
+        // `start`, claim has no later write of its own, so persist the
+        // adoption here or the next ownership check would ask again.
+        let mut task = task;
+        if let Some(adopted) = super::super::task::ensure_task_origin(&task, &self.cas_root, "claim")?
+        {
+            task.origin_project = Some(adopted);
+            task.updated_at = task_store.update(&task).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to adopt unattributed task {} into this project: {e}",
+                    req.task_id
+                )),
+                data: None,
+            })?;
+        }
+        let task = task;
 
         if task.is_terminal() {
             return Err(McpError {
@@ -947,7 +963,11 @@ impl CasCore {
             .list(None)
             .unwrap_or_default()
             .into_iter()
-            .filter(|t| super::super::task::task_belongs_to_project(t, project_id.as_deref()))
+            // cas-a0d2: match the board (`ready`/`list`/`blocked`) — an
+            // unattributed row is this project's work until some other project
+            // claims it, and hiding it from `mine` left an assigned worker
+            // with nothing to act on.
+            .filter(|t| super::super::task::task_visible_in_project(t, project_id.as_deref()))
             .filter(|t| {
                 if t.is_terminal() {
                     return false;

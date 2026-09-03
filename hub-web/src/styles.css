@@ -1384,6 +1384,7 @@ main {
 #message-mic.listening .mic-mark { color: var(--state-crit); }
 
 .composer-status,
+.message-status,
 .message-delivery {
   margin: 0;
   color: var(--text-mid);
@@ -1391,6 +1392,13 @@ main {
 }
 
 .message-delivery { color: var(--state-ok); }
+
+/* Why a message did not go out, beside the composer that did not send it. */
+.message-status {
+  text-wrap: pretty;
+}
+
+.message-status.error { color: var(--state-warn); }
 
 .control-disabled-reason {
   margin: 0;

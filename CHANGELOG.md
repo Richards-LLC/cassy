@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.13.1] - 2026-09-03
+
+### Changed
+- The built-in `cas-cut-release` skill (Claude, Codex, and Grok mirrors) now
+  gives one exact publish procedure: release credentials come from a
+  configurable user-level `release.env` and are proven by name only, release
+  log/PID/done receipts live under the durable artifacts root instead of the
+  clean tag worktree, `release.sh --publish-tag` alone owns annotated-tag
+  creation and local preflight, a PID-safe wrapper always records a numeric
+  exit receipt, and publication may only be announced with tag, workflow,
+  asset, latency, Slack, and host receipts in hand.
+- MechaCassy release posts default to the rubric channel name `cas-internal`
+  and fall back to the directly configured Slack transport when a live Cassy
+  proxy lacks the registration.
+
 ## [3.13.0] - 2026-09-03
 
 ### Added

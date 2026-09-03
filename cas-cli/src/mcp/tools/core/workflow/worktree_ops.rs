@@ -568,6 +568,29 @@ pub(crate) fn describe_target_push_state(
                 short_sha(sha)
             )
         }
+        TargetPushOutcome::NonFastForward {
+            sha,
+            remote_sha,
+            reason,
+        } => {
+            let remote = remote_sha
+                .as_deref()
+                .map(short_sha)
+                .unwrap_or("(no origin ref)");
+            format!(
+                "\n\n⚠️  NOT PUSHED — THIS MERGE IS LOCAL ONLY (origin moved).\n\
+                 Local {target_branch} is at {}; origin/{target_branch} is at {remote} and is \
+                 AHEAD — it carries commits this merge does not contain, which is why the push \
+                 was rejected.\n\
+                 `git push origin {target_branch}` CANNOT succeed until the two are \
+                 reconciled.\n\
+                 REQUIRED NEXT STEP: git fetch origin {target_branch} && git merge \
+                 origin/{target_branch}   (from a checkout on {target_branch}), then re-run \
+                 worktree_merge or push. Never force-push {target_branch}.\n\
+                 git's rejection: {reason}",
+                short_sha(sha)
+            )
+        }
         TargetPushOutcome::NotPushed {
             sha,
             remote_sha,
@@ -590,6 +613,42 @@ pub(crate) fn describe_target_push_state(
                  Automatic push did not land: {reason}"
             )
         }
+    }
+}
+
+/// One receipt line describing what reconciling the target with origin did.
+///
+/// A fast-forward is reported rather than silent: the operator's local target
+/// moved, and a merge receipt that hides that is how a supervisor loses track
+/// of which commits their branch actually carries.
+fn describe_target_reconcile(
+    target_branch: &str,
+    reconcile: &crate::worktree::git::TargetReconcile,
+) -> String {
+    use crate::worktree::git::TargetReconcile;
+
+    match reconcile {
+        TargetReconcile::NoRemote | TargetReconcile::AlreadyCurrent { .. } => String::new(),
+        TargetReconcile::FastForwarded {
+            from,
+            to,
+            commits_gained,
+        } => format!(
+            "\nTarget sync: fast-forwarded {target_branch} {} -> {} ({commits_gained} commit(s) \
+             from origin) before merging.",
+            short_sha(from),
+            short_sha(to)
+        ),
+        TargetReconcile::FetchFailed { local, reason } => {
+            let local = local.as_deref().map(short_sha).unwrap_or("unresolved");
+            format!(
+                "\n⚠️  Target sync: could not fetch origin/{target_branch}: {reason}. Merged \
+                 against local {target_branch} at {local} without verifying it against origin; \
+                 the push may be rejected as non-fast-forward."
+            )
+        }
+        // Refused before the merge, so it never reaches a receipt.
+        TargetReconcile::Diverged { .. } => String::new(),
     }
 }
 
@@ -2561,6 +2620,9 @@ impl CasCore {
         let branch_ci_state = lookup_branch_ci(&worktree.branch, &cwd);
         let ci_prefix = describe_branch_ci_state(&worktree.branch, &branch_ci_state);
 
+        // Carries the target-sync line from inside the merge branch out to the
+        // receipt; empty when nothing needed reconciling.
+        let mut reconcile_note = String::new();
         let merge_commit = if reconciled_delivery {
             crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
                 &cwd,
@@ -2607,6 +2669,41 @@ impl CasCore {
                     ));
                 }
             }
+
+            // cas-42e1 (GH #703): reconcile the local target with origin
+            // BEFORE merging. Merging into a target whose origin has already
+            // advanced produces a push that can only be rejected, and the
+            // operator is then left holding a merge commit they did not ask
+            // for on a branch they must now unpick. Refusing here costs
+            // nothing; refusing after the merge costs a recovery.
+            let reconcile = manager
+                .git()
+                .reconcile_target_with_origin(&worktree.parent_branch);
+            if let crate::worktree::git::TargetReconcile::Diverged {
+                local,
+                remote,
+                ahead,
+                behind,
+            } = &reconcile
+            {
+                let target = &worktree.parent_branch;
+                return Ok(Self::tool_error(format!(
+                    "{ci_prefix}TARGET_DIVERGED_FROM_ORIGIN: local {target} is at {} with \
+                     {ahead} commit(s) origin does not have, while origin/{target} is at {} \
+                     with {behind} commit(s) you do not have. NO MERGE WAS ATTEMPTED.\n\n\
+                     A merge now would produce a push that origin rejects, leaving an \
+                     unpublished merge commit on your local {target}.\n\n\
+                     Reconcile first, from a checkout on {target}:\n\
+                     1. `git fetch origin {target}`\n\
+                     2. `git merge origin/{target}`   (resolve any conflicts)\n\
+                     3. re-run this worktree_merge\n\n\
+                     Never force-push {target}: the {behind} remote commit(s) belong to \
+                     someone else's landed work.",
+                    short_sha(local),
+                    short_sha(remote),
+                )));
+            }
+            reconcile_note = describe_target_reconcile(&worktree.parent_branch, &reconcile);
 
             let merge_result = if transactional_delivery.is_some() {
                 // Persisted delivery state must separate a successful Git
@@ -3046,12 +3143,13 @@ impl CasCore {
             if let Ok(count) = self.promote_branch_entries(&worktree.branch) {
                 if count > 0 {
                     return Ok(Self::success(format!(
-                        "{ci_prefix}{trunk_notice}{CI_ADVISORY_POLICY_NOTICE}Merged worktree {} to {}.{} Commit: {}{}{}\nPromoted {} entries from branch scope.",
+                        "{ci_prefix}{trunk_notice}{CI_ADVISORY_POLICY_NOTICE}Merged worktree {} to {}.{} Commit: {}{}{}{}\nPromoted {} entries from branch scope.",
                         worktree.id,
                         worktree.parent_branch,
                         target_suffix,
                         merge_commit.as_deref().unwrap_or("none"),
                         cleanup_note,
+                        reconcile_note,
                         push_note,
                         count
                     )));
@@ -3060,12 +3158,13 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "{ci_prefix}{trunk_notice}{CI_ADVISORY_POLICY_NOTICE}Merged worktree {} to {}.{} Commit: {}{}{}",
+            "{ci_prefix}{trunk_notice}{CI_ADVISORY_POLICY_NOTICE}Merged worktree {} to {}.{} Commit: {}{}{}{}",
             worktree.id,
             worktree.parent_branch,
             target_suffix,
             merge_commit.as_deref().unwrap_or("none"),
             cleanup_note,
+            reconcile_note,
             push_note
         )))
     }
@@ -3337,6 +3436,47 @@ mod tests {
     // -----------------------------------------------------------------
     // cas-5ee0 (GH #137): the merge receipt must state push state.
     // -----------------------------------------------------------------
+
+    /// cas-42e1 (GH #703): when origin has MOVED, the receipt used to announce
+    /// the exact opposite of reality — "origin/<target> ... is BEHIND" — and
+    /// prescribe `git push origin <target>`, the one command that cannot
+    /// succeed. Both halves are asserted here, positively and negatively.
+    #[test]
+    fn merge_receipt_names_origin_as_ahead_and_gives_a_remedy_that_can_work() {
+        let note = describe_target_push_state(
+            "staging",
+            &TargetPushOutcome::NonFastForward {
+                sha: "42d81bd9aaaabbbbccccddddeeeeffff00001111".to_string(),
+                remote_sha: Some("c2698df216cd9abe7db530ec1d035f6a378d1d06".to_string()),
+                reason: "! [rejected] staging -> staging (fetch first)".to_string(),
+            },
+        );
+
+        assert!(note.contains("NOT PUSHED"), "{note}");
+        assert!(note.contains("origin/staging"), "{note}");
+        assert!(
+            note.contains("AHEAD"),
+            "the remote carries the extra commits; saying BEHIND inverts the diagnosis: {note}"
+        );
+        assert!(
+            !note.contains("is BEHIND"),
+            "the old inverted claim must be gone: {note}"
+        );
+        // Both tips must be named so the operator can see the divergence.
+        assert!(note.contains("42d81bd9"), "{note}");
+        assert!(note.contains("c2698df2"), "{note}");
+        // The remedy must reconcile first, and must not be a bare push.
+        assert!(note.contains("git fetch origin staging"), "{note}");
+        assert!(note.contains("git merge origin/staging"), "{note}");
+        assert!(
+            !note.contains("REQUIRED NEXT STEP: git push origin staging"),
+            "a bare push is exactly what cannot succeed here: {note}"
+        );
+        assert!(
+            note.contains("Never force-push"),
+            "force-pushing a shared target must be ruled out explicitly: {note}"
+        );
+    }
 
     #[test]
     fn merge_receipt_shouts_when_the_merge_is_local_only() {

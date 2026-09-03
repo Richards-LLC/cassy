@@ -58,6 +58,22 @@ pub enum TargetPushOutcome {
         /// GitHub's GH013 diagnostic, retained as evidence.
         reason: String,
     },
+    /// The push was rejected because `origin/<branch>` has commits the local
+    /// branch does not: the remote moved under this merge.
+    ///
+    /// Distinct from `NotPushed` because the remedy is different in kind —
+    /// repeating the push cannot work, and the operator must reconcile with
+    /// the remote first. Reporting this as a generic failure is what produced
+    /// the "origin is BEHIND / just push again" advice in GH #703, which was
+    /// the exact inverse of the real state.
+    NonFastForward {
+        /// Local tip that the rejected push attempted to publish.
+        sha: String,
+        /// Remote tip that the local branch does not contain.
+        remote_sha: Option<String>,
+        /// git's own rejection text, retained as evidence.
+        reason: String,
+    },
     /// The merge is LOCAL ONLY. `reason` says why the push did not land.
     NotPushed {
         /// Local tip of the target branch, or `None` if it did not resolve.
@@ -83,7 +99,15 @@ impl TargetPushOutcome {
     }
 }
 
-fn classify_push_rejection(
+fn first_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no diagnostic output")
+        .to_string()
+}
+
+pub(crate) fn classify_push_rejection(
     branch: &str,
     default_branch: &str,
     local_sha: String,
@@ -102,17 +126,63 @@ fn classify_push_rejection(
         };
     }
 
+    // git names this rejection in several equivalent ways depending on version
+    // and whether an upstream is configured. Match on its stable markers.
+    let lowered = reason.to_ascii_lowercase();
+    let non_fast_forward = lowered.contains("non-fast-forward")
+        || lowered.contains("fetch first")
+        || lowered.contains("the remote contains work that you do")
+        || (lowered.contains("[rejected]") && lowered.contains("failed to push"));
+
     let reason = reason
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or("git push failed with no diagnostic output")
         .to_string();
+    if non_fast_forward {
+        return TargetPushOutcome::NonFastForward {
+            sha: local_sha,
+            remote_sha,
+            reason,
+        };
+    }
     TargetPushOutcome::NotPushed {
         sha: Some(local_sha),
         remote_sha,
         reason,
     }
+}
+
+/// What reconciling the local target with `origin/<target>` did, or could not do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetReconcile {
+    /// No `origin` remote, or no `origin/<target>` to reconcile against.
+    NoRemote,
+    /// Local and remote already name the same commit.
+    AlreadyCurrent { sha: String },
+    /// The local target was strictly behind and has been advanced.
+    FastForwarded {
+        from: String,
+        to: String,
+        commits_gained: u32,
+    },
+    /// Both sides hold commits the other lacks. The caller must refuse BEFORE
+    /// merging: a refusal afterwards would leave a mutated local target for
+    /// the operator to unpick.
+    Diverged {
+        local: String,
+        remote: String,
+        ahead: u32,
+        behind: u32,
+    },
+    /// `origin` could not be reached. The merge proceeds against the local
+    /// target — being offline must not block a merge — but the caller has to
+    /// say so, because the push may still be rejected.
+    FetchFailed {
+        local: Option<String>,
+        reason: String,
+    },
 }
 
 impl GitOperations {
@@ -715,6 +785,115 @@ impl GitOperations {
     /// than turning a completed merge into an error. The push is a plain
     /// (non-force) push, so git itself refuses to clobber a diverged remote
     /// and the divergence is reported instead.
+    /// Bring the local target branch up to `origin/<target>` before a merge.
+    ///
+    /// GH #703: `worktree_merge` merged into a target whose origin had already
+    /// advanced, so the push could only ever be rejected. Reconciling first
+    /// turns that into an ordinary successful merge whenever the local target
+    /// is merely behind, and into an explicit refusal when it is not.
+    ///
+    /// The ahead/behind comparison is made AFTER the fetch, against the
+    /// freshly-updated `origin/<target>`; comparing first would judge
+    /// divergence against a stale remote ref and could call a clean
+    /// fast-forward a divergence (or worse, the reverse).
+    pub fn reconcile_target_with_origin(&self, target: &str) -> TargetReconcile {
+        self.reconcile_target_with_origin_bounded(target, FETCH_TIMEOUT)
+    }
+
+    pub(crate) fn reconcile_target_with_origin_bounded(
+        &self,
+        target: &str,
+        timeout: Duration,
+    ) -> TargetReconcile {
+        if !self.has_origin_remote() {
+            return TargetReconcile::NoRemote;
+        }
+        let local_before = self.resolve_commit(target);
+
+        if let Err(error) = self.fetch_branch_bounded(target, timeout) {
+            // Offline, auth-broken or unreachable: a merge must still be
+            // possible. The caller reports the degradation rather than
+            // pretending the target was verified against origin.
+            return TargetReconcile::FetchFailed {
+                local: local_before,
+                reason: first_line(&error.to_string()),
+            };
+        }
+
+        let remote_ref = format!("origin/{target}");
+        let (Some(local), Some(remote)) =
+            (self.resolve_commit(target), self.resolve_commit(&remote_ref))
+        else {
+            return TargetReconcile::NoRemote;
+        };
+        if local == remote {
+            return TargetReconcile::AlreadyCurrent { sha: local };
+        }
+
+        let behind = self.commits_behind(&local, &remote).unwrap_or(0);
+        let ahead = self.commits_behind(&remote, &local).unwrap_or(0);
+        if ahead > 0 {
+            return TargetReconcile::Diverged {
+                local,
+                remote,
+                ahead,
+                behind,
+            };
+        }
+        if behind == 0 {
+            return TargetReconcile::AlreadyCurrent { sha: local };
+        }
+
+        // Strictly behind: a fast-forward loses nothing. Where the branch is
+        // checked out decides how it moves — the same venue split the merge
+        // itself uses, so the shared checkout's working tree stays in sync and
+        // is never silently left behind its own branch ref.
+        let advanced = if self.branch_is_checked_out_here(target) {
+            self.run_git_ok(&["merge", "--ff-only", &remote_ref])
+        } else {
+            self.run_git_ok(&[
+                "update-ref",
+                &format!("refs/heads/{target}"),
+                &remote,
+                &local,
+            ])
+        };
+        if !advanced {
+            return TargetReconcile::Diverged {
+                local,
+                remote,
+                ahead,
+                behind,
+            };
+        }
+        TargetReconcile::FastForwarded {
+            from: local,
+            to: remote,
+            commits_gained: behind,
+        }
+    }
+
+    /// Whether the repository root currently has `branch` checked out.
+    fn branch_is_checked_out_here(&self, branch: &str) -> bool {
+        Command::new("git")
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(&self.repo_root)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim() == branch)
+            .unwrap_or(false)
+    }
+
+    fn run_git_ok(&self, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(args)
+            .current_dir(&self.repo_root)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
     pub fn publish_branch_to_origin(&self, branch: &str) -> TargetPushOutcome {
         self.publish_branch_to_origin_bounded(branch, PUSH_TIMEOUT)
     }

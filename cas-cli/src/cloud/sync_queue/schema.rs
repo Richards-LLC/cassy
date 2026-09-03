@@ -35,13 +35,41 @@ CREATE TABLE IF NOT EXISTS sync_conflicts (
     discarded_row_json TEXT NOT NULL,
     winner_side TEXT NOT NULL,
     strategy TEXT NOT NULL,
-    resolved_at TEXT NOT NULL
+    resolved_at TEXT NOT NULL,
+    -- Nullable: a conflict settled on the timestamp path (either side lacking
+    -- a server revision) legitimately has no revisions to record.
+    local_revision INTEGER,
+    remote_revision INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_conflicts_resolved_at ON sync_conflicts(resolved_at DESC);
 "#;
 
 impl SyncQueue {
+    /// Add the conflict-journal revision columns to an existing database.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` cannot widen a table that already exists,
+    /// so a store created before cas-c32f would otherwise fail every conflict
+    /// insert until migration 252 happened to run. The queue owns these writes,
+    /// so it repairs its own schema rather than depending on migration order.
+    pub(super) fn migrate_conflict_revisions(&self, conn: &Connection) -> Result<(), CasError> {
+        for column in ["local_revision", "remote_revision"] {
+            let present: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('sync_conflicts') WHERE name = ?1",
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !present {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE sync_conflicts ADD COLUMN {column} INTEGER;"
+                ))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Add the per-row cloud verdict columns to existing sync_queue tables.
     ///
     /// `last_error` alone cannot separate a benign last-writer-wins skip from a

@@ -6498,6 +6498,8 @@ mod team_cmd_tests {
             entity_id: "cas-conflict".to_string(),
             local_updated: now,
             remote_updated: now,
+            local_revision: None,
+            remote_revision: None,
             resolution: crate::cloud::ConflictResolution::RemoteWins,
             action: crate::cloud::ConflictAction::UseRemote,
         });

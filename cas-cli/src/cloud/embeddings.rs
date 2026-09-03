@@ -413,6 +413,18 @@ impl VectorNamespace {
     }
 }
 
+/// Durable receipt that a vector cache generation was created by discarding an
+/// older one.
+///
+/// Stored next to the vectors it describes and therefore removed with them by
+/// the next wipe: whatever is on disk always describes the current generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheRebuild {
+    pub rebuilt_at: chrono::DateTime<chrono::Utc>,
+    /// Why the old cache was discarded, in operator-readable terms.
+    pub reason: String,
+}
+
 /// Local vector cache for knowledge pages, tagged with the embedding space it
 /// belongs to.
 ///
@@ -456,6 +468,10 @@ impl KnowledgeVectorCache {
 
     fn meta_path(dir: &Path) -> PathBuf {
         dir.join("embedding_meta.json")
+    }
+
+    fn rebuild_path(dir: &Path) -> PathBuf {
+        dir.join("rebuilt.json")
     }
 
     /// Open (creating if needed) the cache for `meta`.
@@ -512,8 +528,18 @@ impl KnowledgeVectorCache {
         let mut envs = open_envs().lock().unwrap_or_else(|p| p.into_inner());
 
         let existing = Self::read_meta(&dir);
+        let mut rebuild_reason = None;
         if let Some(existing) = existing {
             if existing != meta {
+                rebuild_reason = Some(format!(
+                    "embedding model changed from {}/{} ({}d) to {}/{} ({}d)",
+                    existing.provider,
+                    existing.model,
+                    existing.dims,
+                    meta.provider,
+                    meta.model,
+                    meta.dims
+                ));
                 // Drop our handle first: the directory is about to disappear
                 // and a registry entry pointing at deleted files would hand
                 // the next caller a store backed by nothing.
@@ -541,6 +567,19 @@ impl KnowledgeVectorCache {
         drop(envs);
 
         Self::write_meta(&dir, &meta)?;
+        // Written *after* the wipe, so the receipt always describes the
+        // generation of vectors currently on disk. Without it, a rebuild is
+        // indistinguishable from a lost index: both show every symbol pending
+        // with no explanation (cas-73e7 / GH #696).
+        if let Some(reason) = rebuild_reason {
+            Self::write_rebuild(
+                &dir,
+                &CacheRebuild {
+                    rebuilt_at: chrono::Utc::now(),
+                    reason,
+                },
+            )?;
+        }
 
         Ok(Self {
             store,
@@ -578,6 +617,23 @@ impl KnowledgeVectorCache {
     fn read_meta(dir: &Path) -> Option<EmbeddingMeta> {
         let raw = std::fs::read_to_string(Self::meta_path(dir)).ok()?;
         serde_json::from_str(&raw).ok()
+    }
+
+    /// Read the rebuild receipt for the isolated source-code cache, if the
+    /// current generation of that cache was created by wiping an older one.
+    ///
+    /// `None` means "no rebuild since this cache first appeared" — a first
+    /// build is not a rebuild and must not be reported as one.
+    pub fn code_cache_rebuild(cas_root: &Path) -> Option<CacheRebuild> {
+        let raw = std::fs::read_to_string(Self::rebuild_path(&Self::code_cache_dir(cas_root))).ok()?;
+        serde_json::from_str(&raw).ok()
+    }
+
+    fn write_rebuild(dir: &Path, rebuild: &CacheRebuild) -> Result<(), CasError> {
+        let raw = serde_json::to_string_pretty(rebuild)
+            .map_err(|e| CasError::Other(format!("Failed to serialize cache rebuild: {e}")))?;
+        std::fs::write(Self::rebuild_path(dir), raw)
+            .map_err(|e| CasError::Other(format!("Failed to write cache rebuild receipt: {e}")))
     }
 
     fn write_meta(dir: &Path, meta: &EmbeddingMeta) -> Result<(), CasError> {
@@ -1103,6 +1159,48 @@ mod tests {
             knowledge.count().unwrap(),
             1,
             "knowledge cache was contaminated"
+        );
+    }
+
+    /// A first build is not a rebuild; a wipe is, and it must leave a receipt
+    /// naming when and why, so doctor can say "vectors are regenerating"
+    /// instead of silently reporting a corpus that lost every vector.
+    #[test]
+    fn code_cache_rebuild_receipt_is_written_only_when_a_cache_is_discarded() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let _first =
+                KnowledgeVectorCache::open_code(tmp.path(), EmbeddingMeta::new("p", "code-1", 3))
+                    .unwrap();
+        }
+        assert!(
+            KnowledgeVectorCache::code_cache_rebuild(tmp.path()).is_none(),
+            "a first build must not be reported as a rebuild"
+        );
+
+        let before = chrono::Utc::now();
+        {
+            let second =
+                KnowledgeVectorCache::open_code(tmp.path(), EmbeddingMeta::new("p", "code-2", 3))
+                    .unwrap();
+            assert!(second.reindexed());
+        }
+        let rebuild = KnowledgeVectorCache::code_cache_rebuild(tmp.path())
+            .expect("a wipe must leave a receipt");
+        assert!(rebuild.rebuilt_at >= before);
+        assert!(
+            rebuild.reason.contains("code-1") && rebuild.reason.contains("code-2"),
+            "receipt must name the change: {}",
+            rebuild.reason
+        );
+
+        // Reopening unchanged neither rebuilds nor rewrites the receipt.
+        let _third =
+            KnowledgeVectorCache::open_code(tmp.path(), EmbeddingMeta::new("p", "code-2", 3))
+                .unwrap();
+        assert_eq!(
+            KnowledgeVectorCache::code_cache_rebuild(tmp.path()),
+            Some(rebuild)
         );
     }
 

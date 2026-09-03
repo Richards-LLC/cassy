@@ -25,7 +25,7 @@ Start with sources that cannot mutate the live Cassy DB:
 If those still do not answer the question:
 
 1. Add a progress or decision note explaining why task/log artifacts were insufficient.
-2. Prefer inspecting a copied snapshot of `.cas/cas.db`.
+2. Prefer inspecting a copied snapshot of `.cas/cas.db`. Take it with `sqlite3 <db> ".backup <path>"` into `~/.cas/artifacts/<task-id>/`, never `cp` into `/tmp`: `$TMPDIR` is RAM-backed on the operator host, so a store copy, a worktree tree, or a build cache placed there evicts memory and takes every live session's shell output down with it when it fills.
 3. If you must inspect the live DB, open it with a read-only SQLite URI such as `file:/abs/path/to/.cas/cas.db?mode=ro`. Do **not** use unrestricted `sqlite3 /path/to/.cas/cas.db` for routine report/evidence work.
 
 ## Syncing (Isolated Mode)

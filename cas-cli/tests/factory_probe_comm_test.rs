@@ -230,6 +230,86 @@ fn probe_comm_cli_returns_nonzero_for_injected_failure() {
     assert_eq!(urgent["failed_stage"], "delivered");
 }
 
+/// GH #704: `probe-comm` leaked one disposable root per run into `$TMPDIR`
+/// (1,242 of them on the operator host, which filled a 32 GB tmpfs and broke
+/// every live session's shell output). Neither the success nor the failure
+/// path may leave a root behind, and the generated default must live on disk
+/// under `~/.cas/scratch/`, not in `$TMPDIR`.
+#[test]
+fn probe_comm_cli_removes_its_generated_root_on_success_and_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let tmpdir = temp.path().join("tmp");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&tmpdir).unwrap();
+
+    cas_cmd()
+        .env("HOME", &home)
+        .env("TMPDIR", &tmpdir)
+        .args(["factory", "probe-comm", "--jsonl"])
+        .arg(temp.path().join("pass.jsonl"))
+        .assert()
+        .success();
+
+    cas_cmd()
+        .env("HOME", &home)
+        .env("TMPDIR", &tmpdir)
+        .args([
+            "factory",
+            "probe-comm",
+            "--jsonl",
+            temp.path().join("fail.jsonl").to_str().unwrap(),
+            "--inject-transport-failure",
+            "urgent:urgent-0",
+        ])
+        .assert()
+        .failure();
+
+    for dir in [tmpdir.clone(), home.join(".cas").join("scratch")] {
+        let leaked = probe_root_names(&dir);
+        assert!(
+            leaked.is_empty(),
+            "probe-comm left {leaked:?} behind in {}",
+            dir.display()
+        );
+    }
+}
+
+/// An operator-supplied `--cas-root` is theirs; the probe must not delete it.
+#[test]
+fn probe_comm_cli_preserves_an_explicit_cas_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let explicit = temp.path().join("operator-root");
+
+    cas_cmd()
+        .args([
+            "factory",
+            "probe-comm",
+            "--jsonl",
+            temp.path().join("probe.jsonl").to_str().unwrap(),
+            "--cas-root",
+            explicit.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(
+        explicit.exists(),
+        "an explicit --cas-root must survive the run"
+    );
+}
+
+fn probe_root_names(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("cas-probe-comm-"))
+        .collect()
+}
+
 #[test]
 fn probe_comm_cli_all_adapters_writes_recorded_fixture_report() {
     let temp = tempfile::tempdir().unwrap();

@@ -11,7 +11,9 @@ Indexes       [OK] legacy search index  [OK] embedding drain  [OK] embeddings
   → run `cas index code` to catch up now.
   [WARN] code history index  cannot check code history index: not a git repository: [TEMP_PATH] ([GIT_NOT_REPOSITORY])
 Cloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [OK] cloud sync queue  [OK] cross-project rows
-Config        [OK] configuration  [OK] MCP stdio upstreams  [OK] sync target  [OK] mcp config
+Config        [OK] configuration  [OK] MCP stdio upstreams  [OK] sync target  [OK] mcp config  [OK] user skills
 Integrations  [OK] integrations
+  [WARN] mecha-cassy  not registered on this machine ([TEMP_PATH] has no mecha-cassy server)
+  → Run `cas integrate mecha-cassy`
 
-22 ok · 3 warnings · 0 errors · [DURATION]
+23 ok · 4 warnings · 0 errors · [DURATION]

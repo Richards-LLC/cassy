@@ -4815,6 +4815,32 @@ impl CasService {
         }
         out.push_str(&orphan_processes.render());
         out.push_str(&artifact_report.render());
+        // GH #704: leaked disposable roots under $TMPDIR filled a 32 GB tmpfs
+        // and broke every live session's shell output. Name them here, with
+        // age and size, before the filesystem fills. Read-only by contract.
+        out.push_str(
+            &crate::temp_hygiene::scan_stale_temp_roots(
+                &std::env::temp_dir(),
+                std::time::Duration::from_secs(
+                    req.older_than_secs
+                        .and_then(|secs| u64::try_from(secs).ok())
+                        .unwrap_or(crate::temp_hygiene::DEFAULT_TEMP_ROOT_STALE_SECS),
+                ),
+                std::time::SystemTime::now(),
+            )
+            .render(),
+        );
+        // Same incident, other half: a Cassy root that itself sits on RAM.
+        // Reported, never enforced here — gc_report is read-only.
+        if let Some(message) = crate::temp_hygiene::inspect_isolated_root(
+            &self.inner.cas_root,
+            crate::temp_hygiene::root_holds_bulk_dirs(&self.inner.cas_root),
+            &crate::temp_hygiene::HostMountProbe,
+        )
+        .message()
+        {
+            out.push_str(&format!("Active Cassy root placement: {message}\n"));
+        }
 
         if !live_viktor_watches.is_empty() {
             out.push_str("\nLive Viktor watches:\n");

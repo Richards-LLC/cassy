@@ -222,6 +222,9 @@ pub struct UndeliveredLifecycleRelay {
     pub target: String,
     /// Row summary — `{transition}: {task_id} ({occurrence})`.
     pub summary: Option<String>,
+    /// Original lifecycle envelope. Consumers use its typed task payload to
+    /// distinguish actionable relays from task-free informational events.
+    pub prompt: String,
     /// Terminal stage the row died at (suppressed / dropped / abandoned).
     pub stage: String,
     /// Recorded reason, when one was stamped.
@@ -4073,7 +4076,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // never be retried, so the failure is final rather than in progress.
         let mut stmt = conn.prepare(
             "SELECT id, source, target, summary, highest_stage, last_pending_reason,
-                    last_pending_detail, factory_session, created_at, processed_at
+                    last_pending_detail, factory_session, created_at, processed_at, prompt
              FROM prompt_queue
              WHERE transport_delivered_at IS NULL
                AND acked_at IS NULL
@@ -4091,6 +4094,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 source: row.get(1)?,
                 target: row.get(2)?,
                 summary: row.get(3)?,
+                prompt: row.get(10)?,
                 stage: row
                     .get::<_, Option<String>>(4)?
                     .unwrap_or_else(|| DeliveryStage::Abandoned.as_str().to_string()),

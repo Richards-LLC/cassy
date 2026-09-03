@@ -19,6 +19,110 @@ use rusqlite::{Connection, OptionalExtension, params};
 /// worker that stops heartbeating still lets the lease expire naturally.
 const TASK_LEASE_HEARTBEAT_RENEWAL_SECS: i64 = DEFAULT_LEASE_DURATION_SECS;
 
+const FACTORY_SESSION_REHOMED_FROM_KEY: &str = "factory_session_rehomed_from";
+const FACTORY_SESSION_REHOMED_AT_KEY: &str = "factory_session_rehomed_at";
+
+/// Move the live fleet owned by a restarted logical supervisor to its new
+/// factory session and retire the supervisor identities it replaces.
+///
+/// Factory session ids identify one supervisor *process lifetime*, not the
+/// durable supervisor.  A restart therefore changes `factory_session` while
+/// preserving `(project database, supervisor name, role)`.  Leaving the old
+/// rows active makes session-scoped status, activity, and prompt delivery lose
+/// workers that never stopped running; later maintenance also mistakes the old
+/// supervisor rows for dead workers.  Reconcile while registration still owns
+/// the write transaction so readers can observe only the pre- or post-restart
+/// registry, never a split fleet.
+fn reconcile_restarted_factory_supervisor(
+    conn: &Connection,
+    agent: &Agent,
+    factory_session: Option<&str>,
+) -> Result<()> {
+    if !matches!(agent.role, cas_types::AgentRole::Supervisor)
+        || factory_session.is_none_or(str::is_empty)
+    {
+        return Ok(());
+    }
+    let factory_session = factory_session.expect("checked above");
+    let role = agent.role.to_string();
+
+    let mut prior_stmt = conn.prepare_cached(
+        "SELECT DISTINCT factory_session
+         FROM agents
+         WHERE id <> ?1
+           AND name = ?2
+           AND role = ?3
+           AND status IN ('active', 'idle')
+           AND factory_session IS NOT NULL",
+    )?;
+    let prior_sessions = prior_stmt
+        .query_map(params![agent.id, agent.name, role], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(prior_stmt);
+
+    if prior_sessions.is_empty() {
+        return Ok(());
+    }
+
+    let rehomed_at = Utc::now().to_rfc3339();
+    for prior_session in prior_sessions
+        .iter()
+        .filter(|session| session.as_str() != factory_session)
+    {
+        let mut worker_stmt = conn.prepare_cached(
+            "SELECT id, metadata
+             FROM agents
+             WHERE role = 'worker'
+               AND status IN ('active', 'idle')
+               AND factory_session = ?1",
+        )?;
+        let workers = worker_stmt
+            .query_map(params![prior_session], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(worker_stmt);
+
+        for (worker_id, metadata_json) in workers {
+            let mut metadata =
+                serde_json::from_str::<std::collections::HashMap<String, String>>(&metadata_json)
+                    .unwrap_or_default();
+            metadata.insert(
+                FACTORY_SESSION_REHOMED_FROM_KEY.to_string(),
+                prior_session.clone(),
+            );
+            metadata.insert(
+                FACTORY_SESSION_REHOMED_AT_KEY.to_string(),
+                rehomed_at.clone(),
+            );
+            let metadata_json = serde_json::to_string(&metadata).unwrap_or(metadata_json);
+            conn.execute(
+                "UPDATE agents
+                 SET factory_session = ?1, metadata = ?2
+                 WHERE id = ?3",
+                params![factory_session, metadata_json, worker_id],
+            )?;
+        }
+    }
+
+    // `shutdown` is intentionally terminal for heartbeat and stale scans.  It
+    // retains the forensic row without allowing maintenance to emit a
+    // worker_died relay about the supervisor itself.
+    conn.execute(
+        "UPDATE agents
+         SET status = 'shutdown'
+         WHERE id <> ?1
+           AND name = ?2
+           AND role = ?3
+           AND status IN ('active', 'idle')",
+        params![agent.id, agent.name, role],
+    )?;
+
+    Ok(())
+}
+
 pub(crate) fn register_agent_with_conn(conn: &Connection, agent: &Agent) -> Result<()> {
     let metadata_json = serde_json::to_string(&agent.metadata).unwrap_or_else(|_| "{}".to_string());
     let env_factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
@@ -84,6 +188,8 @@ pub(crate) fn register_agent_with_conn(conn: &Connection, agent: &Agent) -> Resu
         ],
     )?;
 
+    reconcile_restarted_factory_supervisor(conn, agent, factory_session)?;
+
     if !existed {
         // Record event for sidecar activity feed
         let event = Event::new(
@@ -111,7 +217,10 @@ impl SqliteAgentStore {
     pub(crate) fn agent_register(&self, agent: &Agent) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.lock_conn()?;
-            register_agent_with_conn(&conn, agent)
+            let tx = ImmediateTx::new(&conn)?;
+            register_agent_with_conn(&tx, agent)?;
+            tx.commit()?;
+            Ok(())
         }) // with_write_retry
     }
     pub(crate) fn agent_get(&self, id: &str) -> Result<Agent> {

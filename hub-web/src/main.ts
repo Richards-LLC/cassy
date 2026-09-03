@@ -20,7 +20,7 @@ import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
-import { supervisorMessage, supervisorTarget } from "./supervisor-message";
+import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
 import { TranscriptView } from "./transcript-view";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
@@ -93,6 +93,10 @@ let speechController: SpeechDictationController | undefined;
 let speechInputState: SpeechInputState = "idle";
 let speechInputDetail = "";
 let messageDelivery: { session: string; target: string } | undefined;
+// Why a send did not happen has to survive the render that follows it, and has
+// to sit beside the composer: a toast is gone before a phone operator has
+// finished reading it, and a disabled button says nothing at all.
+let messageStatus: { session: string | undefined; text: string; tone: "info" | "error" } | undefined;
 
 // One phone breakpoint shared by layout state, pane mounting, and pane tapping.
 function phoneLayout(): boolean { return window.matchMedia("(max-width: 850px)").matches; }
@@ -1364,6 +1368,14 @@ function bindSpeechComposer(): void {
     const delivery = document.querySelector<HTMLElement>("#message-delivery");
     if (delivery) delivery.hidden = true;
   };
+  // Enter sends. Without this the composer looked functional and delivered
+  // nothing: the keypress only added a newline, in observe and control mode
+  // alike.
+  composer.onkeydown = (event) => {
+    if (!sendsOnEnter(event)) return;
+    event.preventDefault();
+    void submitSupervisorMessage();
+  };
   keyboard.onclick = () => composer.focus();
   mic.onclick = () => speechController?.toggle();
   syncSpeechComposer();
@@ -1383,10 +1395,119 @@ function openSupervisorComposer(): void {
   queueMicrotask(() => {
     const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
     composer?.scrollIntoView({ block: "nearest" });
-    const mic = document.querySelector<HTMLButtonElement>("#message-mic");
-    if (phoneLayout() && mic && !mic.hidden) mic.focus();
-    else composer?.focus();
+    // Voice is one labelled tap away; focus belongs in the field that accepts text.
+    composer?.focus();
   });
+}
+
+/**
+ * The composer's own status line. The hub can refuse a supervisor message for
+ * reasons the operator cannot see — a device paired without message:send, a
+ * session someone else controls, a transport that is reconnecting — and each of
+ * those used to look identical to a Send button that does nothing.
+ */
+function showComposerStatus(text: string, tone: "info" | "error"): void {
+  messageStatus = { session: selectedSession, text, tone };
+  // A stale "Message sent" beside a refusal reads as a contradiction.
+  messageDelivery = undefined;
+  const delivery = document.querySelector<HTMLElement>("#message-delivery");
+  if (delivery) delivery.hidden = true;
+  const status = document.querySelector<HTMLElement>("#message-status");
+  if (!status) return;
+  status.hidden = false;
+  status.textContent = text;
+  status.classList.toggle("error", tone === "error");
+}
+
+function clearComposerStatus(): void {
+  messageStatus = undefined;
+  const status = document.querySelector<HTMLElement>("#message-status");
+  if (!status) return;
+  status.hidden = true;
+  status.textContent = "";
+  status.classList.remove("error");
+}
+
+function supervisorSendContext(text: string): Parameters<typeof planSupervisorSend>[0] {
+  const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
+  const lease = machine && selectedSession ? leases.get(sessionKey(machine.id, selectedSession)) : undefined;
+  const session = machine && selectedSession ? sessions.get(machine.id)?.find((item) => item.name === selectedSession) : undefined;
+  return {
+    text,
+    machineLabel: machine?.label,
+    session: selectedSession,
+    supervisor: supervisorTarget(session),
+    daemonAttach: machine ? hubSupports(machine.id, "daemon_attach") : false,
+    scopes: machine?.scopes ?? [],
+    leaseHeldByMe: lease?.held_by_me === true,
+    leaseControllerLabel: lease?.held_by_me ? undefined : lease?.controller_label,
+    commanderOrigin: location.origin,
+  };
+}
+
+/**
+ * The hub only accepts a supervisor message from the device holding the session
+ * lease (hub/server.rs handle_client_message). Observing operators were left
+ * with a dead button; taking the lease is the step they would otherwise perform
+ * by hand, and it succeeds only when no one else controls the session.
+ */
+async function takeControlForMessage(machine: StoredMachine, session: string): Promise<boolean> {
+  try {
+    await connections.get(machine.id)?.requestControl(session, false);
+  } catch {
+    return false;
+  }
+  await loadLease(machine.id, session);
+  return leases.get(sessionKey(machine.id, session))?.held_by_me === true;
+}
+
+function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string): void {
+  const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text));
+  // Without an outcome the operator cannot tell a sent message from a lost
+  // one, and the natural response is to send it a second time.
+  if (!sent) {
+    showComposerStatus("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error");
+    return;
+  }
+  clearComposerStatus();
+  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+  if (composer) composer.value = "";
+  messageDraft = "";
+  messageDraftSelection = 0;
+  messageDelivery = { session, target: supervisor };
+  const delivery = document.querySelector<HTMLElement>("#message-delivery");
+  if (delivery) {
+    delivery.hidden = false;
+    delivery.textContent = `Message sent to ${supervisor}`;
+  }
+  toast(`Message sent to ${supervisor}`);
+  // A phone operator usually has a second sentence; keep the caret where they
+  // left it rather than dropping focus to the page body.
+  composer?.focus();
+}
+
+async function submitSupervisorMessage(): Promise<void> {
+  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+  if (!composer) return;
+  const text = composer.value.trim();
+  const plan = planSupervisorSend(supervisorSendContext(text));
+  if (plan.kind === "blocked") {
+    showComposerStatus(plan.reason, "error");
+    composer.focus();
+    return;
+  }
+  const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
+  const session = selectedSession;
+  const supervisor = machine && session ? supervisorTarget(sessions.get(machine.id)?.find((item) => item.name === session)) : undefined;
+  if (!machine || !session || !supervisor) return;
+  if (plan.kind === "take-control-then-send") {
+    showComposerStatus(plan.notice, "info");
+    if (!await takeControlForMessage(machine, session)) {
+      showComposerStatus(`Could not take control of ${session}, and the hub refuses a message from a device that is only observing. Take control from the header, then send again.`, "error");
+      return;
+    }
+  }
+  deliverSupervisorMessage(machine, session, supervisor, text);
 }
 
 /**
@@ -1429,6 +1550,13 @@ function render(captureDraft = true): void {
     : undefined;
   const supervisor = supervisorTarget(selectedHubSession);
   const delivery = selectedSession && messageDelivery?.session === selectedSession ? messageDelivery : undefined;
+  // Evaluated with the draft the operator can actually see, so the button's
+  // stated reason and the reason a send would print are the same sentence. It
+  // never carries `disabled`: a disabled Send button swallows the tap and looks
+  // exactly like a broken one.
+  const sendPlan = planSupervisorSend(supervisorSendContext(messageDraft));
+  const sendReason = sendPlan.kind === "blocked" && sendPlan.block !== "empty" ? sendPlan.reason : undefined;
+  const composerStatus = messageStatus?.session === selectedSession ? messageStatus : undefined;
   // A phone has no hover, so a title attribute is an explanation nobody can
   // reach. Unavailable controls stay focusable and say why when tapped.
   const interruptReason = !selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt")
@@ -1529,7 +1657,7 @@ function render(captureDraft = true): void {
             <button type="button" role="tab" data-context-tab="status" aria-selected="${activeContextTab === "status"}">Workers &amp; Tasks</button>
           </div>
           <section id="attention-panel" class="context-tab" data-context-content="attention" ${activeContextTab === "attention" ? "" : "hidden"}></section>
-          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}>${staleStatusNotice}<div id="status-view"></div><div class="message"><h2>Talk to ${escapeHtml(supervisor ?? "supervisor")}</h2><textarea id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary" ${!selected || !selectedSession || !supervisor || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" ${delivery ? "" : "hidden"}>${delivery ? `Message sent to ${escapeHtml(delivery.target)}` : ""}</p></div></section>
+          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}>${staleStatusNotice}<div id="status-view"></div><div class="message"><h2>Talk to ${escapeHtml(supervisor ?? "supervisor")}</h2><textarea id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary"${sendReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(sendReason)}"` : ""}>Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-status" class="message-status${composerStatus?.tone === "error" ? " error" : ""}" role="status" ${composerStatus ? "" : "hidden"}>${composerStatus ? escapeHtml(composerStatus.text) : ""}</p><p id="message-delivery" class="message-delivery" role="status" ${delivery ? "" : "hidden"}>${delivery ? `Message sent to ${escapeHtml(delivery.target)}` : ""}</p></div></section>
         </div>
       </aside>
     </div>
@@ -1553,9 +1681,10 @@ function render(captureDraft = true): void {
     </dialog>
     ${pairDialogMarkup()}`;
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
-  if (terminalWasFocused) queueMicrotask(() => activePaneContext()?.surface.focus());
+  const focusWinner = composerFocusWinner({ composerWasFocused, terminalWasFocused });
+  if (focusWinner === "terminal") queueMicrotask(() => activePaneContext()?.surface.focus());
   restoreMessageDraft();
-  if (composerWasFocused) queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus());
+  if (focusWinner === "composer") queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus());
   const machineRail = document.querySelector("#machine-rail-list")!;
   const machineTree = document.querySelector("#machine-tree")!;
   for (const machine of machines.values()) {
@@ -2042,35 +2171,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     if (pane) sendControl(selected.id, selectedSession, { InterruptPane: { pane_id: pane } });
   };
   bindSpeechComposer();
-  document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => {
-    if (!selected || !selectedSession) return;
-    const composer = document.querySelector<HTMLTextAreaElement>("#message-text")!;
-    const text = composer.value.trim();
-    if (!text) {
-      toast("Type a message first");
-      composer.focus();
-      return;
-    }
-    const supervisor = supervisorTarget(sessions.get(selected.id)?.find((item) => item.name === selectedSession));
-    if (!supervisor) {
-      toast("This session has no supervisor target");
-      return;
-    }
-    const sent = sendControl(selected.id, selectedSession, supervisorMessage(supervisor, text));
-    // Without an outcome the operator cannot tell a sent message from a lost
-    // one, and the natural response is to send it a second time.
-    if (!sent) return;
-    composer.value = "";
-    messageDraft = "";
-    messageDraftSelection = 0;
-    messageDelivery = { session: selectedSession, target: supervisor };
-    const delivery = document.querySelector<HTMLElement>("#message-delivery");
-    if (delivery) {
-      delivery.hidden = false;
-      delivery.textContent = `Message sent to ${supervisor}`;
-    }
-    toast(`Message sent to ${supervisor}`);
-  };
+  document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };
 }
 
 function scopeChecks(selectedScopes: readonly Scope[]): string {

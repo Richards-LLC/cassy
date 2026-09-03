@@ -71,6 +71,12 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source.indexOf("captureMessageDraft();")).toBeLessThan(source.indexOf("app.innerHTML ="));
     expect(source.indexOf("app.innerHTML =")).toBeLessThan(source.indexOf("restoreMessageDraft();"));
     expect(source).toContain('const composerWasFocused = document.activeElement?.id === "message-text";');
+    // Both restores fire after the same innerHTML rewrite. Arbitrate them once,
+    // in a tested function, instead of relying on the order two microtasks
+    // happen to be queued in: a terminal that wins swallows the sentence.
+    expect(source).toContain("const focusWinner = composerFocusWinner({ composerWasFocused, terminalWasFocused });");
+    expect(source).toContain('if (focusWinner === "terminal") queueMicrotask(() => activePaneContext()?.surface.focus());');
+    expect(source).toContain('if (focusWinner === "composer") queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus());');
   });
 
   it("reports the outcome of sending a supervisor message", async () => {
@@ -78,10 +84,46 @@ describe("binding Cassy Commander browser invariants", () => {
     // A send with no outcome is indistinguishable from a lost one, and invites a
     // duplicate message to the supervisor.
     expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
-    expect(source).toContain("const sent = sendControl(selected.id, selectedSession, supervisorMessage(supervisor, text));");
-    expect(source).toContain("messageDelivery = { session: selectedSession, target: supervisor };");
+    expect(source).toContain("const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text));");
+    expect(source).toContain("messageDelivery = { session, target: supervisor };");
     expect(source).toContain("toast(`Message sent to ${supervisor}`);");
-    expect(source).toContain('toast("Type a message first");');
+  });
+
+  it("sends the supervisor message from Enter and from the button, through one path", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // Enter was never wired: it inserted a newline and sent nothing, in observe
+    // mode and in control mode alike (measured against the live hub, cas-0d61).
+    expect(source).toContain("composer.onkeydown = (event) => {");
+    expect(source).toContain("if (!sendsOnEnter(event)) return;");
+    expect(source).toContain("void submitSupervisorMessage();");
+    expect(source).toContain('document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };');
+    expect(source).toContain("async function submitSupervisorMessage(): Promise<void> {");
+    expect(source).toContain("const plan = planSupervisorSend(supervisorSendContext(text));");
+  });
+
+  it("never leaves the supervisor send button silently disabled", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // A real `disabled` attribute swallows the tap: no event, no frame, no
+    // reason. Observing operators concluded the feature was broken.
+    expect(main).not.toContain('<button id="message-send" class="primary" ${!selected || !selectedSession || !supervisor || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>');
+    expect(main).toContain('id="message-send"');
+    expect(main).toContain("${sendReason ? ` aria-disabled=\"true\" data-disabled-reason=\"${escapeAttr(sendReason)}\"` : \"\"}");
+    expect(main).toContain('<p id="message-status" class="message-status');
+    expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error"): void {');
+    expect(css).toContain(".message-status {");
+    expect(css).toContain(".message-status.error {");
+  });
+
+  it("takes control to deliver an observed message instead of dropping it", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // The hub refuses SendMessage without this device's session lease
+    // (hub/server.rs handle_client_message), so observe-mode sends need the
+    // lease the operator would otherwise have to take by hand.
+    expect(source).toContain('if (plan.kind === "take-control-then-send") {');
+    expect(source).toContain("async function takeControlForMessage(machine: StoredMachine, session: string): Promise<boolean> {");
+    expect(source).toContain("await connections.get(machine.id)?.requestControl(session, false);");
+    expect(source).toContain("return leases.get(sessionKey(machine.id, session))?.held_by_me === true;");
+    expect(source).toContain("Could not take control of ${session}");
   });
 
   it("collapses one outage into one attention card per machine and session", async () => {
@@ -269,7 +311,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).toContain("currentGrid?.dataset.sessionKey === terminalSessionKey");
     expect(source).toContain("replaceWith(preservedGrid)");
     expect(source).toContain('document.activeElement?.matches(".t3-ghostty-input")');
-    expect(source).toContain("terminalWasFocused) queueMicrotask(() => activePaneContext()?.surface.focus())");
+    expect(source).toContain('if (focusWinner === "terminal") queueMicrotask(() => activePaneContext()?.surface.focus());');
     expect(source).toContain("data-session-key");
   });
 
@@ -388,7 +430,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain("padding-right: calc(var(--mobile-context-pill-width) + var(--space-1))");
     // Tapping the envelope must land on the composer it advertises.
     expect(main).toContain('document.querySelector<HTMLTextAreaElement>("#message-text")');
-    expect(main).toContain("else composer?.focus();");
+    expect(main).toContain("composer?.focus();");
   });
 
   it("keeps a dedicated one-handed supervisor action and voice-first phone composer", async () => {
@@ -397,7 +439,13 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).toContain("Talk to supervisor");
     expect(main).toContain('id="message-mic"');
     expect(main).toContain('id="message-keyboard"');
-    expect(main).toContain("if (phoneLayout() && mic && !mic.hidden) mic.focus();");
+    // Opening the composer focuses the composer on every layout. Focusing the
+    // mic button first made the phone composer unusable by keyboard: the caret
+    // was never in the textarea, so the operator's typing went nowhere and
+    // Enter toggled dictation (operator report, cas-0d61). Voice stays one
+    // labelled tap away.
+    expect(main).not.toContain("if (phoneLayout() && mic && !mic.hidden) mic.focus();");
+    expect(main).toContain("// Voice is one labelled tap away; focus belongs in the field that accepts text.");
     expect(css).toContain(".talk-supervisor {");
     expect(css).toContain("#message-mic {");
     expect(css).toContain("grid-column: 1 / -1;");

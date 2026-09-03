@@ -898,7 +898,10 @@ impl PushRowResult {
         };
         matches!(
             reason.to_ascii_lowercase().as_str(),
-            "retryable"
+            // A stale base revision is a lost race, not a bad row: the next
+            // cycle pulls the winning state and retries from a valid base.
+            "revision_conflict"
+                | "retryable"
                 | "temporary"
                 | "transient"
                 | "server_error"
@@ -1187,6 +1190,73 @@ impl PushResponse {
             return Ok(None);
         };
         itemized_failures_for(entity, entity_type, skipped, queued_ids)
+    }
+
+    /// Locate the per-type detail object for `entity_type`.
+    ///
+    /// The personal route puts per-type keys at the top level; the team route
+    /// nests them under `synced`. Both are checked so revision handling works
+    /// on either envelope.
+    fn entity_detail(&self, entity_type: &str) -> Option<&serde_json::Value> {
+        self.fields.get(entity_type).or_else(|| {
+            self.fields
+                .get("synced")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|synced| synced.get(entity_type))
+        })
+    }
+
+    /// Server revisions echoed for rows this push accepted.
+    ///
+    /// Shape: `<type>.accepted[<id>] = {revision, canonical_id}`. Storing these
+    /// keeps the client's base revision current without a follow-up pull; the
+    /// next push for the row then declares a base the server will accept.
+    pub(crate) fn accepted_revisions_for(&self, entity_type: &str) -> HashMap<String, i64> {
+        let mut revisions = HashMap::new();
+        let Some(accepted) = self
+            .entity_detail(entity_type)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|entity| entity.get("accepted"))
+            .and_then(serde_json::Value::as_object)
+        else {
+            return revisions;
+        };
+        for (id, receipt) in accepted {
+            if let Some(revision) = crate::cloud::parse_wire_revision(receipt.get("revision")) {
+                revisions.insert(id.clone(), revision);
+            }
+        }
+        revisions
+    }
+
+    /// Rows the server refused because our base revision was stale, mapped to
+    /// the revision the server actually holds.
+    pub(crate) fn revision_conflicts_for(&self, entity_type: &str) -> HashMap<String, Option<i64>> {
+        let mut conflicts = HashMap::new();
+        let Some(rejected) = self
+            .entity_detail(entity_type)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|entity| entity.get("rejected"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            return conflicts;
+        };
+        for rejection in rejected {
+            let is_revision_conflict = rejection
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|reason| reason == "revision_conflict");
+            if !is_revision_conflict {
+                continue;
+            }
+            if let Some(id) = rejection.get("id").and_then(serde_json::Value::as_str) {
+                conflicts.insert(
+                    id.to_string(),
+                    crate::cloud::parse_wire_revision(rejection.get("current_revision")),
+                );
+            }
+        }
+        conflicts
     }
 
     pub(crate) fn row_results_for(

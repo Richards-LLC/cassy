@@ -2045,3 +2045,237 @@ async fn the_revision_ledger_is_monotonic_and_scoped_per_entity_type() {
     queue.clear_revision(EntityType::Task, "cas-c32f-led").unwrap();
     assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), None);
 }
+
+// --- cas-c32f milestone 2: the base revision on the wire, and the receipts ---
+
+fn decode_push_body(request: &wiremock::Request) -> serde_json::Value {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let mut decoder = GzDecoder::new(request.body.as_slice());
+    let mut decoded = Vec::new();
+    if decoder.read_to_end(&mut decoded).is_ok() {
+        if let Ok(value) = serde_json::from_slice(&decoded) {
+            return value;
+        }
+    }
+    serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null)
+}
+
+#[test]
+fn accepted_and_conflicting_revisions_are_read_from_either_envelope() {
+    // Personal puts per-type keys at the top level; team nests them under
+    // `synced`. Both must yield the same receipts, or team pushes would
+    // silently never learn a revision.
+    let personal: PushResponse = serde_json::from_value(serde_json::json!({
+        "tasks": {
+            "inserted": 1, "updated": 0, "skipped": 1,
+            "accepted": {"cas-ok": {"revision": "6", "canonical_id": "cas-src"}},
+            "rejected": [{
+                "id": "cas-stale", "reason": "revision_conflict",
+                "existing_canonical_id": "cas-src", "current_revision": "9"
+            }]
+        },
+        "rows": [
+            {"entity_type": "tasks", "id": "cas-ok", "outcome": "updated"},
+            {"entity_type": "tasks", "id": "cas-stale", "outcome": "rejected", "reason": "revision_conflict"}
+        ]
+    }))
+    .unwrap();
+    let team: PushResponse = serde_json::from_value(serde_json::json!({
+        "synced": {
+            "tasks": {
+                "inserted": 1, "updated": 0, "skipped": 1,
+                "accepted": {"cas-ok": {"revision": "6", "canonical_id": "cas-src"}},
+                "rejected": [{
+                    "id": "cas-stale", "reason": "revision_conflict",
+                    "existing_canonical_id": "cas-src", "current_revision": "9"
+                }]
+            }
+        }
+    }))
+    .unwrap();
+
+    for response in [&personal, &team] {
+        assert_eq!(
+            response.accepted_revisions_for("tasks").get("cas-ok"),
+            Some(&6)
+        );
+        assert_eq!(
+            response.revision_conflicts_for("tasks").get("cas-stale"),
+            Some(&Some(9))
+        );
+        // A rejection for another reason is not a revision conflict.
+        assert!(!response.revision_conflicts_for("tasks").contains_key("cas-ok"));
+    }
+}
+
+#[test]
+fn a_stale_base_is_retryable_rather_than_parked() {
+    // Losing the race is a stale base, not a bad row: parking it would strand
+    // the user's edit behind a manual requeue.
+    let conflict = PushRowResult {
+        id: "cas-stale".to_string(),
+        outcome: PushRowOutcome::Rejected,
+        reason: Some("revision_conflict".to_string()),
+    };
+    assert!(conflict.rejection_is_retryable());
+    // An unknown reason still parks — losing a diagnostic row is worse.
+    let unknown = PushRowResult {
+        id: "cas-unknown".to_string(),
+        outcome: PushRowOutcome::Rejected,
+        reason: Some("something_new".to_string()),
+    };
+    assert!(!unknown.rejection_is_retryable());
+}
+
+#[tokio::test]
+async fn push_declares_the_stored_base_revision_and_omits_it_when_unknown() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tasks": {
+                "inserted": 0, "updated": 2, "skipped": 0,
+                "accepted": {
+                    "cas-c32f-known": {"revision": "8", "canonical_id": "p"},
+                    "cas-c32f-new": {"revision": "1", "canonical_id": "p"}
+                }
+            },
+            "rows": [
+                {"entity_type": "tasks", "id": "cas-c32f-known", "outcome": "updated"},
+                {"entity_type": "tasks", "id": "cas-c32f-new", "outcome": "inserted"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    // One row whose revision we have observed, one we have never pulled.
+    queue.record_revision(EntityType::Task, "cas-c32f-known", 7).unwrap();
+    for id in ["cas-c32f-known", "cas-c32f-new"] {
+        queue
+            .enqueue(
+                EntityType::Task,
+                id,
+                crate::cloud::SyncOperation::Upsert,
+                Some(&serde_json::json!({"id": id, "title": "t"}).to_string()),
+            )
+            .unwrap();
+    }
+
+    let syncer = CloudSyncer::new_for_project(
+        Arc::clone(&queue),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "p".to_string(),
+        temp.path(),
+    );
+    tokio::task::spawn_blocking(move || syncer.push())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = requests
+        .iter()
+        .find_map(|request| {
+            let decoded = decode_push_body(request);
+            decoded
+                .get("tasks")
+                .is_some_and(|tasks| !tasks.as_array().unwrap_or(&vec![]).is_empty())
+                .then_some(decoded)
+        })
+        .expect("a task push must have been sent");
+    let tasks = body["tasks"].as_array().unwrap();
+    let known = tasks
+        .iter()
+        .find(|task| task["id"] == "cas-c32f-known")
+        .unwrap();
+    let fresh = tasks
+        .iter()
+        .find(|task| task["id"] == "cas-c32f-new")
+        .unwrap();
+    // Known row declares its base as a decimal STRING; unknown row omits the
+    // key entirely, which is what selects the server's timestamp path. A
+    // placeholder would be dropped by the server as an unparseable revision.
+    assert_eq!(known["revision"], serde_json::json!("7"));
+    assert!(
+        fresh.get("revision").is_none(),
+        "a row with no observed revision must omit the key, not send a placeholder"
+    );
+
+    // The echoed revisions are stored, so the next push declares a base the
+    // server will accept without a re-pull first.
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-known").unwrap(), Some(8));
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-new").unwrap(), Some(1));
+}
+
+#[tokio::test]
+async fn a_rejected_stale_base_is_forgotten_rather_than_replaced() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tasks": {
+                "inserted": 0, "updated": 0, "skipped": 1,
+                "rejected": [{
+                    "id": "cas-c32f-lost", "reason": "revision_conflict",
+                    "existing_canonical_id": "p", "current_revision": "12"
+                }]
+            },
+            "rows": [{
+                "entity_type": "tasks", "id": "cas-c32f-lost",
+                "outcome": "rejected", "reason": "revision_conflict"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    queue.record_revision(EntityType::Task, "cas-c32f-lost", 4).unwrap();
+    queue
+        .enqueue(
+            EntityType::Task,
+            "cas-c32f-lost",
+            crate::cloud::SyncOperation::Upsert,
+            Some(&serde_json::json!({"id": "cas-c32f-lost", "title": "t"}).to_string()),
+        )
+        .unwrap();
+
+    let syncer = CloudSyncer::new_for_project(
+        Arc::clone(&queue),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "p".to_string(),
+        temp.path(),
+    );
+    let _ = tokio::task::spawn_blocking(move || syncer.push()).await.unwrap();
+
+    // The proven-stale base is dropped, NOT replaced with the server's current
+    // revision: adopting a revision whose body we have never seen would let the
+    // next push overwrite a change this machine never looked at.
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-lost").unwrap(), None);
+    // The edit itself stays queued for the next cycle rather than being parked.
+    assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+}

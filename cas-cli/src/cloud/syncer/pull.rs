@@ -1561,6 +1561,11 @@ impl CloudSyncer {
                 continue;
             }
             let remote_updated_at = pulled_entry_updated_at(&raw_entry);
+            let entry_revision = crate::cloud::wire_revision(&raw_entry);
+            let entry_revision_id = raw_entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
             let remote_entry: Entry = match deserialize_pulled_entity(raw_entry, "entry") {
                 Ok(e) => e,
                 Err(e) => {
@@ -1573,6 +1578,9 @@ impl CloudSyncer {
             match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_entries += 1;
+                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
+                        let _ = self.queue.record_revision(EntityType::Entry, id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -1594,6 +1602,7 @@ impl CloudSyncer {
             // close — apply it authoritatively rather than via the
             // timestamp-gated upsert.
             let web_close = is_web_close_tombstone(&raw_task);
+            let task_revision = crate::cloud::wire_revision(&raw_task);
             render_task_proposal_provenance(&mut raw_task);
             let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
@@ -1632,6 +1641,11 @@ impl CloudSyncer {
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_tasks += 1;
+                    if let Some(revision) = task_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Task, &remote_task.id, revision);
+                    }
                     if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
                         result.task_status_transitions.push(TaskStatusTransition {
                             task_id: remote_task.id,
@@ -2452,6 +2466,11 @@ impl CloudSyncer {
                 continue;
             }
             let remote_updated_at = pulled_entry_updated_at(&raw_entry);
+            let entry_revision = crate::cloud::wire_revision(&raw_entry);
+            let entry_revision_id = raw_entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
             let remote_entry: Entry = match deserialize_pulled_entity(raw_entry, "entry") {
                 Ok(e) => e,
                 Err(e) => {
@@ -2464,6 +2483,9 @@ impl CloudSyncer {
             match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_entries += 1;
+                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
+                        let _ = self.queue.record_revision(EntityType::Entry, id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.record_local_conflict();
@@ -2488,6 +2510,7 @@ impl CloudSyncer {
         for mut raw_task in raw_tasks {
             render_task_proposal_provenance(&mut raw_task);
             let wire_is_owner = task_wire_is_owner(&raw_task, current_project_id);
+            let team_task_revision = crate::cloud::wire_revision(&raw_task);
             let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
@@ -2516,6 +2539,11 @@ impl CloudSyncer {
             ) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_tasks += 1;
+                    if let Some(revision) = team_task_revision {
+                        let _ = self
+                            .queue
+                            .record_revision(EntityType::Task, &remote_task.id, revision);
+                    }
                     if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
                         result.task_status_transitions.push(TaskStatusTransition {
                             task_id: remote_task.id,

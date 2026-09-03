@@ -1944,6 +1944,13 @@ struct EmbeddingDrainState {
     /// is running at all. `None` means it has never completed a pass, which is
     /// a different fact from "there was nothing to do".
     last_attempt: Option<String>,
+    /// Units the provider refused, retired from the queue with the refusal
+    /// stored on the row. These are NOT pending: they are waiting on a
+    /// decision, not on a tick, and reporting them inside the backlog is how
+    /// a permanent refusal hides as an ordinary queue (GH #695).
+    quarantined: i64,
+    /// The provider's own words for the most recent refusal.
+    quarantine_error: Option<String>,
 }
 
 impl EmbeddingDrainState {
@@ -1975,6 +1982,12 @@ fn gather_embedding_drain_state(cas_root: &Path) -> EmbeddingDrainState {
             state.commits_pending = commits;
             state.docs_pending = docs;
         }
+        if let Ok((commits, docs)) = store.count_quarantined_embedding() {
+            state.quarantined = commits + docs;
+        }
+        if let Ok(error) = store.last_quarantined_embedding_error() {
+            state.quarantine_error = error;
+        }
         if let Ok(repo_root) = crate::history::repo_root_for(cas_root) {
             let repository = crate::history::repository_id(&repo_root);
             if let Ok(Some(ledger)) = store.index_state(&repository, SOURCE_EMBEDDINGS) {
@@ -1987,9 +2000,30 @@ fn gather_embedding_drain_state(cas_root: &Path) -> EmbeddingDrainState {
     state
 }
 
+/// One clause naming the refused units and how to re-arm them, or nothing.
+///
+/// Kept separate from the pending backlog in every branch: a quarantined unit
+/// is not draining on the next tick, and folding the two counts together is
+/// what let a permanent provider refusal read as an ordinary queue for three
+/// days (GH #695).
+fn quarantine_clause(state: &EmbeddingDrainState) -> String {
+    if state.quarantined == 0 {
+        return String::new();
+    }
+    let reason = match &state.quarantine_error {
+        Some(error) => format!(" — the provider said: {error}"),
+        None => String::new(),
+    };
+    format!(
+        "; {} unit(s) quarantined after the provider refused them{reason};          Run `cas history embed --retry-quarantined` once the cause is fixed",
+        state.quarantined
+    )
+}
+
 fn embedding_drain_check(state: EmbeddingDrainState) -> Check {
     let name = "embedding drain".to_string();
     let pending = state.total_pending();
+    let quarantined = quarantine_clause(&state);
 
     // A real failure outranks everything else: it is the reason the queue is
     // not moving, and it must never be summarised away as a backlog.
@@ -1998,7 +2032,7 @@ fn embedding_drain_check(state: EmbeddingDrainState) -> Check {
             name,
             status: CheckStatus::Warning,
             message: format!(
-                "last drain reported: {error} ({pending} unit(s) still awaiting a vector)"
+                "last drain reported: {error} ({pending} unit(s) still awaiting a vector){quarantined}"
             ),
         };
     }
@@ -2025,13 +2059,21 @@ fn embedding_drain_check(state: EmbeddingDrainState) -> Check {
     }
 
     if pending == 0 {
+        let drained = match &state.last_attempt {
+            Some(at) => format!("nothing pending (last drain {at})"),
+            None => "nothing pending".to_string(),
+        };
         return Check {
             name,
-            status: CheckStatus::Ok,
-            message: match &state.last_attempt {
-                Some(at) => format!("nothing pending (last drain {at})"),
-                None => "nothing pending".to_string(),
+            // An empty queue with refused units is not a clean bill of health:
+            // part of the corpus has no vector and never will until someone
+            // acts. Saying "nothing pending" alone would be true and useless.
+            status: if state.quarantined > 0 {
+                CheckStatus::Warning
+            } else {
+                CheckStatus::Ok
             },
+            message: format!("{drained}{quarantined}"),
         };
     }
 
@@ -2039,10 +2081,14 @@ fn embedding_drain_check(state: EmbeddingDrainState) -> Check {
     // job across ticks — say so, and say how deep it is.
     Check {
         name,
-        status: CheckStatus::Ok,
+        status: if state.quarantined > 0 {
+            CheckStatus::Warning
+        } else {
+            CheckStatus::Ok
+        },
         message: format!(
             "{pending} unit(s) queued ({} page(s), {} commit(s), {} doc(s)); the daemon drains \
-             them on its tick{}",
+             them on its tick{}{quarantined}",
             state.pages_pending,
             state.commits_pending,
             state.docs_pending,
@@ -3995,6 +4041,66 @@ mod tests {
         // A backlog with a working drain is progress, not a fault.
         assert!(matches!(check.status, CheckStatus::Ok));
         assert!(check.message.contains("110"), "message: {}", check.message);
+    }
+
+    /// GH #695: refused units are reported apart from the backlog, name the
+    /// provider's reason, and carry the command that re-arms them. An empty
+    /// queue with refusals in it is not a clean bill of health.
+    #[test]
+    fn embedding_drain_check_separates_quarantined_units_from_the_backlog() {
+        let check = embedding_drain_check(EmbeddingDrainState {
+            capability: true,
+            commits_pending: 12,
+            quarantined: 5,
+            quarantine_error: Some(
+                "Embedding request rejected with status 502: {\"error\":\"Embedding provider returned 400\"}"
+                    .to_string(),
+            ),
+            last_attempt: Some("2026-09-03T21:00:00Z".to_string()),
+            ..Default::default()
+        });
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("12 unit(s) queued"), "{}", check.message);
+        assert!(
+            check.message.contains("5 unit(s) quarantined"),
+            "the refused units must not be folded into the backlog: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("provider returned 400"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cas history embed --retry-quarantined"),
+            "a count without a move is not actionable: {}",
+            check.message
+        );
+
+        // Drained to zero, but part of the corpus has no vector and never will
+        // until someone acts: that is a warning, not "nothing pending".
+        let drained = embedding_drain_check(EmbeddingDrainState {
+            capability: true,
+            quarantined: 2,
+            last_attempt: Some("2026-09-03T21:00:00Z".to_string()),
+            ..Default::default()
+        });
+        assert!(matches!(drained.status, CheckStatus::Warning));
+        assert!(drained.message.contains("nothing pending"), "{}", drained.message);
+        assert!(
+            drained.message.contains("2 unit(s) quarantined"),
+            "{}",
+            drained.message
+        );
+
+        // No refusals: the line stays exactly as it was.
+        let clean = embedding_drain_check(EmbeddingDrainState {
+            capability: true,
+            last_attempt: Some("2026-09-03T21:00:00Z".to_string()),
+            ..Default::default()
+        });
+        assert!(matches!(clean.status, CheckStatus::Ok));
+        assert!(!clean.message.contains("quarantined"), "{}", clean.message);
     }
 
     #[test]

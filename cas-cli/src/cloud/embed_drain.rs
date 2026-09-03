@@ -41,7 +41,8 @@ use cas_store::{
 use crate::cloud::CloudConfig;
 use crate::cloud::embeddings::{
     DEFAULT_EMBED_BATCH, EmbedReport, EmbedUnit, KnowledgeEmbedder, KnowledgeVectorCache,
-    RateLimiter, drain_units, embed_pending_pages, history_commit_key, history_doc_key,
+    MAX_EMBED_TEXT_CHARS, RateLimiter, cap_embedding_text, drain_units_with_quarantine,
+    embed_pending_pages, history_commit_key, history_doc_key,
 };
 use crate::error::CasError;
 
@@ -89,6 +90,20 @@ impl DrainReport {
             + self.code.as_ref().map_or(0, |r| r.pending_after)
     }
 
+    /// Units the provider refused this tick, retired from the queue with the
+    /// refusal recorded on the row.
+    ///
+    /// Deliberately absent from [`Self::problems`]: a quarantined unit is a
+    /// durable fact stored per row and read by `cas doctor` from the store, not
+    /// a failure of this run. Folding it into the run's error ledger is exactly
+    /// what froze the doctor line at one provider message for three days
+    /// (GH #695).
+    pub fn quarantined(&self) -> usize {
+        self.knowledge.as_ref().map_or(0, |r| r.quarantined)
+            + self.history.as_ref().map_or(0, |r| r.quarantined)
+            + self.code.as_ref().map_or(0, |r| r.quarantined)
+    }
+
     /// Every problem worth showing a human, verbatim.
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -121,7 +136,7 @@ impl DrainReport {
     }
 
     pub fn did_work(&self) -> bool {
-        self.embedded() > 0 || self.skipped() > 0
+        self.embedded() > 0 || self.skipped() > 0 || self.quarantined() > 0
     }
 }
 
@@ -137,9 +152,10 @@ pub fn is_noise_merge_subject(subject: &str) -> bool {
     subject.starts_with("Merge branch") || subject.starts_with("Merge pull request")
 }
 
-/// Embedded text for a commit: `subject + "\n" + body` (spec §4.4).
+/// Embedded text for a commit: `subject + "\n" + body` (spec §4.4), capped at
+/// [`MAX_EMBED_TEXT_CHARS`].
 pub fn commit_embedding_text(commit: &HistoryCommit) -> String {
-    match commit
+    let text = match commit
         .body
         .as_deref()
         .map(str::trim)
@@ -147,7 +163,8 @@ pub fn commit_embedding_text(commit: &HistoryCommit) -> String {
     {
         Some(body) => format!("{}\n{}", commit.subject, body),
         None => commit.subject.clone(),
-    }
+    };
+    cap_embedding_text(text)
 }
 
 /// Embedded text for a doc: `title + body` (spec §4.4).
@@ -158,12 +175,13 @@ pub fn commit_embedding_text(commit: &HistoryCommit) -> String {
 pub fn doc_embedding_text(doc: &HistoryDoc) -> String {
     let title = doc.title.as_deref().unwrap_or("").trim();
     let body = doc.body.as_deref().unwrap_or("").trim();
-    match (title.is_empty(), body.is_empty()) {
+    let text = match (title.is_empty(), body.is_empty()) {
         (false, false) => format!("{title}\n\n{body}"),
         (false, true) => title.to_string(),
         (true, false) => body.to_string(),
         (true, true) => String::new(),
-    }
+    };
+    cap_embedding_text(text)
 }
 
 /// Embed up to `limit` pending history units (commits first, then docs).
@@ -224,7 +242,20 @@ pub fn embed_pending_history(
 
     {
         let mut mark = |sha: &str| store.mark_commit_embedded(sha).map_err(|e| e.to_string());
-        drain_units(embedder, cache, &units, limiter, &mut mark, &mut report);
+        let mut quarantine = |sha: &str, error: &str| {
+            store
+                .quarantine_commit_embedding(sha, error)
+                .map_err(|e| e.to_string())
+        };
+        drain_units_with_quarantine(
+            embedder,
+            cache,
+            &units,
+            limiter,
+            &mut mark,
+            &mut Some(&mut quarantine),
+            &mut report,
+        );
     }
 
     // Docs are only attempted when the commit half did not hit a systemic
@@ -255,7 +286,20 @@ pub fn embed_pending_history(
         }
 
         let mut mark = |id: &str| store.mark_doc_embedded(id).map_err(|e| e.to_string());
-        drain_units(embedder, cache, &doc_units, limiter, &mut mark, &mut report);
+        let mut quarantine = |id: &str, error: &str| {
+            store
+                .quarantine_doc_embedding(id, error)
+                .map_err(|e| e.to_string())
+        };
+        drain_units_with_quarantine(
+            embedder,
+            cache,
+            &doc_units,
+            limiter,
+            &mut mark,
+            &mut Some(&mut quarantine),
+            &mut report,
+        );
     }
 
     let (commits_pending, docs_pending) = store
@@ -701,6 +745,224 @@ mod tests {
             &[1],
             "the skipped merge must never reach the provider"
         );
+    }
+
+    /// A provider that refuses any request containing `poison`, in the exact
+    /// shape the deployed cloud emits today: the upstream 400 arrives wrapped
+    /// as a gateway 502 (`{"error":"Embedding provider returned 400"}`,
+    /// GH #695). Every other request succeeds.
+    struct RejectsPoison {
+        dims: usize,
+        poison: String,
+        requests: std::sync::Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl wiremock::Respond for RejectsPoison {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            *self.requests.lock().unwrap() += 1;
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let inputs = body.get("input").and_then(|v| v.as_array()).unwrap();
+            if inputs
+                .iter()
+                .any(|i| i.as_str().is_some_and(|t| t.contains(&self.poison)))
+            {
+                return wiremock::ResponseTemplate::new(502).set_body_json(
+                    serde_json::json!({"error": "Embedding provider returned 400"}),
+                );
+            }
+            let vectors: Vec<Vec<f32>> = (0..inputs.len())
+                .map(|i| {
+                    let mut v = vec![0.0f32; self.dims];
+                    v[i % self.dims] = 1.0;
+                    v
+                })
+                .collect();
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "embeddings": vectors }))
+        }
+    }
+
+    /// GH #695, the whole defect in one test: one unit the provider refuses
+    /// must not strand the corpus behind it. The refused unit is quarantined
+    /// with the provider's message, every neighbour in the same chunk is
+    /// embedded in the SAME run, and pending reaches zero.
+    #[tokio::test]
+    async fn one_refused_unit_is_quarantined_and_its_neighbours_still_embed() {
+        use wiremock::{Mock, MockServer, matchers::method, matchers::path};
+
+        let requests = Arc::new(Mutex::new(0usize));
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embeddings"))
+            .respond_with(RejectsPoison {
+                dims: 4,
+                poison: "POISON-BODY".to_string(),
+                requests: Arc::clone(&requests),
+            })
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let (report, pending, quarantined, last_error) = tokio::task::spawn_blocking(move || {
+            // 40 commits so the drain issues more than one 32-input chunk, with
+            // the poison unit buried in the middle of the first one.
+            let commits: Vec<HistoryCommit> = (0..40)
+                .map(|i| {
+                    commit(
+                        &format!("{i:040x}"),
+                        &format!("feat: change number {i}"),
+                        Some(if i == 11 { "POISON-BODY" } else { "body text" }),
+                    )
+                })
+                .collect();
+            seed_history(&root, &commits, &[]);
+
+            let embedder =
+                KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-model", 4);
+            let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap();
+            let store = cas_store::SqliteHistoryStore::open(&root).unwrap();
+            let (c, d) = store.count_pending_embedding().unwrap();
+            let (qc, qd) = store.count_quarantined_embedding().unwrap();
+            (
+                report,
+                c + d,
+                qc + qd,
+                store.last_quarantined_embedding_error().unwrap(),
+            )
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.embedded(), 39, "every healthy unit embeds this run");
+        assert_eq!(report.quarantined(), 1);
+        assert_eq!(quarantined, 1, "the refusal is durable on the row");
+        assert_eq!(
+            pending, 0,
+            "the backlog must reach zero instead of parking behind one unit"
+        );
+        assert!(
+            last_error.is_some_and(|e| e.contains("provider returned 400")),
+            "the provider's own words must survive for reporting"
+        );
+        assert!(
+            report.problems().is_empty(),
+            "a quarantined unit is a stored fact, not a permanent drain error: {:?}",
+            report.problems()
+        );
+        // Bisecting 32 inputs costs a bounded handful of extra requests, not a
+        // per-unit retry storm.
+        let issued = *requests.lock().unwrap();
+        assert!(
+            (2..=16).contains(&issued),
+            "expected a bisect, not a scan: {issued} requests"
+        );
+    }
+
+    /// The docs half must not be starved by a refused commit. Before GH #695's
+    /// fix a failing commit chunk set `request_errors`, and the doc queue was
+    /// skipped entirely on every tick.
+    #[tokio::test]
+    async fn a_refused_commit_does_not_starve_the_doc_queue() {
+        use wiremock::{Mock, MockServer, matchers::method, matchers::path};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embeddings"))
+            .respond_with(RejectsPoison {
+                dims: 4,
+                poison: "POISON-BODY".to_string(),
+                requests: Arc::new(Mutex::new(0)),
+            })
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let (report, pending) = tokio::task::spawn_blocking(move || {
+            seed_history(
+                &root,
+                &[commit(&format!("{:040x}", 1), "feat: poison", Some("POISON-BODY"))],
+                &[doc("gh:issue:1", "An issue", "ordinary text")],
+            );
+            let embedder =
+                KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-model", 4);
+            let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap();
+            let store = cas_store::SqliteHistoryStore::open(&root).unwrap();
+            let (c, d) = store.count_pending_embedding().unwrap();
+            (report, c + d)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.quarantined(), 1);
+        assert_eq!(report.embedded(), 1, "the doc embeds despite the bad commit");
+        assert_eq!(pending, 0);
+    }
+
+    /// A gateway outage is not a refusal. A 502 whose body does not name a
+    /// provider 4xx must keep its units pending for the next tick, because a
+    /// retry genuinely can succeed.
+    #[tokio::test]
+    async fn a_plain_gateway_failure_still_defers_instead_of_quarantining() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method, matchers::path};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embeddings"))
+            .respond_with(ResponseTemplate::new(502).set_body_string("upstream unavailable"))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let (report, pending, quarantined) = tokio::task::spawn_blocking(move || {
+            seed_history(
+                &root,
+                &[commit(&format!("{:040x}", 2), "feat: a change", None)],
+                &[],
+            );
+            let embedder =
+                KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-model", 4);
+            let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap();
+            let store = cas_store::SqliteHistoryStore::open(&root).unwrap();
+            let (c, d) = store.count_pending_embedding().unwrap();
+            let (qc, qd) = store.count_quarantined_embedding().unwrap();
+            (report, c + d, qc + qd)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.quarantined(), 0, "an outage is not the unit's fault");
+        assert_eq!(quarantined, 0);
+        assert_eq!(pending, 1, "the unit waits for the next tick");
+        assert!(report.problems().iter().any(|p| p.contains("502")));
+    }
+
+    /// The measured cliff from GH #695: bodies over ~34k chars are refused by
+    /// the model. Capping the text keeps those commits searchable instead of
+    /// quarantining them.
+    #[test]
+    fn oversized_commit_text_is_capped_on_a_char_boundary() {
+        let huge = "é".repeat(MAX_EMBED_TEXT_CHARS * 2);
+        let squashed = commit(&format!("{:040x}", 9), "squash: everything", Some(&huge));
+        let text = commit_embedding_text(&squashed);
+
+        assert_eq!(text.chars().count(), MAX_EMBED_TEXT_CHARS);
+        assert!(
+            text.starts_with("squash: everything"),
+            "the subject is the most useful part and must survive the cap"
+        );
+
+        // Ordinary units are untouched.
+        let small = commit(&format!("{:040x}", 10), "feat: small", Some("body"));
+        assert_eq!(commit_embedding_text(&small), "feat: small\nbody");
     }
 
     /// AC3. A request-level failure is reported and the rows stay pending —

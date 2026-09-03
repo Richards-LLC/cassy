@@ -105,14 +105,22 @@ impl EmbeddingMeta {
 pub enum EmbedError {
     /// The endpoint does not implement `/api/embeddings` (404/501).
     Unsupported(String),
-    /// Auth, rate limit, payload, transport or malformed-response failure.
+    /// Auth, rate limit, transport or malformed-response failure. Retrying the
+    /// same request later can succeed, so the drain defers rather than discards.
     Failed(String),
+    /// The provider refused this input and will refuse it again: the payload
+    /// itself is the problem (over the model's token cap, malformed, wrong
+    /// type). Retrying is guaranteed to fail, so the drain must isolate the
+    /// offending unit instead of halting the corpus behind it (GH #695).
+    Rejected(String),
 }
 
 impl std::fmt::Display for EmbedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EmbedError::Unsupported(m) | EmbedError::Failed(m) => write!(f, "{m}"),
+            EmbedError::Unsupported(m) | EmbedError::Failed(m) | EmbedError::Rejected(m) => {
+                write!(f, "{m}")
+            }
         }
     }
 }
@@ -161,6 +169,13 @@ pub struct EmbedReport {
     /// `Merge branch 'x'` (spec §7.1, §12 Q5). Counted rather than silent, so
     /// "embedded + skipped < listed" is always explainable.
     pub skipped: usize,
+    /// Units the provider refused and this run retired from the queue with the
+    /// refusal recorded. Unlike `deferred` these will never be retried on their
+    /// own: something about the payload has to change first.
+    pub quarantined: usize,
+    /// `(id, provider message)` for each quarantined unit, so the reason is
+    /// reportable rather than only countable.
+    pub quarantine_errors: Vec<(String, String)>,
 }
 
 impl EmbedReport {
@@ -282,6 +297,11 @@ impl KnowledgeEmbedder {
                         self.endpoint
                     )));
                 }
+                if is_provider_rejection(code, &body) {
+                    return Err(EmbedError::Rejected(format!(
+                        "Embedding request rejected with status {code}: {body}"
+                    )));
+                }
                 return Err(EmbedError::Failed(format!(
                     "Embedding request failed with status {code}: {body}"
                 )));
@@ -305,6 +325,60 @@ impl KnowledgeEmbedder {
 
         Ok(vectors)
     }
+}
+
+/// Longest text this drain will send for one unit.
+///
+/// The provider's model caps input at 8,192 tokens. GH #695 measured the cliff
+/// on real commits: 34,139 chars embedded, 43,392 chars was refused — roughly
+/// four chars per token. 24,000 chars (~6k tokens) sits comfortably under it
+/// with room for the tokenizer's worst case on dense text.
+///
+/// Truncating beats quarantining here. A squash-merge commit whose body
+/// concatenates 2,800 lines of sub-commit messages still has its subject and
+/// leading summary in the first 24k chars, so a truncated vector is a useful
+/// answer to "what was this commit about"; no vector at all is not. Quarantine
+/// remains the sink for whatever the provider still refuses.
+pub const MAX_EMBED_TEXT_CHARS: usize = 24_000;
+
+/// Cut `text` to [`MAX_EMBED_TEXT_CHARS`] on a char boundary.
+///
+/// Char-counted, not byte-sliced: a naive `&text[..n]` panics mid-codepoint on
+/// any commit message with an emoji or accented name in it.
+pub fn cap_embedding_text(text: String) -> String {
+    if text.chars().count() <= MAX_EMBED_TEXT_CHARS {
+        return text;
+    }
+    text.chars().take(MAX_EMBED_TEXT_CHARS).collect()
+}
+
+/// Is this HTTP answer the provider refusing the payload, rather than the
+/// service being unavailable?
+///
+/// Two shapes count, because the deployed gateway currently emits the second:
+///
+/// 1. A direct client-error status — 400/413/422 — which by definition says the
+///    request itself is unacceptable.
+/// 2. Any status whose body names a provider 4xx, e.g.
+///    `502 {"error":"Embedding provider returned 400"}`. The cloud wraps the
+///    upstream 400 as a gateway error (petra-stella-cloud#63 tracks the server
+///    half), so status alone would read a permanent refusal as a transient
+///    outage and retry it forever — the exact GH #695 defect.
+///
+/// A bare 502/503/504 with no provider status in the body stays retryable: a
+/// real gateway outage must not quarantine the units caught in it.
+pub fn is_provider_rejection(status: u16, body: &str) -> bool {
+    if matches!(status, 400 | 413 | 422) {
+        return true;
+    }
+    let body = body.to_ascii_lowercase();
+    let Some(rest) = body.split("provider returned ").nth(1) else {
+        return false;
+    };
+    rest.trim_start()
+        .get(..3)
+        .and_then(|code| code.parse::<u16>().ok())
+        .is_some_and(|code| (400..500).contains(&code))
 }
 
 /// Extract vectors from the committed response shape.
@@ -761,7 +835,7 @@ pub fn embed_pending_pages(
             EmbedUnit::new(
                 page.id.clone(),
                 page.id.clone(),
-                page_embedding_text(page, &body),
+                cap_embedding_text(page_embedding_text(page, &body)),
             )
         })
         .collect();
@@ -827,53 +901,123 @@ pub fn drain_units(
     mark: &mut dyn FnMut(&str) -> Result<(), String>,
     report: &mut EmbedReport,
 ) {
+    drain_units_with_quarantine(embedder, cache, units, limiter, mark, &mut None, report);
+}
+
+/// [`drain_units`] with somewhere to put units the provider refuses.
+///
+/// Without a quarantine sink a refused unit can only stay pending, and because
+/// the queue is drained in a deterministic order it is re-sent on every tick
+/// and the corpus behind it never moves (GH #695: one 138k-char commit body
+/// held 7,885 units for three days across two releases). Given a sink, the
+/// drain bisects the failing chunk down to the offending unit(s), retires
+/// exactly those, and keeps draining their neighbours.
+///
+/// Callers whose store has no quarantine state pass `None` and keep the
+/// original halt-and-defer behaviour.
+pub fn drain_units_with_quarantine(
+    embedder: &KnowledgeEmbedder,
+    cache: &KnowledgeVectorCache,
+    units: &[EmbedUnit],
+    limiter: &RateLimiter,
+    mark: &mut dyn FnMut(&str) -> Result<(), String>,
+    quarantine: &mut Option<&mut dyn FnMut(&str, &str) -> Result<(), String>>,
+    report: &mut EmbedReport,
+) {
     let mut chunks = units.chunks(MAX_EMBED_INPUTS_PER_REQUEST);
     let mut halted = false;
 
     for chunk in chunks.by_ref() {
-        let texts: Vec<String> = chunk.iter().map(|u| u.text.clone()).collect();
-
-        limiter.acquire();
-        report.requests += 1;
-        let vectors = match embedder.embed_batch(&texts) {
-            Ok(vectors) => vectors,
-            Err(e) => {
-                // A request-level failure is systemic (auth, rate limit,
-                // capability, payload) — hammering the endpoint with the
-                // remaining chunks would only multiply it. Stop, and account
-                // for every unit we did not attempt.
-                if matches!(e, EmbedError::Unsupported(_)) {
-                    report.capability_absent = true;
-                }
-                report.request_errors.push(e.to_string());
-                report.deferred += chunk.len();
-                halted = true;
-                break;
-            }
-        };
-
-        for (unit, vector) in chunk.iter().zip(vectors.iter()) {
-            if is_zero_vector(vector) {
-                report.rejected_zero += 1;
-                continue;
-            }
-            if vector.len() != cache.meta().dims {
-                report.rejected_dims += 1;
-                continue;
-            }
-            match cache.put(&unit.key, vector) {
-                Ok(()) => match mark(&unit.id) {
-                    Ok(()) => report.embedded += 1,
-                    Err(e) => report.errors.push((unit.id.clone(), e)),
-                },
-                Err(e) => report.errors.push((unit.id.clone(), e.to_string())),
-            }
+        if !drain_chunk(embedder, cache, chunk, limiter, mark, quarantine, report) {
+            halted = true;
+            break;
         }
     }
 
     if halted {
         report.deferred += chunks.map(<[EmbedUnit]>::len).sum::<usize>();
     }
+}
+
+/// Embed one chunk. Returns false when the run must stop entirely.
+///
+/// A refusal is not a reason to stop: it is a property of the units in this
+/// chunk, so the chunk is split and re-attempted until the offenders are
+/// isolated. Every other failure is systemic — auth, rate limit, capability,
+/// transport — and hammering the endpoint with the remaining chunks would only
+/// multiply it.
+fn drain_chunk(
+    embedder: &KnowledgeEmbedder,
+    cache: &KnowledgeVectorCache,
+    chunk: &[EmbedUnit],
+    limiter: &RateLimiter,
+    mark: &mut dyn FnMut(&str) -> Result<(), String>,
+    quarantine: &mut Option<&mut dyn FnMut(&str, &str) -> Result<(), String>>,
+    report: &mut EmbedReport,
+) -> bool {
+    if chunk.is_empty() {
+        return true;
+    }
+    let texts: Vec<String> = chunk.iter().map(|u| u.text.clone()).collect();
+
+    limiter.acquire();
+    report.requests += 1;
+    let vectors = match embedder.embed_batch(&texts) {
+        Ok(vectors) => vectors,
+        Err(EmbedError::Rejected(message)) if quarantine.is_some() => {
+            if let [unit] = chunk {
+                // Isolated: this unit alone is what the provider refuses.
+                let sink = quarantine
+                    .as_mut()
+                    .expect("guard proved the sink is present");
+                match sink(&unit.id, &message) {
+                    Ok(()) => {
+                        report.quarantined += 1;
+                        report
+                            .quarantine_errors
+                            .push((unit.id.clone(), message.clone()));
+                    }
+                    Err(e) => report.errors.push((unit.id.clone(), e)),
+                }
+                return true;
+            }
+            // Split and re-attempt: the refusal belongs to some subset, and
+            // bisecting costs O(log n) extra requests instead of stranding the
+            // whole chunk. Both halves are attempted even if the first one
+            // fails, so two poison units in one chunk are both isolated.
+            let (left, right) = chunk.split_at(chunk.len() / 2);
+            let left_ok = drain_chunk(embedder, cache, left, limiter, mark, quarantine, report);
+            let right_ok = drain_chunk(embedder, cache, right, limiter, mark, quarantine, report);
+            return left_ok && right_ok;
+        }
+        Err(e) => {
+            if matches!(e, EmbedError::Unsupported(_)) {
+                report.capability_absent = true;
+            }
+            report.request_errors.push(e.to_string());
+            report.deferred += chunk.len();
+            return false;
+        }
+    };
+
+    for (unit, vector) in chunk.iter().zip(vectors.iter()) {
+        if is_zero_vector(vector) {
+            report.rejected_zero += 1;
+            continue;
+        }
+        if vector.len() != cache.meta().dims {
+            report.rejected_dims += 1;
+            continue;
+        }
+        match cache.put(&unit.key, vector) {
+            Ok(()) => match mark(&unit.id) {
+                Ok(()) => report.embedded += 1,
+                Err(e) => report.errors.push((unit.id.clone(), e)),
+            },
+            Err(e) => report.errors.push((unit.id.clone(), e.to_string())),
+        }
+    }
+    true
 }
 
 /// Client-side pacing for the embedding endpoint.
@@ -1161,6 +1305,57 @@ mod tests {
         let openai = serde_json::json!({"data": [{"embedding": [1.0, 2.0]}]});
         assert!(parse_embedding_response(&openai).is_none());
         assert!(parse_embedding_response(&serde_json::json!({"oops": 1})).is_none());
+    }
+
+    /// GH #695: the deployed cloud used to wrap a provider 400 as a gateway
+    /// 502, and now (petra-stella-cloud#63) returns the 400 directly. Both must
+    /// read as "this payload will never be accepted"; a bare gateway failure
+    /// must not, or an outage would quarantine every unit caught in it.
+    #[test]
+    fn provider_refusals_are_told_apart_from_gateway_outages() {
+        // Direct client errors, the post-#63 shape.
+        assert!(is_provider_rejection(
+            400,
+            r#"{"error":"embedding_input_rejected","message":"Invalid 'input[14]': maximum input length is 8,192 tokens."}"#
+        ));
+        assert!(is_provider_rejection(413, "payload too large"));
+        assert!(is_provider_rejection(422, "unprocessable"));
+
+        // The wrapper shape still deployed when GH #695 was filed.
+        assert!(is_provider_rejection(
+            502,
+            r#"{"error":"Embedding provider returned 400"}"#
+        ));
+        assert!(is_provider_rejection(
+            500,
+            "Embedding provider returned 422 for input 3"
+        ));
+
+        // Genuinely transient: retrying can succeed, so these stay retryable.
+        assert!(!is_provider_rejection(502, "upstream unavailable"));
+        assert!(!is_provider_rejection(503, "service unavailable"));
+        assert!(!is_provider_rejection(429, "rate limited"));
+        assert!(!is_provider_rejection(500, "internal error"));
+        // A provider 5xx named in the body is the provider being down, not the
+        // payload being wrong.
+        assert!(!is_provider_rejection(
+            502,
+            r#"{"error":"Embedding provider returned 503"}"#
+        ));
+    }
+
+    /// Every corpus that builds embedding text must stay under the model's
+    /// input cap — a long knowledge page is the same poison shape as the
+    /// 138k-char commit body from GH #695.
+    #[test]
+    fn the_text_cap_is_char_safe_and_leaves_ordinary_text_alone() {
+        assert_eq!(cap_embedding_text("short".to_string()), "short");
+
+        let huge = "→".repeat(MAX_EMBED_TEXT_CHARS + 500);
+        let capped = cap_embedding_text(huge);
+        assert_eq!(capped.chars().count(), MAX_EMBED_TEXT_CHARS);
+        // Multi-byte safety: a byte slice here would panic mid-codepoint.
+        assert!(capped.chars().all(|c| c == '→'));
     }
 
     #[test]

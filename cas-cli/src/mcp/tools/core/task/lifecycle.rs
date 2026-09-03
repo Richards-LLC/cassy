@@ -989,7 +989,12 @@ impl CasCore {
             data: None,
         })?;
 
-        super::ensure_task_origin(&task, &self.cas_root, "start")?;
+        // cas-a0d2: an unattributed row is adopted into this project here. The
+        // in-progress write below persists it, so the repair survives and every
+        // later ownership check (claim, mine, board filters) agrees.
+        if let Some(adopted) = super::ensure_task_origin(&task, &self.cas_root, "start")? {
+            task.origin_project = Some(adopted);
+        }
 
         if task.is_terminal() {
             // cas-3c23: this message used to tell EVERY caller "Use reopen

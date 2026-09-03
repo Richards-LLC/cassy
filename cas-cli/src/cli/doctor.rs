@@ -1554,9 +1554,10 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
     let Some(current_project) = crate::cloud::resolve_canonical_id(cas_root) else {
         return Vec::new();
     };
+    let mut checks = registered_alias_checks(cas_root, &current_project);
     let db_path = cas_root.join("cas.db");
     if !db_path.is_file() {
-        return Vec::new();
+        return checks;
     }
     let conn = match rusqlite::Connection::open_with_flags(
         &db_path,
@@ -1564,11 +1565,12 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
     ) {
         Ok(conn) => conn,
         Err(error) => {
-            return vec![Check {
+            checks.push(Check {
                 name: "project aliases".to_string(),
                 status: CheckStatus::Warning,
                 message: format!("Could not inspect task project aliases: {error}"),
-            }];
+            });
+            return checks;
         }
     };
     let has_origin_project = conn
@@ -1580,7 +1582,7 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
         .map(|columns| columns.iter().any(|column| column == "origin_project"))
         .unwrap_or(false);
     if !has_origin_project {
-        return Vec::new();
+        return checks;
     }
 
     let mut stmt = match conn.prepare(
@@ -1590,43 +1592,80 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
     ) {
         Ok(stmt) => stmt,
         Err(error) => {
-            return vec![Check {
+            checks.push(Check {
                 name: "project aliases".to_string(),
                 status: CheckStatus::Warning,
                 message: format!("Could not inspect task project aliases: {error}"),
-            }];
+            });
+            return checks;
         }
     };
     let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
         Ok(rows) => rows,
         Err(error) => {
-            return vec![Check {
+            checks.push(Check {
                 name: "project aliases".to_string(),
                 status: CheckStatus::Warning,
                 message: format!("Could not inspect task project aliases: {error}"),
-            }];
+            });
+            return checks;
         }
     };
     let origins = rows.filter_map(Result::ok).collect::<Vec<_>>();
-    canonical_alias_counts(&origins, &current_project)
-        .into_iter()
-        .map(|(alias, count)| Check {
-            name: "project aliases".to_string(),
-            status: CheckStatus::Warning,
-            message: format!(
-                "{count} rows use alias `{alias}` of this project; run `cas cloud project \
-                 --adopt-aliases` to rewrite and enqueue them"
-            ),
-        })
-        .collect()
+    let registered = crate::cloud::project_aliases_from_config_toml(cas_root);
+    checks.extend(
+        canonical_alias_counts(&origins, &current_project, &registered)
+            .into_iter()
+            .map(|(alias, count)| Check {
+                name: "project aliases".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "{count} rows use alias `{alias}` of this project; run `cas cloud project \
+                     --adopt-aliases` to rewrite and enqueue them"
+                ),
+            }),
+    );
+    checks
 }
 
-fn canonical_alias_counts(origins: &[String], current_project: &str) -> BTreeMap<String, usize> {
+/// Report the cloud's per-project `aliases` record as mirrored into
+/// `.cas/config.toml` (GH #669), so a reader can see *why* rows spelled
+/// `ozer-health` are counted as this project's own rather than as foreign.
+fn registered_alias_checks(cas_root: &Path, current_project: &str) -> Vec<Check> {
+    let registered = crate::cloud::project_aliases_from_config_toml(cas_root);
+    if registered.is_empty() {
+        return Vec::new();
+    }
+    vec![Check {
+        name: "project aliases".to_string(),
+        status: CheckStatus::Ok,
+        message: format!(
+            "Cloud registry folds {} alias spelling(s) into `{current_project}`: {}. Rows \
+             carrying them are this project's own, not foreign.",
+            registered.len(),
+            registered.join(", ")
+        ),
+    }]
+}
+
+/// Count task rows whose persisted `origin_project` is a *different spelling*
+/// of the current project.
+///
+/// `registered` is the cloud's alias record for this project. Without it only
+/// the syntactic remote/bare-slug rule applies, which cannot see a renamed
+/// repository (`ozer-health` under `ozer`) — those rows would keep being
+/// counted as another project's (GH #669).
+fn canonical_alias_counts(
+    origins: &[String],
+    current_project: &str,
+    registered: &[String],
+) -> BTreeMap<String, usize> {
+    let mut class = registered.to_vec();
+    class.push(current_project.to_string());
     origins
         .iter()
         .filter(|origin| {
-            crate::cloud::canonical_project_id_with_pin(origin, Some(current_project))
-                .is_some_and(|canonical| canonical == current_project)
+            crate::cloud::project_ids_match_with_aliases(origin, current_project, &class)
                 && origin.trim() != current_project
         })
         .fold(BTreeMap::new(), |mut counts, origin| {
@@ -3436,7 +3475,7 @@ mod tests {
             "github.com/other/pixel-hive".to_string(),
         ];
 
-        let counts = canonical_alias_counts(&origins, "gabber-studio");
+        let counts = canonical_alias_counts(&origins, "gabber-studio", &[]);
 
         assert_eq!(counts.get("GABBER-STUDIO"), Some(&1));
         assert_eq!(
@@ -3445,6 +3484,56 @@ mod tests {
         );
         assert!(!counts.contains_key("gabber-studio"));
         assert!(!counts.contains_key("github.com/other/pixel-hive"));
+    }
+
+    /// GH #669: a *renamed* repository shares no path segment with its
+    /// canonical id, so only the cloud's alias record can attribute it. Before
+    /// the record is consumed those rows are counted as another project's.
+    #[test]
+    fn alias_doctor_attributes_a_renamed_repository_only_through_the_registered_record() {
+        let origins = vec![
+            "ozer-health".to_string(),
+            "github.com/richards-llc/ozer-health".to_string(),
+            "penguinz".to_string(),
+        ];
+
+        let without_record = canonical_alias_counts(&origins, "ozer", &[]);
+        assert!(without_record.is_empty(), "got: {without_record:?}");
+
+        let registered = vec![
+            "ozer-health".to_string(),
+            "github.com/richards-llc/ozer-health".to_string(),
+        ];
+        let with_record = canonical_alias_counts(&origins, "ozer", &registered);
+        assert_eq!(with_record.get("ozer-health"), Some(&1));
+        assert_eq!(
+            with_record.get("github.com/richards-llc/ozer-health"),
+            Some(&1)
+        );
+        // `penguinz` is an unmapped legacy bucket: never folded in.
+        assert!(!with_record.contains_key("penguinz"));
+    }
+
+    #[test]
+    fn registered_alias_check_names_the_folded_spellings() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join("ozer/.cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        fs::write(
+            cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"ozer\"\naliases = [\"ozer-health\"]\n",
+        )
+        .unwrap();
+
+        let checks = registered_alias_checks(&cas_root, "ozer");
+
+        assert_eq!(checks.len(), 1);
+        assert!(matches!(checks[0].status, CheckStatus::Ok));
+        assert!(
+            checks[0].message.contains("ozer-health"),
+            "got: {}",
+            checks[0].message
+        );
     }
 
     #[test]

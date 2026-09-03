@@ -224,6 +224,7 @@ mod m245_retrieval_outcomes_add_attribution;
 mod m246_spawn_queue_add_requester_secure_storage_dir;
 mod m247_tasks_add_delivery_mode;
 mod m248_tasks_retire_pending_supervisor_review;
+mod m249_task_dependency_tombstones;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -484,6 +485,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m246_spawn_queue_add_requester_secure_storage_dir::MIGRATION,
     m247_tasks_add_delivery_mode::MIGRATION,
     m248_tasks_retire_pending_supervisor_review::MIGRATION,
+    m249_task_dependency_tombstones::MIGRATION,
 ];
 
 #[cfg(test)]

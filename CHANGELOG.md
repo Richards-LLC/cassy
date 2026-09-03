@@ -7,6 +7,38 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.15.0] - 2026-09-03
+
+### Added
+- `cas integrate mecha-cassy` sets up MechaCassy on a machine in one command:
+  a machine-level proxy registration that every project inherits, Claude Code
+  and Codex entries by environment-variable name, and an authenticated tool
+  list as the receipt; `cas doctor` gains a mecha-cassy row and a credential
+  script handles the one human step. Onboarding doc for teammates.
+- Cloud sync consumes the per-row push outcomes the cloud now returns: rows
+  the cloud kept newer are acknowledged, rejections are held with their reason
+  and a remedy, and `cas update` / `cas doctor` say which is which. Terminal
+  failures parked by an older client are requeued once after upgrade.
+- Cloud sync consumes dependency deletion tombstones: a removed dependency
+  edge propagates to every machine and cannot be resurrected, and the
+  "N edges healed" churn on every pull is gone (reconciliation runs against a
+  complete snapshot at most every six hours).
+- `cas doctor`, worker status and the spawn receipt warn when two live
+  supervisor sessions share one clone path (GH #699).
+
+### Fixed
+- Tasks whose owner project was never recorded can be started and claimed
+  again: they are adopted into the current project instead of refused as an
+  "unassigned legacy row" (GH #690).
+- Client project-identity canonicalization now matches the cloud's rule
+  exactly (case-insensitive `.git` on every shape), consumes the cloud's alias
+  record, and a parity audit script reports per-project convergence (GH #669).
+- Pull attribution reads a row's origin project before the server's scope
+  stamp, so another project's rows are no longer ingested as this project's;
+  throwaway checkouts no longer mint a cloud identity on push (GH #701).
+- Migration cursor fixtures follow the new tombstone ledger migration.
+
+
 ### Added
 - Two supervisors working the same checkout are now visible to each other.
   `cas doctor`, `worker_status` and every spawn receipt name both sessions and

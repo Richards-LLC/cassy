@@ -327,11 +327,19 @@ pub(crate) fn run_probe_comm_with_parent(
         })?;
     }
 
-    let run_root = match cas_root {
-        Some(path) => path,
-        None => generated_scratch_root_path().join(".cas"),
+    // GH #704: a generated root is ours and must not outlive the run — on the
+    // success path or any of the error paths below. `_scratch` owns that
+    // removal; an operator-supplied `--cas-root` is left alone.
+    let (run_root, _scratch) = match cas_root {
+        Some(path) => (path, ScratchRootGuard::borrowed()),
+        None => {
+            let container = generated_scratch_root_path();
+            let root = container.join(".cas");
+            (root, ScratchRootGuard::owning(container))
+        }
     };
     guard_active_parent_root(&run_root, parent_cas_root, allow_active_cas_root)?;
+    crate::temp_hygiene::guard_isolated_root(&run_root, &crate::temp_hygiene::HostMountProbe)?;
     fs::create_dir_all(&run_root)
         .with_context(|| format!("failed to create isolated Cassy root {}", run_root.display()))?;
 
@@ -1089,9 +1097,45 @@ fn composed_evidence_stage(
     }
 }
 
-/// Location of a probe-generated disposable Cassy root.
+/// Location of a probe-generated disposable Cassy root: disk-backed
+/// `~/.cas/scratch/cas-probe-comm-<uuid>`, never `$TMPDIR` (GH #704).
 fn generated_scratch_root_path() -> PathBuf {
-    std::env::temp_dir().join(format!("cas-probe-comm-{}", uuid::Uuid::new_v4()))
+    crate::temp_hygiene::default_scratch_root(&format!(
+        "cas-probe-comm-{}",
+        uuid::Uuid::new_v4()
+    ))
+}
+
+/// Removes a probe-generated disposable root when the run ends, however it
+/// ends. A root the operator named stays put: it is theirs, not ours.
+struct ScratchRootGuard {
+    owned: Option<PathBuf>,
+}
+
+impl ScratchRootGuard {
+    fn owning(path: PathBuf) -> Self {
+        Self { owned: Some(path) }
+    }
+
+    fn borrowed() -> Self {
+        Self { owned: None }
+    }
+}
+
+impl Drop for ScratchRootGuard {
+    fn drop(&mut self) {
+        let Some(path) = self.owned.take() else {
+            return;
+        };
+        if let Err(error) = fs::remove_dir_all(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "warning: failed to remove probe-comm scratch root {}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 fn guard_active_parent_root(

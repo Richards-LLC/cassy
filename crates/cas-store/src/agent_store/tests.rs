@@ -184,6 +184,63 @@ fn test_agent_factory_session_update_none_preserves_existing_tag() {
     );
 }
 
+/// GH #677 / #678: a supervisor restart changes the factory session id but
+/// not the logical supervisor identity.  The new registration must adopt the
+/// still-running workers and retire the prior supervisor row in one store
+/// transition, otherwise every session-scoped coordination surface loses the
+/// worker and the old supervisor later expires as a pseudo-worker death.
+#[test]
+fn supervisor_reregistration_rehomes_workers_and_supersedes_the_old_row() {
+    let (_temp, store) = create_test_store();
+
+    let mut original_supervisor =
+        Agent::new("supervisor-session-1".to_string(), "steady-fox-24".to_string());
+    original_supervisor.role = AgentRole::Supervisor;
+    original_supervisor.factory_session = Some("factory-session-1".to_string());
+    store.register(&original_supervisor).unwrap();
+
+    let mut worker = Agent::new("worker-session".to_string(), "wild-cobra-45".to_string());
+    worker.role = AgentRole::Worker;
+    worker.agent_type = AgentType::Worker;
+    worker.factory_session = Some("factory-session-1".to_string());
+    store.register(&worker).unwrap();
+
+    let mut replacement_supervisor =
+        Agent::new("supervisor-session-2".to_string(), "steady-fox-24".to_string());
+    replacement_supervisor.role = AgentRole::Supervisor;
+    replacement_supervisor.factory_session = Some("factory-session-2".to_string());
+    store.register(&replacement_supervisor).unwrap();
+
+    let active_supervisors = store
+        .list(Some(AgentStatus::Active))
+        .unwrap()
+        .into_iter()
+        .filter(|agent| agent.role == AgentRole::Supervisor && agent.name == "steady-fox-24")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        active_supervisors.len(),
+        1,
+        "a logical supervisor must have exactly one active registry row after restart"
+    );
+    assert_eq!(active_supervisors[0].id, "supervisor-session-2");
+    assert_eq!(
+        store.get("supervisor-session-1").unwrap().status,
+        AgentStatus::Shutdown,
+        "the prior supervisor row must be superseded, not left active to expire"
+    );
+
+    let rehomed_worker = store.get("worker-session").unwrap();
+    assert_eq!(
+        rehomed_worker.factory_session.as_deref(),
+        Some("factory-session-2"),
+        "a still-active worker must move with its logical supervisor"
+    );
+    assert!(
+        rehomed_worker.visible_to_factory_session(Some("factory-session-2")),
+        "worker_status, worker_activity, and delivery target discovery all use this visibility gate"
+    );
+}
+
 #[test]
 fn test_agent_pid_starttime_none_round_trips_as_null() {
     // Legacy / non-Linux path: no fingerprint → column is NULL → typed

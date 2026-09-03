@@ -493,11 +493,25 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // Every active factory session needs exactly one live durable supervisor
     // row. Otherwise logical handoffs and verification recovery have nowhere
     // to route even while the supervisor pane itself exists.
-    match open_agent_store(&cas_root)
-        .and_then(|store| Ok(store.list(None)?))
-        .map(|agents| factory_supervisor_checks(&agents))
-    {
-        Ok(session_checks) => checks.extend(session_checks),
+    match open_agent_store(&cas_root).and_then(|store| Ok(store.list(None)?)) {
+        Ok(agents) => {
+            checks.extend(factory_supervisor_checks(&agents));
+            // The per-session checks above each pass in isolation while two
+            // supervisors quietly share one clone's `.cas/` state, which is
+            // exactly the reap-the-other's-workers hazard (GH #699). Cross
+            // the sessions and say so.
+            if let Some(warning) = crate::factory_supervisor_overlap::shared_clone_warning(
+                &agents,
+                &cas_root,
+                chrono::Utc::now(),
+            ) {
+                checks.push(Check {
+                    name: "factory session overlap".to_string(),
+                    status: CheckStatus::Warning,
+                    message: warning,
+                });
+            }
+        }
         Err(error) => checks.push(Check {
             name: "factory supervisors".to_string(),
             status: CheckStatus::Warning,
@@ -2944,6 +2958,74 @@ mod tests {
         assert_eq!(checks.len(), 1);
         assert!(matches!(checks[0].status, CheckStatus::Ok));
         assert!(checks[0].message.contains("supervisors: 1"));
+    }
+
+    /// GH #699: this is the reported shape — every per-session check is green
+    /// while two supervisors share one clone and either can reap the other's
+    /// workers. The per-session verdicts must stay green (they are correct in
+    /// isolation) and the cross-session pass must add the warning.
+    #[test]
+    fn two_live_supervisor_sessions_add_an_overlap_warning_beside_green_session_checks() {
+        use crate::types::AgentRole;
+        let agents = vec![
+            factory_agent(
+                "sup-incumbent",
+                "noble-koala-5",
+                "gabber-gentle-hawk-71",
+                AgentRole::Supervisor,
+            ),
+            factory_agent(
+                "sup-newcomer",
+                "gentle-falcon-66",
+                "gabber-witty-panda-98",
+                AgentRole::Supervisor,
+            ),
+        ];
+
+        let checks = factory_supervisor_checks(&agents);
+        assert_eq!(checks.len(), 2);
+        let rendered: Vec<String> = checks
+            .iter()
+            .map(|check| format!("{}: {}", check.name, check.message))
+            .collect();
+        assert!(
+            checks.iter().all(|c| matches!(c.status, CheckStatus::Ok)),
+            "each session alone is well-formed: {rendered:?}"
+        );
+
+        let warning = crate::factory_supervisor_overlap::shared_clone_warning(
+            &agents,
+            Path::new("/home/pippenz/Petrastella/gabber-studio/.cas"),
+            chrono::Utc::now(),
+        )
+        .expect("two live supervisor sessions on one clone must warn");
+        assert!(warning.contains("2 live supervisors share this clone"));
+        assert!(warning.contains("/home/pippenz/Petrastella/gabber-studio"));
+        assert!(warning.contains("gabber-gentle-hawk-71/noble-koala-5"));
+        assert!(warning.contains("gabber-witty-panda-98/gentle-falcon-66"));
+        assert!(warning.contains("reap the other's workers"));
+    }
+
+    #[test]
+    fn one_live_supervisor_session_adds_no_overlap_warning() {
+        use crate::types::AgentRole;
+        let agents = vec![
+            factory_agent(
+                "sup-a",
+                "supervisor-a",
+                "factory-a",
+                AgentRole::Supervisor,
+            ),
+            factory_agent("worker-a", "worker-a", "factory-a", AgentRole::Worker),
+        ];
+        assert!(
+            crate::factory_supervisor_overlap::shared_clone_warning(
+                &agents,
+                Path::new("/repo/.cas"),
+                chrono::Utc::now(),
+            )
+            .is_none()
+        );
     }
 
     // ── cas-f699 / GH #134: canonical-id doctor rows ─────────────────────

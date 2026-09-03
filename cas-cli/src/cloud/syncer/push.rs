@@ -37,6 +37,20 @@ impl CloudSyncer {
         self.push_scoped(PushScope::All)
     }
 
+    /// `Some(message)` when this checkout is a scratch/probe root that must not
+    /// push (GH #701). Resolution failure yields `None`: an unclassifiable root
+    /// syncs, because blocking a real project is the expensive mistake.
+    fn ephemeral_project_refusal(&self) -> Option<String> {
+        let cas_root = crate::store::find_cas_root().ok()?;
+        let verdict = crate::cloud::classify_project_root(&cas_root);
+        let project_id = self
+            .push_project_canonical_id
+            .clone()
+            .or_else(crate::cloud::get_project_canonical_id)
+            .unwrap_or_else(|| cas_root.display().to_string());
+        verdict.explain(&project_id)
+    }
+
     /// Describe the exact next queue batch without mutating it.
     pub fn plan_push(&self, scope: PushScope) -> Result<PushPlan, CasError> {
         let batch_limit = self.config.batch_size.max(1);
@@ -112,6 +126,15 @@ impl CloudSyncer {
         result.requeued_after_upgrade = self.requeue_stale_client_failures()?;
 
         if !self.is_available() {
+            return Ok(result);
+        }
+
+        // GH #701: a throwaway checkout must not mint a cloud identity and
+        // push into the account's shared buckets. Declining is a no-op, not a
+        // failure — the queue is left intact so a later `cas cloud project
+        // set` drains it.
+        if let Some(refusal) = self.ephemeral_project_refusal() {
+            warn!("[Cassy sync] {refusal}");
             return Ok(result);
         }
 

@@ -2441,3 +2441,100 @@ async fn a_rejected_stale_base_is_forgotten_rather_than_replaced() {
     // The edit itself stays queued for the next cycle rather than being parked.
     assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
 }
+
+/// The comparison has to fire on a REAL pull, not only through the unit-level
+/// API: the revision travels on the raw wire row while the decision is taken
+/// deep inside a typed upsert helper. This drives a whole team pull to prove
+/// the two ends are actually connected.
+#[tokio::test]
+async fn a_real_pull_lets_a_higher_local_revision_beat_a_newer_remote_timestamp() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
+    use crate::store::{
+        open_rule_store_local, open_skill_store_local, open_store_local, open_task_store_local,
+    };
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let project_id = "revision-pull-project";
+    let team_id = "team-cas-c32f";
+    let now = chrono::Utc::now();
+
+    // The cloud row is an hour NEWER by the clock but a revision BEHIND: this
+    // is the skewed-clock case, and the local row must survive it.
+    let mut remote = Task::new("cas-c32f-pull".to_string(), "remote title".to_string());
+    remote.updated_at = now + chrono::Duration::hours(1);
+    remote.origin_project = Some(project_id.to_string());
+    let mut wire = serde_json::to_value(&remote).unwrap();
+    wire["project_id"] = serde_json::json!(project_id);
+    wire["revision"] = serde_json::json!("4");
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{team_id}/sync/pull")))
+        .and(query_param("project_id", project_id))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [wire], "rules": [], "skills": [],
+            "task_dependencies": [],
+            "pulled_at": "2026-09-03T22:00:00Z",
+            "team_id": team_id,
+            "status": "ok",
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let store = open_store_local(temp.path()).unwrap();
+    let task_store = open_task_store_local(temp.path()).unwrap();
+    let rule_store = open_rule_store_local(temp.path()).unwrap();
+    let skill_store = open_skill_store_local(temp.path()).unwrap();
+
+    let mut local = Task::new("cas-c32f-pull".to_string(), "local title".to_string());
+    local.updated_at = now;
+    local.origin_project = Some(project_id.to_string());
+    task_store.add(&local).unwrap();
+    // This machine holds revision 7; the incoming row is revision 4.
+    queue.record_revision(EntityType::Task, "cas-c32f-pull", 7).unwrap();
+    // A pending local change makes the discarded-row journal fire.
+    queue
+        .enqueue(
+            EntityType::Task,
+            "cas-c32f-pull",
+            SyncOperation::Upsert,
+            Some("{}"),
+        )
+        .unwrap();
+
+    let syncer = CloudSyncer::new(
+        Arc::clone(&queue),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig {
+            // "keep whichever is newer" is the question revisions arbitrate.
+            // The default team strategy is RemoteWins, a deliberate operator
+            // choice that revisions must NOT override.
+            team_conflict_resolution: ConflictResolution::KeepRecent,
+            ..CloudSyncerConfig::default()
+        },
+    );
+    syncer
+        .pull_team(
+            team_id,
+            project_id,
+            store.as_ref(),
+            task_store.as_ref(),
+            rule_store.as_ref(),
+            skill_store.as_ref(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        task_store.get("cas-c32f-pull").unwrap().title,
+        "local title",
+        "a newer remote TIMESTAMP must not overwrite a higher local REVISION"
+    );
+}

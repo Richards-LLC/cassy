@@ -508,6 +508,15 @@ pub struct CloudSyncer {
     /// Conflict decisions are collected during pull application and folded
     /// into the returned `SyncResult` after the operation completes.
     conflict_log: Arc<Mutex<Vec<SyncConflict>>>,
+    /// Server revisions carried by the rows of the pull currently being
+    /// applied, keyed by (entity type, id).
+    ///
+    /// The revision travels on the raw wire row, but conflict resolution
+    /// happens deep inside typed upsert helpers. Staging it here lets every
+    /// entity kind consult it without threading an extra argument through six
+    /// upsert signatures — and, more importantly, without one of them being
+    /// forgotten and silently falling back to clock comparison.
+    incoming_revisions: Arc<Mutex<HashMap<(String, String), i64>>>,
 }
 
 impl CloudSyncer {
@@ -527,6 +536,7 @@ impl CloudSyncer {
             push_project_canonical_id: None,
             personal_push_git_remote,
             conflict_log: Arc::new(Mutex::new(Vec::new())),
+            incoming_revisions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -546,6 +556,7 @@ impl CloudSyncer {
             push_project_canonical_id: Some(project_canonical_id),
             personal_push_git_remote: crate::cloud::normalized_git_remote_for_push(cas_root),
             conflict_log: Arc::new(Mutex::new(Vec::new())),
+            incoming_revisions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -609,15 +620,77 @@ impl CloudSyncer {
         remote_time: chrono::DateTime<chrono::Utc>,
         strategy: ConflictResolution,
     ) -> ConflictAction {
+        let local_revision = EntityType::parse(entity_type)
+            .and_then(|entity| self.queue.revision(entity, entity_id).ok().flatten());
+        let remote_revision = self
+            .incoming_revisions
+            .lock()
+            .ok()
+            .and_then(|revisions| {
+                revisions
+                    .get(&(entity_type.to_string(), entity_id.to_string()))
+                    .copied()
+            });
         self.resolve_conflict_with_revisions(
             entity_type,
             entity_id,
             local_time,
             remote_time,
-            None,
-            None,
+            local_revision,
+            remote_revision,
             strategy,
         )
+    }
+
+    /// Whether an incoming row supersedes the local one.
+    ///
+    /// The same rule the conflict resolver applies, for the paths that compare
+    /// timestamps inline rather than going through `resolve_conflict`: server
+    /// revisions decide when both sides have one, and the clock decides only
+    /// when they do not. Those paths are the common case for personal pulls,
+    /// so leaving them on the raw timestamp comparison would have made this
+    /// feature reachable in tests and absent in practice.
+    pub(crate) fn remote_supersedes_local(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        local_time: chrono::DateTime<chrono::Utc>,
+        remote_time: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        let local_revision = self.queue.revision(entity_type, entity_id).ok().flatten();
+        let remote_revision = self.incoming_revisions.lock().ok().and_then(|revisions| {
+            revisions
+                .get(&(entity_type.as_str().to_string(), entity_id.to_string()))
+                .copied()
+        });
+        match (local_revision, remote_revision) {
+            (Some(local), Some(remote)) if local != remote => remote > local,
+            _ => remote_time > local_time,
+        }
+    }
+
+    /// Stage the server revision carried by a row about to be applied.
+    pub(crate) fn note_incoming_revision(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        raw: &serde_json::Value,
+    ) {
+        let Some(revision) = crate::cloud::wire_revision(raw) else {
+            return;
+        };
+        if let Ok(mut revisions) = self.incoming_revisions.lock() {
+            revisions.insert(
+                (entity_type.as_str().to_string(), entity_id.to_string()),
+                revision,
+            );
+        }
+    }
+
+    pub(crate) fn clear_incoming_revisions(&self) {
+        if let Ok(mut revisions) = self.incoming_revisions.lock() {
+            revisions.clear();
+        }
     }
 
     /// Resolve a sync conflict, preferring the server's per-row revisions over

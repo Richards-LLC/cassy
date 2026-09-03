@@ -144,13 +144,81 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).toContain("const plan = planSupervisorSend(supervisorSendContext(text));");
   });
 
+  it("keeps a hub heartbeat off the shell rebuild path", async () => {
+    const [main, regions] = await Promise.all(["main.ts", "live-regions.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // A five-second status frame used to replace every live control in the
+    // page: the composer was re-created six times and blurred six times inside
+    // ten seconds of typing, and on a phone each blur closes the keyboard.
+    expect(main.match(/app\.innerHTML\s*=/g)).toHaveLength(1);
+    const decision = main.indexOf("const decision = renderDecision(");
+    const rebuild = main.indexOf("app.innerHTML =");
+    expect(decision).toBeGreaterThan(0);
+    expect(decision).toBeLessThan(rebuild);
+    // The regions path returns before the rebuild it is standing in for.
+    const guard = main.slice(decision, rebuild);
+    expect(guard).toContain('if (decision !== "shell") {');
+    expect(guard).toContain("renderRegions({");
+    expect(guard).toContain("return;");
+
+    // renderRegions and the updater it calls may only write into nodes that
+    // already exist; a single innerHTML there would restore the whole defect.
+    const body = main.slice(main.indexOf("function renderRegions(context: RegionContext): void {"));
+    const end = body.indexOf("\n}\n");
+    expect(end).toBeGreaterThan(0);
+    expect(body.slice(0, end)).not.toMatch(/\.innerHTML\s*=/);
+    expect(regions).not.toMatch(/\.innerHTML\s*=/);
+    expect(regions).not.toContain("createElement(");
+    expect(regions).not.toContain("replaceChildren(");
+
+    // The deferred rebuild has to be flushed, or a structural change that
+    // arrived mid-sentence would never land.
+    expect(main).toContain("pendingShellRender = true;");
+    expect(main).toContain('app.addEventListener("focusout"');
+  });
+
+  it("keeps the live-region selectors and the shell markup on the same nodes", async () => {
+    const [main, regions, fixture] = await Promise.all(
+      ["main.ts", "live-regions.ts", "live-regions.test.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")),
+    );
+    // The updater writes by selector into markup rendered somewhere else. A
+    // rename on either side would silently stop updating a region rather than
+    // fail, so both ends are pinned here.
+    const selectors = [...regions.matchAll(/(?:querySelector|closest)<[^>]*>\("([^"]+)"\)/g)].map((match) => match[1]!);
+    expect(selectors.length).toBeGreaterThan(8);
+    for (const selector of new Set(selectors)) {
+      // Every region the updater touches is exercised by its own fixture.
+      expect(fixture, `${selector} is missing from the live-regions fixture`).toContain(selector.replace(/^[.#]/, ""));
+    }
+    for (const marker of [
+      'class="connection-summary ',
+      'data-machine-latency="',
+      'class="connection-dot"',
+      'class="mode-badge ',
+      'id="lease"',
+      'class="control-action"',
+      'id="control-disabled-reason"',
+      'id="interrupt"',
+      'class="status-stale" role="status"',
+      'class="control-disabled-reason" role="note"',
+      'id="message-send"',
+      'id="message-status"',
+      'id="message-delivery"',
+    ]) expect(main, `${marker} left the shell template`).toContain(marker);
+  });
+
   it("never leaves the supervisor send button silently disabled", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     // A real `disabled` attribute swallows the tap: no event, no frame, no
     // reason. Observing operators concluded the feature was broken.
     expect(main).not.toContain('<button id="message-send" class="primary" ${!selected || !selectedSession || !supervisor || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>');
     expect(main).toContain('id="message-send"');
-    expect(main).toContain("${sendReason ? ` aria-disabled=\"true\" data-disabled-reason=\"${escapeAttr(sendReason)}\"` : \"\"}");
+    // The reason now reaches the button through the live-region updater, which
+    // must still state it with aria-disabled rather than the disabled property.
+    const regions = await readFile(new URL("live-regions.ts", import.meta.url), "utf8");
+    expect(main).toContain("...(sendReason ? { sendReason } : {}),");
+    expect(regions).toContain('setDisabledReason(root.querySelector<HTMLElement>("#message-send"), view.sendReason);');
+    expect(regions).toContain('element.setAttribute("aria-disabled", "true");');
+    expect(regions).not.toMatch(/\.disabled\s*=\s*true/);
     expect(main).toContain('<p id="message-status" class="message-status');
     expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error"): void {');
     expect(css).toContain(".message-status {");
@@ -454,7 +522,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain(".attention-count--critical { color: var(--state-crit); }");
     expect(css).toContain(".attention-count--info { color: var(--state-info); }");
     expect(view).toContain("export function renderAttentionSummary(");
-    expect(main).toContain("renderAttentionSummary(counts)");
+    expect(main).toContain("renderAttentionSummary(context.counts)");
   });
 
   it("keeps supervisor messaging reachable from the collapsed phone rail", async () => {

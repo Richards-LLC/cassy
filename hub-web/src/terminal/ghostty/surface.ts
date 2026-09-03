@@ -529,6 +529,15 @@ export class GhosttyTerminalSurface {
   private resizeNotifyTimer: number | null = null;
   private originY = CONTENT_PADDING;
   private mountHeight = 0;
+  /**
+   * The PTY geometry the daemon says this pane really has, when this viewer is
+   * not the one that owns it (cas-37f8). While it is set the grid is pinned to
+   * it, the whole grid is scaled down to fit the mount, and no resize is
+   * reported upstream: a viewer renders the pane, it does not drive it.
+   */
+  private authoritativeGrid: { cols: number; rows: number } | null = null;
+  /** Scale applied to the canvas so a pinned grid fits the mount. */
+  private renderScale = 1;
   private selectionEnd: { x: number; y: number } | null = null;
   private selectionAnchorScreen: { x: number; y: number } | null = null;
   private selectionEndScreen: { x: number; y: number } | null = null;
@@ -769,11 +778,53 @@ export class GhosttyTerminalSurface {
     this.applyFontMetrics();
   };
 
+  /**
+   * Pin this viewer to the pane's real PTY geometry, or release it back to
+   * measuring its own mount (cas-37f8).
+   */
+  setAuthoritativeSize(size: { cols: number; rows: number } | null): void {
+    const next = size && size.cols > 0 && size.rows > 0 ? { cols: size.cols, rows: size.rows } : null;
+    const current = this.authoritativeGrid;
+    if (next?.cols === current?.cols && next?.rows === current?.rows) return;
+    this.authoritativeGrid = next;
+    this.fit();
+  }
+
+  /**
+   * The scale a pinned grid needs so that `cols x rows` cells fit inside the
+   * mount. Never magnifies: a grid that already fits is drawn at 1:1 and the
+   * slack becomes letterbox.
+   */
+  private scaleForGrid(
+    grid: { cols: number; rows: number },
+    width: number,
+    height: number,
+  ): number {
+    const neededWidth = CONTENT_PADDING * 2 + grid.cols * this.metrics.width;
+    const neededHeight = CONTENT_PADDING * 2 + grid.rows * this.metrics.height;
+    const scale = Math.min(width / neededWidth, height / neededHeight);
+    return Number.isFinite(scale) && scale > 0 ? Math.min(1, scale) : 1;
+  }
+
   fit(): boolean {
     if (this.disposed) return false;
-    const width = this.mount.clientWidth;
-    const height = this.mount.clientHeight;
-    if (width <= 0 || height <= 0) return false;
+    const mountWidth = this.mount.clientWidth;
+    const mountHeight = this.mount.clientHeight;
+    if (mountWidth <= 0 || mountHeight <= 0) return false;
+    const pinned = this.authoritativeGrid;
+    const scale = pinned ? this.scaleForGrid(pinned, mountWidth, mountHeight) : 1;
+    // The canvas keeps drawing in unscaled cell units; CSS shrinks the finished
+    // surface, so the renderer, the metrics and the grid all stay untouched.
+    const width = mountWidth / scale;
+    const height = mountHeight / scale;
+    if (scale !== this.renderScale) {
+      this.renderScale = scale;
+      this.canvas.style.transformOrigin = "top left";
+      this.canvas.style.transform = scale === 1 ? "" : `scale(${scale})`;
+      this.canvas.style.width = scale === 1 ? "" : `${width}px`;
+      this.canvas.style.height = scale === 1 ? "" : `${height}px`;
+      this.forceFullRender = true;
+    }
     const ratio = window.devicePixelRatio || 1;
     const pixelWidth = Math.max(1, Math.round(width * ratio));
     const pixelHeight = Math.max(1, Math.round(height * ratio));
@@ -794,7 +845,7 @@ export class GhosttyTerminalSurface {
       this.scrollbarDirty = true;
       shouldRender = true;
     }
-    const grid = terminalGridSize(width, height, this.metrics, CONTENT_PADDING);
+    const grid = pinned ?? terminalGridSize(width, height, this.metrics, CONTENT_PADDING);
     this.mountHeight = height;
     // onResize is the only PTY resize channel, so the first successful fit must
     // notify even when the measured grid equals the 1x1 construction sentinel.
@@ -802,7 +853,10 @@ export class GhosttyTerminalSurface {
       this.cols = grid.cols;
       this.rows = grid.rows;
       this.core.resize(grid.cols, grid.rows, this.metrics.width, this.metrics.height);
-      this.notifyResize();
+      // A pinned grid came from the daemon, so reporting it back would be an
+      // echo, and reporting the mount's own measurement would be exactly the
+      // shrink the daemon just refused.
+      if (!pinned) this.notifyResize();
       this.forceFullRender = true;
       this.scrollbarDirty = true;
       shouldRender = true;
@@ -869,8 +923,12 @@ export class GhosttyTerminalSurface {
     if (!viewportEnd) return null;
     const bounds = this.canvas.getBoundingClientRect();
     return {
-      right: bounds.left + CONTENT_PADDING + (viewportEnd.x + 1) * this.metrics.width,
-      bottom: bounds.top + this.originY + (viewportEnd.y + 1) * this.metrics.height,
+      right:
+        bounds.left
+        + (CONTENT_PADDING + (viewportEnd.x + 1) * this.metrics.width) * this.renderScale,
+      bottom:
+        bounds.top
+        + (this.originY + (viewportEnd.y + 1) * this.metrics.height) * this.renderScale,
     };
   }
 
@@ -1624,8 +1682,22 @@ export class GhosttyTerminalSurface {
     this.inputTop = top;
   }
 
-  private cellAt(clientX: number, clientY: number): { x: number; y: number } {
+  /**
+   * Client coordinates remapped into the canvas's own unscaled drawing space,
+   * so cell hit-testing keeps working while a pinned grid is scaled down.
+   */
+  private canvasSpace(clientX: number, clientY: number): { bounds: DOMRect; clientX: number; clientY: number } {
     const bounds = this.canvas.getBoundingClientRect();
+    if (this.renderScale === 1) return { bounds, clientX, clientY };
+    return {
+      bounds,
+      clientX: bounds.left + (clientX - bounds.left) / this.renderScale,
+      clientY: bounds.top + (clientY - bounds.top) / this.renderScale,
+    };
+  }
+
+  private cellAt(pointerX: number, pointerY: number): { x: number; y: number } {
+    const { bounds, clientX, clientY } = this.canvasSpace(pointerX, pointerY);
     return {
       x: Math.max(
         0,
@@ -1646,10 +1718,11 @@ export class GhosttyTerminalSurface {
 
   private linkAt(clientX: number, clientY: number): TerminalLinkWithRange | null {
     if (!this.snapshot) return null;
+    const space = this.canvasSpace(clientX, clientY);
     const cell = terminalGridCellAt({
-      bounds: this.canvas.getBoundingClientRect(),
-      clientX,
-      clientY,
+      bounds: space.bounds,
+      clientX: space.clientX,
+      clientY: space.clientY,
       cols: this.cols,
       rows: this.rows,
       metrics: this.metrics,
@@ -1696,7 +1769,7 @@ export class GhosttyTerminalSurface {
     button: number | null,
     event: MouseEvent,
   ): void {
-    const bounds = this.canvas.getBoundingClientRect();
+    const { bounds, clientX, clientY } = this.canvasSpace(event.clientX, event.clientY);
     const data = this.core.encodeMouse({
       action,
       button,
@@ -1705,16 +1778,19 @@ export class GhosttyTerminalSurface {
         (event.ctrlKey ? 1 << 1 : 0) |
         (event.altKey ? 1 << 2 : 0) |
         (event.metaKey ? 1 << 3 : 0),
-      x: Math.max(0, event.clientX - bounds.left),
-      y: Math.max(0, event.clientY - bounds.top),
-      screenWidth: bounds.width,
-      screenHeight: bounds.height,
+      x: Math.max(0, clientX - bounds.left),
+      y: Math.max(0, clientY - bounds.top),
+      screenWidth: bounds.width / this.renderScale,
+      screenHeight: bounds.height / this.renderScale,
       cellWidth: this.metrics.width,
       cellHeight: this.metrics.height,
       paddingLeft: CONTENT_PADDING,
       paddingRight: CONTENT_PADDING,
       paddingTop: this.originY,
-      paddingBottom: Math.max(0, bounds.height - this.originY - this.rows * this.metrics.height),
+      paddingBottom: Math.max(
+        0,
+        bounds.height / this.renderScale - this.originY - this.rows * this.metrics.height,
+      ),
       anyButtonPressed: event.buttons !== 0,
     });
     if (data.length > 0) this.options.onData(data);

@@ -14,7 +14,7 @@ function resizeHarness(width: number, height: number, onResize = vi.fn()) {
   Object.assign(surface, {
     disposed: false,
     mount,
-    canvas: { width: 0, height: 0 },
+    canvas: { width: 0, height: 0, style: {} },
     context: { setTransform: vi.fn() },
     metrics: { width: 10, height: 20 },
     core: { resize: vi.fn() },
@@ -22,6 +22,8 @@ function resizeHarness(width: number, height: number, onResize = vi.fn()) {
     resizeNotifyTimer: null,
     resizeNotified: false,
     canvasConfigured: false,
+    renderScale: 1,
+    authoritativeGrid: null,
     forceFullRender: false,
     scrollbarDirty: false,
     cols: 1,
@@ -79,5 +81,68 @@ describe("Ghostty terminal cursor mode", () => {
   it("still respects focus and reduced motion while controlling", () => {
     expect(shouldBlinkTerminalCursor({ ...activeCursor, controlMode: true, focused: false })).toBe(false);
     expect(shouldBlinkTerminalCursor({ ...activeCursor, controlMode: true, reducedMotion: true })).toBe(false);
+  });
+});
+
+// cas-37f8: while the operator's dashboard owns a pane, this viewer renders the
+// pane's real geometry instead of reporting (and so imposing) its own.
+describe("Ghostty terminal pinned to an authoritative pane size", () => {
+  function pinnedHarness(width: number, height: number) {
+    const { surface, mount, onResize } = resizeHarness(width, height);
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { devicePixelRatio: 1, setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout },
+    });
+    return { surface, mount, onResize };
+  }
+
+  it("renders the daemon's grid and never reports a resize back", () => {
+    vi.useFakeTimers();
+    // A 412px phone: 40 columns of a 10px cell, nowhere near the real 203.
+    const { surface, onResize } = pinnedHarness(412, 660);
+
+    surface.setAuthoritativeSize({ cols: 203, rows: 44 });
+
+    expect(surface.cols).toBe(203);
+    expect(surface.rows).toBe(44);
+    vi.advanceTimersByTime(500);
+    expect(onResize).not.toHaveBeenCalled();
+  });
+
+  it("scales the surface down so the whole authoritative grid fits the mount", () => {
+    vi.useFakeTimers();
+    const { surface } = pinnedHarness(412, 660);
+
+    surface.setAuthoritativeSize({ cols: 203, rows: 44 });
+
+    // 203 cols * 10px + 8px padding = 2038px of content in a 412px mount.
+    expect(surface.renderScale).toBeCloseTo(412 / 2038, 5);
+    expect(surface.canvas.style.transform).toBe(`scale(${412 / 2038})`);
+    expect(surface.renderScale * 2038).toBeCloseTo(412, 5);
+  });
+
+  it("never magnifies a grid that already fits", () => {
+    vi.useFakeTimers();
+    const { surface } = pinnedHarness(2000, 2000);
+
+    surface.setAuthoritativeSize({ cols: 80, rows: 24 });
+
+    expect(surface.renderScale).toBe(1);
+    expect(surface.canvas.style.transform ?? "").toBe("");
+  });
+
+  it("goes back to measuring its own mount when the dashboard releases the pane", () => {
+    vi.useFakeTimers();
+    const { surface, onResize } = pinnedHarness(800, 600);
+
+    surface.setAuthoritativeSize({ cols: 203, rows: 44 });
+    expect(surface.cols).toBe(203);
+
+    surface.setAuthoritativeSize(null);
+    vi.advanceTimersByTime(500);
+
+    expect(surface.cols).not.toBe(203);
+    expect(surface.renderScale).toBe(1);
+    expect(onResize).toHaveBeenCalledWith(surface.cols, surface.rows);
   });
 });

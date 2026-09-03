@@ -261,6 +261,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       paneBuffers.set(key, [...data]);
       surfaces.get(key)?.write(data);
     },
+    onPaneSize: (session, pane, cols, rows, authority) => {
+      applyPaneAuthority(machine.id, session, pane, cols, rows, authority);
+    },
     onFlowControlReset: (session) => {
       const prefix = `${sessionKey(machine.id, session)}:`;
       for (const key of paneKeyframesReady) {
@@ -790,13 +793,45 @@ async function loadLease(machineId: string, session: string): Promise<void> {
   } catch { /* legacy hub may not expose lease status */ }
 }
 
+/**
+ * The pane geometry the daemon says is authoritative, per pane (cas-37f8).
+ * `local` means the operator's dashboard owns the PTY: this viewer renders
+ * that size and must stop asking for its own.
+ */
+const paneAuthority = new Map<string, { cols: number; rows: number; local: boolean }>();
+
+function applyPaneAuthority(
+  machineId: string,
+  session: string,
+  paneId: string,
+  cols: number,
+  rows: number,
+  authority: string,
+): void {
+  const key = paneKey(machineId, session, paneId);
+  const local = authority === "LocalDashboard";
+  paneAuthority.set(key, { cols, rows, local });
+  surfaces.get(key)?.setAuthoritativeSize(local ? { cols, rows } : null);
+}
+
+/** A viewer whose pane is owned by the local dashboard never asks again. */
+function ownsPaneGeometry(machineId: string, session: string, paneId: string): boolean {
+  return paneAuthority.get(paneKey(machineId, session, paneId))?.local !== true;
+}
+
+function requestPaneSize(machineId: string, session: string, paneId: string, cols: number, rows: number): void {
+  if (!canResizePanes(machineId, session)) return;
+  if (!ownsPaneGeometry(machineId, session, paneId)) return;
+  sendControl(machineId, session, { ResizePane: { pane_id: paneId, cols, rows } });
+}
+
 function resizeViewablePanes(machineId: string, session: string): void {
   if (!canResizePanes(machineId, session)) return;
   const state = sessionStates.get(sessionKey(machineId, session));
   if (!state) return;
   for (const pane of state.panes.filter((candidate) => candidate.kind !== "Director")) {
     const surface = surfaces.get(paneKey(machineId, session, pane.id));
-    if (surface) sendControl(machineId, session, { ResizePane: { pane_id: pane.id, cols: surface.cols, rows: surface.rows } });
+    if (surface) requestPaneSize(machineId, session, pane.id, surface.cols, surface.rows);
   }
 }
 
@@ -990,7 +1025,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (!surfaces.has(key)) {
       const surface = await createTerminalSurface(mount, {
         onData: (data) => { if (canControl(machineId, session, "pane-input")) sendControl(machineId, session, { Input: { pane_id: pane.id, data: [...data] } }); },
-        onResize: (cols, rows) => { if (canResizePanes(machineId, session)) sendControl(machineId, session, { ResizePane: { pane_id: pane.id, cols, rows } }); },
+        onResize: (cols, rows) => requestPaneSize(machineId, session, pane.id, cols, rows),
       });
       const currentMount = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane.id)}"] .terminal-mount`);
       if (selectedMachineId !== machineId || selectedSession !== session || !mount.isConnected || currentMount !== mount) {
@@ -999,6 +1034,8 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       }
       surfaces.set(key, surface);
       surface.setControlMode(leases.get(selectedKey)?.held_by_me === true);
+      const authority = paneAuthority.get(key);
+      if (authority?.local) surface.setAuthoritativeSize({ cols: authority.cols, rows: authority.rows });
       const buffered = paneBuffers.get(key);
       if (buffered) surface.write(new Uint8Array(buffered));
     }

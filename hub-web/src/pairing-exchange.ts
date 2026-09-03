@@ -1,3 +1,4 @@
+import { pairingExchangeFailure, unreachableHubMessage } from "./pairing-messages";
 import type { PendingInvitation, PairingRelayDelivery } from "./pending-pairing";
 import type { PairingInstallIdentity, Scope, StoredMachine } from "./types";
 
@@ -23,9 +24,13 @@ interface ExchangeOptions {
 }
 
 export class PairingExchangeError extends Error {
-  constructor(message = "This pairing invitation has expired or was already used.") {
+  /** The invitation is untouched, so the caller keeps it and lets the operator retry. */
+  readonly recoverable: boolean;
+
+  constructor(message = "This pairing invitation has expired or was already used.", options: { recoverable?: boolean } = {}) {
     super(message);
     this.name = "PairingExchangeError";
+    this.recoverable = options.recoverable ?? false;
   }
 }
 
@@ -48,36 +53,50 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
     throw new PairingExchangeError("This pairing invitation belongs to a different Cassy Commander origin.");
   }
   const baseUrl = invitation.hubUrl ?? (options.legacyHubUrl ? new URL(options.legacyHubUrl).origin : undefined);
-  if (!baseUrl) throw new PairingExchangeError("The pairing invitation does not identify a reachable hub.");
-  const scopes = invitation.scopes ? [...invitation.scopes] : options.requestedScopes;
-  if (!scopes?.length) throw new PairingExchangeError("Choose at least one read-only scope.");
+  if (!baseUrl) {
+    throw new PairingExchangeError("The pairing invitation does not identify a reachable hub. Enter the machine's hub URL and tap Pair again.", { recoverable: true });
+  }
+  // The invitation's declared scopes are a ceiling, not a suggestion. Requesting
+  // above it is refused by the hub with an opaque 401, so the request is clamped
+  // here and the form only ever narrows what the machine already granted.
+  const granted = invitation.scopes ? [...invitation.scopes] : undefined;
+  const scopes = granted
+    ? (options.requestedScopes === undefined ? granted : options.requestedScopes.filter((scope) => granted.includes(scope)))
+    : options.requestedScopes;
+  if (!scopes?.length) {
+    throw new PairingExchangeError("Tick at least one scope this invitation grants, then tap Pair again.", { recoverable: true });
+  }
   const { privateKey, publicKey } = await options.createKey();
   ensureCurrent(options);
-  const response = await options.fetcher(new URL("/v1/auth/pairing/exchange", baseUrl), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "omit",
-    signal: options.signal,
-    body: JSON.stringify({
-      token: invitation.token,
-      hub_id: invitation.hubId,
-      controller_origin: options.controllerOrigin,
-      public_key_jwk: publicKey,
-      device_label: options.deviceLabel,
-      operator_label: options.operatorLabel,
-      requested_scopes: scopes,
-    }),
-  });
+  const endpoint = new URL("/v1/auth/pairing/exchange", baseUrl);
+  let response: Response;
+  try {
+    response = await options.fetcher(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "omit",
+      signal: options.signal,
+      body: JSON.stringify({
+        token: invitation.token,
+        hub_id: invitation.hubId,
+        controller_origin: options.controllerOrigin,
+        public_key_jwk: publicKey,
+        device_label: options.deviceLabel,
+        operator_label: options.operatorLabel,
+        requested_scopes: scopes,
+      }),
+    });
+  } catch (error) {
+    // A cancelled exchange keeps its own cancellation path; anything else means
+    // the request never reached the hub, so the invitation is still unused.
+    if (options.signal?.aborted || options.isCurrent?.() === false) throw error;
+    throw new PairingExchangeError(unreachableHubMessage(endpoint.origin), { recoverable: true });
+  }
   ensureCurrent(options);
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
-    let message = detail;
-    try {
-      const payload = JSON.parse(detail) as { error_description?: unknown; error?: unknown };
-      message = typeof payload.error_description === "string" ? payload.error_description
-        : typeof payload.error === "string" ? payload.error : detail;
-    } catch { /* a plain-text hub error is already suitable for the dialog */ }
-    throw new PairingExchangeError(message || `The hub rejected this pairing exchange (${response.status}).`);
+    const failure = pairingExchangeFailure({ status: response.status, body: detail, controllerOrigin: options.controllerOrigin });
+    throw new PairingExchangeError(failure.message, { recoverable: failure.keepInvitation });
   }
   const credential = await response.json().catch(() => null) as Record<string, unknown> | null;
   ensureCurrent(options);

@@ -1,5 +1,5 @@
 import type { Scope } from "./types";
-import { DEFAULT_PAIRING_SCOPES } from "./pairing-relay";
+import { PAIRING_SCOPES } from "./pairing-scopes";
 
 export interface PairingDraft {
   hubUrl: string;
@@ -10,13 +10,14 @@ export interface PairingDraft {
   email: string;
 }
 
-export function createPairingDraft(controllerOrigin: string): PairingDraft {
+/** `scopes` is the invitation's ceiling when one is known, never a wider guess. */
+export function createPairingDraft(controllerOrigin: string, scopes?: readonly Scope[]): PairingDraft {
   return {
     hubUrl: controllerOrigin,
     machineLabel: "",
     deviceLabel: "Cassy Commander browser",
     operatorLabel: "",
-    scopes: [...DEFAULT_PAIRING_SCOPES],
+    scopes: scopes ? [...scopes] : [...PAIRING_SCOPES],
     email: "",
   };
 }

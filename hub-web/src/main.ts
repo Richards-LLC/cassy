@@ -12,6 +12,7 @@ import { bindPairingDialogCancel } from "./pairing-dialog";
 import { pairingCleanupFailureUpdate, pairingStorageClearFailureMessage } from "./pairing-cleanup";
 import { exchangePendingPairing, PairingCleanupError, PairingExchangeError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
+import { PAIRING_SCOPES, pairCommand, preselectedScopes, scopeChoices, scopeLabel, ungrantedScopes } from "./pairing-scopes";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { attentionStore, catalog } from "./storage";
@@ -28,6 +29,9 @@ import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCar
 const pendingPairingStore = pendingPairingStoreFor(window);
 const relayOrigin = pairingRelayOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-pairing-relay-origin"]')?.content ?? null);
 let pendingPairing: PendingPairing | null = consumePairingFragment(window.location, window.history, pendingPairingStore);
+// Opening the link is the operator's "yes"; making them hunt for Pair a machine
+// afterwards is how a one-time invitation gets left unused on a phone.
+let pairDialogAutoOpen = pendingPairing !== null;
 pendingPairing ??= pendingPairingStore.load();
 const pairingOperations = new PairingOperationCoordinator();
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -82,7 +86,7 @@ let pairingCountdownTimer: number | undefined;
 let connectionViewTicker: number | undefined;
 let pairingCreateInFlight = false;
 let pairingExchangeInFlight = false;
-let pairingDraft = createPairingDraft(location.origin);
+let pairingDraft = createPairingDraft(location.origin, preselectedScopes(pendingPairing));
 let machineDrawerOpen = false;
 let attentionPanelCollapsed = window.matchMedia("(max-width: 850px)").matches;
 let activeContextTab: "attention" | "status" = "attention";
@@ -507,7 +511,8 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
       machineLabel: String(values.get("label")),
       deviceLabel: String(values.get("device")),
       operatorLabel: String(values.get("operator")),
-      requestedScopes: values.getAll("scope") as Scope[],
+      // The relay form has no scope boxes, so its invitation's own scopes stand.
+      requestedScopes: form.querySelector('input[name="scope"]') ? values.getAll("scope") as Scope[] : undefined,
       fetcher: window.fetch.bind(window),
       createKey: createDeviceKey,
       installationGeneration: operation.generation,
@@ -547,6 +552,14 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
       return false;
     }
     pairingExchangeInFlight = false;
+    if (error instanceof PairingExchangeError && error.recoverable) {
+      // Nothing reached the machine, so the invitation is still good: say what
+      // happened and leave Pair usable instead of sending the operator back to
+      // a terminal for a fresh link.
+      pairingStatus = error.message;
+      render(false);
+      throw error;
+    }
     if (error instanceof PairingExchangeError) {
       pairingOperations.invalidate();
       const cleared = pendingPairingStore.clear();
@@ -1267,7 +1280,7 @@ function connectionLabel(state: ConnectionState | AttachSnapshot | undefined): s
 function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }
 
 function pairingDetails(origin: string, scopes: readonly Scope[]): string {
-  return `<dl class="pair-details"><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Scopes</dt><dd>${scopes.map(escapeHtml).join(", ")}</dd></div></dl>`;
+  return `<dl class="pair-details"><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Scopes</dt><dd>${scopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl>`;
 }
 
 function pairDialogMarkup(): string {
@@ -1278,8 +1291,8 @@ function pairDialogMarkup(): string {
     const relay = Boolean(pendingPairing.relay);
     const hubUrl = pendingPairing.hubUrl;
     const origin = pendingPairing.controllerOrigin;
-    const scopes = pendingPairing.scopes;
-    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && scopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Hub</dt><dd>${escapeHtml(hubUrl)}</dd></div><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${scopes.map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Hub URL<input name="url" type="url" required autofocus value="${escapeAttr(pairingDraft.hubUrl)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes)}</fieldset>`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
+    const invitationScopes = pendingPairing.scopes;
+    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Hub</dt><dd>${escapeHtml(hubUrl)}</dd></div><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Hub URL<input name="url" type="url" required autofocus value="${escapeAttr(pairingDraft.hubUrl)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(invitationScopes)}`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
   }
   const relayAction = relayOrigin
     ? `<button id="pair-create" type="button" class="primary" ${pairingCreateInFlight ? "disabled" : ""}>${pairingCreateInFlight ? "Creating…" : "Create pairing code"}</button>`
@@ -2112,6 +2125,11 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       .then(() => toast("Command copied"))
       .catch(() => toast("Copy failed — type the command shown above"));
   };
+  if (pairDialogAutoOpen) {
+    pairDialogAutoOpen = false;
+    const opened = document.querySelector<HTMLDialogElement>("#pair-dialog");
+    if (opened && !opened.open) opened.showModal();
+  }
   if (pairCancel) pairCancel.onclick = cancelPendingPairing;
   if (pairClose) pairClose.onclick = pairingCreateInFlight ? cancelPendingPairing : () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).close();
   if (pairCreate) pairCreate.onclick = () => {
@@ -2174,9 +2192,21 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };
 }
 
-function scopeChecks(selectedScopes: readonly Scope[]): string {
-  const scopes: Scope[] = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
-  return scopes.map((scope) => `<label class="scope"><input type="checkbox" name="scope" value="${scope}" ${selectedScopes.includes(scope) ? "checked" : ""}>${scope.replaceAll("-", ":")}</label>`).join("");
+/**
+ * Render the six scopes against the invitation's ceiling. A scope the machine
+ * did not grant is shown, disabled, and explained — requesting it is what made
+ * a default `cas hub pair` link fail its first exchange with a bare 401.
+ */
+function scopeChecks(selectedScopes: readonly Scope[], grantedScopes: readonly Scope[] | undefined): string {
+  return scopeChoices(grantedScopes, selectedScopes).map((choice) => `<label class="scope${choice.granted ? "" : " scope-denied"}"><input type="checkbox" name="scope" value="${choice.scope}" ${choice.checked ? "checked" : ""} ${choice.granted ? "" : "disabled"}>${choice.label}${choice.granted ? "" : '<span class="scope-note">not granted by this invitation</span>'}</label>`).join("");
+}
+
+/** Name the missing scopes and the exact command that mints them. */
+function scopeCeilingHint(grantedScopes: readonly Scope[] | undefined): string {
+  const missing = ungrantedScopes(grantedScopes);
+  if (!missing.length) return "";
+  const command = pairCommand(location.origin, PAIRING_SCOPES);
+  return `<p class="scope-hint">To also get ${missing.map((scope) => escapeHtml(scopeLabel(scope))).join(", ")}, run this on the machine and open the new link:</p><div class="pair-code-actions"><code>${escapeHtml(command)}</code><button id="pair-copy" type="button" data-pair-command="${escapeAttr(command)}">Copy command</button></div>`;
 }
 
 function escapeHtml(value: string): string { const span = document.createElement("span"); span.textContent = value; return span.innerHTML; }

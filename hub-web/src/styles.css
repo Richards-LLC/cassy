@@ -1698,9 +1698,45 @@ fieldset {
 .scope {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
   gap: var(--space-2);
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
+}
+
+/* A scope the invitation never granted stays visible and says why it is off. */
+.scope-denied {
+  color: var(--text-mid);
+}
+
+/* Its reason takes its own line: beside the label it widens the dialog past a
+   phone viewport and pushes the Pair button off-screen. */
+.scope-note {
+  flex-basis: 100%;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--text-mid);
+}
+
+.scope-hint {
+  margin: var(--space-2) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--text-mid);
+}
+
+.scope-hint + .pair-code-actions {
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+}
+
+.scope-hint + .pair-code-actions code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--fs-xs);
 }
 
 /* The action row rides the bottom of the scrolling field list, so Pair is

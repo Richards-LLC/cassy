@@ -1,6 +1,11 @@
+import { parseGrantedScopes } from "./pairing-scopes";
+import type { Scope } from "./types";
+
 export interface PairingFragment {
   token: string;
   hubId: string;
+  /** Scope ceiling declared by `cas hub pair`; absent on links minted before it. */
+  scopes?: readonly Scope[];
 }
 
 const BASE64URL_32_BYTES = /^[A-Za-z0-9_-]{43}$/;
@@ -16,7 +21,7 @@ export interface FragmentWatchTarget {
 }
 
 interface LegacyPairingStore<T extends PairingFragment> {
-  saveLegacy(token: string, hubId: string): T;
+  saveLegacy(token: string, hubId: string, scopes?: readonly Scope[]): T;
 }
 
 /** Consume the one-time capability before this module permits any network work. */
@@ -29,7 +34,10 @@ export function consumePairingFragment<T extends PairingFragment>(location: Loca
     const token = params.get("pair");
     const hubId = params.get("hub");
     if (params.getAll("pair").length !== 1 || params.getAll("hub").length !== 1 || !token || !hubId || !BASE64URL_32_BYTES.test(token) || hubId.length > 128) return null;
-    return store?.saveLegacy(token, hubId) ?? { token, hubId };
+    // An unreadable scope list leaves the ceiling unknown rather than voiding a
+    // usable invitation; the form then falls back to read-only preselection.
+    const scopes: readonly Scope[] | undefined = params.getAll("scopes").length === 1 ? parseGrantedScopes(params.get("scopes")) : undefined;
+    return store?.saveLegacy(token, hubId, scopes) ?? { token, hubId, ...(scopes ? { scopes } : {}) };
   } finally {
     history.replaceState(null, "", `${location.pathname}${location.search}`);
   }

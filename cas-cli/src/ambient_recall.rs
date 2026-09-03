@@ -4916,7 +4916,7 @@ mod tests {
             .sync_file_symbols(&[public_symbol, private_symbol], &[])
             .unwrap();
         code_state
-            .record_scan(&repository, 2, 2, 0, Some(sha), None)
+            .record_scan(&repository, 2, 2, 0, 0, None, Some(sha), None)
             .unwrap();
 
         let drain_started = Instant::now();

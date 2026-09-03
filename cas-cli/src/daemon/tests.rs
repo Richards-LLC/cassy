@@ -1182,3 +1182,170 @@ fn a_held_legacy_lock_does_not_wedge_the_daemon_cycle() {
     // deadlock this test against itself.
     drop(held);
 }
+
+// ---------------------------------------------------------------------------
+// cas-bd9df (GH #698): BOM-marked source files.
+//
+// The reporter's repo carried UTF-16 LE files with CRLF. `read_to_string`
+// failed on them, they were counted as index failures, and `cas index code` —
+// the remediation doctor itself printed — re-read the same bytes and failed
+// identically, so the warning could never clear.
+// ---------------------------------------------------------------------------
+
+fn utf16_le_bytes(text: &str) -> Vec<u8> {
+    let mut bytes = vec![0xFF, 0xFE];
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
+#[test]
+fn a_utf16_source_file_indexes_instead_of_failing_forever() {
+    use crate::daemon::indexing::index_code_files;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("bom-repo");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+    std::fs::create_dir_all(repo.join(".git")).expect(".git dir");
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("cas root");
+
+    // The reporter's exact shape: UTF-16 LE with CRLF line endings.
+    let file = repo.join("src/admin.ts");
+    std::fs::write(
+        &file,
+        utf16_le_bytes(
+            "export function quicksilverAdmin(a: number): number {\r\n  return a + 1;\r\n}\r\n",
+        ),
+    )
+    .expect("write utf-16 file");
+
+    let result = index_code_files(&[file], &cas_root).expect("indexing should succeed");
+    assert!(
+        result.errors.is_empty(),
+        "a UTF-16 file must not be an error: {:?}",
+        result.errors
+    );
+    assert!(
+        result.skipped.is_empty(),
+        "a decodable UTF-16 file must be indexed, not skipped: {:?}",
+        result.skipped
+    );
+    assert_eq!(result.files_indexed, 1);
+    assert!(
+        result.symbols_indexed > 0,
+        "the decoded UTF-16 source must yield real symbols"
+    );
+}
+
+#[test]
+fn a_utf8_bom_file_indexes_without_the_bom_reaching_the_parser() {
+    use crate::daemon::indexing::index_code_files;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("bom8-repo");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+    std::fs::create_dir_all(repo.join(".git")).expect(".git dir");
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("cas root");
+
+    // The quiet half of GH #698: read_to_string ACCEPTED this (a BOM is valid
+    // UTF-8), so the BOM reached the parser glued to the first token.
+    let file = repo.join("src/lib.rs");
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(b"pub fn quicksilver_bom(a: i64) -> i64 { a }\n");
+    std::fs::write(&file, bytes).expect("write utf-8-bom file");
+
+    let result = index_code_files(&[file], &cas_root).expect("indexing should succeed");
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.files_indexed, 1);
+
+    let store = crate::store::open_code_store(&cas_root).expect("code store");
+    let symbols = store
+        .search_symbols("quicksilver_bom", None, None, 10)
+        .unwrap_or_default();
+    assert!(
+        symbols.iter().any(|s| s.name == "quicksilver_bom"),
+        "the first symbol must be findable by its real name, not with a BOM \
+         attached: {:?}",
+        symbols.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_binary_file_is_skipped_with_a_reason_and_is_not_an_error() {
+    use crate::daemon::indexing::index_code_files;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("bin-repo");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+    std::fs::create_dir_all(repo.join(".git")).expect(".git dir");
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("cas root");
+
+    // A .rs path holding PNG bytes: eligible by extension, undecodable in fact.
+    let file = repo.join("src/not-really.rs");
+    std::fs::write(&file, [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0xFF]).expect("write");
+
+    let result = index_code_files(&[file.clone()], &cas_root).expect("indexing should succeed");
+    assert!(
+        result.errors.is_empty(),
+        "an undecodable file is a skip, not a failure — counting it as a failure \
+         is what made the warning permanent: {:?}",
+        result.errors
+    );
+    assert_eq!(result.files_indexed, 0);
+    assert_eq!(result.skipped.len(), 1);
+    assert_eq!(result.skipped[0].0, file);
+    assert!(
+        result.skipped[0].1.contains("not valid UTF-8"),
+        "the skip must name its reason: {}",
+        result.skipped[0].1
+    );
+}
+
+#[test]
+fn skipped_files_leave_the_eligible_denominator_so_coverage_can_reach_100_percent() {
+    use crate::daemon::indexing::reconcile_code_tree;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("cov-repo");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+    std::fs::create_dir_all(repo.join(".git")).expect(".git dir");
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("cas root");
+
+    let good = repo.join("src/good.rs");
+    std::fs::write(&good, "pub fn quicksilver_good() -> i64 { 1 }\n").expect("write good");
+    let binary = repo.join("src/binary.rs");
+    std::fs::write(&binary, [0x89, b'P', b'N', b'G', 0xFF, 0x00]).expect("write binary");
+
+    let result = reconcile_code_tree(
+        &[good, binary.clone()],
+        std::slice::from_ref(&repo),
+        &cas_root,
+        true,
+    )
+    .expect("reconcile should succeed");
+    assert_eq!(result.skipped.len(), 1);
+
+    let state = cas_store::SqliteCodeVectorStore::open(&cas_root).expect("state store");
+    let repositories = ["cov-repo".to_string()];
+    let scan = repositories
+        .iter()
+        .find_map(|repository| state.index_state(repository).ok().flatten())
+        .expect("a scan receipt must have been recorded");
+
+    // The whole point of GH #698: the undecodable file leaves the denominator
+    // rather than sitting in it as a failure no rerun can clear.
+    assert_eq!(
+        scan.failed_files, 0,
+        "an undecodable file must not be counted as a failure"
+    );
+    assert_eq!(scan.eligible_files, scan.indexed_files, "coverage must reach 100% of eligible");
+    assert_eq!(scan.skipped_files, 1);
+    let detail = scan.skipped_detail.expect("the skip must be named");
+    assert!(detail.contains("binary.rs"), "{detail}");
+    assert!(detail.contains("not valid UTF-8"), "{detail}");
+}

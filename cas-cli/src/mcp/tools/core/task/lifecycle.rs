@@ -1637,6 +1637,118 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn duplicate_description_warning_flags_the_gh679_pair() {
+        let temp = TempDir::new().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let first_title = "Backend: workspaces are still created container-less on 3 phone-based paths, and 3 divergent \"ensure default container\" seams exist ('ideas' / 'Inbox' / SMS-import)";
+        let first_description = "The ensureDefaultProjects function remains divergent at phone-workspace.service.ts:158/687/1031. The 'ideas', 'Inbox', and SMS-import seams all need the same backfill.";
+        let second_title = "Backend: wire ensureDefaultProjects into the three phone-based workspace creation paths + unify the three divergent default-container seams";
+        let second_description = "Wire ensureDefaultProjects into phone-workspace.service.ts:158/687/1031, unifying the 'ideas', 'Inbox', and SMS-import seams and applying the same backfill.";
+
+        core.cas_task_create(Parameters(described_task_request(
+            first_title,
+            first_description,
+        )))
+        .await
+        .expect("the original GH #679 task should be created");
+        let original_id = core
+            .open_task_store()
+            .expect("task store")
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title == first_title)
+            .expect("original GH #679 task")
+            .id;
+
+        let warning = core
+            .cas_task_create(Parameters(described_task_request(
+                second_title,
+                second_description,
+            )))
+            .await
+            .expect_err("the GH #679 twin must require confirmation");
+        assert_eq!(warning.code, ErrorCode::INVALID_PARAMS);
+        assert!(
+            warning.message.contains("DUPLICATE TASK WARNING")
+                && warning.message.contains(&original_id)
+                && warning.message.contains("confirm_warning=true"),
+            "unexpected warning: {}",
+            warning.message
+        );
+        for identifier in [
+            "ensuredefaultprojects",
+            "phone-workspace.service.ts:158",
+            "phone-workspace.service.ts:687",
+            "phone-workspace.service.ts:1031",
+            "ideas",
+            "inbox",
+            "sms-import",
+        ] {
+            assert!(
+                warning.message.to_ascii_lowercase().contains(identifier),
+                "warning must name overlapping identifier {identifier:?}: {}",
+                warning.message
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_description_overlap_does_not_warn_for_distinct_tasks() {
+        let temp = TempDir::new().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let pairs = [
+            (
+                (
+                    "Backend: improve workspace creation metrics",
+                    "Update backend service behavior and add tests for the workspace workflow.",
+                ),
+                (
+                    "Backend: improve workspace deletion metrics",
+                    "Update backend service behavior and add tests for the account workflow.",
+                ),
+            ),
+            (
+                (
+                    "Add task lifecycle logging",
+                    "Review the service changes and update the integration tests for the release.",
+                ),
+                (
+                    "Remove task lifecycle logging",
+                    "Review the service changes and update the unit tests for the release.",
+                ),
+            ),
+            (
+                (
+                    "Handle API timeout errors",
+                    "Improve error handling in the client and document the expected behavior.",
+                ),
+                (
+                    "Handle API retry errors",
+                    "Improve error handling in the server and document the expected behavior.",
+                ),
+            ),
+        ];
+
+        for ((first_title, first_description), (second_title, second_description)) in pairs {
+            core.cas_task_create(Parameters(described_task_request(
+                first_title,
+                first_description,
+            )))
+            .await
+            .expect("distinct first task should be created");
+            core.cas_task_create(Parameters(described_task_request(
+                second_title,
+                second_description,
+            )))
+            .await
+            .unwrap_or_else(|error| {
+                panic!("generic overlap must not warn for distinct task {second_title:?}: {error}")
+            });
+        }
+    }
+
+    #[tokio::test]
     async fn duplicate_title_warning_keeps_short_distinguishing_tokens() {
         let temp = TempDir::new().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
@@ -1713,6 +1825,13 @@ mod related_recall_response_tests {
             epic: None,
             depth: None,
         }
+    }
+
+    fn described_task_request(title: &str, description: &str) -> TaskCreateRequest {
+        let mut request = plain_task_request(title);
+        request.description = Some(description.to_string());
+        request.task_type = "bug".to_string();
+        request
     }
 
     fn add_memory(core: &CasCore, id: &str, title: &str, content: &str) {

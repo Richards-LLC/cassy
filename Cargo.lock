@@ -710,6 +710,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.24.0",
  "toml",
+ "toml_edit",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -6546,6 +6547,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

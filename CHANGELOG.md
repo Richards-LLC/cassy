@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- Two supervisors working the same checkout are now visible to each other.
+  `cas doctor`, `worker_status` and every spawn receipt name both sessions and
+  when each started, and say plainly that a reset, merge or shutdown from
+  either can reap the other's workers. Previously each session checked out
+  green on its own and the newer supervisor was shown only itself, with an
+  empty worker roster it had every reason to believe. (GH #699)
+
 ### Fixed
 - A task with no recorded owner project can be started and claimed again. Such
   a row was listed on the board and shown as this project's work, but `start`

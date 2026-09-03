@@ -31,62 +31,76 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 - `cas integrate mecha-cassy` sets up MechaCassy on a machine in one command:
-  a machine-level proxy registration that every project inherits, Claude Code
-  and Codex entries by environment-variable name, and an authenticated tool
-  list as the receipt; `cas doctor` gains a mecha-cassy row and a credential
-  script handles the one human step. Onboarding doc for teammates.
-- Cloud sync consumes the per-row push outcomes the cloud now returns: rows
-  the cloud kept newer are acknowledged, rejections are held with their reason
-  and a remedy, and `cas update` / `cas doctor` say which is which. Terminal
-  failures parked by an older client are requeued once after upgrade.
-- Cloud sync consumes dependency deletion tombstones: a removed dependency
-  edge propagates to every machine and cannot be resurrected, and the
-  "N edges healed" churn on every pull is gone (reconciliation runs against a
-  complete snapshot at most every six hours).
+  a machine-level proxy registration every project inherits, Claude Code and
+  Codex entries by environment-variable name, and an authenticated tool list as
+  the receipt. `cas doctor` gains a mecha-cassy row; a credential script handles
+  the one human step; onboarding doc for teammates. The `mecha-cassy` skill is
+  now the whole posting contract (the separate mecha-cassy-post skill is
+  retired) and a new `user skills` doctor row flags stale or orphaned
+  user-level skills per harness.
+- Cloud sync consumes per-row push outcomes: rows the cloud kept newer are
+  acknowledged, rejections are held with their reason and a remedy, and
+  `cas update` / `cas doctor` say which is which. Terminal failures parked by
+  an older client are requeued once after upgrade.
+- Cloud sync consumes dependency deletion tombstones: a removed edge
+  propagates everywhere and cannot be resurrected; the "N edges healed" churn
+  on every pull is gone.
+- Revision-based conflict resolution: when both sides carry a server revision
+  the higher revision wins and clocks are not consulted, so a machine with a
+  wrong clock no longer silently wins or loses. Revisions arbitrate the
+  "keep newest" strategy (personal pulls and teams configured for it); an
+  explicit remote-wins or local-wins team strategy stays authoritative.
+- `cas doctor --fix-cloud-rows [--yes]` sets aside task rows a past sync leak
+  copied into the wrong project: they leave the ready queue and are never
+  pushed, stay readable by id, and `--release-cloud-rows` restores them.
+  Doctor reports unattributed and colliding rows with the rekey
+  recommendation.
+- `cas doctor --verbose` prints each check's duration and a slowest-phases
+  table; `--json` carries per-check timings.
 - `cas doctor`, worker status and the spawn receipt warn when two live
   supervisor sessions share one clone path (GH #699).
+- Factory `gc_report` lists stale disposable roots under the temp directory
+  with age and size; isolated Cassy roots default to `~/.cas/scratch/<name>`
+  and refuse a RAM-backed location that would hold worktrees or build cache
+  (GH #704).
 
 ### Fixed
 - Tasks whose owner project was never recorded can be started and claimed
-  again: they are adopted into the current project instead of refused as an
-  "unassigned legacy row" (GH #690).
-- Client project-identity canonicalization now matches the cloud's rule
-  exactly (case-insensitive `.git` on every shape), consumes the cloud's alias
-  record, and a parity audit script reports per-project convergence (GH #669).
+  again instead of being refused as an "unassigned legacy row" (GH #690).
+- Client project-identity canonicalization matches the cloud's rule exactly,
+  consumes the cloud's alias record, and a parity audit reports per-project
+  convergence (GH #669).
 - Pull attribution reads a row's origin project before the server's scope
   stamp, so another project's rows are no longer ingested as this project's;
   throwaway checkouts no longer mint a cloud identity on push (GH #701).
-- Migration cursor fixtures follow the new tombstone ledger migration.
-
-
-### Added
-- Task rows that a past sync leak copied into the wrong project — rows nothing
-  on this machine can place — can now be put aside. `cas doctor
-  --fix-cloud-rows` shows exactly which rows it would set aside and changes
-  nothing until you add `--yes`; those rows then leave the ready queue and are
-  never sent to the cloud, while staying readable by id and restorable with
-  `--release-cloud-rows`. The rows themselves are untouched, so a later sync
-  cannot bring them back into view. `cas doctor` now reports how many rows are
-  unplaceable, how many are set aside, and how many share an id with a
-  different task — the last group is left alone on purpose, because those need
-  a new id rather than removal. (GH #701)
-- Two supervisors working the same checkout are now visible to each other.
-  `cas doctor`, `worker_status` and every spawn receipt name both sessions and
-  when each started, and say plainly that a reset, merge or shutdown from
-  either can reap the other's workers. Previously each session checked out
-  green on its own and the newer supervisor was shown only itself, with an
-  empty worker roster it had every reason to believe. (GH #699)
-
-### Fixed
-- A task with no recorded owner project can be started and claimed again. Such
-  a row was listed on the board and shown as this project's work, but `start`
-  and `claim` refused it as an "unassigned legacy row" with no field a worker
-  could set to repair it — which wedged a whole factory whose supervisor
-  process still ran a build that predated owner stamping. The row is now
-  adopted into the current project and the repair is written back, so later
-  ownership checks agree; `mine` lists it too. Rows owned by a *different*
-  project are still refused, and the refusal now spells out the supervisor
-  command that reassigns one. (GH #690)
+- `cas doctor` on a large store dropped from over two minutes to about three
+  seconds: the history-index check ran a per-commit JSON scan over every task
+  (GH #700).
+- The embedding drain no longer retries a provider refusal forever: oversized
+  text is capped, refusals are told apart from outages, a poisoned batch is
+  bisected so only the offending unit is quarantined with the provider's
+  message, and doctor reports pending and quarantined separately with
+  `cas history embed --retry-quarantined` (GH #695).
+- Doctor's code-vector figures come from symbol coverage instead of queue
+  rows, so they no longer reset when the queue is re-armed, and a discarded
+  vector cache generation is named instead of showing every vector gone
+  (GH #696).
+- `cas doctor --verbose` no longer inserts thousands separators into task ids,
+  UUIDs and timestamps, and the "cannot reach N rows" count matches the rows
+  it lists (GH #697).
+- The code index decodes UTF-16 and UTF-8-BOM source files instead of failing
+  forever; undecodable files are skipped with a named reason and excluded from
+  coverage; a UTF-8 BOM no longer corrupts a file's first symbol (GH #698).
+- A merge request sent after a new push is delivered instead of being
+  suppressed as "already landed": the suppressor now checks the live branch
+  tip, not the anchor recorded at the previous merge (GH #703).
+- `worktree_merge` fetches and fast-forwards the local target before merging,
+  refuses a diverged target before touching it, and reports a rejected
+  non-fast-forward push honestly with a working remediation (GH #703).
+- probe-comm removes its scratch root on success and failure; test fixtures
+  no longer leak hand-named directories into the temp directory (GH #704).
+- Migration cursor fixtures derive their expectation from the migration
+  registry instead of a hand-pinned list.
 
 ## [3.14.0] - 2026-09-03
 

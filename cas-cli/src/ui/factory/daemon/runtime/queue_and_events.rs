@@ -1421,6 +1421,141 @@ impl FactoryDaemon {
         }
     }
 
+    /// Report a worker whose harness refused a turn because of its account,
+    /// and give its task back (cas-8a55).
+    ///
+    /// This failure is worse than a crash because it looks like health: the
+    /// harness process stays up and keeps heartbeating, the MCP child stays
+    /// registered, and the only evidence is one line in a transcript. In the
+    /// incident this exists for, four Codex workers each died on their first
+    /// turn with a revoked refresh token and were still listed as live and
+    /// "assigned but unstarted" 34 minutes later, with their tasks held.
+    ///
+    /// One relay per episode, the spawn recorded as failed rather than
+    /// registered, and the pre-assigned task released so another worker — or
+    /// the same one after `codex login` — can pick it up.
+    pub(super) fn relay_auth_failed_workers(&mut self) {
+        const AUTH_FAILURE_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+        let now = std::time::Instant::now();
+        if self
+            .last_auth_failure_scan
+            .is_some_and(|last| now.saturating_duration_since(last) < AUTH_FAILURE_SCAN_INTERVAL)
+        {
+            return;
+        }
+        self.last_auth_failure_scan = Some(now);
+
+        let Ok(agents) = crate::store::open_agent_store(self.app.cas_dir()) else {
+            return;
+        };
+        let Ok(active) = agents.list(Some(cas_types::AgentStatus::Active)) else {
+            return;
+        };
+        let workers: std::collections::HashSet<String> =
+            self.app.worker_names().iter().cloned().collect();
+        let candidates: Vec<cas_types::Agent> = active
+            .into_iter()
+            .filter(|agent| {
+                agent.role == cas_types::AgentRole::Worker
+                    && agent.factory_session.as_deref() == Some(self.session_name.as_str())
+                    && workers.contains(&agent.name)
+            })
+            .collect();
+
+        for agent in candidates {
+            use crate::factory_auth_health::AuthFailureEvidence;
+            let evidence = crate::mcp::tools::service::factory_ops::worker_auth_failure_evidence(
+                self.app.cas_dir(),
+                &agent,
+            );
+            let (message, occurrence) = match evidence {
+                // Only affirmative later evidence closes an episode; an
+                // unreadable transcript must never reset the dedupe key.
+                AuthFailureEvidence::Healthy => {
+                    self.reported_auth_failed_workers.remove(&agent.id);
+                    continue;
+                }
+                AuthFailureEvidence::Unavailable => continue,
+                AuthFailureEvidence::Failed {
+                    message,
+                    occurrence,
+                } => (message, occurrence),
+            };
+            let occurrence = format!("{}:{occurrence}", agent.id);
+            if self.reported_auth_failed_workers.get(&agent.id) == Some(&occurrence) {
+                continue;
+            }
+
+            let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
+            let account_dir =
+                crate::mcp::tools::service::factory_ops::worker_account_dir(&agent);
+            let detail = crate::factory_auth_health::auth_failure_detail(
+                &agent.name,
+                cli,
+                account_dir.as_deref(),
+                &message,
+            );
+
+            // The task comes back first: a held task is the part of this
+            // failure that blocks the epic, and it must not depend on a
+            // relay write succeeding.
+            let released = crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
+                self.app.cas_dir(),
+                &agent.name,
+            );
+            let detail = match released {
+                0 => detail,
+                1 => format!("{detail} Its assigned task was released back to open."),
+                count => format!("{detail} Its {count} assigned tasks were released back to open."),
+            };
+
+            crate::telemetry::track(
+                "factory_worker_spawn_result",
+                vec![("success", "false"), ("reason", "harness_unauthorized")],
+            );
+            append_spawn_audit(
+                self.app.cas_dir(),
+                &self.session_name,
+                None,
+                Some(&agent.name),
+                "harness_auth",
+                "failed",
+                &detail,
+            );
+            match enqueue_spawn_outcome_notice(
+                self.app.cas_dir(),
+                self.app.supervisor_name(),
+                &self.session_name,
+                None,
+                &agent.name,
+                "harness_auth",
+                false,
+                &detail,
+            ) {
+                Ok(_) => {
+                    self.reported_auth_failed_workers
+                        .insert(agent.id.clone(), occurrence);
+                    tracing::error!(
+                        target: "cas::coordination",
+                        stage = "worker_auth_failed",
+                        worker = %agent.name,
+                        harness = ?cli,
+                        "harness refused the worker's turn on its account — spawn reported failed and task released"
+                    );
+                }
+                Err(error) => {
+                    // Leaving the dedupe key unset retries the relay on the
+                    // next scan rather than losing the report entirely.
+                    tracing::warn!(
+                        worker = %agent.name,
+                        %error,
+                        "cas-8a55: failed to relay a harness account failure to the supervisor"
+                    );
+                }
+            }
+        }
+    }
+
     /// Bounce aged direct messages to their original sender. The prompt store
     /// owns the read/ack race and one-shot marker; this daemon layer adds the
     /// live recipient harness and the authoritative delivery-state context.

@@ -46,7 +46,9 @@ fn git(repo: &std::path::Path, args: &[&str]) {
 }
 
 fn project(with_mcp: bool) -> TempDir {
-    let dir = TempDir::new().unwrap();
+    // This is a real registered project fixture, so keep it outside the
+    // system temp roots that discovery intentionally treats as disposable.
+    let dir = TempDir::new_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
     git(
         dir.path(),
@@ -74,7 +76,12 @@ fn project(with_mcp: bool) -> TempDir {
 }
 
 fn command(project: &TempDir, home: &TempDir) -> Command {
-    command_at(project.path(), home)
+    let mut command = command_at(project.path(), home);
+    command.args([
+        "--cas-root",
+        project.path().join(".cas").to_str().unwrap(),
+    ]);
+    command
 }
 
 fn command_at(cwd: &std::path::Path, home: &TempDir) -> Command {

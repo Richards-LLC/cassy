@@ -85,6 +85,8 @@ Run the full suite on the assembled tree. Use nohup, kill -0, stranded_branch_ov
 release-published-receipt.sh --write-draft, and cas --version.
 Require Scoped Validation; the ledger is the last prep step; record a cause class.
 Use 9.99.x fixtures; workers never poll CI; commit a reviewed snapshot update.
+Check for a competing release with the merge-queue GraphQL query. Read CAS_RELEASE_ENV_FILE.
+Require the annotated tag peels, four Slack POSTED receipts, and refresh_binary_version.
 EOF
     cat >"$repo/scripts/release.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -399,6 +401,25 @@ output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base" \
 assert_named_failure scratch-base "$output"
 grep -qF 'parent' <<<"$output" && ok 'scratch-base names an unwritable parent' \
     || bad "scratch-base omitted the unwritable parent: $output"
+
+# The full gate aborts after this first preflight failure. Neither Cargo nor
+# archive receipt mutation may occur after the host was already proven unsafe.
+preflight_cargo_sentinel="$tmp/preflight-abort-cargo.log"
+preflight_archive_sentinel="$tmp/preflight-abort-archive-size"
+rm -f "$preflight_cargo_sentinel" "$preflight_archive_sentinel"
+output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base" \
+    CAS_RELEASE_GATE_PARENT_WRITABLE=0 \
+    CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$preflight_archive_sentinel" \
+    GATE_FIXTURE_CARGO_LOG="$preflight_cargo_sentinel" \
+    CARGO="$repo/scripts/cargo-stub" \
+    RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
+    "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+if [[ ! -e "$preflight_cargo_sentinel" && ! -e "$preflight_archive_sentinel" ]] \
+    && ! grep -qE '^(PASS|FAIL) (fixture-paths|workspace-tests|nextest|archive-mode)' <<<"$output"; then
+    ok 'scratch-base failure aborts before Cargo and archive rows run'
+else
+    bad "scratch-base failure continued into costly rows: $output"
+fi
 
 output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base" \
     CAS_RELEASE_GATE_CHECKOUT_DEVICE=11 CAS_RELEASE_GATE_SCRATCH_DEVICE=22 \

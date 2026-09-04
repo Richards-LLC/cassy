@@ -16,10 +16,11 @@ name the blocking step in the operator timeline, and require its receipt.
    tags=release`. `--learn` regenerates the builtin reference ledger.
 2. Before `worktree_merge` on any release-bound lane, run
    `scripts/release-train.sh <version> <epic-worktree> --check-lane <branch>`
-   and require that branch tip's own push-triggered Scoped Validation to be
-   GREEN. Missing, pending, skipped, cancelled, or red is a refusal. The only
-   substitute is the supervisor running the affected caller modules in the
-   gate worktree. The supervisor monitors CI; workers never poll CI.
+   and require the `Scoped Validation (factory/PR)` job inside that branch tip's
+   exact-SHA, push-triggered `CI` workflow run to be GREEN. Missing or malformed evidence,
+   API errors, pending, skipped, cancelled, or red is a refusal. The only
+   substitute is the supervisor running the affected caller modules in the gate
+   worktree. The supervisor monitors CI; workers never poll CI.
 3. A stalled worker with green proofs gets one urgent interrupt; if it remains
    stalled, the supervisor pushes from its worktree. When a rebase makes the
    anchor stale, close the handoff with `commit_receipt` instead of spending
@@ -43,8 +44,17 @@ name the blocking step in the operator timeline, and require its receipt.
    the checkout mount with a writable parent and no `.cas` ancestor. On
    soundwave use `/home/cas-release-gate/base`, not `/`, which was 97% full.
    The scratch-base row runs first and requires free space at least twice
-   the last recorded archive size and records the new archive size per run.
-8. Prepare the source commit with `scripts/bump-release-version.sh <version>`,
+   the last recorded archive size and records the new archive size per run. A
+   failure aborts before Cargo or archive rows. Archive mode builds outside the
+   checkout with a remap rooted at `Cargo.toml` plus every package path from
+   `git ls-files '*/Cargo.toml'`, symlinks only cargo/rustc/git/sh/bash/jq/python3,
+   removes `rg`, and uses `--workspace-remap`; exclude `component_output_test`
+   only when its source snapshots require the checkout.
+8. Before changing a version, prove there is no competing release with
+   `gh pr list --state open --search release`, the merge-queue GraphQL query,
+   and `git ls-remote --tags origin`. A competing release from another supervisor lands
+   first and this train takes the next patch number. Then prepare the source
+   commit with `scripts/bump-release-version.sh <version>`,
    `cargo update --workspace --offline`, CHANGELOG, release draft, and prior
    POSTED receipt. Start the gate with `scripts/release-train.sh <version>
    <epic-worktree> --gate`; it regenerates and refuses an uncommitted ledger,
@@ -53,24 +63,70 @@ name the blocking step in the operator timeline, and require its receipt.
    watcher. `--stop` terminates the recorded process group, including nextest
    and git children. After a targeted fix rerun only failed rows with `--gate
    --only <row,row>`; row order and the selected-row summary are preserved.
+   These are diagnostic receipts in append-only per-attempt directories: they
+   never overwrite or authorize the exact-SHA full gate required by pipeline.
+   The main per-run directory is keyed by version and worktree, never only by
+   version, and every gate is located by its recorded PID, never `pgrep`.
 9. Create `pr-body.md` in the printed run directory, then use `--pipeline`.
-   Require pull-request Fast Validation and macOS Check pass rows before queue
-   admission; skipped push rows prove nothing. The train records the PR, merge
-   queue terminal state, and landed main SHA in the same per-run directory,
-   which is keyed by version and worktree. Locate processes only by recorded
-   PID/process group, never by `pgrep` or a version-keyed path.
+   It refuses unless `gate.done`, `gate.full.sha`, and the current tree prove a
+   successful full gate on the exact commit about to be pushed. Require
+   pull-request Fast Validation and macOS Check pass rows before queue admission;
+   skipped push rows prove nothing. The train records the PR, merge-queue
+   terminal state, and landed main SHA. It detects a missing `mergeQueueEntry`
+   with no new `merge_group` run and re-enqueues at most three times before
+   failing; stale queue runs from before this attempt prove nothing.
 10. Add one epic note per gate run containing tip, failed rows, cause class
     (`product`, `fixture`, `environment`, or `procedure`), and blocking step.
     The final pane summary names green-to-published latency; `--status` prints
     the note template and latency receipt when available.
 11. Publish the recorded landed SHA with `--publish`. Require origin/main and
-    the landed commit's `cas-cli/Cargo.toml` to match before the detached tag
-    worktree is created. Let `release.sh --publish-tag` create the annotated tag
-    and run local preflight; keep log, PID, and numeric done receipts outside
-    the tag worktree. At reminder wakeups use `kill -0` on the recorded PID and
-    inspect the done receipt; never foreground-poll or use `pkill -f`.
-12. Before announcing, verify the remote tag and release workflow, run
-    `release-published-receipt.sh --write-draft` and the latency receipt, save
-    the required Slack POSTED receipts, and prove host `cas update`, `cas
-    --version`, and `cas hub`. Close only after merge and stranded-branch
-    inspection; use `stranded_branch_override` only with proof on main.
+   the landed commit's `cas-cli/Cargo.toml` to match before the detached tag
+   worktree is created. Hardlink `.context/zig`, source
+   `CAS_RELEASE_ENV_FILE` (default `$HOME/.cas/release.env`) without printing
+   values, and print only the set/unset state of `CAS_POSTHOG_API_KEY` and
+   `CAS_SENTRY_DSN`. Let `release.sh --publish-tag` create the annotated tag and
+   run local preflight. Keep `release.log`, the recorded PID, and numeric done
+   receipt in the train's external run directory. The detached wrapper must
+   capture status without changing the caller's errexit state:
+
+   ```bash
+   cd "$TAG_WORKTREE"
+   test -x "$PWD/.context/zig/zig"
+   export ZIG="$PWD/.context/zig/zig"
+   RELEASE_ENV_FILE="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}"
+   test -r "$RELEASE_ENV_FILE"
+   set -a; source "$RELEASE_ENV_FILE"; set +a
+   for name in CAS_POSTHOG_API_KEY CAS_SENTRY_DSN; do
+     if [[ -v "$name" ]]; then printf '%s: set\n' "$name"; else printf '%s: unset\n' "$name"; fi
+   done
+   EVIDENCE_DIR="$(scripts/release-train.sh "$VERSION" "$EPIC_WORKTREE" --print-run-dir)"
+   mkdir -p "$EVIDENCE_DIR"
+   LOG="$EVIDENCE_DIR/release.log"
+   PID_FILE="$EVIDENCE_DIR/release.pid"; DONE="$EVIDENCE_DIR/release.done"
+   nohup bash -c '
+     set +e
+     "$1" --publish-tag >"$2" 2>&1
+     status=$?
+     case "$status" in (""|*[!0-9]*) status=1;; esac
+     printf "%s\n" "$status" >"$3"
+     exit "$status"
+   ' bash "$PWD/scripts/release.sh" "$LOG" "$DONE" &
+   PUBLISH_PID=$!; printf '%s\n' "$PUBLISH_PID" >"$PID_FILE"
+   ```
+
+   At reminder wakeups use `kill -0` on that PID and inspect the done receipt;
+   never `wait`, foreground-poll, or use `pkill -f`.
+12. Before announcing, require the annotated tag peels to the landed SHA and
+   `git ls-remote --exit-code --refs origin "refs/tags/$TAG"` succeeds. Save the
+   exact matching `gh run list --workflow release.yml --limit 20 --json
+   databaseId,headSha,status,conclusion` row and require success. Run
+   `release-published-receipt.sh --write-draft` and the latency receipt. Use
+   MechaCassy's default `cas-internal` channel, retain `C0B44GUKDK2` only for
+   verification, and save four Slack POSTED entries with timestamps and
+   permalinks. If the live proxy lacks registration, use the configured direct
+   mecha-cassy MCP or an approved bounded one-shot route; do not retry an
+   authenticated-session rejection. Save `cas update`, `cas --version`, and
+   `cas hub` proof and require `refresh_binary_version` in the host update JSON
+   to equal the released version. Carry the POSTED receipt into the next prep
+   commit. Close only after merge and stranded-branch inspection; use
+   `stranded_branch_override` only with proof on main.

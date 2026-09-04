@@ -6661,6 +6661,13 @@ This is the body content."#;
                 "9.99.x",
                 "cause class",
                 "green-to-published latency",
+                "competing release",
+                "merge-queue GraphQL query",
+                "CAS_RELEASE_ENV_FILE",
+                "annotated tag peels",
+                "four Slack POSTED",
+                "refresh_binary_version",
+                "stranded_branch_override",
             ] {
                 assert!(
                     skill.content.contains(marker),

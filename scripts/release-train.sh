@@ -90,14 +90,16 @@ live_gate_pid() {
 }
 
 write_run_env() {
-    local tip
+    local env_file="${1:-$run_dir/run.env}" tip tip_sha
     tip="$(git -C "$worktree" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    cat >"$run_dir/run.env" <<EOF
+    tip_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || echo unknown)"
+    cat >"$env_file" <<EOF
 version=$version
 worktree=$worktree
 worktree_name=$worktree_name
 repository=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null || echo unknown)
 tip=$tip
+tip_sha=$tip_sha
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 started_by_pid=$$
 EOF
@@ -117,33 +119,54 @@ EOF
 gh_cmd() { "${CAS_RELEASE_TRAIN_GH:-gh}" "$@"; }
 
 check_lane() {
-    local branch="$1" repo_slug sha runs row status conclusion run_id
+    local branch="$1" repo_slug sha runs row run_id jobs job status conclusion job_id
     [[ -n "$branch" ]] || {
         printf 'error: --check-lane requires a branch\n' >&2
         return 2
     }
     repo_slug="${CAS_RELEASE_TRAIN_REPO:-Richards-LLC/cassy}"
-    sha="$(git -C "$worktree" rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" 2>/dev/null \
-        || git -C "$worktree" rev-parse --verify --quiet "$branch^{commit}" 2>/dev/null || true)"
+    sha="$(git -C "$worktree" rev-parse --verify --quiet "refs/heads/$branch^{commit}" 2>/dev/null \
+        || git -C "$worktree" rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" 2>/dev/null || true)"
     [[ -n "$sha" ]] || {
         printf 'lane %s: MISSING (branch tip not found locally)\n' "$branch"
         return 1
     }
-    runs="$(gh_cmd run list -R "$repo_slug" --workflow 'Scoped Validation' --branch "$branch" \
-        --event push --limit 20 --json databaseId,headBranch,headSha,status,conclusion,event,workflowName 2>/dev/null \
-        || printf '[]')"
-    row="$(printf '%s' "$runs" | jq -c --arg branch "$branch" --arg sha "$sha" '
-        [.[] | select(.headBranch == $branch and .headSha == $sha and .event == "push"
-          and .workflowName == "Scoped Validation")] | first // empty' 2>/dev/null || true)"
-    if [[ -z "$row" ]]; then
-        printf 'lane %s at %s: MISSING Scoped Validation push run\n' "$branch" "$sha"
+    if ! runs="$(gh_cmd run list -R "$repo_slug" --workflow ci.yml --branch "$branch" \
+        --event push --limit 20 --json databaseId,headBranch,headSha,status,conclusion,event,workflowName 2>&1)"; then
+        printf 'lane %s at %s: API ERROR listing CI push runs: %s\n' "$branch" "$sha" "$runs"
         return 1
     fi
-    status="$(printf '%s' "$row" | jq -r '.status // "unknown"')"
-    conclusion="$(printf '%s' "$row" | jq -r '.conclusion // "pending"')"
+    if ! printf '%s' "$runs" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        printf 'lane %s at %s: API ERROR parsing CI push runs\n' "$branch" "$sha"
+        return 1
+    fi
+    row="$(printf '%s' "$runs" | jq -c --arg branch "$branch" --arg sha "$sha" '
+        [.[] | select(.headBranch == $branch and .headSha == $sha and .event == "push"
+          and .workflowName == "CI")] | first // empty')"
+    if [[ -z "$row" ]]; then
+        printf 'lane %s at %s: MISSING exact-sha CI push run\n' "$branch" "$sha"
+        return 1
+    fi
     run_id="$(printf '%s' "$row" | jq -r '.databaseId // "unknown"')"
-    printf 'lane %s at %s: Scoped Validation run %s status=%s conclusion=%s\n' \
-        "$branch" "$sha" "$run_id" "$status" "$conclusion"
+    if ! jobs="$(gh_cmd run view "$run_id" -R "$repo_slug" --json jobs 2>&1)"; then
+        printf 'lane %s at %s: API ERROR reading CI run %s jobs: %s\n' \
+            "$branch" "$sha" "$run_id" "$jobs"
+        return 1
+    fi
+    if ! printf '%s' "$jobs" | jq -e '.jobs | type == "array"' >/dev/null 2>&1; then
+        printf 'lane %s at %s: API ERROR parsing CI run %s jobs\n' "$branch" "$sha" "$run_id"
+        return 1
+    fi
+    job="$(printf '%s' "$jobs" | jq -c '[.jobs[] | select(.name == "Scoped Validation (factory/PR)")] | first // empty')"
+    if [[ -z "$job" ]]; then
+        printf 'lane %s at %s: MISSING Scoped Validation (factory/PR) job in CI run %s\n' "$branch" "$sha" "$run_id"
+        return 1
+    fi
+    status="$(printf '%s' "$job" | jq -r '.status // "unknown"')"
+    conclusion="$(printf '%s' "$job" | jq -r '.conclusion // "pending"')"
+    job_id="$(printf '%s' "$job" | jq -r '.databaseId // "unknown"')"
+    printf 'lane %s at %s: CI run %s Scoped Validation (factory/PR) job %s status=%s conclusion=%s\n' \
+        "$branch" "$sha" "$run_id" "$job_id" "$status" "$conclusion"
     if [[ "$status" != completed ]]; then
         printf 'lane %s: PENDING; refusing release-bound merge\n' "$branch"
         return 1
@@ -175,11 +198,18 @@ required_checks_pass() {
 }
 
 run_pipeline() {
-    local gate_status
+    local gate_status gate_sha current_sha
     gate_status="$(cat "$run_dir/gate.done" 2>/dev/null || true)"
-    if [[ "$gate_status" != "0" ]]; then
-        pipeline_log "GATE_NOT_GREEN (gate.done=${gate_status:-absent}) in $run_dir"
+    gate_sha="$(cat "$run_dir/gate.full.sha" 2>/dev/null || true)"
+    current_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+    if [[ "$gate_status" != "0" || -z "$gate_sha" ]]; then
+        pipeline_log "GATE_NOT_GREEN (full gate.done=${gate_status:-absent} gate.full.sha=${gate_sha:-absent}) in $run_dir"
         pipeline_finish GATE_NOT_GREEN
+        return 1
+    fi
+    if [[ -z "$current_sha" || "$gate_sha" != "$current_sha" ]]; then
+        pipeline_log "STALE_FULL_GATE (proved=$gate_sha current=${current_sha:-absent}); run the full gate on the current tree"
+        pipeline_finish STALE_FULL_GATE
         return 1
     fi
 
@@ -504,6 +534,27 @@ esac
 
 mkdir -p "$run_dir"
 
+# A full gate owns the authorization receipts consumed by --pipeline. Targeted
+# --only reruns are diagnostics: keep them in an append-only subdirectory so a
+# partial success cannot overwrite or manufacture full-gate authorization.
+if [[ -n "${only_rows:-}" ]]; then
+    diagnostic_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    receipt_dir="$run_dir/diagnostics/$diagnostic_id"
+    mkdir -p "$receipt_dir"
+    gate_done_file="$receipt_dir/gate.done"
+    gate_green_file=''
+    gate_sha_file=''
+    gate_log_file="$receipt_dir/gate.log"
+    run_env_file="$receipt_dir/run.env"
+else
+    receipt_dir="$run_dir"
+    gate_done_file="$run_dir/gate.done"
+    gate_green_file="$run_dir/gate.green.epoch"
+    gate_sha_file="$run_dir/gate.full.sha"
+    gate_log_file="$run_dir/gate.log"
+    run_env_file="$run_dir/run.env"
+fi
+
 # Builtin reference history is a content ledger, so it is regenerated only
 # after every merge and --learn edit is complete. Refuse before detaching a
 # slow gate when the generated bytes are not committed.
@@ -534,32 +585,48 @@ if [[ ! -x "$gate_cmd" ]]; then
     exit 2
 fi
 
-write_run_env
-rm -f "$run_dir/gate.done" "$run_dir/gate.green.epoch"
+write_run_env "$run_env_file"
+if [[ -z "${only_rows:-}" ]]; then
+    rm -f "$gate_done_file" "$gate_green_file" "$gate_sha_file"
+fi
 
 printf 'gate start %s version=%s worktree=%s tip=%s\n' \
     "$(date -u +%H:%M:%SZ)" "$version" "$worktree" \
     "$(git -C "$worktree" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 printf 'run directory: %s\n' "$run_dir"
+if [[ -n "${only_rows:-}" ]]; then
+    printf 'diagnostic receipt directory: %s\n' "$receipt_dir"
+fi
 
 export CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-/var/tmp/cas-release-gate}"
-export CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$run_dir/archive-size-bytes"
+export CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$receipt_dir/archive-size-bytes"
 gate_args=("$version")
 if [[ -n "${only_rows:-}" ]]; then
     gate_args+=(--only "$only_rows")
 fi
 nohup setsid bash -c '
-    worktree=$1; done_file=$2; green_file=$3; shift 3
+    worktree=$1; done_file=$2; green_file=$3; sha_file=$4; expected_sha=$5; mode=$6; shift 6
     cd "$worktree" || exit 125
     [[ -x "$PWD/.context/zig/zig" ]] && export ZIG="$PWD/.context/zig/zig"
     set +e
     "$@"
     rc=$?
+    if [[ "$rc" -eq 0 && "$mode" == full ]]; then
+        current_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+        if [[ "$current_sha" != "$expected_sha" ]]; then
+            printf "full gate tree changed while running: expected=%s current=%s\n" \
+                "$expected_sha" "${current_sha:-absent}"
+            rc=1
+        else
+            printf "%s\n" "$expected_sha" >"$sha_file"
+            date -u +%s >"$green_file"
+        fi
+    fi
     printf "%s\n" "$rc" >"$done_file"
-    if [[ "$rc" -eq 0 ]]; then date -u +%s >"$green_file"; fi
     exit "$rc"
-' bash "$worktree" "$run_dir/gate.done" "$run_dir/gate.green.epoch" \
-    "$gate_cmd" "${gate_args[@]}" >"$run_dir/gate.log" 2>&1 </dev/null &
+' bash "$worktree" "$gate_done_file" "$gate_green_file" "$gate_sha_file" \
+    "$(git -C "$worktree" rev-parse HEAD)" "$([[ -n "${only_rows:-}" ]] && printf diagnostic || printf full)" \
+    "$gate_cmd" "${gate_args[@]}" >"$gate_log_file" 2>&1 </dev/null &
 gate_pid=$!
 printf '%s\n' "$gate_pid" >"$pid_file"
 printf 'gate detached pid=%s; use coordination remind, then --status (never a shell watcher)\n' "$gate_pid"

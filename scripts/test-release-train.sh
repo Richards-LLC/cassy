@@ -76,6 +76,15 @@ wait_gate_done() {
     return 1
 }
 
+wait_for_file() {
+    local path_pattern="$1"
+    for _ in $(seq 1 100); do
+        compgen -G "$path_pattern" >/dev/null && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # The run directory is keyed by the worktree, not by the version alone.
 # ---------------------------------------------------------------------------
@@ -108,6 +117,11 @@ if [[ "$(cat "$dir_a/gate.done" 2>/dev/null)" == "0" ]]; then
     ok 'a successful gate records its exit status in gate.done'
 else
     bad "gate.done missing or non-zero: $(cat "$dir_a/gate.done" 2>/dev/null || echo absent)"
+fi
+if [[ "$(cat "$dir_a/gate.full.sha" 2>/dev/null)" == "$(git -C "$wt_a" rev-parse HEAD)" ]]; then
+    ok 'a successful full gate records the exact commit it proved'
+else
+    bad "full-gate commit receipt missing or stale: $(cat "$dir_a/gate.full.sha" 2>/dev/null || echo absent)"
 fi
 if grep -q "$wt_a" "$dir_a/run.env" 2>/dev/null; then
     ok 'run.env attributes the run to its worktree'
@@ -166,16 +180,32 @@ else
     bad "ledger drift did not refuse before detach: $out"
 fi
 
-# A targeted rerun forwards only known non-empty rows to the gate.
+# A targeted rerun forwards only known non-empty rows to the gate, writes a
+# diagnostic receipt, and never overwrites the full-gate authorization/history.
 wt_only="$(new_worktree epic-only-merge)"
 dir_only="$("$train" 9.99.2 "$wt_only" --print-run-dir)"
+mkdir -p "$dir_only"
+printf 'FULL GATE LOG SENTINEL\n' >"$dir_only/gate.log"
+printf '0\n' >"$dir_only/gate.done"
+printf '123\n' >"$dir_only/gate.green.epoch"
+git -C "$wt_only" rev-parse HEAD >"$dir_only/gate.full.sha"
 CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.2 "$wt_only" \
     --gate --only nextest,doctests >/dev/null 2>&1
-wait_gate_done "$dir_only" || true
-if grep -qF 'args=9.99.2 --only nextest,doctests' "$dir_only/gate.log"; then
-    ok '--gate --only forwards the selected rows to the detached gate'
+wait_for_file "$dir_only/diagnostics/*/gate.done" || true
+diagnostic_log="$(find "$dir_only/diagnostics" -name gate.log -type f -print -quit 2>/dev/null || true)"
+if [[ -n "$diagnostic_log" ]] \
+    && grep -qF 'args=9.99.2 --only nextest,doctests' "$diagnostic_log"; then
+    ok '--gate --only forwards selected rows to a diagnostic receipt'
 else
-    bad "--only was not forwarded: $(cat "$dir_only/gate.log" 2>/dev/null || echo absent)"
+    bad "--only diagnostic log missing or wrong: ${diagnostic_log:-absent}"
+fi
+if [[ "$(cat "$dir_only/gate.log")" == 'FULL GATE LOG SENTINEL' ]] \
+    && [[ "$(cat "$dir_only/gate.done")" == 0 ]] \
+    && [[ "$(cat "$dir_only/gate.green.epoch")" == 123 ]] \
+    && [[ "$(cat "$dir_only/gate.full.sha")" == "$(git -C "$wt_only" rev-parse HEAD)" ]]; then
+    ok '--gate --only preserves the prior full-gate receipt and history'
+else
+    bad '--gate --only overwrote a full-gate authorization receipt'
 fi
 for invalid in '' not-a-row; do
     wt_invalid="$(new_worktree "epic-only-invalid-${invalid:-empty}")"
@@ -188,46 +218,75 @@ for invalid in '' not-a-row; do
     fi
 done
 
-# --check-lane binds the branch name and exact tip to its own push-triggered
-# Scoped Validation run; missing, pending, skipped, and red all refuse.
+# --check-lane binds the branch name and exact tip to the Scoped Validation JOB
+# inside the real CI workflow's push run. Missing evidence and API errors refuse.
 wt_lane="$(new_worktree lane-ci)"
+remote_lane_sha="$(git -C "$wt_lane" rev-parse HEAD)"
+printf 'new local tip\n' >"$wt_lane/lane-change.txt"
+git -C "$wt_lane" add lane-change.txt
+git -C "$wt_lane" -c commit.gpgsign=false commit -q -m 'new local lane tip'
 lane_sha="$(git -C "$wt_lane" rev-parse HEAD)"
+git -C "$wt_lane" update-ref refs/remotes/origin/main "$remote_lane_sha"
 lane_calls="$tmp/lane-gh.calls"
 lane_runs="$tmp/lane-gh.json"
+lane_jobs="$tmp/lane-gh-jobs.json"
 cat >"$tmp/lane-gh.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$LANE_GH_CALLS"
-cat "$LANE_GH_RUNS"
+case "$1 $2" in
+"run list")
+    [[ "${LANE_GH_FAIL:-}" != list ]] || { printf 'run list API failed\n' >&2; exit 1; }
+    cat "$LANE_GH_RUNS"
+    ;;
+"run view")
+    [[ "${LANE_GH_FAIL:-}" != view ]] || { printf 'run view API failed\n' >&2; exit 1; }
+    cat "$LANE_GH_JOBS"
+    ;;
+*) exit 2;;
+esac
 EOF
 chmod +x "$tmp/lane-gh.sh"
 run_lane_check() {
-    LANE_GH_CALLS="$lane_calls" LANE_GH_RUNS="$lane_runs" \
+    LANE_GH_CALLS="$lane_calls" LANE_GH_RUNS="$lane_runs" LANE_GH_JOBS="$lane_jobs" \
     CAS_RELEASE_TRAIN_GH="$tmp/lane-gh.sh" "$train" 9.99.4 "$wt_lane" --check-lane main 2>&1
 }
 printf '[]\n' >"$lane_runs"
+printf '{"jobs":[]}\n' >"$lane_jobs"
 out="$(run_lane_check || true)"
 [[ "$out" == *MISSING* ]] && ok '--check-lane distinguishes a missing run' \
     || bad "missing lane run was not refused: $out"
-printf '[{"databaseId":1,"headBranch":"main","headSha":"%s","status":"in_progress","conclusion":null,"event":"push","workflowName":"Scoped Validation"}]\n' "$lane_sha" >"$lane_runs"
+out="$(LANE_GH_FAIL=list run_lane_check || true)"
+[[ "$out" == *'API ERROR'* ]] && ok '--check-lane distinguishes a run-list API error' \
+    || bad "run-list API error was collapsed into missing evidence: $out"
+printf '[{"databaseId":41,"headBranch":"main","headSha":"%s","status":"in_progress","conclusion":null,"event":"push","workflowName":"CI"}]\n' "$lane_sha" >"$lane_runs"
+out="$(LANE_GH_FAIL=view run_lane_check || true)"
+[[ "$out" == *'API ERROR'* ]] && ok '--check-lane distinguishes a run-view API error' \
+    || bad "run-view API error was collapsed into missing evidence: $out"
+out="$(run_lane_check || true)"
+[[ "$out" == *MISSING* ]] && ok '--check-lane distinguishes a missing Scoped Validation job' \
+    || bad "missing Scoped Validation job was not refused: $out"
+printf '{"jobs":[{"databaseId":101,"name":"Scoped Validation (factory/PR)","status":"in_progress","conclusion":null}]}\n' >"$lane_jobs"
 out="$(run_lane_check || true)"
 [[ "$out" == *PENDING* ]] && ok '--check-lane distinguishes a pending run' \
     || bad "pending lane run was not refused: $out"
-printf '[{"databaseId":2,"headBranch":"main","headSha":"%s","status":"completed","conclusion":"failure","event":"push","workflowName":"Scoped Validation"}]\n' "$lane_sha" >"$lane_runs"
+printf '{"jobs":[{"databaseId":102,"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"failure"}]}\n' >"$lane_jobs"
 out="$(run_lane_check || true)"
 [[ "$out" == *'RED (failure)'* ]] && ok '--check-lane distinguishes a red run' \
     || bad "red lane run was not refused: $out"
-printf '[{"databaseId":3,"headBranch":"main","headSha":"%s","status":"completed","conclusion":"skipped","event":"push","workflowName":"Scoped Validation"}]\n' "$lane_sha" >"$lane_runs"
+printf '{"jobs":[{"databaseId":103,"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"skipped"}]}\n' >"$lane_jobs"
 out="$(run_lane_check || true)"
 [[ "$out" == *'RED (skipped)'* ]] && ok '--check-lane never accepts a skipped push row' \
     || bad "skipped lane run was accepted: $out"
-printf '[{"databaseId":4,"headBranch":"other","headSha":"%s","status":"completed","conclusion":"success","event":"push","workflowName":"Scoped Validation"},{"databaseId":5,"headBranch":"main","headSha":"%s","status":"completed","conclusion":"success","event":"push","workflowName":"Scoped Validation"}]\n' "$lane_sha" "$lane_sha" >"$lane_runs"
+printf '[{"databaseId":40,"headBranch":"other","headSha":"%s","status":"completed","conclusion":"success","event":"push","workflowName":"CI"},{"databaseId":41,"headBranch":"main","headSha":"%s","status":"completed","conclusion":"success","event":"push","workflowName":"CI"}]\n' "$lane_sha" "$lane_sha" >"$lane_runs"
+printf '{"jobs":[{"databaseId":104,"name":"Fast Validation","status":"completed","conclusion":"skipped"},{"databaseId":105,"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"success"}]}\n' >"$lane_jobs"
 out="$(run_lane_check)"
 [[ "$out" == *GREEN* ]] && ok '--check-lane accepts the branch tip own green run' \
     || bad "green lane run was refused: $out"
-if grep -q -- '--workflow Scoped Validation --branch main --event push' "$lane_calls"; then
-    ok '--check-lane scopes the GitHub query to branch push CI'
+if grep -q -- '--workflow ci.yml --branch main --event push' "$lane_calls" \
+    && grep -q -- 'run view 41 .*--json jobs' "$lane_calls"; then
+    ok '--check-lane scopes the CI run to branch push and inspects its jobs'
 else
-    bad "--check-lane query was not branch/event scoped: $(cat "$lane_calls")"
+    bad "--check-lane did not query the real workflow/job shape: $(cat "$lane_calls")"
 fi
 
 # ---------------------------------------------------------------------------
@@ -367,7 +426,9 @@ for flavour in skills codex/skills grok/skills; do
     fi
     for marker in 'Scoped Validation' 'ledger is the last prep step' 'scratch-base' \
         'detached process group' 'runtime_fixture_parent' 'reviewed snapshot update' \
-        '9.99.x' 'cause class' 'workers never poll CI'; do
+        '9.99.x' 'cause class' 'workers never poll CI' 'competing release' \
+        'merge-queue GraphQL query' 'CAS_RELEASE_ENV_FILE' 'annotated tag peels' \
+        'four Slack POSTED' 'refresh_binary_version' 'stranded_branch_override'; do
         if grep -qF "$marker" "$skill" 2>/dev/null; then
             ok "cas-cut-release ($flavour) carries marker: $marker"
         else
@@ -459,10 +520,13 @@ new_pipeline_fixture() {
 pipeline_run_dir() { "$train" 9.99.9 "$1" --print-run-dir; }
 
 seed_gate_receipt() {
-    local run_dir="$1" status="${2:-0}"
+    local run_dir="$1" worktree="$2" status="${3:-0}"
     mkdir -p "$run_dir"
     printf 'PASS version-literals\nPASS nextest\n' > "$run_dir/gate.log"
     printf '%s\n' "$status" > "$run_dir/gate.done"
+    if [[ "$status" == 0 ]]; then
+        git -C "$worktree" rev-parse HEAD >"$run_dir/gate.full.sha"
+    fi
     printf 'release body\n' > "$run_dir/pr-body.md"
 }
 
@@ -481,7 +545,7 @@ new_gh_stub "$tmp/gh-stub.sh" "$tmp/gh-state-unused"
 # --- refuses while the gate is not green -----------------------------------
 wt_gate="$(new_pipeline_fixture gate-not-green)"
 run_gate_dir="$(pipeline_run_dir "$wt_gate")"
-seed_gate_receipt "$run_gate_dir" 1
+seed_gate_receipt "$run_gate_dir" "$wt_gate" 1
 state="$tmp/state-gate"; mkdir -p "$state"
 out="$(run_pipeline "$wt_gate" "$state" || true)"
 if [[ "$out" == *"GATE_NOT_GREEN"* ]]; then
@@ -490,10 +554,44 @@ else
     bad "pipeline ran without a green gate: $out"
 fi
 
+# A successful diagnostic row without a full-gate receipt cannot authorize a
+# push. The exact remote stays empty, proving refusal happened before mutation.
+wt_partial="$(new_pipeline_fixture partial-only-receipt)"
+run_partial_dir="$(pipeline_run_dir "$wt_partial")"
+mkdir -p "$run_partial_dir/diagnostics/fixture"
+printf 'PASS nextest\n' >"$run_partial_dir/diagnostics/fixture/gate.log"
+printf '0\n' >"$run_partial_dir/diagnostics/fixture/gate.done"
+printf 'release body\n' >"$run_partial_dir/pr-body.md"
+state="$tmp/state-partial"; mkdir -p "$state"
+out="$(run_pipeline "$wt_partial" "$state" || true)"
+if [[ "$out" == *"GATE_NOT_GREEN"* ]] \
+    && [[ -z "$(git -C "$wt_partial" ls-remote --heads origin)" ]]; then
+    ok 'a green --only diagnostic receipt cannot authorize pipeline push'
+else
+    bad "partial diagnostic authorized or reached a push: $out"
+fi
+
+# A full-gate receipt is bound to one exact tree. Any later commit makes it
+# stale and must refuse before pushing the changed tree.
+wt_stale_gate="$(new_pipeline_fixture stale-full-gate-receipt)"
+run_stale_gate_dir="$(pipeline_run_dir "$wt_stale_gate")"
+seed_gate_receipt "$run_stale_gate_dir" "$wt_stale_gate"
+printf 'changed after gate\n' >"$wt_stale_gate/after-gate.txt"
+git -C "$wt_stale_gate" add after-gate.txt
+git -C "$wt_stale_gate" -c commit.gpgsign=false commit -q -m 'change after full gate'
+state="$tmp/state-stale-gate"; mkdir -p "$state"
+out="$(run_pipeline "$wt_stale_gate" "$state" || true)"
+if [[ "$out" == *"STALE_FULL_GATE"* ]] \
+    && [[ -z "$(git -C "$wt_stale_gate" ls-remote --heads origin)" ]]; then
+    ok 'pipeline rejects a changed tree with a stale full-gate receipt before push'
+else
+    bad "stale full-gate receipt authorized or reached a push: $out"
+fi
+
 # --- the incident: SKIPPED rows must not satisfy the required checks -------
 wt_skip="$(new_pipeline_fixture skipped-rows)"
 run_skip_dir="$(pipeline_run_dir "$wt_skip")"
-seed_gate_receipt "$run_skip_dir"
+seed_gate_receipt "$run_skip_dir" "$wt_skip"
 state="$tmp/state-skip"; mkdir -p "$state"
 printf '' > "$state/pr-list.json"
 printf '4242\n' > "$state/pr-number.txt"
@@ -517,7 +615,7 @@ fi
 # --- happy path: create PR, comment, wait, enqueue, watch to MERGED --------
 wt_ok="$(new_pipeline_fixture happy-path)"
 run_ok_dir="$(pipeline_run_dir "$wt_ok")"
-seed_gate_receipt "$run_ok_dir"
+seed_gate_receipt "$run_ok_dir" "$wt_ok"
 state="$tmp/state-ok"; mkdir -p "$state"
 printf '' > "$state/pr-list.json"
 printf '4242\n' > "$state/pr-number.txt"
@@ -550,7 +648,7 @@ fi
 # --- an existing PR is reused, never duplicated ----------------------------
 wt_reuse="$(new_pipeline_fixture reuse-pr)"
 run_reuse_dir="$(pipeline_run_dir "$wt_reuse")"
-seed_gate_receipt "$run_reuse_dir"
+seed_gate_receipt "$run_reuse_dir" "$wt_reuse"
 state="$tmp/state-reuse"; mkdir -p "$state"
 printf '[{"number":777}]\n' > "$state/pr-list.json"
 cat > "$state/checks-default.json" <<'JSON'
@@ -567,7 +665,7 @@ fi
 # --- a dropped merge-queue entry is re-enqueued, then given up on ----------
 wt_drop="$(new_pipeline_fixture dropped-entry)"
 run_drop_dir="$(pipeline_run_dir "$wt_drop")"
-seed_gate_receipt "$run_drop_dir"
+seed_gate_receipt "$run_drop_dir" "$wt_drop"
 state="$tmp/state-drop"; mkdir -p "$state"
 printf '' > "$state/pr-list.json"
 printf '4242\n' > "$state/pr-number.txt"
@@ -593,7 +691,7 @@ fi
 # --- a failed merge_group run is terminal ----------------------------------
 wt_qfail="$(new_pipeline_fixture queue-failed)"
 run_qfail_dir="$(pipeline_run_dir "$wt_qfail")"
-seed_gate_receipt "$run_qfail_dir"
+seed_gate_receipt "$run_qfail_dir" "$wt_qfail"
 state="$tmp/state-qfail"; mkdir -p "$state"
 printf '' > "$state/pr-list.json"
 printf '4242\n' > "$state/pr-number.txt"
@@ -619,7 +717,7 @@ fi
 # re-enqueue), so anything older is another attempt's history.
 wt_stale="$(new_pipeline_fixture stale-queue-run)"
 run_stale_dir="$(pipeline_run_dir "$wt_stale")"
-seed_gate_receipt "$run_stale_dir"
+seed_gate_receipt "$run_stale_dir" "$wt_stale"
 state="$tmp/state-stale"; mkdir -p "$state"
 printf '' > "$state/pr-list.json"
 printf '4242\n' > "$state/pr-number.txt"

@@ -708,6 +708,12 @@ check_procedure_guardrails() {
     grep -qF '9.99.x' "$skill"
     grep -qF 'workers never poll CI' "$skill"
     grep -qF 'reviewed snapshot update' "$skill"
+    grep -qF 'competing release' "$skill"
+    grep -qF 'merge-queue GraphQL query' "$skill"
+    grep -qF 'CAS_RELEASE_ENV_FILE' "$skill"
+    grep -qF 'annotated tag peels' "$skill"
+    grep -qF 'four Slack POSTED' "$skill"
+    grep -qF 'refresh_binary_version' "$skill"
 }
 
 check_working_tree() {
@@ -743,6 +749,10 @@ neutralize_ancestor_proxy_config
 run_check scratch-base \
     'parent writable; same mount as checkout; no .cas ancestor; free bytes >= 2x last archive' \
     check_scratch_base
+if row_selected scratch-base && [[ "${#failures[@]}" -gt 0 ]]; then
+    printf 'RELEASE GATE FAILED: scratch-base (aborted before costly or mutating rows)\n'
+    exit 1
+fi
 run_check epic-worktree-fresh \
     'epic worktree is clean and HEAD matches its claimed epic ref' \
     check_epic_worktree_fresh

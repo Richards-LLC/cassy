@@ -107,11 +107,12 @@ pub fn resolve_canonical_id(cas_root: &Path) -> Option<String> {
 /// Resolve and validate the identity used by a sync rooted at `cas_root`.
 ///
 /// An explicit config pin remains authoritative, including the supported
-/// legacy bare-repository alias. When a git remote is available, however, a
-/// pin for a different repository is an unsafe split-brain configuration: the
-/// caller must refuse network sync rather than silently sending rows to the
-/// pinned bucket. This check is deliberately rooted in the supplied path and
-/// never consults the process cwd.
+/// legacy bare-repository alias. A remote-shaped pin for a different
+/// repository is an unsafe split-brain configuration: the caller must refuse
+/// network sync rather than silently sending rows to the pinned bucket. Bare
+/// slug pins are operator-chosen cloud bucket names and must not be compared
+/// to the remote repository's final path segment. This check is deliberately
+/// rooted in the supplied path and never consults the process cwd.
 pub fn resolve_canonical_id_for_sync(cas_root: &Path) -> Result<String, CasError> {
     let resolved = resolve_canonical_id(cas_root).ok_or_else(|| {
         CasError::Other(format!(
@@ -121,8 +122,9 @@ pub fn resolve_canonical_id_for_sync(cas_root: &Path) -> Result<String, CasError
     })?;
 
     if let Some(pin) = canonical_id_from_config_toml(cas_root)
+        && pin.matches('/').count() >= 2
         && let Some(remote) = normalized_git_remote_for_push(cas_root)
-        && canonical_project_id_with_pin(&remote, Some(&pin)).as_deref() != Some(pin.as_str())
+        && remote != pin
     {
         return Err(CasError::Other(format!(
             "Cannot sync `{}`: resolved identity `{remote}` disagrees with pinned \
@@ -2924,6 +2926,40 @@ mod tests {
         assert!(error.contains("github.com/acme/ledger"), "error: {error}");
         assert!(error.contains("github.com/other/other-repo"), "error: {error}");
         assert!(error.contains("cas cloud project set"), "error: {error}");
+    }
+
+    #[test]
+    fn sync_identity_accepts_authoritative_cas_src_slug_pin() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = git_project_with_remote(
+            temp.path(),
+            "cas-src",
+            "git@github.com:Richards-LLC/cassy.git",
+        );
+        set_canonical_id_in_config_toml(&cas_dir, "cas-src").unwrap();
+
+        assert_eq!(
+            resolve_canonical_id_for_sync(&cas_dir).unwrap(),
+            "cas-src",
+            "a bare slug pin is the operator-selected cloud bucket",
+        );
+    }
+
+    #[test]
+    fn sync_identity_accepts_authoritative_ozer_slug_pin() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = git_project_with_remote(
+            temp.path(),
+            "ozer",
+            "git@github.com:Richards-LLC/ozer-health.git",
+        );
+        set_canonical_id_in_config_toml(&cas_dir, "ozer").unwrap();
+
+        assert_eq!(
+            resolve_canonical_id_for_sync(&cas_dir).unwrap(),
+            "ozer",
+            "a bare slug pin is the operator-selected cloud bucket",
+        );
     }
 
     #[test]

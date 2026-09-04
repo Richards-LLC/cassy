@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.15.4] - 2026-09-04
+
 ### Added
 - `worker_status` now names the epic each live supervisor is running, including
   supervisors in other factory sessions that share the same checkout. Knowing
@@ -42,6 +44,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   value in its receipt. An ordinary `cas init` keeps the 300-second watchdog, a
   meaningless override falls back to it rather than disabling it, and
   `CAS_INIT_NO_TIMEOUT=1` still turns the watchdog off outright.
+- Concurrent `cas hub start` / `cas hub restart` no longer stall ten seconds
+  and report a spurious failure when another command has already brought up
+  the hub that was asked for: the waiters resolve as soon as a live hub
+  satisfying the request is observed, plain `cas hub stop` is unchanged, and
+  each timeout names the wait that expired. The concurrent lock-owner test now
+  asserts both commands succeed and exactly one owner exists.
+- Release gates run through `scripts/release-train.sh`: each run gets a
+  directory keyed by version and worktree with an attributable receipt, the
+  gate's PID is recorded, a second gate for the same run is refused by name,
+  `--stop` signals only the recorded PID, and no release script locates a
+  process by name pattern. `release-train.sh pipeline` opens the PR, waits for
+  the pull-request checks to actually pass, enqueues, re-enqueues if the queue
+  drops the entry, and records the landed main sha.
 
 ### Changed
 - **Behaviour change for automation:** if the newly installed binary cannot be

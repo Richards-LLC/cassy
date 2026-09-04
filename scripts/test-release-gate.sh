@@ -311,6 +311,25 @@ else
     bad "explicit CAS_RELEASE_GATE_HOME_DIR was not honoured (output: $output)"
 fi
 
+# cas-c736. The gate must not accumulate scratch directories under its base.
+# snapshot-portability leaked one <base>.snap.XXXXXX per invocation where
+# archive-mode has always cleaned up after itself; harmless while the base was
+# opt-in, but the default base is now /var/tmp/cas-release-gate on every host,
+# so every run and every fixture below would pile up there forever.
+scratch_leftovers() {
+    find "$(dirname "$CAS_RELEASE_GATE_HOME_DIR")" -maxdepth 1 \
+        -name "$(basename "$CAS_RELEASE_GATE_HOME_DIR").*" 2>/dev/null | wc -l
+}
+repo="$(new_fixture scratch-cleanup)"
+leftovers_before="$(scratch_leftovers)"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 >/dev/null 2>&1 || true
+leftovers_after="$(scratch_leftovers)"
+if [[ "$leftovers_after" -eq "$leftovers_before" ]]; then
+    ok 'a gate run leaves no scratch directory behind under its base'
+else
+    bad "gate run leaked $((leftovers_after - leftovers_before)) scratch dir(s) under $CAS_RELEASE_GATE_HOME_DIR"
+fi
+
 repo="$(new_fixture passing)"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1)"
 assert_all_pass "$output"

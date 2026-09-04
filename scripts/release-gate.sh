@@ -374,8 +374,15 @@ check_snapshot_portability() {
     local deep_base="$scratch_base"
     mkdir -p "$(dirname "$deep_base")"
     assert_no_cas_ancestor "$deep_base" || return 1
-    local deep_tmp
-    deep_tmp="$(mktemp -d "${deep_base}.snap.XXXXXX")/$(printf 'deep-temp-path-%.0s' {1..12})"
+    # The scratch root is kept in its own variable so it can be removed: this
+    # row used to leak one <base>.snap.XXXXXX directory per invocation, where
+    # check_archive_mode has always cleaned up after itself. That was survivable
+    # while the base was an opt-in path; now that /var/tmp/cas-release-gate is
+    # the default on every host, an uncleaned run would accumulate there for
+    # everyone, including once per self-test fixture.
+    local deep_root deep_tmp
+    deep_root="$(mktemp -d "${deep_base}.snap.XXXXXX")"
+    deep_tmp="$deep_root/$(printf 'deep-temp-path-%.0s' {1..12})"
     mkdir -p "$deep_tmp"
     # COLUMNS must be absent, rather than merely empty: terminal-width probes
     # commonly distinguish the two states.
@@ -383,6 +390,7 @@ check_snapshot_portability() {
     env -u COLUMNS INSTA_UPDATE=no TMPDIR="$deep_tmp" \
         "$cargo_bin" nextest run -p cas --test component_output_test
     status=$?
+    rm -rf "$deep_root"
     # Never leave insta's pending-snapshot artifacts behind: they would fail
     # the working-tree row of this same gate.
     find . -path ./target -prune -o -name '*.snap.new' -print0 2>/dev/null | xargs -0 rm -f --

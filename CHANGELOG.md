@@ -5,33 +5,34 @@ All notable changes to CAS are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.15.1] - 2026-09-04
 
 ### Fixed
+- Closing a task no longer wedges when the worker's branch moves after the
+  verifier dispatch was minted. The proof now binds the delivered commits: new
+  commits, merges or fast-forwards on top keep the dispatch valid as long as
+  the delivery is still reachable, a rewritten or dropped delivery is still
+  refused naming both tips, and re-running close after a genuine drift mints a
+  fresh dispatch instead of replaying the spent id.
+- `shutdown_workers` accepts a registered worker by name, agent id or session
+  id (and a JSON-array argument), using the same identity lookup as
+  `worker_status`; the error distinguishes a target refused by policy from one
+  that is genuinely unknown instead of claiming both.
+- Recording a verification verdict no longer fails instantly with
+  "database is locked" under store contention: the write takes the lock up
+  front (`BEGIN IMMEDIATE` with bounded retry) instead of upgrading a deferred
+  read snapshot, which SQLite refuses without consulting the busy handler; the
+  knowledge reindex reads page bodies before opening its write transaction;
+  the WAL is capped at 64 MiB; the give-up error states the wait it attempted.
 - Tests that set up a temporary HOME no longer read the machine's own project
-  configuration. HOME only redirects user-level lookups, so a `proxy.toml`
+  configuration: HOME only redirects user-level lookups, so a `proxy.toml`
   registered in a checkout was still visible to tests running from a worktree
-  inside it, and three proxy tests failed for a reason that had nothing to do
-  with the change under test. The release gate also names any such file instead
-  of leaving it to be found by moving files aside one at a time.
-- A merge request for work pushed after an earlier merge reaches the
-  supervisor instead of being answered with "Merge already landed". The check
-  compared the branch position recorded at the *previous* merge, so every
-  commit after it looked merged; it now resolves the branch's live tip and
-  suppresses only when that tip is genuinely in the target with its content
-  present. When the recorded position and the live tip disagree, both are
-  reported so the drift is visible rather than inferred. (GH #703)
-
-### Fixed
-- `cas doctor` prints task ids, agent UUIDs and timestamps exactly as they are,
-  so they can be copied straight into the next command. A digit-grouping pass
-  ran over each finished line with no way to tell a count from an identifier,
-  turning `cas-7791` into `cas-7,791`, making UUIDs unpasteable and adding
-  three commas to a timestamp; counts now print as plain integers instead.
-  The cross-project row line also said "cannot reach 4 rows" while listing six
-  — the number now describes the list it prints, and when the delete-set
-  shortfall genuinely differs from the rows named, both numbers are stated.
-  (GH #697)
+  inside it. The test harness pins the project root by default, the release
+  gate names such a file and neutralizes it for the run instead of refusing,
+  and the gate self-test defaults its scratch base to a path with no `.cas`
+  ancestor.
+- Insta pending snapshots (`*.snap.new`) are ignored so a test run can no
+  longer sweep one into a commit.
 
 ## [3.15.0] - 2026-09-03
 

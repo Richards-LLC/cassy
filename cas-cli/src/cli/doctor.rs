@@ -673,6 +673,10 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             if let Some(check) = legacy_index_autofix(path) {
                 checks.push(check);
             }
+
+            if let Some(check) = dangling_dependency_autofix(path) {
+                checks.push(check);
+            }
         }
     }
 
@@ -1190,40 +1194,18 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 .collect::<Vec<_>>()
                 .join(", ");
 
-            // Check for orphaned dependencies
+            // Dependency endpoints: a quarantined (hidden but present) endpoint
+            // is not an orphan, and only a genuinely absent id warrants a WARN
+            // (cas-095c).
             let deps = task_store.list_dependencies(None).unwrap_or_default();
-            let task_ids: std::collections::HashSet<_> = tasks.iter().map(|t| &t.id).collect();
-            let orphaned_deps = deps
-                .iter()
-                .filter(|d| !task_ids.contains(&d.from_id) || !task_ids.contains(&d.to_id))
-                .count();
-
-            if orphaned_deps > 0 {
-                checks.push(Check {
-                    name: "tasks".to_string(),
-                    status: CheckStatus::Warning,
-                    message: format!(
-                        "{} tasks ({}) | {} open, {} blocked | {} orphaned dependencies",
-                        tasks.len(),
-                        status_summary,
-                        open_count,
-                        blocked_count,
-                        orphaned_deps
-                    ),
-                });
-            } else {
-                checks.push(Check {
-                    name: "tasks".to_string(),
-                    status: CheckStatus::Ok,
-                    message: format!(
-                        "{} tasks ({}) | {} open, {} blocked",
-                        tasks.len(),
-                        status_summary,
-                        open_count,
-                        blocked_count
-                    ),
-                });
-            }
+            let health = dependency_endpoint_health(task_store.as_ref(), &tasks, &deps);
+            checks.push(task_health_check(
+                tasks.len(),
+                &status_summary,
+                open_count,
+                blocked_count,
+                &health,
+            ));
         }
     }
 
@@ -1410,6 +1392,177 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         started.elapsed(),
         Some(&cas_root),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Task dependency health (cas-095c)
+// ---------------------------------------------------------------------------
+
+/// Dependency rows whose endpoints are not on the board, split by cause.
+///
+/// The board is the *quarantine-filtered* task list, so a dependency touching a
+/// row that `cas doctor --fix-cloud-rows` quarantined looks orphaned to a check
+/// that compares against `list` alone — which is precisely the bug: the operator
+/// did what doctor told them and was warned for it forever after. The
+/// quarantined row is present, intact and reversible; only an endpoint that is
+/// absent from the `tasks` table entirely is a fault.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DependencyEndpointHealth {
+    /// Rows with an endpoint that is hidden by quarantine but still present.
+    quarantined_endpoint_rows: usize,
+    /// `(from_id, to_id)` of rows with an endpoint no longer in `tasks`.
+    dangling: Vec<(String, String)>,
+}
+
+/// Classify every dependency row against the board.
+///
+/// `still_present` resolves an id that is not on the board. In production it is
+/// `TaskStore::get`, which deliberately does not filter quarantine — that is the
+/// seam that answers "does this row exist?" without leaking a hidden row onto
+/// any list surface.
+fn classify_dependency_endpoints(
+    tasks: &[crate::types::Task],
+    deps: &[crate::types::Dependency],
+    mut still_present: impl FnMut(&str) -> bool,
+) -> DependencyEndpointHealth {
+    let board: std::collections::HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+    // One resolve per distinct off-board id, not per row: a quarantine sweep
+    // leaves dozens of rows pointing at the same handful of ids.
+    let mut resolved: BTreeMap<String, bool> = BTreeMap::new();
+    let mut health = DependencyEndpointHealth::default();
+
+    for dep in deps {
+        let mut hidden = false;
+        let mut missing = false;
+        for endpoint in [&dep.from_id, &dep.to_id] {
+            if board.contains(endpoint.as_str()) {
+                continue;
+            }
+            let present = *resolved
+                .entry(endpoint.clone())
+                .or_insert_with(|| still_present(endpoint));
+            if present {
+                hidden = true;
+            } else {
+                missing = true;
+            }
+        }
+
+        // A row with one missing endpoint is dangling whatever the other
+        // endpoint is: the fault dominates.
+        if missing {
+            health
+                .dangling
+                .push((dep.from_id.clone(), dep.to_id.clone()));
+        } else if hidden {
+            health.quarantined_endpoint_rows += 1;
+        }
+    }
+
+    health
+}
+
+/// [`classify_dependency_endpoints`] against a live store.
+fn dependency_endpoint_health(
+    store: &dyn crate::store::TaskStore,
+    tasks: &[crate::types::Task],
+    deps: &[crate::types::Dependency],
+) -> DependencyEndpointHealth {
+    classify_dependency_endpoints(tasks, deps, |id| store.get(id).is_ok())
+}
+
+/// The `tasks` row: counts, plus dependency endpoints reported for what they
+/// are.
+fn task_health_check(
+    total_tasks: usize,
+    status_summary: &str,
+    open_count: usize,
+    blocked_count: usize,
+    health: &DependencyEndpointHealth,
+) -> Check {
+    let mut message = format!(
+        "{total_tasks} tasks ({status_summary}) | {open_count} open, {blocked_count} blocked"
+    );
+
+    if health.quarantined_endpoint_rows > 0 {
+        message.push_str(&format!(
+            " | {} dependency row(s) reference quarantined tasks",
+            health.quarantined_endpoint_rows
+        ));
+    }
+
+    if health.dangling.is_empty() {
+        return Check {
+            name: "tasks".to_string(),
+            status: CheckStatus::Ok,
+            message,
+        };
+    }
+
+    let sample = health
+        .dangling
+        .iter()
+        .take(3)
+        .map(|(from, to)| format!("{from} -> {to}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remainder = health.dangling.len().saturating_sub(3);
+    let remainder = if remainder > 0 {
+        format!(", +{remainder} more")
+    } else {
+        String::new()
+    };
+    message.push_str(&format!(
+        " | {} dependency row(s) point at a task id that is not in this database ({sample}{remainder}); Run `cas doctor --fix` to prune them",
+        health.dangling.len()
+    ));
+
+    Check {
+        name: "tasks".to_string(),
+        status: CheckStatus::Warning,
+        message,
+    }
+}
+
+/// Delete dependency rows whose endpoints are absent from `tasks`.
+///
+/// Quarantined endpoints are left strictly alone: quarantine is reversible, and
+/// pruning its edges would make releasing a row restore it without its graph.
+fn prune_dangling_dependencies(store: &dyn crate::store::TaskStore) -> anyhow::Result<usize> {
+    let tasks = store.list(None)?;
+    let deps = store.list_dependencies(None)?;
+    let health = dependency_endpoint_health(store, &tasks, &deps);
+
+    for (from, to) in &health.dangling {
+        store.remove_dependency(from, to)?;
+    }
+    Ok(health.dangling.len())
+}
+
+/// The `cas doctor --fix` dangling-dependency prune, as one renderable Check.
+///
+/// Returns `None` when there is nothing to prune — the clean case adds no row.
+///
+/// Uses the *local* store on purpose: a locally dangling edge may simply be one
+/// whose task has not been pulled yet, so the prune must not push a delete that
+/// would take a live edge out of the cloud. A later pull can restore it.
+fn dangling_dependency_autofix(cas_root: &Path) -> Option<Check> {
+    let store = crate::store::open_task_store_local(cas_root).ok()?;
+    match prune_dangling_dependencies(store.as_ref()) {
+        Ok(0) => None,
+        Ok(pruned) => Some(Check {
+            name: "auto-fix".to_string(),
+            status: CheckStatus::Ok,
+            message: format!(
+                "Pruned {pruned} dependency row(s) pointing at task ids that are not in this database"
+            ),
+        }),
+        Err(error) => Some(Check {
+            name: "auto-fix".to_string(),
+            status: CheckStatus::Warning,
+            message: format!("Failed to prune dangling dependency rows: {error}"),
+        }),
+    }
 }
 
 /// The `cas doctor --fix` legacy-index repair step, as one renderable Check.

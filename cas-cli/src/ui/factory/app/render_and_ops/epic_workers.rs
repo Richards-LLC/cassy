@@ -2694,7 +2694,7 @@ mod spawn_base_tests {
         TestEnvGuard::run_with_temp_home(|_| {
             crate::store::known_repos::ensure_host_schema().unwrap();
 
-            let tmp = TempDir::new_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let tmp = TempDir::new_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let session_repo = tmp.path().join("session-repo");
             let target_repo = tmp.path().join("target-repo");
             std::fs::create_dir(&session_repo).unwrap();
@@ -2798,7 +2798,7 @@ mod spawn_base_tests {
     fn cross_repo_spawn_missing_target_branch_has_explicit_failure_cas_052a() {
         TestEnvGuard::run_with_temp_home(|_| {
             crate::store::known_repos::ensure_host_schema().unwrap();
-            let tmp = TempDir::new_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let tmp = TempDir::new_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let session_repo = tmp.path().join("session-repo");
             let target_repo = tmp.path().join("target-repo");
             std::fs::create_dir(&session_repo).unwrap();

@@ -34,7 +34,7 @@ fn cas(home: &Path) -> assert_cmd::Command {
 fn explicit_binding_cli_recovers_two_live_clones_across_restart() {
     // The clone roots are real known-repository fixtures, not disposable
     // scratch state, so discovery must be able to see them.
-    let home = TempDir::new_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let home = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     let home_path = home.path().canonicalize().unwrap();
     let clone_a = home_path.join("clone-a");
     let clone_b = home_path.join("clone-b");

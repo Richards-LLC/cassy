@@ -803,6 +803,14 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub merge_request: Option<bool>,
 
+    /// Explicit blocker escalation (cas-8725). Only this type receives CAS's
+    /// `<cas-blocker …>` envelope, which is what wakes an idle supervisor.
+    #[schemars(
+        description = "message action only: mark this message as a blocker escalation. CAS attaches the cas-blocker envelope so an idle supervisor is woken now instead of reading the row at its next turn. Omit or false for status updates, questions and ordinary traffic."
+    )]
+    #[serde(default)]
+    pub blocker: Option<bool>,
+
     /// Explicit notification this message acknowledges or answers.
     #[schemars(
         description = "message action only: notification_id of the direct message this response explicitly acknowledges. CAS validates the endpoints, confirms that exact message, and includes the reference in the delivered reply."
@@ -1171,6 +1179,7 @@ impl CoordinationRequest {
             session_id: self.session_id.clone(),
             task_id: self.task_id.clone(),
             merge_request: self.merge_request,
+            blocker: self.blocker,
             in_reply_to: self.in_reply_to,
             prompt: self.prompt.clone(),
             max_iterations: self.max_iterations,

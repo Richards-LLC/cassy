@@ -3258,6 +3258,47 @@ impl CasCore {
                             data: None,
                         })?;
 
+                        // cas-8725: a factory worker cannot spawn a verifier,
+                        // so this close is parked until the supervisor records
+                        // a verdict. Emit the handoff from CAS itself rather
+                        // than only printing a message for the worker to
+                        // retype: a hand-typed dispatch-id message is free
+                        // text, and free text does not wake an idle supervisor
+                        // (measured 2026-09-04, notification 24370 — the
+                        // handoff sat unread for as long as it blocked the
+                        // close). Best-effort: the printed instructions below
+                        // remain the fallback, so a queue failure degrades to
+                        // today's behaviour instead of losing the close.
+                        let mut dispatch_handoff_queued = false;
+                        if is_factory_worker {
+                            match crate::store::open_prompt_queue_store(&self.cas_root) {
+                                Ok(prompt_queue) => {
+                                    match crate::mcp::tools::core::task::lifecycle::supervisor_push::emit_verification_dispatch_handoff(
+                                        prompt_queue.as_ref(),
+                                        &dispatch.id,
+                                        &req.id,
+                                        &dispatch.owner_agent_id,
+                                        dispatch.deadline_at,
+                                        // The post-update record: the close
+                                        // above fills in an absent assignee,
+                                        // and a handoff that says "worker"
+                                        // when CAS knows the name is a worse
+                                        // row than one that names it.
+                                        task_to_update.assignee.as_deref().unwrap_or("worker"),
+                                        req.reason.as_deref(),
+                                    ) {
+                                        Ok(()) => dispatch_handoff_queued = true,
+                                        Err(error) => {
+                                            tracing::warn!(task_id = %req.id, dispatch_id = %dispatch.id, error = %error, "cas-8725: verification-dispatch handoff not queued");
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(task_id = %req.id, error = %error, "cas-8725: prompt queue unavailable for verification-dispatch handoff");
+                                }
+                            }
+                        }
+
                         // Keep the legacy Error row for old clients and
                         // audit views. It is descriptive only: typed dispatch
                         // state and server-derived authority control new adds.
@@ -3303,11 +3344,25 @@ impl CasCore {
                                     )
                                 })
                                 .unwrap_or_default();
+                            // cas-8725: when CAS queued the handoff itself,
+                            // say so — a worker told to "forward this" sends a
+                            // second, free-text copy that cannot wake anyone
+                            // and buries the row that can. The command stays
+                            // as the stated fallback for the case where the
+                            // enqueue failed or the supervisor stays silent.
+                            let handoff_line = if dispatch_handoff_queued {
+                                "Cassy has already delivered this dispatch to the supervisor \
+                                 (they are woken with it, not left to find it). Wait for the \
+                                 verdict; re-send only if the supervisor does not respond:\n\n"
+                            } else {
+                                "Forward to supervisor (workers cannot spawn task-verifier \
+                                 directly):\n\n"
+                            };
                             format!(
                                 "Factory worker verification gate: task {id} close is pending \
                                      dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. \
                                      This close will only succeed after a legitimate verifier records a verdict.\n\n\
-                                     Forward to supervisor (workers cannot spawn task-verifier directly):\n\n\
+                                     {handoff_line}\
                                      {coord} action=message target=supervisor \
                                      summary=\"Ready to close {id}\" \
                                      message=\"Task {id} is ready to close.{close_reason_hint} \

@@ -26,7 +26,7 @@ use cas::types::{
     Agent, AgentStatus, Entry, Event, EventEntityType, EventType, Task, TaskDepth, TaskStatus,
     TaskType, WorkTarget,
 };
-use cas_mcp::types::{CoordinationRequest, FactoryRequest};
+use cas_mcp::types::{CoordinationRequest, FactoryRequest, TaskRequest};
 use cas_mux::{Mux, MuxConfig, SupervisorCli};
 use cas_types::AgentRole;
 use rmcp::handler::server::wrapper::Parameters;
@@ -491,6 +491,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         task_id: None,
         delivery_mode: None,
         merge_request: None,
+        blocker: None,
         in_reply_to: None,
         target: None,
         message: None,
@@ -4981,6 +4982,12 @@ async fn inbox_poll_applies_default_limit_and_hard_cap() {
 // cas-c931: urgent (interrupt-and-redirect) message routing
 // =============================================================================
 
+/// cas-8725: a TaskRequest built from JSON, so a test names only the fields it
+/// cares about.
+fn task_req(value: serde_json::Value) -> TaskRequest {
+    serde_json::from_value(value).expect("TaskRequest")
+}
+
 /// Minimal CoordinationRequest for the `message`/`interrupt` actions.
 fn coord_msg(
     action: &str,
@@ -4994,6 +5001,7 @@ fn coord_msg(
         task_id: None,
         delivery_mode: None,
         merge_request: None,
+        blocker: None,
         in_reply_to: None,
         target: Some(target.to_string()),
         message: Some(message.to_string()),
@@ -8415,6 +8423,293 @@ async fn cas_5087_a_supervisor_message_crosses_sessions_and_wakes_the_recipient(
         !status.contains("abandoned"),
         "the incident's terminal state must not reappear: {status}"
     );
+}
+
+// =============================================================================
+// cas-8725: CAS-emitted blocker and verification-dispatch envelopes
+// =============================================================================
+
+/// THE MEASURED STALL. A worker's blocker is one of exactly two messages a lane
+/// cannot make progress without, and it was free text — so it stayed
+/// inbox-only, and an idle Claude supervisor reads its inbox only at a turn
+/// boundary it does not have. `blocker=true` makes CAS attach the envelope, and
+/// the envelope is what the wake gate reads.
+///
+/// This drives the whole production path — the MCP send, the row CAS actually
+/// queued, the origin CAS actually stamped, and
+/// `FactoryDaemon::supervisor_wake_decision` itself — because a test that
+/// restates the rules proves nothing about the gate.
+#[tokio::test]
+async fn cas_8725_a_registered_workers_blocker_wakes_the_supervisor_pane() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "swift-fox"),
+        ("CAS_FACTORY_MODE", "1"),
+        ("CAS_FACTORY_SESSION", "cas-src-cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("cas-8725-worker-id");
+    let mut worker = Agent::new("cas-8725-worker-id".to_string(), "swift-fox".to_string());
+    worker.role = AgentRole::Worker;
+    worker.factory_session = Some("cas-src-cosmic-bear-43".to_string());
+    env.agent_store()
+        .register(&worker)
+        .expect("register the sending worker under the service's own agent id");
+    env.register_supervisor_in_session("cosmic-bear-43", "cas-src-cosmic-bear-43");
+
+    let words = "The epic branch will not rebase; I need a decision before I can continue.";
+    let mut blocker = coord_msg("message", "supervisor", words, None);
+    blocker.blocker = Some(true);
+    blocker.task_id = Some("cas-8725".to_string());
+    let send = get_text(
+        &env.service
+            .coordination(Parameters(blocker))
+            .await
+            .expect("a worker must be able to raise a blocker"),
+    );
+    let notification_id = send
+        .lines()
+        .find_map(|line| line.strip_prefix("notification_id: "))
+        .expect("send response must return a notification_id")
+        .parse::<i64>()
+        .expect("notification_id must be an integer");
+
+    let rows = env.prompt_queue().peek_all(10).expect("peek");
+    let row = rows
+        .iter()
+        .find(|row| row.id == notification_id)
+        .expect("the queued row must be the one the sender was told about")
+        .clone();
+    assert!(
+        row.prompt.starts_with(words),
+        "the supervisor must read the worker's own message first: {}",
+        row.prompt
+    );
+    assert!(
+        row.prompt.contains("<cas-blocker ") && row.prompt.ends_with("</cas-blocker>"),
+        "CAS must attach the envelope; the sender never types it: {}",
+        row.prompt
+    );
+
+    let agents = env.agent_store().list(None).expect("roster");
+    let origin = row
+        .origin
+        .clone()
+        .expect("the MCP send path must stamp the sending agent's registry id");
+    let stamped_id = match &origin {
+        cas_store::QueueOrigin::RegisteredAgent { agent_id } => agent_id.clone(),
+        other => panic!("a worker's MCP send must stamp a registered agent, got {other:?}"),
+    };
+    let resolved = agents
+        .iter()
+        .find(|agent| agent.id == stamped_id)
+        .expect("the stamped id must resolve to a registry row");
+    let sender =
+        cas::ui::factory::FactoryDaemon::wake_sender_from_origin(Some(&origin), Some(resolved));
+    let data = director_data_for(&agents, "cas-src-cosmic-bear-43");
+
+    let decision = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
+        &data,
+        "cosmic-bear-43",
+        "cosmic-bear-43",
+        &sender,
+        &row.source,
+        &row.prompt,
+        quiet_supervisor_pane(),
+        chrono::Utc::now(),
+    );
+    assert!(
+        decision.allowed,
+        "a CAS-framed blocker must reach the quiet supervisor pane without a poll: {}",
+        decision.reason
+    );
+
+    // THE CONTROL, on the same fixture so the two rules cannot drift: the same
+    // worker, the same claim, no flag. CAS attaches nothing, and the row stays
+    // inbox-only — which is what keeps cas-dab2's stolen-typing symptom from
+    // returning through ordinary chatter.
+    let free_text = get_text(
+        &env.service
+            .coordination(Parameters(coord_msg(
+                "message",
+                "supervisor",
+                "BLOCKER: the epic branch will not rebase. BLOCKED. Please advise.",
+                None,
+            )))
+            .await
+            .expect("ordinary message"),
+    );
+    let free_id = free_text
+        .lines()
+        .find_map(|line| line.strip_prefix("notification_id: "))
+        .expect("notification_id")
+        .parse::<i64>()
+        .expect("integer");
+    let rows = env.prompt_queue().peek_all(10).expect("peek");
+    let free_row = rows
+        .iter()
+        .find(|row| row.id == free_id)
+        .expect("the free-text row must exist");
+    assert!(
+        !free_row.prompt.contains("<cas-blocker "),
+        "shouting the word must not mint an envelope: {}",
+        free_row.prompt
+    );
+    let refused = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
+        &data,
+        "cosmic-bear-43",
+        "cosmic-bear-43",
+        &sender,
+        &free_row.source,
+        &free_row.prompt,
+        quiet_supervisor_pane(),
+        chrono::Utc::now(),
+    );
+    assert!(!refused.allowed, "{}", refused.reason);
+    assert_eq!(
+        refused.kind,
+        cas::ui::factory::WakeOutcome::NotApplicable,
+        "ordinary worker traffic is not a stalled wake; it was never a wake"
+    );
+
+    // And the envelope alone buys nothing on a row nobody stamped — the shape
+    // `cas factory message --from …` and bridge POST /message still produce.
+    let forged = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
+        &data,
+        "cosmic-bear-43",
+        "cosmic-bear-43",
+        &cas::ui::factory::WakeSender::Unstamped,
+        &row.source,
+        &row.prompt,
+        quiet_supervisor_pane(),
+        chrono::Utc::now(),
+    );
+    assert!(
+        !forged.allowed && forged.reason.contains("no server-stamped sender"),
+        "the envelope is the SECOND factor, never the first: {}",
+        forged.reason
+    );
+}
+
+/// The other half of cas-8725, on the real close path: when a factory worker's
+/// close creates a verification dispatch, CAS enqueues the handoff itself.
+///
+/// Before this, the close printed instructions for the worker to retype — and a
+/// hand-typed dispatch-id message is free text, so it never woke anyone and the
+/// close it blocked stayed blocked (measured 2026-09-04, notification 24370).
+#[tokio::test]
+async fn cas_8725_a_workers_close_hands_its_verification_dispatch_to_the_supervisor() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "swift-fox"),
+        ("CAS_FACTORY_MODE", "1"),
+        ("CAS_FACTORY_SESSION", "cas-src-cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("cas-8725-close-worker");
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[worktrees]\nenabled = false\n[verification]\nenabled = true\n",
+    )
+    .expect("verification must be on for this close to reach a dispatch");
+    let mut worker = Agent::new(
+        "cas-8725-close-worker".to_string(),
+        "swift-fox".to_string(),
+    );
+    worker.role = AgentRole::Worker;
+    worker.factory_session = Some("cas-src-cosmic-bear-43".to_string());
+    env.agent_store().register(&worker).expect("register worker");
+    env.register_supervisor_in_session("cosmic-bear-43", "cas-src-cosmic-bear-43");
+
+    let mut task = cas_types::Task::new(
+        "cas-8725-close".to_string(),
+        "Deliver the envelopes".to_string(),
+    );
+    task.status = cas_types::TaskStatus::InProgress;
+    task.assignee = Some("cas-8725-close-worker".to_string());
+    env.task_store().add(&task).expect("add task");
+
+    let close = get_text(
+        &env.service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": task.id,
+                "reason": "envelopes shipped",
+            }))))
+            .await
+            .expect("close returns verification guidance rather than an error"),
+    );
+    assert!(
+        close.contains("VERIFICATION REQUIRED"),
+        "this fixture must reach the dispatch branch: {close}"
+    );
+    assert!(
+        close.contains("already delivered this dispatch to the supervisor"),
+        "the worker must be told CAS delivered it, or it sends a second free-text copy \
+         that cannot wake anyone: {close}"
+    );
+    let dispatch = cas_store::get_latest_verification_dispatch(&env.cas_root, &task.id)
+        .expect("dispatch lookup")
+        .expect("the close must have created a dispatch");
+
+    let rows = env.prompt_queue().peek_all(20).expect("peek");
+    let handoff = rows
+        .iter()
+        .find(|row| row.prompt.starts_with("<cas-verification-dispatch "))
+        .expect("CAS must queue the handoff itself, not leave it for the worker to retype");
+    assert_eq!(
+        handoff.target, "supervisor",
+        "the handoff belongs to whoever records the verdict: {handoff:?}"
+    );
+    assert!(
+        handoff.prompt.contains(&dispatch.id) && handoff.prompt.contains(&task.id),
+        "the supervisor must be able to act without asking which dispatch: {}",
+        handoff.prompt
+    );
+    assert_eq!(
+        handoff.origin,
+        Some(cas_store::QueueOrigin::Daemon),
+        "CAS composed every byte of this row, so it is Daemon-stamped: {handoff:?}"
+    );
+
+    // The gate, driven for real: this row wakes an idle supervisor pane.
+    let agents = env.agent_store().list(None).expect("roster");
+    let sender = cas::ui::factory::FactoryDaemon::wake_sender_from_origin(
+        handoff.origin.as_ref(),
+        None,
+    );
+    let decision = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
+        &director_data_for(&agents, "cas-src-cosmic-bear-43"),
+        "cosmic-bear-43",
+        "cosmic-bear-43",
+        &sender,
+        &handoff.source,
+        &handoff.prompt,
+        quiet_supervisor_pane(),
+        chrono::Utc::now(),
+    );
+    assert!(
+        decision.allowed,
+        "the dispatch handoff must reach the pane that owns the verdict: {}",
+        decision.reason
+    );
+
+    // A second close for the same dispatch must not queue a second copy: the
+    // supervisor gets one handoff per dispatch, not one per retry.
+    let _ = env
+        .service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": task.id,
+            "reason": "envelopes shipped",
+        }))))
+        .await;
+    let handoffs = env
+        .prompt_queue()
+        .peek_all(20)
+        .expect("peek")
+        .into_iter()
+        .filter(|row| row.prompt.starts_with("<cas-verification-dispatch "))
+        .count();
+    assert_eq!(handoffs, 1, "the handoff must be idempotent on the dispatch");
 }
 
 /// The complement, asserted on the same fixture so the two rules cannot drift:

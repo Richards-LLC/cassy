@@ -3,12 +3,14 @@ Description=Cassy trusted-branch GitHub Actions runner
 Documentation=https://github.com/Richards-LLC/cassy/blob/main/docs/ci/self-hosted-runner-pilot.md
 Wants=network-online.target
 After=network-online.target
+RequiresMountsFor=/var/lib/cassy-actions/cache
 
 [Service]
 Type=simple
 User=cassy-actions
 Group=cassy-actions
 WorkingDirectory=/var/lib/cassy-actions/runner
+ExecStartPre=/var/lib/cassy-actions/check-cache-mount.sh
 ExecStart=/usr/bin/ionice -c 2 -n 7 /var/lib/cassy-actions/run-service.sh
 Restart=always
 RestartSec=10s
@@ -30,11 +32,17 @@ Environment=CARGO_HOME=/var/lib/cassy-actions/.cargo
 Environment=RUSTUP_HOME=/var/lib/cassy-actions/.rustup
 Environment=CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target
 Environment=SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache
+Environment=CARGO_INCREMENTAL=0
+Environment=CASSY_ACTIONS_RUNNER_SLOT=1
+Environment=CASSY_ACTIONS_TARGET_BUDGET_BYTES=50000000000
+Environment=CASSY_ACTIONS_CACHE_MAX_AGE_DAYS=7
+Environment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/var/lib/cassy-actions/prune-cache.sh
+Environment=ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/var/lib/cassy-actions/prune-cache.sh
 # sccache otherwise discovers the operator's machine-global server on its
 # default port and crosses Unix-user/cache boundaries. A dedicated port keeps
 # runner traffic and statistics inside this service account.
 Environment=SCCACHE_SERVER_PORT=4227
-Environment=SCCACHE_CACHE_SIZE=50G
+Environment=SCCACHE_CACHE_SIZE=8G
 # Keep the private server alive across idle merge-queue periods.
 Environment=SCCACHE_IDLE_TIMEOUT=0
 # Cargo otherwise persists a failed sccache rustc probe in

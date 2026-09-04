@@ -22,6 +22,10 @@ runner_unit_2="$repo_root/ops/systemd/cassy-actions-runner-2.service"
 runner_wrapper_2="$repo_root/ops/systemd/run-cassy-actions-runner-2.sh"
 runner_installer="$repo_root/scripts/install-cassy-actions-runner.sh"
 runner_isolation="$repo_root/scripts/check-cassy-actions-runner-isolation.sh"
+runner_pruner="$repo_root/scripts/prune-cassy-actions-cache.sh"
+runner_pruner_test="$repo_root/scripts/test-prune-cassy-actions-cache.sh"
+runner_mount_guard="$repo_root/scripts/check-cassy-actions-cache-mount.sh"
+runner_mount_guard_test="$repo_root/scripts/test-check-cassy-actions-cache-mount.sh"
 rust_setup="$repo_root/scripts/setup-cassy-actions-rust.sh"
 release_runner_trust="$repo_root/scripts/check-release-runner-trust.sh"
 stale_queue_watchdog="$repo_root/.github/workflows/stale-queued-run-watchdog.yml"
@@ -148,6 +152,7 @@ require_text "$self_hosted_text" 'labels: cas-ci-32core' 'self-hosted job uses i
 require_text "$self_hosted_text" 'permissions:' 'self-hosted workflow declares explicit token permissions'
 require_text "$self_hosted_text" 'contents: read' 'self-hosted workflow token is read-only'
 require_text "$self_hosted_text" 'CARGO_BUILD_JOBS: "12"' 'self-hosted compile leaves CPU capacity for the worker fleet'
+require_text "$self_hosted_text" 'CARGO_INCREMENTAL: "0"' 'self-hosted CI does not retain incremental compiler sessions'
 require_text "$self_hosted_text" 'RUSTC_WRAPPER: ""' 'pilot archive timing is not coupled to sccache availability'
 require_text "$self_hosted_text" './scripts/check-cassy-actions-runner-isolation.sh' 'self-hosted job verifies an approved target/cache/port tuple'
 require_absent "$self_hosted_text" 'sccache --start-server' 'workflow steps cannot start a cache server that Runner.Worker will reap'
@@ -191,19 +196,48 @@ require_text "$pilot_doc" 'Ephemeral/JIT runners remain future' 'pilot records t
 runner_unit_text="$(<"$runner_unit")"
 runner_unit_2_text="$(<"$runner_unit_2")"
 require_text "$runner_unit_text" 'Environment=CARGO_CACHE_RUSTC_INFO=0' 'runner does not persist failed sccache rustc probes across jobs'
+require_text "$runner_unit_text" 'Environment=CARGO_INCREMENTAL=0' 'runner disables incremental compilation at the service boundary'
+require_text "$runner_unit_text" 'Environment=SCCACHE_CACHE_SIZE=8G' 'slot 1 bounds sccache below the total slot budget'
+require_text "$runner_unit_text" 'Environment=CASSY_ACTIONS_TARGET_BUDGET_BYTES=50000000000' 'slot 1 bounds Cargo target data at 50 GB'
+require_text "$runner_unit_text" 'Environment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/var/lib/cassy-actions/prune-cache.sh' 'slot 1 prunes before every assigned job'
+require_text "$runner_unit_text" 'Environment=ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/var/lib/cassy-actions/prune-cache.sh' 'slot 1 prunes after every assigned job'
+require_text "$runner_unit_text" 'ExecStartPre=/var/lib/cassy-actions/check-cache-mount.sh' 'slot 1 fails closed when the dedicated cache mount is absent'
 require_text "$runner_unit_text" 'Environment=SCCACHE_IDLE_TIMEOUT=0' 'runner keeps its private sccache server alive between merge-queue jobs'
 require_text "$runner_unit_text" 'TasksMax=2048' 'runner reserves enough cgroup task slots for parallel sccache compiler spawns'
 require_text "$runner_unit_2_text" 'WorkingDirectory=/var/lib/cassy-actions/runner-2' 'slot 2 has an independent runner checkout'
 require_text "$runner_unit_2_text" 'Environment=CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target-2' 'slot 2 has an independent Cargo target'
 require_text "$runner_unit_2_text" 'Environment=SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache-2' 'slot 2 has an independent sccache directory'
 require_text "$runner_unit_2_text" 'Environment=SCCACHE_SERVER_PORT=4228' 'slot 2 has an independent sccache server port'
+require_text "$runner_unit_2_text" 'Environment=CASSY_ACTIONS_RUNNER_SLOT=2' 'slot 2 invokes pruning against its own target'
+require_text "$runner_unit_2_text" 'Environment=SCCACHE_CACHE_SIZE=8G' 'slot 2 bounds sccache below the total slot budget'
 require_text "$runner_unit_2_text" '/var/lib/cassy-actions/run-service-2.sh' 'slot 2 unit starts its dedicated wrapper'
 require_text "$(<"$runner_wrapper_2")" '/var/lib/cassy-actions/runner-2/bin/runsvc.sh' 'slot 2 wrapper starts its independent listener'
 require_text "$(<"$runner_installer")" 'RUNNER_SLOT must be 1 or 2' 'runner installer rejects unbounded slot identifiers'
 require_text "$(<"$runner_installer")" 'runner_name=soundwave-cas-ci-2' 'runner installer registers a distinct slot-2 name'
 require_text "$(<"$runner_installer")" 'service_name=cassy-actions-runner-2.service' 'runner installer enables the slot-2 unit'
+require_text "$(<"$runner_installer")" 'must be a dedicated mounted cache volume' 'runner installer refuses root-filesystem cache fallback'
+require_text "$(<"$runner_installer")" 'prune-cache.sh' 'runner installer deploys the bounded cache hook'
+require_text "$(<"$runner_installer")" 'check-cache-mount.sh' 'runner installer deploys the fail-closed cache mount guard'
 require_text "$(<"$release_runner_trust")" 'check-cassy-actions-runner-isolation.sh' 'release trust guard accepts only approved slot tuples'
 require_text "$pilot_doc" '2,048 cgroup task slots' 'pilot documents the parallel sccache task-slot budget'
+
+if [[ -x "$runner_pruner" && -x "$runner_pruner_test" ]] && "$runner_pruner_test" >/dev/null; then
+    printf 'ok   runner cache pruning behavior test passes\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL runner cache pruning behavior test must be executable and pass\n'
+    fail=$((fail + 1))
+fi
+
+if [[ -x "$runner_mount_guard" && -x "$runner_mount_guard_test" ]] && "$runner_mount_guard_test" >/dev/null; then
+    printf 'ok   runner cache mount guard behavior test passes\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL runner cache mount guard behavior test must be executable and pass\n'
+    fail=$((fail + 1))
+fi
+
+require_text "$ci_text" 'CARGO_INCREMENTAL: "0"' 'main CI disables incremental compiler artifacts'
 
 if [[ -x "$runner_isolation" ]]; then
     if CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target \

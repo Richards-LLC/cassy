@@ -170,6 +170,56 @@ It also points `TMPDIR` at GitHub Runner's disk-backed temporary directory;
 nextest's default archive extraction used the unit's private tmpfs-backed
 `/tmp` and consumed about 2.5 GB during the shard evaluation.
 
+### Dedicated storage and per-slot budget
+
+The persistent cache must be a dedicated mount backed by `/mnt/shockwave`;
+never let `/var/lib/cassy-actions/cache` silently fall back to the host root
+filesystem. On `soundwave`, the source is the pippenz-owned directory
+`/mnt/shockwave/home/pippenz/cassy-actions` (mode `0750`), whose `cache` child
+is owned by `cassy-actions:cassy-actions` (mode `0750`). The bind keeps the
+runner-facing paths stable:
+
+```fstab
+/mnt/shockwave/home/pippenz/cassy-actions/cache /var/lib/cassy-actions/cache none bind,x-systemd.requires-mounts-for=/mnt/shockwave 0 0
+```
+
+Both runner units use `RequiresMountsFor=/var/lib/cassy-actions/cache` and run
+`check-cache-mount.sh` before the listener. That guard requires both paths to
+be mount points on the same block device, so an absent Shockwave mount fails
+the service instead of writing a new cache on root. Validate any fstab edit
+with `mount -a`, then require this to report Shockwave's device:
+
+```bash
+sudo mount -a
+findmnt -T /mnt/shockwave
+findmnt -T /var/lib/cassy-actions/cache
+sudo systemctl start cassy-actions-runner.service cassy-actions-runner-2.service
+```
+
+Each slot has a hard operational budget below 60 GB: at most 50,000,000,000
+bytes of Cargo target data plus an 8 GiB sccache. `CARGO_INCREMENTAL=0` avoids
+CI-only incremental sessions. GitHub Runner's job-started and job-completed
+hooks invoke `prune-cache.sh` for the assigned slot. The hook removes
+incremental sessions and `deps` artifacts older than seven days first. If the
+target is still over budget, it removes whole rebuildable Cargo profile trees
+rather than leaving inconsistent fingerprints; unknown over-budget data is
+retained and the hook fails closed for operator review.
+
+For an existing root-backed cache, disable all self-hosted route variables and
+confirm both organization runners have `busy=false` before migration. Preseed
+with `rsync -aHAX --numeric-ids`, stop both units, prove no `Runner.Worker`
+remains, then run a final `rsync -aHAX --numeric-ids --delete`. Compare byte
+and file counts plus representative hashes before renaming the old source to a
+timestamped rollback directory and mounting the bind. Keep that rollback tree
+until both units are healthy, a newly-created target artifact resolves to the
+Shockwave device, and a CI smoke run completes.
+
+Rollback is the reverse, while routing stays disabled: stop both units,
+unmount `/var/lib/cassy-actions/cache`, remove the bind line from the backed-up
+fstab, rename the timestamped root directory back to `cache`, run
+`systemctl daemon-reload`, and start both units. Re-enable route variables only
+after both runners report online and idle.
+
 ## Provision and audit
 
 Create `cassy-public-trusted` before registration with selected repository
@@ -197,7 +247,9 @@ gh api orgs/Richards-LLC/actions/runner-groups/GROUP_ID \\
 ```
 
 Generate a short-lived organization registration token for each registration,
-then run from a trusted checkout. `RUNNER_SLOT` defaults to `1`; provisioning
+then configure and verify the dedicated cache mount before running the
+installer. The installer refuses a plain directory at
+`/var/lib/cassy-actions/cache`. `RUNNER_SLOT` defaults to `1`; provisioning
 slot 2 is explicit so rerunning the installer cannot silently change the
 existing listener:
 

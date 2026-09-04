@@ -36,7 +36,7 @@ use serde::Serialize;
 use cmcp_core::config::{
     Config as ProxyConfig, ExternalToolConfig, MECHA_CASSY_BYPASS_HEADER,
     MECHA_CASSY_DEFAULT_BYPASS_ENV, MECHA_CASSY_DEFAULT_TOKEN_ENV, MECHA_CASSY_MCP_URL,
-    MECHA_CASSY_SERVER, MECHA_CASSY_TOOLS,
+    MECHA_CASSY_SERVER, MECHA_CASSY_TOOLS, ServerConfig,
 };
 
 use super::fs as ifs;
@@ -536,7 +536,32 @@ fn entry_route(value: &toml_edit::Value) -> Option<ExternalToolConfig> {
     ExternalToolConfig::parse_allowlist_entry(&format!("{server}.{tool}")).ok()
 }
 
-fn plan_project_proxy(path: &Path) -> Result<ProjectProxyPlan> {
+/// Where a server definition actually points, for a note an operator can act
+/// on without opening the file.
+fn server_endpoint(server: &ServerConfig) -> &str {
+    match server {
+        ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } => url,
+        ServerConfig::Stdio { command, .. } => command,
+    }
+}
+
+/// What to do with the project file's own `[servers.mecha-cassy]` block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerAction {
+    /// The file does not define the hub server at all.
+    Absent,
+    /// Byte-for-byte the machine registration: pure duplication, safe to drop.
+    Drop,
+    /// A deliberate override (a staging hub, a different bearer variable).
+    /// Dropping it would silently move this project to another endpoint, so
+    /// it stays and is reported instead.
+    Keep,
+}
+
+fn plan_project_proxy(
+    path: &Path,
+    machine_server: Option<&ServerConfig>,
+) -> Result<ProjectProxyPlan> {
     let raw = ifs::read_capped(path)?;
     let mut document: toml_edit::DocumentMut = raw
         .parse()
@@ -583,34 +608,72 @@ fn plan_project_proxy(path: &Path) -> Result<ProjectProxyPlan> {
         });
     }
 
+    // `--url` exists so a project can point at a staging hub, and the proxy
+    // merges project server tables *over* machine ones. So a block is only
+    // "duplicate" if it is actually identical to the machine registration;
+    // dropping a differing one would silently move this project to another
+    // endpoint — the same silent policy change refused for the allowlist.
+    let project_server = if declares_server {
+        ProxyConfig::load_from(path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .servers
+            .remove(MECHA_CASSY_SERVER)
+    } else {
+        None
+    };
+    let server_action = match (declares_server, &project_server) {
+        (false, _) => ServerAction::Absent,
+        (true, project) if project.as_ref() == machine_server => ServerAction::Drop,
+        (true, _) => ServerAction::Keep,
+    };
+    let kept_override_note = || {
+        let endpoint = project_server
+            .as_ref()
+            .map(server_endpoint)
+            .unwrap_or("unparsed endpoint");
+        format!(
+            "kept [servers.{MECHA_CASSY_SERVER}]: it overrides the machine registration \
+             (url {endpoint})"
+        )
+    };
+
     let canonical = canonical_entries();
     let allowlist_is_canonical = existing_tools == MECHA_CASSY_TOOLS;
-    if allowlist_is_canonical && !declares_server {
+    if allowlist_is_canonical && server_action != ServerAction::Drop {
+        let mut note = "already names exactly the hub's current routes".to_string();
+        if server_action == ServerAction::Keep {
+            note.push_str("; ");
+            note.push_str(&kept_override_note());
+        }
         return Ok(ProjectProxyPlan {
             rewritten: None,
             effective_tools: existing_tools,
             shadows_without_routes: false,
-            note: "already names exactly the hub's current routes".to_string(),
+            note,
         });
     }
 
     let mut changes = Vec::new();
-    if declares_server {
-        let mut emptied = false;
-        if let Some(servers) = document
-            .get_mut("servers")
-            .and_then(|item| item.as_table_like_mut())
-        {
-            servers.remove(MECHA_CASSY_SERVER);
-            emptied = servers.is_empty();
+    match server_action {
+        ServerAction::Drop => {
+            let mut emptied = false;
+            if let Some(servers) = document
+                .get_mut("servers")
+                .and_then(|item| item.as_table_like_mut())
+            {
+                servers.remove(MECHA_CASSY_SERVER);
+                emptied = servers.is_empty();
+            }
+            if emptied {
+                document.remove("servers");
+            }
+            changes.push(format!(
+                "dropped the [servers.{MECHA_CASSY_SERVER}] block (identical to the machine \
+                 registration, which supplies it)"
+            ));
         }
-        if emptied {
-            document.remove("servers");
-        }
-        changes.push(format!(
-            "dropped the duplicate [servers.{MECHA_CASSY_SERVER}] block (the machine \
-             registration supplies it)"
-        ));
+        ServerAction::Keep => changes.push(kept_override_note()),
+        ServerAction::Absent => {}
     }
 
     if !allowlist_is_canonical {
@@ -709,9 +772,10 @@ pub fn run(
     // The project file is reconciled *after* the machine registration, so a
     // file this command refuses to edit still leaves a correct machine file
     // behind, and the error names the one path an operator must repair.
+    let machine_server = config.servers.get(MECHA_CASSY_SERVER).cloned();
     let project = match project_proxy.filter(|path| ifs::is_regular_file(path)) {
         Some(path) => {
-            let plan = plan_project_proxy(path)?;
+            let plan = plan_project_proxy(path, machine_server.as_ref())?;
             let state = match &plan.rewritten {
                 // Not ours to edit vs. ours and already right: an operator who
                 // sees "skipped" must be able to tell which one happened.
@@ -1870,6 +1934,21 @@ mod tests {
          x-vercel-protection-bypass = \"env:MECHA_VERCEL_BYPASS\"\n"
     }
 
+    /// A `[servers.mecha-cassy]` block byte-equal in effect to the machine
+    /// registration `ensure_mecha_cassy_registration` writes under the default
+    /// variable names — the only shape that is a true duplicate and so the
+    /// only one safe to drop.
+    fn duplicate_server_block() -> String {
+        format!(
+            "[servers.mecha-cassy]\ntransport = \"http\"\n\
+             url = \"{MECHA_CASSY_MCP_URL}\"\n\
+             auth = \"env:{MECHA_CASSY_DEFAULT_TOKEN_ENV}\"\n\
+             \n\
+             [servers.mecha-cassy.headers]\n\
+             {MECHA_CASSY_BYPASS_HEADER} = \"env:{MECHA_CASSY_DEFAULT_BYPASS_ENV}\"\n"
+        )
+    }
+
     fn write_project_proxy(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("project").join(".cas").join("proxy.toml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1966,12 +2045,7 @@ mod tests {
             no_harness: true,
             ..Default::default()
         };
-        let project = write_project_proxy(
-            dir.path(),
-            "[servers.mecha-cassy]\ntransport = \"http\"\n\
-             url = \"https://mecha-cassy.vercel.app/mcp/slack\"\n\
-             auth = \"env:MECHA_SLACK_TOKEN_CASSY_PROXY\"\n",
-        );
+        let project = write_project_proxy(dir.path(), &duplicate_server_block());
 
         let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
         assert_eq!(
@@ -1986,6 +2060,66 @@ mod tests {
         assert!(!parsed.servers.contains_key(MECHA_CASSY_SERVER));
         let row = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
+    }
+
+    /// `--url` exists so a project can point at a staging hub, and the proxy
+    /// merges project server tables *over* machine ones. A block that differs
+    /// from the machine registration is therefore an override, not a
+    /// duplicate: dropping it would silently move the project to another
+    /// endpoint. The stale routes are still corrected around it.
+    #[test]
+    fn a_project_server_block_that_overrides_the_machine_registration_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            ..Default::default()
+        };
+        const STAGING: &str = "https://mecha-cassy-staging.vercel.app/mcp/slack";
+        let project = write_project_proxy(
+            dir.path(),
+            &format!(
+                "allowlist = [\n\
+                 \x20 \"mecha-cassy.mecha_read\",\n\
+                 \x20 \"mecha-cassy.slack_post_message\",\n\
+                 ]\n\
+                 \n\
+                 [servers.mecha-cassy]\n\
+                 transport = \"http\"\n\
+                 url = \"{STAGING}\"\n\
+                 auth = \"env:MECHA_SLACK_TOKEN_CASSY_PROXY\"\n"
+            ),
+        );
+
+        let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let entry = report.project_proxy.clone().unwrap();
+        assert_eq!(entry.state, WriteState::Written, "{report:?}");
+        assert!(entry.note.contains("kept [servers.mecha-cassy]"), "{entry:?}");
+        assert!(entry.note.contains(STAGING), "{entry:?}");
+
+        let rendered = std::fs::read_to_string(&project).unwrap();
+        let parsed = ProxyConfig::load_from(&project).unwrap();
+        // The override survives, pointing where the project put it…
+        let server = parsed
+            .servers
+            .get(MECHA_CASSY_SERVER)
+            .expect("the override must survive");
+        assert_eq!(server_endpoint(server), STAGING, "{rendered}");
+        // …while the retired route it carried is corrected.
+        assert_eq!(parsed.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
+
+        // Keeping a block is not a change: a second run must not rewrite.
+        let second = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let second_entry = second.project_proxy.unwrap();
+        assert_eq!(second_entry.state, WriteState::AlreadyCurrent, "{rendered}");
+        assert!(
+            second_entry.note.contains("overrides the machine registration"),
+            "the override must stay visible on every run: {second_entry:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&project).unwrap(), rendered);
     }
 
     /// Adding an `allowlist` key to a file that already opens a `[servers.…]`
@@ -2006,9 +2140,10 @@ mod tests {
         };
         let project = write_project_proxy(
             dir.path(),
-            "[servers.neon]\ntransport = \"stdio\"\ncommand = \"neon-mcp\"\n\n\
-             [servers.mecha-cassy]\ntransport = \"http\"\n\
-             url = \"https://mecha-cassy.vercel.app/mcp/slack\"\n",
+            &format!(
+                "[servers.neon]\ntransport = \"stdio\"\ncommand = \"neon-mcp\"\n\n{}",
+                duplicate_server_block()
+            ),
         );
 
         run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();

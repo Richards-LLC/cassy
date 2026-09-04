@@ -15,9 +15,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   routes kept them authoritative through any number of re-runs while the
   command reported "already configured". It now rewrites those routes in place
   — comments, key order and every unrelated server and route survive
-  untouched — drops a duplicate hub server block the machine registration
-  already supplies, and refuses to claim "already configured" while a shadowing
-  file still drifts. A project file that names no hub route is still left alone
+  untouched — and refuses to claim "already configured" while a shadowing file
+  still drifts. A hub server block in that file is removed only when it is
+  identical to the machine registration that supplies it; one that differs is
+  an override, such as a project pointed at a staging hub, and is kept and
+  reported rather than silently switched. A project file that names no hub route is still left alone
   (widening a policy the project declared is not the command's call) and is
   reported with the exact routes to add. The `mecha-cassy` doctor row now names
   the file the stale entries live in, machine or project.

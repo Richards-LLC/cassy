@@ -17,14 +17,13 @@
 //! real before/after in the message.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use cas::cloud::syncer_testing::{accepts_entity, accepts_task_dependency};
 
 fn fixture() -> serde_json::Value {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/gh701_pull_origin_histogram.json");
-    serde_json::from_str(&std::fs::read_to_string(&path).expect("fixture is readable"))
+    // Embedded at compile time: CI suite shards run on a different runner than
+    // the build, so a CARGO_MANIFEST_DIR path does not exist there.
+    serde_json::from_str(include_str!("fixtures/gh701_pull_origin_histogram.json"))
         .expect("fixture is valid JSON")
 }
 

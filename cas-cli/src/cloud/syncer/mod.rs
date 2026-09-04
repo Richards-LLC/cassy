@@ -505,6 +505,9 @@ pub struct CloudSyncer {
     /// Optional normalized `origin` identity sent with personal pushes.
     /// Missing/non-git remotes deliberately remain absent from the envelope.
     personal_push_git_remote: Option<String>,
+    /// The `.cas` root this syncer pushes for (cas-ee57 ephemeral guard): the
+    /// explicit root for `new_for_project`, the queue's own directory for `new`.
+    push_cas_root: Option<std::path::PathBuf>,
     /// Conflict decisions are collected during pull application and folded
     /// into the returned `SyncResult` after the operation completes.
     conflict_log: Arc<Mutex<Vec<SyncConflict>>>,
@@ -529,12 +532,16 @@ impl CloudSyncer {
         let personal_push_git_remote = crate::store::find_cas_root()
             .ok()
             .and_then(|cas_root| crate::cloud::normalized_git_remote_for_push(&cas_root));
+        // The queue lives in the project's own .cas, so the push guard judges that
+        // root rather than whatever project the process happens to run inside.
+        let push_cas_root = Some(queue.cas_dir().to_path_buf());
         Self {
             config,
             queue,
             cloud_config,
             push_project_canonical_id: None,
             personal_push_git_remote,
+            push_cas_root,
             conflict_log: Arc::new(Mutex::new(Vec::new())),
             incoming_revisions: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -555,6 +562,7 @@ impl CloudSyncer {
             cloud_config,
             push_project_canonical_id: Some(project_canonical_id),
             personal_push_git_remote: crate::cloud::normalized_git_remote_for_push(cas_root),
+            push_cas_root: Some(cas_root.to_path_buf()),
             conflict_log: Arc::new(Mutex::new(Vec::new())),
             incoming_revisions: Arc::new(Mutex::new(HashMap::new())),
         }

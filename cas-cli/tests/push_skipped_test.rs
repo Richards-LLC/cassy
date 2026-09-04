@@ -49,6 +49,9 @@ async fn skipped_response_is_acknowledged_as_lww() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_dir = tmp.path();
 
     // Seed: one queued upsert for an entry. Use a fresh cas.db in TempDir
@@ -137,6 +140,9 @@ async fn per_row_rejected_outcome_stays_visible_with_reason() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     queue
@@ -201,6 +207,9 @@ async fn itemized_rejection_syncs_owned_row_and_names_project_mismatch() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     for id in ["owned-project-entry-001", "rejected-project-entry-002"] {
@@ -276,6 +285,9 @@ async fn itemized_rejection_subset_settles_unrejected_rows_for_six_of_twenty() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     let all_ids = rejected_ids
@@ -346,6 +358,9 @@ async fn legacy_response_without_skipped_field_marks_items_synced() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_dir = tmp.path();
 
     let queue = SyncQueue::open(cas_dir).unwrap();

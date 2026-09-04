@@ -43,6 +43,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// team-tagged entry upsert, returning the TempDir owning the files.
 fn make_cas_root_with_team_item() -> TempDir {
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     queue
@@ -103,6 +106,9 @@ async fn team_task_move_deletes_old_project_before_upserting_new_owner() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
     seed_team_task_move(&queue, "move-order-task");
@@ -147,6 +153,9 @@ async fn team_task_move_delete_failure_blocks_upsert_and_retains_both_rows() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
     seed_team_task_move(&queue, "move-delete-failure");
@@ -196,6 +205,9 @@ async fn team_task_move_upsert_failure_retains_only_upsert_for_retry() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
     seed_team_task_move(&queue, "move-upsert-failure");
@@ -405,6 +417,9 @@ async fn team_itemized_rejection_subset_settles_unrejected_rows_for_fourteen_of_
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
     let all_ids = rejected_ids
@@ -474,6 +489,9 @@ async fn team_push_no_op_when_no_team_configured() {
     // Deliberately no set_team — active_team_id() returns None.
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path().to_path_buf();
     let cli = make_cli_json();
 
@@ -520,6 +538,9 @@ async fn team_push_silent_when_queue_empty() {
 
     let cfg = make_cloud_config(server.uri());
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     // Deliberately no enqueue_for_team — queue is empty.
@@ -542,6 +563,9 @@ async fn team_delete_for_live_task_is_neutralized_without_http() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     open_task_store_local(tmp.path())
         .unwrap()
         .add(&Task::new(
@@ -592,6 +616,9 @@ async fn team_delete_uses_singular_entity_path() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     open_task_store_local(tmp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
@@ -639,6 +666,9 @@ async fn team_task_upsert_includes_explicit_project_scope() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -688,6 +718,9 @@ async fn parked_team_delete_can_be_requeued_and_flushed_after_scope_fix() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     open_task_store_local(tmp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
@@ -797,6 +830,9 @@ async fn team_push_chunks_upserts_by_payload_budget() {
 
     let cfg = make_cloud_config(server.uri());
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
 

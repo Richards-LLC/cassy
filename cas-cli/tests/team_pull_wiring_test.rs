@@ -145,6 +145,9 @@ impl Drop for ScopedEnvVar {
 /// Initialize a fresh `.cas`-style tempdir with empty SQLite stores + queue.
 fn make_cas_root() -> TempDir {
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     // Force store creation so subsequent `open_store(cas_root)` calls inside
@@ -573,6 +576,9 @@ async fn execute_sync_hits_each_pull_endpoint_exactly_once_when_team_configured(
     mount_full_sync_mocks(&server, "alice-shared-via-sync-001").await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path().to_path_buf();
     init_all_stores_at(&cas_root);
     SyncQueue::open(&cas_root).unwrap().init().unwrap();
@@ -665,6 +671,9 @@ async fn execute_sync_does_not_hit_team_pull_when_no_team_configured() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path().to_path_buf();
     init_all_stores_at(&cas_root);
     SyncQueue::open(&cas_root).unwrap().init().unwrap();
@@ -711,6 +720,9 @@ async fn execute_sync_full_ignores_personal_team_and_knowledge_watermarks() {
     mount_full_sync_mocks(&server, "alice-shared-via-full-sync").await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path().to_path_buf();
     init_all_stores_at(&cas_root);
     let queue = SyncQueue::open(&cas_root).unwrap();

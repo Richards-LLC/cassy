@@ -362,30 +362,37 @@ impl CasCore {
                     data: None,
                 },
             )?;
-        if let Some(repository) = proof_dispatch.repository.as_ref()
-            && let Err(error) =
-                crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(
-                    repository,
-                )
-        {
-            cas_store::invalidate_verification_dispatch_for_repository_drift(
-                &self.cas_root,
-                &requested_dispatch_id,
-            )
-            .map_err(|store_error| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
-                    "Repository proof changed, but exact task-scoped invalidation failed: {store_error}"
-                )),
-                data: None,
-            })?;
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
-                    "Verification rejected: {error}. Retry task close to create a fresh dispatch."
-                )),
-                data: None,
-            });
+        // cas-5c33: the boundary that matters is the delivered commit
+        // identity. A branch that moved on to the next task keeps the verdict
+        // valid while every delivered commit is still reachable; the moved
+        // tree is recorded on the verdict instead of refusing it.
+        let mut repository_drift_note: Option<String> = None;
+        if let Some(repository) = proof_dispatch.repository.as_ref() {
+            match crate::mcp::tools::core::task::lifecycle::repository_proof::evaluate_repository_proof(
+                repository,
+            ) {
+                Ok(status) => repository_drift_note = status.drift_note(),
+                Err(error) => {
+                    cas_store::invalidate_verification_dispatch_for_repository_drift(
+                        &self.cas_root,
+                        &requested_dispatch_id,
+                    )
+                    .map_err(|store_error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Repository proof changed, but exact task-scoped invalidation failed: {store_error}"
+                        )),
+                        data: None,
+                    })?;
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!(
+                            "Verification rejected: {error}. Retry task close to create a fresh dispatch."
+                        )),
+                        data: None,
+                    });
+                }
+            }
         }
 
         let id = verification_store.generate_id().map_err(|e| McpError {
@@ -396,7 +403,12 @@ impl CasCore {
 
         let mut verification = Verification::new(id.clone(), req.task_id.clone());
         verification.status = status;
-        verification.summary = authored_content.summary;
+        verification.summary = match repository_drift_note.as_deref() {
+            // The verdict record carries both digests so a reviewer can see
+            // that the tree moved between dispatch and verdict (cas-5c33).
+            Some(note) => format!("{}\n\n{note}", authored_content.summary),
+            None => authored_content.summary,
+        };
         verification.issues = authored_content.issues;
         verification.files_reviewed = authored_content.files_reviewed;
         if let Some(confidence) = req.confidence {

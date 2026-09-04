@@ -3,6 +3,7 @@
 //! Enables syncing Cassy data with Cassy Cloud service.
 
 use clap::{Args, Parser, Subcommand};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -254,6 +255,15 @@ pub struct CloudPurgeForeignArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// Allow a purge whose classified foreign tasks are a majority of local
+    /// tasks. This lifts only the ratio guard and always requires --yes.
+    #[arg(long)]
+    pub allow_majority_foreign: bool,
+
+    /// Confirm the explicit majority-foreign override.
+    #[arg(long)]
+    pub yes: bool,
+
     /// Age in days beyond which the last successful cloud pull is considered
     /// stale and the purge is refused without --force.
     #[arg(long, default_value_t = PURGE_STALE_THRESHOLD_DAYS)]
@@ -438,23 +448,10 @@ enum UnlinkRemoteScope {
 /// `.cas` state. Remote deletion is a separate, explicit phase: all scoped
 /// rows are discovered first, unsupported knowledge deletion fails closed, and
 /// the local link is removed only after every DELETE succeeds.
-fn execute_unlink(
-    args: &CloudUnlinkArgs,
-    cli: &Cli,
-    cas_root: &Path,
-) -> anyhow::Result<()> {
+fn execute_unlink(args: &CloudUnlinkArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let cloud_path = cas_root.join("cloud.json");
     if !cloud_path.exists() {
-        return render_unlink_result(
-            cli,
-            cas_root,
-            None,
-            args,
-            0,
-            0,
-            false,
-            "not cloud-linked",
-        );
+        return render_unlink_result(cli, cas_root, None, args, 0, 0, false, "not cloud-linked");
     }
 
     let mut config = CloudConfig::load_from_cas_dir(cas_root)?;
@@ -518,12 +515,7 @@ fn execute_unlink(
                 "dry run",
             );
         }
-        let deleted = delete_unlink_remote_records(
-            &config.endpoint,
-            token,
-            &project_id,
-            &records,
-        )?;
+        let deleted = delete_unlink_remote_records(&config.endpoint, token, &project_id, &records)?;
         fs::remove_file(&cloud_path).map_err(|error| {
             anyhow::anyhow!(
                 "Remote purge completed ({deleted} row(s)), but removing {} failed: {error}",
@@ -590,13 +582,7 @@ fn discover_unlink_remote_records(
         let team = syncer
             .pull_raw(project_id, &entity_types, Some(team_id))
             .map_err(|error| anyhow::anyhow!("team cloud pull failed: {error}"))?;
-        collect_unlink_records(
-            &mut records,
-            &team,
-            project_id,
-            team_scope,
-            &entity_types,
-        )?;
+        collect_unlink_records(&mut records, &team, project_id, team_scope, &entity_types)?;
     }
 
     Ok(records.into_iter().collect())
@@ -614,9 +600,7 @@ fn collect_unlink_records(
             .get(*key)
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "scoped cloud pull omitted required `{key}` array; refusing unlink"
-                )
+                anyhow::anyhow!("scoped cloud pull omitted required `{key}` array; refusing unlink")
             })?;
         for row in rows {
             let row_project_id = row
@@ -1151,7 +1135,9 @@ fn execute_project_adopt_aliases(cli: &Cli, cas_root: &Path) -> anyhow::Result<(
             crate::cloud::SyncOperation::Upsert,
             Some(&payload),
         )?;
-        if let Some(team_id) = team_id.as_deref() && eligible_for_team_task(&persisted) {
+        if let Some(team_id) = team_id.as_deref()
+            && eligible_for_team_task(&persisted)
+        {
             queue.enqueue_for_team(
                 crate::cloud::EntityType::Task,
                 &persisted.id,
@@ -2775,8 +2761,7 @@ impl SyncSummary {
             team_healed_task_dependencies_to_cloud: 0,
             team_healed_task_dependencies_from_cloud: 0,
             deleted_task_dependencies: result.deleted_task_dependencies,
-            skipped_task_dependencies_by_tombstone: result
-                .skipped_task_dependencies_by_tombstone,
+            skipped_task_dependencies_by_tombstone: result.skipped_task_dependencies_by_tombstone,
             team_errors: Vec::new(),
             team_push_attention: 0,
             skipped_lww: result.skipped_lww_acked,
@@ -2831,8 +2816,7 @@ impl SyncSummary {
             team_healed_task_dependencies_to_cloud: 0,
             team_healed_task_dependencies_from_cloud: 0,
             deleted_task_dependencies: result.deleted_task_dependencies,
-            skipped_task_dependencies_by_tombstone: result
-                .skipped_task_dependencies_by_tombstone,
+            skipped_task_dependencies_by_tombstone: result.skipped_task_dependencies_by_tombstone,
             team_errors: Vec::new(),
             team_push_attention: 0,
             skipped_lww: 0,
@@ -2862,10 +2846,8 @@ impl SyncSummary {
         self.team_conflicts_resolved_local += team.conflicts_resolved_local;
         self.team_conflicts_resolved_remote += team.conflicts_resolved_remote;
         self.team_conflicts.extend(team.conflicts.clone());
-        self.team_healed_task_dependencies_to_cloud +=
-            team.healed_task_dependencies_to_cloud;
-        self.team_healed_task_dependencies_from_cloud +=
-            team.healed_task_dependencies_from_cloud;
+        self.team_healed_task_dependencies_to_cloud += team.healed_task_dependencies_to_cloud;
+        self.team_healed_task_dependencies_from_cloud += team.healed_task_dependencies_from_cloud;
         self.deleted_task_dependencies += team.deleted_task_dependencies;
         self.skipped_task_dependencies_by_tombstone += team.skipped_task_dependencies_by_tombstone;
         self.team_errors.extend(team.errors.clone());
@@ -3130,15 +3112,16 @@ pub(crate) fn render_sync_summary(
                     fmt.write_raw(transition)?;
                     fmt.newline()?;
                 }
-                let conflict_count =
-                    summary.conflicts.len() + summary.team_conflicts.len();
+                let conflict_count = summary.conflicts.len() + summary.team_conflicts.len();
                 if conflict_count > 0 {
-                    fmt.write_raw(&format!(
-                        "    {conflict_count} conflict(s) resolved"
-                    ))?;
+                    fmt.write_raw(&format!("    {conflict_count} conflict(s) resolved"))?;
                     fmt.newline()?;
                 }
-                for conflict in summary.conflicts.iter().chain(summary.team_conflicts.iter()) {
+                for conflict in summary
+                    .conflicts
+                    .iter()
+                    .chain(summary.team_conflicts.iter())
+                {
                     fmt.write_raw(&format!("    {}", conflict_summary_line(conflict)))?;
                     fmt.newline()?;
                 }
@@ -3525,11 +3508,7 @@ fn task_transition_summary(result: &crate::cloud::SyncResult) -> Option<String> 
     ))
 }
 
-fn execute_pull(
-    args: &CloudPullArgs,
-    cli: &Cli,
-    cas_root: &Path,
-) -> anyhow::Result<SyncSummary> {
+fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<SyncSummary> {
     // The delegated implementation clears the `last_team_pull_at_` watermark
     // for `--full` and invokes `execute_team_pull` for standalone pulls too.
     execute_pull_with_output(args, cli, cas_root, true)
@@ -4199,7 +4178,8 @@ fn execute_team_push_with_output(
                 );
                 // Isolation contract: reporter errors must not escape.
                 if emit_output {
-                    let _ = report_team_push_error(cli, &format!("Team sync queue init failed: {e}"));
+                    let _ =
+                        report_team_push_error(cli, &format!("Team sync queue init failed: {e}"));
                 }
                 return Ok(Some(SyncSummary::push(
                     &crate::cloud::SyncResult {
@@ -4433,7 +4413,8 @@ fn execute_team_pull_with_output(
                 );
                 // Isolation contract: reporter errors must not escape.
                 if emit_output {
-                    let _ = report_team_pull_error(cli, &format!("Team sync queue init failed: {e}"));
+                    let _ =
+                        report_team_pull_error(cli, &format!("Team sync queue init failed: {e}"));
                 }
                 return Ok(Some(SyncSummary::pull(
                     &crate::cloud::SyncResult {
@@ -5297,20 +5278,54 @@ pub struct PurgeRetainedTask {
     pub id: String,
     pub title: String,
     pub reason: String,
+    /// Home project from the cross-database classifier, when known. This is
+    /// used only to print a scoped, operator-confirmed remote DELETE command.
+    pub home_project: Option<String>,
 }
 
 impl PurgeRetainedTask {
     /// A collision cannot be auto-deleted because the short task id may name
     /// two different tasks. Give the operator the safe, explicit reassignment
     /// path after they confirm the local `(id, title)` owner.
-    fn operator_command(&self) -> Option<String> {
-        self.reason.starts_with("id collision").then(|| {
-            format!(
+    fn operator_command_with_endpoint(&self, endpoint: &str) -> Option<String> {
+        if self.reason.starts_with("id collision") {
+            return Some(format!(
                 "cas task show id={}; then mcp__cs__task action=update id={} origin_project=<confirmed canonical id>",
                 self.id, self.id
-            )
-        })
+            ));
+        }
+        if self.reason.starts_with("accepted proposal") {
+            return None;
+        }
+        let home_project = self.home_project.as_deref()?.trim();
+        if home_project.is_empty() {
+            return None;
+        }
+        Some(remote_task_delete_command(
+            endpoint,
+            &self.id,
+            &self.title,
+            home_project,
+        ))
     }
+}
+
+/// Render a deliberately manual remote deletion command for a task that the
+/// local purge cannot safely classify. The operator must confirm the exact
+/// `(id, title)` in the task's home project before running it.
+pub(crate) fn remote_task_delete_command(
+    endpoint: &str,
+    id: &str,
+    title: &str,
+    home_project: &str,
+) -> String {
+    let home_project = home_project.trim();
+    let encoded_id = urlencoding::encode(id);
+    let encoded_project = urlencoding::encode(home_project);
+    format!(
+        "confirm (id={id}, title={title:?}) in home project `{home_project}`, then run: curl -fsS -X DELETE '{}/api/sync/task/{encoded_id}?project_id={encoded_project}' -H 'Authorization: Bearer $CAS_TOKEN'",
+        endpoint.trim_end_matches('/')
+    )
 }
 
 /// The shared result consumed by purge and doctor's cross-project check. The
@@ -5376,7 +5391,8 @@ fn attributed_rows(
         } else {
             PURGE_PROJECT_COLUMNS
         },
-    )? else {
+    )?
+    else {
         return Ok(Vec::new());
     };
 
@@ -5428,24 +5444,20 @@ fn is_accepted_proposal_task(
         return Ok(false);
     }
 
-    let notes: Option<String> = conn.query_row(
-        "SELECT notes FROM tasks WHERE id = ?1",
-        [task_id],
-        |row| row.get(0),
-    )?;
+    let notes: Option<String> =
+        conn.query_row("SELECT notes FROM tasks WHERE id = ?1", [task_id], |row| {
+            row.get(0)
+        })?;
     let Some(notes) = notes else {
         return Ok(false);
     };
     let Some(start) = notes.find(PROPOSAL_PROVENANCE_BEGIN) else {
         return Ok(false);
     };
-    let Some((end_offset, end_marker)) = [
-        PROPOSAL_PROVENANCE_END,
-        PROPOSAL_PROVENANCE_SERVER_END,
-    ]
-    .iter()
-    .filter_map(|marker| notes[start..].find(marker).map(|offset| (offset, *marker)))
-    .min_by_key(|(offset, _)| *offset)
+    let Some((end_offset, end_marker)) = [PROPOSAL_PROVENANCE_END, PROPOSAL_PROVENANCE_SERVER_END]
+        .iter()
+        .filter_map(|marker| notes[start..].find(marker).map(|offset| (offset, *marker)))
+        .min_by_key(|(offset, _)| *offset)
     else {
         return Ok(false);
     };
@@ -5519,10 +5531,7 @@ fn count_purge_dependencies(
     conn: &rusqlite::Connection,
     foreign_tasks: &[PurgeEntity],
 ) -> anyhow::Result<usize> {
-    let foreign_ids: BTreeSet<&str> = foreign_tasks
-        .iter()
-        .map(|task| task.id.as_str())
-        .collect();
+    let foreign_ids: BTreeSet<&str> = foreign_tasks.iter().map(|task| task.id.as_str()).collect();
     if foreign_ids.is_empty() {
         return Ok(0);
     }
@@ -5609,8 +5618,7 @@ pub(crate) fn collect_purge_delete_set_with_report(
     // An explicit origin value cannot override the doctor's safety verdict for
     // a collision or an unattributed replica. Both categories are retained.
     delete_set.tasks.retain(|task| {
-        !collision_ids.contains(task.id.as_str())
-            && !unattributed_ids.contains(task.id.as_str())
+        !collision_ids.contains(task.id.as_str()) && !unattributed_ids.contains(task.id.as_str())
     });
     let mut known_task_ids = delete_set
         .tasks
@@ -5648,14 +5656,18 @@ pub(crate) fn collect_purge_delete_set_with_report(
         ));
         known_task_ids.insert(foreign.id.clone());
     }
-    delete_set.tasks.sort_by(|left, right| left.id.cmp(&right.id));
+    delete_set
+        .tasks
+        .sort_by(|left, right| left.id.cmp(&right.id));
     delete_set.dependencies = count_purge_dependencies(conn, &delete_set.tasks)?;
 
     let mut retained_foreign_tasks = Vec::new();
     for foreign in &report.foreign {
-        if delete_set.tasks.iter().any(|task| {
-            task.id == foreign.id && task.label.trim() == foreign.title.trim()
-        }) {
+        if delete_set
+            .tasks
+            .iter()
+            .any(|task| task.id == foreign.id && task.label.trim() == foreign.title.trim())
+        {
             continue;
         }
         let reason = if collision_ids.contains(foreign.id.as_str()) {
@@ -5676,6 +5688,7 @@ pub(crate) fn collect_purge_delete_set_with_report(
             id: foreign.id.clone(),
             title: foreign.title.clone(),
             reason,
+            home_project: Some(foreign.home_project.clone()),
         });
     }
 
@@ -5698,8 +5711,7 @@ pub fn purge_analysis_for_report(
     let db_path = cas_root.join("cas.db");
     let conn = rusqlite::Connection::open_with_flags(
         db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     collect_purge_delete_set_with_report(&conn, current_project, report)
 }
@@ -5794,8 +5806,20 @@ fn evaluate_purge_hard_guards(
     total_tasks: usize,
     proven_rule_count: usize,
 ) -> Vec<PurgeRefusal> {
+    evaluate_purge_hard_guards_with_options(delete_set, total_tasks, proven_rule_count, false)
+}
+
+fn evaluate_purge_hard_guards_with_options(
+    delete_set: &PurgeDeleteSet,
+    total_tasks: usize,
+    proven_rule_count: usize,
+    allow_majority_foreign: bool,
+) -> Vec<PurgeRefusal> {
     let mut refusals = Vec::new();
-    if total_tasks > 0 && delete_set.tasks.len().saturating_mul(2) > total_tasks {
+    if !allow_majority_foreign
+        && total_tasks > 0
+        && delete_set.tasks.len().saturating_mul(2) > total_tasks
+    {
         refusals.push(PurgeRefusal::TooManyForeignTasks {
             foreign: delete_set.tasks.len(),
             total: total_tasks,
@@ -5807,6 +5831,18 @@ fn evaluate_purge_hard_guards(
         });
     }
     refusals
+}
+
+fn validate_majority_foreign_override(
+    allow_majority_foreign: bool,
+    yes: bool,
+) -> anyhow::Result<()> {
+    if allow_majority_foreign && !yes {
+        anyhow::bail!(
+            "--allow-majority-foreign requires --yes; review a fresh --dry-run before applying"
+        );
+    }
+    Ok(())
 }
 
 /// Apply a previously classified delete set atomically. This function accepts
@@ -5968,11 +6004,45 @@ pub(crate) fn pending_content_pushes(
         let (entity_type, entity_id) = row.map_err(|e| {
             anyhow::anyhow!("unreadable row in the sync queue while checking unpushed changes: {e}")
         })?;
-        if matches!(entity_type.to_ascii_lowercase().as_str(), "task" | "rule" | "skill") {
+        if matches!(
+            entity_type.to_ascii_lowercase().as_str(),
+            "task" | "rule" | "skill"
+        ) {
             out.push((entity_type, entity_id));
         }
     }
     Ok(out)
+}
+
+/// Queued content rows that would survive the purge. A foreign replica may
+/// still have a local queue row because an older client pushed it before the
+/// origin guard existed; deleting that replica is the cleanup itself, not a
+/// loss of user work. Only queue rows outside the concrete delete set keep the
+/// unpushed-work refusal active.
+pub(crate) fn pending_content_pushes_excluding(
+    conn: &rusqlite::Connection,
+    delete_set: &PurgeDeleteSet,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let doomed = delete_set
+        .groups()
+        .into_iter()
+        .flat_map(|(kind, rows)| rows.iter().map(move |row| (kind, row.id.as_str())))
+        .map(|(kind, id)| {
+            let queue_kind = match kind {
+                "entries" => "entry",
+                "tasks" => "task",
+                "rules" => "rule",
+                "skills" => "skill",
+                _ => kind,
+            };
+            (queue_kind.to_string(), id.to_string())
+        })
+        .collect::<BTreeSet<_>>();
+
+    Ok(pending_content_pushes(conn)?
+        .into_iter()
+        .filter(|(kind, id)| !doomed.contains(&(kind.to_ascii_lowercase(), id.clone())))
+        .collect())
 }
 
 /// Crash-safe backup of a live WAL database.
@@ -6000,6 +6070,76 @@ fn backup_database_crash_safe(db_path: &Path, backup_path: &Path) -> anyhow::Res
     Ok(())
 }
 
+/// Hash the complete, ordered dry-run payload. The hash binds ids, labels, and
+/// classifier evidence, so an apply cannot silently switch to a changed
+/// classification between its preview and destructive phase.
+fn purge_delete_set_hash(delete_set: &PurgeDeleteSet) -> String {
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(delete_set.to_json().to_string().as_bytes())
+    )
+}
+
+fn purge_task_ratio(foreign_tasks: usize, total_tasks: usize) -> f64 {
+    if total_tasks == 0 {
+        0.0
+    } else {
+        (foreign_tasks as f64 / total_tasks as f64) * 100.0
+    }
+}
+
+fn verify_purge_delete_set_hash(
+    expected: &str,
+    fresh_delete_set: &PurgeDeleteSet,
+) -> anyhow::Result<()> {
+    let actual = purge_delete_set_hash(fresh_delete_set);
+    if actual != expected {
+        anyhow::bail!(
+            "refusing majority-foreign purge: the store changed after the fresh dry-run (delete-set hash {expected} != {actual}); run --dry-run again"
+        );
+    }
+    Ok(())
+}
+
+fn inspect_purge_state(
+    cas_root: &Path,
+    project_id: &str,
+    total_tasks: usize,
+    stale_days: i64,
+    allow_majority_foreign: bool,
+) -> anyhow::Result<(PurgeForeignAnalysis, Vec<PurgeRefusal>)> {
+    let db_path = cas_root.join("cas.db");
+    let conn = rusqlite::Connection::open(&db_path)?;
+    // Use doctor's cross-DB classifier so a legacy backfill that stamped
+    // foreign rows with this project cannot make purge under-delete them.
+    // A failed read is fatal to the purge preview: an incomplete peer scan
+    // must not be presented as a complete delete set.
+    let doctor_report = crate::cli::foreign_rows::scan(cas_root)?;
+    let analysis = collect_purge_delete_set_with_report(&conn, project_id, &doctor_report)?;
+    let proven_rule_count = count_proven_attributed_rules(&conn, project_id)?;
+    let last_pull_at: Option<String> = conn
+        .query_row(
+            "SELECT value FROM sync_metadata WHERE key = 'last_pull_at'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    let pending = pending_content_pushes_excluding(&conn, &analysis.delete_set)?;
+    let mut refusals = evaluate_purge_safety(
+        last_pull_at.as_deref(),
+        &pending,
+        chrono::Utc::now(),
+        stale_days,
+    );
+    refusals.extend(evaluate_purge_hard_guards_with_options(
+        &analysis.delete_set,
+        total_tasks,
+        proven_rule_count,
+        allow_majority_foreign,
+    ));
+    Ok((analysis, refusals))
+}
+
 fn execute_purge_foreign(
     args: &CloudPurgeForeignArgs,
     cli: &Cli,
@@ -6008,6 +6148,8 @@ fn execute_purge_foreign(
     use std::sync::Arc;
 
     use crate::cloud::{CloudSyncer, CloudSyncerConfig, SyncQueue, resolve_canonical_id_for_sync};
+
+    validate_majority_foreign_override(args.allow_majority_foreign, args.yes)?;
 
     let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
     if config.token.is_none() {
@@ -6051,41 +6193,41 @@ fn execute_purge_foreign(
     // cas-a034 / GH #132: resolve the concrete delete set and the safety state
     // BEFORE anything destructive happens, so --dry-run can show exactly what
     // would be lost and a real run can refuse when losing it is unrecoverable.
-    let (analysis, refusals) = {
-        let conn = rusqlite::Connection::open(&db_path)?;
-        // Use doctor's cross-DB classifier so a legacy backfill that stamped
-        // foreign rows with this project cannot make purge under-delete them.
-        // A failed read is fatal to the purge preview: an incomplete peer scan
-        // must not be presented as a complete delete set.
-        let doctor_report = crate::cli::foreign_rows::scan(cas_root)?;
-        let analysis = collect_purge_delete_set_with_report(
-            &conn,
+    let (mut analysis, mut refusals) = inspect_purge_state(
+        cas_root,
+        &project_id,
+        tasks_before,
+        args.stale_days,
+        args.allow_majority_foreign,
+    )?;
+    let mut delete_set_hash = purge_delete_set_hash(&analysis.delete_set);
+
+    if !args.dry_run && args.allow_majority_foreign {
+        // The first inspection is the required fresh dry-run. Recompute the
+        // complete state immediately before any backup or delete and bind the
+        // destructive operation to the first set's hash. A concurrent edit or
+        // classifier change therefore fails closed instead of being purged.
+        let fresh_total_tasks = task_store.list(None)?.len();
+        let (fresh_analysis, fresh_refusals) = inspect_purge_state(
+            cas_root,
             &project_id,
-            &doctor_report,
-        )?;
-        let delete_set = &analysis.delete_set;
-        let proven_rule_count = count_proven_attributed_rules(&conn, &project_id)?;
-        let last_pull_at: Option<String> = conn
-            .query_row(
-                "SELECT value FROM sync_metadata WHERE key = 'last_pull_at'",
-                [],
-                |r| r.get(0),
-            )
-            .ok();
-        let pending = pending_content_pushes(&conn)?;
-        let mut refusals = evaluate_purge_safety(
-            last_pull_at.as_deref(),
-            &pending,
-            chrono::Utc::now(),
+            fresh_total_tasks,
             args.stale_days,
-        );
-        refusals.extend(evaluate_purge_hard_guards(
-            delete_set,
-            tasks_before,
-            proven_rule_count,
-        ));
-        (analysis, refusals)
-    };
+            args.allow_majority_foreign,
+        )?;
+        if fresh_total_tasks != tasks_before {
+            anyhow::bail!(
+                "refusing majority-foreign purge: the store task count changed after the fresh dry-run ({} != {}); run --dry-run again",
+                tasks_before,
+                fresh_total_tasks
+            );
+        }
+        verify_purge_delete_set_hash(&delete_set_hash, &fresh_analysis.delete_set)?;
+        analysis = fresh_analysis;
+        refusals = fresh_refusals;
+        delete_set_hash = purge_delete_set_hash(&analysis.delete_set);
+    }
+
     let delete_set = &analysis.delete_set;
 
     if cli.json {
@@ -6103,6 +6245,12 @@ fn execute_purge_foreign(
                         "total": total_before,
                     },
                     "delete_set": delete_set.to_json(),
+                    "delete_set_hash": delete_set_hash,
+                    "task_ratio": {
+                        "foreign_tasks": delete_set.tasks.len(),
+                        "total_tasks": tasks_before,
+                        "percent": purge_task_ratio(delete_set.tasks.len(), tasks_before),
+                    },
                     "foreign_task_evidence_count": analysis.foreign_task_count,
                     "doctor_exclusions": {
                         "unattributed_tasks": analysis.unattributed_task_count,
@@ -6122,13 +6270,13 @@ fn execute_purge_foreign(
                             "id": row.id,
                             "title": row.title,
                             "reason": row.reason,
-                            "operator_command": row.operator_command(),
+                            "operator_command": row.operator_command_with_endpoint(&config.endpoint),
                         }))
                         .collect::<Vec<_>>(),
                     "refusals": refusals.iter()
                         .map(|r| serde_json::json!({"code": r.code(), "reason": r.reason()}))
                         .collect::<Vec<_>>(),
-                    "would_refuse": refusals.iter().any(|refusal| {
+                "would_refuse": refusals.iter().any(|refusal| {
                         refusal.is_hard() || !args.force
                     }),
                 })
@@ -6195,7 +6343,9 @@ fn execute_purge_foreign(
                 ))?;
                 fmt.newline()?;
                 for retained in &analysis.retained_foreign_tasks {
-                    let Some(operator_command) = retained.operator_command() else {
+                    let Some(operator_command) =
+                        retained.operator_command_with_endpoint(&config.endpoint)
+                    else {
                         continue;
                     };
                     fmt.write_muted("      - ")?;
@@ -6208,6 +6358,17 @@ fn execute_purge_foreign(
                     fmt.newline()?;
                 }
             }
+            fmt.write_muted("    task ratio: ")?;
+            fmt.write_raw(&format!(
+                "{}/{} ({:.1}%)",
+                delete_set.tasks.len(),
+                tasks_before,
+                purge_task_ratio(delete_set.tasks.len(), tasks_before)
+            ))?;
+            fmt.newline()?;
+            fmt.write_muted("    delete-set hash: ")?;
+            fmt.write_raw(&delete_set_hash)?;
+            fmt.newline()?;
             fmt.write_raw(&format!("    {} dependency edges", delete_set.dependencies))?;
             fmt.newline()?;
             if metadata_would_clear.total() > 0 {
@@ -6324,24 +6485,42 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
 
     if cli.json {
         println!(
-            r#"{{"project_id":"{}","backup":"{}","entities_before":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"entities_after":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"purged":{},"team_watermarks_cleared":{},"team_project_registrations_cleared":{},"last_knowledge_push_project_id_cleared":{},"pull_errors":{}}}"#,
-            project_id,
-            backup_path.display(),
-            entries_before,
-            tasks_before,
-            rules_before,
-            skills_before,
-            total_before,
-            entries_after,
-            tasks_after,
-            rules_after,
-            skills_after,
-            total_after,
-            purged,
-            cleared_identity_metadata.team_watermarks,
-            cleared_identity_metadata.team_registrations,
-            cleared_identity_metadata.knowledge_project,
-            serde_json::to_string(&pull_result.errors).unwrap_or_default(),
+            "{}",
+            serde_json::json!({
+                "project_id": project_id,
+                "backup": backup_path,
+                "delete_set_hash": delete_set_hash,
+                "task_ratio": {
+                    "foreign_tasks": delete_set.tasks.len(),
+                    "total_tasks": tasks_before,
+                    "percent": purge_task_ratio(delete_set.tasks.len(), tasks_before),
+                },
+                "operator_decision": if args.allow_majority_foreign {
+                    "allow-majority-foreign (--yes; fresh delete-set hash reverified)"
+                } else {
+                    "default purge safety guards"
+                },
+                "fresh_delete_set_hash_verified": args.allow_majority_foreign,
+                "entities_before": {
+                    "entries": entries_before,
+                    "tasks": tasks_before,
+                    "rules": rules_before,
+                    "skills": skills_before,
+                    "total": total_before,
+                },
+                "entities_after": {
+                    "entries": entries_after,
+                    "tasks": tasks_after,
+                    "rules": rules_after,
+                    "skills": skills_after,
+                    "total": total_after,
+                },
+                "purged": purged,
+                "team_watermarks_cleared": cleared_identity_metadata.team_watermarks,
+                "team_registrations_cleared": cleared_identity_metadata.team_registrations,
+                "knowledge_project_cleared": cleared_identity_metadata.knowledge_project,
+                "pull_errors": pull_result.errors,
+            })
         );
     } else {
         let theme = ActiveTheme::default();
@@ -6366,6 +6545,21 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
         fmt.newline()?;
         fmt.write_muted("  Backup:  ")?;
         fmt.write_raw(&backup_path.to_string_lossy())?;
+        fmt.newline()?;
+        fmt.write_muted("  Task ratio: ")?;
+        fmt.write_raw(&format!(
+            "{}/{} ({:.1}%)",
+            delete_set.tasks.len(),
+            tasks_before,
+            purge_task_ratio(delete_set.tasks.len(), tasks_before)
+        ))?;
+        fmt.newline()?;
+        fmt.write_muted("  Operator decision: ")?;
+        fmt.write_raw(if args.allow_majority_foreign {
+            "allow-majority-foreign (--yes; fresh delete-set hash reverified)"
+        } else {
+            "default purge safety guards"
+        })?;
         fmt.newline()?;
 
         if !pull_result.errors.is_empty() {
@@ -6643,20 +6837,14 @@ mod team_cmd_tests {
             project_id.to_string(),
             project.path(),
         );
-        let records = discover_unlink_remote_records(
-            &syncer,
-            project_id,
-            Some(team_id),
-        )
-        .unwrap();
+        let records = discover_unlink_remote_records(&syncer, project_id, Some(team_id)).unwrap();
 
         assert_eq!(records.len(), 4);
         assert!(records.iter().any(|record| {
             record.scope == UnlinkRemoteScope::Personal && record.id == "personal-entry"
         }));
         assert!(records.iter().any(|record| {
-            record.scope == UnlinkRemoteScope::Team(team_id.to_string())
-                && record.id == "team-task"
+            record.scope == UnlinkRemoteScope::Team(team_id.to_string()) && record.id == "team-task"
         }));
     }
 
@@ -6787,10 +6975,7 @@ mod team_cmd_tests {
 
         render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
 
-        assert_eq!(
-            tf.output(),
-            "[OK] Push complete · 2 batches · 0 pending\n"
-        );
+        assert_eq!(tf.output(), "[OK] Push complete · 2 batches · 0 pending\n");
     }
 
     /// cas-f64e x cas-cf1f: one sync carries both the push-side per-row
@@ -6822,7 +7007,10 @@ mod team_cmd_tests {
         let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(400);
         render_sync_summary(&mut tf.fmt(), &push, false).unwrap();
         let push_output = tf.output();
-        assert!(push_output.contains("4 kept newer by cloud"), "{push_output}");
+        assert!(
+            push_output.contains("4 kept newer by cloud"),
+            "{push_output}"
+        );
         assert!(
             push_output.contains("1 rejected by cloud (project_mismatch ×1)"),
             "{push_output}"
@@ -6973,13 +7161,18 @@ mod team_cmd_tests {
 
         assert_eq!(
             task_transition_summary(&result).as_deref(),
-            Some("Task status transitions: 1 task(s) — project=gabber-studio source=personal_pull closed→open (1)")
+            Some(
+                "Task status transitions: 1 task(s) — project=gabber-studio source=personal_pull closed→open (1)"
+            )
         );
     }
 
     #[test]
     fn task_transition_receipt_is_quiet_without_status_changes() {
-        assert_eq!(task_transition_summary(&crate::cloud::SyncResult::default()), None);
+        assert_eq!(
+            task_transition_summary(&crate::cloud::SyncResult::default()),
+            None
+        );
     }
 
     #[test]
@@ -7604,14 +7797,20 @@ mod purge_foreign_safety_tests {
         let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
 
         assert_eq!(
-            set.tasks.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+            set.tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["foreign-1", "foreign-2"]
         );
         assert!(set.entries.is_empty());
         assert!(set.rules.is_empty(), "the proven local rule is protected");
         assert!(set.skills.is_empty());
         assert_eq!(set.dependencies, 1);
-        assert!(set.tasks.len() <= 5, "delete count cannot exceed rows present");
+        assert!(
+            set.tasks.len() <= 5,
+            "delete count cannot exceed rows present"
+        );
     }
 
     #[test]
@@ -7676,7 +7875,9 @@ mod purge_foreign_safety_tests {
 
     #[test]
     fn blocks_origin_and_doctor_safety_categories_are_never_purged() {
-        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport, IdCollision, UnattributedRow};
+        use crate::cli::foreign_rows::{
+            ForeignRow, ForeignRowReport, IdCollision, UnattributedRow,
+        };
 
         let conn = Connection::open_in_memory().unwrap();
         seed_project_scoped_db(&conn);
@@ -7710,6 +7911,14 @@ mod purge_foreign_safety_tests {
                     home_project: "accounting".to_string(),
                     also_present_in: Vec::new(),
                 },
+                ForeignRow {
+                    id: "foreign-2".to_string(),
+                    title: "foreign task 2".to_string(),
+                    closed: false,
+                    origin_project: Some("other-project".to_string()),
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
             ],
             unattributed: vec![UnattributedRow {
                 id: "foreign-1".to_string(),
@@ -7728,15 +7937,28 @@ mod purge_foreign_safety_tests {
 
         let analysis = collect_purge_delete_set_with_report(&conn, "cas-src", &report).unwrap();
 
-        assert!(analysis.delete_set.tasks.iter().all(|task| {
-            !matches!(task.id.as_str(), "own-2" | "foreign-1" | "foreign-2")
-        }));
+        assert!(
+            analysis
+                .delete_set
+                .tasks
+                .iter()
+                .all(|task| { !matches!(task.id.as_str(), "own-2" | "foreign-1" | "foreign-2") })
+        );
         assert_eq!(analysis.unattributed_task_count, 1);
         assert_eq!(analysis.collision_count, 1);
-        assert!(analysis
-            .retained_foreign_tasks
-            .iter()
-            .any(|task| task.id == "own-2" && task.reason.contains("blocks_origin")));
+        assert!(
+            analysis
+                .retained_foreign_tasks
+                .iter()
+                .any(|task| task.id == "own-2" && task.reason.contains("blocks_origin"))
+        );
+        assert!(
+            analysis
+                .retained_foreign_tasks
+                .iter()
+                .any(|task| task.id == "foreign-2" && task.reason.contains("id collision")),
+            "majority override must not turn an id collision into a deletion"
+        );
     }
 
     fn row_to_json(set: &PurgeDeleteSet, id: &str) -> serde_json::Value {
@@ -7767,7 +7989,10 @@ mod purge_foreign_safety_tests {
         let set = collect_purge_delete_set(&conn, "gabber-studio").unwrap();
 
         assert_eq!(
-            set.tasks.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+            set.tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["foreign-2"]
         );
     }
@@ -7842,17 +8067,14 @@ mod purge_foreign_safety_tests {
             conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| {
                 row.get::<_, i64>(0)
             })
-                .unwrap(),
+            .unwrap(),
             3,
             "the two foreign tasks are deleted; own and legacy rows remain"
         );
         assert_eq!(
-            conn.query_row(
-                "SELECT COUNT(*) FROM dependencies",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
+            conn.query_row("SELECT COUNT(*) FROM dependencies", [], |row| row
+                .get::<_, i64>(0),)
+                .unwrap(),
             1,
             "the local-to-legacy edge remains"
         );
@@ -7872,9 +8094,66 @@ mod purge_foreign_safety_tests {
         let refusals = evaluate_purge_hard_guards(&set, 5, 0);
 
         assert!(refusals.iter().any(|refusal| {
-            refusal.code() == "too_many_foreign_tasks"
-                && refusal.reason().contains("5 of 5")
+            refusal.code() == "too_many_foreign_tasks" && refusal.reason().contains("5 of 5")
         }));
+    }
+
+    #[test]
+    fn majority_foreign_override_requires_yes() {
+        let error = validate_majority_foreign_override(true, false).unwrap_err();
+        assert!(error.to_string().contains("requires --yes"), "{error}");
+        validate_majority_foreign_override(true, true).unwrap();
+        validate_majority_foreign_override(false, false).unwrap();
+    }
+
+    #[test]
+    fn majority_foreign_override_lifts_only_the_ratio_guard() {
+        let delete_set = PurgeDeleteSet {
+            tasks: (0..3)
+                .map(|index| {
+                    PurgeEntity::with_evidence(
+                        "task",
+                        format!("foreign-{index}"),
+                        "foreign",
+                        "origin_project",
+                        "other-project",
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let refusals = evaluate_purge_hard_guards_with_options(&delete_set, 5, 1, true);
+
+        assert_eq!(
+            refusals,
+            vec![PurgeRefusal::ProvenRule { count: 1 }],
+            "the override removes only the majority ratio refusal"
+        );
+    }
+
+    #[test]
+    fn majority_foreign_apply_rejects_a_stale_dry_run_hash() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+        let first = collect_purge_delete_set(&conn, "test-project").unwrap();
+        let expected = purge_delete_set_hash(&first);
+        let mut changed = first.clone();
+        changed.tasks.push(PurgeEntity::with_evidence(
+            "task",
+            "new-foreign",
+            "new row",
+            "origin_project",
+            "other-project",
+        ));
+
+        let error = verify_purge_delete_set_hash(&expected, &changed).unwrap_err();
+
+        assert!(
+            error.to_string().contains("store changed")
+                && error.to_string().contains("run --dry-run again"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -7893,8 +8172,7 @@ mod purge_foreign_safety_tests {
         let refusals = evaluate_purge_hard_guards(&set, 5, 1);
 
         assert!(refusals.iter().any(|refusal| {
-            refusal.code() == "proven_rule"
-                && refusal.reason().contains("1 proven rule")
+            refusal.code() == "proven_rule" && refusal.reason().contains("1 proven rule")
         }));
     }
 
@@ -7983,7 +8261,9 @@ mod purge_foreign_safety_tests {
         let conn = Connection::open_in_memory().unwrap();
         seed_db(&conn);
 
-        let json = collect_purge_delete_set(&conn, "test-project").unwrap().to_json();
+        let json = collect_purge_delete_set(&conn, "test-project")
+            .unwrap()
+            .to_json();
 
         assert_eq!(json["total"], 5);
         assert_eq!(json["tasks"][0]["id"], "cas-0001");
@@ -8001,7 +8281,10 @@ mod purge_foreign_safety_tests {
 
         let set = collect_purge_delete_set(&conn, "test-project").unwrap();
 
-        assert!(set.tasks.is_empty(), "tasks without attribution are retained");
+        assert!(
+            set.tasks.is_empty(),
+            "tasks without attribution are retained"
+        );
         assert!(set.entries.is_empty());
         assert_eq!(set.dependencies, 0);
     }
@@ -8118,10 +8401,7 @@ mod purge_foreign_safety_tests {
 
         // Task/rule/skill content kinds only (case-insensitively); entry access
         // refreshes and events survive a purge and must not trip the guard.
-        assert_eq!(
-            pending,
-            vec![("Task".to_string(), "cas-0001".to_string())]
-        );
+        assert_eq!(pending, vec![("Task".to_string(), "cas-0001".to_string())]);
     }
 
     #[test]
@@ -8141,16 +8421,32 @@ mod purge_foreign_safety_tests {
         .unwrap();
         let delete_set = PurgeDeleteSet {
             entries: vec![PurgeEntity::with_evidence(
-                "entry", "e1", "Local learning", "origin_project", "other-project",
+                "entry",
+                "e1",
+                "Local learning",
+                "origin_project",
+                "other-project",
             )],
             tasks: vec![PurgeEntity::with_evidence(
-                "task", "cas-0001", "Fix the purge guard", "origin_project", "other-project",
+                "task",
+                "cas-0001",
+                "Fix the purge guard",
+                "origin_project",
+                "other-project",
             )],
             rules: vec![PurgeEntity::with_evidence(
-                "rule", "r1", "always verify", "origin_project", "other-project",
+                "rule",
+                "r1",
+                "always verify",
+                "origin_project",
+                "other-project",
             )],
             skills: vec![PurgeEntity::with_evidence(
-                "skill", "s1", "release-notes", "origin_project", "other-project",
+                "skill",
+                "s1",
+                "release-notes",
+                "origin_project",
+                "other-project",
             )],
             dependencies: 0,
         };

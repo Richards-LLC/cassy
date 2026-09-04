@@ -21,7 +21,7 @@ readonly -a gate_check_ids=(
     version-literals workspace-tests nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions
     working-tree release-script procedure-guardrails failure-log
-    ancestor-proxy-config
+    ancestor-proxy-config epic-worktree-fresh epic-worktree-zig
 )
 
 usage() {
@@ -161,6 +161,79 @@ is_gate_check_id() {
     for known in "${gate_check_ids[@]}"; do
         [[ "$candidate" == "$known" ]] && return 0
     done
+    return 1
+}
+
+# `worktree_merge` advances the shared epic ref, but a second worktree with
+# that branch checked out keeps its old index and files until it is reset. The
+# gate must never vouch for that stale tree. `CAS_RELEASE_EPIC_REF` is useful
+# for detached gate worktrees; the train's branch setting and the current
+# symbolic branch are the normal sources.
+check_epic_worktree_fresh() {
+    local claimed branch epic_ref expected head dirty
+    claimed="${CAS_RELEASE_EPIC_REF:-${CAS_RELEASE_TRAIN_BRANCH:-}}"
+    branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    if [[ -z "$claimed" ]]; then
+        claimed="$branch"
+    fi
+    if [[ -z "$claimed" ]]; then
+        printf 'epic-worktree-fresh: HEAD is detached and no epic ref was supplied\n'
+        printf 'epic-worktree-fresh: reset command: git -C %q reset --hard HEAD\n' "$repo_root"
+        return 1
+    fi
+    if [[ "$claimed" == refs/* || "$claimed" == HEAD || "$claimed" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+        epic_ref="$claimed"
+    else
+        epic_ref="refs/heads/$claimed"
+    fi
+    expected="$(git rev-parse --verify "${epic_ref}^{commit}" 2>/dev/null || true)"
+    head="$(git rev-parse --verify HEAD 2>/dev/null || true)"
+    dirty="$(git status --porcelain)"
+    if [[ -z "$expected" || -z "$head" || -n "$dirty" || "$head" != "$expected" ]]; then
+        printf 'epic-worktree-fresh: refusing stale or dirty worktree (HEAD=%s ref=%s expected=%s)\n' \
+            "${head:-missing}" "$epic_ref" "${expected:-missing}"
+        printf 'epic-worktree-fresh: reset command: git -C %q reset --hard HEAD\n' "$repo_root"
+        return 1
+    fi
+    printf 'epic-worktree-fresh: clean and current at %s (%s)\n' "$head" "$epic_ref"
+}
+
+# Zig is gitignored, so a newly-created epic worktree may not have the
+# compiler even though the main checkout does. Resolve it before Cargo-backed
+# rows run and export the absolute path for every child of this gate.
+check_epic_worktree_zig() {
+    local configured common_dir main_checkout candidate resolved
+    configured="${ZIG:-}"
+    if [[ -n "$configured" ]]; then
+        [[ "$configured" = /* ]] || configured="$repo_root/$configured"
+        if [[ -x "$configured" ]]; then
+            resolved="$(cd "$(dirname "$configured")" && pwd -P)/$(basename "$configured")"
+            export ZIG="$resolved"
+            printf 'epic-worktree-zig: using executable ZIG=%s (environment)\n' "$ZIG"
+            return 0
+        fi
+    fi
+
+    candidate="$repo_root/.context/zig/zig"
+    if [[ -x "$candidate" ]]; then
+        export ZIG="$candidate"
+        printf 'epic-worktree-zig: using executable ZIG=%s (epic worktree)\n' "$ZIG"
+        return 0
+    fi
+
+    common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    main_checkout="${common_dir%/.git}"
+    [[ -n "$main_checkout" ]] || main_checkout="$repo_root"
+    candidate="$main_checkout/.context/zig/zig"
+    if [[ -x "$candidate" ]]; then
+        export ZIG="$candidate"
+        printf 'epic-worktree-zig: using executable ZIG=%s (main checkout)\n' "$ZIG"
+        return 0
+    fi
+
+    printf 'epic-worktree-zig: no executable Zig compiler found in ZIG, %s, or %s\n' \
+        "$repo_root/.context/zig/zig" "$main_checkout/.context/zig/zig"
+    printf 'epic-worktree-zig: refusing the release; run ./scripts/bootstrap-zig.sh\n'
     return 1
 }
 
@@ -534,6 +607,12 @@ printf 'init watchdog budget: %ss (from %s; cas init clamps at 3600s)\n' \
     "$CAS_INIT_TIMEOUT_SECS" "$init_timeout_origin"
 neutralize_ancestor_proxy_config
 
+run_check epic-worktree-fresh \
+    'epic worktree is clean and HEAD matches its claimed epic ref' \
+    check_epic_worktree_fresh
+run_check epic-worktree-zig \
+    'resolve and export an executable Zig from env, epic worktree, or main checkout' \
+    check_epic_worktree_zig
 run_check failure-log \
     "parse $failure_log_rel; every entry maps to a gate check id or manual:" \
     check_failure_log

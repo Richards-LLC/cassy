@@ -47,8 +47,14 @@ bad() { printf 'FAIL %s\n' "$1"; fail=$((fail + 1)); }
 new_fixture() {
     local name="$1" repo
     repo="$tmp/$name"
-    mkdir -p "$repo/scripts" "$repo/cas-cli/src" "$repo/cas-cli/tests" "$repo/crates"
+    mkdir -p "$repo/scripts" "$repo/cas-cli/src" "$repo/cas-cli/tests" "$repo/crates" \
+        "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
+    cat >"$repo/.gitignore" <<'EOF'
+.context/zig/
+EOF
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$repo/.context/zig/zig"
+    chmod +x "$repo/.context/zig/zig"
     cat >"$repo/Cargo.toml" <<'EOF'
 [workspace]
 members = ["cas-cli", "crates/cas-types", "crates/cas-search", "crates/cas-store", "crates/cas-core", "crates/cas-mcp"]
@@ -117,6 +123,8 @@ printf '%s\n' "$*" >>"${GATE_FIXTURE_CARGO_LOG:?}"
 # processes below the gate.
 printf 'CAS_INIT_TIMEOUT_SECS=%s :: %s\n' "${CAS_INIT_TIMEOUT_SECS:-unset}" "$*" \
   >>"${GATE_FIXTURE_ENV_LOG:-/dev/null}"
+printf 'ZIG=%s :: %s\n' "${ZIG:-unset}" "$*" \
+  >>"${GATE_FIXTURE_ZIG_LOG:-/dev/null}"
 if [[ "$*" == 'check --workspace --tests' && "${GATE_FIXTURE_CHECK_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'nextest run -p cas'* && "${GATE_FIXTURE_NEXTEST_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'test -p cas --doc' && "${GATE_FIXTURE_DOCTEST_FAIL:-}" == 1 ]]; then exit 1; fi
@@ -140,6 +148,7 @@ EOF
     git -C "$repo" config user.name release-gate-test
     git -C "$repo" add .
     git -C "$repo" commit -qm 'release gate fixture'
+    git -C "$repo" branch -M epic/release-gate-fixture
     printf '%s' "$repo"
 }
 
@@ -148,13 +157,15 @@ run_gate() {
     shift 2
     if [[ -n "$failure_variable" ]]; then
         (cd "$repo" && \
-          env "$failure_variable=1" \
+          env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH \
+          "$failure_variable=1" \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
           CARGO="$repo/scripts/cargo-stub" \
           RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
           "$@")
     else
         (cd "$repo" && \
+          env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
           CARGO="$repo/scripts/cargo-stub" \
           RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
@@ -173,7 +184,7 @@ assert_named_failure() {
 
 assert_all_pass() {
     local output="$1"
-    for name in failure-log version-literals workspace-tests nextest doctests archive-mode \
+    for name in epic-worktree-fresh epic-worktree-zig failure-log version-literals workspace-tests nextest doctests archive-mode \
         snapshot-portability builtin-projections changelog-and-versions release-script \
         procedure-guardrails working-tree; do
         if ! grep -qF "PASS $name" <<<"$output"; then
@@ -226,6 +237,54 @@ repo="$(new_fixture invalid-failure-log)"
 printf '%s\n' '- 2026-09-02 — **not-a-gate-check** — Symptom: unparseable. Root cause: fixture. Release: fixture.' >>"$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
 assert_named_failure failure-log "$output"
+
+# cas-8b90. A worktree that is dirty or no longer matches its claimed epic ref
+# must not enter a release gate. The reset command is printed so the operator
+# can refresh the exact worktree that failed the freshness check.
+repo="$(new_fixture stale-epic-worktree)"
+printf 'stale worktree\n' >"$repo/stale.txt"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+assert_named_failure epic-worktree-fresh "$output"
+if grep -qF "reset command: git -C $repo reset --hard HEAD" <<<"$output"; then
+    ok 'stale epic worktree receipt names the exact reset command'
+else
+    bad "stale epic worktree receipt omitted its reset command (output: $output)"
+fi
+
+# The normal fixture has an ignored Zig installation, proving the worktree
+# candidate. Remove it to prove the refusal is named and actionable.
+repo="$(new_fixture missing-epic-zig)"
+rm -f "$repo/.context/zig/zig"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+assert_named_failure epic-worktree-zig "$output"
+if grep -qF './scripts/bootstrap-zig.sh' <<<"$output"; then
+    ok 'missing epic-worktree Zig receipt names bootstrap-zig.sh'
+else
+    bad "missing epic-worktree Zig receipt omitted bootstrap-zig.sh (output: $output)"
+fi
+
+# A detached fresh worktree has no ignored .context/zig of its own. Its Git
+# common directory still points at the main checkout, so the main-checkout
+# fallback must export the executable and keep the gate green.
+repo="$(new_fixture main-checkout-zig)"
+epic_worktree="$tmp/main-checkout-zig-worktree"
+zig_log="$tmp/main-checkout-zig.log"
+git -C "$repo" worktree add --detach "$epic_worktree" HEAD >/dev/null
+output="$(cd "$epic_worktree" && \
+    env -u ZIG \
+    CAS_RELEASE_EPIC_REF=refs/heads/epic/release-gate-fixture \
+    GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+    GATE_FIXTURE_ZIG_LOG="$zig_log" \
+    CARGO="$epic_worktree/scripts/cargo-stub" \
+    RELEASE_GATE_GEN_REFERENCE_HISTORY="$epic_worktree/scripts/gen-builtin-reference-history.sh" \
+    "$epic_worktree/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+git -C "$repo" worktree remove --force "$epic_worktree" >/dev/null
+if grep -qF 'PASS epic-worktree-zig' <<<"$output" \
+    && grep -qF "ZIG=$repo/.context/zig/zig ::" "$zig_log"; then
+    ok 'fresh epic worktree resolves Zig from the main checkout'
+else
+    bad "fresh epic worktree did not use the main-checkout Zig fallback (output: $output)"
+fi
 
 repo="$(new_fixture learn-mode)"
 learn_output="$(cd "$repo" && "$repo/scripts/release-gate.sh" --learn 'new release symptom' 'new release cause' 'procedure-guardrails' 2>&1)"

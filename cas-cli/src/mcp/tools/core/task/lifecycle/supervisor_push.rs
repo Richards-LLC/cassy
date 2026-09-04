@@ -675,6 +675,62 @@ pub fn emit_task_lifecycle_transition(
     }
 }
 
+/// Source marker for the verification-dispatch handoff (cas-8725).
+///
+/// Deliberately NOT a `lifecycle-wake:` source: this row is not a task
+/// lifecycle transition, and borrowing that prefix would make the lifecycle
+/// wake's own corroboration rule mean two different things. The wake gate
+/// classifies this row from its envelope and its Daemon origin stamp; the
+/// source is for operators reading the queue.
+pub const VERIFICATION_DISPATCH_SOURCE_PREFIX: &str = "verification-dispatch:";
+
+/// Hand a just-created verification dispatch to the supervisor (cas-8725).
+///
+/// The close path already knows the dispatch id, its bound owner and its
+/// deadline at the moment it refuses the close — so CAS emits the handoff
+/// itself instead of printing instructions and hoping the worker relays them.
+/// That relay is what measurably failed: the worker's hand-typed dispatch-id
+/// message was free text, so it never woke the supervisor, and the close it
+/// blocked stayed blocked until someone polled.
+///
+/// Stamped [`cas_store::QueueOrigin::Daemon`] because CAS composed every byte
+/// of it. Idempotent on the dispatch id: a retried close for the same dispatch
+/// re-uses the row rather than queueing a second copy.
+pub fn emit_verification_dispatch_handoff(
+    prompt_queue: &dyn PromptQueueStore,
+    dispatch_id: &str,
+    task_id: &str,
+    owner_agent_id: &str,
+    deadline: DateTime<Utc>,
+    worker: &str,
+    close_reason: Option<&str>,
+) -> Result<(), String> {
+    let body = crate::prompt_revalidation::verification_dispatch_envelope(
+        dispatch_id,
+        task_id,
+        owner_agent_id,
+        &deadline.to_rfc3339(),
+        worker,
+        close_reason,
+    );
+    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let source = format!("{VERIFICATION_DISPATCH_SOURCE_PREFIX}{dispatch_id}");
+    let summary = format!("Verification required: {task_id} (dispatch {dispatch_id})");
+    prompt_queue
+        .enqueue_idempotent(
+            &source,
+            "supervisor",
+            &body,
+            factory_session.as_deref(),
+            Some(&summary),
+            Some(NotificationPriority::High),
+            &source,
+            Some(&cas_store::QueueOrigin::Daemon),
+        )
+        .map(|_| ())
+        .map_err(|error| format!("verification-dispatch handoff enqueue failed: {error}"))
+}
+
 /// Idempotent prompt handoff + stamp for one durable notification (cas-ecff).
 ///
 /// Uses `lifecycle-outbox:{notification_id}` as prompt_queue dedupe_key so a

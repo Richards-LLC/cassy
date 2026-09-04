@@ -857,6 +857,21 @@ impl CasService {
             }
         }
 
+        // cas-8725: a blocker is the other message whose whole purpose is to
+        // unblock the supervisor, and it was free text — so it stayed
+        // inbox-only and was found by polling. CAS frames it here, on the same
+        // terms as the merge request above: the envelope is attached by the
+        // SERVER for an explicit message type, so the wake gate never has to
+        // read the sender's words. Sending the word "BLOCKER" without the flag
+        // still reaches the inbox and still does not wake a pane.
+        if req.blocker.unwrap_or(false) {
+            message = crate::prompt_revalidation::attach_blocker_envelope(
+                &message,
+                &display_name,
+                req.task_id.as_deref(),
+            );
+        }
+
         // cas-6913: "Message queued" reads as delivery confirmation, but a
         // message addressed to a not-yet-registered worker name (the common
         // spawn-then-immediately-assign sequence) sits in the queue until

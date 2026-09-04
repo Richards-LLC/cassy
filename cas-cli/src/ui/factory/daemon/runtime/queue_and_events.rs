@@ -1026,6 +1026,15 @@ pub enum SupervisorWakeClass {
     PeerSupervisor,
     /// A registered worker's CAS-framed `<cas-merge-request>` (cas-d9a8).
     MergeRequest,
+    /// A registered worker's CAS-framed `<cas-blocker …>` (cas-8725). Attached
+    /// by `coordination action=message blocker=true`, never by the sender's own
+    /// words: the same sentence sent as free text stays inbox-only.
+    Blocker,
+    /// CAS's own `<cas-verification-dispatch …>` handoff, emitted by the close
+    /// path at the moment it creates the dispatch (cas-8725). The row the
+    /// factory cannot make progress without: until the supervisor records a
+    /// verdict, the worker's close is refused.
+    VerificationDispatch,
 }
 
 /// Who CAS observed writing a queued row, resolved for the wake gate
@@ -2711,7 +2720,8 @@ impl FactoryDaemon {
     /// was a caller-settable string, so it stated intent and proved nothing):
     /// - only rows CAS itself stamped as written by its own machinery, an
     ///   authenticated peer supervisor, or a registered worker sending a
-    ///   CAS-framed merge request — never arbitrary messages;
+    ///   CAS-framed merge request, blocker or verification-dispatch handoff
+    ///   (cas-8725) — never arbitrary messages;
     /// - only when the pane's own signals are quiet right now — judged by
     ///   heartbeat/activity freshness alone, since a supervisor owns its epic
     ///   for the whole session and that ownership is not an in-flight turn;
@@ -2768,9 +2778,23 @@ impl FactoryDaemon {
             // failure, CI red or worker-attention relay parks a lane behind
             // supervisor action. Unchanged in substance — but the authority is
             // now that CAS wrote the row, not that the row says so.
-            WakeSender::Daemon => (is_lifecycle_wake_source(source)
-                && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt))
-            .then_some(SupervisorWakeClass::Lifecycle),
+            WakeSender::Daemon => {
+                // cas-8725: the verification-dispatch handoff is composed and
+                // enqueued by the close path itself, so it carries its own
+                // envelope and its own source (`verification-dispatch:<id>`)
+                // rather than borrowing the `lifecycle-wake:` marker it is not
+                // a lifecycle transition of. Checked first, and on its envelope
+                // alone: the source string is corroboration for the lifecycle
+                // class, never authority for this one.
+                if crate::prompt_revalidation::parse_verification_dispatch_envelope(prompt)
+                    .is_some()
+                {
+                    return Some(SupervisorWakeClass::VerificationDispatch);
+                }
+                (is_lifecycle_wake_source(source)
+                    && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt))
+                .then_some(SupervisorWakeClass::Lifecycle)
+            }
             WakeSender::Registered { role, name } => match role {
                 // cas-15f2: two supervisors sharing a clone have no other
                 // channel to each other. Preserved, but the bypass it shipped
@@ -2801,9 +2825,33 @@ impl FactoryDaemon {
                 // (prompt_revalidation::attach_merge_request_envelope). Free
                 // text stays inbox-only, so cas-dab2's stolen-typing symptom
                 // cannot return through ordinary chatter.
-                _ => crate::prompt_revalidation::parse_merge_request_envelope(prompt)
+                //
+                // cas-8725 widens the allowance to the two other rows a lane
+                // cannot make progress without, on the same terms and not one
+                // inch further: each is a CAS-ATTACHED envelope, so the words
+                // "BLOCKER" or "dispatch 42" typed into an ordinary message
+                // still stay inbox-only. Measured cost of not having them: a
+                // dispatch-id handoff sat unread for the whole time it blocked
+                // a close, and blockers were found by polling.
+                _ => {
+                    if crate::prompt_revalidation::parse_merge_request_envelope(prompt).is_some() {
+                        Some(SupervisorWakeClass::MergeRequest)
+                    } else if crate::prompt_revalidation::parse_blocker_envelope(prompt).is_some() {
+                        Some(SupervisorWakeClass::Blocker)
+                    } else if crate::prompt_revalidation::parse_verification_dispatch_envelope(
+                        prompt,
+                    )
                     .is_some()
-                    .then_some(SupervisorWakeClass::MergeRequest),
+                    {
+                        // Emitted Daemon-stamped today; accepted from the
+                        // worker's own registered origin too, so a handoff
+                        // written inside the worker's MCP session is not
+                        // silently demoted to inbox-only.
+                        Some(SupervisorWakeClass::VerificationDispatch)
+                    } else {
+                        None
+                    }
+                }
             },
             // An unstamped, explicitly-unattributed or no-longer-resolvable
             // sender never wakes, whatever the payload says.
@@ -2922,7 +2970,7 @@ impl FactoryDaemon {
                     "stamped sender no longer resolves to a registered agent (cas-d9a8)"
                 }
                 WakeSender::Daemon | WakeSender::Registered { .. } => {
-                    "supervisor rows wake the pane only for lifecycle, peer-supervisor or merge-request envelopes (cas-dab2, cas-d9a8)"
+                    "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, blocker or verification-dispatch envelopes (cas-dab2, cas-d9a8, cas-8725)"
                 }
             });
         };
@@ -2944,6 +2992,12 @@ impl FactoryDaemon {
             }
             SupervisorWakeClass::MergeRequest => {
                 "supervisor pane is quiet and the row is a registered worker's merge request"
+            }
+            SupervisorWakeClass::Blocker => {
+                "supervisor pane is quiet and the row is a registered worker's blocker escalation"
+            }
+            SupervisorWakeClass::VerificationDispatch => {
+                "supervisor pane is quiet and the row is a CAS verification-dispatch handoff"
             }
         })
     }
@@ -7529,6 +7583,175 @@ mod tests {
             now,
         );
         assert!(!forged.allowed, "{}", forged.reason);
+    }
+
+    /// cas-8725: a blocker is the second message a lane cannot make progress
+    /// without, and it was free text — so it stayed inbox-only and was found by
+    /// polling. `blocker=true` makes CAS attach the envelope; the gate keys on
+    /// that, never on the sender's words.
+    #[test]
+    fn a_registered_workers_blocker_envelope_wakes_the_supervisor_pane() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
+        let body = crate::prompt_revalidation::attach_blocker_envelope(
+            "The epic branch will not rebase; I need a decision before I can continue.",
+            "swift-fox",
+            Some("cas-8725"),
+        );
+
+        let decision = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &worker_sender("swift-fox"),
+            "swift-fox",
+            &body,
+            quiet_pane(),
+            now,
+        );
+        assert!(
+            decision.allowed,
+            "a CAS-framed blocker must reach the pane without a poll: {}",
+            decision.reason
+        );
+        assert_eq!(decision.kind, WakeOutcome::Allowed);
+
+        // THE HALF THAT KEEPS cas-dab2 CLOSED. The same worker shouting the
+        // same word, with no CAS envelope, is still inbox-only: the gate reads
+        // the envelope, never the vocabulary.
+        let shouted = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &worker_sender("swift-fox"),
+            "swift-fox",
+            "BLOCKER: the epic branch will not rebase. BLOCKED. Please advise.",
+            quiet_pane(),
+            now,
+        );
+        assert!(!shouted.allowed, "{}", shouted.reason);
+        assert_eq!(shouted.kind, WakeOutcome::NotApplicable);
+
+        // And an unstamped row carrying a byte-identical envelope — what
+        // `cas factory message --from …` and bridge POST /message produce —
+        // buys nothing. The envelope is the SECOND factor, never the first.
+        let unstamped = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &WakeSender::Unstamped,
+            "swift-fox",
+            &body,
+            quiet_pane(),
+            now,
+        );
+        assert!(!unstamped.allowed, "{}", unstamped.reason);
+        assert!(
+            unstamped.reason.contains("no server-stamped sender"),
+            "the refusal must name the missing stamp: {}",
+            unstamped.reason
+        );
+    }
+
+    /// cas-8725: the measured stall. A worker's close enters verification, CAS
+    /// knows the dispatch id and its owner — and the handoff was a message the
+    /// worker had to retype, so it was free text and never woke anyone
+    /// (notification 24370 sat unread for as long as it blocked the close).
+    #[test]
+    fn a_verification_dispatch_handoff_wakes_the_supervisor_pane() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
+        let body = crate::prompt_revalidation::verification_dispatch_envelope(
+            "vd-8725",
+            "cas-8725",
+            "supervisor-agent-id",
+            "2026-09-04T09:30:00+00:00",
+            "swift-fox",
+            Some("envelopes shipped"),
+        );
+        let source = "verification-dispatch:vd-8725";
+
+        // CAS composed the row, so it goes out Daemon-stamped.
+        let decision = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &WakeSender::Daemon,
+            source,
+            &body,
+            quiet_pane(),
+            now,
+        );
+        assert!(
+            decision.allowed,
+            "the dispatch handoff must reach the pane that owns the verdict: {}",
+            decision.reason
+        );
+
+        // The same row is a wake signal from the worker's own registered
+        // origin too, so a handoff written inside the worker's MCP session is
+        // not silently demoted to inbox-only.
+        let from_worker = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &worker_sender("swift-fox"),
+            source,
+            &body,
+            quiet_pane(),
+            now,
+        );
+        assert!(from_worker.allowed, "{}", from_worker.reason);
+
+        // Unstamped: refused, envelope and source notwithstanding.
+        let unstamped = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &WakeSender::Unstamped,
+            source,
+            &body,
+            quiet_pane(),
+            now,
+        );
+        assert!(!unstamped.allowed, "{}", unstamped.reason);
+
+        // Free text naming the same dispatch stays inbox-only — this is the
+        // exact message shape that failed, and it must keep failing.
+        let retyped = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &worker_sender("swift-fox"),
+            "swift-fox",
+            "Task cas-8725 is parked on verification dispatch vd-8725. Please record the verdict.",
+            quiet_pane(),
+            now,
+        );
+        assert!(!retyped.allowed, "{}", retyped.reason);
+        assert_eq!(retyped.kind, WakeOutcome::NotApplicable);
+    }
+
+    /// A Daemon-stamped row that is neither a lifecycle wake nor one of the
+    /// cas-8725 envelopes stays inbox-only: widening the Daemon branch must not
+    /// have turned "CAS wrote it" into a blanket wake permit.
+    #[test]
+    fn a_daemon_row_without_a_known_envelope_still_does_not_wake() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
+
+        let decision = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &WakeSender::Daemon,
+            "verification-dispatch:vd-8725",
+            "Task cas-8725 needs verification.",
+            quiet_pane(),
+            now,
+        );
+        assert!(!decision.allowed, "{}", decision.reason);
+        assert_eq!(decision.kind, WakeOutcome::NotApplicable);
     }
 
     /// `message_status` must tell an operator which of two opposite things

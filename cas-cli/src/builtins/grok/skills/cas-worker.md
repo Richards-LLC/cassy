@@ -105,8 +105,21 @@ This is a requirement, not a suggestion; bare assertions are not evidence.
 - **Recover from workspace denials; never retry the denied target.** Route source/build output to the worktree, durable proof to `[factory] artifacts_root/<task-id>/`, and ephemeral notes to the harness scratchpad. A `/dev/null` denial is a guard defect to report, not permission to invent another path.
 
 Add a blocker note with the exact error, re-read the task, set `status=blocked`,
-and message the supervisor. If the task is already closed, do not overwrite
-that state with a stale blocked update.
+and message the supervisor with `blocker=true`. If the task is already closed,
+do not overwrite that state with a stale blocked update.
+
+```
+cas__coordination action=message target=supervisor blocker=true \
+  task_id=cas-abc1 summary="blocked on schema review" \
+  message="<what is blocked, the exact error, what you already tried>"
+```
+
+`blocker=true` is what reaches an idle supervisor. Cassy attaches its own
+`cas-blocker` envelope, and that envelope is what lets the message wake the
+supervisor's pane instead of waiting for their next turn — the same mechanism
+`merge_request=true` uses. Writing "BLOCKER" in the message text does nothing:
+the flag is the signal, the words are not. Use it only for real blockers, and
+put the detail in the message body.
 
 ## References
 

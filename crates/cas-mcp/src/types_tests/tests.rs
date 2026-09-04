@@ -335,6 +335,29 @@ fn coordination_merge_request_type_survives_agent_mapping() {
     assert_eq!(req.to_agent_request("message").merge_request, Some(true));
 }
 
+/// cas-8725: the blocker flag must survive the same mapping. Dropped here it
+/// would be silently ignored — the message would still be delivered, and would
+/// still never wake the supervisor, which is exactly the failure this flag
+/// exists to end.
+#[test]
+fn coordination_blocker_type_survives_agent_mapping() {
+    let req: CoordinationRequest = serde_json::from_str(
+        r#"{"action":"message","target":"supervisor","task_id":"cas-8725","blocker":true,"summary":"blocked on schema review","message":"the epic branch will not rebase"}"#,
+    )
+    .unwrap();
+
+    assert_eq!(req.blocker, Some(true));
+    assert_eq!(req.to_agent_request("message").blocker, Some(true));
+
+    // Absent means absent: an ordinary message must not acquire the envelope.
+    let plain: CoordinationRequest = serde_json::from_str(
+        r#"{"action":"message","target":"supervisor","summary":"status","message":"still building"}"#,
+    )
+    .unwrap();
+    assert_eq!(plain.blocker, None);
+    assert_eq!(plain.to_agent_request("message").blocker, None);
+}
+
 #[test]
 fn coordination_reply_reference_survives_agent_mapping() {
     let req: CoordinationRequest = serde_json::from_str(

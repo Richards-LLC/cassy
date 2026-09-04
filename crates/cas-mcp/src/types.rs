@@ -935,6 +935,18 @@ pub struct AgentRequest {
     #[serde(default)]
     pub merge_request: Option<bool>,
 
+    /// Marks a message as a blocker escalation (cas-8725).
+    ///
+    /// CAS attaches the `<cas-blocker …>` envelope, which is what lets the row
+    /// wake an idle supervisor instead of waiting for the recipient's next
+    /// turn. The sender's own words are never inspected: a message that merely
+    /// says "BLOCKER" stays inbox-only.
+    #[schemars(
+        description = "message action only: mark this message as a blocker escalation. CAS attaches its cas-blocker envelope so an idle supervisor is woken instead of finding the row at its next turn. Omit or false for status updates, questions and ordinary traffic."
+    )]
+    #[serde(default)]
+    pub blocker: Option<bool>,
+
     /// Explicit notification this message acknowledges or answers.
     ///
     /// The recipient can use this durable queue ID to distinguish a real reply

@@ -369,8 +369,7 @@ impl ProxyHealthSnapshot {
             server.last_error_code = server
                 .last_error_code
                 .as_deref()
-                .map(safe_error_code)
-                .map(str::to_string);
+                .map(safe_error_code);
         }
         self
     }
@@ -562,7 +561,7 @@ impl ProxyEngine {
                 );
             }
             Err(error) => {
-                let code = classify_error(&error);
+                let code = safe_error_code(&classify_error(&error));
                 let visibility = {
                     let mut health = self.health.write().await;
                     let record = health
@@ -573,7 +572,7 @@ impl ProxyEngine {
                     {
                         record.executable = Some(command.trim().to_string());
                     }
-                    record_failure(record, code, now)
+                    record_failure(record, &code, now)
                 };
                 match visibility {
                     FailureVisibility::Error if code == "executable_missing" => tracing::error!(
@@ -1277,7 +1276,29 @@ fn record_failure(record: &mut UpstreamHealth, error_code: &str, now: u64) -> Fa
     }
 }
 
-fn classify_error(error: &anyhow::Error) -> &'static str {
+#[derive(Debug)]
+struct MissingCredentialError {
+    name: String,
+}
+
+impl std::fmt::Display for MissingCredentialError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("required MCP upstream credential environment variable is unavailable")
+    }
+}
+
+impl std::error::Error for MissingCredentialError {}
+
+const MISSING_CREDENTIAL_ENV_PREFIX: &str = "missing_credential_env:";
+
+fn classify_error(error: &anyhow::Error) -> String {
+    if let Some(name) = error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<MissingCredentialError>()
+            .map(|missing| missing.name.as_str())
+    }) {
+        return format!("{MISSING_CREDENTIAL_ENV_PREFIX}{name}");
+    }
     let message = format!("{error:#}").to_ascii_lowercase();
     if message.contains("authrequired")
         || message.contains("auth required")
@@ -1285,24 +1306,24 @@ fn classify_error(error: &anyhow::Error) -> &'static str {
         || message.contains("status 401")
         || message.contains("status: 401")
     {
-        "authentication_required"
+        "authentication_required".to_string()
     } else if message.contains("unexpectedcontenttype")
         || message.contains("unexpected content type")
     {
-        "unexpected_content_type"
+        "unexpected_content_type".to_string()
     } else if message.contains("invalid url") || message.contains("scheme is not http") {
-        "invalid_url"
+        "invalid_url".to_string()
     } else if message.contains("timed out") || message.contains("timeout") {
-        "timeout"
+        "timeout".to_string()
     } else if message.contains("no such file or directory")
         || message.contains("os error 2")
         || message.contains("exit status: 127")
         || message.contains("status 127")
         || message.contains("code 127")
     {
-        "executable_missing"
+        "executable_missing".to_string()
     } else {
-        "connection_failed"
+        "connection_failed".to_string()
     }
 }
 
@@ -1361,16 +1382,31 @@ fn safe_transport(transport: &str) -> &'static str {
     }
 }
 
-fn safe_error_code(code: &str) -> &'static str {
-    match code {
-        "authentication_required" => "authentication_required",
-        "unexpected_content_type" => "unexpected_content_type",
-        "invalid_url" => "invalid_url",
-        "timeout" => "timeout",
-        "connection_failed" => "connection_failed",
-        "executable_missing" => "executable_missing",
-        _ => "unknown",
+fn safe_error_code(code: &str) -> String {
+    if let Some(name) = code.strip_prefix(MISSING_CREDENTIAL_ENV_PREFIX) {
+        return format!(
+            "{MISSING_CREDENTIAL_ENV_PREFIX}{}",
+            safe_environment_name(name).unwrap_or("unknown")
+        );
     }
+    match code {
+        "authentication_required"
+        | "unexpected_content_type"
+        | "invalid_url"
+        | "timeout"
+        | "connection_failed"
+        | "executable_missing" => code.to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn safe_environment_name(name: &str) -> Option<&str> {
+    (!name.is_empty()
+        && name.len() <= 256
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+    .then_some(name)
 }
 
 fn live_failure_applies(
@@ -1567,8 +1603,11 @@ fn resolve_credential(value: &str) -> Result<String> {
         .strip_prefix("env:")
         .or_else(|| value.strip_prefix("${").and_then(|v| v.strip_suffix('}')));
     match env_name {
-        Some(name) if !name.is_empty() => std::env::var(name)
-            .context("required MCP upstream credential environment variable is unavailable"),
+        Some(name) if !name.is_empty() => std::env::var(name).map_err(|_| {
+            anyhow::Error::new(MissingCredentialError {
+                name: name.to_string(),
+            })
+        }),
         _ => Ok(value.to_string()),
     }
 }
@@ -2331,6 +2370,37 @@ mod tests {
             !message.contains("env:"),
             "credential reference must be redacted"
         );
+    }
+
+    #[tokio::test]
+    async fn health_names_missing_credential_variable_without_exposing_value() {
+        let missing = format!(
+            "CAS_PROXY_MISSING_HEALTH_{}_{}",
+            std::process::id(),
+            SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let secret = "must-never-appear-in-health";
+        let config = ServerConfig::Http {
+            url: "https://example.invalid/mcp".to_string(),
+            auth: Some(format!("env:{missing}")),
+            headers: HashMap::new(),
+            oauth: false,
+        };
+        let engine = ProxyEngine::from_configs(HashMap::from([("mecha-cassy".to_string(), config)]))
+            .await
+            .unwrap();
+        let snapshot = engine.health_snapshot().await;
+        let server = snapshot
+            .servers
+            .iter()
+            .find(|server| server.name == "mecha-cassy")
+            .expect("configured upstream health must be present");
+        let expected_code = format!("{MISSING_CREDENTIAL_ENV_PREFIX}{missing}");
+        assert_eq!(server.last_error_code.as_deref(), Some(expected_code.as_str()));
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains(&missing));
+        assert!(!json.contains(secret));
+        assert!(!json.contains("connection_failed"));
     }
 
     #[test]

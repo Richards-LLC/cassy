@@ -1598,9 +1598,49 @@ fn parse_worker_name_filter(filter: Option<&String>) -> std::collections::HashSe
     filter
         .into_iter()
         .flat_map(|names| names.split(','))
-        .map(|s| s.trim().to_string())
+        .map(strip_target_wrapping)
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Trim one element of a target list down to the bare identifier.
+///
+/// The parameter is typed as a comma-separated string, but its plural name
+/// invites a JSON array and callers write one (cas-2c05: a supervisor called
+/// `worker_names=["quick-dolphin-15"]`). Left alone, the literal `["name"]`
+/// text is compared against `name`, never matches, and the tool reports the
+/// worker as unknown while printing it in the known list of the same message.
+/// Accepting both shapes is bounded and explicit — brackets and quotes are
+/// stripped, nothing else is guessed.
+fn strip_target_wrapping(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
+}
+
+/// The single definition of "does this worker answer to this target".
+///
+/// cas-2c05: the shutdown resolver matched `worker_names` against the name
+/// ONLY, while the `id` selector matched name-or-id and the error message
+/// printed a known-workers list built from a third filter. Those three
+/// disagreeing about identity is the bug itself, so identity now has exactly
+/// one definition and every caller uses it.
+///
+/// Names are compared case-insensitively; ids are not, because an id is opaque
+/// and a case-folded comparison of opaque tokens invites false positives.
+fn worker_answers_to(worker: &cas_types::Agent, target: &str) -> bool {
+    let target = target.trim();
+    worker.name.eq_ignore_ascii_case(target)
+        || worker.id == target
+        || worker
+            .cc_session_id
+            .as_deref()
+            .is_some_and(|session| session == target)
 }
 
 /// How many undrained spawn-queue rows `spawn_workers` scans when checking
@@ -2242,6 +2282,13 @@ impl CasService {
                 format!("Failed to list agents: {e}"),
             )
         })?;
+        // Every registered worker, before scope/ownership filtering. Used only
+        // to tell "unknown" apart from "refused" in the error path (cas-2c05).
+        let all_registry_workers: Vec<cas_types::Agent> = all_agents
+            .iter()
+            .filter(|agent| agent.role == AgentRole::Worker)
+            .cloned()
+            .collect();
         let (known_workers, _) = dedupe_authoritative_agents(
             all_agents
                 .into_iter()
@@ -2264,17 +2311,20 @@ impl CasService {
         let selected: Vec<cas_types::Agent> = if let Some(id) = requested_id {
             known_workers
                 .iter()
-                .find(|worker| worker.id == id || worker.name == id)
+                .find(|worker| worker_answers_to(worker, id))
                 .cloned()
                 .into_iter()
                 .collect()
         } else if !requested_names.is_empty() {
+            // cas-2c05: name OR agent id OR session id, through the one shared
+            // definition. Matching names only here — while the id selector
+            // accepted both — is why a session id was reported as unknown.
             requested_names
                 .iter()
                 .filter_map(|name| {
                     known_workers
                         .iter()
-                        .find(|worker| worker.name == *name)
+                        .find(|worker| worker_answers_to(worker, name))
                         .cloned()
                 })
                 .collect()
@@ -2313,12 +2363,10 @@ impl CasService {
             requested_names
                 .iter()
                 .filter(|name| {
-                    !selected
-                        .iter()
-                        .any(|worker| worker.name.as_str() == name.as_str())
+                    !selected.iter().any(|worker| worker_answers_to(worker, name))
                         && !selected_launched_names
                             .iter()
-                            .any(|launched| launched == *name)
+                            .any(|launched| launched.eq_ignore_ascii_case(name))
                 })
                 .cloned()
                 .collect()
@@ -2334,14 +2382,50 @@ impl CasService {
                         .map(|name| format!("{name} (launched; spawn request {})", spawn.id))
                 }))
                 .collect::<Vec<_>>();
+            // cas-2c05: never assert that a target is unknown while listing it
+            // as known in the same breath. A target that IS in the registry but
+            // was not selectable was refused by a policy (scope/ownership), and
+            // saying so is the difference between a fixable message and one that
+            // costs a supervisor an investigation.
+            let refused: Vec<String> = missing
+                .iter()
+                .filter(|target| {
+                    all_registry_workers
+                        .iter()
+                        .any(|worker| worker_answers_to(worker, target))
+                })
+                .cloned()
+                .collect();
+            let genuinely_absent: Vec<String> = missing
+                .iter()
+                .filter(|target| !refused.contains(target))
+                .cloned()
+                .collect();
+            if !refused.is_empty() {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Worker target(s) refused, not unknown: {}. They are registered but \
+                         outside this session's shutdown scope (a different factory session \
+                         owns them, or they are not workers of yours). Nothing was queued. \
+                         Known workers in scope: {}.",
+                        refused.join(", "),
+                        if known.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            known.join(", ")
+                        }
+                    ),
+                ));
+            }
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
                     "Worker target(s) not found: {}. Known workers: {}. Nothing was queued.",
-                    if missing.is_empty() {
+                    if genuinely_absent.is_empty() {
                         "(none selected)".to_string()
                     } else {
-                        missing.join(", ")
+                        genuinely_absent.join(", ")
                     },
                     if known.is_empty() {
                         "(none)".to_string()
@@ -3764,9 +3848,17 @@ impl CasService {
 
         if !requested_names.is_empty() {
             visible_workers
-                .retain(|a| requested_names.contains(&a.name) || requested_names.contains(&a.id));
+                .retain(|a| {
+                    requested_names
+                        .iter()
+                        .any(|target| worker_answers_to(a, target))
+                });
             dead_workers
-                .retain(|a| requested_names.contains(&a.name) || requested_names.contains(&a.id));
+                .retain(|a| {
+                    requested_names
+                        .iter()
+                        .any(|target| worker_answers_to(a, target))
+                });
         }
 
         let visible_worker_ids: std::collections::HashSet<String> =
@@ -9631,6 +9723,130 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------
+    // cas-2c05: shutdown_workers target resolution.
+    //
+    // Reproduced by the cas-src supervisor against an idle worker with no
+    // assigned task: shutdown by name AND by session id both returned
+    // "Worker target(s) not found", and the same error printed that worker in
+    // its known list. Three different notions of identity were in play — the
+    // id selector matched name-or-id, the names selector matched name only,
+    // and the message was built from a third filtered set.
+    // -----------------------------------------------------------------
+
+    fn worker_named(name: &str, id: &str) -> cas_types::Agent {
+        let mut agent = cas_types::Agent::new(id.to_string(), name.to_string());
+        agent.role = AgentRole::Worker;
+        // The reporter's worker had just closed its last task: idle, no task
+        // assigned. If identity resolution filtered on a non-idle state this
+        // is the case that would fail.
+        agent.status = cas_types::AgentStatus::Idle;
+        agent
+    }
+
+    #[test]
+    fn a_worker_answers_to_its_name_its_agent_id_and_its_session_id() {
+        let mut worker = worker_named("quick-dolphin-15", "f9dc5562-6881-4050-a464-72b7ee16cfde");
+        worker.cc_session_id = Some("cc-session-abc".to_string());
+
+        assert!(worker_answers_to(&worker, "quick-dolphin-15"));
+        assert!(worker_answers_to(
+            &worker,
+            "f9dc5562-6881-4050-a464-72b7ee16cfde"
+        ));
+        assert!(worker_answers_to(&worker, "cc-session-abc"));
+        // Names are matched case-insensitively; whitespace from a split list
+        // must not decide identity either.
+        assert!(worker_answers_to(&worker, "QUICK-Dolphin-15"));
+        assert!(worker_answers_to(&worker, "  quick-dolphin-15  "));
+    }
+
+    #[test]
+    fn a_different_worker_is_still_rejected() {
+        // The fix must not turn resolution into "matches anything".
+        let worker = worker_named("quick-dolphin-15", "f9dc5562-6881-4050-a464-72b7ee16cfde");
+        assert!(!worker_answers_to(&worker, "fast-lynx-22"));
+        assert!(!worker_answers_to(&worker, "f9dc5562"));
+        assert!(!worker_answers_to(&worker, ""));
+        assert!(!worker_answers_to(&worker, "quick-dolphin-150"));
+    }
+
+    #[test]
+    fn a_json_array_target_list_resolves_to_bare_identifiers() {
+        // The parameter is a comma-separated string, but its plural name
+        // invites a JSON array and that is exactly how it was called when this
+        // was reported. Both shapes must land on the same identifiers.
+        let names = parse_worker_name_filter(Some(&"[\"quick-dolphin-15\"]".to_string()));
+        assert_eq!(
+            names,
+            std::collections::HashSet::from(["quick-dolphin-15".to_string()])
+        );
+
+        let multi = parse_worker_name_filter(Some(
+            &"[\"quick-dolphin-15\", \"fast-lynx-22\"]".to_string(),
+        ));
+        assert_eq!(
+            multi,
+            std::collections::HashSet::from([
+                "quick-dolphin-15".to_string(),
+                "fast-lynx-22".to_string()
+            ])
+        );
+
+        // The documented form keeps working unchanged.
+        assert_eq!(
+            parse_worker_name_filter(Some(&"quick-dolphin-15, fast-lynx-22".to_string())),
+            std::collections::HashSet::from([
+                "quick-dolphin-15".to_string(),
+                "fast-lynx-22".to_string()
+            ])
+        );
+        assert!(parse_worker_name_filter(None).is_empty());
+        assert!(parse_worker_name_filter(Some(&"[]".to_string())).is_empty());
+    }
+
+    #[test]
+    fn an_idle_worker_with_no_task_resolves_by_name_and_by_id() {
+        // The reporter's exact state. Resolution must not depend on the worker
+        // having an assigned task or being mid-work.
+        let workers = vec![
+            worker_named("quick-dolphin-15", "f9dc5562-6881-4050-a464-72b7ee16cfde"),
+            worker_named("fast-lynx-22", "aaaaaaaa-0000-0000-0000-000000000000"),
+        ];
+        for target in [
+            "quick-dolphin-15",
+            "f9dc5562-6881-4050-a464-72b7ee16cfde",
+            "[\"quick-dolphin-15\"]",
+        ] {
+            let parsed = parse_worker_name_filter(Some(&target.to_string()));
+            let resolved: Vec<&cas_types::Agent> = parsed
+                .iter()
+                .filter_map(|name| workers.iter().find(|worker| worker_answers_to(worker, name)))
+                .collect();
+            assert_eq!(
+                resolved.len(),
+                1,
+                "target {target} must resolve to exactly one worker"
+            );
+            assert_eq!(resolved[0].name, "quick-dolphin-15");
+        }
+    }
+
+    #[test]
+    fn an_unknown_target_resolves_to_nothing() {
+        let workers = vec![worker_named(
+            "quick-dolphin-15",
+            "f9dc5562-6881-4050-a464-72b7ee16cfde",
+        )];
+        let parsed = parse_worker_name_filter(Some(&"no-such-worker-9".to_string()));
+        assert!(
+            parsed
+                .iter()
+                .all(|name| !workers.iter().any(|worker| worker_answers_to(worker, name))),
+            "an unknown target must still fail to resolve"
+        );
+    }
 
     fn response_text(response: CallToolResult) -> String {
         response

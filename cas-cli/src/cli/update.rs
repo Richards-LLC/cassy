@@ -286,18 +286,10 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // image's behaviour and overwrite an accurate receipt with a stale one.
     if let Some(refresh) = outcome.post_install_refresh {
         if cli.json {
-            let mut combined = serde_json::json!({
-                "binary_updated": outcome.updated,
-                "version": outcome.version,
-            });
-            if let (Some(combined), Some(refresh)) =
-                (combined.as_object_mut(), refresh.as_object())
-            {
-                for (key, value) in refresh {
-                    combined.insert(key.clone(), value.clone());
-                }
-            }
-            println!("{combined}");
+            println!(
+                "{}",
+                combined_update_receipt(&outcome.version, outcome.updated, Some(&refresh))
+            );
         }
         return Ok(());
     }
@@ -305,10 +297,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     if cli.json {
         println!(
             "{}",
-            serde_json::json!({
-                "binary_updated": outcome.updated,
-                "version": outcome.version,
-            })
+            combined_update_receipt(&outcome.version, outcome.updated, None)
         );
     }
 
@@ -325,6 +314,30 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     Ok(())
+}
+
+/// One receipt for the whole `cas update` run (cas-91ba).
+///
+/// The binary phase and the refresh phase used to print two separate JSON
+/// documents, and after the swap the refresh document came from the pre-update
+/// image. Merging the installed binary's refresh receipt into the binary
+/// receipt keeps a single document whose `refresh_binary_version` states which
+/// image actually ran the phases.
+fn combined_update_receipt(
+    version: &str,
+    updated: bool,
+    refresh: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut receipt = serde_json::json!({
+        "binary_updated": updated,
+        "version": version,
+    });
+    if let (Some(target), Some(refresh)) = (receipt.as_object_mut(), refresh.and_then(|r| r.as_object())) {
+        for (key, value) in refresh {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    receipt
 }
 
 /// Add an existing project to the host registry.

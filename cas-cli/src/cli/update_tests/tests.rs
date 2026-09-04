@@ -545,3 +545,26 @@ fn refresh_receipt_names_the_binary_that_ran_it() {
         "every refresh receipt must name the binary version that produced it: {receipt}"
     );
 }
+
+#[test]
+fn combined_receipt_merges_the_installed_binary_refresh_into_one_document() {
+    let refresh = serde_json::json!({
+        "refresh_binary_version": "3.15.2",
+        "projects": [],
+        "user_level_store": {"status": "ok"},
+    });
+
+    let combined = combined_update_receipt("3.15.2", true, Some(&refresh));
+    assert_eq!(combined["binary_updated"], true);
+    assert_eq!(combined["version"], "3.15.2");
+    assert_eq!(
+        combined["refresh_binary_version"], "3.15.2",
+        "the single receipt must state which image ran the refresh: {combined}"
+    );
+    assert!(combined["user_level_store"].is_object(), "{combined}");
+
+    // No swap: no refresh receipt to merge, and no stale version claimed.
+    let solo = combined_update_receipt("3.15.2", false, None);
+    assert_eq!(solo["binary_updated"], false);
+    assert!(solo.get("refresh_binary_version").is_none(), "{solo}");
+}

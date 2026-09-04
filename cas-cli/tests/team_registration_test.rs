@@ -41,6 +41,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// one process, and the env var is shared.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+const FIXTURE_PROJECT_ID: &str = "p";
+
 /// Sets one or more env vars for the duration of a test under a single
 /// ENV_LOCK acquisition. One guard for all of them is required, not stylistic:
 /// `std::sync::Mutex` is not reentrant, so two guards that each take ENV_LOCK
@@ -87,6 +89,7 @@ fn make_cas_root() -> TempDir {
     let tmp = TempDir::new().unwrap();
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
+    set_canonical_id_in_config_toml(tmp.path(), FIXTURE_PROJECT_ID).unwrap();
     tmp
 }
 
@@ -225,7 +228,7 @@ async fn sync_fails_loud_when_server_never_registers_the_project() {
         .unwrap();
     let _env = ScopedEnv::cas_root(&cas_root);
 
-    let expected_id = project_id();
+    let expected_id = FIXTURE_PROJECT_ID.to_string();
     let args = CloudSyncArgs {
         dry_run: false,
         rehome: false,
@@ -278,7 +281,7 @@ async fn sync_fails_loud_when_server_never_registers_the_project() {
 #[tokio::test]
 async fn registration_creates_the_project_when_the_team_does_not_know_it() {
     let server = MockServer::start().await;
-    let expected_id = project_id();
+    let expected_id = FIXTURE_PROJECT_ID.to_string();
 
     // First lookup: unknown. `up_to_n_times(1)` retires this mock so the
     // post-write verification falls through to the registered response.
@@ -625,7 +628,7 @@ async fn sync_adopts_resolved_id_before_its_team_push_and_pull() {
 #[tokio::test]
 async fn already_registered_project_is_verified_once_then_cached() {
     let server = MockServer::start().await;
-    let expected_id = project_id();
+    let expected_id = FIXTURE_PROJECT_ID.to_string();
 
     Mock::given(method("GET"))
         .and(path(projects_path()))
@@ -667,7 +670,7 @@ async fn already_registered_project_is_verified_once_then_cached() {
 #[tokio::test]
 async fn full_sync_reverifies_registration_instead_of_trusting_the_cache() {
     let server = MockServer::start().await;
-    let expected_id = project_id();
+    let expected_id = FIXTURE_PROJECT_ID.to_string();
 
     Mock::given(method("GET"))
         .and(path(projects_path()))
@@ -743,7 +746,7 @@ async fn expired_session_fails_registration_with_a_login_instruction() {
 #[tokio::test]
 async fn sync_adopts_the_resolvable_team_without_any_manual_team_command() {
     let server = MockServer::start().await;
-    let expected_id = project_id();
+    let expected_id = FIXTURE_PROJECT_ID.to_string();
 
     // Registration: unknown first, listed after the registration write.
     Mock::given(method("GET"))

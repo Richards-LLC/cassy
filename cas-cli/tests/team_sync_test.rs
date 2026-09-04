@@ -28,7 +28,6 @@ use common::{TEST_TEAM, make_cli_json, make_cloud_config};
 use cas::cli::cloud::execute_team_push;
 use cas::cloud::{
     CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation, SyncQueue,
-    get_project_canonical_id,
 };
 use cas::store::open_task_store_local;
 use cas::types::Task;
@@ -38,6 +37,11 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+// Every temporary queue root in this binary is pinned to this identity. Keep
+// wire expectations tied to that fixture root rather than the test process's
+// checkout identity.
+const FIXTURE_PROJECT_ID: &str = "p";
 
 /// Create a `.cas`-style directory and seed the sync queue with one
 /// team-tagged entry upsert, returning the TempDir owning the files.
@@ -603,8 +607,7 @@ async fn team_delete_for_live_task_is_neutralized_without_http() {
 #[tokio::test]
 async fn team_delete_uses_singular_entity_path() {
     let server = MockServer::start().await;
-    let expected_project_id =
-        get_project_canonical_id().expect("team delete test must resolve the canonical project id");
+    let expected_project_id = FIXTURE_PROJECT_ID;
     Mock::given(method("DELETE"))
         .and(path(format!(
             "/api/teams/{TEST_TEAM}/sync/task/absent-team-task"
@@ -651,8 +654,7 @@ async fn team_delete_uses_singular_entity_path() {
 #[tokio::test]
 async fn team_task_upsert_includes_explicit_project_scope() {
     let server = MockServer::start().await;
-    let expected_project_id =
-        get_project_canonical_id().expect("team task push test must resolve project identity");
+    let expected_project_id = FIXTURE_PROJECT_ID;
     Mock::given(method("POST"))
         .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -705,8 +707,7 @@ async fn team_task_upsert_includes_explicit_project_scope() {
 #[tokio::test]
 async fn parked_team_delete_can_be_requeued_and_flushed_after_scope_fix() {
     let server = MockServer::start().await;
-    let expected_project_id =
-        get_project_canonical_id().expect("team delete test must resolve the canonical project id");
+    let expected_project_id = FIXTURE_PROJECT_ID;
     Mock::given(method("DELETE"))
         .and(path(format!(
             "/api/teams/{TEST_TEAM}/sync/task/parked-team-task"

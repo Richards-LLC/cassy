@@ -626,6 +626,64 @@ async fn team_push_serializes_task_dependency_collection() {
     assert_eq!(payload["task_dependencies"][0]["dep_type"], "blocks");
 }
 
+#[tokio::test]
+async fn team_push_failure_includes_body_and_trace_headers() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let team_id = "team-c4c4-failure";
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{team_id}/sync/push")))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .insert_header("x-request-id", "request-c4c4")
+                .insert_header("x-vercel-id", "iad1::request-c4c4")
+                .set_body_string("team dependency batch failed"),
+        )
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n")
+        .unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::TaskDependency,
+            "cas-c4c4-from:cas-c4c4-to:blocks",
+            SyncOperation::Upsert,
+            Some(
+                r#"{"from_id":"cas-c4c4-from","to_id":"cas-c4c4-to","dep_type":"blocks","created_at":"2026-09-01T12:00:00Z"}"#,
+            ),
+            team_id,
+        )
+        .unwrap();
+
+    let syncer = CloudSyncer::new(
+        queue,
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+    );
+    let result = tokio::task::spawn_blocking(move || syncer.push_team(team_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.errors.iter().any(|error| {
+        error.contains("status 500")
+            && error.contains("team dependency batch failed")
+            && error.contains("x-request-id=request-c4c4")
+            && error.contains("x-vercel-id=iad1::request-c4c4")
+    }), "team push error lost response diagnostics: {:?}", result.errors);
+}
+
 #[test]
 fn push_response_is_backward_compatible_with_legacy_payload() {
     // Older cloud builds may return shapes like {"synced": {...}} or just
@@ -1450,6 +1508,44 @@ async fn team_pull_single_foreign_open_row_is_parked_before_local_insert() {
         task_store.get("cas-2125-foreign-absent").is_err(),
         "foreign team task must be parked instead of becoming doctor contamination"
     );
+}
+
+#[tokio::test]
+async fn team_pull_parks_malformed_task_and_continues_to_valid_neighbor() {
+    let valid = team_task_fixture(
+        "cas-c4c4-valid-neighbor",
+        TaskStatus::Open,
+        "owner-project",
+        "owner-project",
+        chrono::Utc::now(),
+    );
+    let mut malformed = team_task_fixture(
+        "cas-36fd",
+        TaskStatus::Open,
+        "owner-project",
+        "owner-project",
+        chrono::Utc::now(),
+    );
+    malformed["status"] = serde_json::json!(42);
+
+    let (_temp, result, task_store, queue) =
+        pull_team_task_fixtures("owner-project", vec![malformed, valid], None).await;
+
+    assert!(
+        result.errors.iter().any(|error| {
+            error.contains("task deserialize error") && error.contains("id=cas-36fd")
+        }),
+        "malformed row must retain its id and reason: {:?}",
+        result.errors
+    );
+    assert!(task_store.get("cas-c4c4-valid-neighbor").is_ok());
+    assert!(task_store.get("cas-36fd").is_err());
+    let conflicts = queue.list_conflicts(10).unwrap();
+    assert!(conflicts.iter().any(|conflict| {
+        conflict.entity_id == "cas-36fd"
+            && conflict.strategy == "pull_deserialize"
+            && conflict.discarded_row_json.contains("cas-36fd")
+    }));
 }
 
 #[tokio::test]

@@ -2904,6 +2904,27 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_task_accepts_null_legacy_metadata_and_depth() {
+        // This is the wire shape of cas-36fd from the gabber-studio team
+        // snapshot. Both fields are nullable in legacy cloud rows; null must
+        // mean the empty/default value rather than poison the whole pull.
+        let mut raw = serde_json::to_value(Task::new(
+            "cas-36fd".to_string(),
+            "legacy task".to_string(),
+        ))
+        .unwrap();
+        raw["origin_project"] = json!("gabber-studio");
+        raw["project_id"] = json!("gabber-studio");
+        raw["metadata"] = serde_json::Value::Null;
+        raw["depth"] = serde_json::Value::Null;
+
+        let task = deserialize_pulled_entity::<Task>(raw, "task")
+            .expect("nullable legacy task metadata must be treated as empty");
+        assert_eq!(task.id, "cas-36fd");
+        assert_eq!(task.depth, crate::types::TaskDepth::Deep);
+    }
+
+    #[test]
     fn materialized_task_renders_attested_and_asserted_provenance_visibly() {
         let mut raw = json!({
             "notes": "Receiver notes",

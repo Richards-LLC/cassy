@@ -54,11 +54,18 @@ pub struct SeedReport {
     pub existing: Vec<PathBuf>,
     /// Paths rejected because `<path>/.cas/` is not a directory.
     pub skipped_missing: Vec<PathBuf>,
+    /// Paths rejected as disposable roots (factory artifacts, `~/.cas/scratch`,
+    /// a named temp root), paired with the reason. These have a real `.cas/`
+    /// — they are copies of a project, not projects (cas-647c).
+    pub skipped_disposable: Vec<(PathBuf, String)>,
 }
 
 impl SeedReport {
     pub fn total_considered(&self) -> usize {
-        self.new.len() + self.existing.len() + self.skipped_missing.len()
+        self.new.len()
+            + self.existing.len()
+            + self.skipped_missing.len()
+            + self.skipped_disposable.len()
     }
 }
 
@@ -77,11 +84,8 @@ impl SeedReport {
 /// home dir) and must be gated behind an explicit CLI flag.
 pub fn seed(include_home_scan: bool) -> Result<SeedReport> {
     let store = open_host_known_repo_store()?;
-    let already: std::collections::HashSet<PathBuf> = store
-        .list()?
-        .into_iter()
-        .map(|r| r.path)
-        .collect();
+    let already: std::collections::HashSet<PathBuf> =
+        store.list()?.into_iter().map(|r| r.path).collect();
 
     let mut candidates: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
 
@@ -106,6 +110,15 @@ pub fn seed(include_home_scan: bool) -> Result<SeedReport> {
             report.skipped_missing.push(cand);
             continue;
         }
+        if let Some(skip) = crate::store::known_repos::registry_skip(&cand) {
+            debug!(
+                path = %cand.display(),
+                reason = %skip.reason(),
+                "seed skipped a disposable root",
+            );
+            report.skipped_disposable.push((cand, skip.reason()));
+            continue;
+        }
         let canonical = cand.canonicalize().unwrap_or(cand.clone());
         let is_new = !already.contains(&canonical);
         store.upsert(&cand)?;
@@ -119,6 +132,7 @@ pub fn seed(include_home_scan: bool) -> Result<SeedReport> {
         new = report.new.len(),
         existing = report.existing.len(),
         skipped = report.skipped_missing.len(),
+        skipped_disposable = report.skipped_disposable.len(),
         "known_repos seed complete",
     );
     Ok(report)

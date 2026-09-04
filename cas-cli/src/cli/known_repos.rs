@@ -49,6 +49,20 @@ pub enum KnownReposCommands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Remove one registry row by path, whether or not the path still exists,
+    /// along with any selector binding that points at it.
+    ///
+    /// This is the exit `prune-missing` cannot provide: a disposable root that
+    /// is still on disk (a factory artifact copy, a probe fixture) is a live
+    /// path, so pruning refuses it and the only remaining move was hand-written
+    /// SQL. Repository files are never deleted.
+    Forget {
+        /// Repository root to remove from the host registry.
+        path: PathBuf,
+        /// Confirm forgetting the current project's own root.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 pub fn execute(cmd: &KnownReposCommands) -> Result<()> {
@@ -63,7 +77,78 @@ pub fn execute(cmd: &KnownReposCommands) -> Result<()> {
         KnownReposCommands::Unbind { selector } => execute_unbind(selector),
         KnownReposCommands::Seed { scan_home } => execute_seed(*scan_home),
         KnownReposCommands::PruneMissing { dry_run } => execute_prune_missing(*dry_run),
+        KnownReposCommands::Forget { path, yes } => execute_forget(path, *yes),
     }
+}
+
+/// What one `forget` actually changed. Returned rather than printed so the
+/// receipt and the tests describe the same transaction.
+#[derive(Debug, PartialEq, Eq)]
+struct ForgetReport {
+    removed: usize,
+    unbound: Vec<String>,
+}
+
+fn execute_forget(path: &std::path::Path, yes: bool) -> Result<()> {
+    let report = forget(path, yes)?;
+    let target = canonical_or_owned(path);
+    if report.removed == 0 && report.unbound.is_empty() {
+        println!(
+            "No known-repo row for {}. Nothing to forget; repository files were not changed.",
+            target.display()
+        );
+        return Ok(());
+    }
+    println!(
+        "Forgot {} known-repo row for {}. Repository files were not changed.",
+        report.removed,
+        target.display()
+    );
+    for selector in &report.unbound {
+        println!("  - removed host-local binding `{selector}` (it pointed here)");
+    }
+    println!("Re-register it any time with `cas init` in that directory.");
+    Ok(())
+}
+
+fn forget(path: &std::path::Path, yes: bool) -> Result<ForgetReport> {
+    let target = canonical_or_owned(path);
+    if !yes && is_current_project_root(&target) {
+        anyhow::bail!(
+            "refusing to forget {} — it is the current project root. Re-run with `--yes` if that \
+             is really what you want; the registry row is what host-wide sweeps and `cas doctor`'s \
+             cross-project scan use to find this project.",
+            target.display()
+        );
+    }
+    let store = open_host_known_repo_store()?;
+    let removed = store.forget(&target)?;
+    // Bindings are removed here (unlike `prune-missing`, which deliberately
+    // preserves them): forgetting a path is an explicit operator instruction
+    // about that exact repository, so leaving a selector aimed at it would
+    // resolve to a root the registry no longer knows.
+    let mut unbound = Vec::new();
+    for binding in store.list_bindings()? {
+        if canonical_or_owned(&binding.repo_root) == target {
+            store.unbind(&binding.selector)?;
+            unbound.push(binding.selector);
+        }
+    }
+    unbound.sort();
+    Ok(ForgetReport { removed, unbound })
+}
+
+fn canonical_or_owned(path: &std::path::Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Is `target` the root of the store this invocation is operating on?
+/// `find_cas_root` resolves the `.cas` directory; its parent is the root.
+fn is_current_project_root(target: &std::path::Path) -> bool {
+    crate::store::detect::find_cas_root()
+        .ok()
+        .and_then(|cas_root| cas_root.parent().map(canonical_or_owned))
+        .is_some_and(|root| root == target)
 }
 
 fn execute_bind(repo: &std::path::Path) -> Result<()> {
@@ -201,10 +286,11 @@ fn execute_seed(scan_home: bool) -> Result<()> {
     );
     let report = seed(scan_home)?;
     println!(
-        "Seed complete: {} new, {} already-present, {} skipped (no .cas/)",
+        "Seed complete: {} new, {} already-present, {} skipped (no .cas/), {} skipped (disposable root)",
         report.new.len(),
         report.existing.len(),
         report.skipped_missing.len(),
+        report.skipped_disposable.len(),
     );
     if !report.new.is_empty() {
         println!("Newly registered:");
@@ -216,6 +302,12 @@ fn execute_seed(scan_home: bool) -> Result<()> {
         println!("Skipped (path has no .cas/ subdirectory):");
         for p in &report.skipped_missing {
             println!("  - {}", p.display());
+        }
+    }
+    if !report.skipped_disposable.is_empty() {
+        println!("Skipped (disposable root — a copy of a project, not a project):");
+        for (path, reason) in &report.skipped_disposable {
+            println!("  - {} ({reason})", path.display());
         }
     }
     Ok(())
@@ -285,7 +377,10 @@ mod tests {
             assert_eq!(report.unbound, vec!["project:fresh-proxy".to_string()]);
             assert_eq!(store.count().unwrap(), 1);
             assert!(store.get_binding("project:fresh-proxy").unwrap().is_none());
-            assert!(fixture.exists(), "forget must never delete repository files");
+            assert!(
+                fixture.exists(),
+                "forget must never delete repository files"
+            );
 
             // Idempotent: a second run is a no-op receipt, not an error.
             assert_eq!(

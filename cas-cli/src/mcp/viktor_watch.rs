@@ -97,6 +97,7 @@ pub(crate) async fn alert_unpollable_watches(
                 )),
                 Some(cas_store::NotificationPriority::High),
                 &receipt,
+                Some(&cas_store::QueueOrigin::Daemon),
             )
             .map_err(|error| error.to_string())?;
         delivered += 1;
@@ -332,6 +333,7 @@ fn deliver_pending_inbound(
                 Some(&format!("Viktor question on {}", message.thread_id)),
                 Some(cas_store::NotificationPriority::High),
                 &format!("viktor-inbound:{}", message.message_id),
+                Some(&cas_store::QueueOrigin::Daemon),
             )
             .map_err(|error| error.to_string())?;
         let notification_id = match enqueued {
@@ -596,6 +598,7 @@ async fn poll_one(
             Some(&summary),
             Some(cas_store::NotificationPriority::High),
             &format!("viktor-watch:{}", watch.id),
+            Some(&cas_store::QueueOrigin::Daemon),
         )
         .map_err(|error| error.to_string())?;
     let notification_id = match enqueued {

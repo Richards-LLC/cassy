@@ -110,7 +110,8 @@ pub use client::{
 /// alongside [`FactoryDaemon::supervisor_wake_decision`] so acceptance tests
 /// and diagnostics can drive the real gate instead of restating its rules.
 pub use daemon::runtime::queue_and_events::{
-    PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, ToolCallEvidence, WakeDecision,
+    PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, SupervisorWakeClass, ToolCallEvidence,
+    WakeDecision, WakeOutcome, WakeSender,
 };
 pub use daemon::{
     DaemonConfig, DaemonInitPhase, FactoryDaemon, ForkFirstResult, ForkResult, daemonize,

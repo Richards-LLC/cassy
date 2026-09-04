@@ -7,7 +7,35 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- A worker's merge request now reaches an idle supervisor's screen instead of
+  waiting in an inbox for the supervisor to go looking. A finished task that was
+  parked pending a merge could sit unseen for hours, because the message that
+  said so was delivered silently. Only merge requests gain this — ordinary
+  status chatter still waits for the supervisor's next turn, so nothing types
+  over work in progress.
+- A supervisor whose messages have gone unread past their delivery window is now
+  told how many are waiting and who sent the oldest, instead of finding out by
+  checking. Blockers, verification handoffs and status replies still arrive
+  quietly, as before — what changed is that the backlog itself is announced once,
+  and again only when a different message becomes the oldest one waiting.
+
+### Changed
+- Whether a message may interrupt a supervisor now depends on who actually sent
+  it, as recorded when the message was written, rather than on the sender label
+  attached to it. Labels can be set by whoever sends the message; the record
+  cannot.
+- A message that could not interrupt is now reported with which of the two
+  reasons applied: it was never the kind of message that interrupts, or it was
+  and the moment was wrong. Both used to read the same, so a genuinely stalled
+  request looked identical to routine traffic working as intended.
+
 ### Fixed
+- A message could interrupt a supervisor's screen simply by carrying another
+  supervisor's name. The name was checked against the roster, but anyone sending
+  a message can choose the name it carries, so spelling a real supervisor's name
+  was enough to skip the content check that every other interrupting message has
+  to pass. Interruptions are now decided from the sender recorded at send time.
 - Messages sent to a worker now appear once instead of twice. A worker that was
   idle received the full message a second time as a separate prompt, moments
   after the first copy, with nothing to mark it as a repeat — so a worker that

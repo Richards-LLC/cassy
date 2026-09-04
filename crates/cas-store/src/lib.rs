@@ -234,7 +234,7 @@ pub use prompt_queue_store::{
     ConfirmationSource, DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome,
     MessageDeliveryReport, MessageStatus, ObservationStatus, PROMPT_QUEUE_STALE_TTL_SECS,
     PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptQueueStore, PromptRetryDisposition,
-    QueuedPrompt, RetriedPrompt, SqlitePromptQueueStore, SurfacingSource,
+    QueueOrigin, QueuedPrompt, RetriedPrompt, SqlitePromptQueueStore, SurfacingSource,
     UndeliveredLifecycleRelay, WORKER_PEER_MESSAGE_BURST_LIMIT, WakeAttempt,
     WorkerPeerMessageEnqueue, reply_confirms_delivered_message,
 };

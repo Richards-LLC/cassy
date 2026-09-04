@@ -95,6 +95,7 @@ mod viktor_provenance_tests {
             priority: NotificationPriority::High,
             acked_at: None,
             urgent: false,
+            origin: None,
         };
 
         let observed_at = chrono::DateTime::parse_from_rfc3339("2026-08-18T20:06:00Z")
@@ -122,6 +123,7 @@ mod viktor_provenance_tests {
             priority: NotificationPriority::Normal,
             acked_at: None,
             urgent: false,
+            origin: None,
         };
         let observed_at = row.created_at + chrono::Duration::seconds(299);
         let provenance = queued_message_provenance_at(&row, observed_at);
@@ -1067,6 +1069,19 @@ impl CasService {
         // persistence, daemon wake, daemon poll, or downstream inject. Logged
         // at debug so normal sessions stay quiet; enable via
         // `RUST_LOG=cas::coordination=debug`.
+        // cas-d9a8: the server-stamped sender. This is the REGISTRY ID of the
+        // agent CAS resolved from this MCP session — deliberately not
+        // `display_name`, not `row_source`, and not `source`'s "unknown"
+        // fallback, all of which are labels a caller can influence or a failed
+        // lookup can invent. When no registered row resolves, the row goes out
+        // unstamped and keeps today's inbox-only behaviour: failing to
+        // identify a sender must never be worth a pane wake.
+        let queue_origin =
+            agent_from_store
+                .as_ref()
+                .map(|agent| cas_store::QueueOrigin::RegisteredAgent {
+                    agent_id: agent.id.clone(),
+                });
         let enqueue_started = std::time::Instant::now();
         let peer_copy_message = peer_supervisor_copy.as_ref().map(|_| {
             format!(
@@ -1088,6 +1103,7 @@ impl CasService {
                     Some(summary.as_str()),
                     priority,
                     urgent,
+                    queue_origin.as_ref(),
                 ) {
                     Ok(ids) => (ids.recipient_id, false, Some(ids.supervisor_copy_id)),
                     Err(error) => {
@@ -1120,6 +1136,7 @@ impl CasService {
                     Some(summary.as_str()),
                     priority,
                     urgent,
+                    queue_origin.as_ref(),
                 ) {
                     Ok(id) => id,
                     Err(error) => {

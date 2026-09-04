@@ -2728,10 +2728,44 @@ fn reported_binary_version(binary: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .last()
-        .map(|version| version.trim_start_matches('v').to_string())
+    parse_reported_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The semver inside a `--version` line, or None when there is none.
+///
+/// Clap prints `cas <semver> (<hash>[-dirty] <date>)`, so the last whitespace
+/// token is the build date (`2026-09-04)`), not a version. Take the first token
+/// that is actually a semver instead, with the optional `v` prefix stripped.
+fn parse_reported_version(output: &str) -> Option<String> {
+    output.split_whitespace().find_map(|token| {
+        let candidate = token.strip_prefix('v').unwrap_or(token);
+        is_semver_token(candidate).then(|| candidate.to_string())
+    })
+}
+
+/// `major.minor.patch` in digits, plus an optional `-pre`/`+build` suffix.
+fn is_semver_token(token: &str) -> bool {
+    let core_end = token.find(['-', '+']).unwrap_or(token.len());
+    let (core, suffix) = token.split_at(core_end);
+
+    let mut parts = core.split('.');
+    let core_is_semver = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(major), Some(minor), Some(patch), None) => [major, minor, patch]
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())),
+        _ => false,
+    };
+    if !core_is_semver {
+        return false;
+    }
+
+    // A suffix must carry something after its `-`/`+` and stay inside the
+    // characters semver allows, so `3.15.5-` or `3.15.5-(x)` do not pass.
+    suffix.is_empty()
+        || (suffix.len() > 1
+            && suffix[1..]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'+'))
 }
 
 /// The operator-facing line for a swap whose post-install phases did not run.

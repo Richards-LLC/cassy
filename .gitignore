@@ -52,3 +52,8 @@ docs/requests/artifacts/
 # Python bytecode — regenerated on every run of the docs/analysis scripts
 __pycache__/
 *.pyc
+
+# insta pending snapshots — a rejected/unreviewed snapshot is a local review
+# artifact, never source. One was committed by an over-broad `git add -A`
+# (cas-2c05); ignoring the pattern stops the next worker repeating it.
+*.snap.new

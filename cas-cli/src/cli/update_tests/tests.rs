@@ -296,6 +296,9 @@ fn discovery_separates_registered_projects_from_scan_only_and_storeless_ones() {
     make_project(&with_store);
     let storeless = workspace.join("storeless");
     std::fs::create_dir_all(storeless.join(".cas")).expect("create storeless fixture");
+    crate::store::known_repos::ensure_host_schema().expect("bootstrap known-repos schema");
+    crate::store::known_repos::register_repo_strict(&with_store)
+        .expect("register temp-root fixture");
 
     let discovery = discover_local_projects(None);
 
@@ -309,7 +312,12 @@ fn discovery_separates_registered_projects_from_scan_only_and_storeless_ones() {
             .skipped_unregistered
             .iter()
             .any(|skip| skip.project == with_store && skip.reason.contains("temp")),
-        "a temp-root project must be reported with its exclusion reason: {:?}",
+        "a registered temp-root project must be reported with its exclusion reason: {:?}",
+        discovery.skipped_unregistered
+    );
+    assert!(
+        !discovery.unregistered.contains(&with_store),
+        "a registered temp-root project must not be relabeled as scan-only: {:?}",
         discovery.unregistered
     );
     assert!(

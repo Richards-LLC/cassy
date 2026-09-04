@@ -341,6 +341,40 @@ pub(crate) fn attribute_for_pty(source: &str, text: &str) -> String {
     format!("Message from {source}: {text}")
 }
 
+/// The one line typed into a Claude+teams recipient's pane to WAKE it — never
+/// the message body (cas-cdf9).
+///
+/// The body is written once, to the teams inbox, and the recipient's harness
+/// renders that copy. Before this, the idle nudge typed the very same body into
+/// the pane as well, so every factory message arrived twice: once wrapped in
+/// the harness's `<teammate-message>` envelope and once as a bare turn. Both
+/// copies carried the identical `CAS provenance:` header, because that header
+/// is composed once at `queue_and_events.rs` and handed to both writes — so the
+/// recipient had no way to tell the repeat from a new instruction, and a worker
+/// that had already acted on the first copy was invited to act again.
+///
+/// This is the sibling of the rule cas-5fff already enforces for Codex
+/// (`codex_recipient_is_never_double_typed_by_the_idle_nudge`): exactly one
+/// body-bearing write per message. Codex satisfies it structurally, because its
+/// channel is the PTY and no nudge applies. Claude+teams now satisfies it
+/// structurally too — [`FactoryDaemon::pty_nudge`] is not given the body at
+/// all, so it cannot type it.
+///
+/// The line still NAMES the notification id rather than being an empty wake, so
+/// the wake degrades safely: if the harness ever fails to render the inbox copy,
+/// the recipient still learns a message exists and can `inbox_poll` it, instead
+/// of being woken to silence.
+pub(crate) fn pointer_wake_payload(source: &str, notification_id: Option<i64>) -> String {
+    match notification_id {
+        Some(id) => format!(
+            "CAS wake: message {id} from {source} is in your inbox — see inbox (body not repeated here)."
+        ),
+        None => format!(
+            "CAS wake: a message from {source} is in your inbox — see inbox (body not repeated here)."
+        ),
+    }
+}
+
 /// Apply the shared Codex sender framing when the recipient needs it.
 ///
 /// Used by both normal `deliver_to_worker` PTY injection and the urgent
@@ -480,6 +514,7 @@ pub(super) fn enqueue_commander_message(
         priority,
         urgent,
         Some(&attribution_json),
+        None,
     )?)
 }
 
@@ -851,6 +886,7 @@ impl FactoryDaemon {
         color: Option<&str>,
         wake: super::queue_and_events::WakeDecision,
         retract_task: Option<&str>,
+        notification_id: Option<i64>,
     ) -> anyhow::Result<NudgeReport> {
         let primary_outcome = self
             .deliver_to_worker(target, source, text, summary, color, None, retract_task, None)
@@ -869,11 +905,11 @@ impl FactoryDaemon {
                 // string ("idle gate declined the wake for this pass") was on
                 // 34 of 35 rows during the reported incident and told an
                 // operator nothing about which of six conditions vetoed.
-                &format!("wake gate declined this pass: {}", wake.reason),
+                &wake.status_detail(),
             ));
         }
 
-        self.pty_nudge(target, source, text).await
+        self.pty_nudge(target, source, notification_id).await
     }
 
     /// cas-ef14 (GH #139): the pane-nudge half of
@@ -894,16 +930,16 @@ impl FactoryDaemon {
         &self,
         target: &str,
         source: &str,
-        text: &str,
+        notification_id: Option<i64>,
         wake: super::queue_and_events::WakeDecision,
     ) -> anyhow::Result<NudgeReport> {
         if !wake.allowed {
             return Ok(NudgeReport::not_attempted(
                 InjectOutcome::Delivered,
-                &format!("wake gate declined this pass: {}", wake.reason),
+                &wake.status_detail(),
             ));
         }
-        self.pty_nudge(target, source, text).await
+        self.pty_nudge(target, source, notification_id).await
     }
 
     /// cas-dffe (GH #145): execute a queued context-reset control command.
@@ -985,7 +1021,7 @@ impl FactoryDaemon {
         &self,
         target: &str,
         source: &str,
-        text: &str,
+        notification_id: Option<i64>,
     ) -> anyhow::Result<NudgeReport> {
         let pane_target = if target == "supervisor" {
             self.app.supervisor_name()
@@ -1002,13 +1038,16 @@ impl FactoryDaemon {
             ));
         }
 
+        // cas-cdf9: a WAKE, not a second copy of the message. The body was
+        // written to the inbox by the primary delivery and is rendered from
+        // there; retyping it here is what surfaced every factory message twice.
         let payload = prepare_pty_machine_delivery(
             self.app.cas_dir(),
             pane_target,
             harness,
             source,
-            text,
-            None,
+            &pointer_wake_payload(source, notification_id),
+            notification_id,
         );
         let report = match self.app.mux.inject(pane_target, &payload).await {
             Ok(InjectOutcome::Delivered) => {
@@ -1475,6 +1514,91 @@ mod tests {
                  would type it a second time (teams_active={teams_active})"
             );
         }
+    }
+
+    /// cas-cdf9: the other half of cas-5fff's invariant, for the harness where
+    /// it was violated by design rather than satisfied by the channel.
+    ///
+    /// A Claude+teams recipient IS nudged (the test above pins that), and the
+    /// nudge used to carry the same body the inbox write already held — so
+    /// every factory message was surfaced twice, once as the harness's
+    /// `<teammate-message>` render of the inbox copy and once as the bare PTY
+    /// turn. Measured on live rows 24508/24515/24535: one prompt_queue row
+    /// each, `delivery_attempts=0`, one `transport_delivered_at`, and one
+    /// `prompt_queue_recipient_seen` receipt stamped `transport_delivered` —
+    /// so this was never redelivery and never the turn-start drain, which
+    /// cannot surface a delivered row at all.
+    ///
+    /// The wake payload must therefore contain no part of the body.
+    #[test]
+    fn claude_teams_recipient_is_never_double_typed_by_the_idle_nudge() {
+        let channel = choose_channel(SupervisorCli::Claude, true);
+        assert!(
+            idle_nudge_applies(channel),
+            "precondition: this is the recipient that DOES get a nudge"
+        );
+
+        let body = "Verdict recorded: ver-515b41d9efeb pass on vdispatch-c8c7a08a";
+        let text = format!("CAS provenance: notification_id=24508 origin=supervisor-authored\n\n{body}");
+        let wake = pointer_wake_payload("supervisor", Some(24508));
+
+        assert!(
+            !wake.contains(body),
+            "the nudge must not retype the body the inbox write already carries: {wake}"
+        );
+        assert!(
+            !text.contains(&wake),
+            "the wake is its own line, not a slice of the delivered text: {wake}"
+        );
+        // Claude is unframed, so what is typed is exactly the wake line — the
+        // framing step cannot smuggle the body back in.
+        assert_eq!(
+            frame_pty_payload(SupervisorCli::Claude, "supervisor", &wake),
+            wake
+        );
+    }
+
+    /// The wake names the id so it degrades safely: a recipient woken without
+    /// a rendered inbox copy can still `inbox_poll` the exact message.
+    #[test]
+    fn pointer_wake_names_the_notification_id_and_the_inbox() {
+        let wake = pointer_wake_payload("supervisor", Some(24535));
+        assert!(wake.contains("24535"), "{wake}");
+        assert!(wake.contains("see inbox"), "{wake}");
+        assert_eq!(wake.lines().count(), 1, "one line, not a second message");
+
+        // An id-less wake still points at the inbox rather than claiming an id.
+        let anonymous = pointer_wake_payload("supervisor", None);
+        assert!(anonymous.contains("see inbox"), "{anonymous}");
+        assert!(!anonymous.contains("message  "), "{anonymous}");
+    }
+
+    /// cas-cdf9: the PTY wake is registered against the REAL notification id.
+    /// It used to pass `None`, so `delivery_provenance::register` synthesised a
+    /// timestamp id and nothing downstream could tie the typed turn back to the
+    /// row it came from.
+    #[test]
+    fn pty_wake_provenance_carries_the_real_notification_id() {
+        let temp = tempfile::TempDir::new().expect("temp cas root");
+        let payload = prepare_pty_machine_delivery(
+            temp.path(),
+            "rapid-leopard-25",
+            SupervisorCli::Claude,
+            "supervisor",
+            &pointer_wake_payload("supervisor", Some(24535)),
+            Some(24535),
+        );
+
+        let provenance = crate::hooks::delivery_provenance::consume(
+            temp.path(),
+            "rapid-leopard-25",
+            &payload,
+        )
+        .expect("the wake must register provenance the hook can consume");
+        assert_eq!(
+            provenance.notification_id, 24535,
+            "a synthesised id cannot be traced back to the queued row"
+        );
     }
 
     /// cas-c73d (GH #177): the config dir the daemon resolves for a recipient

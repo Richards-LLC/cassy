@@ -4279,6 +4279,16 @@ impl CasService {
             .inner
             .get_agent_id()
             .unwrap_or_else(|_| "unknown".to_string());
+        // cas-d9a8: stamp the reset control row with the registry id of the
+        // caller CAS actually resolved. `source` above falls back to the string
+        // "unknown", which is not an identity, so the stamp is taken from a
+        // real agent row or omitted entirely.
+        let queue_origin = crate::store::open_agent_store(&self.inner.cas_root)
+            .ok()
+            .and_then(|store| store.get(&source).ok())
+            .map(|agent| cas_store::QueueOrigin::RegisteredAgent {
+                agent_id: agent.id,
+            });
 
         // Pre-flight every recipient BEFORE queueing anything: an unsupported
         // harness or an unlocatable transcript directory means Cassy could never
@@ -4356,6 +4366,7 @@ impl CasService {
                     // command can be typed, and two resets in a row must never
                     // be content-deduped into one.
                     true,
+                    queue_origin.as_ref(),
                 )
                 .map_err(|e| {
                     Self::error(

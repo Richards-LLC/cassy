@@ -205,6 +205,17 @@ pub struct QueuedPrompt {
     /// Claude Code inbox even in agent-teams mode. Default false = normal
     /// inbox/queue delivery (non-disruptive).
     pub urgent: bool,
+    /// Who CAS observed writing this row, as stamped at enqueue time
+    /// (cas-d9a8). `None` means the row carries no stamp at all — a legacy
+    /// row written before the columns existed, or a path that never went
+    /// through a stamping enqueue. It is deliberately NOT folded into
+    /// [`QueueOrigin::Unattributed`]: "nobody was authenticated" and "we never
+    /// looked" are different facts, and only the reader should decide they
+    /// deserve the same treatment.
+    ///
+    /// Never derived from [`Self::source`]. `source` is what the caller typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<QueueOrigin>,
 }
 
 /// A supervisor lifecycle wake relay that reached a terminal stage without
@@ -344,6 +355,36 @@ const PROMPT_QUEUE_ATTRIBUTION_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN attribution_json TEXT;
 "#;
 
+/// Server-stamped sender provenance (cas-d9a8).
+///
+/// `source` is caller-settable (`cas factory message --from …`, bridge
+/// POST /message), and `attribution_json` above is caller-SUPPLIED — both state
+/// what a sender claims. Neither can answer "who actually wrote this row",
+/// which is the only question a pane-wake decision may safely turn on: a wake
+/// is a PTY write into someone's terminal.
+///
+/// These two columns are written ONLY by CAS's own enqueue path, from an
+/// already-authenticated caller. No request field reaches them. A route that
+/// cannot attribute its caller leaves them NULL, and NULL never wakes, so the
+/// unattributable paths degrade to today's inbox-only behaviour instead of
+/// being trusted by default.
+///
+/// Nullable and additive on purpose: legacy rows carry NULL and are treated as
+/// unattributed. There is deliberately no backfill — inventing provenance for
+/// rows whose sender was never recorded is exactly the fiction this column
+/// exists to prevent.
+const PROMPT_QUEUE_ORIGIN_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN origin_agent_id TEXT;
+"#;
+
+/// Coarse class of the stamped origin (`registered_agent`, `daemon`,
+/// `unattributed`). Kept beside the id so the wake gate can reason about the
+/// class without a registry lookup on the hot path, while the id remains the
+/// authority for role resolution.
+const PROMPT_QUEUE_ORIGIN_KIND_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN origin_kind TEXT;
+"#;
+
 /// Indexes supporting two-lane `peek_for_targets` selection (cas-2bcb).
 /// Partial indexes keep the path bounded to pending rows only.
 const PROMPT_QUEUE_TWO_LANE_INDEXES: &str = r#"
@@ -390,6 +431,74 @@ CREATE INDEX IF NOT EXISTS idx_prompt_queue_ack_counterparty
     WHERE transport_delivered_at IS NOT NULL
       AND acked_at IS NULL;
 "#;
+
+/// Who actually wrote a queue row, as established by CAS rather than claimed
+/// by the sender (cas-d9a8).
+///
+/// Constructed only inside CAS's enqueue paths from an already-authenticated
+/// caller. It is deliberately NOT parsed from, defaulted from, or cross-checked
+/// against `source`, `attribution_json`, or any request body: the whole point
+/// is that it cannot be influenced by what a caller types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum QueueOrigin {
+    /// An agent whose identity was resolved from the authenticated session at
+    /// enqueue time. `agent_id` is the registry id, not a display name, so a
+    /// later role lookup cannot be spoofed by naming someone.
+    RegisteredAgent { agent_id: String },
+    /// CAS's own machinery (lifecycle push, daemon relays, orphan recovery).
+    Daemon,
+    /// A route that cannot attribute its caller — `cas factory message`, bridge
+    /// POST /message. Recorded explicitly rather than left implicit so an
+    /// operator reading a row can tell "nobody was authenticated" apart from
+    /// "this predates the column".
+    Unattributed,
+}
+
+impl QueueOrigin {
+    /// Column value for `origin_kind`.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::RegisteredAgent { .. } => "registered_agent",
+            Self::Daemon => "daemon",
+            Self::Unattributed => "unattributed",
+        }
+    }
+
+    /// Column value for `origin_agent_id`, when there is one.
+    pub fn agent_id(&self) -> Option<&str> {
+        match self {
+            Self::RegisteredAgent { agent_id } => Some(agent_id.as_str()),
+            Self::Daemon | Self::Unattributed => None,
+        }
+    }
+
+    /// Rebuild a stamp from its two stored columns.
+    ///
+    /// Returns `None` for an unstamped row (`origin_kind` NULL), and also for
+    /// a `registered_agent` row whose `origin_agent_id` is missing: a class
+    /// that claims an authenticated sender but cannot name one is corrupt, and
+    /// the safe reading of corrupt provenance is "no provenance", never
+    /// "close enough". An unrecognised kind — a row written by a newer CAS —
+    /// is likewise `None` rather than optimistically trusted.
+    pub fn from_columns(agent_id: Option<String>, kind: Option<&str>) -> Option<Self> {
+        match kind? {
+            "registered_agent" => agent_id.map(|agent_id| Self::RegisteredAgent { agent_id }),
+            "daemon" => Some(Self::Daemon),
+            "unattributed" => Some(Self::Unattributed),
+            _ => None,
+        }
+    }
+
+    /// Can a row from this origin be considered for a pane wake at all?
+    ///
+    /// This answers only "is the sender established", never "should this
+    /// particular row wake" — the envelope class is a separate, second factor
+    /// applied by the wake gate. Both must hold.
+    pub fn is_attributed(&self) -> bool {
+        matches!(self, Self::RegisteredAgent { .. } | Self::Daemon)
+    }
+}
 
 /// Result of a normal queue enqueue that may collapse a recent worker resend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1199,6 +1308,7 @@ pub trait PromptQueueStore: Send + Sync {
                 summary,
                 priority,
                 urgent,
+                None,
             )?
             .id())
     }
@@ -1208,6 +1318,12 @@ pub trait PromptQueueStore: Send + Sync {
     /// Legacy callers can continue using [`PromptQueueStore::enqueue_urgent`]
     /// when they only need the row ID. User-facing send paths should use this
     /// method so a reused ID is never presented as a fresh enqueue.
+    ///
+    /// `origin` is the server-stamped sender provenance (cas-d9a8). `None`
+    /// leaves the row unstamped, which is the correct value for any route that
+    /// cannot establish who its caller actually is — an unstamped row keeps
+    /// today's inbox-only behaviour. It must never be synthesised from
+    /// `source`, which is what the caller typed.
     fn enqueue_urgent_with_outcome(
         &self,
         source: &str,
@@ -1217,6 +1333,7 @@ pub trait PromptQueueStore: Send + Sync {
         summary: Option<&str>,
         priority: Option<NotificationPriority>,
         urgent: bool,
+        origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueOutcome>;
 
     /// Atomically enqueue a same-factory-session worker warning and a visible
@@ -1233,6 +1350,7 @@ pub trait PromptQueueStore: Send + Sync {
         summary: Option<&str>,
         priority: Option<NotificationPriority>,
         urgent: bool,
+        origin: Option<&QueueOrigin>,
     ) -> Result<WorkerPeerMessageEnqueue>;
 
     /// Queue a prompt with structured sender attribution persisted on the same
@@ -1248,6 +1366,7 @@ pub trait PromptQueueStore: Send + Sync {
         priority: Option<NotificationPriority>,
         urgent: bool,
         attribution: Option<&serde_json::Value>,
+        origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueOutcome> {
         let _ = attribution;
         self.enqueue_urgent_with_outcome(
@@ -1258,6 +1377,7 @@ pub trait PromptQueueStore: Send + Sync {
             summary,
             priority,
             urgent,
+            origin,
         )
     }
 
@@ -1274,6 +1394,7 @@ pub trait PromptQueueStore: Send + Sync {
         summary: Option<&str>,
         priority: Option<NotificationPriority>,
         dedupe_key: &str,
+        origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult>;
 
     /// Find direct messages that are still unread past their priority threshold.
@@ -1782,6 +1903,13 @@ impl SqlitePromptQueueStore {
         // Column 9 = urgent (cas-c931). Tolerate absence on legacy rows/tables.
         let urgent: bool = row.get::<_, i64>(9).map(|v| v != 0).unwrap_or(false);
         let factory_session: Option<String> = row.get(10).unwrap_or(None);
+        // Columns 11/12 = the server-stamped origin (cas-d9a8). Tolerate
+        // absence the same way `urgent` above does, so a SELECT that predates
+        // the columns still parses; an absent stamp reads as `None`, which the
+        // wake gate treats as "not established" rather than as permission.
+        let origin_agent_id: Option<String> = row.get(11).unwrap_or(None);
+        let origin_kind: Option<String> = row.get(12).unwrap_or(None);
+        let origin = QueueOrigin::from_columns(origin_agent_id, origin_kind.as_deref());
 
         Ok(QueuedPrompt {
             id: row.get(0)?,
@@ -1795,6 +1923,7 @@ impl SqlitePromptQueueStore {
             priority: NotificationPriority::from(priority),
             acked_at,
             urgent,
+            origin,
         })
     }
 
@@ -2299,6 +2428,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ("acked_at", PROMPT_QUEUE_ACKED_AT_MIGRATION),
                 ("urgent", PROMPT_QUEUE_URGENT_MIGRATION),
                 ("attribution_json", PROMPT_QUEUE_ATTRIBUTION_MIGRATION),
+                ("origin_agent_id", PROMPT_QUEUE_ORIGIN_MIGRATION),
+                ("origin_kind", PROMPT_QUEUE_ORIGIN_KIND_MIGRATION),
                 ("selected_at", PROMPT_QUEUE_SELECTED_AT_MIGRATION),
                 ("last_pending_reason", PROMPT_QUEUE_PENDING_REASON_MIGRATION),
                 ("last_pending_detail", PROMPT_QUEUE_PENDING_DETAIL_MIGRATION),
@@ -2436,6 +2567,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         summary: Option<&str>,
         priority: Option<NotificationPriority>,
         urgent: bool,
+        origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueOutcome> {
         self.enqueue_attributed_urgent_with_outcome(
             source,
@@ -2446,6 +2578,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             priority,
             urgent,
             None,
+            origin,
         )
     }
 
@@ -2460,6 +2593,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         summary: Option<&str>,
         priority: Option<NotificationPriority>,
         urgent: bool,
+        origin: Option<&QueueOrigin>,
     ) -> Result<WorkerPeerMessageEnqueue> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -2481,16 +2615,22 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
             let now_text = now.to_rfc3339();
             let priority: i32 = priority.unwrap_or(NotificationPriority::Normal).into();
+            // cas-d9a8: both rows carry the SAME stamp, because both were
+            // written by the same authenticated caller in one transaction. The
+            // supervisor copy is the row that can earn a wake, so getting this
+            // wrong in either direction is the bug.
+            let origin_kind = origin.map(QueueOrigin::kind_str);
+            let origin_agent_id = origin.and_then(QueueOrigin::agent_id);
             tx.execute(
-                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-                params![source, supervisor, supervisor_copy, now_text, factory_session, summary, priority],
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_agent_id, origin_kind) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                params![source, supervisor, supervisor_copy, now_text, factory_session, summary, priority, origin_agent_id, origin_kind],
             )?;
             let supervisor_copy_id = tx.last_insert_rowid();
             tx.execute(
-                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![source, recipient, prompt, now_text, factory_session, summary, priority, i64::from(urgent)],
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_agent_id, origin_kind) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![source, recipient, prompt, now_text, factory_session, summary, priority, i64::from(urgent), origin_agent_id, origin_kind],
             )?;
             let recipient_id = tx.last_insert_rowid();
             let _ = capture_message_event(&tx, source, supervisor);
@@ -2513,6 +2653,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         priority: Option<NotificationPriority>,
         urgent: bool,
         attribution: Option<&serde_json::Value>,
+        origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueOutcome> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -2557,9 +2698,14 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             }
 
             let attribution_json = attribution.map(serde_json::to_string).transpose()?;
+            // cas-d9a8: the stamp comes from the `origin` argument only. It is
+            // never read back off `source` or `attribution_json` — both of
+            // those are what the sender said about itself.
+            let origin_kind = origin.map(QueueOrigin::kind_str);
+            let origin_agent_id = origin.and_then(QueueOrigin::agent_id);
             tx.execute(
-                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent, attribution_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![source, target, prompt, now_text, factory_session, summary, prio, urgent_flag, attribution_json],
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent, attribution_json, origin_agent_id, origin_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![source, target, prompt, now_text, factory_session, summary, prio, urgent_flag, attribution_json, origin_agent_id, origin_kind],
             )?;
 
             let id = tx.last_insert_rowid();
@@ -2578,16 +2724,23 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         summary: Option<&str>,
         priority: Option<NotificationPriority>,
         dedupe_key: &str,
+        origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
             let prio: i32 = priority.unwrap_or(NotificationPriority::Normal).into();
 
+            // cas-d9a8: stamped on insert only. A replay that hits the
+            // IGNORE keeps the FIRST writer's stamp — a later caller must not
+            // be able to re-attribute a row that already exists by resending
+            // its dedupe key.
+            let origin_kind = origin.map(QueueOrigin::kind_str);
+            let origin_agent_id = origin.and_then(QueueOrigin::agent_id);
             let changed = conn.execute(
                 "INSERT OR IGNORE INTO prompt_queue
-                    (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                    (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key, origin_agent_id, origin_kind)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
                 params![
                     source,
                     target,
@@ -2596,7 +2749,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     factory_session,
                     summary,
                     prio,
-                    dedupe_key
+                    dedupe_key,
+                    origin_agent_id,
+                    origin_kind
                 ],
             )?;
 
@@ -2646,7 +2801,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let stale_cutoff = cutoff("stale TTL", PROMPT_QUEUE_STALE_TTL_SECS)?;
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare(
-            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
              FROM prompt_queue q
              WHERE q.target <> 'all_workers'
                AND q.source <> 'all_workers'
@@ -2777,7 +2932,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 factory_session
             {
                 (
-                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
              FROM prompt_queue
              WHERE processed_at IS NULL
                AND (
@@ -2795,7 +2950,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 )
             } else {
                 (
-                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
              FROM prompt_queue
              WHERE (target = ? OR target = 'all_workers') AND processed_at IS NULL
              ORDER BY priority ASC, id ASC
@@ -2973,7 +3128,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let (predicate, mut params) =
             Self::unseen_for_recipient_predicate(recipient, factory_session);
         let sql = format!(
-            "SELECT q.id, q.source, q.target, q.prompt, q.created_at, q.processed_at, q.summary, q.priority, q.acked_at, q.urgent, q.factory_session
+            "SELECT q.id, q.source, q.target, q.prompt, q.created_at, q.processed_at, q.summary, q.priority, q.acked_at, q.urgent, q.factory_session, q.origin_agent_id, q.origin_kind
              {predicate}
              ORDER BY q.id ASC
              LIMIT ?"
@@ -2996,7 +3151,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let now = Utc::now().to_rfc3339();
 
             let mut stmt = conn.prepare_cached(
-            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
              FROM prompt_queue
              WHERE processed_at IS NULL
              ORDER BY priority ASC, id ASC
@@ -3035,7 +3190,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
              FROM prompt_queue
              WHERE processed_at IS NULL
              ORDER BY priority ASC, id ASC
@@ -3078,7 +3233,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let Some(session) = factory_session else {
             let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
             let sql = format!(
-                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
                  FROM (
                      SELECT *, ROW_NUMBER() OVER (
                          PARTITION BY target, priority ORDER BY id ASC
@@ -3136,7 +3291,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // logged as failing, simply invisible. Reproduced at
         // `peek_for_targets_gives_active_target_a_slot_despite_another_targets_stuck_backlog`.
         let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
-        let session_sql = format!("SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+        let session_sql = format!("SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
              FROM (
                  SELECT *, ROW_NUMBER() OVER (
                      PARTITION BY target, priority ORDER BY id ASC
@@ -3169,7 +3324,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         } else {
             let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
             let legacy_sql = format!(
-                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
                  FROM (
                      SELECT *, ROW_NUMBER() OVER (
                          PARTITION BY target, priority ORDER BY id ASC
@@ -3468,7 +3623,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let cutoff = (Utc::now() - chrono::Duration::seconds(timeout_secs)).to_rfc3339();
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
              FROM prompt_queue
              WHERE processed_at IS NOT NULL
                AND processed_at < ?
@@ -4217,7 +4372,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
             let stale: Vec<QueuedPrompt> = {
                 let mut stmt = tx.prepare_cached(
-                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
                      FROM prompt_queue
                      WHERE processed_at IS NULL AND created_at < ?
                      ORDER BY id ASC",
@@ -4419,7 +4574,7 @@ impl SqlitePromptQueueStore {
                         format!(
                             "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
                                 q.processed_at, q.summary, q.priority, q.acked_at,
-                                q.urgent, q.factory_session
+                                q.urgent, q.factory_session, q.origin_agent_id, q.origin_kind
                          FROM prompt_queue q
                          LEFT JOIN prompt_queue_recipient_seen seen
                            ON seen.prompt_id = q.id AND seen.recipient = ?
@@ -4451,7 +4606,7 @@ impl SqlitePromptQueueStore {
                         format!(
                             "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
                                 q.processed_at, q.summary, q.priority, q.acked_at,
-                                q.urgent, q.factory_session
+                                q.urgent, q.factory_session, q.origin_agent_id, q.origin_kind
                          FROM prompt_queue q
                          LEFT JOIN prompt_queue_recipient_seen seen
                            ON seen.prompt_id = q.id AND seen.recipient = ?
@@ -4595,6 +4750,174 @@ mod tests {
         (temp, store)
     }
 
+    /// cas-d9a8: the stamped-origin columns exist and default to unattributed.
+    #[test]
+    fn origin_columns_are_added_and_default_to_null_for_every_existing_path() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("worker-1", "supervisor", "merge request").unwrap();
+        let conn = store.conn.lock().unwrap();
+        let (agent, kind): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT origin_agent_id, origin_kind FROM prompt_queue WHERE id = ?",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        // Every pre-existing enqueue path must leave the stamp empty. A column
+        // that quietly defaulted to something attributable would hand every
+        // legacy and unauthenticated row a wake it never earned.
+        assert_eq!(agent, None, "no enqueue path may invent an origin agent");
+        assert_eq!(kind, None, "no enqueue path may invent an origin kind");
+    }
+
+    /// The classification the wake gate will depend on, pinned before the gate
+    /// is re-keyed onto it (cas-d9a8).
+    #[test]
+    fn only_established_origins_are_attributed() {
+        assert!(
+            QueueOrigin::RegisteredAgent { agent_id: "agent-7".into() }.is_attributed(),
+            "an authenticated registered agent is the case this exists to allow"
+        );
+        assert!(QueueOrigin::Daemon.is_attributed());
+        assert!(
+            !QueueOrigin::Unattributed.is_attributed(),
+            "`cas factory message` and bridge POST cannot attribute a caller, so they must not wake"
+        );
+        assert_eq!(
+            QueueOrigin::RegisteredAgent { agent_id: "agent-7".into() }.agent_id(),
+            Some("agent-7"),
+            "role resolution must key off the registry id, never a display name"
+        );
+        assert_eq!(QueueOrigin::Daemon.agent_id(), None);
+        assert_eq!(QueueOrigin::Unattributed.kind_str(), "unattributed");
+    }
+
+    /// A stamp survives the round trip through SQLite and comes back on the
+    /// row the delivery path actually reads (cas-d9a8). Without this the wake
+    /// gate would be keyed on a value that is always `None` in production.
+    #[test]
+    fn a_stamped_row_returns_its_origin_to_the_delivery_path() {
+        let (_temp, store) = create_test_store();
+        let origin = QueueOrigin::RegisteredAgent {
+            agent_id: "cc-4242-abc".into(),
+        };
+        store
+            .enqueue_urgent_with_outcome(
+                "worker-1",
+                "supervisor",
+                "merge request",
+                None,
+                None,
+                None,
+                false,
+                Some(&origin),
+            )
+            .unwrap();
+        let rows = store.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].origin.as_ref(),
+            Some(&origin),
+            "the row the daemon reads must carry the stamp the enqueue wrote"
+        );
+
+        let daemon_id = store
+            .enqueue_idempotent(
+                "lifecycle-wake:9",
+                "supervisor",
+                "<task-lifecycle …>",
+                None,
+                None,
+                None,
+                "key-9",
+                Some(&QueueOrigin::Daemon),
+            )
+            .unwrap();
+        assert!(matches!(daemon_id, EnqueueIdempotentResult::Created(_)));
+        let rows = store.peek_all(10).unwrap();
+        let lifecycle = rows
+            .iter()
+            .find(|r| r.source == "lifecycle-wake:9")
+            .expect("lifecycle row");
+        assert_eq!(lifecycle.origin, Some(QueueOrigin::Daemon));
+    }
+
+    /// The routes that cannot identify their caller — bridge `POST /message`
+    /// and `cas factory message` — reach the store through [`enqueue`] and
+    /// [`enqueue_with_session`], neither of which accepts an origin at all
+    /// (cas-d9a8). This pins the consequence: no request field can put a stamp
+    /// on such a row, so it can never buy a PTY write.
+    #[test]
+    fn unattributable_routes_cannot_stamp_an_origin() {
+        let (_temp, store) = create_test_store();
+        // The exact calls made by `cas factory message --from <anything>` and
+        // by the bridge's `msg.from` default.
+        store.enqueue("supervisor", "supervisor", "forged").unwrap();
+        store
+            .enqueue_with_session("lifecycle-wake:1", "supervisor", "<task-lifecycle x>", "s1")
+            .unwrap();
+        let rows = store.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert_eq!(
+                row.origin, None,
+                "a caller-settable `source` ({}) must not produce a stamp",
+                row.source
+            );
+        }
+    }
+
+    /// A dedupe-key replay must not let a second caller re-attribute a row
+    /// that already exists (cas-d9a8).
+    #[test]
+    fn an_idempotent_replay_keeps_the_first_writers_stamp() {
+        let (_temp, store) = create_test_store();
+        store
+            .enqueue_idempotent(
+                "lifecycle-wake:1",
+                "supervisor",
+                "body",
+                None,
+                None,
+                None,
+                "dupe",
+                Some(&QueueOrigin::Daemon),
+            )
+            .unwrap();
+        let replay = store
+            .enqueue_idempotent(
+                "lifecycle-wake:1",
+                "supervisor",
+                "body",
+                None,
+                None,
+                None,
+                "dupe",
+                Some(&QueueOrigin::RegisteredAgent {
+                    agent_id: "attacker".into(),
+                }),
+            )
+            .unwrap();
+        assert!(matches!(replay, EnqueueIdempotentResult::AlreadyExists(_)));
+        let rows = store.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].origin, Some(QueueOrigin::Daemon));
+    }
+
+    /// Corrupt provenance reads as no provenance, never as "close enough"
+    /// (cas-d9a8).
+    #[test]
+    fn a_registered_agent_kind_without_an_id_is_not_an_origin() {
+        assert_eq!(QueueOrigin::from_columns(None, Some("registered_agent")), None);
+        assert_eq!(QueueOrigin::from_columns(Some("a".into()), None), None);
+        assert_eq!(QueueOrigin::from_columns(None, Some("from_the_future")), None);
+        assert_eq!(
+            QueueOrigin::from_columns(Some("a".into()), Some("daemon")),
+            Some(QueueOrigin::Daemon),
+            "a stray id must not stop a daemon row being recognised"
+        );
+    }
+
     fn register_bounce_sender(store: &SqlitePromptQueueStore, name: &str, session: &str) {
         let conn = store.conn.lock().unwrap();
         conn.execute_batch(crate::AGENT_SCHEMA).unwrap();
@@ -4628,6 +4951,7 @@ mod tests {
                 None,
                 false,
                 Some(&attribution),
+                None,
             )
             .unwrap()
             .id();
@@ -5908,6 +6232,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -7073,6 +7398,7 @@ mod tests {
                 None,
                 Some(NotificationPriority::High),
                 "delivery-stalled:prior-message",
+                None,
             )
             .unwrap()
         {
@@ -7667,6 +7993,7 @@ mod tests {
                 priority: NotificationPriority::from(priority),
                 acked_at: None,
                 urgent: priority == 0,
+                origin: None,
             }
         }
 
@@ -8639,6 +8966,7 @@ mod tests {
                 None,
                 None,
                 "lifecycle-outbox:9",
+                None,
             )
             .unwrap();
         assert_eq!(store.pending_count().unwrap(), 2);
@@ -8686,6 +9014,7 @@ mod tests {
                 Some("sum"),
                 None,
                 "lifecycle-outbox:1",
+                None,
             )
             .unwrap();
         let r2 = store
@@ -8697,6 +9026,7 @@ mod tests {
                 Some("sum"),
                 None,
                 "lifecycle-outbox:1",
+                None,
             )
             .unwrap();
         match (r1, r2) {

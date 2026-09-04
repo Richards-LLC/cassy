@@ -501,7 +501,15 @@ pub(crate) fn parse_worker_attention_envelope(prompt: &str) -> bool {
         && matches!(
             xml_attribute(tag, "kind"),
             Some(
-                "worker_idle" | "worker_stalled" | "worker_delivery_stalled" | "worker_unavailable"
+                "worker_idle"
+                    | "worker_stalled"
+                    | "worker_delivery_stalled"
+                    | "worker_unavailable"
+                    // cas-d9a8: CAS's own unread-backlog summary for the
+                    // supervisor. Same envelope, same producer (the daemon
+                    // relay), so it inherits the wake terms rather than
+                    // inventing new ones.
+                    | "supervisor_unread"
             )
         )
         && xml_attribute(tag, "worker").is_some_and(|value| !value.is_empty())
@@ -1777,6 +1785,19 @@ mod cas_3dcb_worker_died_relay_tests {
         ));
         assert!(is_supervisor_wake_envelope(
             "<worker-attention kind=\"worker_unavailable\" worker=\"calm-owl\" notification_id=\"42\">\nbody</worker-attention>"
+        ));
+        // cas-d9a8: the unread-backlog fail-safe. Blockers and verification
+        // handoffs stay inbox-only by design, so this summary is the only
+        // thing that reaches an idle supervisor about them — if it did not
+        // qualify here, the fail-safe would be as silent as the traffic it
+        // reports.
+        assert!(is_supervisor_wake_envelope(
+            "<worker-attention kind=\"supervisor_unread\" worker=\"calm-owl\" notification_id=\"42\">\nbody</worker-attention>"
+        ));
+        // An invented kind is still refused: the allowance is a fixed list,
+        // not "anything shaped like a worker-attention tag".
+        assert!(!is_supervisor_wake_envelope(
+            "<worker-attention kind=\"supervisor_please_wake\" worker=\"calm-owl\" notification_id=\"42\">\nbody</worker-attention>"
         ));
         assert!(is_supervisor_wake_envelope(
             "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-1\" old=\"in_progress\" \

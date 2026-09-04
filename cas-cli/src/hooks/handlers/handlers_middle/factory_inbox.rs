@@ -181,6 +181,7 @@ mod tests {
             priority: NotificationPriority::Normal,
             acked_at: None,
             urgent: false,
+            origin: None,
         }
     }
 

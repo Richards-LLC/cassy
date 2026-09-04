@@ -898,6 +898,7 @@ pub(crate) fn emit_failure(
             Some(&summary),
             Some(NotificationPriority::High),
             &key,
+            Some(&cas_store::QueueOrigin::Daemon),
         )
         .map_err(|e| format!("could not enqueue CI red-run relay: {e}"))?
     {

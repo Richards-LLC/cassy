@@ -179,6 +179,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         Some(&format!("merge queue ejected: {task_id}")),
         Some(NotificationPriority::High),
         &format!("merge-queue-ejection-outbox:{notification_id}"),
+        Some(&cas_store::QueueOrigin::Daemon),
     ).is_err() || prompt_queue.enqueue_idempotent(
         "merge-queue-ejection",
         worker,
@@ -187,6 +188,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         Some(&format!("merge queue ejected: {task_id}")),
         Some(NotificationPriority::High),
         &format!("merge-queue-ejection-worker:{key}"),
+        Some(&cas_store::QueueOrigin::Daemon),
     ).is_err() {
         return WorkerAttentionRelayOutcome::Pending;
     }
@@ -247,6 +249,50 @@ pub(super) fn enqueue_pr_lane_failure_relay(
         "pr_lane_failed",
         &failure.worker,
         Some(&failure.task_id),
+        None,
+        &detail,
+        &key,
+        Some(&key),
+    )
+}
+
+/// The fail-safe for supervisor traffic that is NOT wake-eligible (cas-d9a8).
+///
+/// A worker's blocker, verification handoff or plan carries no CAS-emitted
+/// envelope, so it stays inbox-only — waking on those would mean waking on a
+/// keyword, which is the class of check cas-d9a8 removed. But "inbox-only"
+/// became "discovered by polling", and on 2026-09-04 that hid a verification
+/// dispatch-id handoff that blocked a task close for hours.
+///
+/// So the messages themselves stay quiet and CAS says the COUNT out loud
+/// instead: one relay naming how many supervisor-addressed messages have gone
+/// unread past their delivery-stalled threshold, and who sent the oldest.
+///
+/// `oldest_id` is the dedupe key, which sets the cadence for free: the relay
+/// fires once per distinct backlog head. A supervisor who reads the oldest
+/// moves the head and gets told about what is still waiting; a supervisor who
+/// reads nothing is not told twice about the same message.
+pub(super) fn enqueue_supervisor_unread_relay(
+    cas_dir: &std::path::Path,
+    oldest_sender: &str,
+    oldest_id: i64,
+    unread: usize,
+) -> WorkerAttentionRelayOutcome {
+    let detail = if unread == 1 {
+        format!(
+            "1 message addressed to you has gone unread past its delivery threshold — message {oldest_id}, from {oldest_sender}. It was delivered; it does not wake this pane because it carries no merge-request or lifecycle envelope."
+        )
+    } else {
+        format!(
+            "{unread} messages addressed to you have gone unread past their delivery threshold. The oldest is message {oldest_id}, from {oldest_sender}. They were delivered; they do not wake this pane because they carry no merge-request or lifecycle envelope."
+        )
+    };
+    let key = format!("supervisor-unread:{oldest_id}");
+    enqueue_worker_attention_relay_detail_with_key(
+        cas_dir,
+        "supervisor_unread",
+        oldest_sender,
+        None,
         None,
         &detail,
         &key,
@@ -380,6 +426,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
         Some(&format!("{kind}: {worker}")),
         Some(NotificationPriority::High),
         &format!("worker-attention-outbox:{notification_id}"),
+        Some(&cas_store::QueueOrigin::Daemon),
     ) {
         tracing::error!(worker = %worker, kind, notification_id, %error, "worker attention relay prompt enqueue failed");
         return WorkerAttentionRelayOutcome::Pending;
@@ -480,6 +527,59 @@ mod worker_attention_tests {
                 && row.prompt.contains("limited-codex")
                 && row.prompt.contains("terminal unavailable state")
         }));
+    }
+
+    /// cas-d9a8: the fail-safe for supervisor traffic that is not wake-shaped.
+    /// A blocker or verification handoff stays inbox-only — waking on those
+    /// would mean waking on a keyword — so CAS reports the unread COUNT
+    /// instead, on the one channel that does reach an idle pane.
+    #[test]
+    fn the_supervisor_unread_relay_is_wake_shaped_and_fires_once_per_backlog_head() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "supervisor-unread-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "supervisor-unread-test");
+
+        let first = enqueue_supervisor_unread_relay(&cas_dir, "daring-marten-11", 24370, 3);
+        assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
+        // Same backlog head: no second alert. Repeating the same fact at the
+        // daemon's scan cadence would be the noise this is meant to replace.
+        let replay = enqueue_supervisor_unread_relay(&cas_dir, "daring-marten-11", 24370, 4);
+        assert!(matches!(
+            replay,
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        // The head moved — the supervisor read the oldest and something is
+        // still waiting. That is a new fact and is reported.
+        let moved = enqueue_supervisor_unread_relay(&cas_dir, "swift-fox", 24371, 2);
+        assert!(matches!(moved, WorkerAttentionRelayOutcome::Persisted { .. }));
+
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 2, "one relay per distinct backlog head");
+        for row in &rows {
+            assert_eq!(row.target, "supervisor");
+            // Must satisfy the real wake gate's Daemon class, or the fail-safe
+            // is as silent as the traffic it is reporting.
+            assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
+            assert!(
+                crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(
+                    &row.source
+                )
+            );
+            assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
+                &row.prompt
+            ));
+        }
+        assert!(
+            rows.iter().any(|row| row.prompt.contains("3 messages")
+                && row.prompt.contains("24370")
+                && row.prompt.contains("daring-marten-11")),
+            "the relay must name the count, the backlog head and its sender: {rows:?}"
+        );
     }
 
     #[test]

@@ -112,6 +112,11 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${GATE_FIXTURE_CARGO_LOG:?}"
+# cas-c0411: every gate child must see the raised `cas init` watchdog budget,
+# because the child that hit the 300s default was a test's `cas init`, several
+# processes below the gate.
+printf 'CAS_INIT_TIMEOUT_SECS=%s :: %s\n' "${CAS_INIT_TIMEOUT_SECS:-unset}" "$*" \
+  >>"${GATE_FIXTURE_ENV_LOG:-/dev/null}"
 if [[ "$*" == 'check --workspace --tests' && "${GATE_FIXTURE_CHECK_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'nextest run -p cas'* && "${GATE_FIXTURE_NEXTEST_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'test -p cas --doc' && "${GATE_FIXTURE_DOCTEST_FAIL:-}" == 1 ]]; then exit 1; fi
@@ -309,6 +314,56 @@ if grep -qF "scratch base: $override/base (from CAS_RELEASE_GATE_HOME_DIR)" <<<"
     ok 'an explicit CAS_RELEASE_GATE_HOME_DIR still wins over the default'
 else
     bad "explicit CAS_RELEASE_GATE_HOME_DIR was not honoured (output: $output)"
+fi
+
+# cas-c0411. The `cas init` watchdog budget the gate hands its children is the
+# fix for a release that failed on wall clock: a test's child `cas init` hit the
+# 300s default while the box was saturated, and the archive-mode row died with
+# it. The budget must reach the children — including the archive run, which
+# rebuilds its environment with `env -u COLUMNS HOME=... PATH=...` — and must be
+# named in the receipt so a reader can see which budget a release was gated on.
+run_gate_with_env_log() {
+    local repo="$1" env_log="$2"
+    shift 2
+    (cd "$repo" && \
+      env -u CAS_INIT_TIMEOUT_SECS "$@" \
+      GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+      GATE_FIXTURE_ENV_LOG="$env_log" \
+      CARGO="$repo/scripts/cargo-stub" \
+      RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
+      "$repo/scripts/release-gate.sh" 9.8.7)
+}
+
+env_log="$tmp/init-timeout.log"
+: >"$env_log"
+repo="$(new_fixture init-watchdog-budget)"
+output="$(run_gate_with_env_log "$repo" "$env_log" 2>&1 || true)"
+if grep -qF 'cas init watchdog for gate children: 900s (from default)' <<<"$output"; then
+    ok 'the receipt names the cas init watchdog budget the children ran with'
+else
+    bad "the receipt did not name the gate's cas init watchdog budget (output: $output)"
+fi
+if [[ -s "$env_log" ]] && ! grep -q 'CAS_INIT_TIMEOUT_SECS=unset' "$env_log"; then
+    ok 'every gate child inherits the raised cas init watchdog budget'
+else
+    bad "a gate child ran without the raised cas init budget (log: $(cat "$env_log"))"
+fi
+if grep -q '^CAS_INIT_TIMEOUT_SECS=900 :: nextest run --archive-file ' "$env_log"; then
+    ok "the archive-mode row's rebuilt environment keeps the raised budget"
+else
+    bad "the archive run lost the raised budget (log: $(cat "$env_log"))"
+fi
+
+# ...and an operator who wants a different budget still wins, named as such.
+env_log="$tmp/init-timeout-override.log"
+: >"$env_log"
+repo="$(new_fixture init-watchdog-override)"
+output="$(run_gate_with_env_log "$repo" "$env_log" CAS_INIT_TIMEOUT_SECS=1234 2>&1 || true)"
+if grep -qF 'cas init watchdog for gate children: 1234s (from CAS_INIT_TIMEOUT_SECS)' <<<"$output" \
+    && grep -q '^CAS_INIT_TIMEOUT_SECS=1234 :: ' "$env_log"; then
+    ok 'an explicit CAS_INIT_TIMEOUT_SECS overrides the gate default for its children'
+else
+    bad "an explicit CAS_INIT_TIMEOUT_SECS was not honoured (output: $output; log: $(cat "$env_log"))"
 fi
 
 # cas-c736. The gate must not accumulate scratch directories under its base.

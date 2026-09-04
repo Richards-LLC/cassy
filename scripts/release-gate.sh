@@ -102,6 +102,34 @@ else
     scratch_base_origin='default'
 fi
 readonly scratch_base scratch_base_origin
+
+# The gate IS the "slow CI environment" the `cas init` watchdog names.
+#
+# `cas init` aborts itself after CAS_INIT_TIMEOUT_SECS (default 300s) so a hang
+# cannot squat a CPU core (cas-bf06). Dozens of tests spawn `cas init`, so every
+# suite row here — nextest, doctests, archive-mode, snapshot-portability,
+# builtin-projections — has that child in its tree. During the v3.15.1 gate,
+# with three isolation re-runs compiling and six idle `cas serve` daemons
+# resident, one of those children reached 300s and aborted; the archive-mode row
+# failed on wall clock alone, and the same tree passed on the next attempt with
+# the box quiet (cas-c0411).
+#
+# Raised rather than disabled, and only for the gate's own children: a wedged
+# init still aborts here, just on a budget that suits a saturated machine. The
+# ordinary `cas init` an operator runs keeps its 300s. The value sits above
+# nextest's own per-test kill (slow-timeout 60s x terminate-after 10 = 600s), so
+# inside a suite row nextest remains the thing that reports a hang, with the
+# test's name attached.
+readonly gate_init_timeout_secs_default=900
+if [[ -n "${CAS_INIT_TIMEOUT_SECS:-}" ]]; then
+    init_timeout_origin='CAS_INIT_TIMEOUT_SECS'
+else
+    CAS_INIT_TIMEOUT_SECS="$gate_init_timeout_secs_default"
+    init_timeout_origin='default'
+fi
+export CAS_INIT_TIMEOUT_SECS
+readonly init_timeout_origin
+
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/cas-release-gate.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -502,6 +530,8 @@ printf '=== CAS RELEASE GATE RECEIPT ===\n'
 printf 'version: %s\n' "$version"
 printf 'repository: %s\n' "$repo_root"
 printf 'scratch base: %s (from %s)\n' "$scratch_base" "$scratch_base_origin"
+printf 'cas init watchdog for gate children: %ss (from %s)\n' \
+    "$CAS_INIT_TIMEOUT_SECS" "$init_timeout_origin"
 neutralize_ancestor_proxy_config
 
 run_check failure-log \

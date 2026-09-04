@@ -1166,6 +1166,104 @@ mod tests {
         assert_eq!(snap.worked_task_ids.len(), 1);
     }
 
+    /// cas-647c: `~/.cas/artifacts/cas-1bfb/fresh-proxy` is a copied CAS root
+    /// used as a proxy-health fixture — 10 tables, no `tasks`. It is not a
+    /// project store, so there is nothing to compare and nothing is wrong with
+    /// it. Peer enumeration must say "skipped", not "could NOT be read".
+    #[test]
+    fn a_peer_database_without_a_tasks_table_is_skipped_not_unreadable_cas_647c() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("cas.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE proxy_health (id TEXT PRIMARY KEY, checked_at TEXT NOT NULL);",
+            )
+            .unwrap();
+        }
+
+        assert!(
+            read_peer_snapshot(&db, "fresh-proxy").unwrap().is_none(),
+            "a database with no tasks table is not a peer project store"
+        );
+        // A genuinely broken file is still an error, not a silent skip.
+        let broken = dir.path().join("broken.db");
+        std::fs::write(&broken, b"this is not a database").unwrap();
+        assert!(read_peer_snapshot(&broken, "broken").is_err());
+    }
+
+    /// A real project store still reads through the peer entry point.
+    #[test]
+    fn read_peer_snapshot_reads_a_real_project_store_cas_647c() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("cas.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL);
+                 INSERT INTO tasks VALUES ('cas-1111', 'Real work', 'open');",
+            )
+            .unwrap();
+        }
+
+        let snapshot = read_peer_snapshot(&db, "accounting").unwrap().unwrap();
+        assert_eq!(snapshot.tasks.len(), 1);
+        assert_eq!(snapshot.project, "accounting");
+    }
+
+    /// The skipped set is coverage bookkeeping, never a defect: it must appear
+    /// in the summary and the JSON, and must not make the report unclean.
+    #[test]
+    fn skipped_peers_are_informational_and_never_the_warn_driver_cas_647c() {
+        let local = snapshot("cas-src", vec![task("cas-dddd", "Only here", false)], &[]);
+        let peers = vec![snapshot(
+            "accounting",
+            vec![task("cas-eeee", "Elsewhere", false)],
+            &[],
+        )];
+
+        let mut report = classify(&local, &peers);
+        report.peers_skipped = vec![SkippedPeer {
+            project: "fresh-proxy".to_string(),
+            db_path: PathBuf::from("/home/u/.cas/artifacts/cas-1bfb/fresh-proxy/.cas/cas.db"),
+            reason: NOT_A_PROJECT_STORE.to_string(),
+        }];
+
+        assert!(report.is_clean(), "a skipped non-store is not contamination");
+        assert!(report.peers_unreadable.is_empty());
+        let summary = report.summary();
+        assert!(
+            summary.contains("1 registry root(s) skipped (not a project store): fresh-proxy"),
+            "{summary}"
+        );
+        assert!(!summary.contains("could NOT be read"), "{summary}");
+        assert_eq!(
+            report.to_json()["peers_skipped"][0]["project"],
+            "fresh-proxy"
+        );
+    }
+
+    /// The zero-peer branch of the summary must carry the skipped clause too —
+    /// a host whose only other registry row is a scratch copy would otherwise
+    /// report "0 project DB(s) compared" with no explanation of why.
+    #[test]
+    fn a_scan_with_only_skipped_roots_says_why_nothing_was_compared_cas_647c() {
+        let local = snapshot("cas-src", vec![task("cas-dddd", "Only here", false)], &[]);
+        let mut report = classify(&local, &[]);
+        report.peers_skipped = vec![SkippedPeer {
+            project: "fresh-proxy".to_string(),
+            db_path: PathBuf::from("/home/u/.cas/artifacts/cas-1bfb/fresh-proxy/.cas/cas.db"),
+            reason: NOT_A_PROJECT_STORE.to_string(),
+        }];
+
+        let summary = report.summary();
+        assert!(summary.contains("0 project DB(s) compared"), "{summary}");
+        assert!(
+            summary.contains("1 registry root(s) skipped (not a project store)"),
+            "{summary}"
+        );
+    }
+
     /// The scan must never create or modify a database it inspects.
     #[test]
     fn read_snapshot_refuses_a_missing_database_instead_of_creating_one_cas_fc6fa() {

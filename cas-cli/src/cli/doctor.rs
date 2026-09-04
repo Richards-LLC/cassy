@@ -4696,6 +4696,52 @@ mod tests {
         );
     }
 
+    /// cas-647c: a registry root that is not a project store at all is
+    /// coverage bookkeeping, not a defect. It must be named in the row and it
+    /// must not turn the row amber — the operator has no failure to clear.
+    #[test]
+    fn foreign_rows_check_stays_ok_when_a_registry_root_is_only_skipped_cas_647c() {
+        use crate::cli::foreign_rows::{ForeignRowReport, SkippedPeer};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 10,
+            peers_compared: vec!["accounting".to_string()],
+            peers_skipped: vec![SkippedPeer {
+                project: "fresh-proxy".to_string(),
+                db_path: std::path::PathBuf::from(
+                    "/home/u/.cas/artifacts/cas-1bfb/fresh-proxy/.cas/cas.db",
+                ),
+                reason: crate::cli::foreign_rows::NOT_A_PROJECT_STORE.to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let check = foreign_rows_check(Ok(&report), None, 0);
+
+        assert!(
+            matches!(check.status, CheckStatus::Ok),
+            "skipped non-stores must not drive WARN: {}",
+            check.message
+        );
+        assert!(check.message.contains("fresh-proxy"), "{}", check.message);
+        assert!(
+            check.message.contains("not a project store"),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("could NOT be read"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cas known-repos forget"),
+            "the row must name the command that clears the row: {}",
+            check.message
+        );
+    }
+
     fn messages(checks: &[Check], name: &str) -> Vec<String> {
         checks
             .iter()

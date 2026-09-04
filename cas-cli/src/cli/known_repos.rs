@@ -259,6 +259,67 @@ mod tests {
         });
     }
 
+    /// cas-647c: the incident had no exit. `prune-missing` only removes rows
+    /// whose path is gone; the artifacts fixture still existed, so the
+    /// supervisor had to hand-write `DELETE FROM known_repos`. `forget` is that
+    /// missing verb: it removes the row and any binding that points at it,
+    /// prints a receipt, and never touches the files.
+    #[test]
+    fn forget_removes_a_live_registry_row_and_its_bindings_and_is_idempotent_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let fixture = home.join("fresh-proxy");
+            std::fs::create_dir_all(fixture.join(".git")).unwrap();
+            let keep = home.join("myproject");
+            std::fs::create_dir_all(&keep).unwrap();
+
+            let store = open_host_known_repo_store().unwrap();
+            store.upsert(&keep).unwrap();
+            store
+                .bind("project:fresh-proxy", &fixture, &fixture.join(".git"))
+                .unwrap();
+            assert_eq!(store.count().unwrap(), 2);
+
+            let report = forget(&fixture, false).unwrap();
+            assert_eq!(report.removed, 1);
+            assert_eq!(report.unbound, vec!["project:fresh-proxy".to_string()]);
+            assert_eq!(store.count().unwrap(), 1);
+            assert!(store.get_binding("project:fresh-proxy").unwrap().is_none());
+            assert!(fixture.exists(), "forget must never delete repository files");
+
+            // Idempotent: a second run is a no-op receipt, not an error.
+            assert_eq!(
+                forget(&fixture, false).unwrap(),
+                ForgetReport {
+                    removed: 0,
+                    unbound: Vec::new(),
+                }
+            );
+            assert_eq!(store.count().unwrap(), 1);
+        });
+    }
+
+    /// Forgetting the store you are standing in is almost always a mistake, so
+    /// it needs an explicit `--yes`.
+    #[test]
+    fn forget_refuses_the_current_project_root_without_yes_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            // TestEnvGuard pins CAS_ROOT to <home>/.cas, so <home> is the
+            // current project root.
+            let store = open_host_known_repo_store().unwrap();
+            store.upsert(home).unwrap();
+
+            let refusal = forget(home, false).unwrap_err().to_string();
+            assert!(refusal.contains("current project root"), "{refusal}");
+            assert!(refusal.contains("--yes"), "{refusal}");
+            assert_eq!(store.count().unwrap(), 1, "refusal must not mutate");
+
+            assert_eq!(forget(home, true).unwrap().removed, 1);
+            assert_eq!(store.count().unwrap(), 0);
+        });
+    }
+
     #[test]
     fn prune_missing_never_removes_or_rebinds_stale_selector_binding() {
         TestEnvGuard::run_with_temp_home(|home| {

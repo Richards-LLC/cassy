@@ -285,6 +285,51 @@ mod tests {
         });
     }
 
+    /// cas-647c: a factory task that copies a CAS root into
+    /// `~/.cas/artifacts/<task>/` leaves a `.cas/` behind, and a session JSON
+    /// pointing at it. Seeding must not adopt the copy as a host project — it
+    /// is a fixture, and every later host-wide sweep would treat it as live.
+    #[test]
+    fn seed_skips_disposable_artifact_and_scratch_roots_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let sessions_dir = home.join(".cas/sessions");
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            let real = home.join("real-repo");
+            let fixture = home.join(".cas/artifacts/cas-1bfb/fresh-proxy");
+            let sandbox = home.join(".cas/scratch/probe");
+            for root in [&real, &fixture, &sandbox] {
+                std::fs::create_dir_all(root.join(".cas")).unwrap();
+            }
+            for (name, root) in [
+                ("a.json", &real),
+                ("b.json", &fixture),
+                ("c.json", &sandbox),
+            ] {
+                std::fs::write(
+                    sessions_dir.join(name),
+                    serde_json::json!({ "project_dir": root.to_string_lossy() }).to_string(),
+                )
+                .unwrap();
+            }
+
+            let report = seed(false).unwrap();
+
+            assert_eq!(report.new.len(), 1, "only the real repo is a project");
+            assert!(report.new[0].ends_with("real-repo"));
+            assert_eq!(report.skipped_missing.len(), 0);
+            assert_eq!(report.skipped_disposable.len(), 2);
+            let named: Vec<String> = report
+                .skipped_disposable
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .collect();
+            assert!(named.iter().any(|p| p.contains("fresh-proxy")), "{named:?}");
+            assert!(named.iter().any(|p| p.contains("scratch")), "{named:?}");
+            assert_eq!(open_host_known_repo_store().unwrap().count().unwrap(), 1);
+        });
+    }
+
     #[test]
     fn seed_idempotent_second_run_has_no_new() {
         TestEnvGuard::run_with_temp_home(|home| {

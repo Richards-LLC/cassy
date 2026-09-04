@@ -324,6 +324,111 @@ mod tests {
         });
     }
 
+    /// cas-647c: the measured incident. A closed mecha-cassy task copied a CAS
+    /// root to `~/.cas/artifacts/cas-1bfb/fresh-proxy` as a proxy-health
+    /// fixture and ran `cas serve` inside it, which auto-registered the copy as
+    /// a host project. `cas doctor` then opened its 10-table database, found no
+    /// `tasks`, and warned about a project DB that "could NOT be read" — with
+    /// no command that cleared it, because the path existed so `prune-missing`
+    /// refused to touch it.
+    #[test]
+    fn registry_skips_roots_under_the_factory_artifacts_root_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let fixture = home.join(".cas/artifacts/cas-1bfb/fresh-proxy");
+            std::fs::create_dir_all(fixture.join(".cas")).unwrap();
+            let real = home.join("myproject");
+            std::fs::create_dir_all(&real).unwrap();
+
+            register_repo(&fixture);
+            register_repo_strict(&real).unwrap();
+
+            let paths: Vec<PathBuf> = open_host_known_repo_store()
+                .unwrap()
+                .list()
+                .unwrap()
+                .into_iter()
+                .map(|repo| repo.path)
+                .collect();
+            assert_eq!(paths, vec![real.canonicalize().unwrap()]);
+            assert!(matches!(
+                registry_skip(&fixture),
+                Some(RegistrySkip::Artifacts(_))
+            ));
+            assert!(registry_skip(&real).is_none());
+        });
+    }
+
+    /// The strict variant must not turn a disposable root into a hard error:
+    /// its callers are boot paths that would abort on `Err`. Skipping is a
+    /// success that registered nothing, and it stays idempotent.
+    #[test]
+    fn register_repo_strict_reports_the_skip_without_failing_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let scratch = home.join(".cas/scratch/fresh-proxy");
+            std::fs::create_dir_all(scratch.join(".cas")).unwrap();
+
+            register_repo_strict(&scratch).unwrap();
+            register_repo_strict(&scratch).unwrap();
+
+            assert_eq!(open_host_known_repo_store().unwrap().count().unwrap(), 0);
+            assert!(matches!(
+                registry_skip(&scratch),
+                Some(RegistrySkip::Scratch(_))
+            ));
+            assert!(registry_skip(&scratch).unwrap().reason().contains("scratch"));
+        });
+    }
+
+    /// A `[factory] artifacts_root` pointed somewhere other than the default
+    /// must be honoured — the skip follows configuration, not a hardcoded path.
+    #[test]
+    fn registry_skip_follows_a_configured_artifacts_root_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            let artifacts = home.join("durable-artifacts");
+            std::fs::create_dir_all(&artifacts).unwrap();
+            std::fs::write(
+                home.join(".cas/config.toml"),
+                format!("[factory]\nartifacts_root = {:?}\n", artifacts.display().to_string()),
+            )
+            .unwrap();
+            let fixture = artifacts.join("cas-1bfb/fresh-proxy");
+            std::fs::create_dir_all(&fixture).unwrap();
+
+            assert!(matches!(
+                registry_skip(&fixture),
+                Some(RegistrySkip::Artifacts(_))
+            ));
+            // The default location stays covered too, not replaced.
+            assert!(matches!(
+                registry_skip(&home.join(".cas/artifacts/cas-9999/copy")),
+                Some(RegistrySkip::Artifacts(_))
+            ));
+        });
+    }
+
+    /// Named disposable roots directly under `$TMPDIR` (the cas-cb5e temp-root
+    /// inventory names) are the third disposable class. An unrelated temp
+    /// directory — including the temp HOME every test runs under — is NOT one.
+    #[test]
+    fn registry_skip_names_cassy_temp_roots_but_not_arbitrary_temp_paths_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            let temp = std::env::temp_dir();
+            assert!(matches!(
+                registry_skip(&temp.join("cas-probe-comm-1234/root")),
+                Some(RegistrySkip::Temp(_))
+            ));
+            assert!(matches!(
+                registry_skip(&temp.join("custom-wt-abcd/erin")),
+                Some(RegistrySkip::Temp(_))
+            ));
+            // The temp HOME itself, and repos inside it, are ordinary projects.
+            assert!(registry_skip(home).is_none());
+            assert!(registry_skip(&home.join("myproject")).is_none());
+        });
+    }
+
     #[test]
     fn ensure_host_schema_records_migration_and_is_idempotent() {
         TestEnvGuard::run_with_temp_home(|home| {

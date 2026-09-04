@@ -3445,6 +3445,7 @@ async fn test_20ac_lifecycle_ack_actions_terminate_both_queue_lanes_without_repl
                 Some("worker died: duplicate-worker"),
                 Some(cas_store::NotificationPriority::Critical),
                 "worker-died-outbox:1",
+                None,
             )
             .expect("linked relay")
         {
@@ -3545,6 +3546,7 @@ async fn test_20ac_queue_ack_repairs_processed_durable_row_with_replay_pending()
             Some("worker died: duplicate-worker"),
             Some(cas_store::NotificationPriority::Critical),
             &format!("worker-died-outbox:{durable_id}"),
+            None,
         )
         .expect("linked relay")
     {

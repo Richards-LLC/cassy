@@ -375,6 +375,7 @@ pub(crate) fn queue_auto_unblock_worker_wake(
                     Some(&summary),
                     Some(cas_store::NotificationPriority::Normal),
                     &dedupe_key,
+                    Some(&cas_store::QueueOrigin::Daemon),
                 )
                 .map_err(|error| format!("auto-unblock worker wake enqueue failed: {error}"))?;
             let prompt_id = match result {
@@ -721,6 +722,7 @@ fn deliver_prompt_for_notification(
             Some(&summary),
             Some(kind.priority()),
             &dedupe,
+            Some(&cas_store::QueueOrigin::Daemon),
         )
         .map_err(|e| {
             reject(format!(
@@ -1493,6 +1495,7 @@ mod tests {
             Some("sum"),
             None,
             &lifecycle_prompt_dedupe_key(id),
+            None,
         )
         .unwrap();
         assert_eq!(pq.pending_count().unwrap(), 1);

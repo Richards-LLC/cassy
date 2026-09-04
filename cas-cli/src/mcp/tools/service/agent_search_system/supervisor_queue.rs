@@ -313,6 +313,7 @@ mod cas_20ac_ack_tests {
                 Some("worker died: lost"),
                 Some(NotificationPriority::Critical),
                 "worker-died-outbox:1",
+                None,
             )
             .expect("linked prompt")
         {
@@ -391,6 +392,7 @@ mod cas_20ac_ack_tests {
                 Some("worker_delivery_stalled: quiet-ibis"),
                 Some(NotificationPriority::High),
                 &format!("worker-attention-outbox:{durable_id}"),
+                None,
             )
             .expect("linked prompt")
         {
@@ -457,6 +459,7 @@ mod cas_20ac_ack_tests {
                     Some(&format!("{kind}: quiet-ibis")),
                     Some(NotificationPriority::High),
                     &format!("worker-attention-outbox:{durable_id}"),
+                    None,
                 )
                 .expect("linked prompt")
             {

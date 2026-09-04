@@ -394,6 +394,7 @@ fn deliver_worker_died_notice(
         Some(&display),
         Some(NotificationPriority::Critical),
         &format!("worker-died-outbox:{notification_id}"),
+        Some(&cas_store::QueueOrigin::Daemon),
     ) {
         tracing::error!(
             target: "cas::coordination",
@@ -1089,6 +1090,7 @@ mod cas_3dcb_death_relay_tests {
                     Some("worker died: logical-worker"),
                     Some(NotificationPriority::Critical),
                     &format!("worker-died-outbox:{notification_id}"),
+                    None,
                 )
                 .expect("prompt relay");
         }

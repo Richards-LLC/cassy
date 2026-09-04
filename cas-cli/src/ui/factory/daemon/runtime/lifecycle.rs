@@ -179,6 +179,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         Some(&format!("merge queue ejected: {task_id}")),
         Some(NotificationPriority::High),
         &format!("merge-queue-ejection-outbox:{notification_id}"),
+        Some(&cas_store::QueueOrigin::Daemon),
     ).is_err() || prompt_queue.enqueue_idempotent(
         "merge-queue-ejection",
         worker,
@@ -187,6 +188,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         Some(&format!("merge queue ejected: {task_id}")),
         Some(NotificationPriority::High),
         &format!("merge-queue-ejection-worker:{key}"),
+        Some(&cas_store::QueueOrigin::Daemon),
     ).is_err() {
         return WorkerAttentionRelayOutcome::Pending;
     }
@@ -380,6 +382,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
         Some(&format!("{kind}: {worker}")),
         Some(NotificationPriority::High),
         &format!("worker-attention-outbox:{notification_id}"),
+        Some(&cas_store::QueueOrigin::Daemon),
     ) {
         tracing::error!(worker = %worker, kind, notification_id, %error, "worker attention relay prompt enqueue failed");
         return WorkerAttentionRelayOutcome::Pending;

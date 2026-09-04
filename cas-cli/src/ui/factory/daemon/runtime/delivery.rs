@@ -514,6 +514,7 @@ pub(super) fn enqueue_commander_message(
         priority,
         urgent,
         Some(&attribution_json),
+        None,
     )?)
 }
 

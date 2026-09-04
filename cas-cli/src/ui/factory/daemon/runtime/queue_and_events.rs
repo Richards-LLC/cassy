@@ -741,6 +741,7 @@ fn enqueue_preassign_failure_lifecycle_relay(
         Some(&format!("Worker spawn preassign failed: {worker_name}")),
         Some(crate::store::NotificationPriority::High),
         &format!("spawn-preassign-failed:{request}:{worker_name}:{task_id}"),
+        Some(&cas_store::QueueOrigin::Daemon),
     )?;
     let id = match result {
         cas_store::EnqueueIdempotentResult::Created(id)
@@ -3329,6 +3330,7 @@ impl FactoryDaemon {
                         Some(summary),
                         Some(cas_store::NotificationPriority::High),
                         false,
+                        Some(&cas_store::QueueOrigin::Daemon),
                     ) {
                         Ok(_) => {
                             super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
@@ -7836,6 +7838,7 @@ mod tests {
                 Some("checkpoint request"),
                 None,
                 false,
+                None,
             )
             .unwrap()
             .id();

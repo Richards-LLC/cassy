@@ -915,10 +915,10 @@ fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
     // Generate the current project-level settings and CLAUDE.md block in an
     // isolated project. Keeping this behavioral avoids duplicating the large
     // hook JSON and the managed block's prose in the drift test itself.
-    // `cas init` registers this project fixture; keep its root outside the
-    // system temp roots that discovery intentionally treats as disposable.
-    let fixture = TempDir::new_in(env!("CARGO_MANIFEST_DIR"))
-        .expect("temporary projection fixture");
+    // `cas init` registers this project fixture; resolve its parent at runtime
+    // because archive-mode tests must not depend on the source checkout path.
+    let fixture_parent = std::env::current_dir().expect("test current directory");
+    let fixture = TempDir::new_in(fixture_parent).expect("temporary projection fixture");
     // Keep the project beneath its isolated HOME so ancestor-based managed
     // document detection stops at the fixture HOME before reaching this
     // checkout's own CLAUDE.md.

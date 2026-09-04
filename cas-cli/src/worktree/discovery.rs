@@ -277,7 +277,8 @@ mod tests {
             // Seed source: a session JSON pointing at a real repo and a fake one.
             let sessions_dir = home.join(".cas/sessions");
             std::fs::create_dir_all(&sessions_dir).unwrap();
-            let fixtures = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let real = fixtures.path().join("real-repo");
             std::fs::create_dir_all(real.join(".cas")).unwrap();
             std::fs::write(
@@ -315,7 +316,8 @@ mod tests {
             ensure_host_schema().unwrap();
             let sessions_dir = home.join(".cas/sessions");
             std::fs::create_dir_all(&sessions_dir).unwrap();
-            let fixtures = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let real = fixtures.path().join("real-repo");
             let fixture = home.join(".cas/artifacts/cas-1bfb/fresh-proxy");
             let sandbox = home.join(".cas/scratch/probe");
@@ -362,7 +364,8 @@ mod tests {
             ensure_host_schema().unwrap();
             let sessions_dir = home.join(".cas/sessions");
             std::fs::create_dir_all(&sessions_dir).unwrap();
-            let fixtures = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let repo = fixtures.path().join("repo");
             std::fs::create_dir_all(repo.join(".cas")).unwrap();
             std::fs::write(

@@ -488,7 +488,8 @@ mod tests {
     #[test]
     fn register_repo_strict_creates_host_dir_and_inserts() {
         TestEnvGuard::run_with_temp_home(|home| {
-            let external = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let external =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let repo = external.path().join("myproject");
             std::fs::create_dir_all(&repo).unwrap();
 
@@ -509,7 +510,8 @@ mod tests {
         // Pre-schema: register_repo must NOT panic and must NOT abort;
         // the warn-and-swallow contract is what the hot boot path depends on.
         TestEnvGuard::run_with_temp_home(|_| {
-            let external = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let external =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let repo = external.path().join("pre-init-repo");
             std::fs::create_dir_all(&repo).unwrap();
             // Schema intentionally not installed.
@@ -554,7 +556,8 @@ mod tests {
             ensure_host_schema().unwrap();
             let fixture = home.join(".cas/artifacts/cas-1bfb/fresh-proxy");
             std::fs::create_dir_all(fixture.join(".cas")).unwrap();
-            let external = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let external =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let real = external.path().join("myproject");
             std::fs::create_dir_all(&real).unwrap();
 

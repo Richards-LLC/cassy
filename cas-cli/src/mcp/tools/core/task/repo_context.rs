@@ -1083,7 +1083,8 @@ mod tests {
     fn bounded_registry_fails_closed_before_scanning_too_many_host_repos() {
         TestEnvGuard::run_with_temp_home(|_home| {
             crate::store::known_repos::ensure_host_schema().unwrap();
-            let fixtures = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             for index in 0..3 {
                 let repo = fixtures.path().join(format!("repo-{index}"));
                 std::fs::create_dir(&repo).unwrap();
@@ -1247,7 +1248,8 @@ mod tests {
     fn explicit_target_is_normalized_registered_and_path_free_when_serialized() {
         TestEnvGuard::run_with_temp_home(|home| {
             crate::store::known_repos::ensure_host_schema().unwrap();
-            let fixtures = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let repo = fixtures.path().join("checkout");
             std::fs::create_dir(&repo).unwrap();
             git(&repo, &["init", "-q", "-b", "main"]);
@@ -1297,7 +1299,8 @@ mod tests {
     fn declared_repo_b_resolves_from_repo_a_spawn_context() {
         TestEnvGuard::run_with_temp_home(|_home| {
             crate::store::known_repos::ensure_host_schema().unwrap();
-            let fixtures = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let repo_a = fixtures.path().join("spawn-a");
             let repo_b = fixtures.path().join("work-b");
             for (repo, remote) in [
@@ -1326,7 +1329,7 @@ mod tests {
     fn duplicate_selector_binding_survives_restart_and_never_falls_back() {
         let mut guard = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
-        let fixtures = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let fixtures = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
         let repo_a = fixtures.path().join("clone-a");
         let repo_b = fixtures.path().join("clone-b");
         for repo in [&repo_a, &repo_b] {
@@ -1839,7 +1842,8 @@ mod tests {
 
         TestEnvGuard::run_with_temp_home(|_home| {
             crate::store::known_repos::ensure_host_schema().unwrap();
-            let fixtures = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let repo_a = fixtures.path().join("spawn-a");
             let repo_b = fixtures.path().join("work-b");
             for (repo, remote) in [

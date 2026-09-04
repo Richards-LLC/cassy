@@ -1493,3 +1493,94 @@ fn writer_lock_budget_retries_contention_once_per_run_and_passes_other_errors_th
     assert!(other.is_err());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+/// cas-8a03 (review follow-up): the whole retirement chain under a foreign
+/// `BEGIN IMMEDIATE` held past a full busy_timeout window — the queue retire,
+/// the code-store deletes and the scan receipt — must wait and land, with no
+/// file failure recorded for a file that no longer exists.
+///
+/// Scope note: this guards the chain end to end, but it is not the pin for the
+/// code-store statements specifically. The queue retire runs first and waits out
+/// the holder, so by the time `delete_symbols_in_file` / `delete_file` execute
+/// the lock is usually already free. The deterministic pin for those two
+/// statements is `sqlite_code_store::tests::
+/// code_store_writes_wait_out_a_foreign_writer_past_one_busy_timeout_window`,
+/// which fails without the bounded retry.
+#[test]
+fn retiring_a_deleted_file_waits_out_a_foreign_writer_instead_of_failing() {
+    use crate::daemon::indexing::reconcile_code_tree;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("busy-repo");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+    std::fs::create_dir_all(repo.join(".git")).expect(".git dir");
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("cas root");
+    let source = repo.join("src/old.rs");
+    std::fs::write(&source, "pub fn retired_symbol() -> i64 { 1 }\n").expect("write source");
+
+    reconcile_code_tree(
+        std::slice::from_ref(&source),
+        std::slice::from_ref(&repo),
+        &cas_root,
+        false,
+    )
+    .expect("initial index");
+    std::fs::remove_file(&source).expect("delete the file while nothing is watching");
+
+    // Hold the pooled connection so the shortened window survives, and shorten
+    // it so "outlives one busy_timeout window" costs 300ms, not 5s.
+    let db_path = cas_root.join("cas.db");
+    let shared = cas_store::shared_db::shared_connection(&db_path).expect("shared connection");
+    shared
+        .lock()
+        .expect("shared connection lock")
+        .busy_timeout(Duration::from_millis(50))
+        .expect("shorten busy timeout");
+
+    let holder_path = db_path.clone();
+    let (holding, held) = mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(&holder_path).expect("foreign connection");
+        conn.busy_timeout(Duration::from_millis(50))
+            .expect("timeout");
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .expect("take the write lock");
+        conn.execute(
+            "INSERT OR REPLACE INTO code_vector_queue
+                 (symbol_id, content_hash, status, last_error, updated_at)
+             VALUES ('foreign-row', 'h', 'pending', NULL, '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("foreign write");
+        holding.send(()).expect("signal");
+        std::thread::sleep(Duration::from_millis(300));
+        conn.execute_batch("COMMIT")
+            .expect("release the write lock");
+    });
+
+    held.recv().expect("foreign writer holding");
+    let result = reconcile_code_tree(&[], std::slice::from_ref(&repo), &cas_root, false)
+        .expect("reconcile under contention");
+    blocker.join().expect("blocker thread");
+
+    assert_eq!(result.files_deleted, 1, "the deleted file was not retired");
+    assert!(
+        result.errors.is_empty(),
+        "contention was recorded as a file failure: {:?}",
+        result.errors
+    );
+    let scan = cas_store::SqliteCodeVectorStore::open(&cas_root)
+        .expect("vector state")
+        .index_state("busy-repo")
+        .expect("scan receipt")
+        .expect("recorded scan receipt");
+    assert_eq!(
+        scan.failed_files, 0,
+        "a waited-out lock must not count as a failure"
+    );
+    assert_eq!(scan.last_error, None);
+    drop(shared);
+}

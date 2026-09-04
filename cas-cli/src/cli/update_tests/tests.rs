@@ -641,8 +641,8 @@ fn reported_version_is_the_semver_not_the_build_date() {
     assert_eq!(parse_reported_version("cas 3.15.5\n").as_deref(), Some("3.15.5"));
     assert_eq!(parse_reported_version("v3.15.5").as_deref(), Some("3.15.5"));
     assert_eq!(
-        parse_reported_version("cas 3.16.0-rc.1 (a94b6ac 2026-09-04)").as_deref(),
-        Some("3.16.0-rc.1")
+        parse_reported_version("cas 9.99.0-rc.1 (a94b6ac 2026-09-04)").as_deref(),
+        Some("9.99.0-rc.1")
     );
 
     // Nothing that is a version means we cannot vouch for the child.

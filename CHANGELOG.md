@@ -7,6 +7,37 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.15.8] - 2026-09-04
+
+### Fixed
+- `cas update` refreshed every local project in one process but resolved the
+  cloud identity once, from the directory the command was launched in, so all
+  projects pushed to and pulled from that one project's cloud scope. Each
+  project now syncs strictly as itself: the identity is resolved from the
+  project root being synced, and a project whose pinned identity names a
+  different repository than its git remote is refused instead of silently
+  sent to the wrong scope. Bare slug pins (a project pinned as `cas-src` in a
+  repository named `cassy`) remain authoritative.
+- A team pull no longer writes another project's task rows into the local
+  database. Rows whose origin names a foreign project, and rows with no
+  ownership evidence at all, are parked; a row with no recorded origin takes
+  only the server-attested owner, never the requesting scope.
+- `cas cloud purge-foreign` runs from a fresh session again: session-start
+  memory refreshes no longer count as unpushed content, and access-only memory
+  updates no longer queue a cloud write at all. The purge also clears every
+  team-pull watermark so the next pull re-evaluates from a full snapshot.
+
+### Added
+- `cas doctor` reports a new `cloud identity metadata` check that names any
+  team-pull watermark, team registration, or knowledge-push identity that
+  belongs to another project, with the exact command to repair it. Retained
+  id-collision rows now print a title-confirmed operator path instead of a
+  bare warning.
+- Slack release notes follow a readable-at-a-glance format: plain language on
+  the user side, one bold-labelled bullet per shipped change, Slack mrkdwn
+  only, and a preflight lint in the `mecha-cassy` skill that refuses to post
+  markdown-shaped text.
+
 ## [3.15.7] - 2026-09-04
 
 ### Added

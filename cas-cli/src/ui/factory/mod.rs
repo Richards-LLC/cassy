@@ -85,6 +85,18 @@ pub(crate) use app::{
 pub(crate) fn preferred_epic_id_from_session_metadata() -> Option<String> {
     app::preferred_epic_focus_from_session_metadata().epic_id
 }
+
+/// The same resolution for a NAMED session rather than this process's own
+/// (cas-5087).
+///
+/// Session metadata lives in one shared `~/.cas/sessions/` directory, so a
+/// supervisor can read what another live supervisor on this clone declared it
+/// is running. That is the whole point: `worker_status` is read before a gate,
+/// and "who else is here" is only half the answer without "and what are they
+/// in the middle of".
+pub(crate) fn preferred_epic_id_from_session_metadata_named(session: &str) -> Option<String> {
+    app::preferred_epic_focus_from_session_metadata_named(session).epic_id
+}
 // cas-bd9d: the parity conformance gate drives these launch intro-prompt paths.
 pub use app::{FactoryApp, FactoryConfig};
 #[cfg(test)]

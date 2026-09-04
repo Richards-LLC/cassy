@@ -16,7 +16,6 @@
 //! - mcp_execute: Execute tool calls across connected upstream MCP servers
 
 use rmcp::handler::server::wrapper::Parameters;
-#[cfg(feature = "mcp-proxy")]
 use rmcp::model::Content;
 use rmcp::model::{CallToolResult, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
@@ -176,6 +175,22 @@ impl CasService {
     #[allow(dead_code)]
     fn success(text: impl Into<String>) -> CallToolResult {
         CasCore::success(text)
+    }
+
+    /// Append an advisory line to an already-successful result (cas-15f2).
+    ///
+    /// Used for a parameter that is accepted but has no effect: the caller
+    /// should learn that, without the call failing. An error result is passed
+    /// through untouched — a notice must never mask a real failure.
+    fn append_notice(
+        result: Result<CallToolResult, McpError>,
+        notice: &str,
+    ) -> Result<CallToolResult, McpError> {
+        let Ok(mut ok) = result else {
+            return result;
+        };
+        ok.content.push(Content::text(format!("\n\n{notice}")));
+        Ok(ok)
     }
 
     fn error(code: ErrorCode, message: impl Into<String>) -> McpError {
@@ -567,6 +582,18 @@ impl CasService {
                     } else {
                         req.to_agent_request(&action)
                     };
+                    // cas-15f2: `cross_session` is a reminder parameter.
+                    // `AgentRequest` has no such field, so serde dropped it
+                    // silently here and a supervisor who set it reasonably
+                    // believed it had asked for cross-session delivery. Since
+                    // cas-15f2 every message routes by the recipient's session
+                    // unconditionally, so the flag is redundant rather than
+                    // wrong — warn, do not reject, so existing callers keep
+                    // working.
+                    let cross_session_notice = matches!(
+                        action.as_str(),
+                        "message" | "interrupt"
+                    ) && req.cross_session.unwrap_or(false);
                     match action.as_str() {
                         "register" => this.agent_register(agent_req).await,
                         "unregister" => this.agent_unregister(agent_req).await,
@@ -583,7 +610,20 @@ impl CasService {
                         "queue_peek" => this.queue_peek(agent_req).await,
                         "queue_ack" => this.queue_ack(agent_req).await,
                         "inbox_poll" => this.inbox_poll(agent_req).await,
-                        "message" | "interrupt" => this.message_send(agent_req).await,
+                        "message" | "interrupt" => {
+                            let result = this.message_send(agent_req).await;
+                            if cross_session_notice {
+                                Self::append_notice(
+                                    result,
+                                    "Note: `cross_session` is ignored on action=message — it is a \
+                                     reminder-scoped parameter. Messages are routed by the \
+                                     recipient's registered factory session automatically, so no \
+                                     flag is needed to reach an agent in another session.",
+                                )
+                            } else {
+                                result
+                            }
+                        }
                         "message_ack" => this.message_ack(agent_req).await,
                         "message_status" => this.message_status_query(agent_req).await,
                         _ => unreachable!(),

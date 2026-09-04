@@ -1695,6 +1695,50 @@ impl FactoryDaemon {
             }
         };
 
+        // cas-d9a8: the same scan already knows which supervisor-addressed
+        // messages have gone unread past their threshold. Bouncing to the
+        // sender tells the WORKER; nobody was telling the supervisor, which is
+        // how a verification dispatch-id handoff sat unread while the task it
+        // was blocking stayed open. `delivery_stalled_candidates` is ordered
+        // oldest-first, so the head of this list is the backlog head.
+        let supervisor_name = self.app.supervisor_name().to_string();
+        let unread_for_supervisor: Vec<&cas_store::QueuedPrompt> = candidates
+            .iter()
+            .filter(|queued| {
+                queued.target.eq_ignore_ascii_case(&supervisor_name)
+                    // Wake-eligible relays are excluded, and this is load-
+                    // bearing rather than tidiness: the summary this emits IS
+                    // one of them, so counting them would let an unread
+                    // summary become the backlog head and mint a fresh summary
+                    // about itself, forever. They also need no help — a
+                    // lifecycle row is held pending until it actually wakes
+                    // the pane (cas-f02b).
+                    && !crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(
+                        &queued.source,
+                    )
+            })
+            .collect();
+        if let Some(oldest) = unread_for_supervisor.iter().min_by_key(|queued| queued.id) {
+            let outcome = super::lifecycle::enqueue_supervisor_unread_relay(
+                self.app.cas_dir(),
+                &oldest.source,
+                oldest.id,
+                unread_for_supervisor.len(),
+            );
+            if let super::lifecycle::WorkerAttentionRelayOutcome::Persisted { notification_id } =
+                outcome
+            {
+                tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "supervisor_unread_backlog",
+                    notification_id,
+                    unread = unread_for_supervisor.len(),
+                    oldest_message_id = oldest.id,
+                    "cas-d9a8: supervisor has unread delivered messages that do not wake the pane"
+                );
+            }
+        }
+
         for queued in candidates {
             let report = match queue.message_delivery_report(queued.id) {
                 Ok(report) => report,

@@ -14,6 +14,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   said so was delivered silently. Only merge requests gain this — ordinary
   status chatter still waits for the supervisor's next turn, so nothing types
   over work in progress.
+- A supervisor whose messages have gone unread past their delivery window is now
+  told how many are waiting and who sent the oldest, instead of finding out by
+  checking. Blockers, verification handoffs and status replies still arrive
+  quietly, as before — what changed is that the backlog itself is announced once,
+  and again only when a different message becomes the oldest one waiting.
 
 ### Changed
 - Whether a message may interrupt a supervisor now depends on who actually sent

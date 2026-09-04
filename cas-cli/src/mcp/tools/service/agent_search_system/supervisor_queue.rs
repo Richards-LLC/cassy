@@ -36,7 +36,11 @@ pub(crate) fn acknowledge_linked_lifecycle_notification(
         // this bridge does not recognise them, `message_ack notification_id`
         // acknowledges only the durable row and leaves the linked prompt
         // relay visible in every later worker_status response.
-        "worker_idle" | "worker_stalled" | "worker_delivery_stalled" | "worker_unavailable" => {
+        "worker_idle"
+        | "worker_stalled"
+        | "worker_delivery_stalled"
+        | "worker_unavailable"
+        | "supervisor_unread" => {
             format!("worker-attention-outbox:{notification_id}")
         }
         _ => return Ok(None),

@@ -295,6 +295,86 @@ fn running_hub_satisfies_request(
     true
 }
 
+/// What the caller intends to do once the hub is stopped.
+///
+/// cas-bf90. `stop_with_output` serves two very different callers. A plain
+/// `cas hub stop` demands the machine actually end up without a hub, so a live
+/// hub appearing mid-wait is a reason to keep waiting, never a success. A
+/// stop-to-relaunch (`hub restart`, or `hub start` when flags differ) only
+/// wants "a hub with these flags is running" — and a concurrent command may
+/// have produced exactly that while we waited. Passing the intent explicitly
+/// keeps those two meanings apart instead of overloading one wait.
+struct RelaunchIntent<'a> {
+    args: &'a HubServeArgs,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+}
+
+/// How a stop resolved.
+enum StopOutcome {
+    /// The hub is gone and the machine is quiescent.
+    Stopped,
+    /// A concurrent command already produced the hub the caller was going to
+    /// relaunch. Only reachable with a [`RelaunchIntent`].
+    ///
+    /// The caller MUST return success directly rather than continuing into its
+    /// relaunch: the teardown steps after the wait (`remove_process_record`,
+    /// cgroup kill, Tailscale disable) would otherwise dismantle a healthy hub
+    /// this command does not own.
+    AlreadySatisfied(Box<HubProcessRecord>),
+}
+
+/// Wait for the machine to go quiescent, unless the relaunch is already done.
+///
+/// `settle_pid` is the hub we just signalled: quiescence additionally requires
+/// that process to be gone. `stale_pid` is never accepted as satisfying — the
+/// hub we are trying to replace must not be mistaken for the replacement.
+fn wait_for_stop_or_satisfying_hub(
+    paths: &HubRuntimePaths,
+    settle_pid: Option<u32>,
+    stale_pid: Option<u32>,
+    timeout: Duration,
+    relaunch: Option<&RelaunchIntent<'_>>,
+) -> Result<Option<HubProcessRecord>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let lock = paths.try_acquire_instance_lock()?;
+        let quiescent = lock.is_some()
+            && settle_pid.is_none_or(|pid| !process_is_running(pid));
+        drop(lock);
+        if quiescent {
+            return Ok(None);
+        }
+        if let Some(intent) = relaunch
+            && let Ok(record) = paths.read_process_record()
+            && stale_pid != Some(record.pid)
+            && running_hub_satisfies_request(
+                &record,
+                intent.args,
+                intent.tailscale_serve,
+                intent.tailscale_port,
+                env!("CARGO_PKG_VERSION"),
+            )
+            && record_is_live(&record)
+        {
+            return Ok(Some(record));
+        }
+        if Instant::now() >= deadline {
+            return match settle_pid {
+                Some(pid) => anyhow::bail!(
+                    "cas hub pid {pid} or its machine lock remained live after {:.1}s; no replacement was started",
+                    timeout.as_secs_f64()
+                ),
+                None => anyhow::bail!(
+                    "cas hub machine lock remained held after {:.1}s; the old instance may still be shutting down and no replacement was started",
+                    timeout.as_secs_f64()
+                ),
+            };
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// How a launch attempt resolved its race with a concurrent lifecycle command.
 enum LaunchWait {
     /// We hold the machine lock and are responsible for launching.
@@ -411,8 +491,35 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         HubCommands::Status => status(cli),
         HubCommands::Stop => stop(cli),
         HubCommands::Restart(serve) => {
-            stop(cli)?;
-            start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
+            // `hub restart` is a stop-to-relaunch, so its stop carries the
+            // intent: if a concurrent lifecycle command already produced a hub
+            // with these flags, the restart's goal is met and waiting out the
+            // machine lock would be exactly the cas-bf90 stall. Plain
+            // `hub stop` still goes through stop(), which passes no intent.
+            match stop_with_output(
+                cli,
+                true,
+                Some(RelaunchIntent {
+                    args: &serve,
+                    tailscale_serve: args.tailscale_serve,
+                    tailscale_port: args.tailscale_serve_port,
+                }),
+            )? {
+                StopOutcome::AlreadySatisfied(record) => {
+                    if cli.json {
+                        println!("{}", serde_json::to_string(&record)?);
+                    } else {
+                        println!(
+                            "hub already running (pid {}, version {}) — a concurrent start won the race",
+                            record.pid, record.version
+                        );
+                    }
+                    Ok(())
+                }
+                StopOutcome::Stopped => {
+                    start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
+                }
+            }
         }
         HubCommands::Service(service) => super::hub_service::manage_service(
             &service.command,
@@ -501,7 +608,25 @@ fn start_with_output_from(
                             record.pid, record.version
                         );
                     }
-                    stop_with_output(cli, emit_output)?;
+                    if let StopOutcome::AlreadySatisfied(record) = stop_with_output(
+                        cli,
+                        emit_output,
+                        Some(RelaunchIntent {
+                            args,
+                            tailscale_serve,
+                            tailscale_port,
+                        }),
+                    )? {
+                        if emit_output && cli.json {
+                            println!("{}", serde_json::to_string(&record)?);
+                        } else if emit_output {
+                            println!(
+                                "hub already running (pid {}, version {}) — a concurrent start won the race",
+                                record.pid, record.version
+                            );
+                        }
+                        return Ok(());
+                    }
                     return start_with_output_from(
                         args,
                         cli,
@@ -1141,12 +1266,19 @@ fn status(cli: &Cli) -> Result<()> {
 }
 
 fn stop(cli: &Cli) -> Result<()> {
-    stop_with_output(cli, true)
+    // No relaunch intent: a live hub can never mean success here, so this
+    // keeps the pre-cas-bf90 behaviour exactly.
+    stop_with_output(cli, true, None).map(|_| ())
 }
 
-fn stop_with_output(cli: &Cli, emit_output: bool) -> Result<()> {
+fn stop_with_output(
+    cli: &Cli,
+    emit_output: bool,
+    relaunch: Option<RelaunchIntent<'_>>,
+) -> Result<StopOutcome> {
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
+    let stale_pid = record.as_ref().map(|record| record.pid);
     let hub_cgroup = record.as_ref().and_then(|record| record.cgroup.clone());
     let tailscale_manager = TailscaleServeManager::new(paths.root());
     // Capture the exact mapping we own before asking the hub to exit. The
@@ -1164,11 +1296,27 @@ fn stop_with_output(cli: &Cli, emit_output: bool) -> Result<()> {
         Command::new("taskkill")
             .args(["/PID", &record.pid.to_string()])
             .status()?;
-        wait_for_process_and_lock_release(&paths, record.pid, HUB_LIFECYCLE_TIMEOUT)?;
+        if let Some(satisfying) = wait_for_stop_or_satisfying_hub(
+            &paths,
+            Some(record.pid),
+            stale_pid,
+            HUB_LIFECYCLE_TIMEOUT,
+            relaunch.as_ref(),
+        )? {
+            return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
+        }
     } else {
         // Record absence does not authorize stale cleanup: a shutting-down hub
         // may already have removed it while still holding the machine lock.
-        drop(paths.wait_for_instance_lock(HUB_LIFECYCLE_TIMEOUT)?);
+        if let Some(satisfying) = wait_for_stop_or_satisfying_hub(
+            &paths,
+            None,
+            stale_pid,
+            HUB_LIFECYCLE_TIMEOUT,
+            relaunch.as_ref(),
+        )? {
+            return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
+        }
     }
     if let Some(cgroup) = hub_cgroup {
         if let Err(error) = crate::ui::factory::cgroup::kill_scope(&cgroup) {
@@ -1221,7 +1369,7 @@ fn stop_with_output(cli: &Cli, emit_output: bool) -> Result<()> {
             Err(error) => eprintln!("Tailscale Serve mapping left untouched: {error}"),
         }
     }
-    Ok(())
+    Ok(StopOutcome::Stopped)
 }
 
 /// Restart a live hub left behind by an older Cassy binary. This is called by
@@ -1245,12 +1393,24 @@ pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool>
             record.pid, record.version, binary_version
         );
     }
-    stop_with_output(cli, !cli.json)?;
     let args = HubServeArgs {
         bind: spec.bind,
         port: spec.port,
         ..HubServeArgs::default()
     };
+    // A stale-version restart is a relaunch: if a concurrent command already
+    // produced a hub on the new binary, that is the outcome this wanted.
+    if let StopOutcome::AlreadySatisfied(_) = stop_with_output(
+        cli,
+        !cli.json,
+        Some(RelaunchIntent {
+            args: &args,
+            tailscale_serve: spec.tailscale_serve,
+            tailscale_port: spec.tailscale_port,
+        }),
+    )? {
+        return Ok(true);
+    }
     start_with_output_from(
         &args,
         cli,
@@ -1260,30 +1420,6 @@ pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool>
         HubLaunchOrigin::Update,
     )?;
     Ok(true)
-}
-
-fn wait_for_process_and_lock_release(
-    paths: &HubRuntimePaths,
-    pid: u32,
-    timeout: Duration,
-) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let process_gone = !process_is_running(pid);
-        let lock = paths.try_acquire_instance_lock()?;
-        if process_gone && lock.is_some() {
-            drop(lock);
-            return Ok(());
-        }
-        drop(lock);
-        if Instant::now() >= deadline {
-            anyhow::bail!(
-                "cas hub pid {pid} or its machine lock remained live after {:.1}s; no replacement was started",
-                timeout.as_secs_f64()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
 }
 
 fn process_is_running(pid: u32) -> bool {

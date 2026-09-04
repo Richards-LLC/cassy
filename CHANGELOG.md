@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+- `cas integrate mecha-cassy` now repairs the project `.cas/proxy.toml` that
+  shadows the machine registration, so the fix `cas doctor` prescribes actually
+  clears the warning it prints. A project proxy file replaces the machine
+  allowlist rather than widening it, so one left naming the retired Slack tool
+  routes kept them authoritative through any number of re-runs while the
+  command reported "already configured". It now rewrites those routes in place
+  — comments, key order and every unrelated server and route survive
+  untouched — drops a duplicate hub server block the machine registration
+  already supplies, and refuses to claim "already configured" while a shadowing
+  file still drifts. A project file that names no hub route is still left alone
+  (widening a policy the project declared is not the command's call) and is
+  reported with the exact routes to add. The `mecha-cassy` doctor row now names
+  the file the stale entries live in, machine or project.
+
 ## [3.15.1] - 2026-09-04
 
 ### Fixed

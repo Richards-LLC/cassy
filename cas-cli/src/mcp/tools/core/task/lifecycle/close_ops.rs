@@ -236,10 +236,16 @@ fn tmpfs_receipt_path_in_close_reason(
     first_tmpfs_path
 }
 
-/// Strip the punctuation a path picks up from surrounding prose or markup,
-/// without touching `.`, which is part of most filenames.
+/// Strip the punctuation a path picks up from surrounding prose or markup.
+///
+/// `.` is only trimmed as a single trailing character — sentence punctuation
+/// after a cited path — because it is otherwise part of most filenames, and a
+/// name that genuinely ends in `.` does not occur in practice. Without this the
+/// rejection message quotes `/tmp/run.log.` and the operator cannot tell
+/// whether the trailing dot is part of the path it is complaining about.
 fn strip_path_punctuation(token: &str) -> &str {
-    token.trim_matches(|ch: char| "(),[]{}<>\"'`;:*".contains(ch))
+    let trimmed = token.trim_matches(|ch: char| "(),[]{}<>\"'`;:*".contains(ch));
+    trimmed.strip_suffix('.').unwrap_or(trimmed)
 }
 
 fn tmpfs_path_token(token: &str) -> Option<String> {
@@ -687,6 +693,16 @@ mod delivery_audit_text_tests {
             tmpfs_receipt_path_in_close_reason(
                 "Notes at /home/u/.cas/artifacts/cas-8a9e/notes.md; full transcript saved to \
                  /tmp/run-8a9e.log for the record.",
+                Some(artifacts_root),
+            ),
+            Some("/tmp/run-8a9e.log".to_string())
+        );
+        // Sentence punctuation must not end up inside the quoted path, or the
+        // operator cannot tell what the gate is actually complaining about.
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason(
+                "Notes at /home/u/.cas/artifacts/cas-8a9e/notes.md; transcript saved to \
+                 /tmp/run-8a9e.log.",
                 Some(artifacts_root),
             ),
             Some("/tmp/run-8a9e.log".to_string())

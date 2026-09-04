@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Store the two MechaCassy secrets in this machine's credentials file.
 #
-# This is the ONLY step in MechaCassy onboarding that a human does by hand:
-# `cas integrate mecha-cassy` does everything else, but no agent may ever
-# handle a plaintext credential. See docs/MECHA_CASSY_ONBOARDING.md.
+# This is the fallback path when the hub cannot return a token or bypass:
+# `cas integrate mecha-cassy` normally provisions through the authenticated
+# hub route and writes the private file itself. See the onboarding doc.
 #
 # Guarantees:
 #   - values are read with `read -s` and never echoed, logged, or passed as an
@@ -45,7 +45,7 @@ prompt_secret() {
         printf '%s: ' "$prompt" >&2
         IFS= read -r -s value || die "no input available; run this in an interactive terminal"
         printf '\n' >&2
-        [[ -n "$value" ]] || printf 'That was empty. Paste the value from the hub admin.\n' >&2
+        [[ -n "$value" ]] || printf 'That was empty. Paste the value issued for this machine.\n' >&2
     done
     printf -v "$out_var" '%s' "$value"
 }
@@ -57,7 +57,7 @@ printf '  file: %s\n\n' "$CREDENTIALS_FILE"
 
 label="${1:-}"
 while [[ -z "$label" ]]; do
-    printf 'Machine label the hub admin minted a token for (e.g. DANIEL_LAPTOP): ' >&2
+    printf 'Machine label for the issued token (e.g. DANIEL_LAPTOP): ' >&2
     IFS= read -r label || die "no input available"
 done
 # Match the folding `cas integrate mecha-cassy --label` applies, so the wizard
@@ -78,8 +78,13 @@ upsert_export "$token_var" token_value
 upsert_export "$BYPASS_VAR" bypass_value
 unset token_value bypass_value
 
-profile="$HOME/.bashrc"
-[[ -n "${ZSH_VERSION:-}" || "${SHELL:-}" == *zsh ]] && profile="$HOME/.zshrc"
+shell_name="${SHELL##*/}"
+profile="$HOME/.profile"
+if [[ "$shell_name" == zsh ]]; then
+    profile="$HOME/.zprofile"
+elif [[ "$shell_name" == bash && -f "$HOME/.bash_profile" ]]; then
+    profile="$HOME/.bash_profile"
+fi
 source_line="[ -f \"$CREDENTIALS_FILE\" ] && . \"$CREDENTIALS_FILE\""
 
 printf '\nStored %s and %s (0600, values not shown).\n' "$token_var" "$BYPASS_VAR"

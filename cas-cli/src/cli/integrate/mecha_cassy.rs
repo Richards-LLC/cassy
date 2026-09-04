@@ -13,12 +13,13 @@
 //!
 //! ## Credential rule
 //!
-//! Every artifact this module writes references a credential by environment
-//! variable **name** (`auth = "env:MECHA_SLACK_TOKEN_<LABEL>"`,
-//! `x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"`). A token value is
-//! never read into a report, never printed, never written to disk, and never
-//! embedded in an error. The only fact this module publishes about a variable
-//! is [`EnvState`] — set, empty, or unset.
+//! Every generated proxy or harness artifact references a credential by
+//! environment variable **name** (`auth = "env:MECHA_SLACK_TOKEN_<LABEL>"`,
+//! `x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"`). Provisioning
+//! writes the values only to the private machine credentials file; a value is
+//! never read into a report, printed, or embedded in an error. The only fact
+//! this module publishes about a variable is [`EnvState`] — set, empty, or
+//! unset.
 //!
 //! ## Seams
 //!
@@ -27,27 +28,36 @@
 //! rather than a live hub. [`MachinePaths`] is passed in for the same reason:
 //! a test points it at a `tempdir` and asserts on real written files.
 
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
+use url::Url;
 
 use cmcp_core::config::{
     Config as ProxyConfig, ExternalToolConfig, MECHA_CASSY_BYPASS_HEADER,
-    MECHA_CASSY_DEFAULT_BYPASS_ENV, MECHA_CASSY_DEFAULT_TOKEN_ENV, MECHA_CASSY_MCP_URL,
+    MECHA_CASSY_DEFAULT_BYPASS_ENV, MECHA_CASSY_MCP_URL,
     MECHA_CASSY_SERVER, MECHA_CASSY_TOOLS, ServerConfig,
 };
+
+use crate::cloud::{CloudConfig, DeviceConfig};
 
 use super::fs as ifs;
 use super::types::{IntegrationAction, IntegrationOutcome, IntegrationStatus, Platform};
 
 /// Where an operator is told to put the two values. Named in every remedy so
 /// the message is actionable without opening the onboarding doc.
+pub const HUB_CLIENT_ROUTE: &str = "/api/clients";
+pub const HUB_BYPASS_ROUTE: &str = "/api/bypass";
+pub const HUB_CLIENT_ISSUE: &str = "mecha-cassy#5";
+pub const VERCEL_PROJECT: &str = "mecha-cassy";
 pub const CREDENTIALS_HINT: &str =
-    "add both to your machine credentials file (the file your login shell exports, e.g. \
-     ~/.config/cas/credentials.env) and start a new shell; the hub admin mints \
-     MECHA_SLACK_TOKEN_<LABEL> per machine — see docs/MECHA_CASSY_ONBOARDING.md";
+    "run `cas login`, then re-run `cas integrate mecha-cassy`; credentials are stored in the \
+     machine credentials file sourced by your login shell — see \
+     docs/MECHA_CASSY_ONBOARDING.md";
 
 // ---------------------------------------------------------------------------
 // CLI surface
@@ -62,7 +72,7 @@ pub struct MechaCassyArgs {
     /// Environment variable holding the Vercel edge-protection bypass secret.
     #[arg(long, value_name = "NAME", default_value = MECHA_CASSY_DEFAULT_BYPASS_ENV)]
     pub bypass_env: String,
-    /// Per-machine client label the hub admin minted a token for (e.g. `LAPTOP`).
+    /// Per-machine client label override (e.g. `LAPTOP`).
     #[arg(long, value_name = "LABEL")]
     pub label: Option<String>,
     /// Hub MCP endpoint. Only needed against a staging hub.
@@ -81,18 +91,25 @@ pub struct MechaCassyArgs {
 
 impl MechaCassyArgs {
     /// Bearer variable name: `--token-env` wins, then `--label`, then the
-    /// default proxy label. A label is upper-cased and non-alphanumerics are
-    /// folded to `_` so `my laptop` and `my-laptop` name the same variable.
+    /// hostname-derived label. A label is upper-cased and non-alphanumerics
+    /// are folded to `_` so `my laptop` and `my-laptop` name the same variable.
     pub fn resolved_token_env(&self) -> String {
         if let Some(explicit) = self.token_env.as_deref().map(str::trim)
             && !explicit.is_empty()
         {
             return explicit.to_string();
         }
-        match self.label.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
-            Some(label) => format!("MECHA_SLACK_TOKEN_{}", sanitize_label(label)),
-            None => MECHA_CASSY_DEFAULT_TOKEN_ENV.to_string(),
+        let label = resolve_label(self.label.as_deref(), DeviceConfig::hostname().as_deref());
+        self.resolved_token_env_for_label(&label)
+    }
+
+    fn resolved_token_env_for_label(&self, label: &str) -> String {
+        if let Some(explicit) = self.token_env.as_deref().map(str::trim)
+            && !explicit.is_empty()
+        {
+            return explicit.to_string();
         }
+        format!("MECHA_SLACK_TOKEN_{}", sanitize_label(label))
     }
 }
 
@@ -107,6 +124,16 @@ fn sanitize_label(label: &str) -> String {
             }
         })
         .collect()
+}
+
+fn resolve_label(override_label: Option<&str>, hostname: Option<&str>) -> String {
+    sanitize_label(
+        override_label
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .or_else(|| hostname.map(str::trim).filter(|label| !label.is_empty()))
+            .unwrap_or("unknown-host"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +282,393 @@ impl HubProbe for ProxyHubProbe {
     }
 }
 
+/// Secrets returned by the hub or a bypass fallback. This type never crosses
+/// the report/terminal boundary; it exists only long enough to populate the
+/// machine credentials file and the current process environment.
+#[derive(Clone)]
+struct CredentialValues {
+    token: String,
+    bypass: String,
+}
+
+impl std::fmt::Debug for CredentialValues {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialValues")
+            .field("token", &"<redacted>")
+            .field("bypass", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HubClientError {
+    RouteUnavailable,
+    Unauthorized,
+    Forbidden,
+    LabelTaken,
+    HttpStatus(u16),
+    Transport(String),
+    InvalidResponse,
+}
+
+impl std::fmt::Display for HubClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RouteUnavailable => write!(f, "route unavailable"),
+            Self::Unauthorized => write!(f, "unauthorized"),
+            Self::Forbidden => write!(f, "forbidden"),
+            Self::LabelTaken => write!(f, "label taken"),
+            Self::HttpStatus(status) => write!(f, "HTTP {status}"),
+            Self::Transport(error) => write!(f, "transport error: {error}"),
+            Self::InvalidResponse => write!(f, "invalid response"),
+        }
+    }
+}
+
+trait HubClient {
+    fn create_client(
+        &self,
+        hub_url: &str,
+        cloud_token: &str,
+        label: &str,
+    ) -> std::result::Result<(String, Option<String>), HubClientError>;
+    fn fetch_bypass(
+        &self,
+        hub_url: &str,
+        cloud_token: &str,
+    ) -> std::result::Result<String, HubClientError>;
+}
+
+fn hub_route_url(hub_url: &str, route: &str) -> std::result::Result<String, HubClientError> {
+    let mut url = Url::parse(hub_url).map_err(|_| HubClientError::InvalidResponse)?;
+    url.set_path(route);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
+fn classify_hub_status(status: u16) -> HubClientError {
+    match status {
+        401 => HubClientError::Unauthorized,
+        403 => HubClientError::Forbidden,
+        404 | 405 => HubClientError::RouteUnavailable,
+        _ => HubClientError::HttpStatus(status),
+    }
+}
+
+struct ProcessHubClient;
+
+impl HubClient for ProcessHubClient {
+    fn create_client(
+        &self,
+        hub_url: &str,
+        cloud_token: &str,
+        label: &str,
+    ) -> std::result::Result<(String, Option<String>), HubClientError> {
+        let url = hub_route_url(hub_url, HUB_CLIENT_ROUTE)?;
+        let response = ureq::post(&url)
+            .set("Authorization", &format!("Bearer {cloud_token}"))
+            .set("Content-Type", "application/json")
+            .send_json(serde_json::json!({
+                "label": label,
+                "connector": "slack",
+            }));
+        let response = match response {
+            Ok(response) => response,
+            Err(ureq::Error::Status(status, response)) => {
+                if status == 409 {
+                    let body = response.into_string().unwrap_or_default();
+                    let is_taken = serde_json::from_str::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|value| value.get("error").and_then(serde_json::Value::as_str).map(|error| error == "label_taken"))
+                        .unwrap_or(false);
+                    return Err(if is_taken {
+                        HubClientError::LabelTaken
+                    } else {
+                        HubClientError::HttpStatus(status)
+                    });
+                }
+                return Err(classify_hub_status(status));
+            }
+            Err(ureq::Error::Transport(error)) => {
+                return Err(HubClientError::Transport(error.to_string()));
+            }
+        };
+        let body = response
+            .into_json::<serde_json::Value>()
+            .map_err(|_| HubClientError::InvalidResponse)?;
+        let token = body
+            .get("token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|token| !token.trim().is_empty())
+            .ok_or(HubClientError::InvalidResponse)?
+            .to_string();
+        let bypass = body
+            .get("bypass")
+            .and_then(serde_json::Value::as_str)
+            .filter(|bypass| !bypass.trim().is_empty())
+            .map(str::to_string);
+        Ok((token, bypass))
+    }
+
+    fn fetch_bypass(
+        &self,
+        hub_url: &str,
+        cloud_token: &str,
+    ) -> std::result::Result<String, HubClientError> {
+        let url = hub_route_url(hub_url, HUB_BYPASS_ROUTE)?;
+        let response = ureq::get(&url)
+            .set("Authorization", &format!("Bearer {cloud_token}"))
+            .call();
+        let response = match response {
+            Ok(response) => response,
+            Err(ureq::Error::Status(status, _)) => return Err(classify_hub_status(status)),
+            Err(ureq::Error::Transport(error)) => {
+                return Err(HubClientError::Transport(error.to_string()));
+            }
+        };
+        let body = response
+            .into_json::<serde_json::Value>()
+            .map_err(|_| HubClientError::InvalidResponse)?;
+        body.get("bypass")
+            .and_then(serde_json::Value::as_str)
+            .filter(|bypass| !bypass.trim().is_empty())
+            .map(str::to_string)
+            .ok_or(HubClientError::InvalidResponse)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BypassReadError {
+    HttpStatus(u16),
+    Transport(String),
+    InvalidResponse,
+}
+
+trait BypassReader {
+    fn read(&self, vercel_token: &str, project: &str)
+        -> std::result::Result<String, BypassReadError>;
+}
+
+struct ProcessBypassReader;
+
+impl BypassReader for ProcessBypassReader {
+    fn read(
+        &self,
+        vercel_token: &str,
+        project: &str,
+    ) -> std::result::Result<String, BypassReadError> {
+        let url = format!("https://api.vercel.com/v1/projects/{project}/protection-bypass");
+        let response = ureq::get(&url)
+            .set("Authorization", &format!("Bearer {vercel_token}"))
+            .call();
+        let response = match response {
+            Ok(response) => response,
+            Err(ureq::Error::Status(status, _)) => return Err(BypassReadError::HttpStatus(status)),
+            Err(ureq::Error::Transport(error)) => {
+                return Err(BypassReadError::Transport(error.to_string()));
+            }
+        };
+        let body = response
+            .into_json::<serde_json::Value>()
+            .map_err(|_| BypassReadError::InvalidResponse)?;
+        ["bypass", "secret", "protectionBypass"]
+            .iter()
+            .find_map(|key| {
+                body.get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string)
+            })
+            .ok_or(BypassReadError::InvalidResponse)
+    }
+}
+
+trait SecretPrompt {
+    fn read(&self) -> Result<String>;
+}
+
+struct ProcessSecretPrompt;
+
+impl SecretPrompt for ProcessSecretPrompt {
+    fn read(&self) -> Result<String> {
+        inquire::Password::new("Vercel protection bypass secret")
+            .without_confirmation()
+            .prompt()
+            .context("could not read the Vercel bypass secret")
+    }
+}
+
+trait DeviceIdentity {
+    fn hostname(&self) -> Option<String>;
+    fn device_id(&self) -> Result<Option<String>>;
+}
+
+struct ProcessDeviceIdentity;
+
+impl DeviceIdentity for ProcessDeviceIdentity {
+    fn hostname(&self) -> Option<String> {
+        DeviceConfig::hostname()
+    }
+
+    fn device_id(&self) -> Result<Option<String>> {
+        DeviceConfig::load()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+            .map(|config| config.map(|config| config.device_id))
+    }
+}
+
+fn provisioning_error(args: &str) -> anyhow::Error {
+    anyhow::anyhow!(args.to_string())
+}
+
+fn hub_auth_error(error: &HubClientError) -> anyhow::Error {
+    match error {
+        HubClientError::Unauthorized | HubClientError::Forbidden => anyhow::anyhow!(
+            "hub route POST {HUB_CLIENT_ROUTE} rejected the Cassy Cloud login ({}); run `cas login` and retry",
+            error
+        ),
+        HubClientError::RouteUnavailable => anyhow::anyhow!(
+            "hub route POST {HUB_CLIENT_ROUTE} not available ({HUB_CLIENT_ISSUE})"
+        ),
+        _ => anyhow::anyhow!("hub route POST {HUB_CLIENT_ROUTE} failed: {error}"),
+    }
+}
+
+fn fallback_bypass(
+    env: &dyn EnvLookup,
+    vercel: &dyn BypassReader,
+    prompt: &dyn SecretPrompt,
+) -> Result<String> {
+    if let Some(token) = env
+        .get("VERCEL_TOKEN")
+        .filter(|token| !token.trim().is_empty())
+    {
+        if let Ok(bypass) = vercel.read(&token, VERCEL_PROJECT)
+            && !bypass.trim().is_empty()
+        {
+            return Ok(bypass);
+        }
+    }
+    let bypass = prompt.read()?;
+    anyhow::ensure!(!bypass.trim().is_empty(), "the Vercel bypass secret cannot be empty");
+    Ok(bypass)
+}
+
+fn mint_client(
+    args: &MechaCassyArgs,
+    label: &str,
+    cloud_token: &str,
+    hub: &dyn HubClient,
+    device: &dyn DeviceIdentity,
+) -> Result<(String, Option<String>, String)> {
+    match hub.create_client(&args.url, cloud_token, label) {
+        Ok((token, bypass)) => Ok((token, bypass, label.to_string())),
+        Err(HubClientError::LabelTaken) => {
+            let device_id = device
+                .device_id()?
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| {
+                    provisioning_error(&format!(
+                        "hub route POST {HUB_CLIENT_ROUTE} reported label_taken; no device id is available in ~/.config/cas/device.json"
+                    ))
+                })?;
+            let suffix: String = device_id.chars().take(6).collect();
+            let retry_label = format!("{label}_{suffix}");
+            let (token, bypass) = hub
+                .create_client(&args.url, cloud_token, &retry_label)
+                .map_err(|error| match error {
+                    HubClientError::LabelTaken => provisioning_error(&format!(
+                        "hub route POST {HUB_CLIENT_ROUTE} rejected both labels as taken"
+                    )),
+                    other => hub_auth_error(&other),
+                })?;
+            Ok((token, bypass, retry_label))
+        }
+        Err(error) => Err(hub_auth_error(&error)),
+    }
+}
+
+fn provision_credentials(
+    args: &MechaCassyArgs,
+    env: &dyn EnvLookup,
+    hub: &dyn HubClient,
+    vercel: &dyn BypassReader,
+    prompt: &dyn SecretPrompt,
+    device: &dyn DeviceIdentity,
+) -> Result<(String, CredentialValues)> {
+    let cloud_token = CloudConfig::load_effective()
+        .token
+        .filter(|token| !token.trim().is_empty());
+    provision_credentials_with_cloud_token(
+        args,
+        env,
+        cloud_token.as_deref(),
+        hub,
+        vercel,
+        prompt,
+        device,
+    )
+}
+
+fn provision_credentials_with_cloud_token(
+    args: &MechaCassyArgs,
+    env: &dyn EnvLookup,
+    cloud_token: Option<&str>,
+    hub: &dyn HubClient,
+    vercel: &dyn BypassReader,
+    prompt: &dyn SecretPrompt,
+    device: &dyn DeviceIdentity,
+) -> Result<(String, CredentialValues)> {
+    let label = resolve_label(args.label.as_deref(), device.hostname().as_deref());
+    let token_env = args.resolved_token_env_for_label(&label);
+    let existing_token = env.get(&token_env).filter(|value| !value.trim().is_empty());
+    let existing_bypass = env
+        .get(args.bypass_env.trim())
+        .filter(|value| !value.trim().is_empty());
+    if existing_token.is_some() && existing_bypass.is_some() {
+        return Ok((label, CredentialValues {
+            token: existing_token.unwrap_or_default(),
+            bypass: existing_bypass.unwrap_or_default(),
+        }));
+    }
+
+    let (token, hub_bypass, cloud_token, actual_label) = if let Some(token) = existing_token {
+        (token, None, cloud_token.map(str::to_string), label.clone())
+    } else {
+        let cloud_token = cloud_token.ok_or_else(|| {
+            provisioning_error(&format!(
+                "MechaCassy onboarding requires an existing Cassy Cloud login for hub route POST {HUB_CLIENT_ROUTE}; run `cas login` and retry"
+            ))
+        })?;
+        let (token, bypass, actual_label) = mint_client(args, &label, cloud_token, hub, device)?;
+        (token, bypass, Some(cloud_token.to_string()), actual_label)
+    };
+    let bypass = if let Some(bypass) = existing_bypass {
+        bypass
+    } else if let Some(bypass) = hub_bypass {
+        bypass
+    } else {
+        match cloud_token {
+            Some(cloud_token) => match hub.fetch_bypass(&args.url, &cloud_token) {
+                Ok(bypass) => bypass,
+                Err(HubClientError::RouteUnavailable) => fallback_bypass(env, vercel, prompt)?,
+                Err(error @ (HubClientError::Unauthorized | HubClientError::Forbidden)) => {
+                    return Err(anyhow::anyhow!(
+                        "hub route GET {HUB_BYPASS_ROUTE} rejected the Cassy Cloud login ({}); run `cas login` and retry",
+                        error
+                    ));
+                }
+                Err(error) => return Err(anyhow::anyhow!(
+                    "hub route GET {HUB_BYPASS_ROUTE} failed: {error}"
+                )),
+            },
+            None => fallback_bypass(env, vercel, prompt)?,
+        }
+    };
+    Ok((actual_label, CredentialValues { token, bypass }))
+}
+
 // ---------------------------------------------------------------------------
 // Machine paths
 // ---------------------------------------------------------------------------
@@ -268,6 +682,10 @@ pub struct MachinePaths {
     pub claude_json: Option<PathBuf>,
     /// `<CODEX_HOME|$HOME/.codex>/config.toml`.
     pub codex_config: Option<PathBuf>,
+    /// The only file allowed to contain the two plaintext onboarding values.
+    pub credentials_file: PathBuf,
+    /// The login-shell profile that must source the credentials file.
+    pub login_profile: Option<PathBuf>,
 }
 
 impl MachinePaths {
@@ -279,6 +697,9 @@ impl MachinePaths {
             .config_path()
             .context("could not determine the user MCP configuration path")?;
         let home = env.get("HOME").map(PathBuf::from);
+        let home_for_credentials = home
+            .clone()
+            .context("could not determine HOME for MechaCassy credentials")?;
         let claude_dir = env
             .get("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
@@ -287,12 +708,202 @@ impl MachinePaths {
             .get("CODEX_HOME")
             .map(PathBuf::from)
             .or_else(|| home.map(|h| h.join(".codex")));
+        let credentials_file = env
+            .get("CAS_CREDENTIALS_FILE")
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                env.get("XDG_CONFIG_HOME")
+                    .map(PathBuf::from)
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .map(|path| path.join("cas").join("credentials.env"))
+            })
+            .unwrap_or_else(|| {
+                home_for_credentials
+                    .join(".config")
+                    .join("cas")
+                    .join("credentials.env")
+            });
+        let login_profile = Some(login_profile_path(
+            &home_for_credentials,
+            env.get("SHELL").as_deref(),
+        ));
         Ok(Self {
             user_proxy,
             claude_json: claude_dir.map(|d| d.join(".claude.json")),
             codex_config: codex_dir.map(|d| d.join("config.toml")),
+            credentials_file,
+            login_profile,
         })
     }
+}
+
+fn login_profile_path(home: &Path, shell: Option<&str>) -> PathBuf {
+    let shell_name = shell
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if shell_name == "zsh" {
+        return home.join(".zprofile");
+    }
+    if shell_name == "bash" && home.join(".bash_profile").exists() {
+        return home.join(".bash_profile");
+    }
+    home.join(".profile")
+}
+
+fn valid_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_'
+                || (byte.is_ascii_alphanumeric() && (index > 0 || byte.is_ascii_alphabetic()))
+        })
+}
+
+fn assignment_name(line: &str) -> Option<&str> {
+    let mut value = line.trim_start();
+    if let Some(rest) = value.strip_prefix("export") {
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        value = rest.trim_start();
+    }
+    let (name, _) = value.split_once('=')?;
+    let name = name.trim();
+    valid_env_name(name).then_some(name)
+}
+
+fn shell_quote(value: &str) -> String {
+    value.replace('\'', "'\\''")
+}
+
+fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("credentials path has no parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating credentials directory {}", parent.display()))?;
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        anyhow::bail!("{} is a symlink; refusing to write credentials", path.display());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("credentials file name is not UTF-8")?;
+    let temp_path = parent.join(format!(
+        ".{file_name}.cas-credentials.{}.tmp",
+        std::process::id()
+    ));
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temp_path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    let result = (|| -> std::io::Result<()> {
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp_path, path)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error).with_context(|| format!("writing {}", path.display()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Upsert exactly the two owned exports, preserving unrelated credentials.
+/// Plaintext values are accepted only in this writer and never appear in a
+/// report or error string.
+fn write_credentials(
+    path: &Path,
+    token_name: &str,
+    token: &str,
+    bypass_name: &str,
+    bypass: &str,
+) -> Result<bool> {
+    anyhow::ensure!(valid_env_name(token_name), "invalid token environment variable name");
+    anyhow::ensure!(valid_env_name(bypass_name), "invalid bypass environment variable name");
+    anyhow::ensure!(
+        !token.contains(['\r', '\n']) && !bypass.contains(['\r', '\n']),
+        "credential values cannot contain newlines"
+    );
+    let existing = if ifs::is_regular_file(path) {
+        ifs::read_capped(path)?
+    } else if path.exists() {
+        anyhow::bail!("{} is not a regular file", path.display());
+    } else {
+        String::new()
+    };
+    let mut lines: Vec<&str> = existing
+        .lines()
+        .filter(|line| {
+            !matches!(
+                assignment_name(line),
+                Some(name) if name == token_name || name == bypass_name
+            )
+        })
+        .collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.push("");
+    let rendered = format!(
+        "{}export {token_name}='{}'\nexport {bypass_name}='{}'\n",
+        lines.join("\n"),
+        shell_quote(token),
+        shell_quote(bypass),
+    );
+    let changed = rendered != existing;
+    if changed {
+        write_private_file(path, &rendered)?;
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(changed)
+}
+
+fn profile_source_line(credentials: &Path) -> String {
+    let path = shell_quote(&credentials.to_string_lossy());
+    format!("[ -f '{path}' ] && . '{path}'")
+}
+
+fn ensure_profile_line(profile: &Path, credentials: &Path) -> Result<bool> {
+    let line = profile_source_line(credentials);
+    let existing = if ifs::is_regular_file(profile) {
+        ifs::read_capped(profile)?
+    } else if profile.exists() {
+        anyhow::bail!("{} is not a regular file", profile.display());
+    } else {
+        String::new()
+    };
+    if existing.lines().any(|candidate| candidate.trim() == line) {
+        return Ok(false);
+    }
+    let separator = if existing.is_empty() || existing.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    ifs::atomic_write_create_dirs(profile, &format!("{existing}{separator}{line}\n"))?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +963,10 @@ pub struct MechaCassyReport {
     pub bypass_env_state: EnvState,
     pub registration_path: PathBuf,
     pub registration: WriteState,
+    pub credentials_path: PathBuf,
+    pub credentials: WriteState,
+    pub login_profile_path: Option<PathBuf>,
+    pub login_profile: WriteState,
     /// Routes that will actually be admitted from here. A project
     /// `.cas/proxy.toml` *replaces* the machine allowlist rather than widening
     /// it, so when one is present this is its policy, not the machine's.
@@ -726,9 +1341,10 @@ fn plan_project_proxy(
     })
 }
 
-/// Run the integration. Pure with respect to its seams: every filesystem
-/// write goes through `paths` and `project_proxy`, every credential fact
-/// through `env`, and the only network call through `probe`.
+/// Run the registration/reconciliation portion of the integration. Pure with
+/// respect to its seams: every filesystem write goes through `paths` and
+/// `project_proxy`, every credential fact through `env`, and the only network
+/// call through `probe`. Production [`execute`] provisions credentials first.
 ///
 /// `project_proxy` is the project's `.cas/proxy.toml` when the caller resolved
 /// one. It is repaired, not merely reported: rewriting only the machine file
@@ -741,6 +1357,17 @@ pub fn run(
     env: &dyn EnvLookup,
     probe: &dyn HubProbe,
 ) -> Result<MechaCassyReport> {
+    run_with_credentials(args, project_proxy, paths, env, probe, None)
+}
+
+fn run_with_credentials(
+    args: &MechaCassyArgs,
+    project_proxy: Option<&Path>,
+    paths: &MachinePaths,
+    env: &dyn EnvLookup,
+    probe: &dyn HubProbe,
+    credentials: Option<&CredentialValues>,
+) -> Result<MechaCassyReport> {
     let token_env = args.resolved_token_env();
     let bypass_env = args.bypass_env.trim().to_string();
     anyhow::ensure!(
@@ -751,6 +1378,39 @@ pub fn run(
     let token_env_state = EnvState::of(env, &token_env);
     let bypass_env_state = EnvState::of(env, &bypass_env);
     let credentials_ready = token_env_state.is_usable() && bypass_env_state.is_usable();
+
+    let (credentials_state, profile_state) = match credentials {
+        Some(_values) if args.dry_run => (WriteState::Planned, WriteState::Planned),
+        Some(values) => {
+            let changed = write_credentials(
+                &paths.credentials_file,
+                &token_env,
+                &values.token,
+                &bypass_env,
+                &values.bypass,
+            )
+            .with_context(|| format!("writing {}", paths.credentials_file.display()))?;
+            let credentials_state = if changed {
+                WriteState::Written
+            } else {
+                WriteState::AlreadyCurrent
+            };
+            let profile_state = match paths.login_profile.as_deref() {
+                Some(profile) => {
+                    let changed = ensure_profile_line(profile, &paths.credentials_file)
+                        .with_context(|| format!("writing {}", profile.display()))?;
+                    if changed {
+                        WriteState::Written
+                    } else {
+                        WriteState::AlreadyCurrent
+                    }
+                }
+                None => WriteState::Skipped,
+            };
+            (credentials_state, profile_state)
+        }
+        None => (WriteState::Skipped, WriteState::Skipped),
+    };
 
     // The registration is written even when a variable is missing: it names
     // variables, holds no secret, and having it on disk is what makes the
@@ -920,6 +1580,10 @@ pub fn run(
         bypass_env_state,
         registration_path: paths.user_proxy.clone(),
         registration,
+        credentials_path: paths.credentials_file.clone(),
+        credentials: credentials_state,
+        login_profile_path: paths.login_profile.clone(),
+        login_profile: profile_state,
         allowlist,
         project_proxy: project.map(|(entry, _)| entry),
         harnesses,
@@ -952,9 +1616,8 @@ fn build_remedy(
     }
     match probe {
         ProbeOutcome::Unauthorized => Some(format!(
-            "The hub rejected this machine's bearer (HTTP 401; Authorization: Bearer <set>). Ask \
-             the hub admin to mint or re-register a token for this label, then re-export \
-             {token_env} and run `cas integrate mecha-cassy` again."
+            "The hub rejected this machine's bearer (HTTP 401; Authorization: Bearer <set>). \
+             Confirm `cas login`, then run `cas integrate mecha-cassy` again."
         )),
         ProbeOutcome::Unreachable { code } => Some(format!(
             "The hub did not answer ({code}). Check connectivity, then re-run \
@@ -1293,9 +1956,8 @@ pub fn doctor_row(
         ProbeOutcome::Unauthorized => DoctorRow {
             severity: DoctorSeverity::Error,
             message: format!(
-                "hub rejected this machine (HTTP 401; Authorization: Bearer <set>). Ask the hub \
-                 admin to re-mint the token for this label, re-export {token_env}, then run \
-                 `cas integrate mecha-cassy`"
+                "hub rejected this machine (HTTP 401; Authorization: Bearer <set>). Confirm \
+                 `cas login`, then run `cas integrate mecha-cassy`"
             ),
         },
         ProbeOutcome::Unreachable { code } => DoctorRow {
@@ -1328,7 +1990,55 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
     let env = ProcessEnv;
     let paths = MachinePaths::from_env(&env)?;
     let project_proxy = project_proxy_path();
-    let report = run(args, project_proxy.as_deref(), &paths, &env, &ProxyHubProbe)?;
+    let device = ProcessDeviceIdentity;
+    let label = resolve_label(args.label.as_deref(), device.hostname().as_deref());
+    let mut effective_args = args.clone();
+    effective_args.label = Some(label);
+    let credentials = if args.dry_run {
+        Some((
+            effective_args
+                .label
+                .clone()
+                .unwrap_or_else(|| "UNKNOWN_HOST".to_string()),
+            CredentialValues {
+                token: String::new(),
+                bypass: String::new(),
+            },
+        ))
+    } else {
+        let hub = ProcessHubClient;
+        let vercel = ProcessBypassReader;
+        let prompt = ProcessSecretPrompt;
+        let provisioned = provision_credentials(
+            &effective_args,
+            &env,
+            &hub,
+            &vercel,
+            &prompt,
+            &device,
+        )?;
+        effective_args.label = Some(provisioned.0.clone());
+        Some(provisioned)
+    };
+    let credential_values = credentials.as_ref().map(|(_, values)| values);
+    if !args.dry_run {
+        if let Some(values) = credential_values {
+        // The probe and generated harnesses use env-name references, while
+        // this process must verify the freshly provisioned values immediately.
+            unsafe {
+                std::env::set_var(&effective_args.resolved_token_env(), &values.token);
+                std::env::set_var(&effective_args.bypass_env, &values.bypass);
+            }
+        }
+    }
+    let report = run_with_credentials(
+        &effective_args,
+        project_proxy.as_deref(),
+        &paths,
+        &env,
+        &ProxyHubProbe,
+        credential_values,
+    )?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1341,6 +2051,8 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
         matches!(state, WriteState::Written | WriteState::Planned)
     };
     let wrote_anything = changed_anything(report.registration)
+        || changed_anything(report.credentials)
+        || changed_anything(report.login_profile)
         || report
             .project_proxy
             .as_ref()
@@ -1374,6 +2086,18 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
         report.bypass_env,
         report.bypass_env_state.as_str()
     ));
+    outcome.summary.push(format!(
+        "credentials file: {} ({})",
+        report.credentials.as_str(),
+        report.credentials_path.display()
+    ));
+    if let Some(profile) = &report.login_profile_path {
+        outcome.summary.push(format!(
+            "login profile: {} ({})",
+            report.login_profile.as_str(),
+            profile.display()
+        ));
+    }
     outcome.summary.push(format!(
         "machine registration: {} ({})",
         report.registration.as_str(),
@@ -1424,6 +2148,14 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
     if matches!(report.registration, WriteState::Written) {
         outcome.files.push(report.registration_path.clone());
     }
+    if matches!(report.credentials, WriteState::Written) {
+        outcome.files.push(report.credentials_path.clone());
+    }
+    if matches!(report.login_profile, WriteState::Written)
+        && let Some(path) = &report.login_profile_path
+    {
+        outcome.files.push(path.clone());
+    }
     if let Some(entry) = &report.project_proxy
         && matches!(entry.state, WriteState::Written)
     {
@@ -1470,7 +2202,10 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::collections::HashMap;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     const FAKE_TOKEN: &str = "xoxb-fake-secret-value-do-not-leak";
     const FAKE_BYPASS: &str = "bypass-secret-do-not-leak";
@@ -1502,6 +2237,82 @@ mod tests {
         }
     }
 
+    struct FakeHub {
+        creates: RefCell<Vec<std::result::Result<(String, Option<String>), HubClientError>>>,
+        bypasses: RefCell<Vec<std::result::Result<String, HubClientError>>>,
+        labels: RefCell<Vec<String>>,
+        cloud_tokens: RefCell<Vec<String>>,
+    }
+
+    impl HubClient for FakeHub {
+        fn create_client(
+            &self,
+            _hub_url: &str,
+            cloud_token: &str,
+            label: &str,
+        ) -> std::result::Result<(String, Option<String>), HubClientError> {
+            self.labels.borrow_mut().push(label.to_string());
+            self.cloud_tokens
+                .borrow_mut()
+                .push(cloud_token.to_string());
+            self.creates.borrow_mut().remove(0)
+        }
+
+        fn fetch_bypass(
+            &self,
+            _hub_url: &str,
+            cloud_token: &str,
+        ) -> std::result::Result<String, HubClientError> {
+            self.cloud_tokens
+                .borrow_mut()
+                .push(cloud_token.to_string());
+            self.bypasses.borrow_mut().remove(0)
+        }
+    }
+
+    struct FakeBypassReader {
+        result: std::result::Result<String, BypassReadError>,
+        calls: RefCell<usize>,
+    }
+
+    impl BypassReader for FakeBypassReader {
+        fn read(
+            &self,
+            _vercel_token: &str,
+            _project: &str,
+        ) -> std::result::Result<String, BypassReadError> {
+            *self.calls.borrow_mut() += 1;
+            self.result.clone()
+        }
+    }
+
+    struct FakePrompt {
+        value: String,
+        calls: RefCell<usize>,
+    }
+
+    impl SecretPrompt for FakePrompt {
+        fn read(&self) -> Result<String> {
+            *self.calls.borrow_mut() += 1;
+            Ok(self.value.clone())
+        }
+    }
+
+    struct FakeDevice {
+        hostname: Option<String>,
+        device_id: Option<String>,
+    }
+
+    impl DeviceIdentity for FakeDevice {
+        fn hostname(&self) -> Option<String> {
+            self.hostname.clone()
+        }
+
+        fn device_id(&self) -> Result<Option<String>> {
+            Ok(self.device_id.clone())
+        }
+    }
+
     fn live_tools() -> ProbeOutcome {
         ProbeOutcome::Tools {
             tools: MECHA_CASSY_TOOLS.iter().map(|t| t.to_string()).collect(),
@@ -1513,14 +2324,224 @@ mod tests {
             user_proxy: dir.join("config").join("code-mode-mcp").join("config.toml"),
             claude_json: Some(dir.join("home").join(".claude.json")),
             codex_config: Some(dir.join("home").join(".codex").join("config.toml")),
+            credentials_file: dir.join("home").join(".config").join("cas").join("credentials.env"),
+            login_profile: Some(dir.join("home").join(".profile")),
         }
     }
 
     fn ready_env() -> FakeEnv {
-        FakeEnv::with(&[
-            (MECHA_CASSY_DEFAULT_TOKEN_ENV, FAKE_TOKEN),
-            (MECHA_CASSY_DEFAULT_BYPASS_ENV, FAKE_BYPASS),
-        ])
+        let mut values = HashMap::new();
+        values.insert(MechaCassyArgs::default().resolved_token_env(), FAKE_TOKEN.to_string());
+        values.insert(MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(), FAKE_BYPASS.to_string());
+        FakeEnv(values)
+    }
+
+    #[test]
+    fn hostname_is_the_default_label_and_label_override_is_folded() {
+        assert_eq!(resolve_label(None, Some("soundwave")), "SOUNDWAVE");
+        assert_eq!(resolve_label(Some("Daniel-laptop"), Some("soundwave")), "DANIEL_LAPTOP");
+    }
+
+    #[test]
+    fn credentials_upsert_preserves_unrelated_exports_and_profile_uses_login_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("config").join("credentials.env");
+        std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+        std::fs::write(
+            &credentials,
+            "export KEEP='unrelated'\nexport MECHA_VERCEL_BYPASS='old'\n",
+        )
+        .unwrap();
+
+        write_credentials(&credentials, "MECHA_SLACK_TOKEN_SOUNDWAVE", FAKE_TOKEN, MECHA_CASSY_DEFAULT_BYPASS_ENV, FAKE_BYPASS).unwrap();
+        let written = std::fs::read_to_string(&credentials).unwrap();
+        assert!(written.contains("export KEEP='unrelated'"));
+        assert!(written.contains(&format!("export MECHA_SLACK_TOKEN_SOUNDWAVE='{FAKE_TOKEN}'")));
+        assert!(written.contains(&format!("export {MECHA_CASSY_DEFAULT_BYPASS_ENV}='{FAKE_BYPASS}'")));
+        assert_eq!(std::fs::metadata(&credentials).unwrap().permissions().mode() & 0o777, 0o600);
+
+        let profile = dir.path().join(".profile");
+        ensure_profile_line(&profile, &credentials).unwrap();
+        let profile_text = std::fs::read_to_string(&profile).unwrap();
+        assert!(profile_text.contains(&profile_source_line(&credentials)));
+        assert!(!profile_text.contains(".bashrc"));
+    }
+
+    #[test]
+    fn provisioning_mints_with_cloud_login_and_hostname_label() {
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            ..Default::default()
+        };
+        let hub = FakeHub {
+            creates: RefCell::new(vec![Ok((FAKE_TOKEN.to_string(), Some(FAKE_BYPASS.to_string())))]),
+            bypasses: RefCell::new(Vec::new()),
+            labels: RefCell::new(Vec::new()),
+            cloud_tokens: RefCell::new(Vec::new()),
+        };
+        let vercel = FakeBypassReader {
+            result: Err(BypassReadError::InvalidResponse),
+            calls: RefCell::new(0),
+        };
+        let prompt = FakePrompt {
+            value: "prompted-secret".to_string(),
+            calls: RefCell::new(0),
+        };
+        let device = FakeDevice {
+            hostname: Some("soundwave".to_string()),
+            device_id: Some("device-123456".to_string()),
+        };
+
+        let (label, values) = provision_credentials_with_cloud_token(
+            &args,
+            &FakeEnv::with(&[]),
+            Some("cloud-bearer"),
+            &hub,
+            &vercel,
+            &prompt,
+            &device,
+        )
+        .unwrap();
+        assert_eq!(label, "SOUNDWAVE");
+        assert_eq!(values.token, FAKE_TOKEN);
+        assert_eq!(values.bypass, FAKE_BYPASS);
+        assert_eq!(hub.labels.borrow().as_slice(), &["SOUNDWAVE"]);
+        assert_eq!(hub.cloud_tokens.borrow().as_slice(), &["cloud-bearer"]);
+        assert_eq!(*vercel.calls.borrow(), 0);
+        assert_eq!(*prompt.calls.borrow(), 0);
+    }
+
+    #[test]
+    fn provisioning_retries_one_taken_label_with_device_suffix() {
+        let args = MechaCassyArgs {
+            label: Some("Daniel-laptop".to_string()),
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            ..Default::default()
+        };
+        let hub = FakeHub {
+            creates: RefCell::new(vec![
+                Err(HubClientError::LabelTaken),
+                Ok((FAKE_TOKEN.to_string(), Some(FAKE_BYPASS.to_string()))),
+            ]),
+            bypasses: RefCell::new(Vec::new()),
+            labels: RefCell::new(Vec::new()),
+            cloud_tokens: RefCell::new(Vec::new()),
+        };
+        let vercel = FakeBypassReader {
+            result: Err(BypassReadError::InvalidResponse),
+            calls: RefCell::new(0),
+        };
+        let prompt = FakePrompt {
+            value: "unused".to_string(),
+            calls: RefCell::new(0),
+        };
+        let device = FakeDevice {
+            hostname: Some("soundwave".to_string()),
+            device_id: Some("abcdef-device".to_string()),
+        };
+
+        let (label, _) = provision_credentials_with_cloud_token(
+            &args,
+            &FakeEnv::with(&[]),
+            Some("cloud-bearer"),
+            &hub,
+            &vercel,
+            &prompt,
+            &device,
+        )
+        .unwrap();
+        assert_eq!(label, "DANIEL_LAPTOP_abcdef");
+        assert_eq!(hub.labels.borrow().as_slice(), &["DANIEL_LAPTOP", "DANIEL_LAPTOP_abcdef"]);
+    }
+
+    #[test]
+    fn missing_hub_mint_route_fails_closed_without_local_mint() {
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            ..Default::default()
+        };
+        let hub = FakeHub {
+            creates: RefCell::new(vec![Err(HubClientError::RouteUnavailable)]),
+            bypasses: RefCell::new(Vec::new()),
+            labels: RefCell::new(Vec::new()),
+            cloud_tokens: RefCell::new(Vec::new()),
+        };
+        let vercel = FakeBypassReader {
+            result: Ok(FAKE_BYPASS.to_string()),
+            calls: RefCell::new(0),
+        };
+        let prompt = FakePrompt {
+            value: "prompted-secret".to_string(),
+            calls: RefCell::new(0),
+        };
+        let error = provision_credentials_with_cloud_token(
+            &args,
+            &FakeEnv::with(&[]),
+            Some("cloud-bearer"),
+            &hub,
+            &vercel,
+            &prompt,
+            &FakeDevice {
+                hostname: Some("soundwave".to_string()),
+                device_id: Some("device-123456".to_string()),
+            },
+        )
+        .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("hub route POST /api/clients not available (mecha-cassy#5)"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(FAKE_TOKEN));
+        assert_eq!(*vercel.calls.borrow(), 0);
+        assert_eq!(*prompt.calls.borrow(), 0);
+    }
+
+    #[test]
+    fn missing_hub_bypass_uses_read_only_vercel_then_hidden_prompt_once() {
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            ..Default::default()
+        };
+        let env = FakeEnv::with(&[
+            (MechaCassyArgs::default().resolved_token_env().as_str(), FAKE_TOKEN),
+            ("VERCEL_TOKEN", "vercel-bearer"),
+        ]);
+        let hub = FakeHub {
+            creates: RefCell::new(Vec::new()),
+            bypasses: RefCell::new(vec![Err(HubClientError::RouteUnavailable)]),
+            labels: RefCell::new(Vec::new()),
+            cloud_tokens: RefCell::new(Vec::new()),
+        };
+        let vercel = FakeBypassReader {
+            result: Err(BypassReadError::HttpStatus(404)),
+            calls: RefCell::new(0),
+        };
+        let prompt = FakePrompt {
+            value: "prompted-secret".to_string(),
+            calls: RefCell::new(0),
+        };
+        let device = FakeDevice {
+            hostname: Some("soundwave".to_string()),
+            device_id: Some("device-123456".to_string()),
+        };
+        let (_, values) = provision_credentials_with_cloud_token(
+            &args,
+            &env,
+            Some("cloud-bearer"),
+            &hub,
+            &vercel,
+            &prompt,
+            &device,
+        )
+        .unwrap();
+        assert_eq!(values.bypass, "prompted-secret");
+        assert_eq!(*vercel.calls.borrow(), 1);
+        assert_eq!(*prompt.calls.borrow(), 1);
     }
 
     #[test]
@@ -1530,7 +2551,13 @@ mod tests {
             url: MECHA_CASSY_MCP_URL.to_string(),
             ..Default::default()
         };
-        assert_eq!(args.resolved_token_env(), MECHA_CASSY_DEFAULT_TOKEN_ENV);
+        assert_eq!(
+            args.resolved_token_env(),
+            format!(
+                "MECHA_SLACK_TOKEN_{}",
+                resolve_label(None, DeviceConfig::hostname().as_deref())
+            )
+        );
 
         args.label = Some("daniel-laptop".to_string());
         assert_eq!(
@@ -1613,6 +2640,53 @@ mod tests {
     }
 
     #[test]
+    fn integrated_credentials_are_written_and_profile_sourcing_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let args = MechaCassyArgs {
+            label: Some("laptop".to_string()),
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            ..Default::default()
+        };
+        let env = FakeEnv::with(&[
+            ("MECHA_SLACK_TOKEN_LAPTOP", FAKE_TOKEN),
+            (MECHA_CASSY_DEFAULT_BYPASS_ENV, FAKE_BYPASS),
+        ]);
+        let values = CredentialValues {
+            token: FAKE_TOKEN.to_string(),
+            bypass: FAKE_BYPASS.to_string(),
+        };
+        let report = run_with_credentials(
+            &args,
+            None,
+            &paths,
+            &env,
+            &FakeProbe(live_tools()),
+            Some(&values),
+        )
+        .unwrap();
+        assert_eq!(report.credentials, WriteState::Written);
+        assert_eq!(report.login_profile, WriteState::Written);
+        let credentials = std::fs::read_to_string(&paths.credentials_file).unwrap();
+        assert!(credentials.contains(FAKE_TOKEN));
+        assert!(credentials.contains(FAKE_BYPASS));
+
+        let second = run_with_credentials(
+            &args,
+            None,
+            &paths,
+            &env,
+            &FakeProbe(live_tools()),
+            Some(&values),
+        )
+        .unwrap();
+        assert_eq!(second.credentials, WriteState::AlreadyCurrent);
+        assert_eq!(second.login_profile, WriteState::AlreadyCurrent);
+    }
+
+    #[test]
     fn missing_variable_names_the_variable_and_the_file_without_probing() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
@@ -1621,7 +2695,9 @@ mod tests {
             url: MECHA_CASSY_MCP_URL.to_string(),
             ..Default::default()
         };
-        let env = FakeEnv::with(&[(MECHA_CASSY_DEFAULT_TOKEN_ENV, "   ")]);
+        let mut values = HashMap::new();
+        values.insert(MechaCassyArgs::default().resolved_token_env(), "   ".to_string());
+        let env = FakeEnv(values);
 
         let report = run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
         assert!(!report.is_green());
@@ -1630,7 +2706,7 @@ mod tests {
         // The probe is never attempted with a known-bad credential.
         assert!(matches!(report.probe, ProbeOutcome::Skipped { .. }));
         let remedy = report.remedy.unwrap();
-        assert!(remedy.contains(MECHA_CASSY_DEFAULT_TOKEN_ENV), "{remedy}");
+        assert!(remedy.contains(&MechaCassyArgs::default().resolved_token_env()), "{remedy}");
         assert!(remedy.contains("set but empty"), "{remedy}");
         assert!(remedy.contains(MECHA_CASSY_DEFAULT_BYPASS_ENV), "{remedy}");
         assert!(remedy.contains("credentials file"), "{remedy}");
@@ -1704,7 +2780,10 @@ mod tests {
         assert!(written.contains("# operator comment worth keeping"), "{written}");
         assert!(written.contains("[mcp_servers.other]"), "{written}");
         assert!(
-            written.contains("bearer_token_env_var = \"MECHA_SLACK_TOKEN_CASSY_PROXY\""),
+            written.contains(&format!(
+                "bearer_token_env_var = \"{}\"",
+                MechaCassyArgs::default().resolved_token_env()
+            )),
             "{written}"
         );
         let parsed: toml::Value = toml::from_str(&written).unwrap();
@@ -1743,7 +2822,7 @@ mod tests {
         assert_eq!(written["mcpServers"]["playwright"]["command"], "npx");
         assert_eq!(
             written["mcpServers"]["mecha-cassy"]["headers"]["Authorization"],
-            "Bearer ${MECHA_SLACK_TOKEN_CASSY_PROXY}"
+            format!("Bearer ${{{}}}", MechaCassyArgs::default().resolved_token_env())
         );
     }
 
@@ -1832,7 +2911,11 @@ mod tests {
             &FakeProbe(live_tools()),
         );
         assert_eq!(row.severity, DoctorSeverity::Error);
-        assert!(row.message.contains(MECHA_CASSY_DEFAULT_TOKEN_ENV), "{row:?}");
+        assert!(
+            row.message
+                .contains(&MechaCassyArgs::default().resolved_token_env()),
+            "{row:?}"
+        );
         assert!(row.message.contains("unset"), "{row:?}");
         assert!(row.message.contains("credentials file"), "{row:?}");
     }
@@ -1909,7 +2992,9 @@ mod tests {
     /// retired `slack_*` quartet, and because a project allowlist *replaces*
     /// the machine one the command's "already-configured" receipt was a lie —
     /// `cas doctor` kept warning after every re-run.
-    fn shadowing_project_proxy() -> &'static str {
+    fn shadowing_project_proxy() -> String {
+        let token_env = MechaCassyArgs::default().resolved_token_env();
+        format!(
         "# project dispatch policy — keep the neon route\n\
          allowlist = [\n\
          \x20 \"neon.run_sql\",\n\
@@ -1928,10 +3013,11 @@ mod tests {
          [servers.mecha-cassy]\n\
          transport = \"http\"\n\
          url = \"https://mecha-cassy.vercel.app/mcp/slack\"\n\
-         auth = \"env:MECHA_SLACK_TOKEN_CASSY_PROXY\"\n\
+         auth = \"env:{token_env}\"\n\
          \n\
          [servers.mecha-cassy.headers]\n\
          x-vercel-protection-bypass = \"env:MECHA_VERCEL_BYPASS\"\n"
+        )
     }
 
     /// A `[servers.mecha-cassy]` block byte-equal in effect to the machine
@@ -1939,10 +3025,11 @@ mod tests {
     /// variable names — the only shape that is a true duplicate and so the
     /// only one safe to drop.
     fn duplicate_server_block() -> String {
+        let token_env = MechaCassyArgs::default().resolved_token_env();
         format!(
             "[servers.mecha-cassy]\ntransport = \"http\"\n\
              url = \"{MECHA_CASSY_MCP_URL}\"\n\
-             auth = \"env:{MECHA_CASSY_DEFAULT_TOKEN_ENV}\"\n\
+             auth = \"env:{token_env}\"\n\
              \n\
              [servers.mecha-cassy.headers]\n\
              {MECHA_CASSY_BYPASS_HEADER} = \"env:{MECHA_CASSY_DEFAULT_BYPASS_ENV}\"\n"
@@ -1970,7 +3057,7 @@ mod tests {
         // A machine file that is already canonical — the exact state that used
         // to make the command exit "already configured" and change nothing.
         run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
-        let project = write_project_proxy(dir.path(), shadowing_project_proxy());
+        let project = write_project_proxy(dir.path(), &shadowing_project_proxy());
 
         let before = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(before.severity, DoctorSeverity::Warning, "{before:?}");
@@ -2090,7 +3177,7 @@ mod tests {
                  [servers.mecha-cassy]\n\
                  transport = \"http\"\n\
                  url = \"{STAGING}\"\n\
-                 auth = \"env:MECHA_SLACK_TOKEN_CASSY_PROXY\"\n"
+                 auth = \"env:MECHA_SLACK_TOKEN_PROJECT_OVERRIDE\"\n"
             ),
         );
 
@@ -2205,7 +3292,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let project = write_project_proxy(dir.path(), shadowing_project_proxy());
+        let project = write_project_proxy(dir.path(), &shadowing_project_proxy());
 
         let report = run(
             &args,

@@ -648,6 +648,63 @@ fn restart_deadline_keeps_old_lock_owner_and_launches_no_replacement() {
     assert!(!home.path().join(".cas/hub/process.json").exists());
 }
 
+/// cas-bf90 guard on the shared stop path.
+///
+/// `hub restart` and a flags-differing `hub start` now pass a relaunch intent,
+/// which lets their wait resolve as success when a concurrent command already
+/// produced a satisfying live hub. Plain `hub stop` passes no intent, because
+/// for it "a hub is alive" is the opposite of success — reporting success while
+/// leaving a hub running would be a far worse bug than the stall being fixed.
+/// This pins that separation: with the lock held past the deadline, plain stop
+/// must still fail, and must say why.
+#[cfg(unix)]
+#[test]
+fn plain_stop_never_reports_success_while_a_hub_still_holds_the_lock() {
+    use cas::hub::HubRuntimePaths;
+
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let barrier = home.path().join("stop-lock-barrier");
+    fs::create_dir(&barrier).unwrap();
+
+    let initial = cas_command(home.path(), bin.as_os_str())
+        .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+        .args(["--json", "hub", "start", "--port", "0"])
+        .output()
+        .expect("start stop-barrier fixture");
+    assert!(initial.status.success());
+
+    // The hub removes its record and then holds the machine lock, so the stop
+    // wait cannot observe a quiescent machine before its deadline.
+    let stop = cas_command(home.path(), bin.as_os_str())
+        .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+        .args(["--json", "hub", "stop"])
+        .output()
+        .expect("run plain stop");
+    let stderr = String::from_utf8_lossy(&stop.stderr);
+    assert!(
+        !stop.status.success(),
+        "plain `hub stop` claimed success while a hub still held the machine lock — \
+         the relaunch-intent early return has leaked into stop: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&stop.stdout)
+    );
+    assert!(
+        stderr.contains("remained live after 10.0s") || stderr.contains("remained held after 10.0s"),
+        "plain stop must name why it could not finish: {stderr}"
+    );
+
+    fs::write(barrier.join("release"), b"release\n").unwrap();
+    let paths = HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let release_deadline = Instant::now() + Duration::from_secs(5);
+    while paths.acquire_instance_lock().is_err() && Instant::now() < release_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "stop"])
+        .output();
+}
+
 #[cfg(unix)]
 #[test]
 fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
@@ -678,14 +735,45 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
         let restart = run("restart", gate.clone());
         gate.wait();
         let outputs = [start.join().unwrap(), restart.join().unwrap()];
-        assert!(
-            outputs.iter().any(|output| output.status.success()),
-            "at least one concurrent lifecycle command must complete: {:?}",
-            outputs
+        let labelled = [("start", &outputs[0]), ("restart", &outputs[1])];
+        let stderrs = || {
+            labelled
                 .iter()
-                .map(|output| String::from_utf8_lossy(&output.stderr))
+                .map(|(name, output)| {
+                    format!("{name}: {}", String::from_utf8_lossy(&output.stderr).trim())
+                })
                 .collect::<Vec<_>>()
-        );
+                .join(" | ")
+        };
+
+        // cas-bf90. The old assertion was `any(success)`, which passed whenever
+        // either command happened to win. That hid the real behaviour: the
+        // losing command failed in ~80% of concurrent iterations, always after
+        // stalling the full 10s machine-lock timeout, because it waited for a
+        // lock the winner's healthy hub legitimately holds. It also meant the
+        // gate's one observed both-failed run was the *only* signal this test
+        // could ever give.
+        //
+        // Now every command must either succeed or fail with a named reason —
+        // never a bare non-zero exit, and never a lock-wait timeout, which is
+        // the specific defect that was fixed.
+        for (name, output) in labelled {
+            if output.status.success() {
+                continue;
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !stderr.contains("machine lock remained held"),
+                "`hub {name}` timed out waiting for a lock a healthy hub already holds — \
+                 the cas-bf90 defect has regressed: {}",
+                stderrs()
+            );
+            assert!(
+                !stderr.trim().is_empty(),
+                "`hub {name}` failed without naming a reason: {}",
+                stderrs()
+            );
+        }
 
         let status = cas_command(home.path(), bin.as_os_str())
             .args(["--json", "hub", "status"])

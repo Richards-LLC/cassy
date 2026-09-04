@@ -246,6 +246,192 @@ fn decide_live_start(
     }
 }
 
+/// Does an already-running hub satisfy the launch we were about to perform?
+///
+/// cas-bf90. Two concurrent lifecycle commands (`hub start` and `hub restart`)
+/// both stop the old hub and both try to launch a replacement. Whichever
+/// arrives second then waits on the machine lock — but the winner's brand-new
+/// hub legitimately *holds* that lock, so the loser's wait condition can never
+/// become true. It burned the full [`HUB_LIFECYCLE_TIMEOUT`] and then reported
+/// failure, even though the state it wanted ("a hub matching my flags is
+/// running") had already been reached. Measured before this predicate existed:
+/// the losing command failed in ~80% of concurrent iterations, always after a
+/// full 10 s stall.
+///
+/// The waiters asked "is the lock free?" when what they care about is "is a
+/// satisfying hub live?". This answers the second question.
+///
+/// Deliberately NOT [`decide_live_start`]: that function drives whether to
+/// restart, and its `record.port != args.port` comparison is right there and
+/// must not change. Here an ephemeral request (`--port 0`) means "any port is
+/// acceptable", so a hub on a kernel-assigned port does satisfy it — otherwise
+/// this predicate could never be true for the `--port 0` callers that hit the
+/// race most often.
+fn running_hub_satisfies_request(
+    record: &HubProcessRecord,
+    args: &HubServeArgs,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+    binary_version: &str,
+) -> bool {
+    if record.version != binary_version || record.bind != args.bind.to_string() {
+        return false;
+    }
+    // Port 0 asks the kernel to choose; any concrete port honours that request.
+    if args.port != 0 && record.port != args.port {
+        return false;
+    }
+    if tailscale_enabled(record) != tailscale_serve {
+        return false;
+    }
+    // A specific Serve port was requested: the live hub must be using it.
+    if tailscale_serve
+        && record
+            .tailscale_serve_port
+            .is_some_and(|port| port != tailscale_port)
+    {
+        return false;
+    }
+    true
+}
+
+/// What the caller intends to do once the hub is stopped.
+///
+/// cas-bf90. `stop_with_output` serves two very different callers. A plain
+/// `cas hub stop` demands the machine actually end up without a hub, so a live
+/// hub appearing mid-wait is a reason to keep waiting, never a success. A
+/// stop-to-relaunch (`hub restart`, or `hub start` when flags differ) only
+/// wants "a hub with these flags is running" — and a concurrent command may
+/// have produced exactly that while we waited. Passing the intent explicitly
+/// keeps those two meanings apart instead of overloading one wait.
+struct RelaunchIntent<'a> {
+    args: &'a HubServeArgs,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+}
+
+/// How a stop resolved.
+enum StopOutcome {
+    /// The hub is gone and the machine is quiescent.
+    Stopped,
+    /// A concurrent command already produced the hub the caller was going to
+    /// relaunch. Only reachable with a [`RelaunchIntent`].
+    ///
+    /// The caller MUST return success directly rather than continuing into its
+    /// relaunch: the teardown steps after the wait (`remove_process_record`,
+    /// cgroup kill, Tailscale disable) would otherwise dismantle a healthy hub
+    /// this command does not own.
+    AlreadySatisfied(Box<HubProcessRecord>),
+}
+
+/// Wait for the machine to go quiescent, unless the relaunch is already done.
+///
+/// `settle_pid` is the hub we just signalled: quiescence additionally requires
+/// that process to be gone. `stale_pid` is never accepted as satisfying — the
+/// hub we are trying to replace must not be mistaken for the replacement.
+fn wait_for_stop_or_satisfying_hub(
+    paths: &HubRuntimePaths,
+    settle_pid: Option<u32>,
+    stale_pid: Option<u32>,
+    timeout: Duration,
+    relaunch: Option<&RelaunchIntent<'_>>,
+) -> Result<Option<HubProcessRecord>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let lock = paths.try_acquire_instance_lock()?;
+        let quiescent = lock.is_some()
+            && settle_pid.is_none_or(|pid| !process_is_running(pid));
+        drop(lock);
+        if quiescent {
+            return Ok(None);
+        }
+        if let Some(intent) = relaunch
+            && let Ok(record) = paths.read_process_record()
+            && stale_pid != Some(record.pid)
+            && running_hub_satisfies_request(
+                &record,
+                intent.args,
+                intent.tailscale_serve,
+                intent.tailscale_port,
+                env!("CARGO_PKG_VERSION"),
+            )
+            && record_is_live(&record)
+        {
+            return Ok(Some(record));
+        }
+        if Instant::now() >= deadline {
+            return match settle_pid {
+                Some(pid) => anyhow::bail!(
+                    "cas hub pid {pid} or its machine lock remained live after {:.1}s; no replacement was started",
+                    timeout.as_secs_f64()
+                ),
+                None => anyhow::bail!(
+                    "cas hub machine lock remained held after {:.1}s; the old instance may still be shutting down and no replacement was started",
+                    timeout.as_secs_f64()
+                ),
+            };
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// How a launch attempt resolved its race with a concurrent lifecycle command.
+enum LaunchWait {
+    /// We hold the machine lock and are responsible for launching.
+    Acquired(crate::hub::HubInstanceLock),
+    /// Someone else already launched the hub we wanted; nothing left to do.
+    AlreadySatisfied(Box<HubProcessRecord>),
+}
+
+/// Wait for the machine lock, but stop early if the state we wanted arrives.
+///
+/// cas-bf90. [`crate::hub::HubRuntimePaths::wait_for_instance_lock`] asks only
+/// "is the lock free?". When a concurrent `hub start`/`hub restart` has just
+/// launched a healthy replacement, that replacement holds the lock for its
+/// whole life, so the question can never become true and the caller fails after
+/// the full timeout — despite the outcome it wanted already existing. This asks
+/// the question the caller actually cares about alongside the lock.
+///
+/// The liveness probe is deliberately last: it is an HTTP health call, so the
+/// cheap record/flag comparison rejects non-matching hubs first, and the probe
+/// only runs while we are genuinely contended.
+fn wait_for_lock_or_satisfying_hub(
+    paths: &HubRuntimePaths,
+    timeout: Duration,
+    args: &HubServeArgs,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+) -> Result<LaunchWait> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(lock) = paths.try_acquire_instance_lock()? {
+            return Ok(LaunchWait::Acquired(lock));
+        }
+        if let Ok(record) = paths.read_process_record()
+            && running_hub_satisfies_request(
+                &record,
+                args,
+                tailscale_serve,
+                tailscale_port,
+                env!("CARGO_PKG_VERSION"),
+            )
+            && record_is_live(&record)
+        {
+            return Ok(LaunchWait::AlreadySatisfied(Box::new(record)));
+        }
+        if Instant::now() >= deadline {
+            // Distinct from the runtime's generic lock-wait message on purpose:
+            // three separate sites could previously emit identical text, so an
+            // operator (or a test) could not tell which wait actually expired.
+            anyhow::bail!(
+                "cas hub launch waiter: machine lock remained held after {:.1}s and no running hub matched the requested flags; no replacement was started",
+                timeout.as_secs_f64()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn restart_spec_for_record(
     record: &HubProcessRecord,
     binary_version: &str,
@@ -305,8 +491,35 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         HubCommands::Status => status(cli),
         HubCommands::Stop => stop(cli),
         HubCommands::Restart(serve) => {
-            stop(cli)?;
-            start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
+            // `hub restart` is a stop-to-relaunch, so its stop carries the
+            // intent: if a concurrent lifecycle command already produced a hub
+            // with these flags, the restart's goal is met and waiting out the
+            // machine lock would be exactly the cas-bf90 stall. Plain
+            // `hub stop` still goes through stop(), which passes no intent.
+            match stop_with_output(
+                cli,
+                true,
+                Some(RelaunchIntent {
+                    args: &serve,
+                    tailscale_serve: args.tailscale_serve,
+                    tailscale_port: args.tailscale_serve_port,
+                }),
+            )? {
+                StopOutcome::AlreadySatisfied(record) => {
+                    if cli.json {
+                        println!("{}", serde_json::to_string(&record)?);
+                    } else {
+                        println!(
+                            "hub already running (pid {}, version {}) — a concurrent start won the race",
+                            record.pid, record.version
+                        );
+                    }
+                    Ok(())
+                }
+                StopOutcome::Stopped => {
+                    start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
+                }
+            }
         }
         HubCommands::Service(service) => super::hub_service::manage_service(
             &service.command,
@@ -395,7 +608,25 @@ fn start_with_output_from(
                             record.pid, record.version
                         );
                     }
-                    stop_with_output(cli, emit_output)?;
+                    if let StopOutcome::AlreadySatisfied(record) = stop_with_output(
+                        cli,
+                        emit_output,
+                        Some(RelaunchIntent {
+                            args,
+                            tailscale_serve,
+                            tailscale_port,
+                        }),
+                    )? {
+                        if emit_output && cli.json {
+                            println!("{}", serde_json::to_string(&record)?);
+                        } else if emit_output {
+                            println!(
+                                "hub already running (pid {}, version {}) — a concurrent start won the race",
+                                record.pid, record.version
+                            );
+                        }
+                        return Ok(());
+                    }
                     return start_with_output_from(
                         args,
                         cli,
@@ -412,7 +643,32 @@ fn start_with_output_from(
     // A missing/stale PID record is not ownership evidence. Acquire the
     // authoritative machine lock before cleaning stale state or launching a
     // replacement, then release it immediately before the child takes over.
-    let launch_guard = paths.wait_for_instance_lock(HUB_LIFECYCLE_TIMEOUT)?;
+    //
+    // cas-bf90: race a concurrent lifecycle command rather than only the lock.
+    // If that command's replacement hub is already up and satisfies what we
+    // were about to launch, we are done — waiting out the full timeout on a
+    // lock its healthy hub legitimately holds produced a guaranteed stall and a
+    // spurious failure.
+    let launch_guard = match wait_for_lock_or_satisfying_hub(
+        &paths,
+        HUB_LIFECYCLE_TIMEOUT,
+        args,
+        tailscale_serve,
+        tailscale_port,
+    )? {
+        LaunchWait::Acquired(lock) => lock,
+        LaunchWait::AlreadySatisfied(record) => {
+            if emit_output && cli.json {
+                println!("{}", serde_json::to_string(&record)?);
+            } else if emit_output {
+                println!(
+                    "hub already running (pid {}, version {}) — a concurrent start won the race",
+                    record.pid, record.version
+                );
+            }
+            return Ok(());
+        }
+    };
     let stale_cgroup = paths
         .read_process_record()
         .ok()
@@ -1010,12 +1266,19 @@ fn status(cli: &Cli) -> Result<()> {
 }
 
 fn stop(cli: &Cli) -> Result<()> {
-    stop_with_output(cli, true)
+    // No relaunch intent: a live hub can never mean success here, so this
+    // keeps the pre-cas-bf90 behaviour exactly.
+    stop_with_output(cli, true, None).map(|_| ())
 }
 
-fn stop_with_output(cli: &Cli, emit_output: bool) -> Result<()> {
+fn stop_with_output(
+    cli: &Cli,
+    emit_output: bool,
+    relaunch: Option<RelaunchIntent<'_>>,
+) -> Result<StopOutcome> {
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
+    let stale_pid = record.as_ref().map(|record| record.pid);
     let hub_cgroup = record.as_ref().and_then(|record| record.cgroup.clone());
     let tailscale_manager = TailscaleServeManager::new(paths.root());
     // Capture the exact mapping we own before asking the hub to exit. The
@@ -1033,11 +1296,27 @@ fn stop_with_output(cli: &Cli, emit_output: bool) -> Result<()> {
         Command::new("taskkill")
             .args(["/PID", &record.pid.to_string()])
             .status()?;
-        wait_for_process_and_lock_release(&paths, record.pid, HUB_LIFECYCLE_TIMEOUT)?;
+        if let Some(satisfying) = wait_for_stop_or_satisfying_hub(
+            &paths,
+            Some(record.pid),
+            stale_pid,
+            HUB_LIFECYCLE_TIMEOUT,
+            relaunch.as_ref(),
+        )? {
+            return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
+        }
     } else {
         // Record absence does not authorize stale cleanup: a shutting-down hub
         // may already have removed it while still holding the machine lock.
-        drop(paths.wait_for_instance_lock(HUB_LIFECYCLE_TIMEOUT)?);
+        if let Some(satisfying) = wait_for_stop_or_satisfying_hub(
+            &paths,
+            None,
+            stale_pid,
+            HUB_LIFECYCLE_TIMEOUT,
+            relaunch.as_ref(),
+        )? {
+            return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
+        }
     }
     if let Some(cgroup) = hub_cgroup {
         if let Err(error) = crate::ui::factory::cgroup::kill_scope(&cgroup) {
@@ -1090,7 +1369,7 @@ fn stop_with_output(cli: &Cli, emit_output: bool) -> Result<()> {
             Err(error) => eprintln!("Tailscale Serve mapping left untouched: {error}"),
         }
     }
-    Ok(())
+    Ok(StopOutcome::Stopped)
 }
 
 /// Restart a live hub left behind by an older Cassy binary. This is called by
@@ -1114,12 +1393,24 @@ pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool>
             record.pid, record.version, binary_version
         );
     }
-    stop_with_output(cli, !cli.json)?;
     let args = HubServeArgs {
         bind: spec.bind,
         port: spec.port,
         ..HubServeArgs::default()
     };
+    // A stale-version restart is a relaunch: if a concurrent command already
+    // produced a hub on the new binary, that is the outcome this wanted.
+    if let StopOutcome::AlreadySatisfied(_) = stop_with_output(
+        cli,
+        !cli.json,
+        Some(RelaunchIntent {
+            args: &args,
+            tailscale_serve: spec.tailscale_serve,
+            tailscale_port: spec.tailscale_port,
+        }),
+    )? {
+        return Ok(true);
+    }
     start_with_output_from(
         &args,
         cli,
@@ -1129,30 +1420,6 @@ pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool>
         HubLaunchOrigin::Update,
     )?;
     Ok(true)
-}
-
-fn wait_for_process_and_lock_release(
-    paths: &HubRuntimePaths,
-    pid: u32,
-    timeout: Duration,
-) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let process_gone = !process_is_running(pid);
-        let lock = paths.try_acquire_instance_lock()?;
-        if process_gone && lock.is_some() {
-            drop(lock);
-            return Ok(());
-        }
-        drop(lock);
-        if Instant::now() >= deadline {
-            anyhow::bail!(
-                "cas hub pid {pid} or its machine lock remained live after {:.1}s; no replacement was started",
-                timeout.as_secs_f64()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
 }
 
 fn process_is_running(pid: u32) -> bool {
@@ -1237,6 +1504,120 @@ mod tests {
     #[test]
     fn bare_hub_defaults_to_status() {
         assert!(matches!(default_hub_command(), HubCommands::Status));
+    }
+
+    /// cas-bf90: the predicate that lets a losing concurrent lifecycle command
+    /// stop waiting on a lock the winner's healthy hub legitimately holds.
+    mod running_hub_satisfies {
+        use super::*;
+
+        const VERSION: &str = env!("CARGO_PKG_VERSION");
+        /// The Serve port default, mirrored from `record.tailscale_serve_port.unwrap_or(443)`.
+        const TS_PORT: u16 = 443;
+
+        fn ephemeral_args() -> HubServeArgs {
+            let mut args = HubServeArgs::default();
+            args.port = 0;
+            args
+        }
+
+        #[test]
+        fn an_ephemeral_request_is_satisfied_by_any_kernel_assigned_port() {
+            // The case that matters: `--port 0` is what the concurrent
+            // lifecycle callers use, so if this were false the fix would be a
+            // no-op exactly where the race happens.
+            let live = record(VERSION, 35053, None);
+            assert!(running_hub_satisfies_request(
+                &live,
+                &ephemeral_args(),
+                false,
+                TS_PORT,
+                VERSION
+            ));
+        }
+
+        #[test]
+        fn an_explicit_port_request_is_not_satisfied_by_a_different_port() {
+            let mut args = HubServeArgs::default();
+            args.port = 4173;
+            let live = record(VERSION, 35053, None);
+            assert!(!running_hub_satisfies_request(
+                &live,
+                &args,
+                false,
+                TS_PORT,
+                VERSION
+            ));
+        }
+
+        #[test]
+        fn a_version_mismatch_is_never_satisfying() {
+            // Version drift must still force a restart: accepting an old binary
+            // here would silently keep a stale hub alive.
+            let stale = record("0.0.1-old", 35053, None);
+            assert!(!running_hub_satisfies_request(
+                &stale,
+                &ephemeral_args(),
+                false,
+                TS_PORT,
+                VERSION
+            ));
+        }
+
+        #[test]
+        fn tailscale_flag_drift_in_either_direction_is_not_satisfying() {
+            let with_ts = record(VERSION, 35053, Some(TS_PORT));
+            let without_ts = record(VERSION, 35053, None);
+            // Wanted plain, found Serve-enabled.
+            assert!(!running_hub_satisfies_request(
+                &with_ts,
+                &ephemeral_args(),
+                false,
+                TS_PORT,
+                VERSION
+            ));
+            // Wanted Serve, found plain.
+            assert!(!running_hub_satisfies_request(
+                &without_ts,
+                &ephemeral_args(),
+                true,
+                TS_PORT,
+                VERSION
+            ));
+            // Wanted Serve, found Serve on the same port.
+            assert!(running_hub_satisfies_request(
+                &with_ts,
+                &ephemeral_args(),
+                true,
+                TS_PORT,
+                VERSION
+            ));
+        }
+
+        #[test]
+        fn a_different_tailscale_serve_port_is_not_satisfying() {
+            let other_port = record(VERSION, 35053, Some(8443));
+            assert!(!running_hub_satisfies_request(
+                &other_port,
+                &ephemeral_args(),
+                true,
+                TS_PORT,
+                VERSION
+            ));
+        }
+
+        #[test]
+        fn a_different_bind_address_is_not_satisfying() {
+            let mut live = record(VERSION, 35053, None);
+            live.bind = "0.0.0.0".to_owned();
+            assert!(!running_hub_satisfies_request(
+                &live,
+                &ephemeral_args(),
+                false,
+                TS_PORT,
+                VERSION
+            ));
+        }
     }
 
     #[test]

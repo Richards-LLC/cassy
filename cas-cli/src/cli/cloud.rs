@@ -5187,13 +5187,28 @@ impl PurgeDeleteSet {
     }
 }
 
-/// A foreign row found by doctor but intentionally retained by purge. These
-/// are cross-project proposal materializations, not accidental replicas.
+/// A foreign row found by doctor but intentionally retained by purge because
+/// the classifier cannot safely decide ownership (for example, an id
+/// collision or an unattributed replica).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PurgeRetainedTask {
     pub id: String,
     pub title: String,
     pub reason: String,
+}
+
+impl PurgeRetainedTask {
+    /// A collision cannot be auto-deleted because the short task id may name
+    /// two different tasks. Give the operator the safe, explicit reassignment
+    /// path after they confirm the local `(id, title)` owner.
+    fn operator_command(&self) -> Option<String> {
+        self.reason.starts_with("id collision").then(|| {
+            format!(
+                "cas task show id={}; then mcp__cs__task action=update id={} origin_project=<confirmed canonical id>",
+                self.id, self.id
+            )
+        })
+    }
 }
 
 /// The shared result consumed by purge and doctor's cross-project check. The
@@ -5811,6 +5826,12 @@ fn evaluate_purge_safety(
 
 /// Queued-but-unpushed local changes for the entity kinds a purge deletes.
 ///
+/// Entry access reinforcement is observational metadata written by
+/// `SessionStart` through `SyncingEntryStore`; it is not a content mutation
+/// that this purge can safely classify from the queue row alone. Tasks, rules,
+/// and skills remain guarded because their queued rows represent content or
+/// ownership changes.
+///
 /// Fails CLOSED. Only an absent `sync_queue` table is "no pending pushes";
 /// every other read failure (schema drift, corruption, a row that will not
 /// decode) is propagated so the purge refuses loudly. Silently returning zero
@@ -5821,7 +5842,6 @@ pub(crate) fn pending_content_pushes(
 ) -> anyhow::Result<Vec<(String, String)>> {
     let mut stmt = match conn.prepare(
         "SELECT entity_type, entity_id FROM sync_queue
-         WHERE lower(entity_type) IN ('entry', 'task', 'rule', 'skill')
          ORDER BY id",
     ) {
         Ok(s) => s,
@@ -5843,9 +5863,12 @@ pub(crate) fn pending_content_pushes(
     for row in rows {
         // No .flatten(): a row that fails to decode must not vanish into a
         // shorter "pending" list that reads as safe.
-        out.push(row.map_err(|e| {
+        let (entity_type, entity_id) = row.map_err(|e| {
             anyhow::anyhow!("unreadable row in the sync queue while checking unpushed changes: {e}")
-        })?);
+        })?;
+        if matches!(entity_type.to_ascii_lowercase().as_str(), "task" | "rule" | "skill") {
+            out.push((entity_type, entity_id));
+        }
     }
     Ok(out)
 }
@@ -5986,6 +6009,7 @@ fn execute_purge_foreign(
                             "id": row.id,
                             "title": row.title,
                             "reason": row.reason,
+                            "operator_command": row.operator_command(),
                         }))
                         .collect::<Vec<_>>(),
                     "refusals": refusals.iter()
@@ -6057,6 +6081,19 @@ fn execute_purge_foreign(
                     analysis.collision_count
                 ))?;
                 fmt.newline()?;
+                for retained in &analysis.retained_foreign_tasks {
+                    let Some(operator_command) = retained.operator_command() else {
+                        continue;
+                    };
+                    fmt.write_muted("      - ")?;
+                    fmt.write_raw(&format!(
+                        "{}  {} [{}]",
+                        retained.id, retained.title, retained.reason
+                    ))?;
+                    fmt.newline()?;
+                    fmt.write_raw(&format!("        operator: {operator_command}"))?;
+                    fmt.newline()?;
+                }
             }
             fmt.write_raw(&format!("    {} dependency edges", delete_set.dependencies))?;
             fmt.newline()?;
@@ -6128,6 +6165,10 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
     // Step 3: Re-pull from cloud with project-scoped filtering
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
+    // Purge removes the local evidence used by team-pull watermarks. Clear
+    // every scoped watermark so the next team pull cannot skip the rows that
+    // need to be re-evaluated under the same ownership rule as doctor.
+    let cleared_team_watermarks = queue.delete_metadata_with_prefix("last_team_pull_at_")?;
     let syncer = CloudSyncer::new(Arc::new(queue), config, CloudSyncerConfig::default());
 
     let pull_result = syncer.pull(
@@ -6153,7 +6194,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
 
     if cli.json {
         println!(
-            r#"{{"project_id":"{}","backup":"{}","entities_before":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"entities_after":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"purged":{},"pull_errors":{}}}"#,
+            r#"{{"project_id":"{}","backup":"{}","entities_before":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"entities_after":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"purged":{},"team_watermarks_cleared":{},"pull_errors":{}}}"#,
             project_id,
             backup_path.display(),
             entries_before,
@@ -6167,6 +6208,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
             skills_after,
             total_after,
             purged,
+            cleared_team_watermarks,
             serde_json::to_string(&pull_result.errors).unwrap_or_default(),
         );
     } else {
@@ -6181,6 +6223,9 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
         fmt.newline()?;
         fmt.write_muted("  Purged:  ")?;
         fmt.write_raw(&format!("{} foreign entities removed", purged))?;
+        fmt.newline()?;
+        fmt.write_muted("  Team pull watermarks cleared: ")?;
+        fmt.write_raw(&cleared_team_watermarks.to_string())?;
         fmt.newline()?;
         fmt.write_muted("  Backup:  ")?;
         fmt.write_raw(&backup_path.to_string_lossy())?;
@@ -7855,15 +7900,26 @@ mod purge_foreign_safety_tests {
 
         let pending = pending_content_pushes(&conn).unwrap();
 
-        // Content kinds only (case-insensitively); events survive a purge and
-        // must not trip the guard.
+        // Task/rule/skill content kinds only (case-insensitively); entry access
+        // refreshes and events survive a purge and must not trip the guard.
         assert_eq!(
             pending,
-            vec![
-                ("entry".to_string(), "e1".to_string()),
-                ("Task".to_string(), "cas-0001".to_string()),
-            ]
+            vec![("Task".to_string(), "cas-0001".to_string())]
         );
+    }
+
+    #[test]
+    fn session_start_entry_refreshes_do_not_block_purge() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation)
+             VALUES ('entry', 'e1', 'update')",
+            [],
+        )
+        .unwrap();
+
+        assert!(pending_content_pushes(&conn).unwrap().is_empty());
     }
 
     #[test]
@@ -7897,7 +7953,7 @@ mod purge_foreign_safety_tests {
         seed_db(&conn);
         conn.execute(
             "INSERT INTO sync_queue (entity_type, entity_id, operation)
-             VALUES ('entry', X'FF', 'create')",
+             VALUES (X'FF', 'cas-0001', 'create')",
             [],
         )
         .unwrap();

@@ -103,6 +103,28 @@ impl SyncingEntryStore {
     }
 }
 
+/// SessionStart reinforces surfaced memories in place. Those updates change
+/// only local access telemetry and should not become cloud content writes (or
+/// make a destructive purge look like it has unsent work). Keep every other
+/// field in the comparison so a real content edit is still queued.
+fn is_access_metadata_only_update(before: &Entry, after: &Entry) -> bool {
+    let (Ok(mut before), Ok(mut after)) = (
+        serde_json::to_value(before),
+        serde_json::to_value(after),
+    ) else {
+        return false;
+    };
+    for key in ["last_accessed", "access_count", "stability"] {
+        if let Some(object) = before.as_object_mut() {
+            object.remove(key);
+        }
+        if let Some(object) = after.as_object_mut() {
+            object.remove(key);
+        }
+    }
+    before == after
+}
+
 impl Store for SyncingEntryStore {
     fn init(&self) -> Result<()> {
         self.inner.init()
@@ -127,8 +149,14 @@ impl Store for SyncingEntryStore {
     }
 
     fn update(&self, entry: &Entry) -> Result<()> {
+        let access_metadata_only = self
+            .inner
+            .get(&entry.id)
+            .is_ok_and(|before| is_access_metadata_only_update(&before, entry));
         self.inner.update(entry)?;
-        self.queue_upsert(entry);
+        if !access_metadata_only {
+            self.queue_upsert(entry);
+        }
         Ok(())
     }
 
@@ -300,6 +328,26 @@ mod tests {
                 .unwrap()
                 .contains("Updated content")
         );
+    }
+
+    #[test]
+    fn access_metadata_only_update_does_not_queue_sync() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+
+        let entry = Entry::new("entry-access-refresh".to_string(), "Test content".to_string());
+        store.add(&entry).unwrap();
+        queue.clear().unwrap();
+
+        let mut surfaced = store.get(&entry.id).unwrap();
+        surfaced.reinforce();
+        store.update(&surfaced).unwrap();
+
+        assert!(
+            queue.pending(10, 5).unwrap().is_empty(),
+            "SessionStart access reinforcement is local telemetry, not a content push"
+        );
+        assert_eq!(store.get(&entry.id).unwrap().access_count, 1);
     }
 
     #[test]

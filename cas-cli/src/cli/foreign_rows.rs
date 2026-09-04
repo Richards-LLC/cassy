@@ -359,9 +359,15 @@ it deletes cloud-backed content rows and re-pulls this project's own scope.",
         if !self.collisions.is_empty() {
             text.push_str(&format!(
                 " Any hand-written cleanup must match on (id, title): {} id(s) in this scan name a \
-different real task in another project, so deleting by id alone destroys live work.",
+                 different real task in another project, so deleting by id alone destroys live work.",
                 self.collisions.len()
             ));
+            text.push_str(
+                " For each retained collision, first run `cas task show id=<task-id>` to confirm \
+the local title, then an authorized supervisor can run `mcp__cs__task action=update \
+id=<task-id> origin_project=<confirmed canonical id>`; do not update or delete until the \
+(id, title) owner is confirmed.",
+            );
         } else {
             text.push_str(
                 " Any hand-written cleanup must match on (id, title) — 4-hex task ids collide \
@@ -1034,6 +1040,9 @@ mod tests {
         assert_eq!(report.collisions[0].id, "cas-1234");
         assert_eq!(report.collisions[0].other_project, "accounting");
         assert!(report.remediation().contains("(id, title)"));
+        assert!(report
+            .remediation()
+            .contains("mcp__cs__task action=update id=<task-id> origin_project=<confirmed canonical id>"));
     }
 
     /// A row that is a genuine replica *and* collides with a third project's

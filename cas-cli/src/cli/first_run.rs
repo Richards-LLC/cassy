@@ -63,6 +63,58 @@ mod tests {
         assert!(!hint.contains('\n'), "first-run hint must be one line: {hint}");
     }
 
+    /// The published install proof runs the released binary on a clean machine
+    /// and greps for this exact greeting. It cannot read `FRONT_DOOR_COMMAND`
+    /// at run time — it curls an installer onto a runner with no checkout — so
+    /// the sentence is duplicated in the workflow and drifts the moment the
+    /// front door is renamed. The v3.16.0 proof failed on both macOS and Linux
+    /// for exactly that reason: the workflow still asserted `cas init` while
+    /// the shipped binary printed `cas setup`. This test is the coupling that
+    /// was missing.
+    #[test]
+    fn install_path_proof_asserts_the_greeting_the_binary_prints() {
+        let root = crate::test_paths::workspace_root();
+        let Ok(workflow) =
+            std::fs::read_to_string(root.join(".github/workflows/install-path-proof.yml"))
+        else {
+            return; // not a source checkout; nothing to assert against
+        };
+
+        let hint = front_door_hint();
+        let greetings: Vec<_> = workflow
+            .lines()
+            .filter(|line| line.contains("Welcome to Cassy."))
+            .collect();
+
+        assert!(
+            !greetings.is_empty(),
+            "install-path-proof.yml no longer proves the first-run greeting; \
+             a renamed front door would reach users unchecked"
+        );
+        for line in &greetings {
+            assert!(
+                line.contains(&hint),
+                "install-path-proof.yml asserts a greeting this binary never prints.\n  \
+                 workflow: {}\n  binary:   {hint}",
+                line.trim()
+            );
+        }
+
+        // Every platform that runs the onboarding block must assert the
+        // greeting, so a failing platform cannot be "fixed" by deleting its
+        // check.
+        let onboarding_blocks = workflow
+            .matches("Checking bare cas and cas doctor in a fresh login shell.")
+            .count();
+        assert_eq!(
+            greetings.len(),
+            onboarding_blocks,
+            "{onboarding_blocks} platform(s) run the onboarding block but only \
+             {} assert the greeting",
+            greetings.len()
+        );
+    }
+
     #[test]
     fn a_host_cas_dir_means_the_machine_is_configured() {
         let temp = tempfile::tempdir().unwrap();

@@ -52,20 +52,32 @@ and do not claim success without its receipt.
    '*/Cargo.toml'`; run outside the checkout with symlinks for
    cargo/rustc/git/sh/bash/jq/python3, no `rg`, and `--workspace-remap`.
    Exclude `component_output_test` only when its source snapshots need checkout.
-6. Push one source branch and open one protected-main PR:
-   `git push -u origin <source-branch>`; `gh pr create --base main --head
-   <source-branch> --fill`; `gh pr merge <pr> --merge`. Verify the PR remains
-   queued, explicitly enqueue it if `isInMergeQueue=false`, and watch the
-   `merge_group` run rather than admission stubs; record retry latency.
-7. After the merge lands, fast-forward and prepare the clean tag worktree:
-   `git fetch origin main`; `LANDED_MAIN="$(git rev-parse origin/main)"`;
-   `VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' cas-cli/Cargo.toml | head -n1)"`;
-   `TAG="v$VERSION"`; `TAG_WORKTREE=".cas/release-$TAG"`;
-   `git worktree add "$TAG_WORKTREE" "$LANDED_MAIN"`; `mkdir -p
-   "$TAG_WORKTREE/.context"`; `cp -al .context/zig "$TAG_WORKTREE/.context/zig"`.
-   Do not run local preflight here:
+6. Push the source branch and drive it to a landed merge with
+   `scripts/release-train.sh <version> <epic-worktree> --pipeline`, which
+   reuses the gate's run directory and writes `pr-number.txt`,
+   `landed-main.sha` and a terminal `pipeline.done`
+   (MERGED / CHECKS_FAILED / QUEUE_RUN_FAILED / DROPPED_TOO_OFTEN / TIMEOUT).
+   It enqueues only after the pull_request run shows a `bucket == pass` row for
+   BOTH Fast Validation and macOS Check: a push-triggered run contributes rows
+   with the same names and `bucket == skipped`, and enqueuing on those gets the
+   merge-queue entry dropped silently (`mergeQueueEntry` null), which is what
+   cost v3.15.2 its first queue attempt. It also watches for that dropped
+   signature — no entry and no new `merge_group` run — and re-enqueues up to
+   three times before giving up (cas-da81).
+7. After the merge lands, publish with
+   `scripts/release-train.sh <version> <epic-worktree> --publish`, which takes
+   the landed sha from the run directory's `landed-main.sha` (pass it
+   explicitly to override). It refuses before creating anything if `origin/main`
+   is not that sha or if the LANDED COMMIT's `cas-cli/Cargo.toml` does not
+   declare the version being published — read from the commit, not the working
+   tree, so a dirty epic worktree cannot vouch for what is tagged. It then
+   creates the detached tag worktree at `.cas/release-v<version>`, hardlinks
+   `.context/zig`, sources `CAS_RELEASE_ENV_FILE` printing variable NAMES and
+   set/unset state only, and runs `release.sh --publish-tag` with
+   `release.log`, a recorded `release.pid` and a numeric `release.done` inside
+   the run directory. Do not run local preflight here:
    `release.sh --publish-tag` owns annotated-tag creation and runs
-   `check-release-preflight.sh --local` before pushing the tag.
+   `check-release-preflight.sh --local` before pushing the tag (cas-c1cd).
 8. From that tag worktree, run this exact publisher wrapper:
 
    ```bash

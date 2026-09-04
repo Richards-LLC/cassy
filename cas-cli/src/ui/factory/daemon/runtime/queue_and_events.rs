@@ -770,8 +770,11 @@ fn take_unverified_spawn_on_exit(
 /// documented as non-authoritative for Claude/Codex — it stays true after
 /// normal completion until an explicit cancel — so it would report a supervisor
 /// permanently busy and silently re-disable the wake.
+///
+/// Exported (cas-5087) as an argument of the wake gate; see
+/// [`super::super::FactoryDaemon::supervisor_wake_decision`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PaneWakeState {
+pub struct PaneWakeState {
     /// An attached operator has an unsubmitted draft. cas-dab2's reported
     /// symptom; the wake yields entirely rather than relying on
     /// `Mux::inject`'s bounded defer window.
@@ -804,8 +807,9 @@ pub(crate) struct PaneWakeState {
 /// no-evidence case *demotion* rather than *veto*: an unknown recipient is
 /// held to the conservative sustained-silence bar instead of being treated as
 /// permanently busy.
+/// Exported (cas-5087) as part of [`PaneWakeState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ToolCallEvidence {
+pub enum ToolCallEvidence {
     /// The transcript shows a tool call that has not come back — mid-turn, or
     /// blocked on an approval dialog, whatever the pane's silence suggests.
     InFlight,
@@ -919,8 +923,12 @@ impl PaneWakeState {
 
 /// Whether a queued row may PTY-wake its recipient right now, and — always —
 /// why (cas-9e81).
+///
+/// Exported with [`super::super::FactoryDaemon::supervisor_wake_decision`]
+/// (cas-5087) so tests and diagnostics can read the real gate's verdict and
+/// stated reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WakeDecision {
+pub struct WakeDecision {
     pub allowed: bool,
     /// Operator-facing explanation, persisted as the row's
     /// `wake_attempt_detail` so `message_status` reports which signal
@@ -950,7 +958,7 @@ impl WakeDecision {
 /// Measured in SECONDS, not poll ticks: `process_prompt_queue` runs on a 100ms
 /// poll, so a tick count here would have made "sustained silence" mean a third
 /// of a second — no evidence at all about turn boundaries.
-const SILENCE_FOR_ACTIVE_RECIPIENT_WAKE: std::time::Duration = std::time::Duration::from_secs(45);
+pub const SILENCE_FOR_ACTIVE_RECIPIENT_WAKE: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Wall-clock PTY silence required before waking a recipient the registry
 /// already judged idle (cas-45c4). Short: this is corroboration that the pane
@@ -2582,14 +2590,11 @@ impl FactoryDaemon {
     /// Deliberately unscoped by session — the whole point is the other session's
     /// supervisor.
     fn source_is_registered_supervisor(&self, source: &str) -> bool {
-        use cas_types::AgentRole;
         crate::store::open_agent_store(self.app.cas_dir())
             .ok()
             .and_then(|store| store.list(None).ok())
             .is_some_and(|agents| {
-                agents.iter().any(|agent| {
-                    agent.role == AgentRole::Supervisor && agent.name.eq_ignore_ascii_case(source)
-                })
+                crate::factory_supervisor_overlap::names_a_registered_supervisor(&agents, source)
             })
     }
 
@@ -2625,7 +2630,14 @@ impl FactoryDaemon {
     }
 
     /// Reasoned form of [`Self::supervisor_wake_is_eligible`] (cas-9e81).
-    fn supervisor_wake_decision(
+    ///
+    /// Exported (cas-5087) so acceptance tests and diagnostics assert THIS
+    /// gate rather than a hand-rolled copy of its rules. cas-15f2's wake
+    /// allowance was unit-tested with `source_is_supervisor` passed in by
+    /// hand, and stayed green for the whole time the production path could
+    /// never resolve that flag to true — a copy of a gate proves nothing about
+    /// the gate. Pure over its arguments: it reads no global state.
+    pub fn supervisor_wake_decision(
         data: &crate::ui::factory::director::DirectorData,
         pane_target: &str,
         supervisor_name: &str,
@@ -2651,7 +2663,11 @@ impl FactoryDaemon {
         // Safe because `source_is_supervisor` is resolved from the agent store
         // by [`Self::source_is_registered_supervisor`], not from the
         // caller-settable `source` string — see that function's note.
-        let peer_supervisor_message = source_is_supervisor && !source.eq_ignore_ascii_case(supervisor_name);
+        let peer_supervisor_message = crate::factory_supervisor_overlap::is_peer_supervisor_message(
+            source,
+            supervisor_name,
+            source_is_supervisor,
+        );
         if !peer_supervisor_message
             && (!is_lifecycle_wake_source(source)
                 || !crate::prompt_revalidation::is_supervisor_wake_envelope(prompt))

@@ -279,7 +279,7 @@ pub fn changelog_path(repo_root: &Path) -> Option<std::path::PathBuf> {
 /// boundary, not swallowed and not raised as a failure.
 ///
 /// The file is read as bytes and decoded through
-/// [`crate::daemon::source_text::decode_source`] rather than demanding UTF-8
+/// `crate::daemon::source_text::decode_source` rather than demanding UTF-8
 /// up front (GH #698, extended by cas-c736). A CHANGELOG that has been through
 /// a Windows editor is commonly UTF-16 or UTF-8-with-BOM; `read_to_string`
 /// failed the whole changelog pass on the first with an encoding message that

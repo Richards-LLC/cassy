@@ -11,6 +11,31 @@ gate="$script_dir/release-gate.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# The gate refuses any scratch base with a .cas ancestor, and its own default is
+# $HOME/.cache/cas-release-gate — which on a developer machine sits under the
+# user-level ~/.cas. Unset, this self-test therefore died mid-run on the two
+# rows that build a scratch base, printing no summary and reading as a broken
+# script rather than the host condition it is (cas-4ccc). Default to a base
+# with no .cas above it, matching the queue runner, and let an explicit value
+# win so the variable stays overridable.
+: "${CAS_RELEASE_GATE_HOME_DIR:=/var/tmp/cas-release-gate}"
+export CAS_RELEASE_GATE_HOME_DIR
+mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
+
+# Fail loudly rather than silently reintroducing the same class: if the chosen
+# base has a .cas ancestor, every scratch row would refuse and the reader would
+# be back to debugging the gate instead of the release.
+probe="$CAS_RELEASE_GATE_HOME_DIR"
+while [[ "$probe" != "/" && -n "$probe" ]]; do
+    if [[ -d "$probe/.cas" ]]; then
+        printf 'CAS_RELEASE_GATE_HOME_DIR=%s has a .cas ancestor at %s; pick a path with none\n' \
+            "$CAS_RELEASE_GATE_HOME_DIR" "$probe/.cas" >&2
+        exit 1
+    fi
+    probe="$(dirname "$probe")"
+done
+unset probe
+
 pass=0
 fail=0
 

@@ -284,8 +284,10 @@ fn scoped_pull_builder_appends_project_id() {
     // must, in the same file, also append `project_id=`. This catches a
     // regression where someone deletes the project_id line in pull.rs
     // without touching the URL format string.
-    let pull_rs =
-        production_source_root().join("cloud").join("syncer").join("pull.rs");
+    let pull_rs = production_source_root()
+        .join("cloud")
+        .join("syncer")
+        .join("pull.rs");
     let src = fs::read_to_string(&pull_rs).expect("read syncer/pull.rs");
     assert!(
         src.contains("project_id="),
@@ -328,15 +330,13 @@ async fn cloud_syncer_pull_request_carries_project_id_on_the_wire() {
         .and(path("/api/sync/pull"))
         .and(query_param("project_id", expected_project_id.as_str()))
         .and(header("Authorization", "Bearer test-token"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "entries": [],
-                "tasks": [],
-                "rules": [],
-                "skills": [],
-                "pulled_at": chrono::Utc::now().to_rfc3339(),
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [],
+            "tasks": [],
+            "rules": [],
+            "skills": [],
+            "pulled_at": chrono::Utc::now().to_rfc3339(),
+        })))
         .expect(1) // exactly one matching request
         .mount(&server)
         .await;
@@ -482,9 +482,7 @@ async fn task_pull_and_direct_writes_remain_isolated_by_store() {
         cas::store::open_file_change_store(&project_root).expect("open file change store");
     let commit_link_store =
         cas::store::open_commit_link_store(&project_root).expect("open commit link store");
-    let queue = Arc::new(
-        cas::cloud::SyncQueue::open(&project_root).expect("open queue"),
-    );
+    let queue = Arc::new(cas::cloud::SyncQueue::open(&project_root).expect("open queue"));
     queue.init().expect("init queue");
 
     let syncer = cas::cloud::CloudSyncer::new(

@@ -1604,7 +1604,10 @@ fn sample_rows(rows: &[(String, String)]) -> String {
 enum PruneOutcome {
     Pruned(usize),
     /// At least one endpoint could not be read, so nothing was deleted.
-    Skipped { reason: String, rows: usize },
+    Skipped {
+        reason: String,
+        rows: usize,
+    },
 }
 
 /// Delete dependency rows whose endpoints are absent from `tasks`.
@@ -1846,7 +1849,28 @@ fn foreign_rows_check_with_classifier_error(
                 let retained = analysis
                     .retained_foreign_tasks
                     .iter()
-                    .map(|row| format!("{} ({})", row.id, row.reason))
+                    .map(|row| {
+                        let detail = format!("{} ({})", row.id, row.reason);
+                        let Some(foreign) =
+                            report.foreign.iter().find(|foreign| foreign.id == row.id)
+                        else {
+                            return detail;
+                        };
+                        if row.reason.starts_with("id collision")
+                            || row.reason.starts_with("accepted proposal")
+                        {
+                            return detail;
+                        }
+                        format!(
+                            "{detail}; {}",
+                            crate::cli::cloud::remote_task_delete_command(
+                                &crate::cloud::CloudConfig::default().endpoint,
+                                &foreign.id,
+                                &foreign.title,
+                                &foreign.home_project,
+                            )
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 message.push_str(&format!(": {retained}"));
@@ -1875,6 +1899,17 @@ fn foreign_rows_check_with_classifier_error(
                 analysis.unattributed_task_count,
                 analysis.collision_count
             ));
+        }
+        let ratio_guard = report.local_task_count > 0
+            && analysis.delete_set.tasks.len().saturating_mul(2) > report.local_task_count;
+        let ratio_is_only_known_refusal = ratio_guard
+            && analysis.unattributed_task_count == 0
+            && analysis.collision_count == 0
+            && analysis.retained_foreign_tasks.is_empty();
+        if ratio_is_only_known_refusal {
+            message.push_str(
+                ". the 50% task-ratio guard is the only known purge refusal — after reviewing a fresh dry-run, run `cas cloud purge-foreign --allow-majority-foreign --yes`",
+            );
         }
     }
     if let Some(remediation) = cloud_row_remediation_summary(report, quarantined_count) {
@@ -2568,8 +2603,8 @@ fn cloud_identity_metadata_checks(cas_root: &Path) -> Vec<Check> {
     let current_suffix = format!("_{current_project}");
     let mut foreign = Vec::new();
     for (key, value) in metadata {
-        let scoped_key = key.starts_with("last_team_pull_at_")
-            || key.starts_with("team_project_registered_");
+        let scoped_key =
+            key.starts_with("last_team_pull_at_") || key.starts_with("team_project_registered_");
         if scoped_key && !key.ends_with(&current_suffix) {
             foreign.push(format!("{key}={value}"));
         } else if key == "last_knowledge_push_project_id" && value != current_project {
@@ -4333,6 +4368,7 @@ mod tests {
                     id: format!("cas-r{index:03}"),
                     title: format!("Retained row {index}"),
                     reason: "id collision".to_string(),
+                    home_project: None,
                 })
                 .collect(),
             unattributed_task_count: 0,
@@ -4648,6 +4684,7 @@ mod tests {
                 id: "cas-0002".to_string(),
                 title: "Accepted proposal".to_string(),
                 reason: "accepted proposal materialized for this project".to_string(),
+                home_project: None,
             }],
             unattributed_task_count: 0,
             collision_count: 0,
@@ -4675,6 +4712,140 @@ mod tests {
             "{}",
             check.message
         );
+    }
+
+    #[test]
+    fn foreign_rows_check_prints_scoped_remote_delete_for_retained_cloud_task() {
+        use crate::cli::cloud::{PurgeDeleteSet, PurgeForeignAnalysis};
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 1,
+            peers_compared: vec!["home/project".to_string()],
+            foreign: vec![ForeignRow {
+                id: "cas-remote/42".to_string(),
+                title: "Foreign task".to_string(),
+                closed: false,
+                origin_project: Some("home/project".to_string()),
+                home_project: "home/project".to_string(),
+                also_present_in: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let analysis = PurgeForeignAnalysis {
+            delete_set: PurgeDeleteSet::default(),
+            foreign_task_count: 1,
+            retained_foreign_tasks: vec![crate::cli::cloud::PurgeRetainedTask {
+                id: "cas-remote/42".to_string(),
+                title: "Foreign task".to_string(),
+                reason: "row is not explicitly attributed to the current project".to_string(),
+                home_project: Some("home/project".to_string()),
+            }],
+            unattributed_task_count: 0,
+            collision_count: 0,
+        };
+
+        let check = foreign_rows_check(Ok(&report), Some(&analysis), 0);
+
+        assert!(
+            check
+                .message
+                .contains("confirm (id=cas-remote/42, title=\"Foreign task\")"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("/api/sync/task/cas-remote%2F42?project_id=home%2Fproject"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn foreign_rows_check_names_majority_override_only_without_other_exclusions() {
+        use crate::cli::cloud::{
+            PurgeDeleteSet, PurgeEntity, PurgeForeignAnalysis, PurgeRetainedTask,
+        };
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport, IdCollision};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 3,
+            peers_compared: vec!["accounting".to_string()],
+            foreign: vec![
+                ForeignRow {
+                    id: "foreign-1".to_string(),
+                    title: "Foreign one".to_string(),
+                    closed: false,
+                    origin_project: Some("accounting".to_string()),
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+                ForeignRow {
+                    id: "foreign-2".to_string(),
+                    title: "Foreign two".to_string(),
+                    closed: false,
+                    origin_project: Some("accounting".to_string()),
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        let delete_set = PurgeDeleteSet {
+            tasks: vec![
+                PurgeEntity::with_evidence(
+                    "task",
+                    "foreign-1",
+                    "Foreign one",
+                    "origin_project",
+                    "accounting",
+                ),
+                PurgeEntity::with_evidence(
+                    "task",
+                    "foreign-2",
+                    "Foreign two",
+                    "origin_project",
+                    "accounting",
+                ),
+            ],
+            ..Default::default()
+        };
+        let analysis = PurgeForeignAnalysis {
+            delete_set: delete_set.clone(),
+            foreign_task_count: 2,
+            retained_foreign_tasks: Vec::new(),
+            unattributed_task_count: 0,
+            collision_count: 0,
+        };
+        let check = foreign_rows_check(Ok(&report), Some(&analysis), 0);
+        assert!(check.message.contains("--allow-majority-foreign --yes"));
+
+        let mut collision_report = report;
+        collision_report.collisions = vec![IdCollision {
+            id: "foreign-2".to_string(),
+            local_title: "Local two".to_string(),
+            other_project: "accounting".to_string(),
+            other_title: "Foreign two".to_string(),
+        }];
+        let collision_analysis = PurgeForeignAnalysis {
+            delete_set,
+            foreign_task_count: 2,
+            retained_foreign_tasks: vec![PurgeRetainedTask {
+                id: "foreign-2".to_string(),
+                title: "Foreign two".to_string(),
+                reason: "id collision across peer rows; purge fails closed".to_string(),
+                home_project: None,
+            }],
+            unattributed_task_count: 0,
+            collision_count: 1,
+        };
+        let collision_check =
+            foreign_rows_check(Ok(&collision_report), Some(&collision_analysis), 0);
+        assert!(!collision_check.message.contains("--allow-majority-foreign"));
     }
 
     #[test]
@@ -5160,12 +5331,22 @@ mod tests {
             .expect("foreign cloud metadata must produce a doctor row");
         assert!(matches!(row.status, CheckStatus::Warning));
         assert!(row.message.contains("last_team_pull_at_team_project-two"));
-        assert!(row.message.contains("team_project_registered_team_project-two"));
-        assert!(row.message.contains("last_knowledge_push_project_id=project-two"));
-        assert!(row
-            .message
-            .contains("cas cloud project set project-one && cas cloud sync --full"));
-        assert!(!row.message.contains("last_team_pull_at_team_project-one=current"));
+        assert!(
+            row.message
+                .contains("team_project_registered_team_project-two")
+        );
+        assert!(
+            row.message
+                .contains("last_knowledge_push_project_id=project-two")
+        );
+        assert!(
+            row.message
+                .contains("cas cloud project set project-one && cas cloud sync --full")
+        );
+        assert!(
+            !row.message
+                .contains("last_team_pull_at_team_project-one=current")
+        );
     }
 
     #[test]
@@ -6690,7 +6871,8 @@ mod tests {
     /// pulled from cloud whose task never arrived) has to be built by hand.
     fn delete_task_row_only(cas_dir: &Path, id: &str) {
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
-        conn.execute("DELETE FROM tasks WHERE id = ?", [id]).unwrap();
+        conn.execute("DELETE FROM tasks WHERE id = ?", [id])
+            .unwrap();
     }
 
     /// A store that answers one id's `get` with a non-not-found failure — the

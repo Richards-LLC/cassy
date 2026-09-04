@@ -7,7 +7,42 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.15.3] - 2026-09-04
+
 ### Fixed
+- `cas doctor` no longer counts a dependency whose endpoint is a quarantined
+  task as an "orphaned dependency". Quarantining foreign rows (which doctor
+  itself prescribes) hid those tasks from the board but not from the dependency
+  table, so every edge touching one read as orphaned with no command that could
+  clear it. Quarantined endpoints now fold into the OK row as a stated count;
+  only an id genuinely absent from the store warns, naming the offending rows
+  and `cas doctor --fix`, which prunes them. A store error during the lookup is
+  never mistaken for absence: such rows go to an unresolved bucket, the prune is
+  skipped for that run, and the row names the error.
+- `cas index code` now reconciles the code-vector queue at the end of every run
+  (and on daemon start): queue rows whose symbol no longer exists are dropped,
+  failed rows are re-armed (all of them on `--force`, otherwise all but
+  provider-rejected input), rows whose content hash drifted are rewritten, and
+  eligible symbols that were never queued are enqueued, with the counts printed.
+  Doctor's "queue rows name symbols that no longer exist" and "failed" clauses
+  now name commands that clear them. Indexer writes take the SQLite write lock
+  up front with bounded retry and wait out a concurrent BM25 writer, so a
+  `cas doctor` or second `cas serve` running alongside no longer turns into
+  "failed to retire deleted source file: database is locked" file failures.
+- The cross-project row scan no longer reports a registered root whose database
+  has no `tasks` table as a project that "could NOT be read". Such roots (a
+  copied CAS root used as a test fixture under the artifacts directory) are
+  listed as skipped, never drive a warning, and the registry refuses to
+  register roots under the factory artifacts root, `~/.cas/scratch`, or
+  Cassy-named temp directories in the first place. New
+  `cas known-repos forget <path>` removes a live registry row and its bindings
+  with a receipt; it refuses the current project root without `--yes`.
+- Closing a task no longer fails the tmpfs proof-receipt gate because the close
+  reason merely mentions a temp path in prose. A temp path counts as a cited
+  receipt only when it is presented as one (a proof cue word shortly before it,
+  or the path opening a line or list item); a reason that cites no durable
+  artifact at all is still rejected, and the quoted path no longer carries the
+  sentence's trailing period.
 - `cas integrate mecha-cassy` now repairs the project `.cas/proxy.toml` that
   shadows the machine registration, so the fix `cas doctor` prescribes actually
   clears the warning it prints. A project proxy file replaces the machine
@@ -23,6 +58,44 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   (widening a policy the project declared is not the command's call) and is
   reported with the exact routes to add. The `mecha-cassy` doctor row now names
   the file the stale entries live in, machine or project.
+
+## [3.15.2] - 2026-09-04
+
+### Fixed
+- `cas update` no longer reports a project as refreshed while its schema stays
+  behind. A migration whose name had already been recorded under another id
+  (a store migrated by a pre-release build that numbered it differently) made
+  the ledger write fail with "schema was detected but its ledger row could not
+  be recorded" on every run, leaving the project pinned two migrations short.
+  The runner now reconciles such rows — the stale entry is logged to the
+  reconciliation ledger with both ids and removed, the migration is recorded
+  under its current id, and whatever migration now owns the vacated id is
+  re-evaluated honestly (detected or applied). Every pending migration gets
+  its turn before the first failure is reported, and the ledger-write error
+  names both ids involved. Read-only checks still report the wedge; only
+  `cas update` repairs it.
+- `cas update` finds every local project, not just the ones already in its
+  registry. The filesystem scan stopped at the first `.cas` it met — on any
+  machine with a user-level store that was `$HOME` itself — so discovery had
+  silently collapsed to the registry and dozens of projects never received
+  migrations while the summary said "N projects refreshed". The scan now
+  descends (skipping `.cas/`, hidden and vendored directories), refreshed
+  projects are registered so discovery converges, a `.cas` without a database
+  is listed as "not refreshed (unregistered)", the user-level `~/.cas` store
+  gets its own refresh phase, every schema line names the store it migrated,
+  and `cas update --register <path>` adds a project by hand.
+- A `CHANGELOG.md` or project doc saved as UTF-16, or with a UTF-8 byte-order
+  mark, is now read instead of skipped. The changelog index no longer fails the
+  whole pass on an encoding it can decode, a leading byte-order mark no longer
+  swallows the file's first release heading, and a doc that genuinely cannot be
+  decoded is reported by name and reason in the pass report rather than
+  disappearing from the knowledge wiki with no explanation.
+- `scripts/release-gate.sh` picks its own scratch base (`/var/tmp/cas-release-gate`)
+  instead of one under `$HOME`. On a machine with a user-level `~/.cas` store the
+  old default sat beneath it, so the gate refused its own archive-mode and
+  snapshot-portability rows until an environment variable was exported by hand.
+  Setting `CAS_RELEASE_GATE_HOME_DIR` still overrides the base, and the receipt
+  now names the base it used and where that value came from.
 
 ## [3.15.1] - 2026-09-04
 

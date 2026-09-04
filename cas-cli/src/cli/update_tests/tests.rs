@@ -22,6 +22,7 @@ fn test_is_newer() {
 fn project_table_plain_uses_phase_glyphs_and_compact_project_names() {
     let receipts = vec![ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
+        unregistered: false,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Warning("busy".to_owned()),
         skills: ProjectPhase::Skipped("not installed".to_owned()),
@@ -52,6 +53,7 @@ fn project_table_phase_headers_are_not_truncated_at_supported_widths() {
         project: PathBuf::from(
             "/home/alice/projects/a-project-with-a-deliberately-long-name/another-project",
         ),
+        unregistered: false,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -85,6 +87,7 @@ fn project_table_phase_headers_are_not_truncated_at_supported_widths() {
 fn non_ok_phase_details_include_phase_summary_when_capture_is_empty() {
     let receipt = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
+        unregistered: false,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -113,6 +116,7 @@ fn non_ok_phase_details_include_phase_summary_when_capture_is_empty() {
 fn cloud_warning_summary_stays_under_the_non_ok_project_row() {
     let receipt = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
+        unregistered: false,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -192,6 +196,189 @@ fn capture_phase_collects_both_stdout_and_stderr() {
     assert_eq!(value, 42);
     assert!(output.contains("captured stdout"), "output was: {output:?}");
     assert!(output.contains("captured stderr"), "output was: {output:?}");
+}
+
+/// Create a directory that looks exactly like an initialized Cassy project:
+/// a `.cas/` directory holding a `cas.db` file.
+fn make_project(root: &Path) {
+    let cas_root = root.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("create fixture .cas directory");
+    std::fs::write(cas_root.join("cas.db"), b"").expect("create fixture store");
+}
+
+#[test]
+fn discovery_finds_sibling_projects_below_a_parent_that_is_itself_a_project() {
+    // The regression: `~/.cas` exists on every real host, and the scan used to
+    // stop at the first ancestor carrying a `.cas` directory. That made the
+    // filesystem walk a no-op — home was recorded, the walk returned, and home
+    // was then dropped as "not a project", so nothing was ever discovered.
+    let guard = crate::test_env_guard::TestEnvGuard::temp_home();
+    let home = guard.home().to_path_buf();
+    let workspace = home.join("Workspace");
+    make_project(&workspace);
+    make_project(&workspace.join("alpha"));
+    make_project(&workspace.join("beta"));
+    make_project(&workspace.join("nested").join("deep"));
+
+    let discovery = discover_local_projects(None);
+
+    for expected in [
+        workspace.clone(),
+        workspace.join("alpha"),
+        workspace.join("beta"),
+        workspace.join("nested").join("deep"),
+    ] {
+        assert!(
+            discovery.projects.contains(&expected),
+            "{} missing from discovery: {:?}",
+            expected.display(),
+            discovery.projects
+        );
+    }
+    assert!(
+        !discovery.projects.contains(&home),
+        "the home directory is host state, not a project: {:?}",
+        discovery.projects
+    );
+}
+
+#[test]
+fn discovery_never_returns_the_user_level_store_as_a_project() {
+    let guard = crate::test_env_guard::TestEnvGuard::temp_home();
+    let home = guard.home().to_path_buf();
+    make_project(&home.join("Workspace"));
+
+    let discovery = discover_local_projects(Some(&home.join(".cas")));
+
+    assert_eq!(user_level_store_root(), Some(home.join(".cas")));
+    assert!(
+        !discovery.projects.contains(&home),
+        "the user-level store must never be counted as a project: {:?}",
+        discovery.projects
+    );
+}
+
+#[test]
+fn discovery_does_not_descend_into_cas_internal_directories() {
+    let guard = crate::test_env_guard::TestEnvGuard::temp_home();
+    let home = guard.home().to_path_buf();
+    let project = home.join("Workspace").join("demo");
+    make_project(&project);
+    let worktree = project.join(".cas").join("worktrees").join("lane-1");
+    make_project(&worktree);
+    let backup = project.join(".cas").join("backup").join("20260904_000000");
+    std::fs::create_dir_all(&backup).expect("create fixture backup");
+    std::fs::write(backup.join("cas.db"), b"").expect("create fixture backup store");
+
+    let discovery = discover_local_projects(None);
+
+    assert!(discovery.projects.contains(&project));
+    assert!(
+        !discovery.projects.contains(&worktree),
+        "factory worktrees under .cas/ are not separate projects: {:?}",
+        discovery.projects
+    );
+    assert!(
+        !discovery
+            .projects
+            .iter()
+            .any(|path| path.starts_with(&backup)),
+        "migration backups under .cas/ are not projects: {:?}",
+        discovery.projects
+    );
+}
+
+#[test]
+fn discovery_separates_registered_projects_from_scan_only_and_storeless_ones() {
+    let guard = crate::test_env_guard::TestEnvGuard::temp_home();
+    let home = guard.home().to_path_buf();
+    let workspace = home.join("Workspace");
+    let with_store = workspace.join("with-store");
+    make_project(&with_store);
+    let storeless = workspace.join("storeless");
+    std::fs::create_dir_all(storeless.join(".cas")).expect("create storeless fixture");
+
+    let discovery = discover_local_projects(None);
+
+    assert!(
+        discovery.unregistered.contains(&with_store),
+        "a project found only by the filesystem scan is unregistered: {:?}",
+        discovery.unregistered
+    );
+    assert!(
+        discovery.skipped_unregistered.contains(&storeless),
+        "a scan-only directory with no cas.db must be listed, not silently dropped: {:?}",
+        discovery.skipped_unregistered
+    );
+    assert!(
+        !discovery.projects.contains(&storeless),
+        "a directory with no store has nothing to migrate: {:?}",
+        discovery.projects
+    );
+}
+
+#[test]
+fn schema_status_json_names_the_store_it_migrated() {
+    let line = schema_status_json(
+        Some(Path::new("/home/alice/projects/demo/.cas")),
+        r#""schema_status":"updated","current_version":248"#,
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&line).expect("schema status is JSON");
+    assert_eq!(parsed["store"], "/home/alice/projects/demo/.cas");
+    assert_eq!(parsed["schema_status"], "updated");
+    assert_eq!(parsed["current_version"], 248);
+
+    let unset = schema_status_json(None, r#""schema_status":"not_initialized""#);
+    let parsed: serde_json::Value = serde_json::from_str(&unset).expect("schema status is JSON");
+    assert!(parsed["store"].is_null(), "line was: {unset}");
+}
+
+#[test]
+fn update_banner_reports_projects_failures_and_skipped_unregistered_stores() {
+    let banner = update_banner_text(&RefreshReport {
+        project_count: 29,
+        failed_count: 1,
+        skipped_unregistered: 2,
+        elapsed: std::time::Duration::from_secs(3),
+    });
+
+    assert!(banner.contains("29 projects refreshed"), "banner: {banner}");
+    assert!(banner.contains("1 failed"), "banner: {banner}");
+    assert!(
+        banner.contains("2 unregistered store(s) not refreshed"),
+        "banner: {banner}"
+    );
+
+    let clean = update_banner_text(&RefreshReport {
+        project_count: 29,
+        failed_count: 0,
+        skipped_unregistered: 0,
+        elapsed: std::time::Duration::from_secs(3),
+    });
+    assert!(
+        !clean.contains("unregistered"),
+        "a clean run stays quiet: {clean}"
+    );
+}
+
+#[test]
+fn register_flag_parses_and_targets_a_project_path() {
+    let parsed = crate::cli::try_parse_from_with_wordmark([
+        "cas",
+        "update",
+        "--register",
+        "/home/alice/projects/demo",
+    ])
+    .expect("--register must parse");
+
+    let Some(crate::cli::Commands::Update(args)) = parsed.command else {
+        panic!("expected update command");
+    };
+    assert_eq!(
+        args.register.as_deref(),
+        Some(Path::new("/home/alice/projects/demo"))
+    );
 }
 
 #[test]
@@ -274,6 +461,7 @@ fn post_swap_mode_is_a_terminal_update_path() {
         dry_run: false,
         keep_backup: false,
         all_projects: false,
+        register: None,
         post_swap: true,
         from: Some("3.7.7".to_owned()),
     };

@@ -277,12 +277,28 @@ pub fn changelog_path(repo_root: &Path) -> Option<std::path::PathBuf> {
 ///
 /// `Ok(None)` means there is no CHANGELOG — reported by the caller as a
 /// boundary, not swallowed and not raised as a failure.
+///
+/// The file is read as bytes and decoded through
+/// `crate::daemon::source_text::decode_source` rather than demanding UTF-8
+/// up front (GH #698, extended by cas-c736). A CHANGELOG that has been through
+/// a Windows editor is commonly UTF-16 or UTF-8-with-BOM; `read_to_string`
+/// failed the whole changelog pass on the first with an encoding message that
+/// named no remedy, and silently glued the BOM onto the second's first heading
+/// so its opening release parsed as prose. A file we genuinely cannot decode is
+/// reported by name and reason, which the caller records as the pass's
+/// `changelog_error`.
 pub fn collect(repo_root: &Path, repository: &str) -> Result<Option<Vec<HistoryDoc>>> {
     let Some(path) = changelog_path(repo_root) else {
         return Ok(None);
     };
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let text = crate::daemon::source_text::decode_source(&bytes).map_err(|reason| {
+        anyhow::anyhow!(
+            "skipped {}: {}",
+            path.display(),
+            reason.as_str()
+        )
+    })?;
     let tags = repo_tags(repo_root);
     let resolved = resolve_ranges(parse_sections(&text), &tags);
     Ok(Some(
@@ -427,13 +443,104 @@ Oldest section.
         assert!(collect(dir.path(), "/repo").unwrap().is_none());
     }
 
+    /// cas-c736: encoding fixtures for the read site itself.
+    ///
+    /// `SAMPLE` is re-encoded rather than hand-written per case so the assertion
+    /// is about the decode, not about a second copy of the changelog grammar.
+    fn write_changelog(dir: &Path, bytes: &[u8]) {
+        std::fs::write(dir.join("CHANGELOG.md"), bytes).unwrap();
+    }
+
+    fn utf16_bytes(text: &str, little_endian: bool) -> Vec<u8> {
+        let mut bytes = if little_endian {
+            vec![0xFF, 0xFE]
+        } else {
+            vec![0xFE, 0xFF]
+        };
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&if little_endian {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            });
+        }
+        bytes
+    }
+
+    fn collected_versions(dir: &Path) -> Vec<String> {
+        collect(dir, "/repo")
+            .expect("a decodable changelog must not fail the pass")
+            .expect("CHANGELOG.md is present")
+            .iter()
+            .map(|doc| doc.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_utf16_le_changelog_is_decoded_rather_than_failing_the_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        write_changelog(dir.path(), &utf16_bytes(SAMPLE, true));
+        let ids = collected_versions(dir.path());
+        assert!(
+            ids.contains(&"changelog:v2.51.0".to_string()),
+            "UTF-16 LE changelog did not parse: {ids:?}"
+        );
+        assert_eq!(ids.len(), 4, "every release section must survive the decode");
+    }
+
+    #[test]
+    fn a_utf16_be_changelog_is_decoded_rather_than_failing_the_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        write_changelog(dir.path(), &utf16_bytes(SAMPLE, false));
+        let ids = collected_versions(dir.path());
+        assert!(
+            ids.contains(&"changelog:v2.49.0".to_string()),
+            "UTF-16 BE changelog did not parse: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn a_utf8_bom_does_not_swallow_the_changelogs_first_heading() {
+        // The quiet half: with the BOM left on, a file whose FIRST line is a
+        // release heading has that heading read as "\u{feff}## [1.0.0] ..." and
+        // the whole release is lost. Start the fixture at the heading so the
+        // difference is visible rather than hidden behind a preamble.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"## [1.0.0] - 2026-01-01\n\n### Added\n- first release\n");
+        write_changelog(dir.path(), &bytes);
+        let ids = collected_versions(dir.path());
+        assert_eq!(ids, vec!["changelog:v1.0.0".to_string()]);
+    }
+
+    #[test]
+    fn an_undecodable_changelog_is_named_with_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        // A UTF-16 BOM followed by an odd byte count: decodable by no rule we
+        // are willing to guess at.
+        let mut bytes = utf16_bytes("## [1.0.0] - 2026-01-01\n", true);
+        bytes.push(0x41);
+        write_changelog(dir.path(), &bytes);
+        let error = collect(dir.path(), "/repo")
+            .expect_err("an undecodable changelog must be reported, not silently empty")
+            .to_string();
+        assert!(
+            error.contains("CHANGELOG.md") && error.contains("odd byte count"),
+            "the failure must name the file and the reason, got: {error}"
+        );
+    }
+
     /// The real file on this repository, parsed end to end.
     #[test]
     fn parses_this_repositorys_own_changelog() {
         let root = crate::test_paths::workspace_root();
-        let Ok(text) = std::fs::read_to_string(root.join("CHANGELOG.md")) else {
+        let Ok(bytes) = std::fs::read(root.join("CHANGELOG.md")) else {
             return; // not a source checkout; nothing to assert against
         };
+        // Decoded the same way `collect` does, so this test cannot pass on a
+        // path the production reader would refuse.
+        let text = crate::daemon::source_text::decode_source(&bytes)
+            .expect("this repository's own CHANGELOG must decode");
         let sections = parse_sections(&text);
         assert!(
             sections.len() > 20,

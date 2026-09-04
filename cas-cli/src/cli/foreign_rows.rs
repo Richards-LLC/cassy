@@ -174,6 +174,24 @@ pub struct UnreadablePeer {
     pub error: String,
 }
 
+/// Reason string for a registry root whose database has no `tasks` table.
+pub const NOT_A_PROJECT_STORE: &str = "no `tasks` table — not a project store";
+
+/// A registry root that opened cleanly but is not a project store at all, so
+/// there is nothing to compare it against.
+///
+/// Distinct from [`UnreadablePeer`] on purpose (cas-647c). A factory artifact
+/// copy such as `~/.cas/artifacts/cas-1bfb/fresh-proxy` holds a real, healthy
+/// SQLite database with ten tables and no `tasks`. Calling that "could NOT be
+/// read" turned the doctor row amber and pointed the operator at a repair that
+/// does not exist; nothing is broken, the root simply is not a project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedPeer {
+    pub project: String,
+    pub db_path: PathBuf,
+    pub reason: String,
+}
+
 /// Result of a read-only contamination scan of one project database.
 #[derive(Debug, Clone, Default)]
 pub struct ForeignRowReport {
@@ -181,6 +199,9 @@ pub struct ForeignRowReport {
     pub local_task_count: usize,
     pub peers_compared: Vec<String>,
     pub peers_unreadable: Vec<UnreadablePeer>,
+    /// Registry roots that are not project stores. Informational coverage
+    /// bookkeeping: never a defect, never a WARN driver.
+    pub peers_skipped: Vec<SkippedPeer>,
     pub foreign: Vec<ForeignRow>,
     pub unattributed: Vec<UnattributedRow>,
     pub collisions: Vec<IdCollision>,
@@ -230,7 +251,28 @@ impl ForeignRowReport {
     }
 
     /// One-line summary used as the `cas doctor` check message.
+    ///
+    /// The skipped-root clause is appended to *every* branch: a host whose only
+    /// other registry row is a scratch copy would otherwise read "0 project
+    /// DB(s) compared" with no explanation of what happened to the other row.
     pub fn summary(&self) -> String {
+        let mut summary = self.comparison_summary();
+        if !self.peers_skipped.is_empty() {
+            let named = self
+                .peers_skipped
+                .iter()
+                .map(|peer| peer.project.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            summary.push_str(&format!(
+                "; {} registry root(s) skipped (not a project store): {named}",
+                self.peers_skipped.len(),
+            ));
+        }
+        summary
+    }
+
+    fn comparison_summary(&self) -> String {
         if self.peers_compared.is_empty() {
             // Still not a bare "clean": nothing was compared, and if databases
             // existed but could not be opened, that is the reason — not health.
@@ -386,11 +428,23 @@ origin_project_id before removing a page, then re-run a scoped pull and this aud
                 })
             })
             .collect();
+        let skipped: Vec<_> = self
+            .peers_skipped
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "project": p.project,
+                    "db_path": p.db_path.to_string_lossy(),
+                    "reason": p.reason,
+                })
+            })
+            .collect();
         serde_json::json!({
             "local_project": self.local_project,
             "local_task_count": self.local_task_count,
             "peers_compared": self.peers_compared,
             "peers_unreadable": unreadable,
+            "peers_skipped": skipped,
             "identity_key": "(id, title)",
             "foreign": {
                 "total": self.foreign.len(),
@@ -599,12 +653,49 @@ pub fn classify_knowledge_pages(
 /// missing or unreadable file is an error rather than a freshly created empty
 /// database that would report "no contamination".
 pub fn read_snapshot(db_path: &Path, project: &str) -> anyhow::Result<DbSnapshot> {
+    let conn = open_read_only(db_path)?;
+    snapshot_from_conn(&conn, db_path, project)
+}
+
+/// Read a **peer** registry root, distinguishing "not a project store" from
+/// "could not be read".
+///
+/// `Ok(None)` means the database opened fine and simply has no `tasks` table,
+/// so it holds no rows this scan could compare — a factory artifact copy, a
+/// probe fixture, any non-project CAS root. `Err` stays reserved for genuine
+/// read failures (permissions, corruption, a missing file), which are the ones
+/// that under-report contamination and must stay loud.
+///
+/// The local database deliberately does **not** get this treatment: a project
+/// store with no `tasks` table is a real fault, so [`read_snapshot`] still
+/// fails on it.
+pub fn read_peer_snapshot(db_path: &Path, project: &str) -> anyhow::Result<Option<DbSnapshot>> {
+    let conn = open_read_only(db_path)?;
+    let has_tasks: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_tasks {
+        return Ok(None);
+    }
+    Ok(Some(snapshot_from_conn(&conn, db_path, project)?))
+}
+
+fn open_read_only(db_path: &Path) -> anyhow::Result<rusqlite::Connection> {
     let conn = rusqlite::Connection::open_with_flags(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(Duration::from_millis(250))?;
+    Ok(conn)
+}
 
+fn snapshot_from_conn(
+    conn: &rusqlite::Connection,
+    db_path: &Path,
+    project: &str,
+) -> anyhow::Result<DbSnapshot> {
     let task_columns = conn
         .prepare("PRAGMA table_info(tasks)")?
         .query_map([], |row| row.get::<_, String>(1))?
@@ -776,10 +867,16 @@ pub fn scan(cas_root: &Path) -> anyhow::Result<ForeignRowReport> {
 
     let mut peers = Vec::new();
     let mut unreadable = Vec::new();
+    let mut skipped = Vec::new();
     for (root, label) in roots.into_iter().zip(labels) {
         let db = root.join(".cas").join("cas.db");
-        match read_snapshot(&db, &label) {
-            Ok(snapshot) => peers.push(snapshot),
+        match read_peer_snapshot(&db, &label) {
+            Ok(Some(snapshot)) => peers.push(snapshot),
+            Ok(None) => skipped.push(SkippedPeer {
+                project: label,
+                db_path: db,
+                reason: NOT_A_PROJECT_STORE.to_string(),
+            }),
             Err(e) => unreadable.push(UnreadablePeer {
                 project: label,
                 db_path: db,
@@ -788,11 +885,13 @@ pub fn scan(cas_root: &Path) -> anyhow::Result<ForeignRowReport> {
         }
     }
     peers.sort_by(|a, b| a.project.cmp(&b.project));
+    skipped.sort_by(|a, b| a.project.cmp(&b.project));
 
     let mut report = classify(&local, &peers);
     let project_id = crate::cloud::resolve_canonical_id(cas_root);
     classify_knowledge_pages(&mut report, &local.knowledge_pages, project_id.as_deref());
     report.peers_unreadable = unreadable;
+    report.peers_skipped = skipped;
     Ok(report)
 }
 
@@ -1113,8 +1212,14 @@ mod tests {
         assert!(report.is_clean());
         let summary = report.summary();
         assert!(summary.contains("0 project DB(s) compared"), "{summary}");
-        assert!(summary.contains("task replication was not checked"), "{summary}");
-        assert!(summary.contains("0 attributed page(s) checked"), "{summary}");
+        assert!(
+            summary.contains("task replication was not checked"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("0 attributed page(s) checked"),
+            "{summary}"
+        );
     }
 
     /// Same folder name in two places must not collapse into one accusation.
@@ -1164,6 +1269,107 @@ mod tests {
         assert!(!snap.worked_task_ids.contains("cas-2222"));
         // Absent activity tables are tolerated, not fatal.
         assert_eq!(snap.worked_task_ids.len(), 1);
+    }
+
+    /// cas-647c: `~/.cas/artifacts/cas-1bfb/fresh-proxy` is a copied CAS root
+    /// used as a proxy-health fixture — 10 tables, no `tasks`. It is not a
+    /// project store, so there is nothing to compare and nothing is wrong with
+    /// it. Peer enumeration must say "skipped", not "could NOT be read".
+    #[test]
+    fn a_peer_database_without_a_tasks_table_is_skipped_not_unreadable_cas_647c() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("cas.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE proxy_health (id TEXT PRIMARY KEY, checked_at TEXT NOT NULL);",
+            )
+            .unwrap();
+        }
+
+        assert!(
+            read_peer_snapshot(&db, "fresh-proxy").unwrap().is_none(),
+            "a database with no tasks table is not a peer project store"
+        );
+        // A genuinely broken file is still an error, not a silent skip.
+        let broken = dir.path().join("broken.db");
+        std::fs::write(&broken, b"this is not a database").unwrap();
+        assert!(read_peer_snapshot(&broken, "broken").is_err());
+    }
+
+    /// A real project store still reads through the peer entry point.
+    #[test]
+    fn read_peer_snapshot_reads_a_real_project_store_cas_647c() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("cas.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL);
+                 INSERT INTO tasks VALUES ('cas-1111', 'Real work', 'open');",
+            )
+            .unwrap();
+        }
+
+        let snapshot = read_peer_snapshot(&db, "accounting").unwrap().unwrap();
+        assert_eq!(snapshot.tasks.len(), 1);
+        assert_eq!(snapshot.project, "accounting");
+    }
+
+    /// The skipped set is coverage bookkeeping, never a defect: it must appear
+    /// in the summary and the JSON, and must not make the report unclean.
+    #[test]
+    fn skipped_peers_are_informational_and_never_the_warn_driver_cas_647c() {
+        let local = snapshot("cas-src", vec![task("cas-dddd", "Only here", false)], &[]);
+        let peers = vec![snapshot(
+            "accounting",
+            vec![task("cas-eeee", "Elsewhere", false)],
+            &[],
+        )];
+
+        let mut report = classify(&local, &peers);
+        report.peers_skipped = vec![SkippedPeer {
+            project: "fresh-proxy".to_string(),
+            db_path: PathBuf::from("/home/u/.cas/artifacts/cas-1bfb/fresh-proxy/.cas/cas.db"),
+            reason: NOT_A_PROJECT_STORE.to_string(),
+        }];
+
+        assert!(
+            report.is_clean(),
+            "a skipped non-store is not contamination"
+        );
+        assert!(report.peers_unreadable.is_empty());
+        let summary = report.summary();
+        assert!(
+            summary.contains("1 registry root(s) skipped (not a project store): fresh-proxy"),
+            "{summary}"
+        );
+        assert!(!summary.contains("could NOT be read"), "{summary}");
+        assert_eq!(
+            report.to_json()["peers_skipped"][0]["project"],
+            "fresh-proxy"
+        );
+    }
+
+    /// The zero-peer branch of the summary must carry the skipped clause too —
+    /// a host whose only other registry row is a scratch copy would otherwise
+    /// report "0 project DB(s) compared" with no explanation of why.
+    #[test]
+    fn a_scan_with_only_skipped_roots_says_why_nothing_was_compared_cas_647c() {
+        let local = snapshot("cas-src", vec![task("cas-dddd", "Only here", false)], &[]);
+        let mut report = classify(&local, &[]);
+        report.peers_skipped = vec![SkippedPeer {
+            project: "fresh-proxy".to_string(),
+            db_path: PathBuf::from("/home/u/.cas/artifacts/cas-1bfb/fresh-proxy/.cas/cas.db"),
+            reason: NOT_A_PROJECT_STORE.to_string(),
+        }];
+
+        let summary = report.summary();
+        assert!(summary.contains("0 project DB(s) compared"), "{summary}");
+        assert!(
+            summary.contains("1 registry root(s) skipped (not a project store)"),
+            "{summary}"
+        );
     }
 
     /// The scan must never create or modify a database it inspects.

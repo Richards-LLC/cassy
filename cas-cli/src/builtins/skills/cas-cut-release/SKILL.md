@@ -25,7 +25,11 @@ and do not claim success without its receipt.
    `.codex/agents`). Do not run `cas update --sync`; run the root-managed-
    projections drift test, regenerate `reference-history.json`, and require
    `git diff --quiet -- cas-cli/src/builtins/reference-history.json`.
-4. Prepare one source commit: run `scripts/bump-release-version.sh <version>`,
+4. Before preparing the source commit, confirm no other open or queued PR
+   bumps a release version (`gh pr list --state open --search release`, the
+   merge-queue GraphQL query, `git ls-remote --tags origin`); a competing release
+   from a second supervisor session must land first and this train takes the
+   next patch number. Then prepare one source commit: run `scripts/bump-release-version.sh <version>`,
    `cargo update --workspace --offline`, update CHANGELOG, the runtime-release
    draft, and the previous POSTED receipt; then run
    `scripts/release-gate.sh <version>` and require every row PASS.

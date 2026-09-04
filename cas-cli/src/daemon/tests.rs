@@ -1349,3 +1349,238 @@ fn skipped_files_leave_the_eligible_denominator_so_coverage_can_reach_100_percen
     assert!(detail.contains("binary.rs"), "{detail}");
     assert!(detail.contains("not valid UTF-8"), "{detail}");
 }
+
+/// cas-8a03, the reported symptom end to end: doctor names orphaned rows,
+/// never-queued symbols and failed rows, and tells the operator to run
+/// `cas index code`. The tree is unchanged on disk, so the run indexes zero
+/// files — and before the closing reconcile it changed nothing at all, leaving
+/// the same three counters and the same instruction forever.
+#[test]
+fn a_no_op_reconcile_run_still_clears_orphaned_failed_and_never_queued_rows() {
+    use crate::daemon::indexing::reconcile_code_tree;
+    use cas_store::CodeStore;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("queue-repo");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+    std::fs::create_dir_all(repo.join(".git")).expect(".git dir");
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("cas root");
+    let source = repo.join("src/lib.rs");
+    std::fs::write(
+        &source,
+        "pub fn alpha() -> i64 { 1 }\npub fn beta() -> i64 { 2 }\npub fn gamma() -> i64 { 3 }\n",
+    )
+    .expect("write source");
+
+    reconcile_code_tree(
+        std::slice::from_ref(&source),
+        std::slice::from_ref(&repo),
+        &cas_root,
+        false,
+    )
+    .expect("initial index");
+
+    let code_store = crate::store::open_code_store(&cas_root).expect("code store");
+    let vectors = cas_store::SqliteCodeVectorStore::open(&cas_root).expect("vector state");
+    let mut symbols = code_store
+        .search_symbols("%", None, None, 50)
+        .expect("indexed symbols");
+    symbols.sort_by(|a, b| a.name.cmp(&b.name));
+    let named = |name: &str| {
+        symbols
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .unwrap_or_else(|| panic!("{name} was not indexed"))
+            .clone()
+    };
+    let (orphan, failure, unqueued) = (named("alpha"), named("beta"), named("gamma"));
+
+    // Three ways the queue drifts from the symbol table, none of which the
+    // incremental pass revisits: the file's bytes never change again.
+    code_store
+        .delete_symbol(&orphan.id)
+        .expect("delete symbol out from under its queue row");
+    assert!(
+        vectors
+            .mark_failed(&failure.id, &failure.content_hash, "provider request failed: 503")
+            .expect("mark failed")
+    );
+    vectors
+        .retire(&[unqueued.id.clone()])
+        .expect("drop the queue row the indexer once wrote");
+
+    let before = vectors.coverage().expect("coverage before");
+    assert_eq!(before.orphaned, 1);
+    assert_eq!(before.failed, 1);
+    assert_eq!(before.unqueued, 1);
+
+    let result = reconcile_code_tree(
+        std::slice::from_ref(&source),
+        std::slice::from_ref(&repo),
+        &cas_root,
+        false,
+    )
+    .expect("second run");
+
+    assert_eq!(
+        result.files_indexed, 0,
+        "the tree is unchanged: this is the 'Indexed 0 file(s)' run from the report"
+    );
+    let reconcile = result
+        .vector_reconcile
+        .expect("every run must end with a reconcile receipt");
+    assert_eq!(reconcile.orphaned_dropped, 1);
+    assert_eq!(reconcile.failed_rearmed, 1);
+    assert_eq!(reconcile.requeued, 1);
+    assert_eq!(reconcile.failed_retained, 0);
+
+    let after = vectors.coverage().expect("coverage after");
+    assert_eq!(after.orphaned, 0, "doctor would still name orphaned rows");
+    assert_eq!(after.failed, 0, "doctor would still name failed rows");
+    assert_eq!(after.unqueued, 0, "doctor would still name never-queued symbols");
+    assert!(
+        result.errors.is_empty(),
+        "reconcile must not manufacture errors: {:?}",
+        result.errors
+    );
+}
+
+/// cas-8a03: a BM25 writer lock held by a concurrent `cas serve` is contention,
+/// not a permanent file failure — but the wait is bought once per run, not once
+/// per retired file, so a run retiring hundreds of files cannot stall on it.
+#[test]
+fn writer_lock_budget_retries_contention_once_per_run_and_passes_other_errors_through() {
+    use crate::daemon::indexing::WriterLockBudget;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    let attempts = AtomicUsize::new(0);
+    let mut budget = WriterLockBudget::new(Duration::from_millis(300));
+    let outcome: Result<&str, String> = budget.run(|| {
+        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err("index error: Failed to acquire Lockfile: LockBusy".to_string())
+        } else {
+            Ok("retired")
+        }
+    });
+    assert_eq!(outcome, Ok("retired"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 2, "contention must be retried");
+
+    // A writer held for the whole run: the budget is spent once and the rest of
+    // the run stops waiting instead of multiplying the stall per file.
+    let started = Instant::now();
+    let held: Result<(), String> =
+        budget.run(|| Err("index error: Failed to acquire Lockfile: LockBusy".to_string()));
+    assert!(held.is_err());
+    let next: Result<(), String> =
+        budget.run(|| Err("index error: Failed to acquire Lockfile: LockBusy".to_string()));
+    assert!(next.is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "an exhausted budget must not keep waiting: {:?}",
+        started.elapsed()
+    );
+
+    // Anything that is not contention fails immediately: retrying a real error
+    // would only hide it.
+    let calls = AtomicUsize::new(0);
+    let mut fresh = WriterLockBudget::new(Duration::from_secs(5));
+    let other: Result<(), String> = fresh.run(|| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Err("schema mismatch".to_string())
+    });
+    assert!(other.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// cas-8a03 (review follow-up): the whole retirement chain under a foreign
+/// `BEGIN IMMEDIATE` held past a full busy_timeout window — the queue retire,
+/// the code-store deletes and the scan receipt — must wait and land, with no
+/// file failure recorded for a file that no longer exists.
+///
+/// Scope note: this guards the chain end to end, but it is not the pin for the
+/// code-store statements specifically. The queue retire runs first and waits out
+/// the holder, so by the time `delete_symbols_in_file` / `delete_file` execute
+/// the lock is usually already free. The deterministic pin for those two
+/// statements is `sqlite_code_store::tests::
+/// code_store_writes_wait_out_a_foreign_writer_past_one_busy_timeout_window`,
+/// which fails without the bounded retry.
+#[test]
+fn retiring_a_deleted_file_waits_out_a_foreign_writer_instead_of_failing() {
+    use crate::daemon::indexing::reconcile_code_tree;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("busy-repo");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+    std::fs::create_dir_all(repo.join(".git")).expect(".git dir");
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("cas root");
+    let source = repo.join("src/old.rs");
+    std::fs::write(&source, "pub fn retired_symbol() -> i64 { 1 }\n").expect("write source");
+
+    reconcile_code_tree(
+        std::slice::from_ref(&source),
+        std::slice::from_ref(&repo),
+        &cas_root,
+        false,
+    )
+    .expect("initial index");
+    std::fs::remove_file(&source).expect("delete the file while nothing is watching");
+
+    // Hold the pooled connection so the shortened window survives, and shorten
+    // it so "outlives one busy_timeout window" costs 300ms, not 5s.
+    let db_path = cas_root.join("cas.db");
+    let shared = cas_store::shared_db::shared_connection(&db_path).expect("shared connection");
+    shared
+        .lock()
+        .expect("shared connection lock")
+        .busy_timeout(Duration::from_millis(50))
+        .expect("shorten busy timeout");
+
+    let holder_path = db_path.clone();
+    let (holding, held) = mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(&holder_path).expect("foreign connection");
+        conn.busy_timeout(Duration::from_millis(50))
+            .expect("timeout");
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .expect("take the write lock");
+        conn.execute(
+            "INSERT OR REPLACE INTO code_vector_queue
+                 (symbol_id, content_hash, status, last_error, updated_at)
+             VALUES ('foreign-row', 'h', 'pending', NULL, '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("foreign write");
+        holding.send(()).expect("signal");
+        std::thread::sleep(Duration::from_millis(300));
+        conn.execute_batch("COMMIT")
+            .expect("release the write lock");
+    });
+
+    held.recv().expect("foreign writer holding");
+    let result = reconcile_code_tree(&[], std::slice::from_ref(&repo), &cas_root, false)
+        .expect("reconcile under contention");
+    blocker.join().expect("blocker thread");
+
+    assert_eq!(result.files_deleted, 1, "the deleted file was not retired");
+    assert!(
+        result.errors.is_empty(),
+        "contention was recorded as a file failure: {:?}",
+        result.errors
+    );
+    let scan = cas_store::SqliteCodeVectorStore::open(&cas_root)
+        .expect("vector state")
+        .index_state("busy-repo")
+        .expect("scan receipt")
+        .expect("recorded scan receipt");
+    assert_eq!(
+        scan.failed_files, 0,
+        "a waited-out lock must not count as a failure"
+    );
+    assert_eq!(scan.last_error, None);
+    drop(shared);
+}

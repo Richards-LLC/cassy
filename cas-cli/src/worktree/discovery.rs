@@ -54,11 +54,18 @@ pub struct SeedReport {
     pub existing: Vec<PathBuf>,
     /// Paths rejected because `<path>/.cas/` is not a directory.
     pub skipped_missing: Vec<PathBuf>,
+    /// Paths rejected as disposable roots (factory artifacts, `~/.cas/scratch`,
+    /// a named temp root), paired with the reason. These have a real `.cas/`
+    /// — they are copies of a project, not projects (cas-647c).
+    pub skipped_disposable: Vec<(PathBuf, String)>,
 }
 
 impl SeedReport {
     pub fn total_considered(&self) -> usize {
-        self.new.len() + self.existing.len() + self.skipped_missing.len()
+        self.new.len()
+            + self.existing.len()
+            + self.skipped_missing.len()
+            + self.skipped_disposable.len()
     }
 }
 
@@ -77,11 +84,8 @@ impl SeedReport {
 /// home dir) and must be gated behind an explicit CLI flag.
 pub fn seed(include_home_scan: bool) -> Result<SeedReport> {
     let store = open_host_known_repo_store()?;
-    let already: std::collections::HashSet<PathBuf> = store
-        .list()?
-        .into_iter()
-        .map(|r| r.path)
-        .collect();
+    let already: std::collections::HashSet<PathBuf> =
+        store.list()?.into_iter().map(|r| r.path).collect();
 
     let mut candidates: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
 
@@ -106,6 +110,15 @@ pub fn seed(include_home_scan: bool) -> Result<SeedReport> {
             report.skipped_missing.push(cand);
             continue;
         }
+        if let Some(skip) = crate::store::known_repos::registry_skip(&cand) {
+            debug!(
+                path = %cand.display(),
+                reason = %skip.reason(),
+                "seed skipped a disposable root",
+            );
+            report.skipped_disposable.push((cand, skip.reason()));
+            continue;
+        }
         let canonical = cand.canonicalize().unwrap_or(cand.clone());
         let is_new = !already.contains(&canonical);
         store.upsert(&cand)?;
@@ -119,6 +132,7 @@ pub fn seed(include_home_scan: bool) -> Result<SeedReport> {
         new = report.new.len(),
         existing = report.existing.len(),
         skipped = report.skipped_missing.len(),
+        skipped_disposable = report.skipped_disposable.len(),
         "known_repos seed complete",
     );
     Ok(report)
@@ -282,6 +296,51 @@ mod tests {
             assert_eq!(report.new.len(), 1, "only real repo seeded");
             assert_eq!(report.skipped_missing.len(), 1);
             assert!(report.new[0].ends_with("real-repo"));
+        });
+    }
+
+    /// cas-647c: a factory task that copies a CAS root into
+    /// `~/.cas/artifacts/<task>/` leaves a `.cas/` behind, and a session JSON
+    /// pointing at it. Seeding must not adopt the copy as a host project — it
+    /// is a fixture, and every later host-wide sweep would treat it as live.
+    #[test]
+    fn seed_skips_disposable_artifact_and_scratch_roots_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let sessions_dir = home.join(".cas/sessions");
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            let real = home.join("real-repo");
+            let fixture = home.join(".cas/artifacts/cas-1bfb/fresh-proxy");
+            let sandbox = home.join(".cas/scratch/probe");
+            for root in [&real, &fixture, &sandbox] {
+                std::fs::create_dir_all(root.join(".cas")).unwrap();
+            }
+            for (name, root) in [
+                ("a.json", &real),
+                ("b.json", &fixture),
+                ("c.json", &sandbox),
+            ] {
+                std::fs::write(
+                    sessions_dir.join(name),
+                    serde_json::json!({ "project_dir": root.to_string_lossy() }).to_string(),
+                )
+                .unwrap();
+            }
+
+            let report = seed(false).unwrap();
+
+            assert_eq!(report.new.len(), 1, "only the real repo is a project");
+            assert!(report.new[0].ends_with("real-repo"));
+            assert_eq!(report.skipped_missing.len(), 0);
+            assert_eq!(report.skipped_disposable.len(), 2);
+            let named: Vec<String> = report
+                .skipped_disposable
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .collect();
+            assert!(named.iter().any(|p| p.contains("fresh-proxy")), "{named:?}");
+            assert!(named.iter().any(|p| p.contains("scratch")), "{named:?}");
+            assert_eq!(open_host_known_repo_store().unwrap().count().unwrap(), 1);
         });
     }
 

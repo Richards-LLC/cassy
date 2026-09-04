@@ -139,7 +139,11 @@ struct GitRepo {
 
 impl GitRepo {
     fn new() -> Self {
-        let temp = TempDir::new().expect("TempDir");
+        // Host-wide known-repos discovery intentionally quarantines system
+        // temporary roots. Keep these Git fixtures under the checkout so
+        // `init_cas_dir` can register real project peers for cross-repo
+        // lifecycle tests while their TempDir cleanup remains automatic.
+        let temp = TempDir::new_in(env!("CARGO_MANIFEST_DIR")).expect("TempDir");
         let root = temp.path().canonicalize().expect("canonical repo fixture");
 
         let run = |args: &[&str]| {

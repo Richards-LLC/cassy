@@ -1326,7 +1326,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     ));
     checks.extend(canonical_alias_checks(&cas_root));
     checks.extend(cloud_identity_metadata_checks(&cas_root));
-    checks.extend(registered_project_root_checks());
+    let current_project_root = cas_root.parent().unwrap_or(Path::new("."));
+    checks.extend(registered_project_root_checks(current_project_root));
 
     recorder.mark("canonical id", &checks);
     // Check 15: residual cross-project contamination from the cas-ed15 pull
@@ -2416,9 +2417,15 @@ fn collect_local_root_identities() -> Result<Vec<crate::cloud::LocalRootIdentity
 /// Report registered roots that host-wide `cas update` deliberately excludes.
 /// Keep this separate from the update sweep so doctor can name a stale
 /// registration even when the path is still present and `prune-missing` cannot
-/// remove it.
-fn registered_project_root_checks() -> Vec<Check> {
+/// remove it. The current project is intentionally excluded: its local
+/// disposable-root registration is expected and is not stale from the user's
+/// perspective.
+fn registered_project_root_checks(current_project_root: &Path) -> Vec<Check> {
     use crate::store::KnownRepoStore as _;
+
+    let current_project_root = current_project_root
+        .canonicalize()
+        .unwrap_or_else(|_| current_project_root.to_path_buf());
 
     let store = match crate::store::known_repos::open_host_known_repo_store() {
         Ok(store) => store,
@@ -2447,6 +2454,10 @@ fn registered_project_root_checks() -> Vec<Check> {
     let known_roots = repos.iter().map(|repo| repo.path.clone()).collect::<Vec<_>>();
     let mut checks = Vec::new();
     for repo in repos {
+        let repo_path = repo.path.canonicalize().unwrap_or_else(|_| repo.path.clone());
+        if repo_path == current_project_root {
+            continue;
+        }
         let Some(skip) = crate::store::known_repos::registry_skip_for_known_roots(
             &repo.path,
             &known_roots,
@@ -5366,7 +5377,8 @@ mod tests {
             store.upsert(&project).unwrap();
             store.upsert(&artifact_copy).unwrap();
 
-            let checks = registered_project_root_checks();
+            let checks =
+                registered_project_root_checks(&PathBuf::from("/home/u/current-project"));
             let message = checks
                 .iter()
                 .map(|check| check.message.as_str())
@@ -5378,6 +5390,34 @@ mod tests {
                 message.contains("cas cloud unlink --purge-remote"),
                 "{message}"
             );
+        });
+    }
+
+    #[test]
+    fn doctor_ignores_current_disposable_root_but_warns_for_other_registered_root() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let current = home.join("current-project");
+            let other = home.join("other-project");
+            std::fs::create_dir_all(current.join(".cas")).unwrap();
+            crate::store::known_repos::register_repo_strict(&current).unwrap();
+
+            let current_only = registered_project_root_checks(&current);
+            assert_eq!(current_only.len(), 1);
+            assert!(matches!(current_only[0].status, CheckStatus::Ok));
+            assert!(current_only[0].message.contains("no registered"));
+
+            std::fs::create_dir_all(other.join(".cas")).unwrap();
+            crate::store::known_repos::register_repo_strict(&other).unwrap();
+            let checks = registered_project_root_checks(&current);
+            let messages = checks
+                .iter()
+                .map(|check| check.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(messages.contains(&other.display().to_string()), "{messages}");
+            assert!(!messages.contains(&current.display().to_string()), "{messages}");
+            assert!(matches!(checks[0].status, CheckStatus::Warning));
         });
     }
 

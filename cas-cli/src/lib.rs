@@ -152,7 +152,16 @@ pub(crate) mod test_support {
                 // CAS_ROOT is the one CAS_* the guard sets itself, to pin the
                 // project root inside the temp HOME (cas-4ccc). It is checked
                 // below rather than exempted silently.
-                (!key.starts_with("CAS_") || key == "CAS_ROOT")
+                //
+                // CAS_INIT_TIMEOUT_SECS is the one ambient CAS_* the guard
+                // deliberately keeps: a pure wall-clock budget for the `cas
+                // init` watchdog, which a saturated batch host raises for its
+                // whole process tree (cas-c0411). The exemption is stated once,
+                // in test_env_guard::is_scrubbed_ambient_env_key, and covered by
+                // its own tests there.
+                (!key.starts_with("CAS_")
+                    || key == "CAS_ROOT"
+                    || key == crate::test_env_guard::AMBIENT_INIT_TIMEOUT_SECS)
                     && !matches!(
                         key,
                         "CLAUDE_CONFIG_DIR"

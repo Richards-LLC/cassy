@@ -28,10 +28,66 @@ use crate::cli::hook::{configure_claude_hooks, configure_mcp_server, provision_c
 use crate::cli::interactive;
 use crate::ui::components::OutputMode;
 
-/// Overall timeout for `cas init`. If init is still running past this, the
-/// watchdog aborts the process with a clear error so a hang never consumes
-/// a CPU core indefinitely (see cas-bf06). Opt out via `CAS_INIT_NO_TIMEOUT=1`.
+/// Default overall timeout for `cas init`. If init is still running past this,
+/// the watchdog aborts the process with a clear error so a hang never consumes
+/// a CPU core indefinitely (see cas-bf06). Opt out via `CAS_INIT_NO_TIMEOUT=1`,
+/// or raise/lower the budget with `CAS_INIT_TIMEOUT_SECS`.
 const INIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Removes the watchdog entirely. Set to `1`.
+const ENV_INIT_NO_TIMEOUT: &str = "CAS_INIT_NO_TIMEOUT";
+
+/// Overrides the watchdog budget in whole seconds, keeping the watchdog armed.
+///
+/// This exists because the budget is a wall-clock assumption, and a batch host
+/// can break it without anything being wrong: during the v3.15.1 release gate a
+/// test's child `cas init` hit the 300 s budget while three isolation re-runs
+/// and six idle `cas serve` daemons saturated the box, failing the archive-mode
+/// row on timing alone (cas-c0411). `scripts/release-gate.sh` now raises this
+/// for its own children instead of removing their watchdog: a genuinely wedged
+/// init still aborts, just on a budget that suits a saturated machine.
+const ENV_INIT_TIMEOUT_SECS: &str = "CAS_INIT_TIMEOUT_SECS";
+
+/// Ceiling on `CAS_INIT_TIMEOUT_SECS`. An hour is far past any plausible init,
+/// even on a machine being hammered, and it keeps the override from becoming a
+/// second way to disable the watchdog: `CAS_INIT_TIMEOUT_SECS=99999999` reads
+/// like a raised budget and behaves like no budget at all. Disabling stays a
+/// single explicit knob.
+const INIT_TIMEOUT_MAX: Duration = Duration::from_secs(3600);
+
+/// Resolve the watchdog budget. `None` means "no watchdog".
+///
+/// Pure — takes the two environment values rather than reading them — so the
+/// whole matrix is testable without mutating process-global environment in a
+/// parallel test run.
+///
+/// A meaningless override (empty, non-numeric, zero, negative) falls back to
+/// the default budget rather than disabling the watchdog: a typo must never be
+/// the thing that removes a hang detector. An over-large one is clamped to
+/// [`INIT_TIMEOUT_MAX`] for the same reason.
+fn resolve_init_timeout(no_timeout: Option<&str>, timeout_secs: Option<&str>) -> Option<Duration> {
+    if no_timeout.map(str::trim) == Some("1") {
+        return None;
+    }
+    let seconds = timeout_secs
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(INIT_TIMEOUT)
+        .min(INIT_TIMEOUT_MAX);
+    Some(seconds)
+}
+
+/// The operator-facing abort text, kept next to the knobs it documents.
+fn watchdog_abort_message(budget: Duration) -> String {
+    format!(
+        "\n\ncas init: aborting after {}s timeout. \
+         Check .cas/logs/ for the last completed phase.\n\
+         Set {ENV_INIT_TIMEOUT_SECS}=<seconds> to raise this budget on a slow or \
+         loaded machine, or {ENV_INIT_NO_TIMEOUT}=1 to disable the watchdog.",
+        budget.as_secs()
+    )
+}
 
 /// Record a successfully initialized repository in the host registry.
 ///
@@ -52,8 +108,10 @@ fn register_initialized_repo(cwd: &Path) {
 }
 
 /// Spawn a watchdog thread that aborts the process if init runs longer than
-/// `INIT_TIMEOUT`. The watchdog is purely defensive: normal init completes
-/// in well under a second, so reaching the timeout always indicates a bug.
+/// its resolved budget (see [`resolve_init_timeout`]). The watchdog is purely
+/// defensive: normal init completes in well under a second, so reaching the
+/// timeout means either a bug or a host so loaded that the caller should have
+/// raised `CAS_INIT_TIMEOUT_SECS`.
 ///
 /// **Invariant:** this must only ever run in a short-lived process that exits
 /// after `init::execute` returns (i.e., the `cas init` subcommand binary).
@@ -66,23 +124,19 @@ fn register_initialized_repo(cwd: &Path) {
 /// called in-process from a long-lived daemon, refactor this to use a
 /// cancellable channel-based wait first.
 fn spawn_init_watchdog() {
-    if std::env::var("CAS_INIT_NO_TIMEOUT").ok().as_deref() == Some("1") {
+    let no_timeout = std::env::var(ENV_INIT_NO_TIMEOUT).ok();
+    let timeout_secs = std::env::var(ENV_INIT_TIMEOUT_SECS).ok();
+    let Some(budget) = resolve_init_timeout(no_timeout.as_deref(), timeout_secs.as_deref()) else {
         return;
-    }
-    thread::spawn(|| {
-        thread::sleep(INIT_TIMEOUT);
+    };
+    thread::spawn(move || {
+        thread::sleep(budget);
         error!(
-            timeout_secs = INIT_TIMEOUT.as_secs(),
+            timeout_secs = budget.as_secs(),
             "cas init watchdog: aborting — init exceeded hard timeout. \
              Check .cas/logs/ for the last completed phase."
         );
-        eprintln!(
-            "\n\ncas init: aborting after {}s timeout. \
-             Check .cas/logs/ for the last completed phase.\n\
-             Set CAS_INIT_NO_TIMEOUT=1 to disable this watchdog \
-             (e.g., in slow CI environments).",
-            INIT_TIMEOUT.as_secs()
-        );
+        eprintln!("{}", watchdog_abort_message(budget));
         // Exit code 3 matches CasError::NotInitialized mapping in main.rs,
         // signalling "init did not complete successfully".
         std::process::exit(3);
@@ -1359,6 +1413,110 @@ mod grok_agent_selection_tests {
         let selection = detect_agent_defaults(temp.path());
         assert!(!selection.grok);
         assert!(selection.claude);
+    }
+}
+
+#[cfg(test)]
+mod init_watchdog_budget_tests {
+    use super::*;
+
+    #[test]
+    fn an_unconfigured_run_keeps_the_default_budget() {
+        assert_eq!(
+            resolve_init_timeout(None, None),
+            Some(Duration::from_secs(300)),
+            "ordinary `cas init` must keep the 300s watchdog it has today"
+        );
+    }
+
+    #[test]
+    fn the_opt_out_still_disables_the_watchdog_entirely() {
+        assert_eq!(resolve_init_timeout(Some("1"), None), None);
+        assert_eq!(
+            resolve_init_timeout(Some("1"), Some("900")),
+            None,
+            "the documented opt-out wins over a budget override"
+        );
+    }
+
+    #[test]
+    fn a_saturated_ci_can_raise_the_budget_without_disabling_it() {
+        // cas-c0411: the release gate is itself the "slow CI environment" the
+        // abort message names. It raises this rather than disabling the
+        // watchdog, so a genuinely wedged init is still bounded.
+        assert_eq!(
+            resolve_init_timeout(None, Some("900")),
+            Some(Duration::from_secs(900))
+        );
+        assert_eq!(
+            resolve_init_timeout(None, Some(" 900\n")),
+            Some(Duration::from_secs(900)),
+            "a value that travelled through a shell must not be rejected on whitespace"
+        );
+    }
+
+    #[test]
+    fn the_budget_may_also_be_lowered() {
+        assert_eq!(
+            resolve_init_timeout(None, Some("5")),
+            Some(Duration::from_secs(5)),
+            "a test that wants to observe the watchdog must be able to shorten it"
+        );
+    }
+
+    #[test]
+    fn a_meaningless_override_falls_back_to_the_default_rather_than_disabling() {
+        // A typo must never silently remove the watchdog: that is exactly how a
+        // hang stops being observable. Disabling stays explicit.
+        for value in ["", "   ", "abc", "-1", "0", "9e9"] {
+            assert_eq!(
+                resolve_init_timeout(None, Some(value)),
+                Some(Duration::from_secs(300)),
+                "override {value:?} must fall back to the default budget"
+            );
+        }
+    }
+
+    #[test]
+    fn an_over_large_override_is_clamped_rather_than_becoming_a_second_opt_out() {
+        // `CAS_INIT_TIMEOUT_SECS=99999999` reads like a raised budget and
+        // behaves like no watchdog at all. Only CAS_INIT_NO_TIMEOUT disables.
+        assert_eq!(
+            resolve_init_timeout(None, Some("99999999")),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            resolve_init_timeout(None, Some(&u64::MAX.to_string())),
+            Some(Duration::from_secs(3600)),
+            "the ceiling must hold at the top of the range, not overflow past it"
+        );
+        assert_eq!(
+            resolve_init_timeout(None, Some("3600")),
+            Some(Duration::from_secs(3600)),
+            "the ceiling itself is a legal budget"
+        );
+    }
+
+    #[test]
+    fn the_gate_budget_sits_under_the_ceiling() {
+        // scripts/release-gate.sh exports 900. If the ceiling ever dropped
+        // below the value the gate hands its children, the gate would silently
+        // be running on a shorter budget than its own receipt claims.
+        assert_eq!(
+            resolve_init_timeout(None, Some("900")),
+            Some(Duration::from_secs(900))
+        );
+    }
+
+    #[test]
+    fn the_abort_message_names_both_knobs_and_the_effective_budget() {
+        let message = watchdog_abort_message(Duration::from_secs(900));
+        assert!(message.contains("900s"), "names the budget actually in force");
+        assert!(message.contains("CAS_INIT_NO_TIMEOUT=1"));
+        assert!(
+            message.contains("CAS_INIT_TIMEOUT_SECS"),
+            "an operator who hit the watchdog must learn they can raise it, not only remove it"
+        );
     }
 }
 

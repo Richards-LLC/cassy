@@ -18,7 +18,9 @@ use url::{Host, Url};
 use crate::cli::Cli;
 use crate::cli::hub::{HubAuthorizeArgs, record_is_live};
 use crate::cloud::CloudConfig;
-use crate::hub::{AuthStore, HubRuntimePaths, MachineIdentityStore, Scope};
+use crate::hub::{
+    AuthStore, HubRuntimePaths, MachineIdentityStore, PairingInvitationTarget, Scope,
+};
 
 const RELAY_PREFIX: &str = "/api/hub/pairing";
 const WIRE_VERSION: u8 = 1;
@@ -112,7 +114,7 @@ impl RelayClient {
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .send_json(body)
-            .map_err(relay_error)
+            .map_err(|error| relay_error_with_request(error, body))
             .with_context(|| {
                 format!("relay POST {suffix} failed; request body: {diagnostic_body}")
             })?;
@@ -354,12 +356,13 @@ fn authorize_with_relay_with_config(
     }
 
     let invitation = auth.mint_pairing(&claim.controller_origin, granted.clone(), Utc::now())?;
+    let relay_invitation_url = invitation.url_for(PairingInvitationTarget::HostedRelay);
     let complete = relay.complete(
         &claim.authorization_id,
         &attempt.nonce,
         &hub_url,
         &machine_label,
-        &invitation.url,
+        &relay_invitation_url,
         invitation.expires_at,
         &granted,
     )?;
@@ -621,13 +624,95 @@ fn parse_override_scopes(scopes: Option<&[String]>) -> Result<Option<BTreeSet<Sc
         .transpose()
 }
 
+const RELAY_INVITATION_CONTRACT: &str = "exactly two fragment keys (`pair` and `hub`), a 32-byte base64url `pair` secret, a `hub` value of at most 128 bytes, root path `/`, and no query";
+
+fn validate_relay_invitation_url(invitation_url: &str) -> Result<()> {
+    let parsed = Url::parse(invitation_url).context("invalid relay invitation URL")?;
+    anyhow::ensure!(
+        parsed.host_str().is_some()
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.path() == "/"
+            && parsed.query().is_none(),
+        "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
+    );
+    let fragment = parsed
+        .fragment()
+        .context("relay invitation URL must use {RELAY_INVITATION_CONTRACT}")?;
+    let fields = fragment.split('&').collect::<Vec<_>>();
+    anyhow::ensure!(
+        fields.len() == 2,
+        "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
+    );
+
+    let mut pair = None;
+    let mut hub = None;
+    for field in fields {
+        let (key, value) = field
+            .split_once('=')
+            .context("relay invitation URL must use {RELAY_INVITATION_CONTRACT}")?;
+        anyhow::ensure!(
+            !value.is_empty(),
+            "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
+        );
+        match key {
+            "pair" => anyhow::ensure!(
+                pair.replace(value).is_none(),
+                "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
+            ),
+            "hub" => anyhow::ensure!(
+                hub.replace(value).is_none(),
+                "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
+            ),
+            _ => anyhow::bail!("relay invitation URL must use {RELAY_INVITATION_CONTRACT}"),
+        }
+    }
+
+    let pair = pair.context("relay invitation URL must use {RELAY_INVITATION_CONTRACT}")?;
+    let hub = hub.context("relay invitation URL must use {RELAY_INVITATION_CONTRACT}")?;
+    let pair = URL_SAFE_NO_PAD
+        .decode(pair)
+        .context("relay invitation URL must use {RELAY_INVITATION_CONTRACT}")?;
+    anyhow::ensure!(
+        pair.len() == 32 && hub.len() <= 128,
+        "relay invitation URL must use {RELAY_INVITATION_CONTRACT}"
+    );
+    Ok(())
+}
+
 fn relay_error(error: ureq::Error) -> anyhow::Error {
+    let (status, code, description) = relay_error_parts(error);
+    relay_error_from_parts(status, &code, &description)
+}
+
+fn relay_error_with_request<B: Serialize>(error: ureq::Error, body: &B) -> anyhow::Error {
+    let (status, code, description) = relay_error_parts(error);
+    if code == "invalid_invitation" {
+        let invitation_url = serde_json::to_value(body)
+            .ok()
+            .and_then(|body| {
+                body.get("invitation_url")
+                    .and_then(|url| url.as_str())
+                    .map(str::to_owned)
+            })
+            .map(|url| relay_invitation_shape(&url))
+            .unwrap_or_else(|| "<unavailable>".to_owned());
+        return anyhow::anyhow!(
+            "relay rejected invitation_url (invalid_invitation): the relay requires {RELAY_INVITATION_CONTRACT}; sent URL shape: {invitation_url}"
+        );
+    }
+    relay_error_from_parts(status, &code, &description)
+}
+
+fn relay_error_parts(error: ureq::Error) -> (Option<u16>, String, String) {
     let (status, envelope) = match error {
         ureq::Error::Status(status, response) => {
             let body = response.into_json::<serde_json::Value>().ok();
             (Some(status), body)
         }
-        ureq::Error::Transport(error) => return anyhow::anyhow!("relay unavailable: {error}"),
+        ureq::Error::Transport(error) => {
+            return (None, "relay_unavailable".to_owned(), error.to_string());
+        }
     };
     let code = envelope
         .as_ref()
@@ -639,7 +724,25 @@ fn relay_error(error: ureq::Error) -> anyhow::Error {
         .and_then(|body| body.get("error_description"))
         .and_then(|value| value.as_str())
         .unwrap_or("request was refused");
-    relay_error_from_parts(status, code, description)
+    (status, code.to_owned(), description.to_owned())
+}
+
+fn relay_invitation_shape(invitation_url: &str) -> String {
+    let Ok(parsed) = Url::parse(invitation_url) else {
+        return "<invalid URL>".to_owned();
+    };
+    let hub = parsed
+        .fragment()
+        .and_then(|fragment| {
+            fragment
+                .split('&')
+                .find_map(|field| field.strip_prefix("hub="))
+        })
+        .unwrap_or("<missing>");
+    format!(
+        "{}/#pair=<redacted>&hub={hub}",
+        parsed.origin().ascii_serialization()
+    )
 }
 
 fn relay_request_diagnostic(body: &impl Serialize) -> String {
@@ -677,6 +780,7 @@ fn redact_relay_secrets(value: &mut serde_json::Value) {
 
 fn relay_error_from_parts(status: Option<u16>, code: &str, description: &str) -> anyhow::Error {
     match (status, code) {
+        (None, "relay_unavailable") => anyhow::anyhow!("relay unavailable: {description}"),
         (Some(404), "invalid_code") => {
             anyhow::anyhow!("No live pairing request matches that code.")
         }
@@ -918,6 +1022,7 @@ mod tests {
     struct RecordingRelay {
         claims: std::sync::Mutex<Vec<(String, String)>>,
         completed_hub_urls: std::sync::Mutex<Vec<String>>,
+        completed_invitation_urls: std::sync::Mutex<Vec<String>>,
         active_claim: std::sync::Mutex<Option<(String, String)>>,
         fail_first_completion: std::sync::atomic::AtomicBool,
     }
@@ -969,6 +1074,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(hub_url.to_owned());
+            self.completed_invitation_urls
+                .lock()
+                .unwrap()
+                .push(_invitation_url.to_owned());
             if self
                 .fail_first_completion
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -1119,6 +1228,91 @@ mod tests {
             Some("https://configured.example".to_owned())
         );
         health.join().unwrap();
+    }
+
+    #[test]
+    fn hosted_relay_completion_uses_the_two_key_invitation_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let (port, health) = serve_ready_health_checks(1);
+        write_live_record(&paths, port, Some("https://workstation.tail.example/"));
+
+        let relay = RecordingRelay::default();
+        authorize_with_relay(&authorize_args("K7MW-4H2Q"), &test_cli(), &relay, &paths).unwrap();
+        health.join().unwrap();
+
+        let invitation_url = relay.completed_invitation_urls.lock().unwrap()[0].clone();
+        assert!(!invitation_url.contains("&scopes="), "{invitation_url}");
+        assert!(invitation_url.contains("#pair="), "{invitation_url}");
+        assert!(invitation_url.contains("&hub="), "{invitation_url}");
+        assert_eq!(invitation_url.matches('&').count(), 1, "{invitation_url}");
+        validate_relay_invitation_url(&invitation_url).unwrap();
+
+        let pair = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        for invalid in [
+            format!("https://commander.example/#pair={pair}&hub=machine&scopes=read"),
+            format!("https://commander.example/#pair=short&hub=machine"),
+            format!("https://commander.example/path#pair={pair}&hub=machine"),
+            format!("https://commander.example/?query=1#pair={pair}&hub=machine"),
+            format!(
+                "https://commander.example/#pair={pair}&hub={}",
+                "h".repeat(129)
+            ),
+        ] {
+            assert!(
+                validate_relay_invitation_url(&invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_invitation_reports_the_field_contract_and_sent_shape() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"error":"invalid_invitation","error_description":"malformed or has an invalid expiry"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let relay = RelayClient {
+            endpoint,
+            token: "test-token".to_owned(),
+        };
+        let scopes = Scope::default_read_only();
+        let error = relay
+            .complete(
+                "authorization",
+                "nonce",
+                "https://workstation.tail.example",
+                "machine",
+                "https://commander.example/#pair=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&hub=machine-uuid",
+                "2026-08-11T20:11:30Z".parse().unwrap(),
+                &scopes,
+            )
+            .unwrap_err();
+        let error = format!("{error:#}");
+        server.join().unwrap();
+
+        assert!(error.contains("invitation_url"), "{error}");
+        assert!(error.contains("exactly two fragment keys"), "{error}");
+        assert!(!error.contains("invalid expiry"), "{error}");
+        assert!(
+            error.contains("https://commander.example/#pair=<redacted>&hub=machine-uuid"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub use detector::detect_applied_migrations;
 pub use migrations::MIGRATIONS;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 use crate::error::CasError;
@@ -318,6 +318,87 @@ fn migration_is_detected(conn: &Connection, migration: &Migration) -> bool {
         .is_some_and(|detected| detected > 0)
 }
 
+/// Repair ledger rows whose name belongs to a different id in the current
+/// registry (cas-d9c7).
+///
+/// A migration renamed or renumbered between builds leaves its old name in the
+/// ledger under the old id. `cas_migrations.name` is UNIQUE, so the new id can
+/// never be recorded: `INSERT OR IGNORE` swallows the conflict, the row count
+/// for the new id stays 0, and the phase dies with "schema was detected but its
+/// ledger row could not be recorded" on every run — gabber-studio sat at 252
+/// with 2 pending indefinitely. The same stale row also fails
+/// `reconcile_recorded_migration`'s identity check once the *old* id belongs to
+/// a different registry migration.
+///
+/// The stale row is logged into `cas_migration_reconciliations` (naming both
+/// ids and preserving its original `applied_at`) and then deleted, which frees
+/// both the name and the id. Everything after that is ordinary machinery: the
+/// renamed migration is recorded when its predicate holds, and whichever
+/// registry migration now owns the vacated id is re-evaluated honestly —
+/// detected means recorded, undetected means applied. Nothing is skipped
+/// because its id happened to be occupied.
+///
+/// Deleting rather than renaming the row to `<name>@legacy-<id>` is deliberate:
+/// `id` is the PRIMARY KEY, so a legacy-named row would keep the old id
+/// occupied under a name no registry migration claims — exactly the state that
+/// trips the identity-mismatch check later. The audit lives in the
+/// reconciliations table, which already records the previous `applied_at`.
+fn reconcile_renamed_ledger_rows(conn: &Connection) -> Result<Vec<String>> {
+    let mut repaired = Vec::new();
+    for migration in MIGRATIONS {
+        let stale: Option<(u32, String)> = conn
+            .query_row(
+                "SELECT id, applied_at FROM cas_migrations WHERE name = ?1 AND id != ?2",
+                params![migration.name, migration.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((stale_id, previous_applied_at)) = stale else {
+            continue;
+        };
+
+        let reason = format!(
+            "migration '{name}' moved from ledger id {stale_id} to registry id {current_id}; \
+             stale row retired so both ids can be re-evaluated against the schema",
+            name = migration.name,
+            current_id = migration.id,
+        );
+        conn.execute(
+            "INSERT INTO cas_migration_reconciliations
+                 (migration_id, migration_name, previous_applied_at, reconciled_at, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                migration.id,
+                migration.name,
+                previous_applied_at,
+                Utc::now().to_rfc3339(),
+                reason,
+            ],
+        )?;
+        conn.execute("DELETE FROM cas_migrations WHERE id = ?1", [stale_id])?;
+        repaired.push(reason);
+    }
+    Ok(repaired)
+}
+
+/// Which ledger id currently owns `name`, if any. Used to say *why* a row
+/// could not be recorded instead of reporting a bare failure.
+fn ledger_id_holding_name(conn: &Connection, name: &str) -> Option<u32> {
+    conn.query_row(
+        "SELECT id FROM cas_migrations WHERE name = ?1",
+        [name],
+        |row| row.get::<_, u32>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// Records a detected migration. A name held by another ledger id makes this
+/// return `false` rather than repairing: the read paths (`check_migrations`,
+/// `cas update --check`) must report the wedged ledger honestly, and repair
+/// belongs to the write path in `run_migrations`, inside its serialized
+/// transaction (cas-d9c7).
 fn record_detected_migration(conn: &Connection, migration: &Migration) -> Result<bool> {
     conn.execute(
         "INSERT OR IGNORE INTO cas_migrations (id, name, subsystem, applied_at)
@@ -644,7 +725,7 @@ fn apply_migration(conn: &Connection, migration: &Migration) -> Result<()> {
 }
 
 /// Result of running migrations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MigrationResult {
     /// Number of migrations applied
     pub applied_count: usize,
@@ -652,6 +733,8 @@ pub struct MigrationResult {
     pub applied_names: Vec<String>,
     /// Any errors encountered (migration name -> error message)
     pub errors: Vec<(String, String)>,
+    /// Ledger rows repaired before the run (human-readable, one per repair).
+    pub reconciliations: Vec<String>,
 }
 
 /// Check if the database has been initialized with base schemas.
@@ -709,8 +792,15 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
     // ledger and retain stale pending lists before either reaches its first
     // per-migration BEGIN IMMEDIATE.
     conn.execute("BEGIN IMMEDIATE", [])?;
+    let mut reconciliations = Vec::new();
     let status = (|| {
         ensure_migrations_table(&conn)?;
+
+        // cas-d9c7: retire ledger rows whose name now belongs to a different
+        // registry id BEFORE anything reads the ledger, so detection and the
+        // pending list are computed against a ledger that can actually be
+        // written to.
+        reconciliations = reconcile_renamed_ledger_rows(&conn)?;
 
         // Ensure every subsystem's base schema exists before any ALTER
         // migration runs. Fix for cas-bdb9: `cas doctor --fix` previously
@@ -736,13 +826,13 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
             applied_count: status.pending.len(),
             applied_names: status.pending.iter().map(|m| m.name.to_string()).collect(),
             errors: vec![],
+            reconciliations,
         });
     }
 
     let mut result = MigrationResult {
-        applied_count: 0,
-        applied_names: vec![],
-        errors: vec![],
+        reconciliations,
+        ..Default::default()
     };
 
     for migration in status.pending {
@@ -774,14 +864,13 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
                 }
                 Err(error) => {
                     conn.execute("ROLLBACK", [])?;
-                    let reason = error.to_string();
+                    // cas-d9c7: one migration's failure must not strand every
+                    // later pending migration. Record it and keep going; the
+                    // collected errors still fail the phase below.
                     result
                         .errors
-                        .push((migration.name.to_string(), reason.clone()));
-                    return Err(CasError::MigrationFailed {
-                        name: migration.name.to_string(),
-                        reason,
-                    });
+                        .push((migration.name.to_string(), error.to_string()));
+                    continue;
                 }
             }
         }
@@ -797,27 +886,33 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
                     continue;
                 }
                 Ok(false) => {
+                    let holder = ledger_id_holding_name(&conn, migration.name);
                     conn.execute("ROLLBACK", [])?;
-                    let reason =
-                        "schema was detected but its ledger row could not be recorded".to_string();
+                    let reason = match holder {
+                        Some(other_id) => format!(
+                            "schema was detected but its ledger row could not be recorded: \
+                             id {id} is unwritable because ledger id {other_id} still holds the \
+                             name '{name}'",
+                            id = migration.id,
+                            name = migration.name,
+                        ),
+                        None => format!(
+                            "schema was detected but its ledger row for id {id} could not be \
+                             recorded",
+                            id = migration.id,
+                        ),
+                    };
                     result
                         .errors
-                        .push((migration.name.to_string(), reason.clone()));
-                    return Err(CasError::MigrationFailed {
-                        name: migration.name.to_string(),
-                        reason,
-                    });
+                        .push((migration.name.to_string(), reason));
+                    continue;
                 }
                 Err(error) => {
                     conn.execute("ROLLBACK", [])?;
-                    let reason = error.to_string();
                     result
                         .errors
-                        .push((migration.name.to_string(), reason.clone()));
-                    return Err(CasError::MigrationFailed {
-                        name: migration.name.to_string(),
-                        reason,
-                    });
+                        .push((migration.name.to_string(), error.to_string()));
+                    continue;
                 }
             }
         }
@@ -830,19 +925,24 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
             }
             Err(e) => {
                 conn.execute("ROLLBACK", [])?;
-                let reason = e.to_string();
                 result
                     .errors
-                    .push((migration.name.to_string(), reason.clone()));
-                return Err(CasError::MigrationFailed {
-                    name: migration.name.to_string(),
-                    reason,
-                });
+                    .push((migration.name.to_string(), e.to_string()));
             }
         }
     }
 
     backfill_task_origin_project(&conn, cas_dir)?;
+
+    // Every pending migration got its turn. A failure is still loud — callers
+    // (cas update, doctor --fix, MCP startup, init) treat Err as failure — but
+    // the store keeps whatever progress the other migrations made.
+    if let Some((name, reason)) = result.errors.first() {
+        return Err(CasError::MigrationFailed {
+            name: name.clone(),
+            reason: reason.clone(),
+        });
+    }
 
     Ok(result)
 }
@@ -2321,10 +2421,13 @@ mod tests {
         let cas_dir = project.join(".cas");
         let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
 
-        // m254's table must be absent so the run has real work to apply after
+        // m254's columns must be absent so the run has real work to APPLY after
         // the reconciliation, not just rows to record.
-        conn.execute_batch("DROP TABLE IF EXISTS code_index_skipped_files;")
-            .unwrap();
+        conn.execute_batch(
+            "ALTER TABLE code_index_state DROP COLUMN skipped_files;
+             ALTER TABLE code_index_state DROP COLUMN skipped_detail;",
+        )
+        .unwrap();
         if drop_embedding_error_column {
             // The name matches but the schema is NOT there: the migration must
             // be applied, never assumed from the ledger row.
@@ -2393,6 +2496,10 @@ mod tests {
             Some("code_index_skipped_files"),
             "later pending migrations must still be applied"
         );
+        assert!(
+            cas_store::shared_db::column_exists(&conn, "code_index_state", "skipped_files"),
+            "m254 must have really applied, not just been recorded"
+        );
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM cas_migrations WHERE name = 'history_embedding_error'",
@@ -2448,6 +2555,98 @@ mod tests {
             Some("history_embedding_error")
         );
         assert_eq!(check_migrations(&cas_dir).unwrap().pending_count(), 0);
+    }
+
+    /// cas-d9c7 (2): one migration's failure must not strand the later pending
+    /// ones. m248's `up` is a bare UPDATE, so a store whose predicate is false
+    /// again (a legacy status row reappears) cannot be safely replayed and its
+    /// reconciliation fails by design — while m254 is independent and must
+    /// still land. Before this change the phase returned at the first failure
+    /// and m254 never ran.
+    #[test]
+    fn a_failing_migration_does_not_strand_later_pending_migrations() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path().join("partial-failure");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::store::init_cas_dir(&project).unwrap();
+        let cas_dir = project.join(".cas");
+
+        {
+            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+            // Falsify m248's predicate while its ledger row stays recorded.
+            conn.execute(
+                "INSERT INTO tasks (id, title, status, created_at, updated_at)
+                 VALUES ('cas-legacy', 'legacy row', 'pending_supervisor_review', ?1, ?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            // Make the later, independent migration genuinely pending.
+            conn.execute_batch(
+                "ALTER TABLE code_index_state DROP COLUMN skipped_files;
+                 ALTER TABLE code_index_state DROP COLUMN skipped_detail;",
+            )
+            .unwrap();
+            conn.execute("DELETE FROM cas_migrations WHERE id >= 254", [])
+                .unwrap();
+        }
+
+        let error = run_migrations(&cas_dir, false)
+            .expect_err("an unreplayable migration must still fail the phase");
+        let CasError::MigrationFailed { name, .. } = &error else {
+            panic!("expected MigrationFailed, got {error:?}");
+        };
+        assert_eq!(name, "tasks_retire_pending_supervisor_review", "{error:?}");
+
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        assert!(
+            cas_store::shared_db::column_exists(&conn, "code_index_state", "skipped_files"),
+            "the later independent migration must still have been applied"
+        );
+        assert_eq!(
+            ledger_name(&conn, 254).as_deref(),
+            Some("code_index_skipped_files"),
+            "and it must be recorded in the ledger"
+        );
+    }
+
+    /// Opt-in repair harness for a real store (cas-d9c7 verification).
+    ///
+    /// Point `CAS_MIGRATION_REPAIR_STORE` at a directory holding a **copy** of
+    /// a `cas.db` (take it with `sqlite3 <live> ".backup <copy>"`), then run
+    /// `cargo test -p cas --lib migration::tests::repair_store_from_env -- --ignored --nocapture`.
+    /// Never point this at a live store.
+    #[test]
+    #[ignore = "opt-in: requires CAS_MIGRATION_REPAIR_STORE pointing at a store copy"]
+    fn repair_store_from_env() {
+        let Some(dir) = std::env::var_os("CAS_MIGRATION_REPAIR_STORE") else {
+            panic!("set CAS_MIGRATION_REPAIR_STORE to a directory holding a cas.db copy");
+        };
+        let cas_dir = PathBuf::from(dir);
+
+        let before = check_migrations(&cas_dir).expect("read status before");
+        eprintln!(
+            "before: version {} pending {}",
+            before.current_version,
+            before.pending_count()
+        );
+
+        let result = run_migrations(&cas_dir, false).expect("migration phase must complete");
+        for line in &result.reconciliations {
+            eprintln!("reconciled: {line}");
+        }
+        eprintln!(
+            "applied {}: {:?}; errors {:?}",
+            result.applied_count, result.applied_names, result.errors
+        );
+
+        let after = check_migrations(&cas_dir).expect("read status after");
+        eprintln!(
+            "after: version {} pending {}",
+            after.current_version,
+            after.pending_count()
+        );
+        assert_eq!(after.pending_count(), 0, "pending: {:?}", after.pending);
+        assert_eq!(after.current_version, MIGRATIONS.last().unwrap().id);
     }
 
     #[test]

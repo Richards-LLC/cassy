@@ -110,6 +110,66 @@ pub struct CodeVectorCoverage {
     pub orphaned: usize,
 }
 
+/// What one [`SqliteCodeVectorStore::reconcile`] pass actually changed.
+///
+/// Every field is a row count the operator can check against the numbers
+/// `cas doctor` prints, which is the point: the doctor line used to name
+/// `cas index code` as the remedy for orphaned and never-queued rows while
+/// that command touched neither (cas-8a03).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodeVectorReconcile {
+    /// Queue rows deleted because no eligible symbol carries their id.
+    pub orphaned_dropped: usize,
+    /// `failed` rows returned to `pending` so the drain retries them.
+    pub failed_rearmed: usize,
+    /// `failed` rows deliberately left alone because their recorded error
+    /// describes input the provider will reject again. Cleared by `force`.
+    pub failed_retained: usize,
+    /// Rows whose `content_hash` no longer matched the symbol's. The drain
+    /// skips those rows forever (`embed_pending_code` refuses to mark a hash
+    /// the symbol no longer has), so they are permanent pending work until
+    /// something rewrites the hash.
+    pub stale_rearmed: usize,
+    /// Eligible symbols that had no queue row at all and now have one.
+    pub requeued: usize,
+    /// Ids of the dropped orphan rows, so the caller can retire their cached
+    /// vectors from LMDB in the same pass.
+    pub dropped_symbol_ids: Vec<String>,
+}
+
+impl CodeVectorReconcile {
+    /// True when the pass changed nothing — used to keep quiet runs quiet.
+    pub fn is_noop(&self) -> bool {
+        self.orphaned_dropped == 0
+            && self.failed_rearmed == 0
+            && self.stale_rearmed == 0
+            && self.requeued == 0
+    }
+}
+
+/// Whether a recorded queue failure is worth retrying without `--force`.
+///
+/// Deliberately optimistic: everything the drain records today is an
+/// environment fact (provider request error, missing embedding capability
+/// while logged out, an unusable response), and one wasted embed call is
+/// cheaper than a warning no operator command can clear. Only errors that name
+/// input the provider will reject identically on every retry are retained, and
+/// `cas index code --force` re-arms even those.
+pub fn is_retryable_vector_failure(last_error: Option<&str>) -> bool {
+    let Some(error) = last_error.map(str::to_lowercase) else {
+        return true;
+    };
+    const PERMANENT: &[&str] = &[
+        "too large",
+        "exceeds maximum",
+        "invalid request",
+        "unsupported input",
+        "400 bad request",
+        "422 unprocessable",
+    ];
+    !PERMANENT.iter().any(|marker| error.contains(marker))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CodeIndexState {
     pub repository: String,
@@ -134,9 +194,15 @@ pub struct SqliteCodeVectorStore {
 impl SqliteCodeVectorStore {
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let conn = crate::shared_db::shared_connection(&cas_dir.join("cas.db"))?;
-        conn.lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?
-            .execute_batch(CODE_VECTOR_SCHEMA)?;
+        // `retire_code_file` opens this store once per retired file, so schema
+        // creation sits on a hot path that runs beside `cas doctor`. Retry the
+        // DDL rather than surfacing SQLITE_BUSY as a file failure (cas-8a03).
+        crate::shared_db::with_write_retry(|| {
+            conn.lock()
+                .map_err(|_| StoreError::Other("lock poisoned".to_string()))?
+                .execute_batch(CODE_VECTOR_SCHEMA)
+                .map_err(StoreError::from)
+        })?;
         Ok(Self { conn })
     }
 
@@ -163,11 +229,12 @@ impl SqliteCodeVectorStore {
             .cloned()
             .collect();
 
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
-        let tx = conn.transaction()?;
+        let conn = self.lock()?;
+        // The write lock is taken up front with bounded retry: a concurrent
+        // `cas doctor` or second `cas serve` holding the writer used to turn
+        // this into a hard "database is locked" file failure (cas-8a03,
+        // mirroring cas-759f).
+        let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
         for id in &retired {
             tx.execute(
                 "DELETE FROM code_vector_queue WHERE symbol_id = ?1",
@@ -202,19 +269,16 @@ impl SqliteCodeVectorStore {
         if symbol_ids.is_empty() {
             return Ok(());
         }
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
-        let tx = conn.transaction()?;
-        for id in symbol_ids {
-            tx.execute(
-                "DELETE FROM code_vector_queue WHERE symbol_id = ?1",
-                params![id],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+        let conn = self.lock()?;
+        crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+            for id in symbol_ids {
+                tx.execute(
+                    "DELETE FROM code_vector_queue WHERE symbol_id = ?1",
+                    params![id],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     pub fn list_pending(&self, limit: usize) -> Result<Vec<CodeVectorWork>> {
@@ -378,6 +442,140 @@ impl SqliteCodeVectorStore {
             pending: eligible.saturating_sub(vectorized).saturating_sub(failed),
             unqueued: unqueued.max(0) as usize,
             orphaned,
+        })
+    }
+
+    /// Make the queue describe the symbol table again, and report what moved.
+    ///
+    /// Three inconsistencies accumulate that no incremental indexing pass can
+    /// remove, because incremental indexing only visits files whose content
+    /// changed (cas-8a03):
+    ///
+    /// 1. **Orphaned rows** — a queue row whose symbol no longer exists (or is
+    ///    no longer an embeddable kind). The drain only retires these if it
+    ///    happens to reach them, and it never reaches them while thousands of
+    ///    live rows sort ahead.
+    /// 2. **Failed rows** — durable, retryable in principle, but nothing
+    ///    re-arms them on demand. Without `force`, rows whose recorded error
+    ///    names permanently-invalid input are retained and counted; `force`
+    ///    re-arms every failed row.
+    /// 3. **Never-queued and stale-hash symbols** — an eligible symbol with no
+    ///    queue row is invisible to the drain, and a row whose `content_hash`
+    ///    disagrees with its symbol is skipped by the drain on every tick
+    ///    (`embed_pending_code` refuses to complete a hash the symbol no
+    ///    longer has), so it is pending work that can never finish.
+    ///
+    /// The whole pass runs in one `BEGIN IMMEDIATE` transaction with bounded
+    /// retry, so a concurrent reader-writer (`cas doctor`, a second
+    /// `cas serve`) delays it instead of failing it.
+    pub fn reconcile(&self, force: bool) -> Result<CodeVectorReconcile> {
+        let conn = self.lock()?;
+        let kinds = cas_code::SymbolKind::embeddable_kind_names();
+        let placeholders = vec!["?"; kinds.len()].join(", ");
+
+        // No `code_symbols` table means structural indexing has never run in
+        // this store. Every queue row would then read as orphaned; emptying
+        // the queue on the strength of a table that merely has not been
+        // created yet would delete real work.
+        let symbols_table = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'code_symbols'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+        if symbols_table == 0 {
+            return Ok(CodeVectorReconcile::default());
+        }
+
+        crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+            let now = Utc::now().to_rfc3339();
+            let mut outcome = CodeVectorReconcile::default();
+
+            let dropped: Vec<String> = {
+                let mut stmt = tx.prepare(&format!(
+                    "SELECT symbol_id FROM code_vector_queue q
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM code_symbols s
+                         WHERE s.id = q.symbol_id AND s.kind IN ({placeholders})
+                     )"
+                ))?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(kinds.iter()), |row| {
+                    row.get::<_, String>(0)
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for id in &dropped {
+                tx.execute(
+                    "DELETE FROM code_vector_queue WHERE symbol_id = ?1",
+                    params![id],
+                )?;
+            }
+            outcome.orphaned_dropped = dropped.len();
+            outcome.dropped_symbol_ids = dropped;
+
+            let failed: Vec<(String, Option<String>)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT symbol_id, last_error FROM code_vector_queue WHERE status = 'failed'",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for (symbol_id, last_error) in &failed {
+                if !force && !is_retryable_vector_failure(last_error.as_deref()) {
+                    outcome.failed_retained += 1;
+                    continue;
+                }
+                tx.execute(
+                    "UPDATE code_vector_queue
+                     SET status = 'pending', last_error = NULL, updated_at = ?2
+                     WHERE symbol_id = ?1",
+                    params![symbol_id, now],
+                )?;
+                outcome.failed_rearmed += 1;
+            }
+
+            outcome.stale_rearmed = tx.execute(
+                &format!(
+                    "UPDATE code_vector_queue
+                     SET content_hash = (
+                             SELECT s.content_hash FROM code_symbols s
+                             WHERE s.id = code_vector_queue.symbol_id
+                         ),
+                         status = 'pending',
+                         last_error = NULL,
+                         updated_at = ?1
+                     WHERE EXISTS (
+                         SELECT 1 FROM code_symbols s
+                         WHERE s.id = code_vector_queue.symbol_id
+                           AND s.kind IN ({placeholders})
+                           AND s.content_hash <> code_vector_queue.content_hash
+                     )"
+                ),
+                rusqlite::params_from_iter(
+                    std::iter::once(now.clone()).chain(kinds.iter().map(|kind| kind.to_string())),
+                ),
+            )?;
+
+            outcome.requeued = tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO code_vector_queue
+                         (symbol_id, content_hash, status, last_error, updated_at)
+                     SELECT s.id, s.content_hash, 'pending', NULL, ?1
+                     FROM code_symbols s
+                     WHERE s.kind IN ({placeholders})
+                       AND NOT EXISTS (
+                           SELECT 1 FROM code_vector_queue q WHERE q.symbol_id = s.id
+                       )"
+                ),
+                rusqlite::params_from_iter(
+                    std::iter::once(now.clone()).chain(kinds.iter().map(|kind| kind.to_string())),
+                ),
+            )?;
+
+            Ok(outcome)
         })
     }
 
@@ -608,6 +806,200 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteCodeVectorStore::open(root.path()).unwrap();
         assert_eq!(store.coverage().unwrap(), CodeVectorCoverage::default());
+    }
+
+    /// The cas-8a03 shape, all three inconsistencies at once: a queue row for a
+    /// deleted symbol, a failed row, a symbol the indexer never queued, and a
+    /// row whose hash no longer matches its symbol. One reconcile pass has to
+    /// leave doctor with nothing left to warn about.
+    #[test]
+    fn reconcile_drops_orphans_rearms_failures_and_queues_missing_symbols() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+
+        let failed = symbol("sym-failed", "a", SymbolKind::Function);
+        let stale = symbol("sym-stale", "old", SymbolKind::Struct);
+        let never_queued = symbol("sym-new", "c", SymbolKind::Trait);
+        let ghost = symbol("sym-gone", "g", SymbolKind::Function);
+
+        // The queue knows about the ghost, the failure and the stale row.
+        store
+            .sync_file_symbols(&[ghost, failed.clone(), stale.clone()], &[])
+            .unwrap();
+        assert!(
+            store
+                .mark_failed("sym-failed", "a", "provider request failed: 503")
+                .unwrap()
+        );
+        // The symbol table has everything except the ghost, and carries a newer
+        // hash for the stale row.
+        seed_symbols(
+            root.path(),
+            &[
+                failed,
+                symbol("sym-stale", "new", SymbolKind::Struct),
+                never_queued,
+            ],
+        );
+
+        let before = store.coverage().unwrap();
+        assert_eq!(before.orphaned, 1);
+        assert_eq!(before.unqueued, 1);
+        assert_eq!(before.failed, 1);
+
+        let outcome = store.reconcile(false).unwrap();
+        assert_eq!(outcome.orphaned_dropped, 1);
+        assert_eq!(outcome.dropped_symbol_ids, vec!["sym-gone".to_string()]);
+        assert_eq!(outcome.failed_rearmed, 1);
+        assert_eq!(outcome.failed_retained, 0);
+        assert_eq!(outcome.stale_rearmed, 1);
+        assert_eq!(outcome.requeued, 1);
+        assert!(!outcome.is_noop());
+
+        let after = store.coverage().unwrap();
+        assert_eq!(after.orphaned, 0, "orphaned queue rows survived reconcile");
+        assert_eq!(after.unqueued, 0, "never-queued symbols survived reconcile");
+        assert_eq!(after.failed, 0, "retryable failure survived reconcile");
+        assert_eq!(after.eligible, 3);
+        assert_eq!(after.pending, 3);
+
+        // The stale row is now drainable: its hash matches the symbol, which is
+        // the drain's own completion condition.
+        let pending = store.list_pending(10).unwrap();
+        assert!(
+            pending
+                .iter()
+                .any(|work| work.symbol_id == "sym-stale" && work.content_hash == "new"),
+            "stale queue row kept an unreachable hash: {pending:?}"
+        );
+    }
+
+    /// A second pass with nothing to do reports nothing, so the command can
+    /// stay quiet on a healthy store.
+    #[test]
+    fn reconcile_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        let one = symbol("sym-1", "a", SymbolKind::Function);
+        seed_symbols(root.path(), std::slice::from_ref(&one));
+
+        assert_eq!(store.reconcile(false).unwrap().requeued, 1);
+        let second = store.reconcile(false).unwrap();
+        assert_eq!(second, CodeVectorReconcile::default());
+        assert!(second.is_noop());
+    }
+
+    /// Permanently-invalid input is not re-armed by a plain run — it would fail
+    /// identically — but `--force` re-arms it, which is the documented
+    /// remediation doctor prints for the residual.
+    #[test]
+    fn reconcile_retains_permanent_failures_until_forced() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        let broken = symbol("sym-1", "a", SymbolKind::Function);
+        seed_symbols(root.path(), std::slice::from_ref(&broken));
+        store
+            .sync_file_symbols(std::slice::from_ref(&broken), &[])
+            .unwrap();
+        assert!(
+            store
+                .mark_failed("sym-1", "a", "input too large for the embedding model")
+                .unwrap()
+        );
+
+        let plain = store.reconcile(false).unwrap();
+        assert_eq!(plain.failed_rearmed, 0);
+        assert_eq!(plain.failed_retained, 1);
+        assert_eq!(store.coverage().unwrap().failed, 1);
+
+        let forced = store.reconcile(true).unwrap();
+        assert_eq!(forced.failed_rearmed, 1);
+        assert_eq!(forced.failed_retained, 0);
+        assert_eq!(store.coverage().unwrap().failed, 0);
+    }
+
+    /// A store whose structural index never ran has no symbol table. Reconcile
+    /// must not read that as "every queue row is an orphan" and empty the queue.
+    #[test]
+    fn reconcile_without_a_symbol_table_changes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        store
+            .sync_file_symbols(&[symbol("sym-1", "a", SymbolKind::Function)], &[])
+            .unwrap();
+
+        assert_eq!(store.reconcile(false).unwrap(), CodeVectorReconcile::default());
+        assert_eq!(store.stats().unwrap().pending, 1);
+    }
+
+    /// Hold the write lock from a foreign connection — what a concurrent
+    /// `cas doctor` or second `cas serve` does — and both the reconcile and the
+    /// retirement path must wait it out instead of failing with
+    /// "database is locked" (cas-8a03; the retire failure is what turned a
+    /// parallel doctor run into 36 file failures).
+    #[test]
+    fn queue_writes_wait_out_a_foreign_write_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        let symbols = [
+            symbol("sym-1", "a", SymbolKind::Function),
+            symbol("sym-2", "b", SymbolKind::Struct),
+        ];
+        seed_symbols(root.path(), &symbols);
+        store.sync_file_symbols(&symbols, &[]).unwrap();
+
+        let db_path = root.path().join("cas.db");
+        let (holding, held) = mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            // A separate `Connection::open` deliberately bypasses the
+            // process-wide shared connection: an in-process mutex would
+            // serialize instead of reproducing SQLITE_BUSY.
+            let conn = Connection::open(&db_path).unwrap();
+            conn.busy_timeout(crate::SQLITE_BUSY_TIMEOUT).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO code_vector_queue
+                     (symbol_id, content_hash, status, last_error, updated_at)
+                 VALUES ('foreign', 'h', 'pending', NULL, '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            holding.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+            conn.execute_batch("COMMIT").unwrap();
+        });
+
+        held.recv().unwrap();
+        store
+            .retire(&["sym-2".to_string()])
+            .expect("retire waited out the foreign write lock");
+        assert!(
+            store
+                .list_pending(10)
+                .unwrap()
+                .iter()
+                .all(|work| work.symbol_id != "sym-2"),
+            "retire did not take effect after waiting"
+        );
+
+        // The symbol is still live, so the next reconcile is expected to queue
+        // it again — that it does so proves the reconcile write landed too.
+        let outcome = store
+            .reconcile(false)
+            .expect("reconcile waited out the foreign write lock");
+        assert_eq!(outcome.requeued, 1);
+        blocker.join().unwrap();
+        assert!(
+            store
+                .list_pending(10)
+                .unwrap()
+                .iter()
+                .any(|work| work.symbol_id == "sym-2"),
+            "reconcile did not take effect after waiting"
+        );
     }
 
     #[test]

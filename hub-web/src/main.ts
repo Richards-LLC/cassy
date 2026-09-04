@@ -28,6 +28,7 @@ import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type Tra
 import { TranscriptView } from "./transcript-view";
 import { applyLiveRegions, type LiveRegionView } from "./live-regions";
 import { DeferredRenderScheduler } from "./deferred-render";
+import { FleetBoardRenderer } from "./fleet-board";
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
@@ -1954,97 +1955,28 @@ function fleetConnectionLabel(state: ConnectionState | undefined): string {
   return "Connecting";
 }
 
-let lastFleetBoardSignature: string | undefined;
+const fleetBoard = new FleetBoardRenderer();
 
 function renderFleetBoard(): void {
   const board = document.querySelector<HTMLElement>("#fleet-board");
-  if (!board) { lastFleetBoardSignature = undefined; return; }
   const entries = sessionPickerEntries({
     machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label })),
     sessions,
     selection: selectedMachineId ? { machineId: selectedMachineId } : undefined,
     summaries: sessionSummaries,
   });
-  const signature = [
-    selectedMachineId ?? "",
-    ...[...machines.values()].map((machine) => `${machine.id}|${machine.label}|${connectionClass(connectionStates.get(machine.id))}|${fleetConnectionLabel(connectionStates.get(machine.id))}`),
-    ...entries.map((entry) => `${entry.machineId}/${entry.session}|${entry.supervisor ?? ""}|${entry.workerCount}|${entry.status}|${entry.title ?? ""}|${entry.phase ?? ""}`),
-  ].join("~");
-  if (signature === lastFleetBoardSignature) return;
-  lastFleetBoardSignature = signature;
-  board.replaceChildren();
-  const header = document.createElement("header");
-  header.className = "fleet-board-header";
-  const heading = document.createElement("h2");
-  heading.textContent = "Fleet";
-  const summary = document.createElement("p");
-  summary.className = "fleet-board-summary";
-  const machineCount = machines.size;
-  const liveMachines = [...machines.keys()].filter((id) => connectionStates.get(id)?.phase === "live").length;
-  summary.textContent = [
-    `${machineCount} ${machineCount === 1 ? "machine" : "machines"}`,
-    `${entries.length} ${entries.length === 1 ? "session" : "sessions"}`,
-    ...(liveMachines < machineCount ? [`${machineCount - liveMachines} not live`] : []),
-  ].join(" · ");
-  header.append(heading, summary);
-  board.append(header);
-  for (const machine of [...machines.values()].sort((a, b) => Number(b.id === selectedMachineId) - Number(a.id === selectedMachineId))) {
-    const snapshot = connectionStates.get(machine.id);
-    const section = document.createElement("section");
-    section.className = `fleet-machine${machine.id === selectedMachineId ? " active" : ""}`;
-    const machineHeader = document.createElement("header");
-    machineHeader.className = "fleet-machine-header";
-    const dot = document.createElement("span");
-    dot.className = `machine-state ${connectionClass(snapshot)}`;
-    const label = document.createElement("strong");
-    label.textContent = machine.label;
-    const phase = document.createElement("small");
-    phase.className = `fleet-machine-phase ${connectionClass(snapshot)}`;
-    phase.textContent = fleetConnectionLabel(snapshot);
-    machineHeader.append(dot, label, phase);
-    section.append(machineHeader);
-    const list = document.createElement("div");
-    list.className = "fleet-sessions";
-    for (const entry of entries.filter((item) => item.machineId === machine.id)) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "fleet-session";
-      button.dataset.fleetMachine = entry.machineId;
-      button.dataset.fleetSession = entry.session;
-      button.setAttribute("aria-label", `Open ${entry.session} on ${entry.machineLabel}`);
-      const name = document.createElement("span");
-      name.className = "session-name";
-      name.textContent = entry.session;
-      button.append(name);
-      if (entry.phase) {
-        const chip = document.createElement("span");
-        chip.className = `phase-chip phase-${entry.phase}`;
-        chip.textContent = entry.phase;
-        button.append(chip);
-      }
-      if (entry.title) {
-        const title = document.createElement("span");
-        title.className = "session-summary-title";
-        title.textContent = entry.title;
-        button.append(title);
-      }
-      const meta = document.createElement("small");
-      meta.className = "session-meta";
-      meta.textContent = sessionPickerMeta(entry);
-      button.append(meta);
-      // A region re-creates this node, so it carries its own handler.
-      button.onclick = () => { machineDrawerOpen = false; void openSession(entry.machineId, entry.session); };
-      list.append(button);
-    }
-    if (!list.childElementCount) {
-      const empty = document.createElement("p");
-      empty.className = "fleet-empty-sessions";
-      empty.textContent = snapshot?.phase === "live" ? "No live sessions." : "Sessions appear once the machine is reachable.";
-      list.append(empty);
-    }
-    section.append(list);
-    board.append(section);
-  }
+  fleetBoard.render(board, {
+    machines: [...machines.values()].map((machine) => ({
+      id: machine.id,
+      label: machine.label,
+      state: connectionClass(connectionStates.get(machine.id)),
+      phase: fleetConnectionLabel(connectionStates.get(machine.id)),
+      selected: machine.id === selectedMachineId,
+    })),
+    sessions: entries,
+  }, {
+    open: (machineId, session) => { machineDrawerOpen = false; void openSession(machineId, session); },
+  });
 }
 
 function compatibilityWarning(machineId: string): string | undefined {

@@ -77,7 +77,7 @@ Ghostty's 16-colour ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is
 - `--bg-raised` is every card, row, input and button, and the desktop machine tile. Hover moves to `--bg-hover`; selection, the primary button, the active tab and the active machine tile move to `--bg-active`.
 - `--bg-terminal` is reserved for terminal mounts, the transcript, code wells, dialog inputs and the connection log.
 - `--line-subtle` is a hairline for search and palette inputs only. `--line-strong` is the focused pane border and the selected context tab underline; the phone block contains no `--line-strong` at all (D7 invariant).
-- `--text-hi` is primary copy and every identifier the operator acts on; `--text-mid` is labels, prose and unfocused identifiers; `--text-lo` is timestamps, eyebrows, empty-state hints and disabled metadata.
+- `--text-hi` is primary copy and every identifier the operator acts on; `--text-mid` (6.4:1 on `--bg-raised`) is labels, prose, eyebrows, session metadata and empty-state guidance — anything the operator is meant to read; `--text-lo` (2.8:1) is only timestamps, disabled metadata and unfocused pane chrome.
 - `--state-ok`, `--state-info` and `--state-idle` show through dots, text and outlines only. `--state-warn` and `--state-crit` may sit on `--tint-warn`/`--tint-crit` behind actionable content: the warning attention card, the blocked phase chip, the stale status notice, the browser-unsupported line; critical cards add a 2px left rule.
 - `.danger` (Interrupt, remove machine, explicit dismiss) is red text on a normal surface, never a red fill.
 - Only two `box-shadow` declarations exist — `dialog` and `#toast` — and the test suite counts them.
@@ -86,7 +86,7 @@ Ghostty's 16-colour ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is
 
 - Human sentences, buttons, titles, headlines and explanations use `--font-ui`. Anything a machine minted — session names, agent codenames, task IDs, paths, JSON, timestamps, connection phases, pairing codes, scope names — uses `--font-mono`, even inside UI prose.
 - The one `--fs-lg` title is the open session name in `.session-header h1.toolbar-session-title`; "Fleet overview" is the same slot in the UI face. Panels and dialogs title at `--fs-md` semibold.
-- Eyebrows (`.session-eyebrow`, `.picker-machine`, `.status-section-label`, `.fleet-machine-phase`, `.pair-details dt`, `.pane-role`) are `--fs-xs`, uppercase, `--tracking-label`, `--text-lo`. Codenames are never uppercased.
+- Eyebrows (`.session-eyebrow`, `.picker-machine`, `.status-section-label`, `.fleet-machine-phase`, `.pair-details dt`, `.pane-role`) are `--fs-xs`, uppercase, `--tracking-label`; those that name something use `--text-mid`, `.pane-role` alone stays `--text-lo`. Codenames are never uppercased.
 - Chips (`.phase-chip`, `.status-chip`, `.mode-badge`) are `--fs-xs` mono uppercase on `--bg-panel` with `--radius-pill`; only blocked/control borrow a state colour.
 - Card prose (`.attention-detail`, `.status-activity`, `.session-summary-description`) is `--fs-sm` and wraps with `text-wrap: pretty` or a two-line clamp; it never ellipsises after four words.
 - Ghostty reads `--font-mono` and `--fs-terminal` at mount and clamps 12–16px. The transcript reads at `--fs-md`/1.5 mono because it exists to be read, and its hanging indent is in `ch`, which only lines up in the mono face.
@@ -124,7 +124,7 @@ Ghostty's 16-colour ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is
 ## Components
 
 - Shell and rail: `.shell`, `.machine-navigation`, `.machine-rail`, `.machine-icon` (raised tile, `--bg-active` when selected), `.rail-control` (transparent glyph, raised on hover) — `render()` in `hub-web/src/main.ts`.
-- Fleet board: `.fleet-board`, `.fleet-machine-header` (dot · name · phase eyebrow), `.fleet-session` (mono name, phase chip, two-line summary, mono meta) — `renderFleetBoard()` in `hub-web/src/main.ts`, a region updater keyed on phase only so heartbeats never rebuild it.
+- Fleet board: `.fleet-board`, `.fleet-machine-header` (dot · name · phase eyebrow), `.fleet-session` (mono name, phase chip, two-line summary, `--text-mid` meta) — `FleetBoardRenderer` in `hub-web/src/fleet-board.ts`, fed by `renderFleetBoard()` in `hub-web/src/main.ts`; keyed on the board element plus a phase-only signature, so a shell rebuild refills the new container and a heartbeat never rebuilds it.
 - Drawer and session rows: `.machine-row`, `.nav-item`, `sessionButton()`; the codename stays mono in `.session-name` and the enriched card puts the title in the UI face with the codename as a mono eyebrow.
 - Header: `.session-header`, `.session-back`, `.session-picker-toggle`, `.machine-chip`, `.mode-badge`, `.connection-summary`; only an open session gets the mono `.toolbar-session-title` and the three chips.
 - Terminal pane: `.pane`, `.pane.selected`, `.pane-header`, `.pane-layout-controls`, `.terminal-mount`, `.transcript`, `.transcript-jump` — `renderSessionState()` in `hub-web/src/main.ts`, `hub-web/src/transcript-view.ts`.

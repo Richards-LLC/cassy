@@ -564,7 +564,7 @@ pre { font-family: var(--font-mono); }
 }
 
 .fleet-machine-phase {
-  color: var(--text-lo);
+  color: var(--text-mid);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   letter-spacing: var(--tracking-label);
@@ -622,14 +622,14 @@ pre { font-family: var(--font-mono); }
 
 .fleet-session .session-meta {
   grid-column: 1 / -1;
-  color: var(--text-lo);
+  color: var(--text-mid);
   font-size: var(--fs-xs);
 }
 
 .fleet-empty-sessions {
   margin: 0;
   padding: var(--space-3);
-  color: var(--text-lo);
+  color: var(--text-mid);
   background: var(--bg-panel);
   border-radius: var(--radius-card);
   font-size: var(--fs-sm);
@@ -1396,7 +1396,7 @@ main {
 }
 
 .attention-dismiss-group {
-  color: var(--text-lo);
+  color: var(--text-mid);
   background: var(--color-transparent);
 }
 
@@ -1667,7 +1667,7 @@ main {
    about what the agent is doing reads as prose beneath it. */
 .status-section-label {
   margin: var(--space-3) 0 0;
-  color: var(--text-lo);
+  color: var(--text-mid);
   font-size: var(--fs-xs);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
@@ -1713,7 +1713,7 @@ main {
 .status-chip--in-progress { color: var(--state-info); }
 .status-chip--blocked { color: var(--state-warn); background: var(--tint-warn); }
 .status-chip--idle,
-.status-chip--open { color: var(--text-lo); }
+.status-chip--open { color: var(--text-mid); }
 
 .status-activity,
 .status-task-title {
@@ -1726,7 +1726,7 @@ main {
 
 .status-empty {
   margin: var(--space-2) 0;
-  color: var(--text-lo);
+  color: var(--text-mid);
   font-size: var(--fs-sm);
 }
 
@@ -2074,7 +2074,7 @@ fieldset {
 }
 
 .pair-details dt {
-  color: var(--text-lo);
+  color: var(--text-mid);
   font-size: var(--fs-xs);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;

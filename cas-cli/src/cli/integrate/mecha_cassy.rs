@@ -2209,6 +2209,8 @@ mod tests {
 
     const FAKE_TOKEN: &str = "xoxb-fake-secret-value-do-not-leak";
     const FAKE_BYPASS: &str = "bypass-secret-do-not-leak";
+    const TEST_LABEL: &str = "SOUNDWAVE";
+    const TEST_TOKEN_ENV: &str = "MECHA_SLACK_TOKEN_SOUNDWAVE";
 
     struct FakeEnv(HashMap<String, String>);
 
@@ -2244,6 +2246,15 @@ mod tests {
         cloud_tokens: RefCell<Vec<String>>,
     }
 
+    fn take_hub_response<T>(responses: &RefCell<Vec<T>>, method: &str) -> T {
+        let mut responses = responses.borrow_mut();
+        assert!(
+            !responses.is_empty(),
+            "FakeHub::{method} called unexpectedly: no queued response remains"
+        );
+        responses.remove(0)
+    }
+
     impl HubClient for FakeHub {
         fn create_client(
             &self,
@@ -2255,7 +2266,7 @@ mod tests {
             self.cloud_tokens
                 .borrow_mut()
                 .push(cloud_token.to_string());
-            self.creates.borrow_mut().remove(0)
+            take_hub_response(&self.creates, "create_client")
         }
 
         fn fetch_bypass(
@@ -2266,7 +2277,7 @@ mod tests {
             self.cloud_tokens
                 .borrow_mut()
                 .push(cloud_token.to_string());
-            self.bypasses.borrow_mut().remove(0)
+            take_hub_response(&self.bypasses, "fetch_bypass")
         }
     }
 
@@ -2331,9 +2342,18 @@ mod tests {
 
     fn ready_env() -> FakeEnv {
         let mut values = HashMap::new();
-        values.insert(MechaCassyArgs::default().resolved_token_env(), FAKE_TOKEN.to_string());
+        values.insert(TEST_TOKEN_ENV.to_string(), FAKE_TOKEN.to_string());
         values.insert(MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(), FAKE_BYPASS.to_string());
         FakeEnv(values)
+    }
+
+    fn test_args() -> MechaCassyArgs {
+        MechaCassyArgs {
+            label: Some(TEST_LABEL.to_string()),
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -2372,7 +2392,7 @@ mod tests {
         let args = MechaCassyArgs {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
-            ..Default::default()
+            ..test_args()
         };
         let hub = FakeHub {
             creates: RefCell::new(vec![Ok((FAKE_TOKEN.to_string(), Some(FAKE_BYPASS.to_string())))]),
@@ -2418,7 +2438,7 @@ mod tests {
             label: Some("Daniel-laptop".to_string()),
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
-            ..Default::default()
+            ..test_args()
         };
         let hub = FakeHub {
             creates: RefCell::new(vec![
@@ -2461,7 +2481,7 @@ mod tests {
         let args = MechaCassyArgs {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
-            ..Default::default()
+            ..test_args()
         };
         let hub = FakeHub {
             creates: RefCell::new(vec![Err(HubClientError::RouteUnavailable)]),
@@ -2505,10 +2525,10 @@ mod tests {
         let args = MechaCassyArgs {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
-            ..Default::default()
+            ..test_args()
         };
         let env = FakeEnv::with(&[
-            (MechaCassyArgs::default().resolved_token_env().as_str(), FAKE_TOKEN),
+            (TEST_TOKEN_ENV, FAKE_TOKEN),
             ("VERCEL_TOKEN", "vercel-bearer"),
         ]);
         let hub = FakeHub {
@@ -2546,17 +2566,10 @@ mod tests {
 
     #[test]
     fn label_selects_the_per_machine_bearer_variable() {
-        let mut args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
-            ..Default::default()
-        };
+        let mut args = test_args();
         assert_eq!(
             args.resolved_token_env(),
-            format!(
-                "MECHA_SLACK_TOKEN_{}",
-                resolve_label(None, DeviceConfig::hostname().as_deref())
-            )
+            TEST_TOKEN_ENV
         );
 
         args.label = Some("daniel-laptop".to_string());
@@ -2693,10 +2706,10 @@ mod tests {
         let args = MechaCassyArgs {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
-            ..Default::default()
+            ..test_args()
         };
         let mut values = HashMap::new();
-        values.insert(MechaCassyArgs::default().resolved_token_env(), "   ".to_string());
+        values.insert(TEST_TOKEN_ENV.to_string(), "   ".to_string());
         let env = FakeEnv(values);
 
         let report = run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
@@ -2706,7 +2719,7 @@ mod tests {
         // The probe is never attempted with a known-bad credential.
         assert!(matches!(report.probe, ProbeOutcome::Skipped { .. }));
         let remedy = report.remedy.unwrap();
-        assert!(remedy.contains(&MechaCassyArgs::default().resolved_token_env()), "{remedy}");
+        assert!(remedy.contains(TEST_TOKEN_ENV), "{remedy}");
         assert!(remedy.contains("set but empty"), "{remedy}");
         assert!(remedy.contains(MECHA_CASSY_DEFAULT_BYPASS_ENV), "{remedy}");
         assert!(remedy.contains("credentials file"), "{remedy}");
@@ -2721,7 +2734,7 @@ mod tests {
         let args = MechaCassyArgs {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
-            ..Default::default()
+            ..test_args()
         };
 
         let report = run(
@@ -2747,7 +2760,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             dry_run: true,
-            ..Default::default()
+            ..test_args()
         };
         let report = run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
         assert_eq!(report.registration, WriteState::Planned);
@@ -2772,7 +2785,7 @@ mod tests {
         let args = MechaCassyArgs {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
-            ..Default::default()
+            ..test_args()
         };
         run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
 
@@ -2782,7 +2795,7 @@ mod tests {
         assert!(
             written.contains(&format!(
                 "bearer_token_env_var = \"{}\"",
-                MechaCassyArgs::default().resolved_token_env()
+                TEST_TOKEN_ENV
             )),
             "{written}"
         );
@@ -2811,7 +2824,7 @@ mod tests {
         let args = MechaCassyArgs {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
-            ..Default::default()
+            ..test_args()
         };
         run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
 
@@ -2822,7 +2835,7 @@ mod tests {
         assert_eq!(written["mcpServers"]["playwright"]["command"], "npx");
         assert_eq!(
             written["mcpServers"]["mecha-cassy"]["headers"]["Authorization"],
-            format!("Bearer ${{{}}}", MechaCassyArgs::default().resolved_token_env())
+            format!("Bearer ${{{TEST_TOKEN_ENV}}}")
         );
     }
 
@@ -2882,7 +2895,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 
@@ -2900,7 +2913,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
 
@@ -2913,7 +2926,7 @@ mod tests {
         assert_eq!(row.severity, DoctorSeverity::Error);
         assert!(
             row.message
-                .contains(&MechaCassyArgs::default().resolved_token_env()),
+                .contains(TEST_TOKEN_ENV),
             "{row:?}"
         );
         assert!(row.message.contains("unset"), "{row:?}");
@@ -2929,7 +2942,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 
@@ -2959,7 +2972,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 
@@ -2993,7 +3006,7 @@ mod tests {
     /// the machine one the command's "already-configured" receipt was a lie —
     /// `cas doctor` kept warning after every re-run.
     fn shadowing_project_proxy() -> String {
-        let token_env = MechaCassyArgs::default().resolved_token_env();
+        let token_env = TEST_TOKEN_ENV;
         format!(
         "# project dispatch policy — keep the neon route\n\
          allowlist = [\n\
@@ -3025,7 +3038,7 @@ mod tests {
     /// variable names — the only shape that is a true duplicate and so the
     /// only one safe to drop.
     fn duplicate_server_block() -> String {
-        let token_env = MechaCassyArgs::default().resolved_token_env();
+        let token_env = TEST_TOKEN_ENV;
         format!(
             "[servers.mecha-cassy]\ntransport = \"http\"\n\
              url = \"{MECHA_CASSY_MCP_URL}\"\n\
@@ -3052,7 +3065,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         // A machine file that is already canonical — the exact state that used
         // to make the command exit "already configured" and change nothing.
@@ -3130,7 +3143,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         let project = write_project_proxy(dir.path(), &duplicate_server_block());
 
@@ -3163,7 +3176,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         const STAGING: &str = "https://mecha-cassy-staging.vercel.app/mcp/slack";
         let project = write_project_proxy(
@@ -3223,7 +3236,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         let project = write_project_proxy(
             dir.path(),
@@ -3262,7 +3275,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         let original = "allowlist = [\"neon.run_sql\"]\n";
         let project = write_project_proxy(dir.path(), original);
@@ -3290,7 +3303,7 @@ mod tests {
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
             dry_run: true,
-            ..Default::default()
+            ..test_args()
         };
         let project = write_project_proxy(dir.path(), &shadowing_project_proxy());
 
@@ -3320,7 +3333,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         let project = write_project_proxy(
             dir.path(),
@@ -3350,7 +3363,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 
@@ -3376,7 +3389,7 @@ mod tests {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
             url: MECHA_CASSY_MCP_URL.to_string(),
             no_harness: true,
-            ..Default::default()
+            ..test_args()
         };
         run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 

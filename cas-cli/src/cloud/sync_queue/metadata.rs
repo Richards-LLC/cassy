@@ -36,4 +36,18 @@ impl SyncQueue {
         conn.execute("DELETE FROM sync_metadata WHERE key = ?1", params![key])?;
         Ok(())
     }
+
+    /// Delete all metadata keys sharing a prefix and return the number removed.
+    ///
+    /// Prefix deletion is used when a destructive content cleanup invalidates
+    /// every team-pull watermark. `substr` keeps the prefix literal (unlike a
+    /// `LIKE` expression, where `_` and `%` are wildcards).
+    pub fn delete_metadata_with_prefix(&self, prefix: &str) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM sync_metadata WHERE substr(key, 1, length(?1)) = ?1",
+            params![prefix],
+        )?;
+        Ok(deleted)
+    }
 }

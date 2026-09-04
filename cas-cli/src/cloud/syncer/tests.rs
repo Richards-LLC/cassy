@@ -1364,7 +1364,7 @@ async fn team_pull_duplicate_task_id_prefers_owner_closed_row() {
         ),
     ];
     let (_temp, result, task_store, queue) =
-        pull_team_task_fixtures("replica-project", tasks, None).await;
+        pull_team_task_fixtures("owner-project", tasks, None).await;
 
     assert!(
         result.errors.is_empty(),
@@ -1381,7 +1381,7 @@ async fn team_pull_duplicate_task_id_prefers_owner_closed_row() {
 }
 
 #[tokio::test]
-async fn team_pull_single_foreign_open_row_preserves_wire_origin_project() {
+async fn team_pull_single_foreign_open_row_is_parked_before_local_insert() {
     let task = team_task_fixture(
         "cas-2125-foreign-absent",
         TaskStatus::Open,
@@ -1390,16 +1390,70 @@ async fn team_pull_single_foreign_open_row_preserves_wire_origin_project() {
         chrono::Utc::now(),
     );
     let (_temp, result, task_store, _queue) =
-        pull_team_task_fixtures("replica-project", vec![task], None).await;
+        pull_team_task_and_dependency_fixtures_with_pull_count(
+            "replica-project",
+            vec![task],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            2,
+        )
+        .await;
 
     assert!(
         result.errors.is_empty(),
         "unexpected pull errors: {:?}",
         result.errors
     );
-    let task = task_store.get("cas-2125-foreign-absent").unwrap();
-    assert_eq!(task.status, TaskStatus::Open);
-    assert_eq!(task.origin_project.as_deref(), Some("foreign-project"));
+    assert!(
+        task_store.get("cas-2125-foreign-absent").is_err(),
+        "foreign team task must be parked instead of becoming doctor contamination"
+    );
+}
+
+#[tokio::test]
+async fn team_pull_null_origin_uses_server_attested_project_identity() {
+    let mut task = serde_json::to_value(Task::new(
+        "cas-a1cf-null-origin".to_string(),
+        "server-owned task".to_string(),
+    ))
+    .unwrap();
+    task["origin_project"] = serde_json::Value::Null;
+    task["project_id"] = serde_json::json!("server-project");
+
+    let (_temp, result, task_store, _queue) =
+        pull_team_task_fixtures("server-project", vec![task], None).await;
+
+    assert!(result.errors.is_empty(), "unexpected pull errors: {:?}", result.errors);
+    assert_eq!(
+        task_store
+            .get("cas-a1cf-null-origin")
+            .unwrap()
+            .origin_project
+            .as_deref(),
+        Some("server-project")
+    );
+}
+
+#[tokio::test]
+async fn team_pull_task_without_any_project_identity_is_parked() {
+    let mut task = serde_json::to_value(Task::new(
+        "cas-a1cf-no-identity".to_string(),
+        "unattributed task".to_string(),
+    ))
+    .unwrap();
+    task["origin_project"] = serde_json::Value::Null;
+    task.as_object_mut().unwrap().remove("project_id");
+    task.as_object_mut().unwrap().remove("project_canonical_id");
+
+    let (_temp, result, task_store, _queue) =
+        pull_team_task_fixtures("requested-project", vec![task], None).await;
+
+    assert!(result.errors.is_empty(), "unexpected pull errors: {:?}", result.errors);
+    assert!(
+        task_store.get("cas-a1cf-no-identity").is_err(),
+        "a task without an origin or server project must remain parked"
+    );
 }
 
 #[tokio::test]

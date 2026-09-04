@@ -29,8 +29,11 @@ and do not claim success without its receipt.
    `cargo update --workspace --offline`, update CHANGELOG, the runtime-release
    draft, and the previous POSTED receipt; then run
    `scripts/release-gate.sh <version>` and require every row PASS.
-5. For archive mode, put the archive and TMPDIR under a large real-disk
-   scratch base with no `.cas` ancestor, never `/tmp` tmpfs. Build a remap
+5. For archive mode, the gate already puts the archive and TMPDIR under
+   `/var/tmp/cas-release-gate` — a large real-disk scratch base with no `.cas`
+   ancestor, never `/tmp` tmpfs. Set `CAS_RELEASE_GATE_HOME_DIR` only to move
+   that base; the receipt names the base and where it came from, and the gate
+   still refuses any base with a `.cas` ancestor. Build a remap
    with root `Cargo.toml` and every package path from `git ls-files
    '*/Cargo.toml'`; run outside the checkout with symlinks for
    cargo/rustc/git/sh/bash/jq/python3, no `rg`, and `--workspace-remap`.

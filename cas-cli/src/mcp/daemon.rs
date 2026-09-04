@@ -1221,7 +1221,14 @@ impl EmbeddedDaemon {
             // set with no `code://` module sources would cascade-delete every
             // module page the CLI had built (and re-bill them next pass).
             let symbols = crate::cli::knowledge_symbols_with_limit(&cas_root, crate::cli::KNOWLEDGE_MAX_SYMBOLS);
-            let sources = crate::knowledge::collect_sources(&project_root, &symbols.symbols);
+            let scan = crate::knowledge::scan_sources(&project_root, &symbols.symbols);
+            // A source that could not be decoded is named here rather than
+            // dropped: its page will be missing from the wiki either way, and a
+            // silent hole is the one an operator never chases (cas-c736).
+            for note in scan.skip_notes() {
+                tracing::warn!(%note, "Knowledge distillation skipped a source");
+            }
+            let sources = scan.sources;
             let runner = crate::knowledge::ClaudeCliRunner::new(Some(model));
             let config = crate::knowledge::DistillConfig {
                 protected_prefixes: if symbols.truncated {

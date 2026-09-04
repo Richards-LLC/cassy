@@ -34,8 +34,9 @@ use clap::Args;
 use serde::Serialize;
 
 use cmcp_core::config::{
-    Config as ProxyConfig, MECHA_CASSY_BYPASS_HEADER, MECHA_CASSY_DEFAULT_BYPASS_ENV,
-    MECHA_CASSY_DEFAULT_TOKEN_ENV, MECHA_CASSY_MCP_URL, MECHA_CASSY_SERVER, MECHA_CASSY_TOOLS,
+    Config as ProxyConfig, ExternalToolConfig, MECHA_CASSY_BYPASS_HEADER,
+    MECHA_CASSY_DEFAULT_BYPASS_ENV, MECHA_CASSY_DEFAULT_TOKEN_ENV, MECHA_CASSY_MCP_URL,
+    MECHA_CASSY_SERVER, MECHA_CASSY_TOOLS, ServerConfig,
 };
 
 use super::fs as ifs;
@@ -331,6 +332,17 @@ pub struct HarnessEntry {
     pub note: Option<String>,
 }
 
+/// What happened to the project `.cas/proxy.toml` that shadows the machine
+/// registration, if this command found one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectProxyEntry {
+    pub path: PathBuf,
+    pub state: WriteState,
+    /// What changed, or why nothing did. Always present: a file that can
+    /// silently override machine policy is never reported by state alone.
+    pub note: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MechaCassyReport {
     pub url: String,
@@ -340,8 +352,12 @@ pub struct MechaCassyReport {
     pub bypass_env_state: EnvState,
     pub registration_path: PathBuf,
     pub registration: WriteState,
-    /// Routes the machine registration now admits.
+    /// Routes that will actually be admitted from here. A project
+    /// `.cas/proxy.toml` *replaces* the machine allowlist rather than widening
+    /// it, so when one is present this is its policy, not the machine's.
     pub allowlist: Vec<String>,
+    /// The project file whose policy shadows the machine registration.
+    pub project_proxy: Option<ProjectProxyEntry>,
     pub harnesses: Vec<HarnessEntry>,
     pub probe: ProbeOutcome,
     /// How the hub's live tool list disagrees with the allowlist, if at all.
@@ -399,7 +415,16 @@ impl ToolDrift {
         !self.unallowlisted.is_empty()
     }
 
-    pub fn describe(&self, live: &[String], allowlisted: &[String]) -> String {
+    /// `source` is the file that actually holds the allowlist being compared.
+    /// Naming it is not decoration: with a project `.cas/proxy.toml` in play
+    /// the entries are in one of two files, and an operator who is not told
+    /// which one edits the wrong one (cas-a0ab).
+    pub fn describe(
+        &self,
+        live: &[String],
+        allowlisted: &[String],
+        source: Option<&Path>,
+    ) -> String {
         let mut parts = Vec::new();
         if !self.unallowlisted.is_empty() {
             parts.push(format!(
@@ -413,8 +438,12 @@ impl ToolDrift {
                 self.retired.join(", ")
             ));
         }
+        let allowlist_label = match source {
+            Some(path) => format!("allowlist in {}", path.display()),
+            None => "allowlist".to_string(),
+        };
         format!(
-            "hub tool contract drifted: {} (hub: [{}]; allowlist: [{}])",
+            "hub tool contract drifted: {} (hub: [{}]; {allowlist_label}: [{}])",
             parts.join("; "),
             sorted_unique(live).join(", "),
             sorted_unique(allowlisted).join(", ")
@@ -448,11 +477,266 @@ pub fn tool_drift(allowlisted: &[String], live: &[String]) -> ToolDrift {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The project file that shadows the machine registration
+// ---------------------------------------------------------------------------
+//
+// A project `.cas/proxy.toml` is merged *above* the machine registration and,
+// for the allowlist, it does not widen — it replaces (see
+// `Config::load_merged_with_sources_from`). So a project file left behind by an
+// older setup keeps the retired `slack_*` routes authoritative no matter how
+// many times the machine file is rewritten, which is exactly how `cas doctor`
+// came to print a remediation that could not clear its own warning (cas-a0ab).
+//
+// The file is edited with `toml_edit` rather than round-tripped through
+// `ProxyConfig`, because it is operator-owned: its comments, key order, and
+// every unrelated server and route survive the rewrite.
+
+/// The plan for one project `.cas/proxy.toml`.
+#[derive(Debug, Clone)]
+struct ProjectProxyPlan {
+    /// The rewritten document, when something has to change.
+    rewritten: Option<String>,
+    /// MechaCassy routes the file admits once the plan is applied. Because a
+    /// project allowlist replaces the machine one, this *is* the effective
+    /// dispatch policy for this project.
+    effective_tools: Vec<String>,
+    /// True when the file governs policy here but names no hub route, so no
+    /// rewrite of the machine file can make the hub reachable.
+    shadows_without_routes: bool,
+    note: String,
+}
+
+/// The file whose allowlist is authoritative for dispatch here. A project
+/// `.cas/proxy.toml` replaces the machine allowlist rather than widening it
+/// (`Config::load_merged_with_sources_from`), so whenever one exists it — and
+/// only it — decides which hub routes are admitted.
+fn allowlist_source<'a>(project_proxy: Option<&'a Path>, user_proxy: &'a Path) -> &'a Path {
+    project_proxy.unwrap_or(user_proxy)
+}
+
+fn canonical_entries() -> Vec<String> {
+    MECHA_CASSY_TOOLS
+        .iter()
+        .map(|tool| format!("{MECHA_CASSY_SERVER}.{tool}"))
+        .collect()
+}
+
+/// The `(server, tool)` an allowlist item names, for both spellings a project
+/// file may use: the canonical `"server.tool"` string (plus the historical
+/// separator aliases [`ExternalToolConfig::parse_allowlist_entry`] accepts) and
+/// the structured `{ server = "…", tool = "…" }` inline table.
+fn entry_route(value: &toml_edit::Value) -> Option<ExternalToolConfig> {
+    if let Some(text) = value.as_str() {
+        return ExternalToolConfig::parse_allowlist_entry(text).ok();
+    }
+    let table = value.as_inline_table()?;
+    let server = table.get("server")?.as_str()?;
+    let tool = table.get("tool")?.as_str()?;
+    ExternalToolConfig::parse_allowlist_entry(&format!("{server}.{tool}")).ok()
+}
+
+/// Where a server definition actually points, for a note an operator can act
+/// on without opening the file.
+fn server_endpoint(server: &ServerConfig) -> &str {
+    match server {
+        ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } => url,
+        ServerConfig::Stdio { command, .. } => command,
+    }
+}
+
+/// What to do with the project file's own `[servers.mecha-cassy]` block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerAction {
+    /// The file does not define the hub server at all.
+    Absent,
+    /// Byte-for-byte the machine registration: pure duplication, safe to drop.
+    Drop,
+    /// A deliberate override (a staging hub, a different bearer variable).
+    /// Dropping it would silently move this project to another endpoint, so
+    /// it stays and is reported instead.
+    Keep,
+}
+
+fn plan_project_proxy(
+    path: &Path,
+    machine_server: Option<&ServerConfig>,
+) -> Result<ProjectProxyPlan> {
+    let raw = ifs::read_capped(path)?;
+    let mut document: toml_edit::DocumentMut = raw
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+
+    let declares_server = document
+        .get("servers")
+        .and_then(|servers| servers.as_table_like())
+        .is_some_and(|servers| servers.contains_key(MECHA_CASSY_SERVER));
+
+    let allowlist_item = document.get("allowlist");
+    if let Some(item) = allowlist_item
+        && item.as_array().is_none()
+    {
+        anyhow::bail!(
+            "{}: `allowlist` is not an array of routes; repair it by hand before re-running",
+            path.display()
+        );
+    }
+    let existing_tools: Vec<String> = allowlist_item
+        .and_then(|item| item.as_array())
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(entry_route)
+                .filter(|route| route.server == MECHA_CASSY_SERVER)
+                .map(|route| route.tool)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // A project file that says nothing about this hub is not ours to edit —
+    // but it still replaces the machine allowlist, so its silence is the
+    // operative policy and the caller must say so rather than claim success.
+    if !declares_server && existing_tools.is_empty() {
+        return Ok(ProjectProxyPlan {
+            rewritten: None,
+            effective_tools: Vec::new(),
+            shadows_without_routes: true,
+            note: format!(
+                "names no {MECHA_CASSY_SERVER} route and is authoritative for dispatch policy \
+                 here; left untouched"
+            ),
+        });
+    }
+
+    // `--url` exists so a project can point at a staging hub, and the proxy
+    // merges project server tables *over* machine ones. So a block is only
+    // "duplicate" if it is actually identical to the machine registration;
+    // dropping a differing one would silently move this project to another
+    // endpoint — the same silent policy change refused for the allowlist.
+    let project_server = if declares_server {
+        ProxyConfig::load_from(path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .servers
+            .remove(MECHA_CASSY_SERVER)
+    } else {
+        None
+    };
+    let server_action = match (declares_server, &project_server) {
+        (false, _) => ServerAction::Absent,
+        (true, project) if project.as_ref() == machine_server => ServerAction::Drop,
+        (true, _) => ServerAction::Keep,
+    };
+    let kept_override_note = || {
+        let endpoint = project_server
+            .as_ref()
+            .map(server_endpoint)
+            .unwrap_or("unparsed endpoint");
+        format!(
+            "kept [servers.{MECHA_CASSY_SERVER}]: it overrides the machine registration \
+             (url {endpoint})"
+        )
+    };
+
+    let canonical = canonical_entries();
+    let allowlist_is_canonical = existing_tools == MECHA_CASSY_TOOLS;
+    if allowlist_is_canonical && server_action != ServerAction::Drop {
+        let mut note = "already names exactly the hub's current routes".to_string();
+        if server_action == ServerAction::Keep {
+            note.push_str("; ");
+            note.push_str(&kept_override_note());
+        }
+        return Ok(ProjectProxyPlan {
+            rewritten: None,
+            effective_tools: existing_tools,
+            shadows_without_routes: false,
+            note,
+        });
+    }
+
+    let mut changes = Vec::new();
+    match server_action {
+        ServerAction::Drop => {
+            let mut emptied = false;
+            if let Some(servers) = document
+                .get_mut("servers")
+                .and_then(|item| item.as_table_like_mut())
+            {
+                servers.remove(MECHA_CASSY_SERVER);
+                emptied = servers.is_empty();
+            }
+            if emptied {
+                document.remove("servers");
+            }
+            changes.push(format!(
+                "dropped the [servers.{MECHA_CASSY_SERVER}] block (identical to the machine \
+                 registration, which supplies it)"
+            ));
+        }
+        ServerAction::Keep => changes.push(kept_override_note()),
+        ServerAction::Absent => {}
+    }
+
+    if !allowlist_is_canonical {
+        if document.get("allowlist").is_none() {
+            document["allowlist"] = toml_edit::value(toml_edit::Array::new());
+        }
+        let array = document["allowlist"]
+            .as_array_mut()
+            .expect("checked above: allowlist is an array");
+        // Keep the file's own shape: a multi-line array stays multi-line, an
+        // inline one stays inline.
+        let sample_prefix = array
+            .len()
+            .checked_sub(1)
+            .and_then(|last| array.get(last))
+            .and_then(|value| value.decor().prefix())
+            .and_then(|prefix| prefix.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let trailing_comma = array.trailing_comma();
+        array.retain(|value| {
+            entry_route(value).is_none_or(|route| route.server != MECHA_CASSY_SERVER)
+        });
+        for entry in &canonical {
+            let prefix = if array.is_empty() && !sample_prefix.contains('\n') {
+                String::new()
+            } else if sample_prefix.is_empty() {
+                " ".to_string()
+            } else {
+                sample_prefix.clone()
+            };
+            array.push_formatted(toml_edit::Value::from(entry.as_str()).decorated(&prefix, ""));
+        }
+        array.set_trailing_comma(trailing_comma);
+        changes.push(if existing_tools.is_empty() {
+            format!("added the hub routes {}", canonical.join(", "))
+        } else {
+            format!(
+                "rewrote its {MECHA_CASSY_SERVER} routes to {}",
+                canonical.join(", ")
+            )
+        });
+    }
+
+    Ok(ProjectProxyPlan {
+        rewritten: Some(document.to_string()),
+        effective_tools: MECHA_CASSY_TOOLS.iter().map(|t| (*t).to_string()).collect(),
+        shadows_without_routes: false,
+        note: changes.join("; "),
+    })
+}
+
 /// Run the integration. Pure with respect to its seams: every filesystem
-/// write goes through `paths`, every credential fact through `env`, and the
-/// only network call through `probe`.
+/// write goes through `paths` and `project_proxy`, every credential fact
+/// through `env`, and the only network call through `probe`.
+///
+/// `project_proxy` is the project's `.cas/proxy.toml` when the caller resolved
+/// one. It is repaired, not merely reported: rewriting only the machine file
+/// while a project file keeps the retired routes authoritative is what made
+/// this command's own "already configured" receipt a lie (cas-a0ab).
 pub fn run(
     args: &MechaCassyArgs,
+    project_proxy: Option<&Path>,
     paths: &MachinePaths,
     env: &dyn EnvLookup,
     probe: &dyn HubProbe,
@@ -484,7 +768,44 @@ pub fn run(
             .with_context(|| format!("writing {}", paths.user_proxy.display()))?;
         WriteState::Written
     };
-    let allowlist = config.mecha_cassy_allowlisted_tools();
+
+    // The project file is reconciled *after* the machine registration, so a
+    // file this command refuses to edit still leaves a correct machine file
+    // behind, and the error names the one path an operator must repair.
+    let machine_server = config.servers.get(MECHA_CASSY_SERVER).cloned();
+    let project = match project_proxy.filter(|path| ifs::is_regular_file(path)) {
+        Some(path) => {
+            let plan = plan_project_proxy(path, machine_server.as_ref())?;
+            let state = match &plan.rewritten {
+                // Not ours to edit vs. ours and already right: an operator who
+                // sees "skipped" must be able to tell which one happened.
+                None if plan.shadows_without_routes => WriteState::Skipped,
+                None => WriteState::AlreadyCurrent,
+                Some(_) if args.dry_run => WriteState::Planned,
+                Some(text) => {
+                    ifs::atomic_write_create_dirs(path, text)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    WriteState::Written
+                }
+            };
+            Some((
+                ProjectProxyEntry {
+                    path: path.to_path_buf(),
+                    state,
+                    note: plan.note.clone(),
+                },
+                plan,
+            ))
+        }
+        None => None,
+    };
+
+    // What this project will actually dispatch: the project file when one
+    // governs policy here, the machine registration otherwise.
+    let allowlist = match &project {
+        Some((_, plan)) => plan.effective_tools.clone(),
+        None => config.mecha_cassy_allowlisted_tools(),
+    };
 
     let harnesses = if args.no_harness {
         vec![
@@ -542,14 +863,45 @@ pub fn run(
 
     // After a successful write the allowlist is exactly the constant, so any
     // drift here means the hub itself moved — worth reporting either way.
+    let source = allowlist_source(
+        project.as_ref().map(|(entry, _)| entry.path.as_path()),
+        &paths.user_proxy,
+    );
     let (drift, drift_message) = match &probe_outcome {
         ProbeOutcome::Tools { tools } => {
             let drift = tool_drift(&allowlist, tools);
-            let message = (!drift.is_empty()).then(|| drift.describe(tools, &allowlist));
+            let message =
+                (!drift.is_empty()).then(|| drift.describe(tools, &allowlist, Some(source)));
             (drift, message)
         }
         _ => (ToolDrift::default(), None),
     };
+
+    // Drift that survives this command needs a different sentence from drift
+    // this command just fixed: re-running cannot widen a project policy that
+    // deliberately names no hub route.
+    let shadowed_without_routes = project
+        .as_ref()
+        .filter(|(_, plan)| plan.shadows_without_routes)
+        .map(|(entry, _)| entry.path.clone());
+    let drift_remedy = drift_message.as_deref().map(|drift| {
+        match &shadowed_without_routes {
+            Some(path) => format!(
+                "{drift}. {} is authoritative for dispatch policy here and names no \
+                 {MECHA_CASSY_SERVER} route: add {} to its allowlist",
+                path.display(),
+                canonical_entries()
+                    .iter()
+                    .map(|entry| format!("\"{entry}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => format!(
+                "{drift}. Re-run `cas integrate mecha-cassy` to rewrite the allowlist against \
+                 the hub's current contract."
+            ),
+        }
+    });
 
     let remedy = build_remedy(
         &token_env,
@@ -557,7 +909,7 @@ pub fn run(
         &bypass_env,
         bypass_env_state,
         &probe_outcome,
-        drift_message.as_deref(),
+        drift_remedy,
     );
 
     Ok(MechaCassyReport {
@@ -569,6 +921,7 @@ pub fn run(
         registration_path: paths.user_proxy.clone(),
         registration,
         allowlist,
+        project_proxy: project.map(|(entry, _)| entry),
         harnesses,
         probe: probe_outcome,
         drift,
@@ -582,7 +935,7 @@ fn build_remedy(
     bypass_env: &str,
     bypass_state: EnvState,
     probe: &ProbeOutcome,
-    drift: Option<&str>,
+    drift: Option<String>,
 ) -> Option<String> {
     let mut missing = Vec::new();
     if !token_state.is_usable() {
@@ -595,10 +948,7 @@ fn build_remedy(
         return Some(format!("Set {}; {CREDENTIALS_HINT}", missing.join(" and ")));
     }
     if let Some(drift) = drift {
-        return Some(format!(
-            "{drift}. Re-run `cas integrate mecha-cassy` to rewrite the allowlist against the \
-             hub's current contract."
-        ));
+        return Some(drift);
     }
     match probe {
         ProbeOutcome::Unauthorized => Some(format!(
@@ -917,6 +1267,12 @@ pub fn doctor_row(
                     ),
                 }
             } else {
+                // Which file the stale entries live in is the whole
+                // remediation: a project `.cas/proxy.toml` replaces the
+                // machine allowlist, so "run the command" was a false remedy
+                // until the command learned to rewrite that file too
+                // (cas-a0ab).
+                let source = allowlist_source(project_proxy, &paths.user_proxy);
                 DoctorRow {
                     // A hub tool nothing admits is a live outage; a stale entry
                     // for a tool the hub retired is only clutter, so it must
@@ -928,8 +1284,8 @@ pub fn doctor_row(
                         DoctorSeverity::Warning
                     },
                     message: format!(
-                        "{}. Run `cas integrate mecha-cassy` to rewrite the allowlist",
-                        drift.describe(&tools, &allowlist)
+                        "{}. Run `cas integrate mecha-cassy` to rewrite that file",
+                        drift.describe(&tools, &allowlist, Some(source)),
                     ),
                 }
             }
@@ -960,24 +1316,48 @@ pub fn doctor_row(
 // Command entry point
 // ---------------------------------------------------------------------------
 
+/// The project `.cas/proxy.toml` that governs dispatch where this command was
+/// invoked, resolved by the same ancestor walk the proxy loader uses so the
+/// command repairs the very file `cas doctor` reads.
+fn project_proxy_path() -> Option<PathBuf> {
+    let path = crate::store::detect::find_cas_root().ok()?.join("proxy.toml");
+    ifs::is_regular_file(&path).then_some(path)
+}
+
 pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> {
     let env = ProcessEnv;
     let paths = MachinePaths::from_env(&env)?;
-    let report = run(args, &paths, &env, &ProxyHubProbe)?;
+    let project_proxy = project_proxy_path();
+    let report = run(args, project_proxy.as_deref(), &paths, &env, &ProxyHubProbe)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     }
 
+    // "Already configured" is a claim about dispatch, not about one file: a
+    // project proxy this run had to repair means the machine was *not*
+    // already configured, however untouched the machine file was.
+    let changed_anything = |state: WriteState| {
+        matches!(state, WriteState::Written | WriteState::Planned)
+    };
+    let wrote_anything = changed_anything(report.registration)
+        || report
+            .project_proxy
+            .as_ref()
+            .is_some_and(|entry| changed_anything(entry.state))
+        || report
+            .harnesses
+            .iter()
+            .any(|harness| changed_anything(harness.state));
     let status = if !report.credentials_ready() || !report.drift.is_empty() {
         IntegrationStatus::Stale
     } else {
-        match (&report.probe, report.registration) {
-            (ProbeOutcome::Unauthorized, _) | (ProbeOutcome::Unreachable { .. }, _) => {
+        match &report.probe {
+            ProbeOutcome::Unauthorized | ProbeOutcome::Unreachable { .. } => {
                 IntegrationStatus::TransportError
             }
-            (_, WriteState::AlreadyCurrent) => IntegrationStatus::AlreadyConfigured,
-            _ => IntegrationStatus::Configured,
+            _ if wrote_anything => IntegrationStatus::Configured,
+            _ => IntegrationStatus::AlreadyConfigured,
         }
     };
 
@@ -1002,6 +1382,14 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
     outcome
         .summary
         .push(format!("allowlist: {}", report.allowlist.join(", ")));
+    if let Some(entry) = &report.project_proxy {
+        outcome.summary.push(format!(
+            "project proxy: {} ({}) — {}",
+            entry.state.as_str(),
+            entry.path.display(),
+            entry.note
+        ));
+    }
     for harness in &report.harnesses {
         outcome.summary.push(format!(
             "{}: {}{}",
@@ -1035,6 +1423,11 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
     }
     if matches!(report.registration, WriteState::Written) {
         outcome.files.push(report.registration_path.clone());
+    }
+    if let Some(entry) = &report.project_proxy
+        && matches!(entry.state, WriteState::Written)
+    {
+        outcome.files.push(entry.path.clone());
     }
     for harness in &report.harnesses {
         if matches!(harness.state, WriteState::Written)
@@ -1165,7 +1558,7 @@ mod tests {
             (MECHA_CASSY_DEFAULT_BYPASS_ENV, FAKE_BYPASS),
         ]);
 
-        let report = run(&args, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let report = run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
         assert!(report.is_green(), "{report:?}");
         assert_eq!(report.registration, WriteState::Written);
         assert_eq!(report.allowlist, MECHA_CASSY_TOOLS);
@@ -1207,7 +1600,7 @@ mod tests {
         assert!(!contains_any(&rendered, &secrets));
 
         // Idempotent: a second run rewrites nothing.
-        let second = run(&args, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let second = run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
         assert_eq!(second.registration, WriteState::AlreadyCurrent);
         assert!(
             second
@@ -1230,7 +1623,7 @@ mod tests {
         };
         let env = FakeEnv::with(&[(MECHA_CASSY_DEFAULT_TOKEN_ENV, "   ")]);
 
-        let report = run(&args, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let report = run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
         assert!(!report.is_green());
         assert_eq!(report.token_env_state, EnvState::Empty);
         assert_eq!(report.bypass_env_state, EnvState::Unset);
@@ -1257,6 +1650,7 @@ mod tests {
 
         let report = run(
             &args,
+            None,
             &paths,
             &ready_env(),
             &FakeProbe(ProbeOutcome::Unauthorized),
@@ -1279,7 +1673,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let report = run(&args, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
+        let report = run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
         assert_eq!(report.registration, WriteState::Planned);
         assert!(!paths.user_proxy.exists());
         assert!(!paths.claude_json.unwrap().exists());
@@ -1304,7 +1698,7 @@ mod tests {
             url: MECHA_CASSY_MCP_URL.to_string(),
             ..Default::default()
         };
-        run(&args, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
+        run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
 
         let written = std::fs::read_to_string(&codex).unwrap();
         assert!(written.contains("# operator comment worth keeping"), "{written}");
@@ -1340,7 +1734,7 @@ mod tests {
             url: MECHA_CASSY_MCP_URL.to_string(),
             ..Default::default()
         };
-        run(&args, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
+        run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
 
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&claude).unwrap()).unwrap();
@@ -1368,7 +1762,7 @@ mod tests {
             vec!["slack_post_message", "slack_read_channel"]
         );
         assert!(drift.blocks_dispatch());
-        let described = drift.describe(&live, &allowlist);
+        let described = drift.describe(&live, &allowlist, None);
         assert!(described.contains("denied by policy"), "{described}");
         assert!(described.contains("slack_post_message"), "{described}");
 
@@ -1411,7 +1805,7 @@ mod tests {
             no_harness: true,
             ..Default::default()
         };
-        run(&args, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 
         let row = doctor_row(None, &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
@@ -1429,7 +1823,7 @@ mod tests {
             no_harness: true,
             ..Default::default()
         };
-        run(&args, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
+        run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
 
         let row = doctor_row(
             None,
@@ -1454,7 +1848,7 @@ mod tests {
             no_harness: true,
             ..Default::default()
         };
-        run(&args, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 
         let row = doctor_row(
             None,
@@ -1484,7 +1878,7 @@ mod tests {
             no_harness: true,
             ..Default::default()
         };
-        run(&args, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 
         let project = dir.path().join("proxy.toml");
         std::fs::write(
@@ -1498,6 +1892,366 @@ mod tests {
         assert_eq!(row.severity, DoctorSeverity::Warning, "{row:?}");
         assert!(row.message.contains("slack_upload_file"), "{row:?}");
         assert!(!row.message.contains("denied by policy"), "{row:?}");
+        // The stale entries are in the *project* file, and only naming it
+        // makes the remedy checkable (cas-a0ab).
+        assert!(
+            row.message.contains(&project.display().to_string()),
+            "{row:?}"
+        );
+        assert!(
+            !row.message.contains(&paths.user_proxy.display().to_string()),
+            "the machine file holds no stale entry and must not be blamed: {row:?}"
+        );
+    }
+
+    /// The 2026-09-04 report (cas-a0ab): the machine file was already
+    /// canonical, an untracked project `.cas/proxy.toml` still named the
+    /// retired `slack_*` quartet, and because a project allowlist *replaces*
+    /// the machine one the command's "already-configured" receipt was a lie —
+    /// `cas doctor` kept warning after every re-run.
+    fn shadowing_project_proxy() -> &'static str {
+        "# project dispatch policy — keep the neon route\n\
+         allowlist = [\n\
+         \x20 \"neon.run_sql\",\n\
+         \x20 \"mecha-cassy.mecha_read\",\n\
+         \x20 \"mecha-cassy.mecha_post\",\n\
+         \x20 \"mecha-cassy.slack_list_channels\",\n\
+         \x20 \"mecha-cassy.slack_post_message\",\n\
+         \x20 \"mecha-cassy.slack_read_channel\",\n\
+         \x20 \"mecha-cassy.slack_upload_file\",\n\
+         ]\n\
+         \n\
+         [servers.neon]\n\
+         transport = \"stdio\"\n\
+         command = \"neon-mcp\"\n\
+         \n\
+         [servers.mecha-cassy]\n\
+         transport = \"http\"\n\
+         url = \"https://mecha-cassy.vercel.app/mcp/slack\"\n\
+         auth = \"env:MECHA_SLACK_TOKEN_CASSY_PROXY\"\n\
+         \n\
+         [servers.mecha-cassy.headers]\n\
+         x-vercel-protection-bypass = \"env:MECHA_VERCEL_BYPASS\"\n"
+    }
+
+    /// A `[servers.mecha-cassy]` block byte-equal in effect to the machine
+    /// registration `ensure_mecha_cassy_registration` writes under the default
+    /// variable names — the only shape that is a true duplicate and so the
+    /// only one safe to drop.
+    fn duplicate_server_block() -> String {
+        format!(
+            "[servers.mecha-cassy]\ntransport = \"http\"\n\
+             url = \"{MECHA_CASSY_MCP_URL}\"\n\
+             auth = \"env:{MECHA_CASSY_DEFAULT_TOKEN_ENV}\"\n\
+             \n\
+             [servers.mecha-cassy.headers]\n\
+             {MECHA_CASSY_BYPASS_HEADER} = \"env:{MECHA_CASSY_DEFAULT_BYPASS_ENV}\"\n"
+        )
+    }
+
+    fn write_project_proxy(dir: &Path, body: &str) -> PathBuf {
+        let path = dir.join("project").join(".cas").join("proxy.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn one_run_repairs_a_project_proxy_that_shadows_a_clean_machine_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            ..Default::default()
+        };
+        // A machine file that is already canonical — the exact state that used
+        // to make the command exit "already configured" and change nothing.
+        run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let project = write_project_proxy(dir.path(), shadowing_project_proxy());
+
+        let before = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
+        assert_eq!(before.severity, DoctorSeverity::Warning, "{before:?}");
+
+        let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let entry = report.project_proxy.clone().expect("project file reported");
+        assert_eq!(entry.state, WriteState::Written, "{report:?}");
+        assert_eq!(entry.path, project);
+        assert_eq!(report.registration, WriteState::AlreadyCurrent);
+        assert!(report.is_green(), "{report:?}");
+        assert_eq!(report.allowlist, MECHA_CASSY_TOOLS);
+
+        let rewritten = std::fs::read_to_string(&project).unwrap();
+        // Exact bytes: an operator-owned file must come back looking like an
+        // operator wrote it — same comment, same multi-line array shape, same
+        // key order — or nobody will trust the command with it twice.
+        assert_eq!(
+            rewritten,
+            "# project dispatch policy — keep the neon route\n\
+             allowlist = [\n\
+             \x20 \"neon.run_sql\",\n\
+             \x20 \"mecha-cassy.mecha_read\",\n\
+             \x20 \"mecha-cassy.mecha_post\",\n\
+             ]\n\
+             \n\
+             [servers.neon]\n\
+             transport = \"stdio\"\n\
+             command = \"neon-mcp\"\n"
+        );
+        let parsed = ProxyConfig::load_from(&project).unwrap();
+        assert_eq!(parsed.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
+        // Everything unrelated survives, comments included.
+        assert!(
+            parsed
+                .allowlist
+                .iter()
+                .any(|route| route.server == "neon" && route.tool == "run_sql"),
+            "{rewritten}"
+        );
+        assert!(parsed.servers.contains_key("neon"), "{rewritten}");
+        assert!(rewritten.contains("# project dispatch policy"), "{rewritten}");
+        // The duplicate registration is gone: the machine file supplies it.
+        assert!(
+            !parsed.servers.contains_key(MECHA_CASSY_SERVER),
+            "{rewritten}"
+        );
+
+        // Doctor now agrees, which is the whole acceptance criterion.
+        let after = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
+        assert_eq!(after.severity, DoctorSeverity::Ok, "{after:?}");
+
+        // Idempotent: a second run is byte-identical and rewrites nothing.
+        let second = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        assert_eq!(
+            second.project_proxy.unwrap().state,
+            WriteState::AlreadyCurrent
+        );
+        assert_eq!(std::fs::read_to_string(&project).unwrap(), rewritten);
+    }
+
+    /// A project file whose only MechaCassy trace is the duplicate server
+    /// block: dropping the block alone would leave a file that admits nothing,
+    /// so the routes it evidently wanted are named explicitly.
+    #[test]
+    fn a_duplicate_server_block_without_routes_is_replaced_by_the_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            ..Default::default()
+        };
+        let project = write_project_proxy(dir.path(), &duplicate_server_block());
+
+        let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        assert_eq!(
+            report.project_proxy.as_ref().unwrap().state,
+            WriteState::Written,
+            "{report:?}"
+        );
+        assert!(report.is_green(), "{report:?}");
+
+        let parsed = ProxyConfig::load_from(&project).unwrap();
+        assert_eq!(parsed.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
+        assert!(!parsed.servers.contains_key(MECHA_CASSY_SERVER));
+        let row = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
+        assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
+    }
+
+    /// `--url` exists so a project can point at a staging hub, and the proxy
+    /// merges project server tables *over* machine ones. A block that differs
+    /// from the machine registration is therefore an override, not a
+    /// duplicate: dropping it would silently move the project to another
+    /// endpoint. The stale routes are still corrected around it.
+    #[test]
+    fn a_project_server_block_that_overrides_the_machine_registration_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            ..Default::default()
+        };
+        const STAGING: &str = "https://mecha-cassy-staging.vercel.app/mcp/slack";
+        let project = write_project_proxy(
+            dir.path(),
+            &format!(
+                "allowlist = [\n\
+                 \x20 \"mecha-cassy.mecha_read\",\n\
+                 \x20 \"mecha-cassy.slack_post_message\",\n\
+                 ]\n\
+                 \n\
+                 [servers.mecha-cassy]\n\
+                 transport = \"http\"\n\
+                 url = \"{STAGING}\"\n\
+                 auth = \"env:MECHA_SLACK_TOKEN_CASSY_PROXY\"\n"
+            ),
+        );
+
+        let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let entry = report.project_proxy.clone().unwrap();
+        assert_eq!(entry.state, WriteState::Written, "{report:?}");
+        assert!(entry.note.contains("kept [servers.mecha-cassy]"), "{entry:?}");
+        assert!(entry.note.contains(STAGING), "{entry:?}");
+
+        let rendered = std::fs::read_to_string(&project).unwrap();
+        let parsed = ProxyConfig::load_from(&project).unwrap();
+        // The override survives, pointing where the project put it…
+        let server = parsed
+            .servers
+            .get(MECHA_CASSY_SERVER)
+            .expect("the override must survive");
+        assert_eq!(server_endpoint(server), STAGING, "{rendered}");
+        // …while the retired route it carried is corrected.
+        assert_eq!(parsed.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
+
+        // Keeping a block is not a change: a second run must not rewrite.
+        let second = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let second_entry = second.project_proxy.unwrap();
+        assert_eq!(second_entry.state, WriteState::AlreadyCurrent, "{rendered}");
+        assert!(
+            second_entry.note.contains("overrides the machine registration"),
+            "the override must stay visible on every run: {second_entry:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&project).unwrap(), rendered);
+    }
+
+    /// Adding an `allowlist` key to a file that already opens a `[servers.…]`
+    /// table is the one edit that can silently produce a *different* document:
+    /// a root key emitted after a table header belongs to that table. This
+    /// pins the rendering, because the damage would be invisible until some
+    /// unrelated server stopped connecting.
+    #[test]
+    fn an_added_allowlist_stays_a_root_key_ahead_of_existing_server_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            ..Default::default()
+        };
+        let project = write_project_proxy(
+            dir.path(),
+            &format!(
+                "[servers.neon]\ntransport = \"stdio\"\ncommand = \"neon-mcp\"\n\n{}",
+                duplicate_server_block()
+            ),
+        );
+
+        run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+
+        let rendered = std::fs::read_to_string(&project).unwrap();
+        let parsed = ProxyConfig::load_from(&project).unwrap();
+        assert_eq!(
+            parsed.mecha_cassy_allowlisted_tools(),
+            MECHA_CASSY_TOOLS,
+            "{rendered}"
+        );
+        assert!(parsed.servers.contains_key("neon"), "{rendered}");
+        assert_eq!(parsed.servers.len(), 1, "{rendered}");
+        assert!(
+            rendered.find("allowlist").unwrap() < rendered.find("[servers.neon]").unwrap(),
+            "the root key must precede the first table header:\n{rendered}"
+        );
+    }
+
+    /// A project that declares its own policy and never mentions the hub is
+    /// not this command's to rewrite: widening its allowlist would be a
+    /// silent policy change. It is reported, with the exact edit, instead.
+    #[test]
+    fn a_project_proxy_that_names_no_hub_route_is_left_alone_and_named_in_the_remedy() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            ..Default::default()
+        };
+        let original = "allowlist = [\"neon.run_sql\"]\n";
+        let project = write_project_proxy(dir.path(), original);
+
+        let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let entry = report.project_proxy.clone().unwrap();
+        assert_eq!(entry.state, WriteState::Skipped, "{report:?}");
+        assert_eq!(std::fs::read_to_string(&project).unwrap(), original);
+        assert!(!report.is_green(), "{report:?}");
+        let remedy = report.remedy.clone().unwrap();
+        assert!(remedy.contains(&project.display().to_string()), "{remedy}");
+        assert!(remedy.contains("mecha-cassy.mecha_read"), "{remedy}");
+        assert!(
+            !remedy.contains("Re-run `cas integrate mecha-cassy`"),
+            "re-running cannot fix this, so it must not be offered: {remedy}"
+        );
+    }
+
+    #[test]
+    fn dry_run_does_not_touch_a_shadowing_project_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            dry_run: true,
+            ..Default::default()
+        };
+        let project = write_project_proxy(dir.path(), shadowing_project_proxy());
+
+        let report = run(
+            &args,
+            Some(&project),
+            &paths,
+            &ready_env(),
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
+        assert_eq!(report.project_proxy.unwrap().state, WriteState::Planned);
+        assert_eq!(
+            std::fs::read_to_string(&project).unwrap(),
+            shadowing_project_proxy()
+        );
+    }
+
+    /// An `allowlist` that is not an array cannot be edited safely, and
+    /// guessing would destroy operator configuration. The machine file is
+    /// still written, and the error names the one path to repair.
+    #[test]
+    fn a_malformed_project_allowlist_is_refused_by_name_after_the_machine_file_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            ..Default::default()
+        };
+        let project = write_project_proxy(
+            dir.path(),
+            "allowlist = \"mecha-cassy.mecha_read\"\n[servers.mecha-cassy]\n\
+             transport = \"http\"\nurl = \"https://x\"\n",
+        );
+
+        let error = run(
+            &args,
+            Some(&project),
+            &paths,
+            &ready_env(),
+            &FakeProbe(live_tools()),
+        )
+        .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains(&project.display().to_string()), "{rendered}");
+        assert!(paths.user_proxy.is_file(), "machine file must still land");
     }
 
     #[test]
@@ -1511,7 +2265,7 @@ mod tests {
             no_harness: true,
             ..Default::default()
         };
-        run(&args, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 
         let project = dir.path().join("proxy.toml");
         std::fs::write(&project, "allowlist = [\"neon.run_sql\"]\n").unwrap();
@@ -1537,7 +2291,7 @@ mod tests {
             no_harness: true,
             ..Default::default()
         };
-        run(&args, &paths, &env, &FakeProbe(live_tools())).unwrap();
+        run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 
         let row = doctor_row(None, &paths, &env, &FakeProbe(ProbeOutcome::Unauthorized));
         assert_eq!(row.severity, DoctorSeverity::Error);

@@ -97,11 +97,14 @@ Useful flags:
 | `not registered on this machine` | No hub server in the machine config. | `cas integrate mecha-cassy` |
 | `MECHA_SLACK_TOKEN_… is unset` / `set but empty` | The registration is fine; the credentials file is not. | Add the value, **open a new shell** |
 | `hub rejected this machine (HTTP 401…)` | The bearer is not registered hub-side, was revoked, or the hub was not redeployed after the token was added. | Ask the admin to re-mint or redeploy, re-export, re-run the command |
-| `hub tool contract drifted…` | The hub renamed or added tools; the allowlist names the old ones, so every call would be denied by policy. | `cas integrate mecha-cassy` rewrites the allowlist |
+| `hub tool contract drifted…` | The hub renamed or added tools; the allowlist names the old ones, so every call would be denied by policy. | `cas integrate mecha-cassy` rewrites the allowlist. The row names the file the stale entries are in — machine or project — and the command rewrites that same file |
 | `…is authoritative for dispatch policy and names none` | This project has its own `.cas/proxy.toml`, and a project file **replaces** the machine allowlist rather than widening it. | Add the hub routes to that project's `allowlist`, exactly as the message spells them |
 
 That last one is deliberate, not a bug: a machine-wide policy must never
-silently widen what a project has declared it will dispatch.
+silently widen what a project has declared it will dispatch. A project file
+that already names hub routes is a different case — there the command *does*
+rewrite them, because correcting a route the project itself asked for is not
+widening its policy.
 
 ---
 

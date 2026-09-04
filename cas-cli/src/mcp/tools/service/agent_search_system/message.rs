@@ -1098,11 +1098,18 @@ impl CasService {
                     }
                 }
             } else {
+                // cas-15f2: stamp the row with the RECIPIENT's session, not the
+                // sender's, so the recipient's daemon and inbox can select it.
+                let row_session = row_factory_session(
+                    &resolved_target,
+                    resolved_target_agent.as_ref(),
+                    factory_session.as_deref(),
+                );
                 let enqueue_outcome = match queue.enqueue_urgent_with_outcome(
                     &display_name,
                     &resolved_target,
                     &message,
-                    factory_session.as_deref(),
+                    row_session.as_deref(),
                     Some(summary.as_str()),
                     priority,
                     urgent,
@@ -2037,12 +2044,24 @@ impl CasService {
                 // `wake_attempt` is the daemon's own record of which of those
                 // happened; `wake` remains recipient-side evidence.
                 let wake_attempt_line = wake_attempt_narrative(r.wake_attempt, r.wake);
+                // cas-15f2: a row that no daemon can select used to read
+                // "awaiting_delivery" for a full 15 minutes and then flip to
+                // abandoned, so the operator watching it had no way to tell
+                // "in flight" from "already doomed" — two supervisors waited on
+                // exactly this. State the deadline while it is still pending,
+                // and say the reason out loud once it is terminal.
+                let pending_deadline_line = pending_deadline_narrative(
+                    r.stage,
+                    r.pending_detail.as_deref(),
+                    undelivered_after_secs,
+                );
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
                      stage: {}  pending_reason: {}  wake: {}  wake_attempt: {}  wake_gate_declines: {}  \
                      reaction: {}  confirmation_source: {}\n\
                      {wake_attempt_line}\
                      {transport_line}\
+                     {pending_deadline_line}\
                      {undelivered_line}\
                      {json}",
                     r.legacy_status,
@@ -2161,6 +2180,225 @@ fn enrich_report_from_harness_artifact(
         report.reaction = ObservationStatus::Observed;
         report.reaction_observed_at = Some(reaction.at);
         report.reaction_evidence = Some(reaction.evidence);
+    }
+}
+
+/// How long a never-selected row waits before the poison sweep abandons it
+/// (`PROMPT_RETRY_MAX_AGE_SECS` in cas-store).
+const PROMPT_ABANDON_DEADLINE_SECS: i64 = 15 * 60;
+
+/// Say whether a still-pending row is in flight or already doomed, and name the
+/// reason once it is terminal (cas-15f2).
+///
+/// The old status text reported `stage=enqueued / pending_reason=awaiting_delivery`
+/// identically for a row about to be delivered and for one no daemon could ever
+/// select. Two supervisors watched that line for 15 minutes before it flipped to
+/// `abandoned`, which is the whole "pending forever with no reason" complaint.
+fn pending_deadline_narrative(
+    stage: cas_store::DeliveryStage,
+    pending_detail: Option<&str>,
+    undelivered_after_secs: Option<i64>,
+) -> String {
+    use cas_store::DeliveryStage;
+    match stage {
+        DeliveryStage::Abandoned => format!(
+            "undeliverable: this row was abandoned and will never be delivered — {}\n",
+            pending_detail.unwrap_or("no reason was recorded")
+        ),
+        DeliveryStage::Enqueued | DeliveryStage::Gated | DeliveryStage::Selected => {
+            let Some(waited) = undelivered_after_secs else {
+                return String::new();
+            };
+            let remaining = PROMPT_ABANDON_DEADLINE_SECS - waited;
+            if remaining > 0 {
+                format!(
+                    "delivery deadline: abandoned as undeliverable in {remaining}s if no daemon \
+                     selects it (waited {waited}s of {PROMPT_ABANDON_DEADLINE_SECS}s)\n"
+                )
+            } else {
+                format!(
+                    "delivery deadline: PAST ({waited}s waited, limit \
+                     {PROMPT_ABANDON_DEADLINE_SECS}s) — the sweep will mark this undeliverable; \
+                     it is not still in flight\n"
+                )
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+/// Which `factory_session` a queued row must carry (cas-15f2).
+///
+/// The row is stamped with the **recipient's** session, never the sender's.
+/// Every downstream filter — the daemon's `peek_for_targets`, `inbox_poll`'s
+/// `drain_unseen_for_recipient`, turn-start surfacing, and the `worker_status`
+/// unseen counter — selects on `factory_session = <observer's own session>`.
+/// Stamping at enqueue with the target's session is therefore the single change
+/// that makes all four see the row, and it keeps every cross-session isolation
+/// test true: the row genuinely belongs to the recipient's session, so nothing
+/// leaks into a session that was not addressed.
+///
+/// Before this, `message_send` stamped the sender's `CAS_FACTORY_SESSION` while
+/// validating the target against a session-blind name lookup, so a supervisor
+/// addressing a supervisor in another session got an optimistic "enqueued
+/// (target is registered)" for a row no daemon could ever select: the sender's
+/// daemon matched the session but not its roster, the recipient's daemon
+/// matched its roster but not the session. The row sat at
+/// `stage=enqueued / awaiting_delivery` until the sender-side 15-minute poison
+/// sweep abandoned it as `abandoned_unknown_target`.
+///
+/// Logical fan-out names stay sender-scoped: `all_workers` is a broadcast to
+/// *this* factory, and `supervisor` / `director` resolve within the caller's own
+/// session. Only a concrete registered agent redirects the stamp.
+fn row_factory_session(
+    resolved_target: &str,
+    target_agent: Option<&cas_types::Agent>,
+    sender_session: Option<&str>,
+) -> Option<String> {
+    if matches!(
+        resolved_target.to_ascii_lowercase().as_str(),
+        "all_workers" | "supervisor" | "director"
+    ) {
+        return sender_session.map(str::to_owned);
+    }
+    target_agent
+        .and_then(|agent| agent.factory_session.clone())
+        .filter(|session| !session.trim().is_empty())
+        .or_else(|| sender_session.map(str::to_owned))
+}
+
+#[cfg(test)]
+mod pending_deadline_tests {
+    use super::pending_deadline_narrative;
+    use cas_store::DeliveryStage;
+
+    /// The 15 minutes two supervisors spent watching "awaiting_delivery" must
+    /// now say how much of the budget is left.
+    #[test]
+    fn a_pending_row_states_how_long_before_it_is_abandoned() {
+        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, Some(60));
+        assert!(line.contains("abandoned as undeliverable in 840s"), "{line}");
+        assert!(line.contains("waited 60s of 900s"), "{line}");
+    }
+
+    /// Past the deadline the row is doomed, not in flight. Saying "still
+    /// pending" there is the claimed-green shape this task exists to remove.
+    #[test]
+    fn a_row_past_the_deadline_says_it_is_not_in_flight() {
+        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, Some(1200));
+        assert!(line.contains("PAST"), "{line}");
+        assert!(line.contains("not still in flight"), "{line}");
+    }
+
+    #[test]
+    fn an_abandoned_row_names_its_reason_instead_of_reporting_progress() {
+        let line = pending_deadline_narrative(
+            DeliveryStage::Abandoned,
+            Some("target no longer belongs to factory session"),
+            Some(1800),
+        );
+        assert!(line.contains("undeliverable"), "{line}");
+        assert!(
+            line.contains("target no longer belongs to factory session"),
+            "{line}"
+        );
+        assert!(line.contains("will never be delivered"), "{line}");
+    }
+
+    #[test]
+    fn an_abandoned_row_without_a_recorded_reason_says_so() {
+        let line = pending_deadline_narrative(DeliveryStage::Abandoned, None, None);
+        assert!(line.contains("no reason was recorded"), "{line}");
+    }
+
+    #[test]
+    fn a_delivered_row_adds_no_deadline_noise() {
+        assert!(
+            pending_deadline_narrative(DeliveryStage::Delivered, None, Some(30)).is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod cross_session_routing_tests {
+    use super::row_factory_session;
+    use cas_types::Agent;
+
+    fn agent_in(name: &str, session: Option<&str>) -> Agent {
+        let mut agent = Agent::new(format!("id-{name}"), name.to_string());
+        agent.factory_session = session.map(str::to_owned);
+        agent
+    }
+
+    /// The cas-15f2 regression: supervisor A in session A messages supervisor B
+    /// in session B. The row must belong to B, or no daemon ever selects it.
+    #[test]
+    fn a_message_to_an_agent_in_another_session_is_stamped_with_the_recipients_session() {
+        let target = agent_in("noble-lynx-44", Some("cas-src-vivid-sparrow-8"));
+
+        let session = row_factory_session(
+            "noble-lynx-44",
+            Some(&target),
+            Some("cas-src-young-raven-93"),
+        );
+
+        assert_eq!(session.as_deref(), Some("cas-src-vivid-sparrow-8"));
+    }
+
+    #[test]
+    fn a_same_session_message_is_unchanged() {
+        let target = agent_in("daring-marten-11", Some("cas-src-young-raven-93"));
+
+        let session = row_factory_session(
+            "daring-marten-11",
+            Some(&target),
+            Some("cas-src-young-raven-93"),
+        );
+
+        assert_eq!(session.as_deref(), Some("cas-src-young-raven-93"));
+    }
+
+    /// `all_workers` means "this factory's workers". Redirecting it to some
+    /// other session's roster would be a broadcast into a factory the caller
+    /// does not run.
+    #[test]
+    fn logical_fanout_names_stay_scoped_to_the_sender() {
+        for name in ["all_workers", "supervisor", "director", "ALL_WORKERS"] {
+            let stray = agent_in(name, Some("cas-src-other-session"));
+            let session = row_factory_session(name, Some(&stray), Some("cas-src-mine"));
+            assert_eq!(
+                session.as_deref(),
+                Some("cas-src-mine"),
+                "{name} must not redirect the stamp"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unregistered_or_sessionless_target_keeps_the_senders_session() {
+        assert_eq!(
+            row_factory_session("ghost", None, Some("cas-src-mine")).as_deref(),
+            Some("cas-src-mine")
+        );
+        let legacy = agent_in("legacy", None);
+        assert_eq!(
+            row_factory_session("legacy", Some(&legacy), Some("cas-src-mine")).as_deref(),
+            Some("cas-src-mine")
+        );
+        let blank = agent_in("blank", Some("   "));
+        assert_eq!(
+            row_factory_session("blank", Some(&blank), Some("cas-src-mine")).as_deref(),
+            Some("cas-src-mine")
+        );
+    }
+
+    #[test]
+    fn a_sessionless_sender_still_routes_to_the_recipients_session() {
+        let target = agent_in("noble-lynx-44", Some("cas-src-vivid-sparrow-8"));
+        assert_eq!(
+            row_factory_session("noble-lynx-44", Some(&target), None).as_deref(),
+            Some("cas-src-vivid-sparrow-8")
+        );
     }
 }
 

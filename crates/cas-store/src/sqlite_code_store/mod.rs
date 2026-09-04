@@ -109,6 +109,26 @@ impl SqliteCodeStore {
         Ok(Self { conn })
     }
 
+    /// Run one self-contained write statement with the shared bounded busy
+    /// retry.
+    ///
+    /// The connection's 5s `busy_timeout` is the only thing that used to stand
+    /// between these statements and a hard failure, so a foreign writer that
+    /// outlived one window turned an ordinary retirement into
+    /// `failed to retire deleted source file: database error: database is
+    /// locked` — a permanent file failure for a file that no longer exists
+    /// (cas-8a03). Every body passed here is a single idempotent statement, so
+    /// re-running it after a busy verdict cannot double-apply.
+    fn write_with_retry<F>(&self, body: F) -> Result<()>
+    where
+        F: Fn(&Connection) -> Result<()>,
+    {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            body(&conn)
+        })
+    }
+
     /// Parse a datetime string into DateTime<Utc>.
     fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
         if let Ok(dt) = DateTime::parse_from_rfc3339(s) {

@@ -199,6 +199,54 @@ fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
     );
 }
 
+/// cas-9d5c: the user-level store must be migrated by the sweep, not merely
+/// mentioned. Before this fix `~/.cas` only received the builtin distribution,
+/// so on the reporting host it sat at schema 248 with 6 pending migrations
+/// while the banner claimed every project was refreshed.
+#[test]
+fn all_projects_runs_migrations_against_the_user_level_store() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let home = root.join(".test-home");
+    let projects = root.join("projects");
+    let project = projects.join("demo");
+    init_project(root, &project);
+    // Make `$HOME/.cas` a real store rather than the bare known-repo registry.
+    // `cas init` guards the home directory, which is exactly the distinction
+    // this phase exists to honour: the user-level store is host state.
+    std::fs::create_dir_all(&home).unwrap();
+    cas_cmd(root)
+        .current_dir(&home)
+        .args(["init", "--yes", "--allow-non-project"])
+        .assert()
+        .success();
+
+    let update = cas_cmd(root)
+        .current_dir(root)
+        .env("CAS_ROOT", project.join(".cas"))
+        .env("CAS_PROJECT_ROOTS", &projects)
+        .args(["--json", "update", "--all-projects"])
+        .assert()
+        .success();
+    let output = String::from_utf8_lossy(&update.get_output().stdout);
+
+    let user_store = home.join(".cas").to_string_lossy().into_owned();
+    let migrated_user_store = output
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .any(|value| {
+            value.get("schema_status").is_some() && value["store"].as_str() == Some(&user_store)
+        });
+    assert!(
+        migrated_user_store,
+        "no schema_status receipt names the user-level store {user_store}:\n{output}"
+    );
+    assert!(
+        !output.contains(&format!("\"project\":\"{}\"", home.to_string_lossy())),
+        "the home directory must never appear as a project:\n{output}"
+    );
+}
+
 #[test]
 fn all_projects_repairs_stray_search_roots_and_reports_clean_projects() {
     let temp = TempDir::new().unwrap();

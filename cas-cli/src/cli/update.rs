@@ -918,8 +918,8 @@ fn refresh_all_projects(
         cli,
     );
 
-    let failed_count =
-        receipts.iter().filter(|receipt| receipt.failed()).count() + usize::from(user_level.failed());
+    let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
+        + usize::from(user_level.failed());
     if failed_count > 0 {
         anyhow::bail!(
             "one or more projects were not fully refreshed; see the per-project phase summary above"
@@ -946,7 +946,10 @@ fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
     };
     if !cas_root.join("cas.db").is_file() {
         return match sync_user_builtins(cli) {
-            Ok(()) => ProjectPhase::Ok(format!("builtins only — no store at {}", cas_root.display())),
+            Ok(()) => ProjectPhase::Ok(format!(
+                "builtins only — no store at {}",
+                cas_root.display()
+            )),
             Err(error) => ProjectPhase::Failed(error.to_string()),
         };
     }
@@ -962,7 +965,10 @@ fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
         return migration;
     }
     match sync_user_builtins(cli) {
-        Ok(()) => ProjectPhase::Ok(format!("migrated {} and synced builtins", cas_root.display())),
+        Ok(()) => ProjectPhase::Ok(format!(
+            "migrated {} and synced builtins",
+            cas_root.display()
+        )),
         Err(error) => ProjectPhase::Failed(error.to_string()),
     }
 }

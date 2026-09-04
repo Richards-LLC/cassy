@@ -279,7 +279,10 @@ fn discovery_does_not_descend_into_cas_internal_directories() {
         discovery.projects
     );
     assert!(
-        !discovery.projects.iter().any(|path| path.starts_with(&backup)),
+        !discovery
+            .projects
+            .iter()
+            .any(|path| path.starts_with(&backup)),
         "migration backups under .cas/ are not projects: {:?}",
         discovery.projects
     );

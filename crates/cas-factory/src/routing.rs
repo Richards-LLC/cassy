@@ -270,8 +270,7 @@ pub struct Lane {
 pub type LaneDefinition = Lane;
 
 /// Per-harness policy defaults. These retain the existing spawn defaults,
-/// which are intentionally distinct from the taste recipe's canonical
-/// `claude-opus-5` model.
+/// independently of the lane recipes (including Astra/medium for taste).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerDefaults {
@@ -1155,7 +1154,7 @@ candidates = ["codex_luna"]
             registry.lanes["standard"].candidates,
             ["codex_luna", "claude_opus"]
         );
-        assert_eq!(registry.lanes["taste"].candidates, ["claude_opus"]);
+        assert_eq!(registry.lanes["taste"].candidates, ["codex_astra"]);
         assert_eq!(registry.lanes["taste"].fallbacks, ["codex_luna"]);
         assert!(registry.lanes["taste"].no_fallback);
         assert_eq!(
@@ -1194,6 +1193,57 @@ candidates = ["codex_luna"]
                 .iter()
                 .any(|candidate| candidate == "qwencloud_qwen")
         }));
+    }
+
+    #[test]
+    fn taste_lane_resolves_astra_medium_and_fails_closed_when_unavailable() {
+        let registry = registry().unwrap();
+        let recipe = &registry.recipes["codex_astra"];
+        assert_eq!(recipe.provider, "openai");
+        assert_eq!(recipe.required_capability.as_deref(), Some("codex-account"));
+        assert_eq!(recipe.allowed_efforts, [Effort::Medium]);
+        let now = CapabilitySnapshot::now_ms();
+        for availability in [
+            CapabilityAvailability::Unknown,
+            CapabilityAvailability::Available,
+        ] {
+            let mut snapshot = CapabilitySnapshot::default();
+            snapshot.record(
+                recipe_route_identity(recipe, "default"),
+                CapabilityEvidence::new(availability, now),
+            );
+            for decision in resolve_lane_specs("taste", 2, &snapshot).unwrap() {
+                assert_eq!(decision.recipe_id, "codex_astra");
+                assert_eq!(decision.spec.cli, SupervisorCli::Codex);
+                assert_eq!(decision.spec.model.as_deref(), Some("gpt-6-astra"));
+                assert_eq!(decision.spec.effort, Some(Effort::Medium));
+                assert!(decision.warnings.is_empty());
+                validate_explicit(&decision.spec, &snapshot).unwrap();
+                let mut invalid = decision.spec;
+                invalid.effort = Some(Effort::High);
+                assert!(
+                    validate_explicit(&invalid, &snapshot)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("allowed efforts are medium")
+                );
+            }
+        }
+        let mut snapshot = CapabilitySnapshot::default();
+        snapshot.record(
+            recipe_route_identity(recipe, "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Unavailable, now),
+        );
+        for alternative in ["claude_opus", "codex_luna"] {
+            snapshot.record(
+                recipe_route_identity(&registry.recipes[alternative], "default"),
+                CapabilityEvidence::new(CapabilityAvailability::Available, now),
+            );
+        }
+        assert!(matches!(
+            resolve_lane("taste", &snapshot),
+            Err(RoutingError::NoActiveRecipe { .. })
+        ));
     }
 
     #[test]

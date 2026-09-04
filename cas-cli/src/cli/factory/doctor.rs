@@ -114,9 +114,21 @@ fn required_harnesses(args: &FactoryArgs, project_root: &Path) -> Result<Vec<Sup
         project_config: project_config.clone(),
         ..ConfigSources::default()
     };
-    let worker = resolve_specs(1, sources).map_err(|error| {
-        anyhow::anyhow!("failed to resolve worker config for factory doctor: {error}")
-    })?;
+    let worker = if let Some(lane) = args.lane.as_deref() {
+        super::resolve_lane_worker_specs(
+            lane,
+            1,
+            &[],
+            worker_cli,
+            &args.worker_spec,
+            &CapabilitySnapshot::default(),
+        )?
+        .0
+    } else {
+        resolve_specs(1, sources).map_err(|error| {
+            anyhow::anyhow!("failed to resolve worker config for factory doctor: {error}")
+        })?
+    };
     for spec in &worker {
         cas_factory::validate_explicit(spec, &CapabilitySnapshot::default()).map_err(|error| {
             anyhow::anyhow!("failed to validate worker config for factory doctor: {error}")
@@ -718,6 +730,60 @@ mod tests {
         required_harnesses(&args, directory.path())
             .expect_err("doctor must reject an invalid explicit routing spec")
             .to_string()
+    }
+
+    #[test]
+    fn doctor_taste_lane_requires_codex_even_with_claude_project_defaults() {
+        let _home = crate::test_support::TestEnvGuard::temp_home();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join(".cas")).unwrap();
+        std::fs::write(
+            directory.path().join(".cas/config.toml"),
+            r#"[factory.defaults]
+cli = "claude"
+model = "opus"
+effort = "high"
+"#,
+        )
+        .unwrap();
+        let mut args = FactoryArgs {
+            workers: 1,
+            ..FactoryArgs::default()
+        };
+        assert!(
+            !required_harnesses(&args, directory.path())
+                .unwrap()
+                .contains(&SupervisorCli::Codex)
+        );
+        args.lane = Some("taste".to_string());
+        assert!(
+            required_harnesses(&args, directory.path())
+                .unwrap()
+                .contains(&SupervisorCli::Codex)
+        );
+        args.worker_spec = vec![r#"{"model":"claude-opus-5"}"#.to_string()];
+        assert!(required_harnesses(&args, directory.path()).is_err());
+    }
+
+    #[test]
+    fn doctor_accepts_astra_taste_spec_and_requires_codex() {
+        let _home = crate::test_support::TestEnvGuard::temp_home();
+        let directory = tempfile::tempdir().unwrap();
+        let decision = cas_factory::resolve_lane("taste", &CapabilitySnapshot::default()).unwrap();
+        let args = FactoryArgs {
+            workers: 1,
+            worker_spec: vec![serde_json::to_string(&decision.spec).unwrap()],
+            ..FactoryArgs::default()
+        };
+        let required = required_harnesses(&args, directory.path()).unwrap();
+        assert!(required.contains(&SupervisorCli::Codex));
+    }
+
+    #[test]
+    fn doctor_rejects_astra_outside_taste_effort() {
+        let error =
+            doctor_routing_error(r#"{"cli":"codex","model":"gpt-6-astra","effort":"high"}"#);
+        assert!(error.contains("allowed efforts are medium"), "{error}");
     }
 
     #[test]

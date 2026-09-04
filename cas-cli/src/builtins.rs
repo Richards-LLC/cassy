@@ -2992,7 +2992,7 @@ This is the body content."#;
             "Registry lanes",
             "Claude/Haiku 4.5/low",
             "Codex/GPT-5.6 Luna/xhigh",
-            "Claude/Opus 5/high",
+            "Codex/GPT-6 Astra/medium",
             "Codex/GPT-5.6 Sol/high",
             "standing suspension",
             "generated route table and recipes",
@@ -5296,6 +5296,54 @@ This is the body content."#;
         );
     }
 
+    #[test]
+    fn test_taste_routes_match_registry_in_all_supervisor_readers() {
+        for (skills, prefix) in [
+            (BUILTIN_SKILLS, "mcp__cas__"),
+            (CODEX_BUILTIN_SKILLS, "mcp__cs__"),
+            (GROK_BUILTIN_SKILLS, "cas__"),
+        ] {
+            for builtin in skills
+                .iter()
+                .filter(|b| b.path.starts_with("skills/cas-supervisor"))
+            {
+                for stale in [
+                    "Claude/Opus 5/high",
+                    "Claude Opus 5/high",
+                    "Claude Opus 5 at high",
+                    "Opus is the normal taste",
+                    "Opus is a normal taste",
+                    "Opus/high is the taste",
+                    "Opus taste to high",
+                    "# taste — recipe claude_opus",
+                ] {
+                    assert!(
+                        !builtin.content.contains(stale),
+                        "{} retains {stale:?}",
+                        builtin.path
+                    );
+                }
+                if builtin.path.ends_with("workflow.md") {
+                    let recipes = render_spawn_recipes(prefix).unwrap();
+                    assert!(
+                        builtin.content.contains(&recipes),
+                        "{} has stale recipes",
+                        builtin.path
+                    );
+                    assert!(recipes.contains(&format!(
+                        "# taste — recipe codex_astra\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-astra effort=medium"
+                    )));
+                }
+            }
+        }
+        let agent = include_str!("builtins/codex/agents/factory-supervisor.md");
+        assert!(agent.contains(&render_spawn_recipes("mcp__cs__").unwrap()));
+        assert_eq!(
+            agent,
+            include_str!("../../.codex/agents/factory-supervisor.md")
+        );
+    }
+
     /// cas-6219: the supervisor's model-selection rubric must be registered on
     /// both surfaces, stay content-identical across mirrors modulo the
     /// intentional per-harness tool prefix (cas-2c61/cas-62ab: the codex copy
@@ -5403,7 +5451,7 @@ This is the body content."#;
                 "registry recipe for {lane_name:?} missing from the supervisor guidance"
             );
         }
-        assert!(claude.content.contains("Claude Opus 5 at high"));
+        assert!(claude.content.contains("Codex GPT-6 Astra at medium"));
         assert!(claude.content.contains("Claude Haiku 4.5"));
         assert!(!claude.content.contains("operator decision pending"));
         assert!(!claude.content.contains("exceptional-only"));
@@ -6270,7 +6318,7 @@ This is the body content."#;
             "Registry lanes",
             "Claude/Haiku 4.5/low",
             "Codex/GPT-5.6 Luna/xhigh",
-            "Claude/Opus 5/high",
+            "Codex/GPT-6 Astra/medium",
             "Codex/GPT-5.6 Sol/high",
             "standing suspension",
             "generated route table and recipes",

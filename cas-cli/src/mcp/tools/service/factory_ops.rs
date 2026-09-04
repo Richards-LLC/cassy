@@ -10583,6 +10583,49 @@ mod tests {
     }
 
     #[test]
+    fn taste_lane_spawn_specs_and_explicit_astra_route_agree() {
+        let _home = TestEnvGuard::temp_home();
+        let (specs, recipe, warnings) = build_lane_spawn_specs(
+            2,
+            "taste",
+            Some("~/.codex-alt"),
+            Some(r#"[{"name":"taste-a"},{"name":"taste-b"}]"#),
+            &cas_factory::CapabilitySnapshot::default(),
+        )
+        .unwrap();
+        assert_eq!(recipe, "codex_astra");
+        assert!(warnings.is_empty());
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].name.as_deref(), Some("taste-a"));
+        assert_eq!(specs[1].name.as_deref(), Some("taste-b"));
+        for spec in specs {
+            assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
+            assert_eq!(spec.model.as_deref(), Some("gpt-6-astra"));
+            assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+            assert_eq!(spec.config_dir.as_deref(), Some("~/.codex-alt"));
+        }
+        assert_eq!(
+            cli_for_model_slug("gpt-6-astra"),
+            Some(cas_mux::SupervisorCli::Codex)
+        );
+        for cli in [None, Some("codex")] {
+            let json = build_spawn_spec_json(cli, Some("gpt-6-astra"), Some("medium")).unwrap();
+            let spec = decoded_spawn_spec(&json);
+            assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
+            assert_eq!(spec.model.as_deref(), Some("gpt-6-astra"));
+            assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+        }
+        for cli in ["claude", "grok", "opencode"] {
+            let error =
+                build_spawn_spec_json(Some(cli), Some("gpt-6-astra"), Some("medium")).unwrap_err();
+            assert!(error.contains("cli=codex"), "{error}");
+        }
+        let error =
+            build_spawn_spec_json(Some("codex"), Some("gpt-6-astra"), Some("high")).unwrap_err();
+        assert!(error.contains("allowed efforts are medium"), "{error}");
+    }
+
+    #[test]
     fn lane_spawn_specs_reject_explicit_worker_recipe_fields() {
         let snapshot = cas_factory::CapabilitySnapshot::default();
         let error = build_lane_spawn_specs(

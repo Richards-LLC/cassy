@@ -462,6 +462,9 @@ async fn personal_push_keeps_itemized_invalid_revision_visible_in_queue_health()
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -538,6 +541,9 @@ async fn team_push_serializes_task_dependency_collection() {
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -713,6 +719,9 @@ async fn push_response_aggregate_skip_acknowledges_the_whole_personal_batch() {
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -775,6 +784,9 @@ async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors()
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     for id in ["entry-good", "entry-rejected"] {
@@ -820,6 +832,9 @@ async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors()
 fn version_gate_requeues_only_after_minimum_and_is_idempotent() {
     let (_temp, queue) = {
         let temp = tempfile::tempdir().unwrap();
+        // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+        // root under the temp directory, and a TempDir is exactly that.
+        std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
         let queue = SyncQueue::open(temp.path()).unwrap();
         queue.init().unwrap();
         queue
@@ -908,6 +923,9 @@ async fn version_gate_push_requeues_terminal_items_before_reading_pending_queue(
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -1071,6 +1089,9 @@ async fn pull_team_task_and_dependency_fixtures_with_pull_count(
         .await;
 
     let temp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     let store = open_store_local(temp.path()).unwrap();
@@ -1508,6 +1529,9 @@ async fn pull_team_dependency_scenario(
         .await;
 
     let temp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     if let Some(watermark) = watermark {
@@ -1855,6 +1879,9 @@ async fn top_level_rows_ack_lww_skips_and_park_rejections_by_reason() {
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     for id in ["entry-written", "entry-kept-newer", "entry-refused"] {
@@ -1923,6 +1950,9 @@ async fn responses_without_rows_keep_the_legacy_aggregate_behaviour() {
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     for id in ["entry-one", "entry-two"] {
@@ -1996,6 +2026,9 @@ fn revision_syncer() -> (tempfile::TempDir, CloudSyncer) {
     use crate::cloud::{CloudConfig, CloudSyncerConfig};
 
     let temp = tempfile::TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     let syncer = CloudSyncer::new(
@@ -2317,6 +2350,9 @@ async fn push_declares_the_stored_base_revision_and_omits_it_when_unknown() {
         .await;
 
     let temp = tempfile::TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     // One row whose revision we have observed, one we have never pulled.
@@ -2409,6 +2445,9 @@ async fn a_rejected_stale_base_is_forgotten_rather_than_replaced() {
         .await;
 
     let temp = tempfile::TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue.record_revision(EntityType::Task, "cas-c32f-lost", 4).unwrap();
@@ -2483,6 +2522,9 @@ async fn a_real_pull_lets_a_higher_local_revision_beat_a_newer_remote_timestamp(
         .await;
 
     let temp = tempfile::TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     let store = open_store_local(temp.path()).unwrap();

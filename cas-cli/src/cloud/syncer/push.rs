@@ -41,7 +41,13 @@ impl CloudSyncer {
     /// push (GH #701). Resolution failure yields `None`: an unclassifiable root
     /// syncs, because blocking a real project is the expensive mistake.
     fn ephemeral_project_refusal(&self) -> Option<String> {
-        let cas_root = crate::store::find_cas_root().ok()?;
+        // Classify the root this syncer was built for, not whatever project the
+        // process happens to be running in: on CI the process root is the runner
+        // workspace, which is not the project being pushed.
+        let cas_root = self
+            .push_cas_root
+            .clone()
+            .or_else(|| crate::store::find_cas_root().ok())?;
         let verdict = crate::cloud::classify_project_root(&cas_root);
         let project_id = self
             .push_project_canonical_id
@@ -1125,6 +1131,60 @@ impl CloudSyncer {
         payload.insert(
             "client_build".to_string(),
             serde_json::json!(option_env!("CAS_GIT_HASH").unwrap_or("unknown")),
+        );
+    }
+}
+
+#[cfg(test)]
+mod ephemeral_guard_root_tests {
+    use std::sync::Arc;
+
+    use super::super::{CloudSyncer, CloudSyncerConfig};
+    use crate::cloud::CloudConfig;
+    use crate::cloud::sync_queue::SyncQueue;
+
+    fn syncer_for(root: &std::path::Path, pinned: bool) -> CloudSyncer {
+        std::fs::create_dir_all(root).unwrap();
+        if pinned {
+            std::fs::write(
+                root.join("config.toml"),
+                "[project]\ncanonical_id = \"pinned-project\"\n",
+            )
+            .unwrap();
+        }
+        let queue = SyncQueue::open(root).unwrap();
+        queue.init().unwrap();
+        let mut cloud = CloudConfig::default();
+        cloud.endpoint = "http://127.0.0.1:9".to_string();
+        cloud.token = Some("test-token".to_string());
+        CloudSyncer::new_for_project(
+            Arc::new(queue),
+            cloud,
+            CloudSyncerConfig::default(),
+            "pinned-project".to_string(),
+            root,
+        )
+    }
+
+    /// The guard must judge the root the syncer was built for. A pinned
+    /// scratch root is durable; an unpinned one under /tmp is ephemeral —
+    /// regardless of which project the test process itself runs inside.
+    #[test]
+    fn guard_classifies_the_syncers_own_root_not_the_process_root() {
+        let base = tempfile::Builder::new()
+            .prefix("cas-guard-root-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let pinned = syncer_for(&base.path().join("pinned").join(".cas"), true);
+        assert!(
+            pinned.ephemeral_project_refusal().is_none(),
+            "a pinned root is durable wherever it lives"
+        );
+        let unpinned = syncer_for(&base.path().join("scratch").join(".cas"), false);
+        let refusal = unpinned.ephemeral_project_refusal();
+        assert!(
+            refusal.as_deref().is_some_and(|r| r.contains("/tmp")),
+            "an unpinned /tmp root must be refused by its own path, got {refusal:?}"
         );
     }
 }

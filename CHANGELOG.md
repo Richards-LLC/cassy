@@ -8,6 +8,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [Unreleased]
 
 ### Fixed
+- Tests that set up a temporary HOME no longer read the machine's own project
+  configuration. HOME only redirects user-level lookups, so a `proxy.toml`
+  registered in a checkout was still visible to tests running from a worktree
+  inside it, and three proxy tests failed for a reason that had nothing to do
+  with the change under test. The release gate also names any such file instead
+  of leaving it to be found by moving files aside one at a time.
 - A merge request for work pushed after an earlier merge reaches the
   supervisor instead of being answered with "Merge already landed". The check
   compared the branch position recorded at the *previous* merge, so every

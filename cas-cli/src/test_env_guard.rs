@@ -87,7 +87,30 @@ impl TestEnvGuard {
         guard.temp_home = Some(temp);
         guard.temp_home_path = Some(path.clone());
         guard.set("HOME", &path);
+        guard.pin_cas_root_under_home();
         guard
+    }
+
+    /// Pin the project root inside the temp HOME so **ancestor** project
+    /// config cannot leak into a test that believes it is hermetic.
+    ///
+    /// HOME and `XDG_CONFIG_HOME` only redirect *user-level* lookups. Project
+    /// config resolves through `find_cas_root`, which walks up from the current
+    /// directory and maps a git worktree onto its main repository's `.cas`.
+    /// Every factory worktree lives under `<repo>/.cas/worktrees/<name>`, so
+    /// without this the host checkout's `.cas/proxy.toml` was reachable from
+    /// tests that set only HOME: on 2026-09-03 three proxy tests began
+    /// panicking inside reqwest because the loader handed them a real http
+    /// server (cas-4ccc). `CAS_ROOT` is the loader's own documented override
+    /// and wins ahead of both the worktree mapping and the walk.
+    ///
+    /// The directory is created because `find_cas_root` only honours an
+    /// override that exists; an empty one is exactly the hermetic world these
+    /// tests assume — a project store with nothing configured in it.
+    fn pin_cas_root_under_home(&mut self) {
+        let root = self.home().join(".cas");
+        std::fs::create_dir_all(&root).expect("temp CAS_ROOT");
+        self.set("CAS_ROOT", &root);
     }
 
     pub(crate) fn with_vars(vars: &[(&str, &str)]) -> Self {

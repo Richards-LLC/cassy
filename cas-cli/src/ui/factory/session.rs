@@ -640,9 +640,14 @@ mod tests {
         use crate::store::{AgentStore, SqliteAgentStore, init_cas_dir};
         use cas_types::{AgentRole, AgentStatus, AgentType};
 
-        let env = crate::test_support::TestEnvGuard::temp_home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let project = tempfile::tempdir().unwrap();
         let cas_root = init_cas_dir(project.path()).unwrap();
+        // `worker_names` resolves with RootOverride::Honor, so CAS_ROOT decides
+        // which registry it reads. The guard now pins that at a hermetic empty
+        // root (cas-4ccc); point it at the project this test just created,
+        // which is what the assertion has always meant.
+        env.set("CAS_ROOT", &cas_root);
         let session_name = "factory-registry-count";
         let metadata = create_metadata(
             session_name,

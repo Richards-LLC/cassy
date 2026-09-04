@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+- Messages sent to a worker now appear once instead of twice. A worker that was
+  idle received the full message a second time as a separate prompt, moments
+  after the first copy, with nothing to mark it as a repeat — so a worker that
+  had already acted on it could be led to do the same work again. The second
+  copy is now a single line telling the worker a message is waiting and naming
+  it, and the message itself is delivered once.
+
 ## [3.15.4] - 2026-09-04
 
 ### Added

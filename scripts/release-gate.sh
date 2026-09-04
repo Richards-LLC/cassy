@@ -125,7 +125,7 @@ if [[ -n "${CAS_INIT_TIMEOUT_SECS:-}" ]]; then
     init_timeout_origin='CAS_INIT_TIMEOUT_SECS'
 else
     CAS_INIT_TIMEOUT_SECS="$gate_init_timeout_secs_default"
-    init_timeout_origin='default'
+    init_timeout_origin='release-gate'
 fi
 export CAS_INIT_TIMEOUT_SECS
 readonly init_timeout_origin
@@ -530,7 +530,7 @@ printf '=== CAS RELEASE GATE RECEIPT ===\n'
 printf 'version: %s\n' "$version"
 printf 'repository: %s\n' "$repo_root"
 printf 'scratch base: %s (from %s)\n' "$scratch_base" "$scratch_base_origin"
-printf 'cas init watchdog for gate children: %ss (from %s)\n' \
+printf 'init watchdog budget: %ss (from %s; cas init clamps at 3600s)\n' \
     "$CAS_INIT_TIMEOUT_SECS" "$init_timeout_origin"
 neutralize_ancestor_proxy_config
 

@@ -48,6 +48,13 @@ const ENV_INIT_NO_TIMEOUT: &str = "CAS_INIT_NO_TIMEOUT";
 /// init still aborts, just on a budget that suits a saturated machine.
 const ENV_INIT_TIMEOUT_SECS: &str = "CAS_INIT_TIMEOUT_SECS";
 
+/// Ceiling on `CAS_INIT_TIMEOUT_SECS`. An hour is far past any plausible init,
+/// even on a machine being hammered, and it keeps the override from becoming a
+/// second way to disable the watchdog: `CAS_INIT_TIMEOUT_SECS=99999999` reads
+/// like a raised budget and behaves like no budget at all. Disabling stays a
+/// single explicit knob.
+const INIT_TIMEOUT_MAX: Duration = Duration::from_secs(3600);
+
 /// Resolve the watchdog budget. `None` means "no watchdog".
 ///
 /// Pure — takes the two environment values rather than reading them — so the
@@ -56,7 +63,8 @@ const ENV_INIT_TIMEOUT_SECS: &str = "CAS_INIT_TIMEOUT_SECS";
 ///
 /// A meaningless override (empty, non-numeric, zero, negative) falls back to
 /// the default budget rather than disabling the watchdog: a typo must never be
-/// the thing that removes a hang detector. Disabling stays explicit.
+/// the thing that removes a hang detector. An over-large one is clamped to
+/// [`INIT_TIMEOUT_MAX`] for the same reason.
 fn resolve_init_timeout(no_timeout: Option<&str>, timeout_secs: Option<&str>) -> Option<Duration> {
     if no_timeout.map(str::trim) == Some("1") {
         return None;
@@ -65,7 +73,8 @@ fn resolve_init_timeout(no_timeout: Option<&str>, timeout_secs: Option<&str>) ->
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
-        .unwrap_or(INIT_TIMEOUT);
+        .unwrap_or(INIT_TIMEOUT)
+        .min(INIT_TIMEOUT_MAX);
     Some(seconds)
 }
 
@@ -1466,6 +1475,37 @@ mod init_watchdog_budget_tests {
                 "override {value:?} must fall back to the default budget"
             );
         }
+    }
+
+    #[test]
+    fn an_over_large_override_is_clamped_rather_than_becoming_a_second_opt_out() {
+        // `CAS_INIT_TIMEOUT_SECS=99999999` reads like a raised budget and
+        // behaves like no watchdog at all. Only CAS_INIT_NO_TIMEOUT disables.
+        assert_eq!(
+            resolve_init_timeout(None, Some("99999999")),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            resolve_init_timeout(None, Some(&u64::MAX.to_string())),
+            Some(Duration::from_secs(3600)),
+            "the ceiling must hold at the top of the range, not overflow past it"
+        );
+        assert_eq!(
+            resolve_init_timeout(None, Some("3600")),
+            Some(Duration::from_secs(3600)),
+            "the ceiling itself is a legal budget"
+        );
+    }
+
+    #[test]
+    fn the_gate_budget_sits_under_the_ceiling() {
+        // scripts/release-gate.sh exports 900. If the ceiling ever dropped
+        // below the value the gate hands its children, the gate would silently
+        // be running on a shorter budget than its own receipt claims.
+        assert_eq!(
+            resolve_init_timeout(None, Some("900")),
+            Some(Duration::from_secs(900))
+        );
     }
 
     #[test]

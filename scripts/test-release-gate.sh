@@ -338,7 +338,7 @@ env_log="$tmp/init-timeout.log"
 : >"$env_log"
 repo="$(new_fixture init-watchdog-budget)"
 output="$(run_gate_with_env_log "$repo" "$env_log" 2>&1 || true)"
-if grep -qF 'cas init watchdog for gate children: 900s (from default)' <<<"$output"; then
+if grep -qF 'init watchdog budget: 900s (from release-gate; cas init clamps at 3600s)' <<<"$output"; then
     ok 'the receipt names the cas init watchdog budget the children ran with'
 else
     bad "the receipt did not name the gate's cas init watchdog budget (output: $output)"
@@ -359,7 +359,7 @@ env_log="$tmp/init-timeout-override.log"
 : >"$env_log"
 repo="$(new_fixture init-watchdog-override)"
 output="$(run_gate_with_env_log "$repo" "$env_log" CAS_INIT_TIMEOUT_SECS=1234 2>&1 || true)"
-if grep -qF 'cas init watchdog for gate children: 1234s (from CAS_INIT_TIMEOUT_SECS)' <<<"$output" \
+if grep -qF 'init watchdog budget: 1234s (from CAS_INIT_TIMEOUT_SECS; cas init clamps at 3600s)' <<<"$output" \
     && grep -q '^CAS_INIT_TIMEOUT_SECS=1234 :: ' "$env_log"; then
     ok 'an explicit CAS_INIT_TIMEOUT_SECS overrides the gate default for its children'
 else

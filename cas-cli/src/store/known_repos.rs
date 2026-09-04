@@ -132,8 +132,11 @@ pub fn open_host_known_repo_store() -> anyhow::Result<SqliteKnownRepoStore> {
     Ok(store)
 }
 
-/// Why a path is disposable by construction and must never enter the host
-/// registry.
+/// Why a path is disposable by construction for host-wide discovery.
+///
+/// These paths may still be registered because local startup and explicit
+/// bindings need a complete host registry. Update discovery and cloud-facing
+/// sweeps apply this classification before acting on registered roots.
 ///
 /// ROOT CAUSE this exists for (cas-647c): every registry row is treated as a
 /// live host project by the sweep and doctor surfaces. A closed mecha-cassy
@@ -144,8 +147,8 @@ pub fn open_host_known_repo_store() -> anyhow::Result<SqliteKnownRepoStore> {
 /// read" — an amber row with no command that cleared it, because the path
 /// still existed so `prune-missing` would not remove it.
 ///
-/// All three classes below are *copies* of a project created and abandoned by
-/// tooling, never checkouts an operator works in.
+/// All three classes below are normally *copies* of a project created and
+/// abandoned by tooling, not checkouts an operator works in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistrySkip {
     /// Under the resolved `[factory] artifacts_root`.
@@ -348,18 +351,14 @@ fn canonical_path(path: &Path) -> PathBuf {
 /// logged at `warn!` and swallowed. If callers need a fatal variant, use
 /// [`open_host_known_repo_store`] + [`KnownRepoStore::upsert`] directly.
 pub fn register_repo(repo_path: &Path) {
-    match register_repo_outcome(repo_path) {
-        Ok(Some(skip)) => debug!(
-            path = %repo_path.display(),
-            reason = %skip.reason(),
-            "skipped disposable root; not registered in host known_repos",
-        ),
-        Ok(None) => debug!(path = %repo_path.display(), "registered repo in host known_repos"),
-        Err(e) => warn!(
+    if let Err(e) = register_repo_strict(repo_path) {
+        warn!(
             path = %repo_path.display(),
             error = %e,
             "failed to register repo in host known_repos registry (non-fatal)",
-        ),
+        );
+    } else {
+        debug!(path = %repo_path.display(), "registered repo in host known_repos");
     }
 }
 
@@ -367,21 +366,14 @@ pub fn register_repo(repo_path: &Path) {
 /// to propagate the error (e.g. a CLI `cas known-repos add` explicitly run
 /// by the user). Note: does NOT install schema — run
 /// [`ensure_host_schema`] first if the caller is the bootstrap site.
-///
-/// A disposable root is **not** an error: it is a successful decision to
-/// register nothing, so boot paths that `?` this call keep booting.
+/// Registration deliberately does not apply [`registry_skip`]: local startup
+/// and explicit bindings must be able to read back every path they register.
+/// Host-wide discovery applies the disposable-root policy when it sweeps this
+/// registry instead.
 pub fn register_repo_strict(repo_path: &Path) -> anyhow::Result<()> {
-    register_repo_outcome(repo_path).map(|_| ())
-}
-
-/// `Ok(Some(skip))` when the path was deliberately not registered.
-fn register_repo_outcome(repo_path: &Path) -> anyhow::Result<Option<RegistrySkip>> {
-    if let Some(skip) = registry_skip(repo_path) {
-        return Ok(Some(skip));
-    }
     let store = open_host_known_repo_store()?;
     store.upsert(repo_path)?;
-    Ok(None)
+    Ok(())
 }
 
 /// Describe a host-registry failure as an infrastructure problem, including
@@ -557,7 +549,7 @@ mod tests {
     /// no command that cleared it, because the path existed so `prune-missing`
     /// refused to touch it.
     #[test]
-    fn registry_skips_roots_under_the_factory_artifacts_root_cas_647c() {
+    fn registered_disposable_roots_remain_available_for_local_use_cas_c8ab() {
         TestEnvGuard::run_with_temp_home(|home| {
             ensure_host_schema().unwrap();
             let fixture = home.join(".cas/artifacts/cas-1bfb/fresh-proxy");
@@ -576,7 +568,9 @@ mod tests {
                 .into_iter()
                 .map(|repo| repo.path)
                 .collect();
-            assert_eq!(paths, vec![real.canonicalize().unwrap()]);
+            assert_eq!(paths.len(), 2);
+            assert!(paths.contains(&fixture.canonicalize().unwrap()));
+            assert!(paths.contains(&real.canonicalize().unwrap()));
             assert!(matches!(
                 registry_skip(&fixture),
                 Some(RegistrySkip::Artifacts(_))
@@ -585,11 +579,12 @@ mod tests {
         });
     }
 
-    /// The strict variant must not turn a disposable root into a hard error:
-    /// its callers are boot paths that would abort on `Err`. Skipping is a
-    /// success that registered nothing, and it stays idempotent.
+    /// Local registration is intentionally independent from the discovery
+    /// guard. Explicitly registered roots remain visible in known_repos so
+    /// local startup and binding flows can resolve them; update discovery
+    /// applies `registry_skip_for_known_roots` when it sweeps the registry.
     #[test]
-    fn register_repo_strict_reports_the_skip_without_failing_cas_647c() {
+    fn register_repo_strict_registers_disposable_root_for_local_use_cas_c8ab() {
         TestEnvGuard::run_with_temp_home(|home| {
             ensure_host_schema().unwrap();
             let scratch = home.join(".cas/scratch/fresh-proxy");
@@ -598,7 +593,12 @@ mod tests {
             register_repo_strict(&scratch).unwrap();
             register_repo_strict(&scratch).unwrap();
 
-            assert_eq!(open_host_known_repo_store().unwrap().count().unwrap(), 0);
+            let store = open_host_known_repo_store().unwrap();
+            assert_eq!(store.count().unwrap(), 1);
+            assert_eq!(
+                store.list().unwrap()[0].path,
+                scratch.canonicalize().unwrap()
+            );
             assert!(matches!(
                 registry_skip(&scratch),
                 Some(RegistrySkip::Scratch(_))

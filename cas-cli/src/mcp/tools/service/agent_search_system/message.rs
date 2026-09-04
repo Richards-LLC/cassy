@@ -2044,12 +2044,24 @@ impl CasService {
                 // `wake_attempt` is the daemon's own record of which of those
                 // happened; `wake` remains recipient-side evidence.
                 let wake_attempt_line = wake_attempt_narrative(r.wake_attempt, r.wake);
+                // cas-15f2: a row that no daemon can select used to read
+                // "awaiting_delivery" for a full 15 minutes and then flip to
+                // abandoned, so the operator watching it had no way to tell
+                // "in flight" from "already doomed" — two supervisors waited on
+                // exactly this. State the deadline while it is still pending,
+                // and say the reason out loud once it is terminal.
+                let pending_deadline_line = pending_deadline_narrative(
+                    r.stage,
+                    r.pending_detail.as_deref(),
+                    undelivered_after_secs,
+                );
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
                      stage: {}  pending_reason: {}  wake: {}  wake_attempt: {}  wake_gate_declines: {}  \
                      reaction: {}  confirmation_source: {}\n\
                      {wake_attempt_line}\
                      {transport_line}\
+                     {pending_deadline_line}\
                      {undelivered_line}\
                      {json}",
                     r.legacy_status,
@@ -2171,6 +2183,50 @@ fn enrich_report_from_harness_artifact(
     }
 }
 
+/// How long a never-selected row waits before the poison sweep abandons it
+/// (`PROMPT_RETRY_MAX_AGE_SECS` in cas-store).
+const PROMPT_ABANDON_DEADLINE_SECS: i64 = 15 * 60;
+
+/// Say whether a still-pending row is in flight or already doomed, and name the
+/// reason once it is terminal (cas-15f2).
+///
+/// The old status text reported `stage=enqueued / pending_reason=awaiting_delivery`
+/// identically for a row about to be delivered and for one no daemon could ever
+/// select. Two supervisors watched that line for 15 minutes before it flipped to
+/// `abandoned`, which is the whole "pending forever with no reason" complaint.
+fn pending_deadline_narrative(
+    stage: cas_store::DeliveryStage,
+    pending_detail: Option<&str>,
+    undelivered_after_secs: Option<i64>,
+) -> String {
+    use cas_store::DeliveryStage;
+    match stage {
+        DeliveryStage::Abandoned => format!(
+            "undeliverable: this row was abandoned and will never be delivered — {}\n",
+            pending_detail.unwrap_or("no reason was recorded")
+        ),
+        DeliveryStage::Enqueued | DeliveryStage::Gated | DeliveryStage::Selected => {
+            let Some(waited) = undelivered_after_secs else {
+                return String::new();
+            };
+            let remaining = PROMPT_ABANDON_DEADLINE_SECS - waited;
+            if remaining > 0 {
+                format!(
+                    "delivery deadline: abandoned as undeliverable in {remaining}s if no daemon \
+                     selects it (waited {waited}s of {PROMPT_ABANDON_DEADLINE_SECS}s)\n"
+                )
+            } else {
+                format!(
+                    "delivery deadline: PAST ({waited}s waited, limit \
+                     {PROMPT_ABANDON_DEADLINE_SECS}s) — the sweep will mark this undeliverable; \
+                     it is not still in flight\n"
+                )
+            }
+        }
+        _ => String::new(),
+    }
+}
+
 /// Which `factory_session` a queued row must carry (cas-15f2).
 ///
 /// The row is stamped with the **recipient's** session, never the sender's.
@@ -2209,6 +2265,58 @@ fn row_factory_session(
         .and_then(|agent| agent.factory_session.clone())
         .filter(|session| !session.trim().is_empty())
         .or_else(|| sender_session.map(str::to_owned))
+}
+
+#[cfg(test)]
+mod pending_deadline_tests {
+    use super::pending_deadline_narrative;
+    use cas_store::DeliveryStage;
+
+    /// The 15 minutes two supervisors spent watching "awaiting_delivery" must
+    /// now say how much of the budget is left.
+    #[test]
+    fn a_pending_row_states_how_long_before_it_is_abandoned() {
+        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, Some(60));
+        assert!(line.contains("abandoned as undeliverable in 840s"), "{line}");
+        assert!(line.contains("waited 60s of 900s"), "{line}");
+    }
+
+    /// Past the deadline the row is doomed, not in flight. Saying "still
+    /// pending" there is the claimed-green shape this task exists to remove.
+    #[test]
+    fn a_row_past_the_deadline_says_it_is_not_in_flight() {
+        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, Some(1200));
+        assert!(line.contains("PAST"), "{line}");
+        assert!(line.contains("not still in flight"), "{line}");
+    }
+
+    #[test]
+    fn an_abandoned_row_names_its_reason_instead_of_reporting_progress() {
+        let line = pending_deadline_narrative(
+            DeliveryStage::Abandoned,
+            Some("target no longer belongs to factory session"),
+            Some(1800),
+        );
+        assert!(line.contains("undeliverable"), "{line}");
+        assert!(
+            line.contains("target no longer belongs to factory session"),
+            "{line}"
+        );
+        assert!(line.contains("will never be delivered"), "{line}");
+    }
+
+    #[test]
+    fn an_abandoned_row_without_a_recorded_reason_says_so() {
+        let line = pending_deadline_narrative(DeliveryStage::Abandoned, None, None);
+        assert!(line.contains("no reason was recorded"), "{line}");
+    }
+
+    #[test]
+    fn a_delivered_row_adds_no_deadline_noise() {
+        assert!(
+            pending_deadline_narrative(DeliveryStage::Delivered, None, Some(30)).is_empty()
+        );
+    }
 }
 
 #[cfg(test)]

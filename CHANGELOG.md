@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.15.6] - 2026-09-04
+
+### Fixed
+- Updating no longer ends with a false alarm. After the new version installed
+  and its post-install work ran correctly, the update still failed with a
+  message saying the wrong version had done the work and telling you to run it
+  again. It was reading the build date out of the version line and comparing
+  that to the version number. It now reads the version number itself, and still
+  stops the moment the work really was done by a different version.
+
 ## [3.15.5] - 2026-09-04
 
 ### Added

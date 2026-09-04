@@ -8190,6 +8190,87 @@ async fn gh_699_worker_status_names_the_other_live_supervisor_on_this_clone() {
     );
 }
 
+/// cas-5087: knowing another supervisor is live is only half the answer before
+/// a gate. `worker_status` must name the epic each one is running — including
+/// the one in the other session — or the operator still has to go ask.
+#[tokio::test]
+async fn cas_5087_worker_status_names_each_live_supervisors_epic() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "noble-koala-5"),
+        ("CAS_FACTORY_SESSION", "gabber-gentle-hawk-71"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let mine = env.register_supervisor_in_session("noble-koala-5", "gabber-gentle-hawk-71");
+    let theirs = env.register_supervisor_in_session("gentle-falcon-66", "gabber-witty-panda-98");
+
+    let store = env.task_store();
+    for (owner, title) in [
+        (&mine, "EPIC: v3.15.4 update follow-ups"),
+        (&theirs, "EPIC: hub transcript rewrite"),
+    ] {
+        let id = store.generate_id().expect("generate_id");
+        let mut epic = Task::new(id, title.to_string());
+        epic.task_type = TaskType::Epic;
+        epic.status = TaskStatus::InProgress;
+        epic.epic_verification_owner = Some(owner.clone());
+        store.add(&epic).expect("add epic");
+    }
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("worker_status"),
+    );
+
+    assert!(
+        text.contains("noble-koala-5") && text.contains("epic cas"),
+        "the caller's own epic must be named: {text}"
+    );
+    assert!(
+        text.contains("EPIC: v3.15.4 update follow-ups"),
+        "the caller's epic title must be named: {text}"
+    );
+    assert!(
+        text.contains("gabber-witty-panda-98/gentle-falcon-66"),
+        "the other session's supervisor must still be named: {text}"
+    );
+    assert!(
+        text.contains("EPIC: hub transcript rewrite"),
+        "the OTHER supervisor's epic is the point of this row: {text}"
+    );
+}
+
+/// A supervisor running nothing must render cleanly. An empty field would read
+/// as a broken report, and this page is checked before destructive actions.
+#[tokio::test]
+async fn cas_5087_a_supervisor_with_no_epic_renders_cleanly() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "noble-koala-5"),
+        ("CAS_FACTORY_SESSION", "gabber-gentle-hawk-71"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor_in_session("noble-koala-5", "gabber-gentle-hawk-71");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("worker_status"),
+    );
+
+    assert!(
+        text.contains("noble-koala-5") && text.contains("no epic"),
+        "an epic-less supervisor must say so rather than trail an empty field: {text}"
+    );
+    assert!(
+        !text.contains("task store unreadable"),
+        "a readable store with no epics is not an outage: {text}"
+    );
+}
+
 /// The ordinary single-supervisor factory must stay quiet — a warning every
 /// supervisor sees on every poll is a warning nobody reads.
 #[tokio::test]

@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>2026-09-04 · Hub pairing review</title><style>
+:root{color-scheme:light dark;--bg:#f7f8fa;--paper:#fff;--ink:#202b38;--muted:#4b596b;--accent:#174e88;--border:#b1bbc7;--soft:#edf2f7;--focus:#6a3600}
+@media(prefers-color-scheme:dark){:root{--bg:#111820;--paper:#19232e;--ink:#eef3f9;--muted:#c3cfdd;--accent:#9dcdff;--border:#728397;--soft:#263343;--focus:#ffd18b}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:1160px;margin:auto;padding:2.5rem 2.2rem 4rem;background:var(--paper)}h1{font-size:clamp(1.65rem,3.3vw,2.65rem);line-height:1.17;max-width:29ch;margin:0 0 1.1rem}h2{font-size:1.65rem;line-height:1.3;margin:2.4rem 0 .85rem;border-top:2px solid var(--border);padding-top:1.2rem}h3{font-size:1.2rem;line-height:1.4;margin:1.9rem 0 .5rem}p{max-width:92ch;margin:.7rem 0 1rem}a{color:var(--accent);text-underline-offset:.18em}a:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--focus);outline-offset:4px}code{font:.87em/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}pre{background:var(--soft);padding:1rem;border:1px solid var(--border);white-space:pre-wrap;overflow-wrap:anywhere;font-size:.94rem}pre code{font-size:.87em}.table-wrap{overflow:auto;margin:1.2rem 0 1.7rem}table{border-collapse:collapse;width:100%;font-size:.85rem;line-height:1.5}caption{text-align:left;color:var(--muted);font-size:.82rem;padding:.4rem 0 .6rem}th,td{padding:.65rem .7rem;border:1px solid var(--border);text-align:left;vertical-align:top;overflow-wrap:anywhere}th{background:var(--soft);font-weight:650}tbody tr:nth-child(even){background:var(--bg)}.overview th:first-child,.overview td:first-child{width:8rem;overflow-wrap:normal}.ranked th:nth-child(1){width:6%}.ranked th:nth-child(2){width:8%}section{scroll-margin-top:1rem}footer{max-width:1160px;margin:auto;padding:1rem 2rem 2rem;color:var(--muted);font-size:.8rem}.skip{position:absolute;top:-100px;left:1rem;background:var(--paper);padding:.5rem}.skip:focus{top:.5rem}
+@media(max-width:650px){main{padding:1.4rem 1rem 2.2rem}body{font-size:15px}table{min-width:760px}header+ p{font-size:1rem}h2{font-size:1.4rem}.table-wrap:first-of-type table{min-width:0}pre{padding:.65rem}footer{padding:1rem}.overview th:first-child,.overview td:first-child{width:5.8rem}}
+@media print{:root{--bg:#fff;--paper:#fff;--ink:#000;--muted:#333;--accent:#000;--border:#777;--soft:#fff;color-scheme:light}body{font-size:10pt;line-height:1.45;background:#fff}main{max-width:none;padding:0}h1{font-size:24pt}h2{font-size:16pt}h3{font-size:12pt}h1,h2,h3{break-after:avoid}.table-wrap{overflow:visible;margin:.7rem 0}table{min-width:0!important;table-layout:fixed;font-size:8pt}th,td{padding:.3rem}tr,pre{break-inside:avoid}thead{display:table-header-group;break-after:avoid}.overview th:first-child,.overview td:first-child{width:18%}a[href^="http"]::after{content:" (" attr(href) ")"}pre{font-size:9pt}footer{padding:.5rem 0}.skip{display:none}*{box-shadow:none!important}p{orphans:3;widows:3}}
+@page{size:A4;margin:14mm}
+</style></head><body><a class="skip" href="#content">Skip to report</a><main id="content"><header><h1 id="hub-pairing-works-recovery-still-asks-the-user-to-guess">Hub
+pairing works; recovery still asks the user to guess</h1></header>
+<p>The current browser can complete both pairing journeys on desktop and
+a phone-sized touch viewport. The highest-impact remaining defect is
+state visibility: after a failed exchange, the dialog can keep
+“Pairing…” disabled until the user blurs an autofocused field.
+Cancellation and storage failures also hide or contradict the next
+action. Fix these state transitions before simplifying the presentation.
+Confidence is high for the reproduced browser behavior and traced Rust
+contracts; physical-phone, production relay and real VPN behavior were
+not exercised.</p>
+<div aria-label="Overview — baseline 9905c4c6, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="overview"><caption>Overview — baseline 9905c4c6, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">Review question</th>
+<th scope="col">Verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Can a phone start without an invitation?</td>
+<td>Yes: create code, approve on the machine, then confirm in the
+browser.</td>
+</tr>
+<tr>
+<td>Can an existing machine invitation finish directly?</td>
+<td>Yes: it opens the confirmation form without creating another code.
+It still needs a hub address and two labels.</td>
+</tr>
+<tr>
+<td>Can users recover without guessing?</td>
+<td>Often, but recoverable failures can leave the button disabled, and
+some states silently discard or conceal context.</td>
+</tr>
+<tr>
+<td>Review scope</td>
+<td>Current CLI, browser and hub server source; isolated browser and
+Rust fixtures. Product source remained read-only.</td>
+</tr>
+<tr>
+<td>Snapshot and date</td>
+<td><code>9905c4c6679b909659d695cc1b88d1ba77b0f13a</code>, September 4,
+2026. Pairing product paths match fetched <code>origin/main</code> at
+<code>bbc1629b</code>.</td>
+</tr>
+<tr>
+<td>Audience and ownership</td>
+<td>Practitioner review for the hub integration owner and
+visual-overhaul owner. Review task: cas-2226.</td>
+</tr>
+</tbody>
+</table></div>
+<section aria-labelledby="evidence-and-measured-journeys"><h2 id="evidence-and-measured-journeys">Evidence and measured
+journeys</h2>
+<p>The browser evidence comes from the actual frontend compiled from the
+snapshot, with synthetic API responses and real browser DOM, focus,
+WebCrypto and IndexedDB. Every external API call was intercepted, and
+remaining outbound requests were blocked. No production pairing,
+approval, credential inspection or VPN change occurred. Synthetic
+identifiers are not usable credentials. Desktop was Chrome 152.0.7977.82
+at 1440×900; phone was the same engine at 390×844 with touch/mobile
+emulation. These are browser viewport observations, not physical-device
+certification.</p>
+<p>The evidence set contains <strong>52 scenario runs</strong>: 22
+primary cases plus four relay cases, each on both surfaces. Three
+further checks covered keyboard tab order, a 390×360 reduced viewport
+and 844×390 touch landscape. The 390×360 check approximates available
+space with a keyboard open; it does not invoke an Android or iOS
+keyboard. Existing scoped tests passed: <strong>83 frontend tests and 23
+Rust CLI/auth tests</strong>.</p>
+<h3 id="step-count-and-where-the-work-occurs">Step count and where the
+work occurs</h3>
+<p>Counts below treat a text field fill as one action, not one action
+per character. Browser action counts exclude opening the site and
+scrolling. Machine commands and terminal consent are separate,
+source-traced steps, not fabricated browser taps. Camera/QR handling,
+app switching, command transfer, and typing latency vary by device and
+were not timed.</p>
+<div aria-label="Step count and where the
+work occurs — baseline 9905c4c6, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="data"><caption>Step count and where the
+work occurs — baseline 9905c4c6, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">Journey</th>
+<th scope="col" style="text-align: right;">Observed browser actions</th>
+<th scope="col">Machine steps and boundary</th>
+<th scope="col">Friction and result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phone or desktop starts without an invitation</td>
+<td style="text-align: right;">4: open Pair, Create pairing code, fill
+Operator label, Pair</td>
+<td>Run <code>cas hub authorize &lt;code&gt;</code> and approve the
+exact origin/requested capabilities. A hub without a public address also
+needs configuration.</td>
+<td>Browser creation, poll, approval display, exchange, persistence and
+reload passed. Copy command is an optional fifth browser action; moving
+it to another device is outside this count.</td>
+</tr>
+<tr>
+<td>Existing <code>cas hub pair</code> link</td>
+<td style="text-align: right;">4 after opening: correct Hub URL, fill
+Machine label, fill Operator label, Pair</td>
+<td>Run <code>cas hub pair --origin &lt;Commander origin&gt;</code>;
+open its link or scan its QR. No second code or authorization command is
+required.</td>
+<td>All four browser actions passed on both sizes. Hub URL initially
+equals the Commander origin, which is wrong when the hub is another
+host. Device label is prefilled.</td>
+</tr>
+<tr>
+<td>Existing link delivered to an already open tab</td>
+<td style="text-align: right;">0 actions to reveal the form</td>
+<td>Deliver the new URL fragment.</td>
+<td>The fragment is consumed and scrubbed, and the form opens with Hub
+URL focused. Same-tab delivery is working.</td>
+</tr>
+<tr>
+<td>Offline exchange, then network restored</td>
+<td style="text-align: right;">2 extra observed actions: tap heading to
+blur, Pair</td>
+<td>Restore reachability; no new invitation required if the request was
+never processed.</td>
+<td>The first action is an accidental workaround for the disabled retry
+button. Desired count is one explicit Retry.</td>
+</tr>
+<tr>
+<td>Code expires while waiting</td>
+<td style="text-align: right;">1 action to create a replacement
+code</td>
+<td>Run and approve the new command on the machine.</td>
+<td>Expiry is visible; fresh-code creation recovers. Reusing the expired
+capability is not proposed.</td>
+</tr>
+<tr>
+<td>Pairing relay temporarily unavailable</td>
+<td style="text-align: right;">1 additional Create pairing code action
+after service recovery</td>
+<td>No authorization was sent to a machine.</td>
+<td>Error is visible and creation retry succeeds.</td>
+</tr>
+<tr>
+<td>Credential installed, hub temporarily offline</td>
+<td style="text-align: right;">0 pairing actions after network
+recovery</td>
+<td>Hub connectivity returns.</td>
+<td>Stored machine persists; automatic reconnect succeeds. This is a
+transport state, separate from pairing.</td>
+</tr>
+</tbody>
+</table></div>
+<p>CLI provenance: <code>cas-cli/src/cli/hub.rs:1143</code> prints
+expiry, scopes, link and QR; <code>hub_reverse_pairing.rs:312</code>
+resolves the hub, claims, confirms, mints and completes delivery.
+<code>hub_reverse_pairing.rs:399</code> requires an affirmative terminal
+confirmation by default and prints the exact origin with read/control
+capabilities separated. The fixtures exercise claim retry, scope
+reduction and stopped-hub recovery; the terminal prompt was
+source-traced rather than approved against a live service.</p>
+<h3 id="failure-and-recovery-matrix">Failure and recovery matrix</h3>
+<p>“Both” means the named case was run at both browser sizes. Backend
+facts come from the named Rust tests or source trace, not the browser
+response stub. A generic failure response can represent several server
+conditions; the browser cannot safely infer which one occurred.</p>
+<div aria-label="Failure and recovery matrix — baseline 9905c4c6, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="data"><caption>Failure and recovery matrix — baseline 9905c4c6, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">Condition</th>
+<th scope="col">Evidence</th>
+<th scope="col">Observed state and recovery</th>
+<th scope="col">Assessment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Fresh relay request → machine claimed → authorized</td>
+<td>Both: <code>relay-pending</code>; Rust claim/nonce/consent
+tests</td>
+<td>Copyable command, countdown, claimed-state next step and machine
+details appear; final Pair stores a credential.</td>
+<td>Working. Preserve the explicit terminal and browser confirmation
+boundaries.</td>
+</tr>
+<tr>
+<td>Fresh direct invitation</td>
+<td>Both: <code>legacy</code>; Rust single-use test</td>
+<td>Form opens directly; read scopes are selected and unavailable
+control scopes disabled; pairing succeeds after required fields.</td>
+<td>Working, with excess address/label input.</td>
+</tr>
+<tr>
+<td>Reload after successful pairing</td>
+<td>Both: <code>relay</code>, <code>relay-pending</code></td>
+<td>Machine catalog survives; no new invitation is needed.</td>
+<td>Working. Persistence is distinct from a live session.</td>
+</tr>
+<tr>
+<td>Malformed link</td>
+<td>Both: <code>malformed</code></td>
+<td>Fragment is scrubbed, no dialog or explanation opens; page looks
+like ordinary first use.</td>
+<td>Dead end without feedback. Keep scrubbing, add a safe message.</td>
+</tr>
+<tr>
+<td>Pending invitation already expired at reload</td>
+<td>Both: <code>expired-load</code></td>
+<td>Store clears it; page returns to ordinary first use without saying
+why.</td>
+<td>Explain expiry and offer a new invitation.</td>
+</tr>
+<tr>
+<td>Expired waiting code</td>
+<td>Both: <code>relay-expired</code></td>
+<td>Dialog says expired; Create pairing code obtains another
+request.</td>
+<td>Working recovery, cluttered by the unrelated disabled Pair
+control.</td>
+</tr>
+<tr>
+<td>Used or expired exchange invitation</td>
+<td>Both: <code>used</code>, <code>expired</code>; Rust
+<code>h2_pair_02_pairing_is_bound_persistent_single_use_and_fragment_only</code></td>
+<td>Server-style 401 clears pending state and gives a remint command in
+a toast; dialog stays on disabled Pairing until blur.</td>
+<td>Security rejection works; current error presentation fails.</td>
+</tr>
+<tr>
+<td>Explicit origin mismatch in delivered invitation</td>
+<td>Both: <code>wrong-origin</code>;
+<code>pairing-exchange.ts:52</code></td>
+<td>Rejected before any exchange call; pending invitation cleared;
+explanation goes to toast while stale form persists.</td>
+<td>Preserve rejection, fix visibility and next action.</td>
+</tr>
+<tr>
+<td>Other host or unbound origin with opaque CORS refusal</td>
+<td>Both: <code>wrong-host</code> models browser fetch rejection; Rust
+CORS fixture</td>
+<td>Same “could not reach” message as offline.</td>
+<td>Browser cannot distinguish wrong host, CORS, DNS and offline from
+this signal. Do not assert a unique cause.</td>
+</tr>
+<tr>
+<td>Hub unreachable during exchange</td>
+<td>Both: <code>offline</code></td>
+<td>Pending invitation retained; retry succeeds after heading blur and
+network restoration.</td>
+<td>Recoverable, but disabled-button state is wrong.</td>
+</tr>
+<tr>
+<td>Reachability probe fails after relay approval</td>
+<td>Both: <code>relay-health</code>; <code>main.ts:673</code></td>
+<td>Authorized form opens before health result; focus can defer the
+result. Pair still exists. Source warning asks for a fresh code.</td>
+<td>Advisory probe must not force a remint; offer reachability retry
+while invitation remains valid.</td>
+</tr>
+<tr>
+<td>URL returns 404</td>
+<td>Both: <code>not-found</code></td>
+<td>Check Hub URL message; invitation retained; successful retry after
+blur.</td>
+<td>Clear intent, but delivered relay form has no editable URL. Prefer
+checking machine-side published address when fixed by invitation.</td>
+</tr>
+<tr>
+<td>Hub returns 500</td>
+<td>Both: <code>server-error</code></td>
+<td>Invitation retained; “wait a few seconds” message; retry succeeds
+after blur.</td>
+<td>Preserve bounded retry; avoid promising the invitation is definitely
+unused.</td>
+</tr>
+<tr>
+<td>Actual hub exchange rate limit</td>
+<td>Both: <code>rate-limit-actual</code> models traced 401;
+<code>auth.rs:542</code>, <code>server.rs:837</code></td>
+<td>Server maps the rate-limit error to generic 401; browser clears
+pending state.</td>
+<td>Client's helpful 429 branch is unreachable for this server
+path.</td>
+</tr>
+<tr>
+<td>Hypothetical 429 exchange response</td>
+<td>Both: <code>rate-limit-copy</code></td>
+<td>Invitation retained and wait-a-minute copy selected; retry succeeds
+after blur.</td>
+<td>Demonstrates the client branch, not current server behavior.</td>
+</tr>
+<tr>
+<td>Hub processes exchange, response is lost</td>
+<td>Both: <code>lost-response</code>; server consumption at
+<code>auth.rs:577</code></td>
+<td>UI says invitation is still open; retry receives 401 because fixture
+has consumed it.</td>
+<td>Claim of certainty is false under this valid failure ordering.</td>
+</tr>
+<tr>
+<td>Browser credential write fails after exchange</td>
+<td>Both: <code>storage</code>, real IndexedDB write boundary fault
+injected</td>
+<td>Generic toast “Uncaught exception in event handler”; dialog retains
+Creating text. After restoring storage and retrying, consumed invitation
+is rejected.</td>
+<td>Requires a durable storage-specific recovery state. No false success
+toast occurred.</td>
+</tr>
+<tr>
+<td>Cancel before exchange / Escape</td>
+<td>Both: <code>cancel</code>; cancellation unit tests</td>
+<td>Dialog closes and pending invitation is discarded; reopening
+requires a fresh request.</td>
+<td>Working local discard semantics. Does not revoke the server
+invitation.</td>
+</tr>
+<tr>
+<td>Cancel while exchange is in flight</td>
+<td>Both: <code>cancel-flight</code>; coordinator/rollback unit
+tests</td>
+<td>Delayed reply cannot install a selected machine or show
+success.</td>
+<td>Preserve generation invalidation and staged/active rollback
+checks.</td>
+</tr>
+<tr>
+<td>Cancel when session storage removal and tombstone write both
+fail</td>
+<td>Both: <code>cancel-storage</code>; pending-store tests</td>
+<td>Keep-page-open warning is generated inside the already closed
+dialog. Reopening reveals it.</td>
+<td>Dangerous visibility gap: reload safety is unknown, but the
+instruction is hidden.</td>
+</tr>
+<tr>
+<td>Pair succeeds; hub subsequently fails health</td>
+<td>Both: <code>paired-offline</code></td>
+<td>“Fixture workstation paired” toast accompanies a reconnecting
+machine. Connection returns without re-pair.</td>
+<td>Pairing success is true about credential storage; distinguish it
+from Connected.</td>
+</tr>
+<tr>
+<td>Freshly stored credential is rejected/revoked</td>
+<td>Both: <code>revoked</code>; Rust expiry-vs-revoke test</td>
+<td>Catalog remains; auth failure offers Re-pair, while immediate toast
+still says paired.</td>
+<td>Separate saved credential from verified connection. Revocation must
+never auto-refresh.</td>
+</tr>
+</tbody>
+</table></div>
+</section><section aria-labelledby="ranked-findings-and-reasoning"><h2 id="ranked-findings-and-reasoning">Ranked findings and
+reasoning</h2>
+<p>Priorities reflect user impact, not a claim of production
+exploitation. P1 items interrupt safe completion or recovery; P2 items
+add friction or ambiguity. Effort is an estimate of scope, not a
+delivery promise.</p>
+<div aria-label="Ranked findings and
+reasoning — baseline 9905c4c6, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="ranked"><caption>Ranked findings and
+reasoning — baseline 9905c4c6, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">Rank</th>
+<th scope="col">Priority</th>
+<th scope="col">Finding</th>
+<th scope="col">Minimal change</th>
+<th scope="col">Estimated scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>F1</td>
+<td>P1</td>
+<td>Failed exchange leaves disabled Pairing and stale status until focus
+moves</td>
+<td>Update pairing status/buttons in place; preserve fields/focus across
+state changes</td>
+<td>Medium: render boundary plus browser regression</td>
+</tr>
+<tr>
+<td>F2</td>
+<td>P1</td>
+<td>Failed cancellation cleanup hides the keep-page-open warning</td>
+<td>Keep cleanup failure visible in the modal; offer Retry cleanup</td>
+<td>Small–medium: cancellation and recovery UI</td>
+</tr>
+<tr>
+<td>F3</td>
+<td>P1</td>
+<td>Storage failure after exchange lacks a truthful recovery state</td>
+<td>Show credential-not-saved state with storage recovery and fresh-link
+guidance</td>
+<td>Medium: install failure classification and UI</td>
+</tr>
+<tr>
+<td>F4</td>
+<td>P1</td>
+<td>Network rejection claims unused invitation; throttling destroys
+recoverable state</td>
+<td>Distinguish uncertain exchange outcome; classify bound throttling
+safely</td>
+<td>Medium: typed server outcomes, CORS and UI tests</td>
+</tr>
+<tr>
+<td>F5</td>
+<td>P2</td>
+<td>Direct link requires an address it does not carry and defaults to
+the wrong host</td>
+<td>Explain the expected hub address; explore a versioned local-link
+hint</td>
+<td>Small for copy; medium for link contract</td>
+</tr>
+<tr>
+<td>F6</td>
+<td>P2</td>
+<td>Invalid or reload-expired invitation vanishes without
+explanation</td>
+<td>Carry a nonsecret parse/expiry result into first-use state</td>
+<td>Small: parser/store result and UI</td>
+</tr>
+<tr>
+<td>F7</td>
+<td>P2</td>
+<td>Entry mixes two methods; capabilities and labels require
+translation</td>
+<td>State-specific primary action and plain capability summaries</td>
+<td>Small: copy/layout; coordinate with visual overhaul</td>
+</tr>
+<tr>
+<td>F8</td>
+<td>P2</td>
+<td>Paired and connected appear as one outcome; re-pair loses machine
+context</td>
+<td>Separate saved/connecting/connected and name the machine being
+repaired</td>
+<td>Small–medium: connection/repair presentation</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="f1--update-status-without-rebuilding-the-form">F1 — Update
+status without rebuilding the form</h3>
+<p>Repro on either size: load an authorized invitation, fill Operator
+label, submit, and reject the exchange fetch. The submission renders an
+in-flight shell and reopens its dialog, so <code>autofocus</code> moves
+focus to Device label. When the error settles, <code>render()</code>
+sees an editable element and defers the new shell. The toast says to tap
+Pair again while Pair remains disabled. Tapping the heading triggers
+blur, after which Pair becomes enabled and retry succeeds.</p>
+<p>The behavior crosses <code>main.ts:530</code> (in-flight render),
+<code>main.ts:583</code> (failure render), <code>main.ts:1373</code>
+(autofocus), and <code>main.ts:1734</code> (pairing status in shell
+signature). <code>render-model.ts</code> treats every focused input as
+composing; the live-region branch does not update the pairing controls.
+The same mechanism hides terminal failures and delays the post-approval
+health result. This is reproducible even without typing during the
+request.</p>
+<p><code>mobile-offline-result.png</code> additionally shows the
+body-level toast behind the modal/backdrop while the dialog itself still
+displays Creating. A correct toast string in the DOM is insufficient
+evidence of an actionable error. The status and retry action must be
+inside the current dialog and announced there.</p>
+<p>Proposed change: retain the form DOM while updating its status, busy
+attributes and buttons. Focus only on entry to a genuinely new step.
+Preserve the existing heartbeat draft/caret protections; do not fix
+pairing by globally disabling deferred rendering. Test error arrival
+with Device label focused, keyboard submit, replacement invitation and a
+pointer gesture in progress.</p>
+<h3 id="f2--cancellation-needs-visible-cleanup-completion">F2 —
+Cancellation needs visible cleanup completion</h3>
+<p><code>main.ts:719</code> closes the dialog before
+<code>pendingPairingStore.clear()</code> reports whether removal or a
+tombstone was durable. The failure sentence at <code>main.ts:727</code>
+explicitly tells the operator to keep the page open. In both fixture
+runs, the dialog was closed, there was no toast, and that warning became
+visible only after opening Pair again.</p>
+<p>Keep successful cancellation as discard. When cleanup is uncertain,
+keep a focused, persistent “Could not finish cancellation” state visible
+and provide a cleanup retry. Do not offer to resume the old invitation.
+Make the security boundary clear: browser Cancel blocks local
+continuation; it does not remotely invalidate copies of the invitation.
+The current path never calls a hub revocation endpoint. The server
+invitation remains subject to its existing expiry/single-use policy.</p>
+<h3 id="f3--treat-storage-failure-after-consumption-as-its-own-outcome">F3 —
+Treat storage failure after consumption as its own outcome</h3>
+<p>The hub consumes the one-time invitation and persists the device
+before returning (<code>auth.rs:576–599</code>). The browser then stages
+and activates its catalog record (<code>pairing-exchange.ts:129</code>).
+When the actual IndexedDB write boundary is faulted,
+<code>pairMachine()</code> takes its generic-error path and leaves
+<code>pairingStatus</code> at Creating (<code>main.ts:600</code>).
+Restoring storage does not unconsume the invitation.</p>
+<p>Do not show raw storage exceptions or describe the credential as
+installed. Proposed state: “The machine approved this browser, but this
+browser could not save access. Restore browser storage, then get a fresh
+invitation.” Retain rollback and quarantine checks, and make pending
+cleanup visible. If a future design retries installation from an
+in-memory credential, it needs explicit cancellation/expiry ownership
+and must not serialize that credential into a new ad hoc store. This
+review recommends the simpler fresh-invitation recovery first.</p>
+<h3 id="f4--preserve-uncertainty-and-classify-safe-retries">F4 —
+Preserve uncertainty and classify safe retries</h3>
+<p>A rejected <code>fetch()</code> does not prove a POST never reached
+its server. The browser's catch at <code>pairing-exchange.ts:87</code>
+and message at <code>pairing-messages.ts:66</code> assume exactly that.
+The lost-response fixture consumes the invitation and throws; the user
+is told it is still open, then gets a remint error on retry. A
+storage/audit failure after server mutation can produce similar
+uncertainty.</p>
+<p>Minimal copy: “We could not confirm pairing. Check the connection,
+then retry. If the machine already used this invitation, you will need a
+new one.” Keep the invitation for a bounded retry, but never promise it
+remains unused or replay a consumed server capability. Do not introduce
+relaxed origin checks, broader scopes or credential bypass.</p>
+<p>Separately, <code>auth.rs:552</code> enforces five attempts per
+minute for the source, but <code>server.rs:837–840</code> turns all
+bound failures into 401. <code>pairing-messages.ts:32</code> expects 429
+to preserve the invitation. Add a typed throttled result and
+<code>Retry-After</code> only within the existing safe response/CORS
+boundary; unknown/unbound invitations should remain opaque. A new server
+test must demonstrate that the sixth bound attempt yields a retry state
+without widening information disclosure. The current 429 browser fixture
+is explicitly hypothetical.</p>
+<h3 id="f5--carry-or-clearly-request-the-machines-address">F5 — Carry or
+clearly request the machine's address</h3>
+<p>Direct links contain a token, hub ID and local-link scope ceiling
+(<code>auth.rs:247</code>), but no reachable address.
+<code>pairing-draft.ts:20</code> seeds Hub URL from the Commander page
+origin. On a hosted page this is a plausible-looking, wrong default for
+a remote machine. The four-field form then asks for Machine label,
+Device label and Operator label without explaining their purpose; only
+Device label is prefilled.</p>
+<p>Immediate change: label the field “Machine's hub address” with
+concrete machine-side discovery instructions, and explain the two
+labels: the display name of the machine and who is using this browser.
+Preserve direct confirmation when an invitation is present. Longer term,
+a versioned, validated hub-address hint could remove one fill, but it
+must retain explicit target review. <strong>Do not add new fragment
+fields to HostedRelay URLs</strong>: the recent fix deliberately retains
+a two-key relay contract. LocalCommander and HostedRelay are separate
+projections.</p>
+<h3 id="f6--scrub-secrets-and-retain-nonsecret-failure-context">F6 —
+Scrub secrets and retain nonsecret failure context</h3>
+<p><code>fragment.ts:36</code> returns null for malformed input while
+its <code>finally</code> always scrubs the fragment.
+<code>pending-pairing.ts:96</code> clears an expired stored invitation
+and returns null. Both become ordinary unpaired startup. This is safe
+secret handling but poor recovery feedback.</p>
+<p>Return a typed, nonsecret outcome such as invalid-link or
+expired-invitation alongside the absence of a capability. Show “This
+pairing link is invalid” or “This invitation expired” and a
+fresh-link/code action. Never echo the token, URL fragment or stored raw
+value into the message, analytics, screenshots or logs. Already-open-tab
+delivery remains supported.</p>
+<h3 id="f7--one-next-action-for-the-actual-state">F7 — One next action
+for the actual state</h3>
+<p><code>main.ts:1378</code> places Close, disabled Pair and Create
+pairing code in one entry state, while also saying Pair requires a
+machine-generated URL. On a phone “Pair this machine” can refer to the
+phone rather than the workstation. A separate review in cas-ad97 already
+identified scope vocabulary and pairing-form vocabulary as follow-ups;
+they remain in current source.</p>
+<p>For no invitation, use “Pair a machine” with Create pairing code as
+the primary action and concise machine-link instructions as a secondary
+path. For an existing invitation, open its confirmation form immediately
+with Pair as primary. Do not require or suggest creating a second code.
+For a waiting code, show “On the machine, run this command,” expiry and
+cancellation. Add “Read sessions and terminals” / “Type, send messages
+and interrupt” summaries while keeping exact origin and detailed scopes
+visible for consent.</p>
+<p>The optional Email code field has <code>type=email</code> but is in a
+section handled by a button, not a validated form; server behavior was
+not probed for malformed email. Treat delivery/validation as an explicit
+follow-up, not a confirmed mail failure. The Copy command control
+measured 32px high; ordinary dialog actions measured 40px. These are
+compact touch targets, not evidence that actions are unreachable. The
+visible scope label is the hit target, so the 13px checkbox glyph alone
+is not an accessibility finding.</p>
+<h3 id="f8--say-when-access-is-saved-and-when-the-machine-is-live">F8 —
+Say when access is saved and when the machine is live</h3>
+<p><code>main.ts:608–615</code> persists/selects the machine and starts
+a connection; the submit handler immediately says “Machine paired”
+(<code>main.ts:2341</code>). In <code>paired-offline</code>, this toast
+accompanies a machine waiting to reconnect; in <code>revoked</code>, it
+accompanies an authentication failure. The toast truthfully reports
+stored pairing, but does not prove live access.</p>
+<p>Use a short progression: “Access saved — connecting to Fixture
+workstation,” then Connected after authenticated transport is ready, or
+a persistent connection failure with Retry / Re-pair. Existing
+<code>connection.ts:185</code> already models resolving, health, auth,
+stream attachment and live; reuse it. Re-pair should name the selected
+machine and explain how to replace its credential instead of reopening a
+context-free creation prompt. Preserve automatic refresh for eligible
+expired credentials and refusal for revoked credentials.</p>
+</section><section aria-labelledby="proposed-minimal-journey-and-states"><h2 id="proposed-minimal-journey-and-states">Proposed minimal journey
+and states</h2>
+<p>This is a proposal, not behavior shipped by this review. Exact origin
+approval, capability ceilings, single-use tokens, staged credential
+activation and cancel-discard remain required.</p>
+<div aria-label="Proposed minimal journey
+and states — baseline 9905c4c6, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="data"><caption>Proposed minimal journey
+and states — baseline 9905c4c6, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">State</th>
+<th scope="col">Primary action</th>
+<th scope="col">User-facing meaning</th>
+<th scope="col">Recovery or next state</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No invitation</td>
+<td>Create pairing code</td>
+<td>Start from this browser and approve on the machine</td>
+<td>Waiting code; secondary machine-link instructions</td>
+</tr>
+<tr>
+<td>Invitation opened</td>
+<td>Pair</td>
+<td>Review target machine/address and capabilities; identify this
+browser/operator</td>
+<td>Exchanging; never create another code merely to continue</td>
+</tr>
+<tr>
+<td>Waiting / claimed code</td>
+<td>Copy command; terminal approval occurs separately</td>
+<td>Which machine action is still required and when the code
+expires</td>
+<td>Authorized confirmation, Cancel, or expired replacement</td>
+</tr>
+<tr>
+<td>Exchanging</td>
+<td>Busy indicator; Cancel available</td>
+<td>Creating and saving browser access</td>
+<td>Saved/connecting, recoverable error, uncertain outcome, or storage
+failure</td>
+</tr>
+<tr>
+<td>Recoverable / uncertain exchange error</td>
+<td>Retry</td>
+<td>What can be checked; no claim the server definitely did nothing</td>
+<td>Success or fresh invitation if already consumed</td>
+</tr>
+<tr>
+<td>Invalid / expired / used invitation</td>
+<td>Create fresh code or obtain fresh link</td>
+<td>Why this request cannot continue</td>
+<td>A new request; no reuse of the old capability</td>
+</tr>
+<tr>
+<td>Cancellation cleanup pending</td>
+<td>Retry cleanup</td>
+<td>Keep page open; old request cannot continue locally</td>
+<td>Cancelled after durable cleanup proof</td>
+</tr>
+<tr>
+<td>Access saved / connecting</td>
+<td>Retry connection if needed</td>
+<td>Pairing is stored; checking that the machine can be used</td>
+<td>Connected or machine-specific Re-pair</td>
+</tr>
+<tr>
+<td>Connected</td>
+<td>Open a session</td>
+<td>Authenticated connection is live</td>
+<td>Automatic reconnect, eligible refresh, or explicit repair</td>
+</tr>
+</tbody>
+</table></div>
+<p>This table also supplies the full text equivalent of the proposed
+flow: start without a capability by creating a code; start with a
+capability at confirmation; both paths converge at exchange, durable
+save and connection. Errors return to the nearest safe retry boundary,
+and terminal invitation failures require replacement. There is no
+automatic approval or scope expansion.</p>
+</section><section aria-labelledby="counter-evidence-limits-and-falsifiers"><h2 id="counter-evidence-limits-and-falsifiers">Counter-evidence, limits
+and falsifiers</h2>
+<p>The recent hosted-pairing defect is <strong>already fixed</strong> in
+this baseline: <code>ce217ef0</code> uses
+<code>PairingInvitationTarget::HostedRelay</code>, and
+<code>0cefcc67</code> pins its two-key contract. The current code binds
+<code>window.fetch</code>; old unbound-fetch failures are not a finding.
+Fragment watchers handle already-open Android-style URL delivery. Scope
+ceilings prevent browser over-requesting. Cancellation invalidates
+in-flight operations and catalog staging protects reload from activating
+a cancelled credential. Existing tests cover these mechanisms.</p>
+<p>A wrong initial fixture returned all six scopes to a direct read-only
+invitation; the client correctly rejected it. The fixture was corrected
+to return only requested scopes and rerun. That rejection is positive
+security evidence, not a pairing defect. An initial harness wait also
+targeted a background control hidden by a modal; final runs wait on the
+relevant form. Neither harness failure is counted among the product
+findings.</p>
+<p>The layout did not horizontally overflow at 1440, 390 or 844px. In
+the 390×360 reduced viewport, the internally scrolling form could reach
+its required fields and the 40px Pair action, and submission succeeded.
+Keyboard tab traversal reached the fields, selected scopes, Copy
+command, Cancel and Pair. The first tab could return to Hub URL during
+startup rebuild; the more consequential repeatable focus regression is
+F1. No claim is made that mobile layout is globally broken.</p>
+<p>What would falsify the findings: a browser rerun where an error
+arriving with a field focused updates the visible status and enables
+retry without blur would overturn F1; a visible cleanup warning before
+navigation would overturn F2; a truthful storage failure state would
+overturn F3. A server-side typed rate-limit outcome with preserved CORS
+constraints would invalidate the rate-limit portion of F4. Those
+observations must be made on the deployed source revision, not inferred
+from unit tests that only compare message strings.</p>
+<p>Not verified: production relay availability/email delivery, device
+camera QR handling, real Android/iOS keyboard/VoiceOver/TalkBack
+behavior, physical VPN/DNS/network switching, end-to-end live
+CLI-to-cloud-to-phone transport, or adversarial exploitation. The review
+traces all components and verifies local boundaries; it is not a
+production pairing certification. The synthetic hub reports no optional
+session capabilities, so a version-skew warning in some screenshots is
+fixture context, not a new product finding. The safe fixtures
+deliberately avoid live invitations, token capture and credential
+bypass. A follow-up physical-device smoke should use disposable isolated
+hub state and explicit operator approval at the normal consent
+screen.</p>
+</section><section aria-labelledby="actionable-handoff"><h2 id="actionable-handoff">Actionable handoff</h2>
+<ol type="1">
+<li><strong>Integration owner: schedule F1–F4 as bounded behavioral
+fixes.</strong> First preserve visible status/focus, then visible
+cleanup/storage states, then typed retry outcomes. Add browser
+regressions that observe actual enabled buttons and visible modal text,
+plus server assertions for rate limiting and uncertain completion. Keep
+changes scoped to each failure boundary.</li>
+<li><strong>Visual-overhaul owner: align F5–F8 with the two starting
+journeys.</strong> Entry without invitation has Create code; an existing
+invitation opens directly to Pair. Use plain capability summaries and
+explain labels while retaining exact consent details. Do not change
+HostedRelay wire shape in a visual patch.</li>
+<li><strong>Verifier/operator: run physical-device follow-up after
+fixes.</strong> Exercise same-tab link opening, actual keyboard, QR, VPN
+transition, Cancel during response delay and storage denial using
+disposable fixtures. Do not accept a success toast as proof of
+Connected.</li>
+</ol>
+<p>Initial findings and the confirmed focus/cancellation issues were
+sent directly to <code>tender-panda-58</code>, with supervisor copies
+(notifications 25379 and 25383). Product changes and new fix-task
+ownership remain with the supervisor after this review; no fixes were
+folded into the audit branch.</p>
+</section><section aria-labelledby="provenance-and-reproduction"><h2 id="provenance-and-reproduction">Provenance and reproduction</h2>
+<p>Markdown is the source of this report; its sibling HTML is a
+self-contained rendering. Snapshot:
+<code>9905c4c6679b909659d695cc1b88d1ba77b0f13a</code>. Product-path
+comparison against fetched <code>origin/main</code> was empty.
+<code>hub-web/DESIGN.md</code> was read and checked against the render,
+cancellation and styling code. Prior cas-ad97 findings informed the
+vocabulary/recovery checks; the mobile/visual context is cas-6564 and
+cas-b433. No old screenshot or old test result is counted as fresh
+proof.</p>
+<p>Source locations use the snapshot's line numbers. Shorthand file
+names above resolve to these paths:</p>
+<ul>
+<li><a href="../../hub-web/src/main.ts"><code>main.ts</code></a>:
+form/exchange 525, relay polling 662, cancel 717, markup 1364, render
+signature 1734, submit feedback 2335.</li>
+<li><a href="../../hub-web/src/fragment.ts"><code>fragment.ts</code></a>:
+validation and scrubbing 28; same-tab watcher 69.</li>
+<li><a href="../../hub-web/src/pending-pairing.ts"><code>pending-pairing.ts</code></a>:
+expiry/load 93, save 108, cancellation clear 123.</li>
+<li><a href="../../hub-web/src/pairing-exchange.ts"><code>pairing-exchange.ts</code></a>:
+origin 52, fetch 74, failure 87, staging 129.</li>
+<li><a href="../../hub-web/src/pairing-messages.ts"><code>pairing-messages.ts</code></a>:
+retry classification 30, reachability copy 66.</li>
+<li><a href="../../hub-web/src/pairing-draft.ts"><code>pairing-draft.ts</code></a>:
+initial address and labels 17.</li>
+<li><a href="../../hub-web/src/render-model.ts"><code>render-model.ts</code></a>
+and <a href="../../hub-web/src/styles.css"><code>styles.css</code></a>:
+editable-focus deferral; scrolling dialog 1630/1677.</li>
+<li><a href="../../cas-cli/src/hub/auth.rs"><code>auth.rs</code></a>:
+invitation projections 247, mint 493, throttling 542,
+consumption/persistence 576.</li>
+<li><a href="../../cas-cli/src/hub/server.rs"><code>server.rs</code></a>:
+exchange/CORS response mapping 818.</li>
+<li><a href="../../cas-cli/src/cli/hub.rs"><code>hub.rs</code></a>: pair
+command 1143.</li>
+<li><a href="../../cas-cli/src/cli/hub_reverse_pairing.rs"><code>hub_reverse_pairing.rs</code></a>:
+claim/approve/deliver 312, consent 399, hub resolution 466, CLI recovery
+messages 781.</li>
+<li><a href="../../hub-web/src/connection.ts"><code>connection.ts</code></a>:
+connection progression 185, expired refresh and revoke classification
+235.</li>
+</ul>
+<p>Evidence root: <code>/home/pippenz/.cas/artifacts/cas-2226/</code>.
+Browser scripts, structured observations, focused screenshots and logs
+live there. <code>browser-review.json</code> contains 44 cases;
+<code>relay-review.json</code> contains eight;
+<code>interaction-proof.json</code> contains three geometry/keyboard
+checks. <code>unit.log</code> records 83 passes; <code>rust.log</code>
+and <code>rust.exit</code> record 23 passes and exit 0. The Rust compile
+took 3m00s; the resulting scoped run took 47ms. Test counts count tests
+or scenario runs, not independent user studies. No user-completion
+timing was measured.</p>
+<p>Reproduce from the snapshot (Playwright and Chrome paths in the
+scripts are environment-specific):</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a aria-hidden="true" href="#cb1-1" tabindex="-1"></a><span class="ex">npm</span> <span class="at">--prefix</span> hub-web ci <span class="at">--ignore-scripts</span></span>
+<span id="cb1-2"><a aria-hidden="true" href="#cb1-2" tabindex="-1"></a><span class="ex">npm</span> <span class="at">--prefix</span> hub-web run build <span class="at">--</span> <span class="at">--outDir</span> <span class="st">"</span><span class="va">$PWD</span><span class="st">/target/cas-2226/site"</span></span>
+<span id="cb1-3"><a aria-hidden="true" href="#cb1-3" tabindex="-1"></a><span class="ex">npm</span> <span class="at">--prefix</span> hub-web test <span class="at">--</span> src/pairing.test.ts src/pairing-scopes.test.ts src/connection-state.test.ts src/connection-lifecycle.test.ts</span>
+<span id="cb1-4"><a aria-hidden="true" href="#cb1-4" tabindex="-1"></a><span class="ex">scripts/run-scoped-tests.sh</span> <span class="at">-p</span> cas <span class="at">--lib</span> <span class="at">-E</span> <span class="st">'test(hub::tests::h2_pair) | test(hub::tests::h4_pairing) | test(hub::tests::expired_device) | test(hub_reverse_pairing::tests::)'</span></span>
+<span id="cb1-5"><a aria-hidden="true" href="#cb1-5" tabindex="-1"></a><span class="ex">node</span> target/cas-2226/browser-review.cjs</span>
+<span id="cb1-6"><a aria-hidden="true" href="#cb1-6" tabindex="-1"></a><span class="va">REVIEW_RUN</span><span class="op">=</span>relay-review <span class="va">REVIEW_CASES</span><span class="op">=</span>relay-pending,relay-expired,relay-service,relay-health <span class="ex">node</span> target/cas-2226/browser-review.cjs</span>
+<span id="cb1-7"><a aria-hidden="true" href="#cb1-7" tabindex="-1"></a><span class="ex">node</span> target/cas-2226/interaction.cjs</span></code></pre></div>
+<p>Generated app assets stayed under the worktree's ignored target
+directory. Only the report Markdown and HTML are deliverables in this
+commit. Long-running compilation and scenario batches ran detached so
+supervisor messages remained receivable. Report validation separately
+checks content fidelity, offline rendering, keyboard access, mobile
+width and A4 output; those receipts are in the same artifact
+directory.</p>
+</section></main><footer>Markdown source: <a href="2026-09-04-hub-pairing-review.md">2026-09-04-hub-pairing-review.md</a>. Audit snapshot: 9905c4c6679b909659d695cc1b88d1ba77b0f13a. Source SHA-256: <code>a0a1fc4edfe53f566ca3b01e22137e9f6f303ede05c83d3f92a72a06779aca6b</code>.</footer></body></html>

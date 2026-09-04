@@ -37,6 +37,32 @@ impl Drop for TestEnvGuardNesting {
     }
 }
 
+/// The one ambient `CAS_*` variable a guarded test keeps: the wall-clock budget
+/// for the `cas init` watchdog.
+///
+/// It carries no store, root, or account identity — only how long a child `cas
+/// init` may run before it aborts itself. A batch runner raises it to say "this
+/// host is saturated"; the v3.15.1 release gate lost a run because a test's
+/// child `cas init` hit the 300 s default while three isolation re-runs and six
+/// idle daemons competed for the box (cas-c0411). Scrubbing it would put those
+/// children back on the default the runner just overrode.
+pub(crate) const AMBIENT_INIT_TIMEOUT_SECS: &str = "CAS_INIT_TIMEOUT_SECS";
+
+/// Whether a guarded test process must drop this ambient variable.
+///
+/// Pure so the exemption is stated once and tested without mutating
+/// process-global environment.
+pub(crate) fn is_scrubbed_ambient_env_key(key: &str) -> bool {
+    if key == AMBIENT_INIT_TIMEOUT_SECS {
+        return false;
+    }
+    key.starts_with("CAS_")
+        || matches!(
+            key,
+            "CLAUDE_CONFIG_DIR" | "CLAUDE_SECURESTORAGE_CONFIG_DIR" | "CODEX_HOME" | "GROK_HOME"
+        )
+}
+
 pub(crate) fn test_env_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -180,18 +206,7 @@ impl TestEnvGuard {
     fn scrub_ambient_cas_environment(&mut self) {
         let keys = std::env::vars_os()
             .map(|(key, _)| key)
-            .filter(|key| {
-                key.to_str().is_some_and(|key| {
-                    key.starts_with("CAS_")
-                        || matches!(
-                            key,
-                            "CLAUDE_CONFIG_DIR"
-                                | "CLAUDE_SECURESTORAGE_CONFIG_DIR"
-                                | "CODEX_HOME"
-                                | "GROK_HOME"
-                        )
-                })
-            })
+            .filter(|key| key.to_str().is_some_and(is_scrubbed_ambient_env_key))
             .collect::<Vec<_>>();
         for key in keys {
             self.remove(key);
@@ -212,6 +227,65 @@ impl Drop for TestEnvGuard {
         }
         if let Some(cwd) = &self.saved_cwd {
             let _ = std::env::set_current_dir(cwd);
+        }
+    }
+}
+
+#[cfg(test)]
+mod ambient_scrub_tests {
+    use super::*;
+
+    #[test]
+    fn ambient_cas_and_factory_state_is_scrubbed() {
+        for key in [
+            "CAS_ROOT",
+            "CAS_DIR",
+            "CAS_CLOUD_TOKEN",
+            "CAS_SOME_FUTURE_VARIABLE",
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            "CODEX_HOME",
+            "GROK_HOME",
+        ] {
+            assert!(
+                is_scrubbed_ambient_env_key(key),
+                "{key} is ambient Cassy/factory state and must not reach a fixture"
+            );
+        }
+    }
+
+    #[test]
+    fn the_init_watchdog_budget_survives_because_it_is_only_a_clock() {
+        // cas-c0411: scrubbing this put a test's child `cas init` back on the
+        // 300s default that a saturated release gate had just raised, and the
+        // gate failed on wall clock rather than on anything about the tree.
+        assert!(!is_scrubbed_ambient_env_key(AMBIENT_INIT_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn the_exemption_does_not_extend_to_neighbouring_names() {
+        // A prefix or suffix match would quietly widen the carve-out to
+        // variables that do carry identity.
+        for key in [
+            "CAS_INIT_TIMEOUT",
+            "CAS_INIT_TIMEOUT_SECS_EXTRA",
+            "CAS_INIT_NO_TIMEOUT",
+            "CAS_INIT_ROOT",
+        ] {
+            assert!(
+                is_scrubbed_ambient_env_key(key),
+                "{key} must still be scrubbed; only the exact budget variable is exempt"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_host_environment_is_left_alone() {
+        for key in ["PATH", "HOME", "TMPDIR", "CARGO_TARGET_DIR", "CASSETTE"] {
+            assert!(
+                !is_scrubbed_ambient_env_key(key),
+                "{key} is not Cassy state and must survive"
+            );
         }
     }
 }

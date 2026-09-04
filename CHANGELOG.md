@@ -32,6 +32,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   behaviour and a second `cas update` was needed to converge. The receipt now
   states `refresh_binary_version`, the version that actually performed the
   refresh, and `--json` emits a single combined document instead of two.
+- A release no longer fails because the machine cutting it was busy. `cas init`
+  aborts itself after a wall-clock budget so a hang cannot squat a CPU core, and
+  that budget was a fixed 300 seconds with an all-or-nothing opt-out. On a loaded
+  host a test's child `cas init` reached it and took the release gate's
+  archive-mode row down with it, on timing alone — the same tree passed minutes
+  later on a quiet box. The budget is now settable with `CAS_INIT_TIMEOUT_SECS`,
+  and the release gate raises it to 900 seconds for its own children, naming the
+  value in its receipt. An ordinary `cas init` keeps the 300-second watchdog, a
+  meaningless override falls back to it rather than disabling it, and
+  `CAS_INIT_NO_TIMEOUT=1` still turns the watchdog off outright.
 
 ### Changed
 - **Behaviour change for automation:** if the newly installed binary cannot be

@@ -95,6 +95,38 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# cas-c0411. The gate raises the `cas init` watchdog budget for its children by
+# exporting CAS_INIT_TIMEOUT_SECS, and everything that matters — the tests that
+# spawn `cas init` — sits below the gate, so the train must hand the gate an
+# environment rather than a sanitized one. `env -i`, or a nohup wrapper that
+# rebuilt the environment, would put those children back on the 300s default
+# that failed the v3.15.1 archive-mode row, and nothing else here would notice.
+# ---------------------------------------------------------------------------
+gate_env="$tmp/gate-env.sh"
+cat >"$gate_env" <<'EOF'
+#!/usr/bin/env bash
+printf 'stub gate version=%s cwd=%s\n' "$1" "$PWD"
+printf 'CAS_INIT_TIMEOUT_SECS=%s\n' "${CAS_INIT_TIMEOUT_SECS:-unset}"
+printf 'CAS_RELEASE_GATE_HOME_DIR=%s\n' "${CAS_RELEASE_GATE_HOME_DIR:-unset}"
+EOF
+chmod +x "$gate_env"
+wt_env="$(new_worktree epic-env-merge)"
+dir_env="$("$train" 3.15.2 "$wt_env" --print-run-dir)"
+CAS_RELEASE_TRAIN_GATE_CMD="$gate_env" CAS_INIT_TIMEOUT_SECS=900 \
+    "$train" 3.15.2 "$wt_env" --gate >/dev/null 2>&1 || true
+
+if grep -qx 'CAS_INIT_TIMEOUT_SECS=900' "$dir_env/gate.log" 2>/dev/null; then
+    ok 'the train hands the gate its environment, so the raised init budget survives'
+else
+    bad "the train did not forward CAS_INIT_TIMEOUT_SECS to the gate: $(cat "$dir_env/gate.log" 2>/dev/null || echo absent)"
+fi
+if grep -q '^CAS_RELEASE_GATE_HOME_DIR=/' "$dir_env/gate.log" 2>/dev/null; then
+    ok 'the scratch base the train sets reaches the gate in the same environment'
+else
+    bad "the gate ran without a scratch base: $(cat "$dir_env/gate.log" 2>/dev/null || echo absent)"
+fi
+
+# ---------------------------------------------------------------------------
 # A second start refuses while the first run's recorded pid is alive, and says
 # whose run it is and what to do about it.
 # ---------------------------------------------------------------------------

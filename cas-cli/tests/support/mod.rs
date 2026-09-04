@@ -11,6 +11,11 @@ use std::process::Command;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
+/// The `cas init` watchdog budget in seconds. Forwarded through the sandbox's
+/// `CAS_*` scrub so a batch runner can tell its whole process tree it is a slow
+/// environment (cas-c0411); see [`CasSandbox::configure_command`].
+pub const INIT_TIMEOUT_SECS_ENV: &str = "CAS_INIT_TIMEOUT_SECS";
+
 /// Resolve an archive-consumable `cas` binary without trusting a producer path
 /// baked into an integration-test executable.
 pub fn cas_binary() -> PathBuf {
@@ -120,6 +125,20 @@ impl CasSandbox {
             .map(|value| value.to_os_string())
             .or_else(|| std::env::var_os(cas_store::shared_db::PROTECTED_DBS_ENV));
 
+        // Same carve-out, different reason (cas-c0411): this one is a pure
+        // wall-clock budget for the `cas init` watchdog. Every sandbox runs
+        // `cas init` in its constructor, so on a saturated host — the v3.15.1
+        // release gate, with three isolation re-runs and six idle `cas serve`
+        // daemons in flight — that child can hit the 300 s default and abort,
+        // failing a release on timing. The batch runner raises the budget by
+        // exporting it; the scrub must not be what silently drops it. It cannot
+        // redirect any store or root, so forwarding it costs no hermeticity.
+        let init_timeout_secs = cmd
+            .get_envs()
+            .find_map(|(key, value)| (key == INIT_TIMEOUT_SECS_ENV).then_some(value).flatten())
+            .map(|value| value.to_os_string())
+            .or_else(|| std::env::var_os(INIT_TIMEOUT_SECS_ENV));
+
         let cas_keys: Vec<OsString> = std::env::vars_os()
             .map(|(key, _)| key)
             .chain(cmd.get_envs().map(|(key, _)| key.to_os_string()))
@@ -131,6 +150,9 @@ impl CasSandbox {
 
         if let Some(protected_dbs) = protected_dbs {
             cmd.env(cas_store::shared_db::PROTECTED_DBS_ENV, protected_dbs);
+        }
+        if let Some(init_timeout_secs) = init_timeout_secs {
+            cmd.env(INIT_TIMEOUT_SECS_ENV, init_timeout_secs);
         }
 
         cmd.current_dir(self.path())

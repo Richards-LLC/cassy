@@ -41,8 +41,8 @@ name the blocking step in the operator timeline, and require its receipt.
    `cas update --sync` in the source worktree.
 7. Configure `CAS_RELEASE_GATE_HOME_DIR` on the release host to a large base on
    the checkout mount with a writable parent and no `.cas` ancestor. On
-   soundwave use `/home/cas-release-gate/base`, not `/` (the root filesystem is
-   capacity-constrained). The scratch-base row runs first and requires free space at least twice
+   soundwave use `/home/cas-release-gate/base`, not `/`, which was 97% full.
+   The scratch-base row runs first and requires free space at least twice
    the last recorded archive size and records the new archive size per run.
 8. Prepare the source commit with `scripts/bump-release-version.sh <version>`,
    `cargo update --workspace --offline`, CHANGELOG, release draft, and prior

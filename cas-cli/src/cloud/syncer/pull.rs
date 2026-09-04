@@ -11,8 +11,7 @@ use crate::cloud::syncer::{
     TaskStatusTransition, TeamPullResponse, UpsertResult,
 };
 use crate::cloud::{
-    EntityType, SyncOperation, SyncQueue, get_project_canonical_id,
-    project_ids_match as canonical_project_ids_match,
+    EntityType, SyncOperation, SyncQueue, project_ids_match as canonical_project_ids_match,
 };
 use crate::error::CasError;
 use crate::store::{
@@ -854,30 +853,8 @@ fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
 }
 
 /// Build a project-scoped `/api/sync/pull` URL, **failing closed** when the
-/// project scope cannot be resolved.
-///
-/// `extra_params` are appended verbatim (already `key=value` encoded); the
-/// `project_id=` parameter is always appended by this function. If
-/// `get_project_canonical_id()` returns `None` — i.e. the caller is not inside
-/// a CAS project directory, which is the realistic daemon / cwd-independent
-/// case — no URL is produced at all and the pull aborts. Omitting the scope
-/// would ask the server for *every* project's rows, which is exactly the
-/// cross-project contamination this path exists to prevent.
-///
-/// Returns `(url, resolved_project_id)`; callers that also filter the response
-/// client-side reuse the resolved id rather than resolving it a second time.
-pub(crate) fn build_scoped_pull_url(
-    endpoint: &str,
-    extra_params: &[String],
-) -> Result<(String, String), CasError> {
-    build_scoped_pull_url_with(endpoint, extra_params, get_project_canonical_id)
-}
-
-/// [`build_scoped_pull_url`] with an injectable project-scope resolver.
-///
-/// The resolver is a parameter purely so tests can exercise the unresolvable
-/// (`None`) branch without depending on the process-wide cache inside
-/// `get_project_canonical_id` or on the test's working directory.
+/// supplied project scope cannot be resolved. The resolver parameter is kept
+/// as a small test seam for the unresolvable (`None`) branch.
 pub(crate) fn build_scoped_pull_url_with(
     endpoint: &str,
     extra_params: &[String],
@@ -1508,7 +1485,12 @@ impl CloudSyncer {
                     Some(project_id.to_owned())
                 })?
             }
-            None => build_scoped_pull_url(&self.cloud_config.endpoint, params)?,
+            None => {
+                let project_id = self.personal_push_project_id()?;
+                build_scoped_pull_url_with(&self.cloud_config.endpoint, params, || {
+                    Some(project_id)
+                })?
+            }
         };
         let token = self
             .cloud_config
@@ -1543,17 +1525,13 @@ impl CloudSyncer {
     /// Deliberately infallible: identity refresh is an optimization of
     /// *attribution*, never a precondition for syncing rows.
     fn refresh_project_alias_record(&self) {
-        let Ok(cas_root) = crate::store::find_cas_root() else {
+        let Some(cas_root) = self.push_cas_root.as_deref() else {
             return;
         };
         let Some(token) = self.cloud_config.token.as_deref() else {
             return;
         };
-        let Some(project_id) = self
-            .push_project_canonical_id
-            .clone()
-            .or_else(crate::cloud::get_project_canonical_id)
-        else {
+        let Ok(project_id) = self.personal_push_project_id() else {
             return;
         };
         match crate::cloud::refresh_project_alias_record(
@@ -2536,12 +2514,10 @@ impl CloudSyncer {
     /// Pull team data from cloud and merge into local store.
     ///
     /// `project_id` is the canonical project ID for the current scope
-    /// (typically `cas::cloud::get_project_canonical_id()` at the caller
     /// site). Taking it as a parameter (rather than resolving inside the
-    /// function) keeps the watermark scope explicit AND avoids the
-    /// process-wide cache in `get_project_canonical_id` which would make
-    /// it impossible to exercise the cross-project watermark behavior
-    /// in a single test process. The value is used for:
+    /// function) keeps the watermark scope explicit and makes it possible to
+    /// exercise cross-project watermark behavior in one process. The value is
+    /// used for:
     /// - The `last_team_pull_at_{team_id}_{project_id}` metadata key
     ///   (cas-53d5 — per-(team, project) watermark scoping, fixes the
     ///   "second project sees stale `since=` from the first" regression
@@ -2567,6 +2543,22 @@ impl CloudSyncer {
 
         if !self.is_available() {
             return Ok(result);
+        }
+
+        // A team-pull caller may supply an explicit scope, but the syncer
+        // still owns a concrete queue root. Validate that root before any
+        // network request when its pinned identity disagrees with a resolved
+        // git identity; this keeps a stale process-cwd id fail-closed.
+        if let Some(cas_root) = self.push_cas_root.as_deref()
+            && crate::cloud::normalized_git_remote_for_push(cas_root).is_some()
+        {
+            let resolved = crate::cloud::resolve_canonical_id_for_sync(cas_root)?;
+            if resolved != project_id {
+                return Err(CasError::Other(format!(
+                    "Cannot team-sync `{}`: requested identity `{project_id}` does not match root identity `{resolved}`",
+                    cas_root.display()
+                )));
+            }
         }
 
         let token = self

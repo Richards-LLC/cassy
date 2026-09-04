@@ -107,7 +107,7 @@ pub fn handle_session_start(
         }
 
         // Write OTEL context for telemetry correlation
-        let project_id = crate::cloud::get_project_canonical_id();
+        let project_id = crate::cloud::resolve_canonical_id(cas_root);
         let project_path = cas_root.parent().map(|p| p.to_string_lossy().to_string());
 
         // Check for active task (reuses cached task store)

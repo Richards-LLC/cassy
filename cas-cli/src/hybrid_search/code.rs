@@ -207,7 +207,8 @@ fn merge_code_results(
 }
 
 pub fn open_code_search(cas_root: &Path) -> Result<CasCodeSearch> {
-    let config = CloudConfig::load().unwrap_or_default();
+    let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)
+        .unwrap_or_default();
     open_code_search_with_config(cas_root, &config)
 }
 

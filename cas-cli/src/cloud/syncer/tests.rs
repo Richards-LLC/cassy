@@ -168,6 +168,47 @@ fn test_config_default_team_conflict_resolution() {
 }
 
 #[test]
+fn new_binds_project_identity_to_queue_root() {
+    let temp = tempfile::tempdir().unwrap();
+    crate::cloud::set_canonical_id_in_config_toml(temp.path(), "root-project").unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+
+    let syncer = CloudSyncer::new(
+        queue,
+        crate::cloud::CloudConfig::default(),
+        CloudSyncerConfig::default(),
+    );
+
+    assert_eq!(
+        syncer.personal_push_project_id().unwrap(),
+        "root-project",
+        "a syncer must resolve identity from its queue root, not process cwd"
+    );
+}
+
+#[test]
+fn new_keeps_two_queue_root_identities_separate() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    crate::cloud::set_canonical_id_in_config_toml(first.path(), "project-one").unwrap();
+    crate::cloud::set_canonical_id_in_config_toml(second.path(), "project-two").unwrap();
+
+    let first_syncer = CloudSyncer::new(
+        Arc::new(SyncQueue::open(first.path()).unwrap()),
+        crate::cloud::CloudConfig::default(),
+        CloudSyncerConfig::default(),
+    );
+    let second_syncer = CloudSyncer::new(
+        Arc::new(SyncQueue::open(second.path()).unwrap()),
+        crate::cloud::CloudConfig::default(),
+        CloudSyncerConfig::default(),
+    );
+
+    assert_eq!(first_syncer.personal_push_project_id().unwrap(), "project-one");
+    assert_eq!(second_syncer.personal_push_project_id().unwrap(), "project-two");
+}
+
+#[test]
 fn test_conflict_action_variants() {
     // Test all ConflictAction variants exist
     let _use_remote = ConflictAction::UseRemote;

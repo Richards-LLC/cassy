@@ -500,7 +500,7 @@ pub struct CloudSyncer {
     queue: Arc<SyncQueue>,
     cloud_config: CloudConfig,
     /// Explicit project scope for callers that already own a concrete Cassy
-    /// root. Legacy callers leave this unset and retain cwd-based resolution.
+    /// root. When absent, the queue root is resolved at operation time.
     push_project_canonical_id: Option<String>,
     /// Optional normalized `origin` identity sent with personal pushes.
     /// Missing/non-git remotes deliberately remain absent from the envelope.
@@ -529,11 +529,12 @@ impl CloudSyncer {
         cloud_config: CloudConfig,
         config: CloudSyncerConfig,
     ) -> Self {
-        let personal_push_git_remote = crate::store::find_cas_root()
-            .ok()
-            .and_then(|cas_root| crate::cloud::normalized_git_remote_for_push(&cas_root));
-        // The queue lives in the project's own .cas, so the push guard judges that
-        // root rather than whatever project the process happens to run inside.
+        let cas_root = queue.cas_dir().to_path_buf();
+        let personal_push_git_remote =
+            crate::cloud::normalized_git_remote_for_push(&cas_root);
+        // The queue lives in the project's own .cas, so every identity and
+        // guard must judge that root rather than whatever project the process
+        // happens to run inside.
         let push_cas_root = Some(queue.cas_dir().to_path_buf());
         Self {
             config,
@@ -569,14 +570,27 @@ impl CloudSyncer {
     }
 
     fn personal_push_project_id(&self) -> Result<String, crate::error::CasError> {
-        self.push_project_canonical_id
-            .clone()
-            .or_else(crate::cloud::get_project_canonical_id)
-            .ok_or_else(|| {
-                crate::error::CasError::Other(
-                    "Cannot sync: not inside a Cassy project directory".to_string(),
-                )
-            })
+        let Some(cas_root) = self.push_cas_root.as_deref() else {
+            return Err(crate::error::CasError::Other(
+                "Cannot sync: not inside a Cassy project directory".to_string(),
+            ));
+        };
+        if let Some(explicit) = &self.push_project_canonical_id {
+            // Existing isolated callers may intentionally provide a synthetic
+            // identity for a non-git temp root. A real checkout has a remote,
+            // so validate the explicit scope there before allowing a request.
+            if crate::cloud::normalized_git_remote_for_push(cas_root).is_some() {
+                let resolved = crate::cloud::resolve_canonical_id_for_sync(cas_root)?;
+                if explicit != &resolved {
+                    return Err(crate::error::CasError::Other(format!(
+                        "Cannot sync `{}`: requested identity `{explicit}` does not match root identity `{resolved}`",
+                        cas_root.display()
+                    )));
+                }
+            }
+            return Ok(explicit.clone());
+        }
+        crate::cloud::resolve_canonical_id_for_sync(cas_root)
     }
 
     /// Check if cloud sync is available (user logged in)

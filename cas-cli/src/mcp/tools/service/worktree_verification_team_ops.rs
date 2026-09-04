@@ -156,7 +156,10 @@ impl CasService {
         {
             use crate::cloud::CloudConfig;
 
-            let cloud_config = CloudConfig::load().map_err(|e| {
+            let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(
+                &self.inner.cas_root,
+            )
+            .map_err(|e| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!("Failed to load cloud config: {e}"),
@@ -201,7 +204,10 @@ impl CasService {
         {
             use crate::cloud::CloudConfig;
 
-            let cloud_config = CloudConfig::load().map_err(|e| {
+            let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(
+                &self.inner.cas_root,
+            )
+            .map_err(|e| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!("Failed to load cloud config: {e}"),
@@ -313,7 +319,10 @@ impl CasService {
         {
             use crate::cloud::CloudConfig;
 
-            let cloud_config = CloudConfig::load().map_err(|e| {
+            let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(
+                &self.inner.cas_root,
+            )
+            .map_err(|e| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!("Failed to load cloud config: {e}"),
@@ -355,7 +364,10 @@ impl CasService {
             use crate::store::{open_rule_store, open_skill_store, open_store, open_task_store};
             use std::sync::Arc;
 
-            let cloud_config = CloudConfig::load().map_err(|e| {
+            let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(
+                &self.inner.cas_root,
+            )
+            .map_err(|e| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!("Failed to load cloud config: {e}"),
@@ -407,7 +419,15 @@ impl CasService {
                 )
             })?);
 
-            let syncer = CloudSyncer::new(queue, cloud_config, CloudSyncerConfig::default());
+            let project_id = crate::cloud::resolve_canonical_id_for_sync(&self.inner.cas_root)
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+            let syncer = CloudSyncer::new_for_project(
+                queue,
+                cloud_config,
+                CloudSyncerConfig::default(),
+                project_id.clone(),
+                &self.inner.cas_root,
+            );
 
             // Push first, then pull
             let mut output = format!("Team sync for {team_id}\n\n");
@@ -429,12 +449,6 @@ impl CasService {
             // per-(team, project) watermark scoping. Resolve at the
             // caller; bail if we're not inside a Cassy project (same
             // contract as the syncer's prior internal resolve).
-            let project_id = crate::cloud::get_project_canonical_id().ok_or_else(|| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    "Team pull failed: not inside a Cassy project directory".to_string(),
-                )
-            })?;
             let pull_result = syncer
                 .pull_team(
                     &team_id,

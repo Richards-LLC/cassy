@@ -52,7 +52,7 @@ impl CloudSyncer {
         let project_id = self
             .push_project_canonical_id
             .clone()
-            .or_else(crate::cloud::get_project_canonical_id)
+            .or_else(|| crate::cloud::resolve_canonical_id(&cas_root))
             .unwrap_or_else(|| cas_root.display().to_string());
         verdict.explain(&project_id)
     }

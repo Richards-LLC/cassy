@@ -317,7 +317,8 @@ pub fn embed_pending_history(
 /// embedder: that is a state of the installation, not a failure of the tick,
 /// and the daemon must keep ticking for every other subsystem.
 pub fn drain_all_pending(cas_root: &Path, limit: usize) -> Result<DrainReport, CasError> {
-    let config = CloudConfig::load().unwrap_or_default();
+    let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)
+        .unwrap_or_default();
 
     // First gate: no auth, no embedder, no cache directory on disk, no request.
     let Some(embedder) = KnowledgeEmbedder::from_config(&config) else {

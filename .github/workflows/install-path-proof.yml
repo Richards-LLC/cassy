@@ -108,7 +108,7 @@ jobs:
               /bin/zsh -lc 'set -e; cas; cas doctor'
           )"
           printf '%s\n' "$fresh_commands_output"
-          grep -qF 'Welcome to Cassy. Run `cas init` in a project directory to get started.' \
+          grep -qF 'Welcome to Cassy. Run `cas setup` in a project directory to get started.' \
             <<<"$fresh_commands_output"
           grep -qF "Not found. Run 'cas init'" <<<"$fresh_commands_output"
 
@@ -215,7 +215,7 @@ jobs:
               /bin/bash -lc 'set -e; cas; cas doctor'
           )"
           printf '%s\n' "$fresh_commands_output"
-          grep -qF 'Welcome to Cassy. Run `cas init` in a project directory to get started.' \
+          grep -qF 'Welcome to Cassy. Run `cas setup` in a project directory to get started.' \
             <<<"$fresh_commands_output"
           grep -qF "Not found. Run 'cas init'" <<<"$fresh_commands_output"
 

@@ -32,7 +32,17 @@ and do not claim success without its receipt.
    next patch number. Then prepare one source commit: run `scripts/bump-release-version.sh <version>`,
    `cargo update --workspace --offline`, update CHANGELOG, the runtime-release
    draft, and the previous POSTED receipt; then run
-   `scripts/release-gate.sh <version>` and require every row PASS.
+   `scripts/release-train.sh <version> <epic-worktree> --gate` and require every
+   row PASS. Never hand-write a wrapper with a version-keyed artifacts path:
+   `release-train.sh` owns a per-run directory keyed by version AND worktree
+   (`v<version>-<worktree-basename>`), so two supervisors cutting the same
+   version from different epics cannot overwrite each other's `gate.log` or
+   `gate.done`. It records the gate's PID and refuses to start a second gate
+   for that run; inspect with `--status` and stop with `--stop`, which signals
+   only the recorded PID. Locate a run by its recorded PID, never by a process
+   name pattern: `pgrep -f 'release-gate.sh <version>'` matches every
+   concurrent supervisor's gate, and acting on `head -1` picks by pid order
+   rather than by ownership (cas-5212).
 5. For archive mode, the gate already puts the archive and TMPDIR under
    `/var/tmp/cas-release-gate` — a large real-disk scratch base with no `.cas`
    ancestor, never `/tmp` tmpfs. Set `CAS_RELEASE_GATE_HOME_DIR` only to move
@@ -72,7 +82,8 @@ and do not claim success without its receipt.
    done
    # Set CAS_RELEASE_ARTIFACTS_ROOT to the configured [factory] artifacts_root.
    ARTIFACTS_ROOT="${CAS_RELEASE_ARTIFACTS_ROOT:-$HOME/.cas/artifacts}"
-   EVIDENCE_DIR="$ARTIFACTS_ROOT/release/$TAG"
+   # Per-run, not per-version: take the same directory the gate used.
+   EVIDENCE_DIR="$(scripts/release-train.sh "$VERSION" "$EPIC_WORKTREE" --print-run-dir)"
    mkdir -p "$EVIDENCE_DIR"
    LOG="$EVIDENCE_DIR/release.log"
    PID_FILE="$EVIDENCE_DIR/release.pid"; DONE="$EVIDENCE_DIR/release.done"

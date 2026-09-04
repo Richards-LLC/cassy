@@ -5162,9 +5162,9 @@ mod tests {
         assert!(row.message.contains("last_team_pull_at_team_project-two"));
         assert!(row.message.contains("team_project_registered_team_project-two"));
         assert!(row.message.contains("last_knowledge_push_project_id=project-two"));
-        assert!(row
-            .message
-            .contains("cas cloud project set project-one && cas cloud sync --full"));
+        assert!(row.message.contains("cas cloud purge-foreign --dry-run"));
+        assert!(row.message.contains("cas cloud purge-foreign"));
+        assert!(row.message.contains("cas cloud sync"));
         assert!(!row.message.contains("last_team_pull_at_team_project-one=current"));
     }
 

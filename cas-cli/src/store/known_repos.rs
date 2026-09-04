@@ -578,9 +578,8 @@ mod tests {
         });
     }
 
-    /// Named disposable roots directly under `$TMPDIR` (the cas-cb5e temp-root
-    /// inventory names) are the third disposable class. An unrelated temp
-    /// directory — including the temp HOME every test runs under — is NOT one.
+    /// Every root under `$TMPDIR` is disposable for host-wide discovery. The
+    /// updater must not mistake test/probe/container directories for projects.
     #[test]
     fn registry_skip_names_cassy_temp_roots_but_not_arbitrary_temp_paths_cas_647c() {
         TestEnvGuard::run_with_temp_home(|home| {
@@ -593,9 +592,17 @@ mod tests {
                 registry_skip(&temp.join("custom-wt-abcd/erin")),
                 Some(RegistrySkip::Temp(_))
             ));
-            // The temp HOME itself, and repos inside it, are ordinary projects.
-            assert!(registry_skip(home).is_none());
-            assert!(registry_skip(&home.join("myproject")).is_none());
+            assert!(matches!(
+                registry_skip(&temp.join("ordinary-project")),
+                Some(RegistrySkip::Temp(_))
+            ));
+            // The temp HOME itself is also outside the project registry's
+            // intended durable roots.
+            assert!(matches!(registry_skip(home), Some(RegistrySkip::Temp(_))));
+            assert!(matches!(
+                registry_skip(&home.join("myproject")),
+                Some(RegistrySkip::Temp(_))
+            ));
         });
     }
 

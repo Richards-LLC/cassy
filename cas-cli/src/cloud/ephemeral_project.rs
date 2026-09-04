@@ -236,6 +236,15 @@ mod tests {
     }
 
     #[test]
+    fn an_unpinned_store_without_a_git_remote_is_ephemeral() {
+        let verdict = classify(&dir("/home/dev/container"), false, Some(true));
+        assert!(
+            verdict.is_ephemeral(),
+            "a bare folder identity must never mint a cloud bucket: {verdict:?}"
+        );
+    }
+
+    #[test]
     fn the_refusal_names_the_override() {
         let verdict = classify(&dir("/home/dev/fresh-proxy"), false, Some(false));
         let message = verdict.explain("fresh-proxy").expect("ephemeral explains");

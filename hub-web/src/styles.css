@@ -84,7 +84,7 @@
   --pair-detail-label-width: 140px;
   --mobile-drawer-max-height: 520px;
   --mobile-pane-min-width: 260px;
-  --mobile-attention-label-width: 180px;
+  --mobile-attention-label-width: 200px;
   /* Fleet board session cards: one column on a phone, three across a desktop canvas. */
   --fleet-card-min-width: 260px;
   --fleet-board-max-width: 1120px;
@@ -564,7 +564,6 @@ pre { font-family: var(--font-mono); }
 }
 
 .fleet-machine-phase {
-  margin-left: auto;
   color: var(--text-lo);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
@@ -707,6 +706,12 @@ main {
 }
 
 .session-header h1.toolbar-session-title { font-family: var(--font-mono); }
+
+/* Lease mode and terminal latency describe an open session. On the fleet
+   board they described nothing and were clipped to "Status una" on a phone. */
+.session-header:not(:has(.toolbar-session-title)) .machine-chip,
+.session-header:not(:has(.toolbar-session-title)) .mode-badge,
+.session-header:not(:has(.toolbar-session-title)) .connection-summary { display: none; }
 
 /* Where you are, and the way back out of it, sit together at the start of the
    header: the same two controls on a desktop and under a thumb. */
@@ -1636,6 +1641,7 @@ main {
   .attention-item--reclassified { animation: none; }
   .connection-spinner { animation: none; }
   .machine-drawer { transition-property: opacity; }
+  button { transition: none; }
   #toast { transform: translate(-50%, 0); transition-property: opacity; }
 }
 
@@ -2260,11 +2266,25 @@ fieldset {
 
   .session-header .actions { gap: var(--line-width); }
 
+  /* A 44px header leaves 36px for its controls; 32px was the smallest target
+     on the phone and the two the thumb uses most. */
+  .session-header .actions button,
+  .session-back,
+  .session-picker-toggle {
+    min-height: calc(var(--space-8) + var(--space-1));
+  }
+
   .session-header .actions button {
-    min-height: var(--space-8);
     padding: 0 var(--space-2);
     font-size: var(--fs-xs);
   }
+
+  .drawer-header button {
+    width: var(--space-10);
+    min-height: var(--space-10);
+  }
+
+  .remove-machine { min-height: var(--space-10); }
 
   .terminal-state { width: calc(100% - var(--space-4)); }
   .fleet-board { padding: var(--space-1) var(--space-1) var(--space-3); gap: var(--space-3); }
@@ -2437,9 +2457,9 @@ fieldset {
 
   /* A phone reorders by tapping a worker row to open it as primary; the three
      reorder glyphs only ate the header the pane name needs. */
-  .pane-grid.pane-layout .make-primary,
-  .pane-grid.pane-layout .move-earlier,
-  .pane-grid.pane-layout .move-later { display: none; }
+  .pane-grid.pane-layout .pane-layout-controls .make-primary,
+  .pane-grid.pane-layout .pane-layout-controls .move-earlier,
+  .pane-grid.pane-layout .pane-layout-controls .move-later { display: none; }
 
   .pane-grid.pane-layout .pane-view-toggle[data-view="transcript"]::after { content: "▦"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .pane-view-toggle[data-view="terminal"]::after { content: "≡"; font-size: var(--fs-md); }

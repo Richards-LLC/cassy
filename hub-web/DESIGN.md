@@ -6,30 +6,35 @@ colors:
   bg: "--bg-root #101318"
   surface: "--bg-panel #151922"
   surface-raised: "--bg-raised #1B202B"
+  surface-hover: "--bg-hover #222836"
+  surface-active: "--bg-active #2A3142"
   terminal: "--bg-terminal #0C0E13"
-  border: "--line-subtle #232936; focused --line-strong #38415A"
+  border: "--line-subtle #232936; focused pane --line-strong #38415A"
   text: "--text-hi #E8EBF2"
   text-muted: "--text-mid #9AA3B5; tertiary --text-lo #5C6577"
-  primary: "--state-info #6CA7F2 (state and focus only)"
+  primary: "--state-info #6CA7F2 (running state and keyboard focus only; never a fill)"
   success: "--state-ok #4CC38A"
   warning: "--state-warn #E5B454; --tint-warn rgba(229,180,84,.09)"
   danger: "--state-crit #E5645E; --tint-crit rgba(229,100,94,.10)"
+  idle: "--state-idle #5C6577 (same value as --text-lo, on purpose)"
+  overlay: "--overlay-backdrop and --overlay-shadow-color = color-mix(--bg-terminal 72%, transparent)"
 typography:
   families:
     ui: "--font-ui Inter, ui-sans-serif, system-ui, sans-serif"
-    mono: "--font-mono JetBrains Mono, IBM Plex Mono, monospace"
+    mono: "--font-mono \"JetBrains Mono\", \"IBM Plex Mono\", monospace"
   scale:
-    xs: "--fs-xs 11px / uppercase metadata and badges / 400–600"
-    sm: "--fs-sm 12.5px / card body and secondary UI / 400–600"
-    base: "--fs-base 13.5px / primary UI and buttons / 400–600"
-    terminal: "--fs-terminal 13px / 1.35 / 400–600"
-    md: "--fs-md 15px / pane and section titles / 400–600"
-    lg: "--fs-lg 18px / current session title only / 400–600"
-rail:
-  item: "--rail-item-min 44px / one container treatment for every phone-rail control"
+    xs: "--fs-xs .6875rem (11px) / eyebrows, chips, pane chrome, metadata"
+    sm: "--fs-sm .78125rem (12.5px) / card prose, secondary controls"
+    base: "--fs-base .84375rem (13.5px) / body, buttons, session names in cards"
+    terminal: "--fs-terminal .8125rem (13px) at --line-terminal 1.35, clamped 12–16px by Ghostty"
+    md: "--fs-md .9375rem (15px) / section titles, transcript reading view"
+    lg: "--fs-lg 1.125rem (18px) / the open session title and the pairing code"
+  weights: "--weight-regular 400, --weight-medium 500, --weight-semibold 600; nothing heavier"
+  line-height: "--line-ui 1.4"
+  tracking: "--tracking-label .06em on uppercase eyebrows"
 spacing:
   base: "4px"
-  steps: ["4px", "8px", "12px", "16px", "20px", "24px", "32px", "40px"]
+  steps: "--space-1 4, --space-2 8, --space-3 12, --space-4 16, --space-5 20, --space-6 24, --space-8 32, --space-10 40"
 radius:
   card: "--radius-card 6px"
   pane: "--radius-pane 8px"
@@ -38,235 +43,128 @@ elevation:
   root: "--bg-root, no shadow"
   panel: "--bg-panel, no shadow"
   raised: "--bg-raised, no shadow"
-  overlay: "--shadow-overlay only"
+  overlay: "--shadow-overlay 0 24px 80px var(--overlay-shadow-color); dialog and #toast only"
+geometry:
+  rail: "--machine-rail-width 48px; --rail-item-min 44px per phone-rail control"
+  drawer: "--machine-drawer-width 280px"
+  context: "--context-panel-width 320px; --landscape-attention-rail-width 80px"
+  header: "--session-header-height 44px; --pane-header-height 32px"
+  buttons: "--button-height 40px; --button-compact-height 28px"
+  dialog: "--dialog-width 520px, max-height min(88dvh, 720px)"
+  cards: "--terminal-state-width 360px; --fleet-card-min-width 260px; --fleet-board-max-width 1120px"
+  phone: "--mobile-context-pill-width 152px; --mobile-attention-label-width 200px; --mobile-drawer-max-height 520px"
+  motion: "--chrome-motion-duration 120ms; --attention-motion-duration 150ms; --connection-spin-duration 800ms"
 breakpoints:
-  phone: "(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"
+  phone: "(max-width: 53rem), (max-height: 30rem) and (pointer: coarse) — PHONE_MEDIA_QUERY in hub-web/src/viewport.ts"
   landscape_phone: "(max-height: 30rem) and (pointer: coarse)"
-  compact: "max-width: 53rem"
+  compact: "(max-width: 53rem) — column floor and transcript default only"
+  narrow: "(max-width: 500px) — header chips and ⌘K trigger drop"
 ---
 
 ## Overview
 
-Cassy Commander is a dense, dark-only mission-control console built with plain TypeScript and CSS.
-Its sole application token source is `hub-web/src/styles.css`; component rules consume those custom properties rather than declaring colours or type sizes.
-Cool graphite surfaces make the terminal canvas recede, while saturated colour communicates health, severity, focus, or connection state only.
-Desktop and compact layouts share the same 4px rhythm; the compact surface keeps one readable terminal primary rather than shrinking the desktop grid.
-Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal content and stays separate from application tokens.
+Cassy Commander is a dark-only mission-control console: plain TypeScript, one stylesheet, no framework.
+Every application colour, size and duration is a custom property in the `:root` block of `hub-web/src/styles.css`; component rules consume tokens and an invariant test rejects any hex or `rgb()` below that block.
+Cool graphite surfaces recede so terminal pixels stay the deepest thing on screen; saturated colour appears only where it encodes health, severity, focus or connection state.
+Desktop is three columns (rail · canvas · context panel). A phone in portrait is one column over a 48px bottom bar; a phone on its side puts the rails on the long edges.
+The canvas with machines paired and nothing open is the fleet board — machines and their sessions as cards — not an empty card pointing at a drawer.
+Ghostty's 16-colour ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal content, separate from these tokens.
 
 ## Colors
 
-- `--bg-root` is the shell gutter and page background; it must remain visible between regions instead of being replaced by full-height separator borders.
-- `--bg-panel` is quiet chrome: sidebars, toolbar, and pane title bars. Do not use it for terminal pixels.
-- `--bg-raised` is for cards, list rows, inputs, and buttons. Hover moves one step to `--bg-hover`; active selection moves to `--bg-active`.
-- `--bg-terminal` is reserved for terminal panes, terminal mounts, and code wells so machine output remains the deepest layer.
-- `--line-subtle` is available for true hairline separators, but ordinary cards and columns separate through surface steps and spacing.
-- `--line-strong` is the focused-pane border. Do not put it around every pane or use it as a decorative accent.
-- `--text-hi` is primary copy; `--text-mid` is labels and explanations; `--text-lo` is timestamps, disabled metadata, and unfocused pane chrome.
-- `--state-ok` marks connected or healthy state with dots/text only; it never fills a card.
-- `--state-info` marks running/informational state and keyboard focus with dots/text/outlines only; it never fills a card.
-- `--state-warn` may use `--tint-warn` behind degraded or action-needed content; no unrelated amber decoration.
-- `--state-crit` may use `--tint-crit` and a 2px state rule for hard failures; routine dismiss actions must not borrow it.
-- `--state-idle` is intentionally the same resolved value as `--text-lo`; idle should recede instead of reading as an alert.
+- `--bg-root` is the page and the 8px gutter between shell regions; regions separate through the surface ramp and that gutter, never through full-height borders.
+- `--bg-panel` is quiet chrome: rail, drawer, header, context panel, phase chips, `.pair-details`. Never behind terminal pixels.
+- `--bg-raised` is every card, row, input and button, and the desktop machine tile. Hover moves to `--bg-hover`; selection, the primary button, the active tab and the active machine tile move to `--bg-active`.
+- `--bg-terminal` is reserved for terminal mounts, the transcript, code wells, dialog inputs and the connection log.
+- `--line-subtle` is a hairline for search and palette inputs only. `--line-strong` is the focused pane border and the selected context tab underline; the phone block contains no `--line-strong` at all (D7 invariant).
+- `--text-hi` is primary copy and every identifier the operator acts on; `--text-mid` is labels, prose and unfocused identifiers; `--text-lo` is timestamps, eyebrows, empty-state hints and disabled metadata.
+- `--state-ok`, `--state-info` and `--state-idle` show through dots, text and outlines only. `--state-warn` and `--state-crit` may sit on `--tint-warn`/`--tint-crit` behind actionable content: the warning attention card, the blocked phase chip, the stale status notice, the browser-unsupported line; critical cards add a 2px left rule.
+- `.danger` (Interrupt, remove machine, explicit dismiss) is red text on a normal surface, never a red fill.
+- Only two `box-shadow` declarations exist — `dialog` and `#toast` — and the test suite counts them.
 
 ## Typography
 
-- Human-written labels, buttons, explanations, titles, and attention summaries use `--font-ui`.
-- Machine-generated session names, agent codenames, task IDs, paths, JSON, timestamps, connection states, and pairing codes use `--font-mono`.
-- Session names such as `fast-badger-22` remain mono in `.session-name`, `.toolbar-session-title`, `.pane-title`, attention group headers, and status rows.
-- Use `--fs-xs` for uppercase eyebrows and badges with `--tracking-label`; use `--fs-sm` for secondary UI and card prose.
-- `--fs-base` is the default interactive scale; `--fs-md` is for pane/section titles; `--fs-lg` is the one current-session title scale.
-- Ghostty reads `--font-mono` and `--fs-terminal` at mount time; its size clamps to 12–16px and defaults to 13px at 1.35 line height.
-- The transcript reads at `--fs-md`/1.5 in `--font-mono`: it exists to be read at UI size, so it does not follow the `--fs-terminal` clamp. Its hanging indent is expressed in `ch`, which only lines up in the mono face.
-- Use `--weight-regular`, `--weight-medium`, or `--weight-semibold`. Weight above 600 is prohibited, including ANSI bold rendering.
-- Hierarchy comes from scale and text colour, not from heavier slabs or an extra display face.
+- Human sentences, buttons, titles, headlines and explanations use `--font-ui`. Anything a machine minted — session names, agent codenames, task IDs, paths, JSON, timestamps, connection phases, pairing codes, scope names — uses `--font-mono`, even inside UI prose.
+- The one `--fs-lg` title is the open session name in `.session-header h1.toolbar-session-title`; "Fleet overview" is the same slot in the UI face. Panels and dialogs title at `--fs-md` semibold.
+- Eyebrows (`.session-eyebrow`, `.picker-machine`, `.status-section-label`, `.fleet-machine-phase`, `.pair-details dt`, `.pane-role`) are `--fs-xs`, uppercase, `--tracking-label`, `--text-lo`. Codenames are never uppercased.
+- Chips (`.phase-chip`, `.status-chip`, `.mode-badge`) are `--fs-xs` mono uppercase on `--bg-panel` with `--radius-pill`; only blocked/control borrow a state colour.
+- Card prose (`.attention-detail`, `.status-activity`, `.session-summary-description`) is `--fs-sm` and wraps with `text-wrap: pretty` or a two-line clamp; it never ellipsises after four words.
+- Ghostty reads `--font-mono` and `--fs-terminal` at mount and clamps 12–16px. The transcript reads at `--fs-md`/1.5 mono because it exists to be read, and its hanging indent is in `ch`, which only lines up in the mono face.
+- Weight above 600 is prohibited everywhere, including ANSI bold in the renderer.
 
 ## Layout
 
-- All padding and gaps use the `--space-*` 4px scale. Cards and rows use 12px; panels use 16px; pane and shell gaps use 8px.
-- Desktop chrome is centralized as a 48px `--machine-rail-width`, a 212px `--machine-drawer-width` (260px expanded navigation), and a 320px `--context-panel-width`.
-- `.shell` exposes `--bg-root` through its 8px gaps; no full-height left/right column borders may recreate the old boxed grid.
-- `.session-header` is exactly 44px. The supervisor receives 65% of the pane grid and the worker strip 35%; collapsed worker bars are exactly 32px.
-- The collapsed attention region is the same 48px rail width, while the expanded operations panel occupies the 320px context column.
-- A phone is `(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)` — either axis too small for desktop chrome, driven by a finger. Width alone is a narrow-window test, not a phone test: a rotated Pixel 7 is 915px wide and would take the desktop grid onto a 412px-tall screen. The pointer clause keeps a mouse-driven desktop with a short window on the desktop layout. This exact string is `PHONE_MEDIA_QUERY` in `hub-web/src/viewport.ts`, and the stylesheet and every `matchMedia` call must use it, so rotation can never put the layout and the pane-mounting logic in different modes.
-- `compact` stays width-only and separate. It answers how many columns fit across a mount — the 80-column PTY floor and the transcript default — and a phone in landscape genuinely has the width for a wider grid.
-- In portrait, navigation becomes a 48px bottom rail, drawers open above it, and workers scroll horizontally below the readable supervisor terminal.
-- In landscape, the chrome moves to the long edges: machines on the left, the collapsed attention rail on the right, both 48px, each honouring its safe-area inset. The terminal keeps the full height, the machine drawer opens as a left sheet, and the expanded operations panel is a right-hand sheet over the terminal — never a row taken from it. The worker strip is capped at 30dvh there instead of 40dvh.
-- Every control in that rail — Machines, each machine chip, Pair, the attention summary, the message button — shares one container treatment at `--rail-item-min` (44px) on `--bg-raised` with `--radius-card`. The rail is one bar, so it may not mix bordered, filled, and bare controls in a single row.
-- The collapsed context pill floats over the rail: it stays transparent, clips its own contents, and lets its two controls carry the shared rail-item surface, so it never paints a second surface or spills across Pair.
-- At `max-width: 53rem` a pane defaults to the transcript reading view and its PTY is held at a floor of 80 columns; the canvas then sizes to that grid instead of the mount, and terminal view pans horizontally. Above the breakpoint nothing changes: no column floor, terminal view by default.
-- The selected session's `.talk-supervisor` action occupies its own 48px row immediately above the phone rail; it is never moved into the top-bar overflow or a drawer.
-- The phone message composer makes `#message-mic` the full-width first action, with Keyboard and explicit Send beneath it; desktop leaves the textarea keyboard-primary and keeps the mic secondary.
-- Compact pane-order controls use 24px geometry; primary buttons remain 40px high.
-- `.shell` owns `100dvh`; interior regions scroll independently and no page-height content sits beside it.
+- All padding and gaps are `--space-*`: cards and rows 12px, panels 16px, pane and shell gaps 8px, in-card gaps 4–8px.
+- Desktop: `.shell` is `48px · minmax(0,1fr) · 320px`; an open drawer widens the first track by 280px; a collapsed context panel narrows the third to 48px. The `.session-header` is exactly 44px; the supervisor pane takes 65fr and the worker strip 35fr; collapsed worker bars are 32px tall.
+- The fleet board (`.fleet-board`) sits at the top of the canvas, centred at up to 1120px, one `.fleet-machine` section per machine with `.fleet-session` cards on `repeat(auto-fill, minmax(260px, 1fr))`.
+- The phone rule is `PHONE_MEDIA_QUERY`, verbatim in the stylesheet and in every `matchMedia` call, so rotation can never put CSS and pane-mounting logic in different modes. `compact` stays width-only: it decides the 80-column PTY floor and the transcript default, which a landscape phone genuinely has the width to skip.
+- Portrait phone: `main` over a 48px + safe-area bottom bar. The bar holds exactly four labelled controls at `--rail-item-min`: Machines and Pair share the left, the attention summary and the envelope share a 152px pill on the right. Machine chips are hidden here; machines live in the drawer the bar opens and the header names the open one.
+- An expanded phone panel takes a row of `min(45dvh, 520px)` above the bar. Its rail is hidden; the tab row (48px) carries Attention, Workers & Tasks and the close control.
+- Landscape phone: rails on the long edges, 48px machines left (initials) and an 80px labelled attention column right, both honouring safe-area insets; the drawer is a left sheet and the expanded panel a right-hand sheet over the terminal, never a row taken from it. Worker strip capped at 30dvh instead of 40dvh.
+- Below `max-width: 500px` the header drops the machine, mode and latency chips and the ⌘K trigger. Above it, those chips render only while a session is open — on the fleet board they described nothing.
+- On a phone only the primary pane mounts a terminal; every other pane is a 40px tappable row that opens as primary, so the reorder glyphs are hidden and only the view toggle and Find remain in the 32px pane header.
+- `.talk-supervisor` is the selected session's own 48px row above the bar; it hides itself while the composer is already on screen (`:has()` on the open status tab) and returns when the panel or tab changes.
+- `.shell` owns `100dvh`; interior regions scroll independently.
 
 ## Elevation & Depth
 
-- Depth is the ordered surface ramp: `--bg-root` → `--bg-panel` → `--bg-raised`; terminals deliberately step back to `--bg-terminal`.
-- Pane focus changes only the transparent reserved border to `--line-strong`; it does not add glow, shadow, or layout shift.
-- Cards, buttons, sidebars, and terminal panes have no shadow. Surface colour and spacing carry their hierarchy.
-- `dialog` and `#toast` are overlays and are the only elements allowed to use `--shadow-overlay`.
-- The modal backdrop derives from `--bg-terminal` through `--overlay-backdrop`; it must not introduce another ad-hoc black.
+- Depth is the ordered ramp `--bg-root` → `--bg-panel` → `--bg-raised` → (`--bg-hover`, `--bg-active`); terminals deliberately step back to `--bg-terminal`.
+- Pane focus turns the reserved transparent 1px border to `--line-strong` and nothing else: no glow, no shadow, no layout shift.
+- Cards, tiles, buttons, sidebars and panes have no shadow. `dialog` and `#toast` are the only overlays and the only shadows; the modal backdrop derives from `--bg-terminal` through `--overlay-backdrop`.
+- Phone sheets (drawer, expanded landscape panel) are `position: fixed` surfaces on `--bg-panel` with `--radius-pane`, still without shadow; their depth reads from the darker terminal beneath them.
 
 ## Shapes
 
-- Cards, list rows, buttons, inputs, code wells, and state blocks use `--radius-card` (6px).
-- Terminal panes and dialogs use `--radius-pane` (8px).
-- Status dots, count badges, and compact connection pills use `--radius-pill` (999px), never `50%` or another radius.
-- The default pane reserves a transparent `--line-width` border so focused state cannot move content; only `.pane.selected` makes it visible.
-- Critical attention uses a `--state-rule-width` left rule because the rule communicates severity; ordinary cards stay borderless.
-- Keyboard focus is the sole 2px outline and uses `--focus-ring-width` with `--state-info`.
+- `--radius-card` (6px): cards, rows, buttons, inputs, chips that are not pills, code wells, the machine tile, the rail item.
+- `--radius-pane` (8px): terminal panes, dialogs, the empty/connecting card, fleet session cards, phone sheets.
+- `--radius-pill` (999px): status dots, count badges, phase and status chips, the back control, header chips. Never `50%`.
+- Borders: 1px reserved-transparent on panes, 1px `--line-subtle` on search inputs, 1px `--text-mid` on the observer badge, 2px `--state-crit` left rule on critical cards. Focus is the sole 2px outline, `--state-info`, offset 2px.
+- Icons are stroke glyphs at 20px (`.commander-mark-icon`) or single characters; status dots are 8px.
 
 ## Components
 
-- Shell/navigation: `.shell`, `.machine-navigation`, `.machine-rail`, `.machine-drawer`, `.context-panel`, and `.nav-item`; selected rows use `--bg-active`, not a saturated fill.
-- Session row: `sessionButton()` in `hub-web/src/main.ts`; `.session-name` and `.session-meta` keep the codename, supervisor, worker count, and liveness mono.
-- Enriched session card: `.session-summary-title`, `.session-summary-description`, and `.phase-chip` consume the single server-broadcast summary. The machine codename remains a mono eyebrow; stale active descriptions dim after ten minutes. Testing/building use info text, blocked alone may use the warning tint, and idle recedes. Enrichment is per-machine, default off, and must plainly warn that redacted terminal transcript excerpts are sent to the configured model provider.
-- Header: `.session-header` in `hub-web/src/styles.css` and `render()` in `hub-web/src/main.ts`; only an active session receives `.toolbar-session-title` mono styling.
-- Terminal pane: `.pane`, `.pane.selected`, `.pane-header`, and `.terminal-mount`; the terminal canvas owns its independent ANSI palette.
-- Pane transcript: `.transcript`, `.transcript-line`, `.transcript-jump`, and `.pane-view-toggle`; the reflowed reading view of a pane, mono face at `--fs-md` over `--bg-terminal`, layered above the grid rather than replacing it. Colour comes from the same ANSI cells the canvas paints, so it stays outside the application palette.
-- Attention counts: `.attention-count` is one badge on `--bg-active` for every severity, and the collapsed phone rail shows the single labelled `.attention-summary` instead of three bare numbers; severity is carried by text colour and the dot, never by a fill only some severities receive.
-- Attention/status cards: `.attention-item` and `.status-row`; prose stays UI face while `.attention-group-label`, `.attention-ticket`, and `.status-identifier` isolate machine copy.
-- Primary button: `.primary`; it uses `--bg-active` because blue is state/focus, not a decorative call-to-action fill.
-- Pairing dialog: `dialog`, `.pair-flow`, `.pair-code`, and `.pair-details`; code, origins, URLs, and scopes are mono inside an otherwise UI-face flow.
-- Supervisor messaging: `.talk-supervisor`, `.message textarea`, `.composer-actions`, and `openSupervisorComposer()` in `hub-web/src/main.ts`; the selected session supplies the exact supervisor target, the phone mic is primary only when feature detection succeeds, and Send remains explicit.
-- Inputs: `dialog input` and `.message textarea`; raised or terminal fills replace permanent one-pixel boxes, with focus-visible outline for keyboard state.
-- Terminal state: `.terminal-state`; warning tint is allowed because connection degradation is actionable state, and the retry remains a normal button.
-- Toast: `#toast`; it is an overlay, so it may use the one soft overlay shadow but no saturated fill.
-
-## Render model
-
-`render()` used to assign `app.innerHTML` on every hub push. A five-second
-status frame therefore destroyed and re-created every live control in the page:
-the composer was replaced six times and blurred six times inside ten seconds of
-typing, and on a phone each blur closes the soft keyboard. The pairing dialog
-and session picker carried re-open-after-render workarounds for the same
-reason.
-
-The page now has three render paths, chosen in `render()` by
-`renderDecision()` in `src/render-model.ts`:
-
-- **regions** — the default, and the only path a heartbeat can take. Nothing in
-  the shell is replaced; `renderRegions()` writes the new values into the nodes
-  that are already on screen.
-- **shell** — a full rebuild, taken only when `shellSignature()` changed. The
-  signature covers exactly what the shell markup interpolates structurally:
-  selected machine and session, the machine and session catalogs, drawer and
-  panel state, the context tab, supervisor and back targets, lease identity,
-  the palette/picker open flags, and the whole visible state of the pairing
-  dialog.
-- **defer** — the signature changed while a form control inside the app has
-  focus. The rebuild is remembered and flushed once focus has left every
-  editable control **and** the pointer gesture that moved it has delivered its
-  click, so a machine appearing mid-sentence no longer takes the keyboard with
-  it.
-
-Rules that keep this honest:
-
-- If a value appears in the shell markup, it belongs in `shellSignature()` or
-  in `applyLiveRegions()`. Adding it to neither is how a pane goes stale.
-- Per-heartbeat data — latency, attention counts, the status payload, message
-  status, the stale-age sentence — must never enter the signature. One
-  heartbeat-driven field there rebuilds the page every five seconds and undoes
-  all of this.
-- `applyLiveRegions()` may only write into existing nodes: no `innerHTML`, no
-  `createElement`, no `replaceChildren`. An invariant enforces it.
-- Anything a region re-creates (the machine rail, the drawer tree, the session
-  picker list) must bind its own handlers, because `bindEvents()` only runs on
-  a shell rebuild.
-- A region updater owns clearing its own container. The old code relied on the
-  rebuild handing it an empty one.
-- Lease identity is deliberately structural: `bindEvents()` captures the lease
-  in its handlers, so a change of controller has to rebuild rather than leave a
-  stale closure behind a live button.
-
-A deferred rebuild must never run inside a pointer gesture. Pointerdown moves
-focus off a field, `focusout` fires, and rebuilding there replaces the button
-under the finger before the browser dispatches the click — the tap then does
-nothing at all. That is what `DeferredRenderScheduler` in
-`src/deferred-render.ts` exists for: `focusout` releases the rebuild only when
-no gesture is in flight, and a gesture releases it through a macrotask, which
-the browser runs after the click. A microtask is not enough — the click is
-dispatched in the same task as the pointerup.
-
-The dialog re-open lines in `render()` stay. They are no longer load-bearing
-for heartbeats — a heartbeat never reaches them — but a genuine structural
-rebuild can still happen with a dialog open, and re-opening it is correct then.
-
-## Pairing cancellation
-
-Cancel **discards** the invitation. `cancelPendingPairing()` invalidates the
-in-flight operation, clears the pending-pairing store, resets the draft and
-says so in the dialog; re-opening the dialog afterwards offers the create-code
-flow, not the cancelled invitation, and states that pairing needs a fresh URL
-from `cas hub pair`.
-
-That is deliberate and is not a convenience decision. A pairing invitation is a
-one-time capability, and Cancel is the operator's way to say the request must
-not proceed — including the case where they cancel because the link went
-somewhere it should not have. The code already treats a storage-clear failure
-as a durable-blocking problem worth its own message; keeping a still-valid
-invitation retrievable after an explicit cancel would contradict that. A
-cancelled invitation is gone, and a new one costs one command on the machine.
-
-
-## Streaming text on narrow viewports (D15)
-
-A 395px mount measures roughly 46 columns, and Commander used to hand exactly
-that to the PTY. An 80-column agent TUI redrawn at half its width destroys its
-own layout before Commander sees a byte: hanging indents collapse to column 0,
-tags overrun the input rule, and every redraw reflows. Shrinking the font buys
-a handful of columns and fixes none of it.
-
-The fix has two halves.
-
-- **Geometry.** `GhosttyTerminalSurface.setMinimumColumns` puts a floor under
-  the columns reported to the PTY, applied by `main.ts` only below the compact
-  breakpoint. The canvas backing store then sizes to the grid rather than to the
-  mount, and `.terminal-mount` pans horizontally so "Show terminal" shows the
-  real 80-column grid instead of a squeezed one. The floor holds in both views,
-  so toggling never churns a PTY resize.
-- **Reading view.** `TranscriptView` renders the pane's logical lines as
-  wrapping text at UI size, with a per-line hanging indent so a wrap stays
-  inside its own gutter.
-
-**Seam decision — client-side, from the emulator snapshot.** The transcript is
-built in the browser from `GhosttySnapshot.rowData`, which already carries
-`isWrapContinuation` / `wrapsToNext` for soft wraps and per-cell colour, weight
-and decoration for ANSI styling. That is everything a reflow needs, so there is
-no hub-side "logical lines" projection and no new endpoint: a projection would
-mean running a second emulator over the same bytes on the hub and inventing a
-capability flag to negotiate it. `transcript.ts` holds the pure line model and
-`transcript-view.ts` the DOM; the view follows the surface's own render tick
-through the `onRender` callback rather than polling.
-
-Consequences worth knowing:
-
-- Transcript history is the emulator's scrollback, not a second buffer.
-  Reaching the top of the transcript pages the terminal viewport back; "Jump to
-  latest" returns it to the live tail.
-- While the transcript is visible the canvas paint is skipped
-  (`setCanvasPainting(false)`); the snapshot is still taken because the
-  transcript is read from it.
-- A tap on the transcript focuses the pane input, so the reading view never
-  costs the operator the keyboard.
+- Shell and rail: `.shell`, `.machine-navigation`, `.machine-rail`, `.machine-icon` (raised tile, `--bg-active` when selected), `.rail-control` (transparent glyph, raised on hover) — `render()` in `hub-web/src/main.ts`.
+- Fleet board: `.fleet-board`, `.fleet-machine-header` (dot · name · phase eyebrow), `.fleet-session` (mono name, phase chip, two-line summary, mono meta) — `renderFleetBoard()` in `hub-web/src/main.ts`, a region updater keyed on phase only so heartbeats never rebuild it.
+- Drawer and session rows: `.machine-row`, `.nav-item`, `sessionButton()`; the codename stays mono in `.session-name` and the enriched card puts the title in the UI face with the codename as a mono eyebrow.
+- Header: `.session-header`, `.session-back`, `.session-picker-toggle`, `.machine-chip`, `.mode-badge`, `.connection-summary`; only an open session gets the mono `.toolbar-session-title` and the three chips.
+- Terminal pane: `.pane`, `.pane.selected`, `.pane-header`, `.pane-layout-controls`, `.terminal-mount`, `.transcript`, `.transcript-jump` — `renderSessionState()` in `hub-web/src/main.ts`, `hub-web/src/transcript-view.ts`.
+- Canvas states: `.empty-pane-slot` (no machine / no session / no panes) and `.terminal-state` (connecting, failed, retry) are the same centred 360px raised card with `--radius-pane`; the connecting card stacks spinner, mono title, elapsed, amber step and actions — `renderConnectionSurface()` in `hub-web/src/main.ts`.
+- Attention: `.attention-panel-header`, `.attention-group-header` (session name is the heading, `--text-hi` mono), `.attention-item` with `--critical`/`--warning` modifiers; cards omit `.attention-session` when the group already names it — `hub-web/src/attention-view.ts`.
+- Workers & Tasks: `.status-section-label`, `.status-row.status-agent`/`.status-task`, `.status-line` (mono identifiers + `.status-chip`), `.status-activity`/`.status-task-title` prose — `renderStatus()` in `hub-web/src/main.ts`.
+- Composer: `.message`, `#message-text`, `.composer-actions`, `#message-mic` (full-width primary on phone only when feature detection succeeds), explicit `#message-send` — `openSupervisorComposer()` in `hub-web/src/main.ts`.
+- Pairing dialog: `dialog`, `.pair-flow`, `.pair-details` (uppercase eyebrow terms, mono values, stacked on phone), `.pair-code`, sticky `.dialog-actions` — `pairDialogMarkup()` in `hub-web/src/main.ts`, cancel semantics in `hub-web/src/pairing-dialog.ts`.
+- Pickers: `.command-palette`, `.session-picker`, `.palette-command`, `.session-picker-entry[aria-current]`.
+- Toast: `#toast`, body-level overlay above the phone bar.
 
 ## Do's & Don'ts
 
-- ✅ Add every application colour to the `:root` token block in `hub-web/src/styles.css` and consume it with `var(...)`.
-- ❌ Never add a hex, `rgb()`, or `rgba()` colour to component rules, TypeScript markup, or `hub-web/index.html`.
-- ✅ Keep the Ghostty 16-colour ANSI data in `hub-web/src/terminal/ghostty-adapter.ts` independent from the application palette.
-- ❌ Never point ANSI entries at `--state-*`, or use ANSI RGB values for buttons/cards.
-- ✅ Give critical and warning state the permitted low-alpha tints; show OK/info through dots, text, and focus outlines only.
-- ❌ Never use green or blue card fills, gradient decoration, pulse glows, or coloured borders that do not encode state.
-- ✅ Wrap session names, agent names, IDs, paths, timestamps, JSON, and connection state in a mono class even when embedded in UI prose.
-- ❌ Never render a session codename in the UI face, including sidebar rows, header titles, pane bars, or attention grouping.
-- ✅ Use only the 11/12.5/13.5/15/18px UI scale and 13px terminal default; clamp terminal controls to 12–16px.
-- ❌ Never use font weight above 600 or add an unscaled one-off display size.
-- ✅ Use 12px padding for cards/rows, 16px for panels, and 8px gaps between panes.
-- ❌ Never add off-grid spacing or radii other than 6px, 8px, and 999px.
-- ✅ Hide speech controls when secure-context/browser detection fails and keep the same editable textarea and explicit Send path after dictation.
-- ❌ Never auto-send a speech transcript, nag after mic denial, or remove the one-tap keyboard fallback on phone.
-- ✅ Separate shell regions with the graphite surface ramp and the 8px root gutter.
-- ❌ Never restore full-height 1px column borders or shadows on non-overlay surfaces.
-- ✅ Change `hub-web/src/styles.css`, then let the integration owner rebuild distribution assets once.
+- ✅ Add every colour, size and duration to the `:root` block of `hub-web/src/styles.css` and consume it with `var(...)`.
+- ❌ Never write a hex, `rgb()` or `rgba()` outside `:root`, in TypeScript markup, or in `hub-web/index.html` — the invariant test fails the build.
+- ✅ Keep Ghostty's ANSI data in `hub-web/src/terminal/ghostty-adapter.ts` independent of application tokens.
+- ❌ Never point ANSI entries at `--state-*` or reuse ANSI RGB for buttons and cards.
+- ✅ Wrap every codename, ID, path, timestamp and connection phase in a mono class, even mid-sentence.
+- ❌ Never render a session codename in the UI face or uppercase it in an eyebrow.
+- ✅ Use the 11/12.5/13.5/15/18px scale, weights 400–600, radii 6/8/999 and the 4px spacing steps.
+- ❌ Never add a third shadow, a coloured card fill for ok/info, a gradient, a pulse glow or a decorative coloured border.
+- ✅ Give the phone rail one container treatment (`--rail-item-min`, `--bg-raised`, `--radius-card`) for every control in it.
+- ❌ Never put `--line-strong` inside the phone media block; it is the focused-pane border and the phone has no focusable pane chrome.
+- ✅ Keep state that changes every heartbeat (latency, counts, stale age) out of `shellSignature()` and out of region-updater signatures; the fleet board keys on connection phase, not latency.
+- ❌ Never let a region updater call `innerHTML` into the live shell; it owns and clears its own container and binds its own handlers.
+- ✅ Keep Send explicit, keep the dictated text editable, keep Cancel destroying a pairing invitation.
+- ❌ Never auto-send a transcript, hide the keyboard fallback, or make a cancelled invitation retrievable.
+- ✅ Change `hub-web/src/styles.css` and `hub-web/src/main.ts`, then let the integration owner rebuild `hub-web/dist` once.
 - ❌ Never hand-edit or commit generated `hub-web/dist` output from a factory lane.
+
+## Behavioural constraints
+<!-- keep -->
+
+These are engineering decisions the visual system sits on. They survive redesigns.
+
+**Render model.** `render()` chooses one of three paths via `renderDecision()` in `hub-web/src/render-model.ts`: *regions* (default, the only path a heartbeat may take — `renderRegions()` writes into nodes already on screen), *shell* (full rebuild, only when `shellSignature()` changed), or *defer* (signature changed while a form control has focus; flushed by `DeferredRenderScheduler` in `hub-web/src/deferred-render.ts` after focus leaves and the pointer gesture has delivered its click — a macrotask, because the click is dispatched in the same task as pointerup). If a value appears in shell markup it belongs in `shellSignature()` or `applyLiveRegions()`; per-heartbeat data must never enter the signature; `applyLiveRegions()` writes only into existing nodes; anything a region re-creates (rail, drawer tree, session picker, fleet board) binds its own handlers; lease identity is deliberately structural.
+
+**Pairing cancellation.** Cancel discards the invitation: `cancelPendingPairing()` invalidates the in-flight operation, clears the pending store and resets the draft; reopening offers the create-code flow and says pairing needs a fresh URL from `cas hub pair`. A pairing invitation is a one-time capability and Cancel is the operator saying the request must not proceed — including when the link went somewhere it should not have.
+
+**Narrow-viewport text (D15).** Below `compact`, `GhosttyTerminalSurface.setMinimumColumns` floors the PTY at 80 columns; the canvas sizes to the grid and `.terminal-mount` pans, so "Show terminal" shows the real grid. The transcript (`hub-web/src/transcript.ts` model, `hub-web/src/transcript-view.ts` DOM) reflows the emulator's logical lines from `GhosttySnapshot.rowData` in the browser — no hub-side projection, no new endpoint. Its history is the emulator's scrollback; reaching the top pages the viewport back and "Jump to latest" returns. While the transcript is visible canvas paint is skipped but the snapshot is still taken; a tap on the transcript focuses the pane input.
+
+**Phone layout invariants.** The phone rule keys on the short axis and pointer, not width alone (D5); every drawer/attention `.shell` class combination is listed in the phone block because a media query adds no specificity; only the primary pane mounts a terminal on a phone; the collapsed context pill paints no surface of its own and never spills across Pair (D7); severity is carried by text colour and the dot, never by a fill only some severities receive (D8).
+<!-- /keep -->

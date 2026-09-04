@@ -2304,6 +2304,152 @@ mod tests {
         });
     }
 
+    // =========================================================================
+    // cas-d9c7: a migration renamed/renumbered in flight leaves its old name in
+    // the ledger under a different id. `cas_migrations.name` is UNIQUE, so the
+    // new id can never be recorded and the phase dies on every run — observed
+    // on gabber-studio, stuck at 252 with 2 pending forever.
+    // =========================================================================
+
+    /// A fully migrated store rewound to the exact gabber-studio ledger shape:
+    /// row 250 carries `history_embedding_error` (the pre-renumber name) while
+    /// the registry has m250=quarantined_rows and m253=history_embedding_error.
+    fn renamed_ledger_fixture(temp: &TempDir, drop_embedding_error_column: bool) -> PathBuf {
+        let project = temp.path().join("renamed-ledger");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::store::init_cas_dir(&project).unwrap();
+        let cas_dir = project.join(".cas");
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+
+        // m254's table must be absent so the run has real work to apply after
+        // the reconciliation, not just rows to record.
+        conn.execute_batch("DROP TABLE IF EXISTS code_index_skipped_files;")
+            .unwrap();
+        if drop_embedding_error_column {
+            // The name matches but the schema is NOT there: the migration must
+            // be applied, never assumed from the ledger row.
+            conn.execute_batch("ALTER TABLE history_docs DROP COLUMN embedding_error;")
+                .unwrap();
+        }
+
+        conn.execute("DELETE FROM cas_migrations WHERE id >= 250", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO cas_migrations (id, name, subsystem, applied_at)
+             VALUES (250, 'history_embedding_error', 'code', 'DETECTED')",
+            [],
+        )
+        .unwrap();
+        for (id, name, subsystem) in [
+            (251u32, "sync_revisions", "tasks"),
+            (252, "sync_conflicts_add_revisions", "tasks"),
+        ] {
+            conn.execute(
+                "INSERT INTO cas_migrations (id, name, subsystem, applied_at)
+                 VALUES (?1, ?2, ?3, 'DETECTED')",
+                params![id, name, subsystem],
+            )
+            .unwrap();
+        }
+        cas_dir
+    }
+
+    fn ledger_name(conn: &Connection, id: u32) -> Option<String> {
+        conn.query_row(
+            "SELECT name FROM cas_migrations WHERE id = ?1",
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    }
+
+    #[test]
+    fn renamed_ledger_row_is_reconciled_and_the_phase_completes() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = renamed_ledger_fixture(&temp, false);
+
+        // The wedge, before the fix: the phase fails and nothing advances.
+        let result = run_migrations(&cas_dir, false)
+            .expect("a renamed ledger row must not fail the migration phase");
+        assert!(
+            result.errors.is_empty(),
+            "no migration should error: {:?}",
+            result.errors
+        );
+
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        assert_eq!(
+            ledger_name(&conn, 250).as_deref(),
+            Some("quarantined_rows"),
+            "id 250 must end up owned by the registry migration that holds it"
+        );
+        assert_eq!(
+            ledger_name(&conn, 253).as_deref(),
+            Some("history_embedding_error"),
+            "the renamed migration must be recorded under its current id"
+        );
+        assert_eq!(
+            ledger_name(&conn, 254).as_deref(),
+            Some("code_index_skipped_files"),
+            "later pending migrations must still be applied"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cas_migrations WHERE name = 'history_embedding_error'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1,
+            "the stale row must be gone, not duplicated"
+        );
+
+        let status = check_migrations(&cas_dir).unwrap();
+        assert_eq!(status.pending_count(), 0, "pending: {:?}", status.pending);
+        assert_eq!(
+            status.current_version,
+            MIGRATIONS.last().unwrap().id,
+            "the store must reach the latest schema version"
+        );
+
+        let reconciliation: (i64, String, String) = conn
+            .query_row(
+                "SELECT migration_id, migration_name, reason FROM cas_migration_reconciliations
+                 WHERE migration_name = 'history_embedding_error' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("the rename must be recorded as a reconciliation");
+        assert_eq!(reconciliation.0, 253);
+        assert!(
+            reconciliation.2.contains("250") && reconciliation.2.contains("253"),
+            "the reconciliation must name both ids: {}",
+            reconciliation.2
+        );
+
+        let second = run_migrations(&cas_dir, false).expect("repair must be idempotent");
+        assert_eq!(second.applied_count, 0, "second run must be a no-op");
+    }
+
+    #[test]
+    fn ledger_name_match_without_schema_applies_the_migration() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = renamed_ledger_fixture(&temp, true);
+
+        run_migrations(&cas_dir, false).expect("the phase must complete");
+
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        assert!(
+            cas_store::shared_db::column_exists(&conn, "history_docs", "embedding_error"),
+            "a name match with the schema absent must APPLY the migration, not assume it"
+        );
+        assert_eq!(
+            ledger_name(&conn, 253).as_deref(),
+            Some("history_embedding_error")
+        );
+        assert_eq!(check_migrations(&cas_dir).unwrap().pending_count(), 0);
+    }
+
     #[test]
     fn test_failing_migration_rolls_back_cleanly() {
         let temp = TempDir::new().unwrap();

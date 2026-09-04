@@ -374,7 +374,9 @@ fi
 
 printf 'FAIL nextest — fixture\nFAIL archive-mode — fixture\n' >"$dir_a/gate.log"
 printf '100\n' >"$dir_a/gate.green.epoch"
-printf '145\n' >"$dir_a/release.published.epoch"
+printf '120\n' >"$dir_a/release.tag-complete.epoch"
+git -C "$wt_a" tag -a -f v9.99.0 -m 'fixture release tag' HEAD
+git -C "$wt_a" rev-parse HEAD >"$dir_a/landed-main.sha"
 status="$("$train" 9.99.0 "$wt_a" --status 2>&1 || true)"
 if [[ "$status" == *'rows_failed=nextest,archive-mode'* ]] \
     && [[ "$status" == *'cause_class=<product|fixture|environment|procedure>'* ]] \
@@ -383,10 +385,47 @@ if [[ "$status" == *'rows_failed=nextest,archive-mode'* ]] \
 else
     bad "--status omitted timeline fields: $status"
 fi
-if [[ "$status" == *'green-to-published latency: 45s'* ]]; then
-    ok '--status names green-to-published latency'
+if [[ "$status" == *'tag publisher: completed'* ]] \
+    && [[ "$status" == *'publication: pending'* ]] \
+    && [[ "$status" != *'green-to-published latency:'* ]]; then
+    ok '--status keeps delayed GitHub publication pending after tag success'
 else
-    bad "--status omitted green-to-published latency: $status"
+    bad "tag completion was mislabeled as publication: $status"
+fi
+
+cat >"$dir_a/release-workflow.json" <<EOF
+{"headBranch":"v9.99.0","headSha":"$(git -C "$wt_a" rev-parse HEAD)","status":"completed","conclusion":"failure"}
+EOF
+status="$("$train" 9.99.0 "$wt_a" --status 2>&1 || true)"
+if [[ "$status" == *'publication: unavailable'* ]] \
+    && [[ "$status" == *'workflow conclusion=failure'* ]] \
+    && [[ "$status" != *'green-to-published latency:'* ]]; then
+    ok '--status never treats tag success plus release-workflow failure as published'
+else
+    bad "failed release workflow was mislabeled as publication: $status"
+fi
+
+cat >"$dir_a/release-workflow.json" <<EOF
+{"headBranch":"v9.99.0","headSha":"$(git -C "$wt_a" rev-parse HEAD)","status":"completed","conclusion":"success"}
+EOF
+cat >"$dir_a/release-published.receipt" <<'EOF'
+TAG=v9.99.0
+PUBLISHED_AT=1970-01-01T00:02:25Z
+LINUX_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+MACOS_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+cat >"$dir_a/release-latency.receipt" <<'EOF'
+TAG=v9.99.0
+PUBLISHED_AT=1970-01-01T00:02:25Z
+PUBLISH_LATENCY_SECONDS=25
+EOF
+status="$("$train" 9.99.0 "$wt_a" --status 2>&1 || true)"
+if [[ "$status" == *'publication: verified at 1970-01-01T00:02:25Z'* ]] \
+    && [[ "$status" == *'tag-to-published latency: 25s'* ]] \
+    && [[ "$status" == *'green-to-published latency: 45s'* ]]; then
+    ok '--status derives actual publication latency from verified saved receipts'
+else
+    bad "verified publication receipts did not produce actual latency: $status"
 fi
 
 # ---------------------------------------------------------------------------
@@ -428,7 +467,8 @@ for flavour in skills codex/skills grok/skills; do
         'detached process group' 'runtime_fixture_parent' 'reviewed snapshot update' \
         '9.99.x' 'cause class' 'workers never poll CI' 'competing release' \
         'merge-queue GraphQL query' 'CAS_RELEASE_ENV_FILE' 'annotated tag peels' \
-        'four Slack POSTED' 'refresh_binary_version' 'stranded_branch_override'; do
+        'four Slack POSTED' 'refresh_binary_version' 'stranded_branch_override' \
+        'release.tag-complete.epoch' 'release-published.receipt'; do
         if grep -qF "$marker" "$skill" 2>/dev/null; then
             ok "cas-cut-release ($flavour) carries marker: $marker"
         else
@@ -807,6 +847,13 @@ if [[ "$(cat "$run_pub_dir/release.done" 2>/dev/null)" == "0" ]]; then
     ok 'a successful publish records release.done=0 in the run directory'
 else
     bad "release.done is $(cat "$run_pub_dir/release.done" 2>/dev/null || echo absent): $out"
+fi
+if [[ -s "$run_pub_dir/release.tag-complete.epoch" ]] \
+    && [[ ! -e "$run_pub_dir/release.published.epoch" ]] \
+    && [[ ! -e "$run_pub_dir/release-published.receipt" ]]; then
+    ok 'tag publisher success records only tag completion, never publication'
+else
+    bad 'tag publisher success manufactured a publication receipt'
 fi
 if [[ -s "$run_pub_dir/release.pid" ]] && [[ -s "$run_pub_dir/release.log" ]]; then
     ok 'the publisher PID and log are recorded in the run directory'

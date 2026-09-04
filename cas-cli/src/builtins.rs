@@ -6668,6 +6668,8 @@ This is the body content."#;
                 "four Slack POSTED",
                 "refresh_binary_version",
                 "stranded_branch_override",
+                "release.tag-complete.epoch",
+                "release-published.receipt",
             ] {
                 assert!(
                     skill.content.contains(marker),

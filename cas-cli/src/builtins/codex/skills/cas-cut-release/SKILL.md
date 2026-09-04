@@ -77,8 +77,9 @@ name the blocking step in the operator timeline, and require its receipt.
    failing; stale queue runs from before this attempt prove nothing.
 10. Add one epic note per gate run containing tip, failed rows, cause class
     (`product`, `fixture`, `environment`, or `procedure`), and blocking step.
-    The final pane summary names green-to-published latency; `--status` prints
-    the note template and latency receipt when available.
+    The final pane summary names green-to-published latency only from saved,
+    verified publication receipts; `--status` is bounded and read-only, prints
+    the note template, and otherwise reports publication pending or unavailable.
 11. Publish the recorded landed SHA with `--publish`. Require origin/main and
    the landed commit's `cas-cli/Cargo.toml` to match before the detached tag
    worktree is created. Hardlink `.context/zig`, source
@@ -86,7 +87,9 @@ name the blocking step in the operator timeline, and require its receipt.
    values, and print only the set/unset state of `CAS_POSTHOG_API_KEY` and
    `CAS_SENTRY_DSN`. Let `release.sh --publish-tag` create the annotated tag and
    run local preflight. Keep `release.log`, the recorded PID, and numeric done
-   receipt in the train's external run directory. The detached wrapper must
+   receipt in the train's external run directory. A zero publisher status writes
+   `release.tag-complete.epoch`, never a publication timestamp: tag push
+   completion is separate from GitHub release and asset publication. The detached wrapper must
    capture status without changing the caller's errexit state:
 
    ```bash
@@ -119,8 +122,13 @@ name the blocking step in the operator timeline, and require its receipt.
 12. Before announcing, require the annotated tag peels to the landed SHA and
    `git ls-remote --exit-code --refs origin "refs/tags/$TAG"` succeeds. Save the
    exact matching `gh run list --workflow release.yml --limit 20 --json
-   databaseId,headSha,status,conclusion` row and require success. Run
-   `release-published-receipt.sh --write-draft` and the latency receipt. Use
+   databaseId,headBranch,headSha,status,conclusion` row as `release-workflow.json` and
+   require success. Save `release-published-receipt.sh "$TAG" --write-draft
+   <draft-path>` output as `release-published.receipt` and
+   `release-latency-receipt.sh "$TAG"` output as `release-latency.receipt` in
+   the run directory. Only the published receipt's matching tag, SHA, actual
+   `PUBLISHED_AT`, and both required asset digests authorize `--status` to name
+   green-to-published latency. Use
    MechaCassy's default `cas-internal` channel, retain `C0B44GUKDK2` only for
    verification, and save four Slack POSTED entries with timestamps and
    permalinks. If the live proxy lacks registration, use the configured direct

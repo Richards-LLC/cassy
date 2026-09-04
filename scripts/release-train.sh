@@ -439,10 +439,96 @@ run_publish() {
     set -e
     printf '%s\n' "$rc" >"$run_dir/release.done"
     if [[ "$rc" -eq 0 ]]; then
-        date -u +%s >"$run_dir/release.published.epoch"
+        # release.sh --publish-tag ends after the tag push. GitHub Actions still
+        # has to build/upload both assets and publish the Release, so this event
+        # is deliberately not named or consumed as publication.
+        date -u +%s >"$run_dir/release.tag-complete.epoch"
     fi
     printf 'publisher done status=%s at %s\n' "$rc" "$(date -u +%H:%M:%SZ)"
     return "$rc"
+}
+
+receipt_field() {
+    local path="$1" key="$2"
+    sed -n "s/^${key}=//p" "$path" 2>/dev/null | head -n1
+}
+
+print_publication_status() {
+    local tag="v$version" landed tag_sha workflow_row workflow_branch workflow_sha workflow_status workflow_conclusion
+    local published_file="$run_dir/release-published.receipt"
+    local latency_file="$run_dir/release-latency.receipt"
+    local workflow_file="$run_dir/release-workflow.json"
+    local receipt_tag published_at linux_sha macos_sha latency_tag latency_published latency published_epoch green_epoch
+
+    landed="$(cat "$run_dir/landed-main.sha" 2>/dev/null | tr -d '[:space:]' || true)"
+
+    if [[ -s "$run_dir/release.tag-complete.epoch" ]]; then
+        printf 'tag publisher: completed at epoch %s (GitHub publication is a separate event)\n' \
+            "$(tr -d '[:space:]' <"$run_dir/release.tag-complete.epoch")"
+    elif [[ -s "$run_dir/release.done" && "$(tr -d '[:space:]' <"$run_dir/release.done")" != 0 ]]; then
+        printf 'tag publisher: failed with status %s\n' "$(tr -d '[:space:]' <"$run_dir/release.done")"
+        printf 'publication: unavailable (tag publisher failed)\n'
+        return
+    fi
+
+    if [[ -s "$workflow_file" ]]; then
+        workflow_row="$(jq -c 'if type == "array" then (.[0] // {}) else . end' "$workflow_file" 2>/dev/null || true)"
+        workflow_branch="$(printf '%s' "$workflow_row" | jq -r '.headBranch // empty' 2>/dev/null || true)"
+        workflow_sha="$(printf '%s' "$workflow_row" | jq -r '.headSha // empty' 2>/dev/null || true)"
+        workflow_status="$(printf '%s' "$workflow_row" | jq -r '.status // empty' 2>/dev/null || true)"
+        workflow_conclusion="$(printf '%s' "$workflow_row" | jq -r '.conclusion // empty' 2>/dev/null || true)"
+        if [[ -n "$landed" && "$workflow_branch" == "$tag" && "$workflow_sha" == "$landed" \
+            && "$workflow_status" == completed && "$workflow_conclusion" != success ]]; then
+            printf 'publication: unavailable (matching release workflow conclusion=%s)\n' \
+                "${workflow_conclusion:-missing}"
+            return
+        fi
+    fi
+
+    if [[ ! -s "$published_file" || ! -s "$latency_file" || ! -s "$workflow_file" ]]; then
+        printf 'publication: pending (save verified release-workflow.json, release-published.receipt, and release-latency.receipt)\n'
+        return
+    fi
+
+    tag_sha="$(git -C "$worktree" rev-parse "$tag^{}" 2>/dev/null || true)"
+    if [[ "$(git -C "$worktree" cat-file -t "$tag" 2>/dev/null || true)" != tag \
+        || -z "$landed" || "$tag_sha" != "$landed" || "$workflow_branch" != "$tag" \
+        || "$workflow_sha" != "$landed" \
+        || "$workflow_status" != completed || "$workflow_conclusion" != success ]]; then
+        printf 'publication: unavailable (tag, landed SHA, and successful workflow receipt do not match)\n'
+        return
+    fi
+
+    receipt_tag="$(receipt_field "$published_file" TAG)"
+    published_at="$(receipt_field "$published_file" PUBLISHED_AT)"
+    linux_sha="$(receipt_field "$published_file" LINUX_SHA256)"
+    macos_sha="$(receipt_field "$published_file" MACOS_SHA256)"
+    latency_tag="$(receipt_field "$latency_file" TAG)"
+    latency_published="$(receipt_field "$latency_file" PUBLISHED_AT)"
+    latency="$(receipt_field "$latency_file" PUBLISH_LATENCY_SECONDS)"
+    if [[ "$receipt_tag" != "$tag" || "$latency_tag" != "$tag" \
+        || -z "$published_at" || "$latency_published" != "$published_at" \
+        || ! "$linux_sha" =~ ^[0-9a-f]{64}$ || ! "$macos_sha" =~ ^[0-9a-f]{64}$ \
+        || ! "$latency" =~ ^[0-9]+$ ]]; then
+        printf 'publication: unavailable (published/latency receipts are incomplete or disagree)\n'
+        return
+    fi
+    published_epoch="$(date -u -d "$published_at" +%s 2>/dev/null || true)"
+    if [[ ! "$published_epoch" =~ ^[0-9]+$ ]]; then
+        printf 'publication: unavailable (PUBLISHED_AT is invalid: %s)\n' "$published_at"
+        return
+    fi
+
+    printf 'publication: verified at %s for %s\n' "$published_at" "$landed"
+    printf 'tag-to-published latency: %ss\n' "$latency"
+    if [[ -s "$run_dir/gate.green.epoch" ]]; then
+        green_epoch="$(tr -d '[:space:]' <"$run_dir/gate.green.epoch")"
+        if [[ "$green_epoch" =~ ^[0-9]+$ && "$published_epoch" -ge "$green_epoch" ]]; then
+            printf 'green-to-published latency: %ss\n' "$((published_epoch - green_epoch))"
+        else
+            printf 'green-to-published latency: unavailable (invalid gate-green timestamp)\n'
+        fi
+    fi
 }
 
 case "$action" in
@@ -470,11 +556,7 @@ case "$action" in
             printf 'epic-note template: tip=%s rows_failed=%s cause_class=<product|fixture|environment|procedure> blocking_step=<step>\n' \
                 "${tip:-unknown}" "${failed_rows:-none}"
         fi
-        if [[ -s "$run_dir/gate.green.epoch" && -s "$run_dir/release.published.epoch" ]]; then
-            green_epoch="$(cat "$run_dir/gate.green.epoch")"
-            published_epoch="$(cat "$run_dir/release.published.epoch")"
-            printf 'green-to-published latency: %ss\n' "$((published_epoch - green_epoch))"
-        fi
+        print_publication_status
         exit 0
         ;;
     --stop)

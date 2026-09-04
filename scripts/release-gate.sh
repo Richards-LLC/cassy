@@ -714,6 +714,8 @@ check_procedure_guardrails() {
     grep -qF 'annotated tag peels' "$skill"
     grep -qF 'four Slack POSTED' "$skill"
     grep -qF 'refresh_binary_version' "$skill"
+    grep -qF 'release.tag-complete.epoch' "$skill"
+    grep -qF 'release-published.receipt' "$skill"
 }
 
 check_working_tree() {

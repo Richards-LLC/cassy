@@ -87,6 +87,7 @@ Require Scoped Validation; the ledger is the last prep step; record a cause clas
 Use 9.99.x fixtures; workers never poll CI; commit a reviewed snapshot update.
 Check for a competing release with the merge-queue GraphQL query. Read CAS_RELEASE_ENV_FILE.
 Require the annotated tag peels, four Slack POSTED receipts, and refresh_binary_version.
+Keep release.tag-complete.epoch separate from the verified release-published.receipt.
 EOF
     cat >"$repo/scripts/release.sh" <<'EOF'
 #!/usr/bin/env bash

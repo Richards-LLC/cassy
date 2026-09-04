@@ -44,7 +44,7 @@ mod common;
 use common::{TEST_TEAM, make_cli_json, make_cloud_config};
 
 use cas::cli::cloud::{CloudSyncArgs, execute_sync, execute_team_pull};
-use cas::cloud::{CloudConfig, SyncQueue, get_project_canonical_id};
+use cas::cloud::{CloudConfig, SyncQueue};
 use cas::store::{
     open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
     open_rule_store, open_skill_store, open_spec_store, open_store, open_task_store,
@@ -53,6 +53,8 @@ use cas::types::{Entry, EntryType, Scope, Skill};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const FIXTURE_PROJECT_ID: &str = "p";
 
 /// Process-global lock for CAS_ROOT mutations. `cargo test` runs each
 /// `#[tokio::test]` on its own thread within the same binary process; the
@@ -163,13 +165,9 @@ fn make_cas_root() -> TempDir {
 /// serialized via `serde_json::to_value(&Entry{...})` to lock in the actual
 /// wire shape (matches the precedent in `team_memories_e2e_test.rs:331`).
 async fn mount_team_pull_with_one_entry(server: &MockServer, entry_id: &str) {
-    // Inject the same project_id that execute_team_pull resolves via
-    // get_project_canonical_id() so entity_matches_project() (cas-6479) accepts
-    // the row. Using the same runtime resolver ensures the mock and the
-    // production path agree even when the process canonical-id is cached from
-    // a prior test or set via CAS_ROOT (cas-6ddc).
-    let project_id = get_project_canonical_id()
-        .unwrap_or_else(|| "cas-src".to_string());
+    // All callers use make_cas_root(), whose queue root is pinned to this
+    // identity. Keep the mock tied to that fixture rather than process cwd.
+    let project_id = FIXTURE_PROJECT_ID;
 
     let alice_entry = Entry {
         id: entry_id.to_string(),
@@ -470,8 +468,7 @@ async fn mount_full_sync_mocks(server: &MockServer, team_entry_id: &str) {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "projects": [{
                 "id": "project-uuid-1",
-                "canonical_id": get_project_canonical_id()
-                    .unwrap_or_else(|| "cas-src".to_string()),
+                "canonical_id": FIXTURE_PROJECT_ID,
                 "name": "CAS",
                 "contributor_count": 1,
                 "memory_count": 0,
@@ -533,8 +530,7 @@ async fn mount_full_sync_mocks(server: &MockServer, team_entry_id: &str) {
     // zero times (the original bug) OR more than once (regression guard
     // for the previously-rejected double-call fix).
     // project_id injected so entity_matches_project (cas-6479) accepts the row.
-    let project_id = get_project_canonical_id()
-        .unwrap_or_else(|| "cas-src".to_string());
+    let project_id = FIXTURE_PROJECT_ID;
     let alice_entry = Entry {
         id: team_entry_id.to_string(),
         scope: Scope::Project,
@@ -732,7 +728,7 @@ async fn execute_sync_full_ignores_personal_team_and_knowledge_watermarks() {
         .unwrap();
 
     let _env = CasRootGuard::set(&cas_root);
-    let project_id = get_project_canonical_id().expect("full sync project id");
+    let project_id = FIXTURE_PROJECT_ID;
     queue
         .set_metadata("last_pull_at", "2026-08-09T17:00:00Z")
         .unwrap();

@@ -19,6 +19,8 @@ use cas::types::{Entry, EntryType, Scope, Task, TaskStatus};
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+const FIXTURE_PROJECT_ID: &str = "p";
+
 fn cas_cmd() -> Command {
     Command::new(cas::test_paths::binary(
         "cas",
@@ -40,8 +42,7 @@ fn cloud_sync_help_exposes_full_repull_escape_hatch() {
 #[tokio::test]
 async fn empty_first_pull_then_corrected_bucket_backfills_without_metadata_surgery() {
     let server = MockServer::start().await;
-    let project_id = cas::cloud::get_project_canonical_id()
-        .expect("test must run inside a project with a canonical id");
+    let project_id = FIXTURE_PROJECT_ID.to_string();
 
     let entry = Entry {
         id: "recovered-after-id-fix".to_string(),
@@ -91,11 +92,11 @@ async fn empty_first_pull_then_corrected_bucket_backfills_without_metadata_surge
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
-    // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path().join(".cas");
+    // Pin the actual queue root: CloudSyncer resolves identity from its own
+    // queue root, not from the process cwd or the tempdir's parent.
     std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let store = open_store_local(&cas_root).unwrap();
     let task_store = open_task_store_local(&cas_root).unwrap();
     let rule_store = open_rule_store_local(&cas_root).unwrap();
@@ -166,8 +167,7 @@ async fn empty_first_pull_then_corrected_bucket_backfills_without_metadata_surge
 #[tokio::test]
 async fn unattributed_terminal_reopen_is_journaled_once_and_not_retried_next_pull() {
     let server = MockServer::start().await;
-    let project_id = cas::cloud::get_project_canonical_id()
-        .expect("test must run inside a project with a canonical id");
+    let project_id = FIXTURE_PROJECT_ID.to_string();
     let initial_pulled_at = "2026-08-20T15:10:00Z";
 
     let mut remote = Task::new(
@@ -209,11 +209,10 @@ async fn unattributed_terminal_reopen_is_journaled_once_and_not_retried_next_pul
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
-    // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path().join(".cas");
+    // Pin the actual queue root for the root-bound syncer identity.
     std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let store = open_store_local(&cas_root).unwrap();
     let task_store = open_task_store_local(&cas_root).unwrap();
     let rule_store = open_rule_store_local(&cas_root).unwrap();

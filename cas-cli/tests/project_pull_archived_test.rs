@@ -5,9 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cas::cloud::{
-    CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue, get_project_canonical_id,
-};
+use cas::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
 use cas::store::{
     SqliteStore, Store, StoreError, open_commit_link_store, open_event_store,
     open_file_change_store, open_prompt_store, open_rule_store_local, open_skill_store_local,
@@ -18,6 +16,9 @@ use chrono::{DateTime, Duration, Utc};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+// PullHarness roots are pinned to this identity in their fixture config.
+const FIXTURE_PROJECT_ID: &str = "p";
 
 struct RaceStore {
     inner: SqliteStore,
@@ -292,7 +293,7 @@ fn assert_no_pull_errors(result: &cas::cloud::SyncResult) {
 #[tokio::test]
 async fn archived_local_newer_remote_updates_and_unarchives() {
     let server = MockServer::start().await;
-    let project_id = get_project_canonical_id().expect("test runs inside a CAS project");
+    let project_id = FIXTURE_PROJECT_ID;
     let now = Utc::now();
     mount_pull(
         &server,
@@ -334,7 +335,7 @@ async fn archived_local_newer_remote_updates_and_unarchives() {
 #[tokio::test]
 async fn archived_local_older_remote_skips_and_stays_archived() {
     let server = MockServer::start().await;
-    let project_id = get_project_canonical_id().expect("test runs inside a CAS project");
+    let project_id = FIXTURE_PROJECT_ID;
     let now = Utc::now();
     mount_pull(
         &server,
@@ -379,7 +380,7 @@ async fn archived_local_older_remote_skips_and_stays_archived() {
 #[tokio::test]
 async fn active_local_lww_behavior_remains_unchanged() {
     let server = MockServer::start().await;
-    let project_id = get_project_canonical_id().expect("test runs inside a CAS project");
+    let project_id = FIXTURE_PROJECT_ID;
     let now = Utc::now();
     mount_pull(
         &server,
@@ -446,7 +447,7 @@ async fn active_local_lww_behavior_remains_unchanged() {
 #[tokio::test]
 async fn duplicate_race_reconciles_through_lww() {
     let server = MockServer::start().await;
-    let project_id = get_project_canonical_id().expect("test runs inside a CAS project");
+    let project_id = FIXTURE_PROJECT_ID;
     let now = Utc::now();
     mount_pull(
         &server,
@@ -485,7 +486,7 @@ async fn duplicate_race_reconciles_through_lww() {
 #[tokio::test]
 async fn unrelated_store_error_is_reported() {
     let server = MockServer::start().await;
-    let project_id = get_project_canonical_id().expect("test runs inside a CAS project");
+    let project_id = FIXTURE_PROJECT_ID;
     let now = Utc::now();
     mount_pull(
         &server,

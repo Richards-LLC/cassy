@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cas::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue, get_project_canonical_id};
+use cas::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
 use cas::store::{
     open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
     open_rule_store_local, open_skill_store_local, open_spec_store, open_store, open_store_local,
@@ -28,6 +28,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const MAX_RETRIES: i32 = 5;
+const FIXTURE_PROJECT_ID: &str = "p";
 
 fn production_source_root() -> PathBuf {
     cas::test_paths::crate_root().join("src")
@@ -74,8 +75,7 @@ fn entry_payload(id: &str, project_id: &str) -> serde_json::Value {
 #[tokio::test]
 async fn pull_via_local_openers_does_not_grow_sync_queue() {
     let server = MockServer::start().await;
-    let project_id = get_project_canonical_id()
-        .expect("get_project_canonical_id should succeed inside cas-src checkout");
+    let project_id = FIXTURE_PROJECT_ID;
 
     let n = 5usize;
     let entries: Vec<serde_json::Value> = (0..n)
@@ -218,8 +218,7 @@ fn open_store_still_enqueues_local_writes_when_logged_in() {
 #[tokio::test]
 async fn wrapping_open_store_would_reenqueue_on_pull_apply() {
     let server = MockServer::start().await;
-    let project_id = get_project_canonical_id()
-        .expect("get_project_canonical_id should succeed inside cas-src checkout");
+    let project_id = FIXTURE_PROJECT_ID;
 
     let entry = entry_payload("echo-bait-001", &project_id);
     Mock::given(method("GET"))

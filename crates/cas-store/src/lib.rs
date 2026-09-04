@@ -106,7 +106,8 @@ pub use event_store::{EVENT_SCHEMA, EventStore, SqliteEventStore, record_event_w
 pub use code_store::CodeStore;
 pub use code_vector_store::{
     CODE_VECTOR_SCHEMA, CODE_VECTOR_SCHEMA_STATEMENTS, CodeIndexState, CodeVectorCoverage,
-    CodeVectorStats, CodeVectorWork, SqliteCodeVectorStore,
+    CodeVectorReconcile, CodeVectorStats, CodeVectorWork, SqliteCodeVectorStore,
+    is_retryable_vector_failure,
 };
 pub use delegation_receipt_store::{
     DELEGATION_RECEIPT_SCHEMA, DelegationBudget, DelegationReceipt, DelegationReceiptState,

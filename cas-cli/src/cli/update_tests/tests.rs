@@ -474,3 +474,147 @@ fn post_swap_mode_is_a_terminal_update_path() {
 
     execute(&args, &cli, None).expect("post-swap mode must not re-enter binary update");
 }
+
+// =============================================================================
+// cas-91ba: the post-install phases must run on the NEWLY installed binary.
+// Installing 3.15.2 from 3.15.1 refreshed with the 3.15.1 image: 16 projects
+// instead of 43, no user_level_store, and gabber-studio's ledger wedge still
+// reported — a second `cas update` was needed to converge.
+// =============================================================================
+
+#[cfg(unix)]
+fn write_stub_binary(path: &Path, body: &str) {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(path, body).expect("write stub binary");
+    let mut permissions = fs::metadata(path).expect("stat stub binary").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("make stub binary executable");
+}
+
+#[cfg(unix)]
+#[test]
+fn post_swap_refresh_runs_on_the_installed_binary_and_reports_its_version() {
+    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let installed_binary = temp_dir.path().join("cas-new");
+    // The stub stands in for the freshly installed binary: it records its argv
+    // and prints the refresh receipt the real child would print.
+    write_stub_binary(
+        &installed_binary,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n\
+         printf '%s' '{\"refresh_binary_version\":\"9.9.9-stub\",\"projects\":[],\"user_level_store\":{\"status\":\"ok\"},\"skipped_unregistered\":[]}'\n",
+    );
+
+    let receipt = run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
+        .expect("the post-swap refresh must run the installed binary");
+
+    assert_eq!(
+        receipt["refresh_binary_version"], "9.9.9-stub",
+        "the receipt must name the binary that actually refreshed: {receipt}"
+    );
+    let args = std::fs::read_to_string(installed_binary.with_extension("args"))
+        .expect("stub binary should have recorded its arguments");
+    assert!(args.contains("--post-swap"), "{args}");
+    assert!(args.contains("3.15.1"), "{args}");
+    assert!(args.contains("--json"), "{args}");
+}
+
+#[cfg(unix)]
+#[test]
+fn post_swap_refresh_failure_tells_the_operator_to_run_update_again() {
+    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let missing = temp_dir.path().join("cas-not-installed");
+
+    let error = run_post_swap_refresh(&missing, "3.15.1", "3.15.2", true)
+        .expect_err("an unusable installed binary must not read as a successful refresh");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("cas update"),
+        "the operator must be told to run cas update again: {message}"
+    );
+}
+
+#[test]
+fn refresh_receipt_names_the_binary_that_ran_it() {
+    let receipt = project_refresh_receipt_json(&[], &ProjectPhase::Ok(String::new()), &[]);
+
+    assert_eq!(
+        receipt["refresh_binary_version"],
+        env!("CARGO_PKG_VERSION"),
+        "every refresh receipt must name the binary version that produced it: {receipt}"
+    );
+}
+
+#[test]
+fn combined_receipt_merges_the_installed_binary_refresh_into_one_document() {
+    let refresh = serde_json::json!({
+        "refresh_binary_version": "3.15.2",
+        "projects": [],
+        "user_level_store": {"status": "ok"},
+    });
+
+    let combined = combined_update_receipt("3.15.2", true, Some(&refresh));
+    assert_eq!(combined["binary_updated"], true);
+    assert_eq!(combined["version"], "3.15.2");
+    assert_eq!(
+        combined["refresh_binary_version"], "3.15.2",
+        "the single receipt must state which image ran the refresh: {combined}"
+    );
+    assert!(combined["user_level_store"].is_object(), "{combined}");
+
+    // No swap: no refresh receipt to merge, and no stale version claimed.
+    let solo = combined_update_receipt("3.15.2", false, None);
+    assert_eq!(solo["binary_updated"], false);
+    assert!(solo.get("refresh_binary_version").is_none(), "{solo}");
+}
+
+#[cfg(unix)]
+#[test]
+fn post_swap_refresh_rejects_a_child_reporting_a_different_version() {
+    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let installed_binary = temp_dir.path().join("cas-stale");
+    // A stale `cas` answering instead of the binary we just installed.
+    write_stub_binary(
+        &installed_binary,
+        "#!/bin/sh\nprintf '%s' '{\"refresh_binary_version\":\"3.15.1\",\"projects\":[]}'\n",
+    );
+
+    let error = run_post_swap_refresh(&installed_binary, "3.15.0", "3.15.2", true)
+        .expect_err("a refresh performed by the wrong version must not read as converged");
+    let message = format!("{error:#}");
+    assert!(message.contains("3.15.1") && message.contains("3.15.2"), "{message}");
+    assert!(message.contains("cas update"), "{message}");
+}
+
+#[test]
+fn version_verification_accepts_only_the_installed_version() {
+    let binary = Path::new("/usr/local/bin/cas");
+    assert!(verify_refresh_binary_version(Some("3.15.2"), "3.15.2", binary).is_ok());
+    assert!(verify_refresh_binary_version(Some(" 3.15.2 "), "3.15.2", binary).is_ok());
+    assert!(verify_refresh_binary_version(Some("3.15.1"), "3.15.2", binary).is_err());
+    assert!(
+        verify_refresh_binary_version(None, "3.15.2", binary).is_err(),
+        "a child that reports no version proves nothing"
+    );
+}
+
+#[test]
+fn skipped_refresh_receipt_says_the_update_did_not_converge() {
+    let receipt = skipped_refresh_receipt(
+        "3.15.2",
+        "binary updated to 3.15.2; refresh did not run — run `cas update` again",
+    );
+
+    assert_eq!(receipt["binary_updated"], true);
+    assert_eq!(receipt["version"], "3.15.2");
+    assert!(
+        receipt["refresh_binary_version"].is_null(),
+        "nothing refreshed, so no version may be claimed: {receipt}"
+    );
+    assert_eq!(receipt["refresh_status"], "skipped");
+    assert!(
+        receipt["message"].as_str().unwrap().contains("cas update"),
+        "{receipt}"
+    );
+}

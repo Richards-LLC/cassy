@@ -132,6 +132,153 @@ pub fn open_host_known_repo_store() -> anyhow::Result<SqliteKnownRepoStore> {
     Ok(store)
 }
 
+/// Why a path is disposable by construction and must never enter the host
+/// registry.
+///
+/// ROOT CAUSE this exists for (cas-647c): every registry row is treated as a
+/// live host project by the sweep and doctor surfaces. A closed mecha-cassy
+/// task copied a whole CAS root to `~/.cas/artifacts/cas-1bfb/fresh-proxy` as
+/// an isolated proxy-health fixture and ran `cas serve` inside it, which
+/// auto-registered the copy. `cas doctor` then opened the fixture's 10-table
+/// database, found no `tasks`, and reported a project DB that "could NOT be
+/// read" — an amber row with no command that cleared it, because the path
+/// still existed so `prune-missing` would not remove it.
+///
+/// All three classes below are *copies* of a project created and abandoned by
+/// tooling, never checkouts an operator works in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrySkip {
+    /// Under the resolved `[factory] artifacts_root`.
+    Artifacts(PathBuf),
+    /// Under `~/.cas/scratch`, the sanctioned home for disposable roots.
+    Scratch(PathBuf),
+    /// A Cassy-named disposable root directly under `$TMPDIR` (cas-cb5e's
+    /// [`crate::temp_hygiene::TEMP_ROOT_PREFIXES`]).
+    Temp(PathBuf),
+}
+
+impl RegistrySkip {
+    /// The disposable root the path was matched against.
+    pub fn base(&self) -> &Path {
+        match self {
+            Self::Artifacts(base) | Self::Scratch(base) | Self::Temp(base) => base,
+        }
+    }
+
+    /// Operator-readable justification, always naming the base it matched so
+    /// the decision can be checked rather than trusted.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Artifacts(base) => format!(
+                "below the configured [factory] artifacts_root {}",
+                base.display()
+            ),
+            Self::Scratch(base) => format!("below the scratch root {}", base.display()),
+            Self::Temp(base) => format!("a disposable temp root at {}", base.display()),
+        }
+    }
+}
+
+/// Classify `repo_path` against the disposable roots. `None` means it is an
+/// ordinary project checkout and may be registered.
+///
+/// Paths are compared in both their literal and canonical spellings, in both
+/// directions, so a symlinked platform temp dir (macOS `/var` ->
+/// `/private/var`) and a not-yet-created path both classify correctly.
+pub fn registry_skip(repo_path: &Path) -> Option<RegistrySkip> {
+    let candidates = path_spellings(repo_path);
+
+    for root in artifacts_roots(repo_path) {
+        if let Some(base) = matching_base(&candidates, &root) {
+            return Some(RegistrySkip::Artifacts(base));
+        }
+    }
+    if let Some(base) = matching_base(&candidates, &crate::temp_hygiene::scratch_root_base()) {
+        return Some(RegistrySkip::Scratch(base));
+    }
+    named_temp_root(&candidates)
+}
+
+/// Every artifacts root this process could plausibly mean: the default
+/// (`~/.cas/artifacts`), whatever the candidate's own `.cas/config.toml`
+/// declares (an artifacts copy carries the config it was copied from), and
+/// whatever the ambient project store declares. Registering is rare enough
+/// that checking all three is cheaper than being wrong.
+fn artifacts_roots(repo_path: &Path) -> Vec<PathBuf> {
+    let mut configured: Vec<Option<String>> = vec![None];
+    let mut candidate_roots = vec![repo_path.join(".cas")];
+    if let Ok(ambient) = crate::store::detect::find_cas_root() {
+        candidate_roots.push(ambient);
+    }
+    for cas_dir in candidate_roots {
+        if let Ok(config) = crate::config::Config::load(&cas_dir) {
+            let value = config.factory().artifacts_root;
+            if value.is_some() && !configured.contains(&value) {
+                configured.push(value);
+            }
+        }
+    }
+    let mut roots = Vec::new();
+    for value in configured {
+        let root = crate::config::resolved_factory_artifacts_root(value.as_deref());
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+/// Literal and canonical spellings of one path, deduplicated.
+fn path_spellings(path: &Path) -> Vec<PathBuf> {
+    let mut out = vec![path.to_path_buf()];
+    if let Ok(canonical) = path.canonicalize()
+        && canonical != out[0]
+    {
+        out.push(canonical);
+    }
+    out
+}
+
+/// The base, if any spelling of the candidate lies at or below any spelling of
+/// it. Returns the base's literal spelling so the logged reason matches what
+/// the operator configured.
+fn matching_base(candidates: &[PathBuf], base: &Path) -> Option<PathBuf> {
+    path_spellings(base)
+        .into_iter()
+        .any(|spelling| candidates.iter().any(|c| c.starts_with(&spelling)))
+        .then(|| base.to_path_buf())
+}
+
+/// A Cassy-named disposable directory **directly** under `$TMPDIR`.
+///
+/// Deliberately narrow: `$TMPDIR` also holds ordinary temporary checkouts
+/// (every test fixture HOME is one), and skipping those would silently break
+/// registration for anyone whose real work lives on a temp mount. Only the
+/// names Cassy itself creates count.
+fn named_temp_root(candidates: &[PathBuf]) -> Option<RegistrySkip> {
+    for base in path_spellings(&std::env::temp_dir()) {
+        for candidate in candidates {
+            let Ok(rest) = candidate.strip_prefix(&base) else {
+                continue;
+            };
+            let Some(name) = rest
+                .components()
+                .next()
+                .and_then(|first| first.as_os_str().to_str())
+            else {
+                continue;
+            };
+            if crate::temp_hygiene::TEMP_ROOT_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+            {
+                return Some(RegistrySkip::Temp(base.join(name)));
+            }
+        }
+    }
+    None
+}
+
 /// Register `repo_path` in the host registry.
 ///
 /// **Non-fatal by design.** Every known call site is a best-effort upsert on
@@ -140,14 +287,18 @@ pub fn open_host_known_repo_store() -> anyhow::Result<SqliteKnownRepoStore> {
 /// logged at `warn!` and swallowed. If callers need a fatal variant, use
 /// [`open_host_known_repo_store`] + [`KnownRepoStore::upsert`] directly.
 pub fn register_repo(repo_path: &Path) {
-    if let Err(e) = register_repo_strict(repo_path) {
-        warn!(
+    match register_repo_outcome(repo_path) {
+        Ok(Some(skip)) => debug!(
+            path = %repo_path.display(),
+            reason = %skip.reason(),
+            "skipped disposable root; not registered in host known_repos",
+        ),
+        Ok(None) => debug!(path = %repo_path.display(), "registered repo in host known_repos"),
+        Err(e) => warn!(
             path = %repo_path.display(),
             error = %e,
             "failed to register repo in host known_repos registry (non-fatal)",
-        );
-    } else {
-        debug!(path = %repo_path.display(), "registered repo in host known_repos");
+        ),
     }
 }
 
@@ -155,10 +306,21 @@ pub fn register_repo(repo_path: &Path) {
 /// to propagate the error (e.g. a CLI `cas known-repos add` explicitly run
 /// by the user). Note: does NOT install schema — run
 /// [`ensure_host_schema`] first if the caller is the bootstrap site.
+///
+/// A disposable root is **not** an error: it is a successful decision to
+/// register nothing, so boot paths that `?` this call keep booting.
 pub fn register_repo_strict(repo_path: &Path) -> anyhow::Result<()> {
+    register_repo_outcome(repo_path).map(|_| ())
+}
+
+/// `Ok(Some(skip))` when the path was deliberately not registered.
+fn register_repo_outcome(repo_path: &Path) -> anyhow::Result<Option<RegistrySkip>> {
+    if let Some(skip) = registry_skip(repo_path) {
+        return Ok(Some(skip));
+    }
     let store = open_host_known_repo_store()?;
     store.upsert(repo_path)?;
-    Ok(())
+    Ok(None)
 }
 
 /// Describe a host-registry failure as an infrastructure problem, including
@@ -321,6 +483,119 @@ mod tests {
             assert!(message.contains("fuser -v"));
             assert!(message.contains("SIGTERM"));
             assert!(message.contains("SIGKILL"));
+        });
+    }
+
+    /// cas-647c: the measured incident. A closed mecha-cassy task copied a CAS
+    /// root to `~/.cas/artifacts/cas-1bfb/fresh-proxy` as a proxy-health
+    /// fixture and ran `cas serve` inside it, which auto-registered the copy as
+    /// a host project. `cas doctor` then opened its 10-table database, found no
+    /// `tasks`, and warned about a project DB that "could NOT be read" — with
+    /// no command that cleared it, because the path existed so `prune-missing`
+    /// refused to touch it.
+    #[test]
+    fn registry_skips_roots_under_the_factory_artifacts_root_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let fixture = home.join(".cas/artifacts/cas-1bfb/fresh-proxy");
+            std::fs::create_dir_all(fixture.join(".cas")).unwrap();
+            let real = home.join("myproject");
+            std::fs::create_dir_all(&real).unwrap();
+
+            register_repo(&fixture);
+            register_repo_strict(&real).unwrap();
+
+            let paths: Vec<PathBuf> = open_host_known_repo_store()
+                .unwrap()
+                .list()
+                .unwrap()
+                .into_iter()
+                .map(|repo| repo.path)
+                .collect();
+            assert_eq!(paths, vec![real.canonicalize().unwrap()]);
+            assert!(matches!(
+                registry_skip(&fixture),
+                Some(RegistrySkip::Artifacts(_))
+            ));
+            assert!(registry_skip(&real).is_none());
+        });
+    }
+
+    /// The strict variant must not turn a disposable root into a hard error:
+    /// its callers are boot paths that would abort on `Err`. Skipping is a
+    /// success that registered nothing, and it stays idempotent.
+    #[test]
+    fn register_repo_strict_reports_the_skip_without_failing_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let scratch = home.join(".cas/scratch/fresh-proxy");
+            std::fs::create_dir_all(scratch.join(".cas")).unwrap();
+
+            register_repo_strict(&scratch).unwrap();
+            register_repo_strict(&scratch).unwrap();
+
+            assert_eq!(open_host_known_repo_store().unwrap().count().unwrap(), 0);
+            assert!(matches!(
+                registry_skip(&scratch),
+                Some(RegistrySkip::Scratch(_))
+            ));
+            assert!(
+                registry_skip(&scratch)
+                    .unwrap()
+                    .reason()
+                    .contains("scratch")
+            );
+        });
+    }
+
+    /// A `[factory] artifacts_root` pointed somewhere other than the default
+    /// must be honoured — the skip follows configuration, not a hardcoded path.
+    #[test]
+    fn registry_skip_follows_a_configured_artifacts_root_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            let artifacts = home.join("durable-artifacts");
+            std::fs::create_dir_all(&artifacts).unwrap();
+            std::fs::write(
+                home.join(".cas/config.toml"),
+                format!(
+                    "[factory]\nartifacts_root = {:?}\n",
+                    artifacts.display().to_string()
+                ),
+            )
+            .unwrap();
+            let fixture = artifacts.join("cas-1bfb/fresh-proxy");
+            std::fs::create_dir_all(&fixture).unwrap();
+
+            assert!(matches!(
+                registry_skip(&fixture),
+                Some(RegistrySkip::Artifacts(_))
+            ));
+            // The default location stays covered too, not replaced.
+            assert!(matches!(
+                registry_skip(&home.join(".cas/artifacts/cas-9999/copy")),
+                Some(RegistrySkip::Artifacts(_))
+            ));
+        });
+    }
+
+    /// Named disposable roots directly under `$TMPDIR` (the cas-cb5e temp-root
+    /// inventory names) are the third disposable class. An unrelated temp
+    /// directory — including the temp HOME every test runs under — is NOT one.
+    #[test]
+    fn registry_skip_names_cassy_temp_roots_but_not_arbitrary_temp_paths_cas_647c() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            let temp = std::env::temp_dir();
+            assert!(matches!(
+                registry_skip(&temp.join("cas-probe-comm-1234/root")),
+                Some(RegistrySkip::Temp(_))
+            ));
+            assert!(matches!(
+                registry_skip(&temp.join("custom-wt-abcd/erin")),
+                Some(RegistrySkip::Temp(_))
+            ));
+            // The temp HOME itself, and repos inside it, are ordinary projects.
+            assert!(registry_skip(home).is_none());
+            assert!(registry_skip(&home.join("myproject")).is_none());
         });
     }
 

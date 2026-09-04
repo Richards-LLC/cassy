@@ -364,3 +364,90 @@ fn test_deterministic_symbol_id_normalization() {
     assert_eq!(id1, id2);
     assert_eq!(id2, id3);
 }
+
+/// cas-8a03: the retirement path's SQLite writes were bare autocommit
+/// statements, so the connection's `busy_timeout` was the only thing standing
+/// between them and failure. A writer that outlived one window produced
+/// `failed to retire deleted source file: database error: database is locked`
+/// and a permanent file failure. The busy timeout is shortened here so the
+/// holder demonstrably outlives a full window without a multi-second test.
+#[test]
+fn code_store_writes_wait_out_a_foreign_writer_past_one_busy_timeout_window() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (temp, store) = setup_test_db();
+    let file = CodeFile {
+        id: store.generate_file_id().unwrap(),
+        path: "src/retired.rs".to_string(),
+        repository: "test-repo".to_string(),
+        language: Language::Rust,
+        content_hash: "hash".to_string(),
+        ..Default::default()
+    };
+    store.add_file(&file).unwrap();
+    let symbol = CodeSymbol {
+        id: "sym-retired".to_string(),
+        qualified_name: "retired::thing".to_string(),
+        name: "thing".to_string(),
+        kind: SymbolKind::Function,
+        language: Language::Rust,
+        file_path: file.path.clone(),
+        file_id: file.id.clone(),
+        repository: file.repository.clone(),
+        content_hash: "sym-hash".to_string(),
+        created: Utc::now(),
+        updated: Utc::now(),
+        ..Default::default()
+    };
+    store
+        .add_symbols_batch(std::slice::from_ref(&symbol))
+        .unwrap();
+
+    // Same shared connection the store holds; a 50 ms window makes "outlives
+    // one busy_timeout window" reproducible in a fraction of a second.
+    let db_path = temp.path().join("cas.db");
+    let shared = crate::shared_db::shared_connection(&db_path).unwrap();
+    shared
+        .lock()
+        .unwrap()
+        .busy_timeout(Duration::from_millis(50))
+        .unwrap();
+
+    let holder_path = db_path.clone();
+    let (holding, held) = mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        // A distinct connection: the in-process pool would otherwise serialize
+        // on the mutex and never produce SQLITE_BUSY.
+        let conn = Connection::open(&holder_path).unwrap();
+        conn.busy_timeout(Duration::from_millis(50)).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO code_files
+             (id, path, repository, language, size, line_count, commit_hash, content_hash, created, updated, scope)
+             VALUES ('foreign', 'src/foreign.rs', 'other-repo', 'rust', 0, 0, NULL, 'h', '2026-01-01', '2026-01-01', 'project')",
+            [],
+        )
+        .unwrap();
+        holding.send(()).unwrap();
+        // Six full busy_timeout windows: without the application-level retry
+        // every write below fails outright.
+        std::thread::sleep(Duration::from_millis(300));
+        conn.execute_batch("COMMIT").unwrap();
+    });
+
+    held.recv().unwrap();
+    store
+        .delete_symbols_in_file(&file.id)
+        .expect("delete_symbols_in_file must wait out the foreign writer");
+    store
+        .delete_file(&file.id)
+        .expect("delete_file must wait out the foreign writer");
+    blocker.join().unwrap();
+
+    assert!(store.get_file(&file.id).is_err(), "retirement did not land");
+    assert!(
+        store.get_symbols_in_file(&file.id).unwrap().is_empty(),
+        "symbol retirement did not land"
+    );
+}

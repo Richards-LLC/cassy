@@ -150,20 +150,164 @@ fn apply_no_code_close_proof(
     Ok(())
 }
 
-/// Return a durable-proof path under tmpfs cited in a task-close reason.
+/// Words that mark a nearby path as *cited evidence* rather than as subject
+/// matter being discussed. Deliberately nouns and reporting verbs — not
+/// prepositions like "at"/"in"/"under", which appear in ordinary prose about
+/// directories and would re-create the false positive this list exists to fix.
+const PROOF_CUE_WORDS: &[&str] = &[
+    "artifact",
+    "artifacts",
+    "evidence",
+    "log",
+    "logs",
+    "output",
+    "proof",
+    "receipt",
+    "receipts",
+    "recorded",
+    "results",
+    "saved",
+    "screenshot",
+    "screenshots",
+    "stored",
+    "transcript",
+    "written",
+];
+
+/// How many tokens before a path are searched for a [`PROOF_CUE_WORDS`] hit.
+/// Wide enough for "full transcript saved to <path>", narrow enough that a cue
+/// word elsewhere in the same sentence does not reach across a clause.
+const PROOF_CUE_WINDOW: usize = 5;
+
+/// Return a durable-proof path under tmpfs **cited as evidence** in a
+/// task-close reason.
 ///
 /// This deliberately inspects only the close reason, which workers use to
 /// claim their proof. It must not scan task notes: tasks can legitimately
 /// discuss `/tmp` (including the incident that introduced this guard), and
-/// treating that prose as a close failure would make the gate unusable. A
-/// structured artifact-path field is the follow-up durable solution; until
-/// then this catches the primary evidence-loss vector without changing the
-/// receipt schema.
-fn tmpfs_receipt_path_in_close_reason(reason: &str) -> Option<String> {
-    reason.split_whitespace().find_map(|token| {
-        let path = token.trim_matches(|ch: char| "(),[]{}<>\"'`".contains(ch));
-        (path.starts_with("/tmp/") || path.starts_with("/private/tmp/")).then(|| path.to_string())
+/// treating that prose as a close failure would make the gate unusable.
+///
+/// ROOT CAUSE of cas-8a9e: matching *any* `/tmp/` token did exactly that to the
+/// close reason too. Closing cas-647c was rejected because its reason explained
+/// why a new temp-skip rule had to be narrow — "every TestEnvGuard fixture HOME
+/// is a `/tmp/.tmpXXXX` directory" — while citing its real proof under the
+/// durable artifacts root. Nothing ephemeral was ever offered as evidence; the
+/// worker had to reword a design rationale to get past a receipt gate. That is
+/// the same unclearable-warning shape the surrounding epic is about.
+///
+/// So a tmpfs path is only a receipt when it is *presented* as one:
+/// - a [`PROOF_CUE_WORDS`] hit within [`PROOF_CUE_WINDOW`] tokens before it, or
+/// - it opens a line or list item, where a bare path reads as a citation.
+///
+/// Failing both, the path is still rejected when the reason cites no durable
+/// artifact at all — then it is the only evidence on offer, whatever the prose
+/// around it says. The guard therefore never gets weaker for a close that has
+/// nothing durable behind it, and a genuinely cited tmpfs receipt is caught
+/// even when the same reason also names an artifacts-root path.
+fn tmpfs_receipt_path_in_close_reason(
+    reason: &str,
+    artifacts_root: Option<&std::path::Path>,
+) -> Option<String> {
+    let mut first_tmpfs_path = None;
+
+    for line in reason.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let opening = line_opening_token_index(&tokens);
+        for (index, token) in tokens.iter().enumerate() {
+            let Some(path) = tmpfs_path_token(token) else {
+                continue;
+            };
+            if first_tmpfs_path.is_none() {
+                first_tmpfs_path = Some(path.clone());
+            }
+            let cited_as_proof = opening == Some(index)
+                || tokens[index.saturating_sub(PROOF_CUE_WINDOW)..index]
+                    .iter()
+                    .any(|prior| is_proof_cue(prior));
+            if cited_as_proof {
+                return Some(path);
+            }
+        }
+    }
+
+    if cites_durable_artifact(reason, artifacts_root) {
+        return None;
+    }
+    first_tmpfs_path
+}
+
+/// Strip the punctuation a path picks up from surrounding prose or markup.
+///
+/// `.` is only trimmed as a single trailing character — sentence punctuation
+/// after a cited path — because it is otherwise part of most filenames, and a
+/// name that genuinely ends in `.` does not occur in practice. Without this the
+/// rejection message quotes `/tmp/run.log.` and the operator cannot tell
+/// whether the trailing dot is part of the path it is complaining about.
+fn strip_path_punctuation(token: &str) -> &str {
+    let trimmed = token.trim_matches(|ch: char| "(),[]{}<>\"'`;:*".contains(ch));
+    trimmed.strip_suffix('.').unwrap_or(trimmed)
+}
+
+fn tmpfs_path_token(token: &str) -> Option<String> {
+    let path = strip_path_punctuation(token);
+    (path.starts_with("/tmp/") || path.starts_with("/private/tmp/")).then(|| path.to_string())
+}
+
+fn is_proof_cue(token: &str) -> bool {
+    let word = token
+        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+        .to_ascii_lowercase();
+    PROOF_CUE_WORDS.contains(&word.as_str())
+}
+
+/// Index of the token that opens a line's content once list markers are
+/// skipped, so `- /tmp/demo.md` is recognised as a citation.
+fn line_opening_token_index(tokens: &[&str]) -> Option<usize> {
+    let mut index = 0;
+    while index < tokens.len() && is_list_marker(tokens[index]) {
+        index += 1;
+    }
+    (index < tokens.len()).then_some(index)
+}
+
+fn is_list_marker(token: &str) -> bool {
+    matches!(token, "-" | "*" | "+" | ">" | "•")
+        || token
+            .strip_suffix('.')
+            .or_else(|| token.strip_suffix(')'))
+            .is_some_and(|prefix| {
+                !prefix.is_empty() && prefix.chars().all(|ch| ch.is_ascii_digit())
+            })
+}
+
+/// Does the reason name a path under the durable artifacts root?
+///
+/// Accepts the configured root and the conventional `~/.cas/artifacts/`
+/// spelling, because the check only ever *withholds* a fallback rejection —
+/// a path genuinely cited as a tmpfs receipt is caught before this runs.
+fn cites_durable_artifact(reason: &str, artifacts_root: Option<&std::path::Path>) -> bool {
+    let configured = artifacts_root
+        .map(|root| root.to_string_lossy().trim_end_matches('/').to_string())
+        .filter(|root| !root.is_empty());
+    reason.split_whitespace().any(|token| {
+        let path = strip_path_punctuation(token);
+        if path.starts_with("~/.cas/artifacts/") || path.contains("/.cas/artifacts/") {
+            return true;
+        }
+        configured.as_deref().is_some_and(|root| {
+            path.len() > root.len() && path.starts_with(root) && path.as_bytes()[root.len()] == b'/'
+        })
     })
+}
+
+/// Resolve the durable artifacts root for close-reason inspection. Best
+/// effort: an unreadable config simply means the conventional spelling is the
+/// only durable citation recognised.
+fn close_reason_artifacts_root(cas_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let config = crate::config::Config::load(cas_root).ok()?;
+    Some(crate::config::resolved_factory_artifacts_root(
+        config.factory().artifacts_root.as_deref(),
+    ))
 }
 
 /// Validate the optional durable artifact selected for a completion receipt.
@@ -501,16 +645,119 @@ mod delivery_audit_text_tests {
     #[test]
     fn close_reason_names_tmpfs_proof_path_without_scanning_discussion() {
         assert_eq!(
-            tmpfs_receipt_path_in_close_reason("Proof: /tmp/cas-4060-test.exit passed"),
+            tmpfs_receipt_path_in_close_reason("Proof: /tmp/cas-4060-test.exit passed", None),
             Some("/tmp/cas-4060-test.exit".to_string())
         );
         assert_eq!(
-            tmpfs_receipt_path_in_close_reason("See (/private/tmp/cas-proof.json) for output"),
+            tmpfs_receipt_path_in_close_reason(
+                "See (/private/tmp/cas-proof.json) for output",
+                None
+            ),
             Some("/private/tmp/cas-proof.json".to_string())
         );
         assert_eq!(
-            tmpfs_receipt_path_in_close_reason("This task discusses /tmp storage policy"),
+            tmpfs_receipt_path_in_close_reason("This task discusses /tmp storage policy", None),
             None
+        );
+    }
+
+    /// cas-8a9e: the measured false positive. Closing cas-647c was rejected
+    /// because its reason explained *why* the new temp-skip rule is narrow —
+    /// "every TestEnvGuard fixture HOME is a /tmp/.tmpXXXX directory" — while
+    /// citing its actual proof under the durable artifacts root. Nothing on
+    /// tmpfs was ever offered as evidence; the gate matched prose.
+    #[test]
+    fn a_tmp_path_discussed_in_prose_passes_when_durable_proof_is_cited_cas_8a9e() {
+        let artifacts_root = std::path::Path::new("/home/u/.cas/artifacts");
+        let reason = "Merged as df0e8550. Durable acceptance evidence: \
+             /home/u/.cas/artifacts/cas-647c/acceptance-demo.md. A blanket system-temp rule was \
+             tried and rejected, because every TestEnvGuard fixture HOME is itself a \
+             `/tmp/.tmpXXXX` directory; that rule would have disabled registration suite-wide.";
+
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason(reason, Some(artifacts_root)),
+            None,
+            "a path inside explanatory prose is not a cited receipt"
+        );
+    }
+
+    /// The guard's whole point survives: a receipt genuinely cited from tmpfs
+    /// is rejected even when the same reason also names a durable artifact, so
+    /// a worker cannot launder an ephemeral proof past the gate by mentioning
+    /// artifacts_root somewhere else in the text.
+    #[test]
+    fn a_receipt_cited_from_tmpfs_is_rejected_even_beside_a_durable_artifact_cas_8a9e() {
+        let artifacts_root = std::path::Path::new("/home/u/.cas/artifacts");
+
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason(
+                "Notes at /home/u/.cas/artifacts/cas-8a9e/notes.md; full transcript saved to \
+                 /tmp/run-8a9e.log for the record.",
+                Some(artifacts_root),
+            ),
+            Some("/tmp/run-8a9e.log".to_string())
+        );
+        // Sentence punctuation must not end up inside the quoted path, or the
+        // operator cannot tell what the gate is actually complaining about.
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason(
+                "Notes at /home/u/.cas/artifacts/cas-8a9e/notes.md; transcript saved to \
+                 /tmp/run-8a9e.log.",
+                Some(artifacts_root),
+            ),
+            Some("/tmp/run-8a9e.log".to_string())
+        );
+        // A bare path opening a bullet reads as a citation, not as prose.
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason(
+                "Evidence:\n- /home/u/.cas/artifacts/cas-8a9e/demo.md\n- /tmp/scratch-run.json",
+                Some(artifacts_root),
+            ),
+            Some("/tmp/scratch-run.json".to_string())
+        );
+    }
+
+    /// With no durable artifact cited anywhere, a tmpfs path is the only
+    /// evidence on offer, whatever the prose around it claims.
+    #[test]
+    fn a_tmp_path_is_rejected_when_the_reason_cites_no_durable_artifact_cas_8a9e() {
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason(
+                "Ran the demo under an isolated HOME at /tmp/tmp.abc123 and it behaved correctly.",
+                Some(std::path::Path::new("/home/u/.cas/artifacts")),
+            ),
+            Some("/tmp/tmp.abc123".to_string())
+        );
+    }
+
+    /// The durable citation is recognised through the configured root as well
+    /// as the conventional `~/.cas/artifacts/` spelling.
+    #[test]
+    fn durable_citation_is_recognised_by_configured_root_and_convention_cas_8a9e() {
+        let configured = std::path::Path::new("/mnt/durable/cas-artifacts");
+        let prose = "every fixture HOME is a /tmp/.tmpXXXX directory";
+
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason(
+                &format!("Evidence: /mnt/durable/cas-artifacts/cas-8a9e/demo.md. {prose}"),
+                Some(configured),
+            ),
+            None
+        );
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason(
+                &format!("Evidence: ~/.cas/artifacts/cas-8a9e/demo.md. {prose}"),
+                None,
+            ),
+            None
+        );
+        // The configured root must actually contain the cited path.
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason(
+                &format!("Evidence: /mnt/durable/cas-artifacts-elsewhere/demo.md. {prose}"),
+                Some(configured),
+            ),
+            Some("/tmp/.tmpXXXX".to_string())
         );
     }
 
@@ -1817,10 +2064,13 @@ impl CasCore {
 
         if !(supervisor_override && is_supervisor_from_env())
             && let Some(reason) = req.reason.as_deref()
-            && let Some(path) = tmpfs_receipt_path_in_close_reason(reason)
+            && let Some(path) = tmpfs_receipt_path_in_close_reason(
+                reason,
+                close_reason_artifacts_root(&self.cas_root).as_deref(),
+            )
         {
             return Ok(Self::tool_error(format!(
-                "TMPFS PROOF RECEIPT REJECTED: close reason cites `{path}`. Durable proof must not live on tmpfs. Store it under the configured [factory] artifacts_root/<task-id>/ (or another sanctioned durable artifacts root) and retry; harness scratchpads under /tmp are ephemeral and cannot be close evidence. A supervisor may use supervisor_override=true only for a legitimate historical reference."
+                "TMPFS PROOF RECEIPT REJECTED: close reason cites `{path}` as evidence. Durable proof must not live on tmpfs. Store it under the configured [factory] artifacts_root/<task-id>/ (or another sanctioned durable artifacts root) and retry; harness scratchpads under /tmp are ephemeral and cannot be close evidence. If that path is discussion rather than a cited receipt, cite your durable artifact under artifacts_root/<task-id>/ in the same reason and the mention will pass. A supervisor may use supervisor_override=true only for a legitimate historical reference."
             )));
         }
 

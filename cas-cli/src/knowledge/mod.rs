@@ -24,7 +24,10 @@ pub use llm::{ClaudeCliRunner, LlmError, LlmRunner, ScriptedLlm};
 pub use merge::{MergeTier, StripOutcome};
 pub use pipeline::{DistillConfig, DistillReport, run_distillation, run_distillation_with_timeout};
 pub(crate) use pipeline::run_distillation_until;
-pub use sources::{LoadedSource, SourceKind, SymbolLite, collect_file_sources};
+pub use sources::{
+    LoadedSource, SkippedSource, SourceKind, SourceScan, SymbolLite, collect_file_sources,
+    scan_file_sources,
+};
 
 /// Environment gate for automatic distillation inside the daemon.
 ///
@@ -53,9 +56,21 @@ pub fn parse_auto_distill(value: &str) -> bool {
 /// `symbols` is passed in rather than fetched so the collector stays pure and
 /// the caller decides how many symbols it is willing to load.
 pub fn collect_sources(project_root: &Path, symbols: &[SymbolLite]) -> Vec<LoadedSource> {
-    let mut all = collect_file_sources(project_root);
-    all.extend(sources::build_module_sources(symbols, project_root));
-    all
+    scan_sources(project_root, symbols).sources
+}
+
+/// [`collect_sources`] plus the files it could not decode, named.
+///
+/// Callers that print or log a pass report should use this one: a source that
+/// silently drops out produces a wiki with a hole in it and no explanation
+/// (cas-c736). Synthesized `code://` module sources can never be skipped —
+/// they are built from already-indexed symbols, not re-read from disk — so the
+/// skip list is exactly the file walk's.
+pub fn scan_sources(project_root: &Path, symbols: &[SymbolLite]) -> SourceScan {
+    let mut scan = scan_file_sources(project_root);
+    scan.sources
+        .extend(sources::build_module_sources(symbols, project_root));
+    scan
 }
 
 #[cfg(test)]

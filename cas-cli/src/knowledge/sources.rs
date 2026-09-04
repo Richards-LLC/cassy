@@ -156,11 +156,48 @@ pub fn classify_path(rel_path: &str) -> Option<SourceKind> {
     }
 }
 
+/// A distillable file the collector could not turn into text, with the reason.
+///
+/// cas-c736: these used to vanish. A UTF-16 `README.md` was dropped by a bare
+/// `let Ok(...) else { continue }`, so the wiki simply had no page for it and
+/// no line anywhere said why — the failure mode that is hardest to notice,
+/// because the output looks complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedSource {
+    /// Project-relative path, the same identity a [`LoadedSource`] carries.
+    pub path: String,
+    /// Operator-facing reason, already phrased to stand alone in a report line.
+    pub reason: String,
+}
+
+/// The result of a source walk: what loaded, and what was passed over by name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceScan {
+    pub sources: Vec<LoadedSource>,
+    pub skipped: Vec<SkippedSource>,
+}
+
+impl SourceScan {
+    /// Report lines for the skipped files, ready to append to a pass's notes.
+    pub fn skip_notes(&self) -> Vec<String> {
+        self.skipped
+            .iter()
+            .map(|skip| format!("source skipped: {} ({})", skip.path, skip.reason))
+            .collect()
+    }
+}
+
 /// Walk `project_root` and load every distillable file, sorted by path so a
-/// pass is deterministic. Unreadable, oversized and non-UTF-8 files are skipped
-/// silently — they are inputs, not errors.
-pub fn collect_file_sources(project_root: &Path) -> Vec<LoadedSource> {
+/// pass is deterministic.
+///
+/// Oversized files are skipped by design (a vendored blob is cost without
+/// signal) and stay unreported. Files that cannot be read or decoded are
+/// reported by name in [`SourceScan::skipped`]: they were *meant* to be
+/// distilled, so their absence from the wiki is a fact the pass owes its
+/// operator.
+pub fn scan_file_sources(project_root: &Path) -> SourceScan {
     let mut found: BTreeMap<String, LoadedSource> = BTreeMap::new();
+    let mut skipped: BTreeMap<String, SkippedSource> = BTreeMap::new();
 
     let walker = ignore::WalkBuilder::new(project_root)
         .hidden(false)
@@ -187,8 +224,33 @@ pub fn collect_file_sources(project_root: &Path) -> Vec<LoadedSource> {
         if too_big {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(entry.path()) else {
-            continue;
+        // Bytes then decode, not `read_to_string`: a BOM-marked UTF-16 doc is
+        // ordinary prose, and a UTF-8 BOM left on the front glues itself to the
+        // first markdown heading the distiller reads (GH #698, cas-c736).
+        let content = match std::fs::read(entry.path()) {
+            Ok(bytes) => match crate::daemon::source_text::decode_source(&bytes) {
+                Ok(content) => content,
+                Err(reason) => {
+                    skipped.insert(
+                        rel_path.clone(),
+                        SkippedSource {
+                            path: rel_path,
+                            reason: reason.as_str().to_string(),
+                        },
+                    );
+                    continue;
+                }
+            },
+            Err(error) => {
+                skipped.insert(
+                    rel_path.clone(),
+                    SkippedSource {
+                        path: rel_path,
+                        reason: error.to_string(),
+                    },
+                );
+                continue;
+            }
         };
         found.insert(
             rel_path.clone(),
@@ -196,7 +258,15 @@ pub fn collect_file_sources(project_root: &Path) -> Vec<LoadedSource> {
         );
     }
 
-    found.into_values().collect()
+    SourceScan {
+        sources: found.into_values().collect(),
+        skipped: skipped.into_values().collect(),
+    }
+}
+
+/// [`scan_file_sources`] for callers that only need the loaded set.
+pub fn collect_file_sources(project_root: &Path) -> Vec<LoadedSource> {
+    scan_file_sources(project_root).sources
 }
 
 /// The slice of an indexed symbol that a module summary needs.
@@ -393,5 +463,79 @@ mod tests {
         let sources = collect_file_sources(root);
         let paths: Vec<&str> = sources.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(paths, vec!["small.md"]);
+    }
+
+    /// cas-c736 encoding fixtures.
+    fn utf16(text: &str, little_endian: bool) -> Vec<u8> {
+        let mut bytes = if little_endian {
+            vec![0xFF, 0xFE]
+        } else {
+            vec![0xFE, 0xFF]
+        };
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&if little_endian {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            });
+        }
+        bytes
+    }
+
+    #[test]
+    fn utf16_and_bom_marked_docs_are_loaded_rather_than_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("le.md"), utf16("# Little endian\n", true)).unwrap();
+        std::fs::write(root.join("be.md"), utf16("# Big endian\n", false)).unwrap();
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice(b"# Bom stripped\n");
+        std::fs::write(root.join("bom.md"), bom).unwrap();
+
+        let scan = scan_file_sources(root);
+        let paths: Vec<&str> = scan.sources.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, vec!["be.md", "bom.md", "le.md"]);
+        assert!(scan.skipped.is_empty(), "{:?}", scan.skipped);
+
+        let by_path = |name: &str| -> String {
+            scan.sources
+                .iter()
+                .find(|s| s.path == name)
+                .expect("source present")
+                .content
+                .clone()
+        };
+        assert_eq!(by_path("le.md"), "# Little endian\n");
+        assert_eq!(by_path("be.md"), "# Big endian\n");
+        // The BOM must be gone, not merely tolerated: left on, the distiller
+        // reads the first heading as "\u{feff}# Bom stripped".
+        assert_eq!(by_path("bom.md"), "# Bom stripped\n");
+    }
+
+    #[test]
+    fn an_undecodable_doc_is_reported_by_name_instead_of_vanishing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("ok.md"), "# Fine").unwrap();
+        // Not UTF-8, no BOM to name another encoding: a latin-1 byte.
+        std::fs::write(root.join("broken.md"), [b'#', b' ', 0xFF, b'\n']).unwrap();
+
+        let scan = scan_file_sources(root);
+        let paths: Vec<&str> = scan.sources.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, vec!["ok.md"]);
+        assert_eq!(scan.skipped.len(), 1);
+        assert_eq!(scan.skipped[0].path, "broken.md");
+        assert!(
+            scan.skipped[0].reason.contains("not valid UTF-8"),
+            "the skip must carry a reason, got {:?}",
+            scan.skipped[0].reason
+        );
+        assert_eq!(
+            scan.skip_notes(),
+            vec![
+                "source skipped: broken.md (not valid UTF-8 and no BOM identifies its encoding)"
+                    .to_string()
+            ]
+        );
     }
 }

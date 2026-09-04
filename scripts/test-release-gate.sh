@@ -11,13 +11,15 @@ gate="$script_dir/release-gate.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# The gate refuses any scratch base with a .cas ancestor, and its own default is
+# The gate refuses any scratch base with a .cas ancestor. Its default used to be
 # $HOME/.cache/cas-release-gate — which on a developer machine sits under the
-# user-level ~/.cas. Unset, this self-test therefore died mid-run on the two
-# rows that build a scratch base, printing no summary and reading as a broken
-# script rather than the host condition it is (cas-4ccc). Default to a base
-# with no .cas above it, matching the queue runner, and let an explicit value
-# win so the variable stays overridable.
+# user-level ~/.cas — so unset, this self-test died mid-run on the two rows that
+# build a scratch base, printing no summary and reading as a broken script
+# rather than the host condition it is (cas-4ccc). cas-c736 moved the same
+# default into release-gate.sh itself, so this line is now belt-and-braces
+# rather than a prerequisite; it is kept so the harness is deterministic even
+# when an operator has the variable exported to somewhere else. The
+# default-scratch-base fixture below deliberately runs with it UNSET.
 : "${CAS_RELEASE_GATE_HOME_DIR:=/var/tmp/cas-release-gate}"
 export CAS_RELEASE_GATE_HOME_DIR
 mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
@@ -265,6 +267,48 @@ if grep -qF 'FAIL ancestor-proxy-config' <<<"$output"; then
     bad "the repository's own .cas/proxy.toml must not trip the ancestor check"
 else
     ok "the repository's own .cas/proxy.toml is not treated as an ancestor leak"
+fi
+
+# cas-c736. With CAS_RELEASE_GATE_HOME_DIR UNSET the gate must pick its own
+# scratch base rather than $HOME/.cache/cas-release-gate, which has a .cas
+# ancestor on every machine with a user-level store and made archive-mode and
+# snapshot-portability refuse before they ran. This is the fixture that proves
+# the default path is the one taken, so the variable is an override and not a
+# prerequisite for cutting a release.
+run_gate_unset_home() {
+    local repo="$1"
+    (cd "$repo" && \
+      env -u CAS_RELEASE_GATE_HOME_DIR \
+      GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+      CARGO="$repo/scripts/cargo-stub" \
+      RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
+      "$repo/scripts/release-gate.sh" 9.8.7)
+}
+
+repo="$(new_fixture default-scratch-base)"
+output="$(run_gate_unset_home "$repo" 2>&1 || true)"
+if grep -qF 'scratch base: /var/tmp/cas-release-gate (from default)' <<<"$output" \
+    && grep -qF 'PASS archive-mode' <<<"$output" \
+    && grep -qF 'PASS snapshot-portability' <<<"$output"; then
+    ok 'an unset CAS_RELEASE_GATE_HOME_DIR takes the gate default, and the scratch rows run'
+else
+    bad "unset CAS_RELEASE_GATE_HOME_DIR did not take the gate default (output: $output)"
+fi
+
+# ...and an explicit value still wins, named in the receipt so a reader can see
+# which base a release was actually gated against.
+override="$tmp/scratch-override"
+mkdir -p "$override"
+repo="$(new_fixture explicit-scratch-base)"
+output="$(cd "$repo" && env CAS_RELEASE_GATE_HOME_DIR="$override/base" \
+    GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+    CARGO="$repo/scripts/cargo-stub" \
+    RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
+    "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+if grep -qF "scratch base: $override/base (from CAS_RELEASE_GATE_HOME_DIR)" <<<"$output"; then
+    ok 'an explicit CAS_RELEASE_GATE_HOME_DIR still wins over the default'
+else
+    bad "explicit CAS_RELEASE_GATE_HOME_DIR was not honoured (output: $output)"
 fi
 
 repo="$(new_fixture passing)"

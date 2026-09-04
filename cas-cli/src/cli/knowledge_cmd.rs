@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use clap::{Args, Subcommand};
 
 use crate::knowledge::{
-    ClaudeCliRunner, DistillConfig, LlmRunner, ScriptedLlm, SymbolLite, collect_sources,
+    ClaudeCliRunner, DistillConfig, LlmRunner, ScriptedLlm, SymbolLite, scan_sources,
     run_distillation_until,
 };
 use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
@@ -183,7 +183,11 @@ fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
     let project_root = project_root_of(cas_root)?;
     let store = SqliteKnowledgeStore::open(cas_root)?;
     let load = load_symbols(cas_root, args.max_symbols);
-    let sources = collect_sources(&project_root, &load.symbols);
+    let scan = scan_sources(&project_root, &load.symbols);
+    // Taken before the sources are moved out: a file that could not be decoded
+    // is reported with the pass, not dropped on the floor (cas-c736).
+    let skip_notes = scan.skip_notes();
+    let sources = scan.sources;
 
     let config = DistillConfig {
         max_sources_per_pass: args.max_sources,
@@ -217,8 +221,9 @@ fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
         )
     };
 
-    let report =
+    let mut report =
         run_distillation_until(&store, runner.as_ref(), &sources, &config, build_deadline)?;
+    report.notes.extend(skip_notes);
 
     if args.dry_run {
         println!("Knowledge distillation (dry run — nothing was written)");

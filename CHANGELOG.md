@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+- A `CHANGELOG.md` or project doc saved as UTF-16, or with a UTF-8 byte-order
+  mark, is now read instead of skipped. The changelog index no longer fails the
+  whole pass on an encoding it can decode, a leading byte-order mark no longer
+  swallows the file's first release heading, and a doc that genuinely cannot be
+  decoded is reported by name and reason in the pass report rather than
+  disappearing from the knowledge wiki with no explanation.
+- `scripts/release-gate.sh` picks its own scratch base (`/var/tmp/cas-release-gate`)
+  instead of one under `$HOME`. On a machine with a user-level `~/.cas` store the
+  old default sat beneath it, so the gate refused its own archive-mode and
+  snapshot-portability rows until an environment variable was exported by hand.
+  Setting `CAS_RELEASE_GATE_HOME_DIR` still overrides the base, and the receipt
+  now names the base it used and where that value came from.
+
 ## [3.15.1] - 2026-09-04
 
 ### Fixed

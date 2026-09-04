@@ -35,30 +35,28 @@ impl CodeStore for SqliteCodeStore {
     }
 
     fn add_file(&self, file: &CodeFile) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
         let normalized_path = Self::normalize_path(&file.path);
-        conn.execute(
-            "INSERT OR REPLACE INTO code_files
-             (id, path, repository, language, size, line_count, commit_hash, content_hash, created, updated, scope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                file.id,
-                normalized_path,
-                file.repository,
-                file.language.to_string(),
-                file.size as i64,
-                file.line_count as i64,
-                file.commit_hash,
-                file.content_hash,
-                file.created.to_rfc3339(),
-                file.updated.to_rfc3339(),
-                file.scope,
-            ],
-        )?;
-        Ok(())
+        self.write_with_retry(|conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO code_files
+                 (id, path, repository, language, size, line_count, commit_hash, content_hash, created, updated, scope)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    file.id,
+                    normalized_path,
+                    file.repository,
+                    file.language.to_string(),
+                    file.size as i64,
+                    file.line_count as i64,
+                    file.commit_hash,
+                    file.content_hash,
+                    file.created.to_rfc3339(),
+                    file.updated.to_rfc3339(),
+                    file.scope,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     fn get_file(&self, id: &str) -> Result<CodeFile> {
@@ -123,13 +121,11 @@ impl CodeStore for SqliteCodeStore {
     }
 
     fn delete_file(&self, id: &str) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
-        // Foreign key cascades will delete symbols and relationships
-        conn.execute("DELETE FROM code_files WHERE id = ?1", params![id])?;
-        Ok(())
+        self.write_with_retry(|conn| {
+            // Foreign key cascades will delete symbols and relationships
+            conn.execute("DELETE FROM code_files WHERE id = ?1", params![id])?;
+            Ok(())
+        })
     }
 
     // ========== Symbol Operations ==========
@@ -148,39 +144,37 @@ impl CodeStore for SqliteCodeStore {
     }
 
     fn add_symbol(&self, symbol: &CodeSymbol) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
         let normalized_path = Self::normalize_path(&symbol.file_path);
-        conn.execute(
-            "INSERT OR REPLACE INTO code_symbols
-             (id, qualified_name, name, kind, language, file_path, file_id, line_start, line_end,
-              source, documentation, signature, parent_id, repository, created, updated, commit_hash, content_hash, scope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-            params![
-                symbol.id,
-                symbol.qualified_name,
-                symbol.name,
-                symbol.kind.to_string(),
-                symbol.language.to_string(),
-                normalized_path,
-                symbol.file_id,
-                symbol.line_start as i64,
-                symbol.line_end as i64,
-                symbol.source,
-                symbol.documentation,
-                symbol.signature,
-                symbol.parent_id,
-                symbol.repository,
-                symbol.created.to_rfc3339(),
-                symbol.updated.to_rfc3339(),
-                symbol.commit_hash,
-                symbol.content_hash,
-                symbol.scope,
-            ],
-        )?;
-        Ok(())
+        self.write_with_retry(|conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO code_symbols
+                 (id, qualified_name, name, kind, language, file_path, file_id, line_start, line_end,
+                  source, documentation, signature, parent_id, repository, created, updated, commit_hash, content_hash, scope)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                params![
+                    symbol.id,
+                    symbol.qualified_name,
+                    symbol.name,
+                    symbol.kind.to_string(),
+                    symbol.language.to_string(),
+                    normalized_path,
+                    symbol.file_id,
+                    symbol.line_start as i64,
+                    symbol.line_end as i64,
+                    symbol.source,
+                    symbol.documentation,
+                    symbol.signature,
+                    symbol.parent_id,
+                    symbol.repository,
+                    symbol.created.to_rfc3339(),
+                    symbol.updated.to_rfc3339(),
+                    symbol.commit_hash,
+                    symbol.content_hash,
+                    symbol.scope,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     fn get_symbol(&self, id: &str) -> Result<CodeSymbol> {
@@ -320,24 +314,20 @@ impl CodeStore for SqliteCodeStore {
     }
 
     fn delete_symbol(&self, id: &str) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
-        conn.execute("DELETE FROM code_symbols WHERE id = ?1", params![id])?;
-        Ok(())
+        self.write_with_retry(|conn| {
+            conn.execute("DELETE FROM code_symbols WHERE id = ?1", params![id])?;
+            Ok(())
+        })
     }
 
     fn delete_symbols_in_file(&self, file_id: &str) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
-        conn.execute(
-            "DELETE FROM code_symbols WHERE file_id = ?1",
-            params![file_id],
-        )?;
-        Ok(())
+        self.write_with_retry(|conn| {
+            conn.execute(
+                "DELETE FROM code_symbols WHERE file_id = ?1",
+                params![file_id],
+            )?;
+            Ok(())
+        })
     }
 
     // ========== Relationship Operations ==========
@@ -533,72 +523,65 @@ impl CodeStore for SqliteCodeStore {
     // ========== Bulk Operations ==========
 
     fn add_symbols_batch(&self, symbols: &[CodeSymbol]) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
-        let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-
-        for symbol in symbols {
-            let normalized_path = Self::normalize_path(&symbol.file_path);
-            tx.execute(
-                "INSERT OR REPLACE INTO code_symbols
-                 (id, qualified_name, name, kind, language, file_path, file_id, line_start, line_end,
-                  source, documentation, signature, parent_id, repository, created, updated, commit_hash, content_hash, scope)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-                params![
-                    symbol.id,
-                    symbol.qualified_name,
-                    symbol.name,
-                    symbol.kind.to_string(),
-                    symbol.language.to_string(),
-                    normalized_path,
-                    symbol.file_id,
-                    symbol.line_start as i64,
-                    symbol.line_end as i64,
-                    symbol.source,
-                    symbol.documentation,
-                    symbol.signature,
-                    symbol.parent_id,
-                    symbol.repository,
-                    symbol.created.to_rfc3339(),
-                    symbol.updated.to_rfc3339(),
-                    symbol.commit_hash,
-                    symbol.content_hash,
-                    symbol.scope,
-                ],
-            )?;
-        }
-
-        tx.commit()?;
-        Ok(())
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        // Bounded retry on acquisition: a single `ImmediateTx::new` gave up the
+        // moment a foreign writer held the lock, and the indexer's fallback is
+        // to re-insert every symbol one at a time (cas-8a03).
+        crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+            for symbol in symbols {
+                let normalized_path = Self::normalize_path(&symbol.file_path);
+                tx.execute(
+                    "INSERT OR REPLACE INTO code_symbols
+                     (id, qualified_name, name, kind, language, file_path, file_id, line_start, line_end,
+                      source, documentation, signature, parent_id, repository, created, updated, commit_hash, content_hash, scope)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                    params![
+                        symbol.id,
+                        symbol.qualified_name,
+                        symbol.name,
+                        symbol.kind.to_string(),
+                        symbol.language.to_string(),
+                        normalized_path,
+                        symbol.file_id,
+                        symbol.line_start as i64,
+                        symbol.line_end as i64,
+                        symbol.source,
+                        symbol.documentation,
+                        symbol.signature,
+                        symbol.parent_id,
+                        symbol.repository,
+                        symbol.created.to_rfc3339(),
+                        symbol.updated.to_rfc3339(),
+                        symbol.commit_hash,
+                        symbol.content_hash,
+                        symbol.scope,
+                    ],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     fn add_relationships_batch(&self, relationships: &[CodeRelationship]) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
-        let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-
-        for rel in relationships {
-            tx.execute(
-                "INSERT OR REPLACE INTO code_relationships
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+            for rel in relationships {
+                tx.execute(
+                    "INSERT OR REPLACE INTO code_relationships
                  (id, source_id, target_id, relation_type, weight, created)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    rel.id,
-                    rel.source_id,
-                    rel.target_id,
-                    rel.relation_type.to_string(),
-                    rel.weight,
-                    rel.created.to_rfc3339(),
-                ],
-            )?;
-        }
-
-        tx.commit()?;
-        Ok(())
+                    params![
+                        rel.id,
+                        rel.source_id,
+                        rel.target_id,
+                        rel.relation_type.to_string(),
+                        rel.weight,
+                        rel.created.to_rfc3339(),
+                    ],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     fn get_symbols_batch(&self, ids: &[&str]) -> Result<Vec<CodeSymbol>> {

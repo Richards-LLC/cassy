@@ -46,6 +46,9 @@ as `repository` or `harness.codex`; probed paths and commands are never emitted.
 If `repository.candidate_limit` is reported, preview safe registry-only cleanup
 with `cas known-repos prune-missing --dry-run`, then apply it without the flag.
 This removes only rows for paths that no longer exist; it never deletes repo files.
+A row whose path still exists but is not a project — a factory artifact copy or a
+scratch root that got registered — is removed with `cas known-repos forget <path>`,
+which also drops any selector binding aimed at it and never deletes repo files.
 If two live clones share one selector, inspect host-local state with
 `cas known-repos status`, then explicitly select the intended canonical root
 with `cas known-repos bind --repo <path>`. Remove a stale choice with

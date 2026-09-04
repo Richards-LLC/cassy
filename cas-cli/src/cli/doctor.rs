@@ -371,7 +371,9 @@ fn classify_user_skill(
 /// skills Claude does not (`cas-codex-supervisor-checklist`), so comparing a
 /// `~/.codex/skills` directory against the Claude catalog reports a perfectly
 /// current builtin as an orphan.
-fn catalog_skill_names(catalog: &[crate::builtins::BuiltinFile]) -> std::collections::HashSet<String> {
+fn catalog_skill_names(
+    catalog: &[crate::builtins::BuiltinFile],
+) -> std::collections::HashSet<String> {
     catalog
         .iter()
         .filter_map(|file| file.path.strip_prefix("skills/"))
@@ -384,7 +386,9 @@ fn catalog_skill_names(catalog: &[crate::builtins::BuiltinFile]) -> std::collect
 /// **canonical** path: several Claude account directories symlink a single
 /// shared `skills/` directory, so a naive walk reports the same file three
 /// times and an operator "fixes" one file over and over.
-fn scan_user_skill_dirs(targets: &[(PathBuf, std::collections::HashSet<String>)]) -> Vec<StrayUserSkill> {
+fn scan_user_skill_dirs(
+    targets: &[(PathBuf, std::collections::HashSet<String>)],
+) -> Vec<StrayUserSkill> {
     let mut seen = std::collections::HashSet::new();
     let mut strays = Vec::new();
     for (dir, builtin_skill_names) in targets {
@@ -474,7 +478,10 @@ fn stray_user_skills_check(strays: &[StrayUserSkill]) -> Check {
                 format!("{} (retired; {builtin} owns it now)", stray.path.display())
             }
             StrayReason::OrphanedManagedCopy => {
-                format!("{} (managed_by: cas but no longer a builtin)", stray.path.display())
+                format!(
+                    "{} (managed_by: cas but no longer a builtin)",
+                    stray.path.display()
+                )
             }
         })
         .collect::<Vec<_>>()
@@ -671,6 +678,10 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             }
 
             if let Some(check) = legacy_index_autofix(path) {
+                checks.push(check);
+            }
+
+            if let Some(check) = dangling_dependency_autofix(path) {
                 checks.push(check);
             }
         }
@@ -1190,40 +1201,18 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 .collect::<Vec<_>>()
                 .join(", ");
 
-            // Check for orphaned dependencies
+            // Dependency endpoints: a quarantined (hidden but present) endpoint
+            // is not an orphan, and only a genuinely absent id warrants a WARN
+            // (cas-095c).
             let deps = task_store.list_dependencies(None).unwrap_or_default();
-            let task_ids: std::collections::HashSet<_> = tasks.iter().map(|t| &t.id).collect();
-            let orphaned_deps = deps
-                .iter()
-                .filter(|d| !task_ids.contains(&d.from_id) || !task_ids.contains(&d.to_id))
-                .count();
-
-            if orphaned_deps > 0 {
-                checks.push(Check {
-                    name: "tasks".to_string(),
-                    status: CheckStatus::Warning,
-                    message: format!(
-                        "{} tasks ({}) | {} open, {} blocked | {} orphaned dependencies",
-                        tasks.len(),
-                        status_summary,
-                        open_count,
-                        blocked_count,
-                        orphaned_deps
-                    ),
-                });
-            } else {
-                checks.push(Check {
-                    name: "tasks".to_string(),
-                    status: CheckStatus::Ok,
-                    message: format!(
-                        "{} tasks ({}) | {} open, {} blocked",
-                        tasks.len(),
-                        status_summary,
-                        open_count,
-                        blocked_count
-                    ),
-                });
-            }
+            let health = dependency_endpoint_health(task_store.as_ref(), &tasks, &deps);
+            checks.push(task_health_check(
+                tasks.len(),
+                &status_summary,
+                open_count,
+                blocked_count,
+                &health,
+            ));
         }
     }
 
@@ -1410,6 +1399,273 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         started.elapsed(),
         Some(&cas_root),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Task dependency health (cas-095c)
+// ---------------------------------------------------------------------------
+
+/// Dependency rows whose endpoints are not on the board, split by cause.
+///
+/// The board is the *quarantine-filtered* task list, so a dependency touching a
+/// row that `cas doctor --fix-cloud-rows` quarantined looks orphaned to a check
+/// that compares against `list` alone — which is precisely the bug: the operator
+/// did what doctor told them and was warned for it forever after. The
+/// quarantined row is present, intact and reversible; only an endpoint that is
+/// absent from the `tasks` table entirely is a fault.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DependencyEndpointHealth {
+    /// Rows with an endpoint that is hidden by quarantine but still present.
+    quarantined_endpoint_rows: usize,
+    /// `(from_id, to_id)` of rows with an endpoint no longer in `tasks`.
+    dangling: Vec<(String, String)>,
+    /// `(from_id, to_id)` of rows whose endpoint the store could not answer
+    /// for. Never pruned and never counted as dangling.
+    unresolved: Vec<(String, String)>,
+    /// The first store failure behind `unresolved`, verbatim.
+    unresolved_reason: Option<String>,
+}
+
+/// What a lookup of an off-board endpoint established.
+///
+/// The third arm is the whole point: "the store could not answer" is not
+/// "the row is gone". Collapsing them would let a `database is locked` during
+/// `cas doctor --fix` delete live edges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EndpointResolution {
+    /// Present in `tasks`, merely hidden from the board by quarantine.
+    Present,
+    /// Genuinely absent: the store said "not found".
+    Absent,
+    /// The store failed to answer, verbatim reason attached.
+    Unresolved(String),
+}
+
+/// Resolve one off-board id through the store.
+///
+/// Only an explicit not-found verdict counts as absence. Every other error —
+/// a locked database, an I/O failure, a parse error on a corrupt row — is
+/// `Unresolved`, because a check that guesses here is a check that deletes
+/// data on a transient fault.
+fn resolve_endpoint(store: &dyn crate::store::TaskStore, id: &str) -> EndpointResolution {
+    match store.get(id) {
+        Ok(_) => EndpointResolution::Present,
+        Err(crate::store::StoreError::TaskNotFound(_) | crate::store::StoreError::NotFound(_)) => {
+            EndpointResolution::Absent
+        }
+        Err(error) => EndpointResolution::Unresolved(error.to_string()),
+    }
+}
+
+/// Classify every dependency row against the board.
+///
+/// `resolve` answers for an id that is not on the board. In production it is
+/// [`resolve_endpoint`] over `TaskStore::get`, which deliberately does not
+/// filter quarantine — that is the seam that answers "does this row exist?"
+/// without leaking a hidden row onto any list surface.
+fn classify_dependency_endpoints(
+    tasks: &[crate::types::Task],
+    deps: &[crate::types::Dependency],
+    mut resolve: impl FnMut(&str) -> EndpointResolution,
+) -> DependencyEndpointHealth {
+    let board: std::collections::HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+    // One resolve per distinct off-board id, not per row: a quarantine sweep
+    // leaves dozens of rows pointing at the same handful of ids.
+    let mut resolved: BTreeMap<String, EndpointResolution> = BTreeMap::new();
+    let mut health = DependencyEndpointHealth::default();
+
+    for dep in deps {
+        let mut hidden = false;
+        let mut missing = false;
+        let mut unresolved = false;
+        for endpoint in [&dep.from_id, &dep.to_id] {
+            if board.contains(endpoint.as_str()) {
+                continue;
+            }
+            let resolution = resolved
+                .entry(endpoint.clone())
+                .or_insert_with(|| resolve(endpoint))
+                .clone();
+            match resolution {
+                EndpointResolution::Present => hidden = true,
+                EndpointResolution::Absent => missing = true,
+                EndpointResolution::Unresolved(reason) => {
+                    unresolved = true;
+                    health.unresolved_reason.get_or_insert(reason);
+                }
+            }
+        }
+
+        // Precedence is deliberate: a row we could not check is never called
+        // dangling, because dangling rows are the ones `--fix` deletes.
+        if unresolved {
+            health
+                .unresolved
+                .push((dep.from_id.clone(), dep.to_id.clone()));
+        } else if missing {
+            health
+                .dangling
+                .push((dep.from_id.clone(), dep.to_id.clone()));
+        } else if hidden {
+            health.quarantined_endpoint_rows += 1;
+        }
+    }
+
+    health
+}
+
+/// [`classify_dependency_endpoints`] against a live store.
+fn dependency_endpoint_health(
+    store: &dyn crate::store::TaskStore,
+    tasks: &[crate::types::Task],
+    deps: &[crate::types::Dependency],
+) -> DependencyEndpointHealth {
+    classify_dependency_endpoints(tasks, deps, |id| resolve_endpoint(store, id))
+}
+
+/// The `tasks` row: counts, plus dependency endpoints reported for what they
+/// are.
+fn task_health_check(
+    total_tasks: usize,
+    status_summary: &str,
+    open_count: usize,
+    blocked_count: usize,
+    health: &DependencyEndpointHealth,
+) -> Check {
+    let mut message = format!(
+        "{total_tasks} tasks ({status_summary}) | {open_count} open, {blocked_count} blocked"
+    );
+
+    if health.quarantined_endpoint_rows > 0 {
+        message.push_str(&format!(
+            " | {} dependency row(s) reference quarantined tasks",
+            health.quarantined_endpoint_rows
+        ));
+    }
+
+    if health.dangling.is_empty() && health.unresolved.is_empty() {
+        return Check {
+            name: "tasks".to_string(),
+            status: CheckStatus::Ok,
+            message,
+        };
+    }
+
+    if !health.dangling.is_empty() {
+        message.push_str(&format!(
+            " | {} dependency row(s) point at a task id that is not in this database ({})",
+            health.dangling.len(),
+            sample_rows(&health.dangling)
+        ));
+    }
+
+    // An unreadable endpoint suspends the prune entirely: `--fix` must not
+    // delete the rows it *could* classify while the store is answering some
+    // lookups with errors, because the next read could reclassify them.
+    if !health.unresolved.is_empty() {
+        let reason = health
+            .unresolved_reason
+            .as_deref()
+            .unwrap_or("store lookup failed");
+        message.push_str(&format!(
+            " | {} dependency row(s) could not be checked ({}): {reason}; Run `cas doctor --fix` once that error clears — nothing is pruned while any endpoint is unreadable",
+            health.unresolved.len(),
+            sample_rows(&health.unresolved)
+        ));
+    } else {
+        message.push_str("; Run `cas doctor --fix` to prune them");
+    }
+
+    Check {
+        name: "tasks".to_string(),
+        status: CheckStatus::Warning,
+        message,
+    }
+}
+
+/// `a -> b, c -> d, +7 more`: name the rows, bound the line.
+fn sample_rows(rows: &[(String, String)]) -> String {
+    let sample = rows
+        .iter()
+        .take(3)
+        .map(|(from, to)| format!("{from} -> {to}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match rows.len().saturating_sub(3) {
+        0 => sample,
+        remainder => format!("{sample}, +{remainder} more"),
+    }
+}
+
+/// What one prune attempt did.
+#[derive(Debug, PartialEq, Eq)]
+enum PruneOutcome {
+    Pruned(usize),
+    /// At least one endpoint could not be read, so nothing was deleted.
+    Skipped { reason: String, rows: usize },
+}
+
+/// Delete dependency rows whose endpoints are absent from `tasks`.
+///
+/// Quarantined endpoints are left strictly alone: quarantine is reversible, and
+/// pruning its edges would make releasing a row restore it without its graph.
+///
+/// If any endpoint lookup fails, the whole prune is skipped rather than run on
+/// a partial picture — deleting rows is irreversible and a locked database is
+/// not evidence of anything.
+fn prune_dangling_dependencies(
+    store: &dyn crate::store::TaskStore,
+) -> anyhow::Result<PruneOutcome> {
+    let tasks = store.list(None)?;
+    let deps = store.list_dependencies(None)?;
+    let health = dependency_endpoint_health(store, &tasks, &deps);
+
+    if !health.unresolved.is_empty() {
+        return Ok(PruneOutcome::Skipped {
+            reason: health
+                .unresolved_reason
+                .unwrap_or_else(|| "store lookup failed".to_string()),
+            rows: health.unresolved.len(),
+        });
+    }
+
+    for (from, to) in &health.dangling {
+        store.remove_dependency(from, to)?;
+    }
+    Ok(PruneOutcome::Pruned(health.dangling.len()))
+}
+
+/// The `cas doctor --fix` dangling-dependency prune, as one renderable Check.
+///
+/// Returns `None` when there is nothing to prune — the clean case adds no row.
+///
+/// Uses the *local* store on purpose: a locally dangling edge may simply be one
+/// whose task has not been pulled yet, so the prune must not push a delete that
+/// would take a live edge out of the cloud. A later pull can restore it.
+fn dangling_dependency_autofix(cas_root: &Path) -> Option<Check> {
+    let store = crate::store::open_task_store_local(cas_root).ok()?;
+    match prune_dangling_dependencies(store.as_ref()) {
+        Ok(PruneOutcome::Pruned(0)) => None,
+        Ok(PruneOutcome::Pruned(pruned)) => Some(Check {
+            name: "auto-fix".to_string(),
+            status: CheckStatus::Ok,
+            message: format!(
+                "Pruned {pruned} dependency row(s) pointing at task ids that are not in this database"
+            ),
+        }),
+        Ok(PruneOutcome::Skipped { reason, rows }) => Some(Check {
+            name: "auto-fix".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "Skipped the dangling-dependency prune: {rows} endpoint lookup(s) failed ({reason}); no dependency rows were deleted"
+            ),
+        }),
+        Err(error) => Some(Check {
+            name: "auto-fix".to_string(),
+            status: CheckStatus::Warning,
+            message: format!("Failed to prune dangling dependency rows: {error}"),
+        }),
+    }
 }
 
 /// The `cas doctor --fix` legacy-index repair step, as one renderable Check.
@@ -1637,6 +1893,23 @@ fn foreign_rows_check_with_classifier_error(
         message.push_str(&format!(
             ". {} project DB(s) could NOT be read and were not compared: {named}",
             report.peers_unreadable.len()
+        ));
+    }
+    if !report.peers_skipped.is_empty() {
+        // cas-647c: informational, never a WARN driver. These roots opened
+        // cleanly and hold no `tasks` table — a factory artifact copy or probe
+        // fixture, not a broken project. The clause exists so the operator can
+        // see the registry row and remove it if they want to, which is why it
+        // names `cas known-repos forget` rather than a repair.
+        let named = report
+            .peers_skipped
+            .iter()
+            .map(|peer| peer.db_path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!(
+            ". Skipped root(s): {named} — nothing is broken there. Drop a registry row you \
+             no longer want with `cas known-repos forget <path>`."
         ));
     }
 
@@ -1888,6 +2161,24 @@ fn output_foreign_rows_detail(
             peer.db_path.display(),
             peer.error
         ))?;
+    }
+
+    // Muted, not a warning: these roots opened cleanly and hold no tasks at
+    // all, so there is no repair to make — only a registry row to drop if the
+    // operator wants it gone (cas-647c).
+    for peer in &report.peers_skipped {
+        fmt.write_muted(&format!(
+            "SKIPPED: {} ({}) — {}; drop the registry row with `cas known-repos forget {}`",
+            peer.project,
+            peer.db_path.display(),
+            peer.reason,
+            peer.db_path
+                .parent()
+                .and_then(std::path::Path::parent)
+                .unwrap_or(&peer.db_path)
+                .display(),
+        ))?;
+        fmt.newline()?;
     }
 
     if let Some(analysis) = purge_analysis {
@@ -2467,9 +2758,20 @@ fn code_vector_summary(state: &SymbolIndexState) -> String {
     }
     if state.vector_orphaned > 0 {
         summary.push_str(&format!(
-            "; {} queue row(s) name symbols that no longer exist",
+            "; {} queue row(s) name symbols that no longer exist \
+             (run `cas index code` to drop them)",
             state.vector_orphaned
         ));
+    }
+    // A failure that survived a reconcile is a failure the reconcile refused to
+    // re-arm: its recorded error names input the provider rejects identically
+    // every time. Repeating "run `cas index code`" there is exactly the loop
+    // cas-8a03 is about, so the residual gets its own command.
+    if state.vector_failed > 0 {
+        summary.push_str(
+            "; failed rows are re-armed by `cas index code`, and \
+             `cas index code --force` re-arms even the permanently-rejected ones",
+        );
     }
     if let Some(rebuild) = &state.vector_rebuild {
         summary.push_str(&format!(
@@ -3978,7 +4280,9 @@ mod tests {
         let listed = check.message.matches("cas-r").count();
         assert_eq!(listed, 6, "fixture must list six ids: {}", check.message);
         assert!(
-            check.message.contains("purge cannot reach 6 evidence row(s)"),
+            check
+                .message
+                .contains("purge cannot reach 6 evidence row(s)"),
             "the printed count must describe the list it prints: {}",
             check.message
         );
@@ -4027,7 +4331,9 @@ mod tests {
         let check = foreign_rows_check(Ok(&report), None, 1);
 
         assert!(
-            check.message.contains("unattributed: 2 row(s) (1 open), 1 quarantined locally"),
+            check
+                .message
+                .contains("unattributed: 2 row(s) (1 open), 1 quarantined locally"),
             "{}",
             check.message
         );
@@ -4155,12 +4461,7 @@ mod tests {
     fn one_live_supervisor_session_adds_no_overlap_warning() {
         use crate::types::AgentRole;
         let agents = vec![
-            factory_agent(
-                "sup-a",
-                "supervisor-a",
-                "factory-a",
-                AgentRole::Supervisor,
-            ),
+            factory_agent("sup-a", "supervisor-a", "factory-a", AgentRole::Supervisor),
             factory_agent("worker-a", "worker-a", "factory-a", AgentRole::Worker),
         ];
         assert!(
@@ -4696,6 +4997,52 @@ mod tests {
         );
     }
 
+    /// cas-647c: a registry root that is not a project store at all is
+    /// coverage bookkeeping, not a defect. It must be named in the row and it
+    /// must not turn the row amber — the operator has no failure to clear.
+    #[test]
+    fn foreign_rows_check_stays_ok_when_a_registry_root_is_only_skipped_cas_647c() {
+        use crate::cli::foreign_rows::{ForeignRowReport, SkippedPeer};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 10,
+            peers_compared: vec!["accounting".to_string()],
+            peers_skipped: vec![SkippedPeer {
+                project: "fresh-proxy".to_string(),
+                db_path: std::path::PathBuf::from(
+                    "/home/u/.cas/artifacts/cas-1bfb/fresh-proxy/.cas/cas.db",
+                ),
+                reason: crate::cli::foreign_rows::NOT_A_PROJECT_STORE.to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let check = foreign_rows_check(Ok(&report), None, 0);
+
+        assert!(
+            matches!(check.status, CheckStatus::Ok),
+            "skipped non-stores must not drive WARN: {}",
+            check.message
+        );
+        assert!(check.message.contains("fresh-proxy"), "{}", check.message);
+        assert!(
+            check.message.contains("not a project store"),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("could NOT be read"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cas known-repos forget"),
+            "the row must name the command that clears the row: {}",
+            check.message
+        );
+    }
+
     fn messages(checks: &[Check], name: &str) -> Vec<String> {
         checks
             .iter()
@@ -4953,8 +5300,16 @@ mod tests {
 
         let check = stray_user_skills_check(&strays);
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("mecha-cassy-post"), "{}", check.message);
-        assert!(check.message.contains("mecha-cassy owns it now"), "{}", check.message);
+        assert!(
+            check.message.contains("mecha-cassy-post"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("mecha-cassy owns it now"),
+            "{}",
+            check.message
+        );
         assert_eq!(check.group(), CheckGroup::Config);
         // The guidance must reach doctor's remediation column, not stay buried.
         assert!(check.parts().1.is_some(), "{:?}", check.parts());
@@ -5056,8 +5411,13 @@ mod tests {
         #[cfg(not(unix))]
         return;
 
-        let strays = scan_user_skill_dirs(&[(real.clone(), claude_names()), (linked, claude_names())]);
-        assert_eq!(strays.len(), 1, "symlinked duplicate double-counted: {strays:?}");
+        let strays =
+            scan_user_skill_dirs(&[(real.clone(), claude_names()), (linked, claude_names())]);
+        assert_eq!(
+            strays.len(),
+            1,
+            "symlinked duplicate double-counted: {strays:?}"
+        );
     }
 
     /// `cas-8fad`: the machine-scoped MechaCassy row must land in the
@@ -5074,7 +5434,10 @@ mod tests {
         );
         assert_eq!(check.group(), CheckGroup::Integrations);
         let (message, remediation) = check.parts();
-        assert!(message.contains("not registered on this machine"), "{message}");
+        assert!(
+            message.contains("not registered on this machine"),
+            "{message}"
+        );
         assert_eq!(
             remediation.as_deref(),
             Some("Run `cas integrate mecha-cassy`")
@@ -5305,6 +5668,39 @@ mod tests {
         );
     }
 
+    /// cas-8a03: every clause has to name a command that actually clears it.
+    /// Orphaned rows are dropped by `cas index code`; failed rows are re-armed
+    /// by it; the residual it deliberately refuses to re-arm names `--force`.
+    #[test]
+    fn symbol_index_check_names_a_command_for_every_vector_residual() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            vector_eligible: 900,
+            vectorized: 340,
+            vector_pending: 557,
+            vector_failed: 3,
+            vector_unqueued: 120,
+            vector_orphaned: 553,
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        for expected in [
+            "120 never queued — run `cas index code` to re-arm them",
+            "553 queue row(s) name symbols that no longer exist (run `cas index code` to drop them)",
+            "failed rows are re-armed by `cas index code`",
+            "`cas index code --force` re-arms even the permanently-rejected ones",
+        ] {
+            assert!(
+                check.message.contains(expected),
+                "missing {expected}: {}",
+                check.message
+            );
+        }
+    }
+
     /// A reset that is named is not a reset that lies: after the vector cache
     /// is rebuilt, the check says so instead of silently reporting that every
     /// vector disappeared.
@@ -5357,7 +5753,9 @@ mod tests {
         let second = symbol_index_check(state, now);
         assert_eq!(first.message, second.message);
         assert!(
-            first.message.contains("603/13545 vectorized, 12942 pending"),
+            first
+                .message
+                .contains("603/13545 vectorized, 12942 pending"),
             "message: {}",
             first.message
         );
@@ -5506,7 +5904,11 @@ mod tests {
             ..Default::default()
         });
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("12 unit(s) queued"), "{}", check.message);
+        assert!(
+            check.message.contains("12 unit(s) queued"),
+            "{}",
+            check.message
+        );
         assert!(
             check.message.contains("5 unit(s) quarantined"),
             "the refused units must not be folded into the backlog: {}",
@@ -5518,7 +5920,9 @@ mod tests {
             check.message
         );
         assert!(
-            check.message.contains("cas history embed --retry-quarantined"),
+            check
+                .message
+                .contains("cas history embed --retry-quarantined"),
             "a count without a move is not actionable: {}",
             check.message
         );
@@ -5532,7 +5936,11 @@ mod tests {
             ..Default::default()
         });
         assert!(matches!(drained.status, CheckStatus::Warning));
-        assert!(drained.message.contains("nothing pending"), "{}", drained.message);
+        assert!(
+            drained.message.contains("nothing pending"),
+            "{}",
+            drained.message
+        );
         assert!(
             drained.message.contains("2 unit(s) quarantined"),
             "{}",
@@ -5979,6 +6387,434 @@ mod tests {
                 check.message
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Task dependency health (cas-095c)
+    // -----------------------------------------------------------------
+
+    /// A task store shaped like the real one: quarantine-filtered lists over an
+    /// unfiltered SQLite table, which is exactly the pairing that made doctor
+    /// call quarantined endpoints "orphaned".
+    fn task_health_store() -> (
+        TempDir,
+        std::sync::Arc<crate::cloud::SyncQueue>,
+        std::sync::Arc<dyn crate::store::TaskStore>,
+    ) {
+        let temp = TempDir::new().unwrap();
+        let inner = crate::store::SqliteTaskStore::open(temp.path()).unwrap();
+        crate::store::TaskStore::init(&inner).unwrap();
+        let queue = std::sync::Arc::new(crate::cloud::SyncQueue::open(temp.path()).unwrap());
+        queue.init().unwrap();
+        let store: std::sync::Arc<dyn crate::store::TaskStore> =
+            std::sync::Arc::new(crate::store::QuarantineFilteringTaskStore::new(
+                std::sync::Arc::new(inner),
+                std::sync::Arc::clone(&queue),
+            ));
+        (temp, queue, store)
+    }
+
+    fn seed_pair(store: &dyn crate::store::TaskStore) {
+        use crate::types::{Dependency, DependencyType, Task};
+        store
+            .add(&Task::new("cas-aaaa".to_string(), "Child".to_string()))
+            .unwrap();
+        store
+            .add(&Task::new("cas-bbbb".to_string(), "Blocker".to_string()))
+            .unwrap();
+        store
+            .add_dependency(&Dependency::new(
+                "cas-aaaa".to_string(),
+                "cas-bbbb".to_string(),
+                DependencyType::Blocks,
+            ))
+            .unwrap();
+    }
+
+    fn health_of(store: &dyn crate::store::TaskStore) -> DependencyEndpointHealth {
+        let tasks = store.list(None).unwrap();
+        let deps = store.list_dependencies(None).unwrap();
+        dependency_endpoint_health(store, &tasks, &deps)
+    }
+
+    fn check_for(store: &dyn crate::store::TaskStore) -> Check {
+        let tasks = store.list(None).unwrap();
+        task_health_check(tasks.len(), "Open: 2", 2, 0, &health_of(store))
+    }
+
+    /// The reported bug: quarantining a task (which `cas doctor
+    /// --fix-cloud-rows` tells the operator to do) must not turn every
+    /// dependency touching it into an "orphan" the operator cannot clear.
+    #[test]
+    fn dependency_rows_pointing_at_quarantined_tasks_are_ok_and_counted_cas_095c() {
+        let (_temp, queue, store) = task_health_store();
+        seed_pair(store.as_ref());
+
+        assert!(
+            queue
+                .quarantine_row(
+                    crate::cloud::QUARANTINE_TASK,
+                    "cas-bbbb",
+                    "unattributed cloud row"
+                )
+                .unwrap()
+        );
+
+        let health = health_of(store.as_ref());
+        assert_eq!(health.quarantined_endpoint_rows, 1);
+        assert!(health.dangling.is_empty(), "{health:?}");
+
+        let check = check_for(store.as_ref());
+        assert!(
+            matches!(check.status, CheckStatus::Ok),
+            "quarantine is not a fault: {}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("1 dependency row(s) reference quarantined tasks"),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("orphaned"),
+            "quarantined endpoints must not be reported as orphans: {}",
+            check.message
+        );
+    }
+
+    /// A row whose endpoint is gone from the `tasks` table entirely is still a
+    /// fault — and the warning has to name a command that clears it.
+    #[test]
+    fn genuinely_dangling_dependency_rows_warn_and_name_a_command_cas_095c() {
+        let (temp, _queue, store) = task_health_store();
+        seed_pair(store.as_ref());
+        delete_task_row_only(temp.path(), "cas-bbbb");
+
+        let health = health_of(store.as_ref());
+        assert_eq!(health.quarantined_endpoint_rows, 0);
+        assert_eq!(
+            health.dangling,
+            vec![("cas-aaaa".to_string(), "cas-bbbb".to_string())]
+        );
+
+        let check = check_for(store.as_ref());
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        let (_message, remediation) = check.parts();
+        let remediation = remediation.expect("a dangling-row warning must carry remediation");
+        assert!(
+            remediation.contains("cas doctor --fix"),
+            "remediation must name the command that clears it: {remediation}"
+        );
+        assert!(
+            check.message.contains("cas-aaaa -> cas-bbbb"),
+            "the warning must name the offending row: {}",
+            check.message
+        );
+    }
+
+    /// The command the warning names must actually clear the warning.
+    #[test]
+    fn doctor_fix_prunes_dangling_dependency_rows_and_clears_the_warning_cas_095c() {
+        let (temp, queue, store) = task_health_store();
+        seed_pair(store.as_ref());
+        // One genuinely dangling row, one quarantined endpoint: the prune must
+        // take the first and leave the second strictly alone.
+        store
+            .add(&crate::types::Task::new(
+                "cas-cccc".to_string(),
+                "Quarantined".to_string(),
+            ))
+            .unwrap();
+        store
+            .add_dependency(&crate::types::Dependency::new(
+                "cas-aaaa".to_string(),
+                "cas-cccc".to_string(),
+                crate::types::DependencyType::Related,
+            ))
+            .unwrap();
+        queue
+            .quarantine_row(
+                crate::cloud::QUARANTINE_TASK,
+                "cas-cccc",
+                "unattributed cloud row",
+            )
+            .unwrap();
+        delete_task_row_only(temp.path(), "cas-bbbb");
+
+        assert!(matches!(
+            check_for(store.as_ref()).status,
+            CheckStatus::Warning
+        ));
+
+        let pruned = prune_dangling_dependencies(store.as_ref()).unwrap();
+        assert_eq!(pruned, PruneOutcome::Pruned(1));
+
+        let check = check_for(store.as_ref());
+        assert!(
+            matches!(check.status, CheckStatus::Ok),
+            "the named command did not clear the warning: {}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("1 dependency row(s) reference quarantined tasks"),
+            "the quarantined row must survive the prune and stay reported: {}",
+            check.message
+        );
+        assert_eq!(store.list_dependencies(None).unwrap().len(), 1);
+    }
+
+    /// A healthy board says exactly what it said before this fix.
+    #[test]
+    fn a_board_with_no_missing_endpoints_reports_the_plain_summary_cas_095c() {
+        let (_temp, _queue, store) = task_health_store();
+        seed_pair(store.as_ref());
+
+        let check = check_for(store.as_ref());
+        assert!(matches!(check.status, CheckStatus::Ok));
+        assert_eq!(check.message, "2 tasks (Open: 2) | 2 open, 0 blocked");
+    }
+
+    /// Delete only the task row, leaving its dependency edges behind. The store
+    /// API cascades, so the state doctor actually meets in the wild (edges
+    /// pulled from cloud whose task never arrived) has to be built by hand.
+    fn delete_task_row_only(cas_dir: &Path, id: &str) {
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute("DELETE FROM tasks WHERE id = ?", [id]).unwrap();
+    }
+
+    /// A store that answers one id's `get` with a non-not-found failure — the
+    /// `database is locked` case. Everything else passes through, so the test
+    /// exercises the real classification path rather than a stubbed verdict.
+    struct FailingGetStore {
+        inner: std::sync::Arc<dyn crate::store::TaskStore>,
+        failing_id: String,
+    }
+
+    impl crate::store::TaskStore for FailingGetStore {
+        fn init(&self) -> crate::store::Result<()> {
+            self.inner.init()
+        }
+        fn project_id(&self) -> Option<&str> {
+            self.inner.project_id()
+        }
+        fn generate_id(&self) -> crate::store::Result<String> {
+            self.inner.generate_id()
+        }
+        fn add(&self, task: &crate::types::Task) -> crate::store::Result<()> {
+            self.inner.add(task)
+        }
+        fn create_atomic(
+            &self,
+            task: &crate::types::Task,
+            blocked_by: &[String],
+            epic_id: Option<&str>,
+            created_by: Option<&str>,
+        ) -> crate::store::Result<()> {
+            self.inner
+                .create_atomic(task, blocked_by, epic_id, created_by)
+        }
+        fn get(&self, id: &str) -> crate::store::Result<crate::types::Task> {
+            if id == self.failing_id {
+                return Err(crate::store::StoreError::Database(
+                    rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(5), // SQLITE_BUSY
+                        Some("database is locked".to_string()),
+                    ),
+                ));
+            }
+            self.inner.get(id)
+        }
+        fn get_execution_state(
+            &self,
+            task_id: &str,
+        ) -> crate::store::Result<Option<serde_json::Value>> {
+            self.inner.get_execution_state(task_id)
+        }
+        fn patch_execution_state(
+            &self,
+            task_id: &str,
+            patch: &serde_json::Value,
+        ) -> crate::store::Result<serde_json::Value> {
+            self.inner.patch_execution_state(task_id, patch)
+        }
+        fn update(
+            &self,
+            task: &crate::types::Task,
+        ) -> crate::store::Result<chrono::DateTime<chrono::Utc>> {
+            self.inner.update(task)
+        }
+        fn delete(&self, id: &str) -> crate::store::Result<()> {
+            self.inner.delete(id)
+        }
+        fn list(
+            &self,
+            status: Option<crate::types::TaskStatus>,
+        ) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.list(status)
+        }
+        fn list_ready(&self) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.list_ready()
+        }
+        fn list_blocked(
+            &self,
+        ) -> crate::store::Result<Vec<(crate::types::Task, Vec<crate::types::Task>)>> {
+            self.inner.list_blocked()
+        }
+        fn list_pending_verification(&self) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.list_pending_verification()
+        }
+        fn list_pending_worktree_merge(&self) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.list_pending_worktree_merge()
+        }
+        fn close(&self) -> crate::store::Result<()> {
+            self.inner.close()
+        }
+        fn add_dependency(&self, dep: &crate::types::Dependency) -> crate::store::Result<()> {
+            self.inner.add_dependency(dep)
+        }
+        fn remove_dependency(&self, from_id: &str, to_id: &str) -> crate::store::Result<()> {
+            self.inner.remove_dependency(from_id, to_id)
+        }
+        fn remove_dependency_of_type(
+            &self,
+            from_id: &str,
+            to_id: &str,
+            dep_type: crate::types::DependencyType,
+        ) -> crate::store::Result<bool> {
+            self.inner
+                .remove_dependency_of_type(from_id, to_id, dep_type)
+        }
+        fn get_dependencies(
+            &self,
+            task_id: &str,
+        ) -> crate::store::Result<Vec<crate::types::Dependency>> {
+            self.inner.get_dependencies(task_id)
+        }
+        fn get_dependents(
+            &self,
+            task_id: &str,
+        ) -> crate::store::Result<Vec<crate::types::Dependency>> {
+            self.inner.get_dependents(task_id)
+        }
+        fn get_blockers(&self, task_id: &str) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.get_blockers(task_id)
+        }
+        fn would_create_cycle(&self, from_id: &str, to_id: &str) -> crate::store::Result<bool> {
+            self.inner.would_create_cycle(from_id, to_id)
+        }
+        fn list_dependencies(
+            &self,
+            dep_type: Option<crate::types::DependencyType>,
+        ) -> crate::store::Result<Vec<crate::types::Dependency>> {
+            self.inner.list_dependencies(dep_type)
+        }
+        fn get_subtasks(&self, parent_id: &str) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.get_subtasks(parent_id)
+        }
+        fn get_sibling_notes(
+            &self,
+            epic_id: &str,
+            exclude_task_id: &str,
+        ) -> crate::store::Result<Vec<(String, String, String)>> {
+            self.inner.get_sibling_notes(epic_id, exclude_task_id)
+        }
+        fn get_parent_epic(
+            &self,
+            task_id: &str,
+        ) -> crate::store::Result<Option<crate::types::Task>> {
+            self.inner.get_parent_epic(task_id)
+        }
+    }
+
+    /// A store error is not evidence of absence. `database is locked` during
+    /// `--fix` must not delete a live edge: the row is reported as unchecked,
+    /// the prune is skipped whole, and the warning says so.
+    #[test]
+    fn an_unreadable_endpoint_is_never_pruned_and_the_warning_names_the_error_cas_095c() {
+        let (temp, _queue, store) = task_health_store();
+        seed_pair(store.as_ref());
+        // A second, genuinely dangling row: even a correctly-classified
+        // deletion must wait while any endpoint is unreadable.
+        store
+            .add(&crate::types::Task::new(
+                "cas-dddd".to_string(),
+                "Deleted".to_string(),
+            ))
+            .unwrap();
+        store
+            .add_dependency(&crate::types::Dependency::new(
+                "cas-aaaa".to_string(),
+                "cas-dddd".to_string(),
+                crate::types::DependencyType::Related,
+            ))
+            .unwrap();
+        delete_task_row_only(temp.path(), "cas-dddd");
+        delete_task_row_only(temp.path(), "cas-bbbb");
+
+        let failing: std::sync::Arc<dyn crate::store::TaskStore> =
+            std::sync::Arc::new(FailingGetStore {
+                inner: std::sync::Arc::clone(&store),
+                failing_id: "cas-bbbb".to_string(),
+            });
+
+        let health = health_of(failing.as_ref());
+        assert_eq!(
+            health.unresolved,
+            vec![("cas-aaaa".to_string(), "cas-bbbb".to_string())],
+            "an unreadable endpoint must land in its own bucket"
+        );
+        assert_eq!(
+            health.dangling,
+            vec![("cas-aaaa".to_string(), "cas-dddd".to_string())],
+            "readable endpoints are still classified honestly"
+        );
+
+        let check = check_for(failing.as_ref());
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("could not be checked"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("database is locked"),
+            "the warning must name the error: {}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("nothing is pruned while any endpoint is unreadable"),
+            "{}",
+            check.message
+        );
+
+        // The prune is skipped whole — including the row it could classify.
+        let outcome = prune_dangling_dependencies(failing.as_ref()).unwrap();
+        assert_eq!(
+            outcome,
+            PruneOutcome::Skipped {
+                reason: "database error: database is locked".to_string(),
+                rows: 1,
+            }
+        );
+        assert_eq!(
+            store.list_dependencies(None).unwrap().len(),
+            2,
+            "no dependency row may be deleted on a transient store failure"
+        );
     }
 }
 

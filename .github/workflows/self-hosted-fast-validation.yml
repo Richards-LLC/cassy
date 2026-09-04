@@ -15,6 +15,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 # One persistent listener serves this label. Cancel superseded branch heads so
 # stale builds never occupy the box after a newer commit is available.
 concurrency:

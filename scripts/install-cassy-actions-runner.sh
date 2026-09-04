@@ -15,6 +15,10 @@ runner_url="https://github.com/actions/runner/releases/download/v${runner_versio
 runner_sha256=04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
 runner_group=cassy-public-trusted
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+pruner_source="$repo_root/scripts/prune-cassy-actions-cache.sh"
+pruner_dest="$runner_root/prune-cache.sh"
+mount_guard_source="$repo_root/scripts/check-cassy-actions-cache-mount.sh"
+mount_guard_dest="$runner_root/check-cache-mount.sh"
 
 case "$runner_slot" in
     1)
@@ -50,8 +54,8 @@ if [[ -z "${RUNNER_TOKEN:-}" ]]; then
     echo "RUNNER_TOKEN must contain a short-lived Richards-LLC organization runner registration token" >&2
     exit 1
 fi
-if [[ ! -f "$unit_source" || ! -f "$wrapper_source" ]]; then
-    echo "systemd service files not found: $unit_source / $wrapper_source" >&2
+if [[ ! -f "$unit_source" || ! -f "$wrapper_source" || ! -x "$pruner_source" || ! -x "$mount_guard_source" ]]; then
+    echo "runner service/guard files not found: $unit_source / $wrapper_source / $pruner_source / $mount_guard_source" >&2
     exit 1
 fi
 
@@ -64,6 +68,10 @@ install -d -o "$runner_user" -g "$runner_user" -m 0750 \
     "$runner_root/.cargo/bin" "$runner_root/.rustup"
 chown -R "$runner_user:$runner_user" \
     "$runner_root/cache" "$runner_root/.cargo" "$runner_root/.rustup"
+if ! mountpoint -q "$runner_root/cache"; then
+    echo "$runner_root/cache must be a dedicated mounted cache volume; refusing root-filesystem fallback" >&2
+    exit 1
+fi
 
 tmp_dir="$(mktemp -d)"
 chmod 0755 "$tmp_dir"
@@ -112,6 +120,8 @@ fi
 
 install -o "$runner_user" -g "$runner_user" -m 0755 \
     "$wrapper_source" "$wrapper_dest"
+install -o root -g root -m 0755 "$pruner_source" "$pruner_dest"
+install -o root -g root -m 0755 "$mount_guard_source" "$mount_guard_dest"
 install -o root -g root -m 0644 "$unit_source" "/etc/systemd/system/$service_name"
 systemctl daemon-reload
 systemctl enable --now "$service_name"

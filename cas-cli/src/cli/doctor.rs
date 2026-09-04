@@ -4702,8 +4702,8 @@ mod tests {
 
         let check = cloud_queue_check(&cas_root);
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("3 queued content change(s)"));
-        assert!(check.message.contains("entry: 2"));
+        assert!(check.message.contains("1 queued content change(s)"));
+        assert!(!check.message.contains("entry: 2"));
         assert!(check.message.contains("task: 1"));
         let retry = check.message.find("cas cloud queue --retry").unwrap();
         let push = check.message.find("cas cloud push").unwrap();

@@ -436,5 +436,39 @@ else
     bad "pipeline.done is $(cat "$run_qfail_dir/pipeline.done" 2>/dev/null || echo absent): $out"
 fi
 
+
+# --- merge_group runs are judged from the ENQUEUE time, not pipeline start ---
+# A failed queue run from an earlier attempt must not condemn this one: the
+# SINCE cursor is captured when the enqueue happens (and reset on every
+# re-enqueue), so anything older is another attempt's history.
+wt_stale="$(new_pipeline_fixture stale-queue-run)"
+run_stale_dir="$(pipeline_run_dir "$wt_stale")"
+seed_gate_receipt "$run_stale_dir"
+state="$tmp/state-stale"; mkdir -p "$state"
+printf '' > "$state/pr-list.json"
+printf '4242\n' > "$state/pr-number.txt"
+cat > "$state/checks-default.json" <<'JSON'
+[{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]
+JSON
+printf '{"state":"MERGED","mergeCommit":{"oid":"f00dcafef00dcafef00dcafef00dcafef00dcafe"},"id":"PR_id"}\n' > "$state/prview-default.json"
+cat > "$state/runlist-default.json" <<'JSON'
+[{"databaseId":7,"status":"completed","conclusion":"failure","createdAt":"2020-01-01T00:00:00Z"}]
+JSON
+out="$(run_pipeline "$wt_stale" "$state" || true)"
+if [[ "$(cat "$run_stale_dir/pipeline.done" 2>/dev/null)" == "MERGED" ]]; then
+    ok 'a merge_group failure older than the enqueue is ignored'
+else
+    bad "stale queue run condemned this attempt: $(cat "$run_stale_dir/pipeline.done" 2>/dev/null): $out"
+fi
+
+# --- the run directory carries a tailable, UTC-timestamped pipeline log -----
+if [[ -s "$run_stale_dir/pipeline.log" ]] \
+   && grep -qE '^[0-9]{2}:[0-9]{2}:[0-9]{2}Z ' "$run_stale_dir/pipeline.log" \
+   && grep -q 'pipeline terminal state' "$run_stale_dir/pipeline.log"; then
+    ok 'pipeline.log records UTC-timestamped lines through the terminal state'
+else
+    bad "pipeline.log is missing, unstamped, or truncated: $(head -3 "$run_stale_dir/pipeline.log" 2>/dev/null || echo absent)"
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

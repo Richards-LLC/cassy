@@ -284,8 +284,11 @@ case "$action" in
         ;;
     --pipeline)
         mkdir -p "$run_dir"
-        run_pipeline > >(tee -a "$run_dir/pipeline.log") 2>&1
-        exit $?
+        # Piped rather than process-substituted so the shell waits for tee:
+        # a Monitor tailing pipeline.log must see every line the run wrote,
+        # including the terminal one.
+        run_pipeline 2>&1 | tee -a "$run_dir/pipeline.log"
+        exit "${PIPESTATUS[0]}"
         ;;
     --gate) ;;
     *)

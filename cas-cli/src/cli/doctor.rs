@@ -371,7 +371,9 @@ fn classify_user_skill(
 /// skills Claude does not (`cas-codex-supervisor-checklist`), so comparing a
 /// `~/.codex/skills` directory against the Claude catalog reports a perfectly
 /// current builtin as an orphan.
-fn catalog_skill_names(catalog: &[crate::builtins::BuiltinFile]) -> std::collections::HashSet<String> {
+fn catalog_skill_names(
+    catalog: &[crate::builtins::BuiltinFile],
+) -> std::collections::HashSet<String> {
     catalog
         .iter()
         .filter_map(|file| file.path.strip_prefix("skills/"))
@@ -384,7 +386,9 @@ fn catalog_skill_names(catalog: &[crate::builtins::BuiltinFile]) -> std::collect
 /// **canonical** path: several Claude account directories symlink a single
 /// shared `skills/` directory, so a naive walk reports the same file three
 /// times and an operator "fixes" one file over and over.
-fn scan_user_skill_dirs(targets: &[(PathBuf, std::collections::HashSet<String>)]) -> Vec<StrayUserSkill> {
+fn scan_user_skill_dirs(
+    targets: &[(PathBuf, std::collections::HashSet<String>)],
+) -> Vec<StrayUserSkill> {
     let mut seen = std::collections::HashSet::new();
     let mut strays = Vec::new();
     for (dir, builtin_skill_names) in targets {
@@ -474,7 +478,10 @@ fn stray_user_skills_check(strays: &[StrayUserSkill]) -> Check {
                 format!("{} (retired; {builtin} owns it now)", stray.path.display())
             }
             StrayReason::OrphanedManagedCopy => {
-                format!("{} (managed_by: cas but no longer a builtin)", stray.path.display())
+                format!(
+                    "{} (managed_by: cas but no longer a builtin)",
+                    stray.path.display()
+                )
             }
         })
         .collect::<Vec<_>>()
@@ -1639,6 +1646,23 @@ fn foreign_rows_check_with_classifier_error(
             report.peers_unreadable.len()
         ));
     }
+    if !report.peers_skipped.is_empty() {
+        // cas-647c: informational, never a WARN driver. These roots opened
+        // cleanly and hold no `tasks` table — a factory artifact copy or probe
+        // fixture, not a broken project. The clause exists so the operator can
+        // see the registry row and remove it if they want to, which is why it
+        // names `cas known-repos forget` rather than a repair.
+        let named = report
+            .peers_skipped
+            .iter()
+            .map(|peer| peer.db_path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!(
+            ". Skipped root(s): {named} — nothing is broken there. Drop a registry row you \
+             no longer want with `cas known-repos forget <path>`."
+        ));
+    }
 
     let purge_counts_disagree = purge_analysis
         .is_some_and(|analysis| analysis.foreign_task_count != analysis.delete_set.tasks.len());
@@ -1888,6 +1912,24 @@ fn output_foreign_rows_detail(
             peer.db_path.display(),
             peer.error
         ))?;
+    }
+
+    // Muted, not a warning: these roots opened cleanly and hold no tasks at
+    // all, so there is no repair to make — only a registry row to drop if the
+    // operator wants it gone (cas-647c).
+    for peer in &report.peers_skipped {
+        fmt.write_muted(&format!(
+            "SKIPPED: {} ({}) — {}; drop the registry row with `cas known-repos forget {}`",
+            peer.project,
+            peer.db_path.display(),
+            peer.reason,
+            peer.db_path
+                .parent()
+                .and_then(std::path::Path::parent)
+                .unwrap_or(&peer.db_path)
+                .display(),
+        ))?;
+        fmt.newline()?;
     }
 
     if let Some(analysis) = purge_analysis {
@@ -3978,7 +4020,9 @@ mod tests {
         let listed = check.message.matches("cas-r").count();
         assert_eq!(listed, 6, "fixture must list six ids: {}", check.message);
         assert!(
-            check.message.contains("purge cannot reach 6 evidence row(s)"),
+            check
+                .message
+                .contains("purge cannot reach 6 evidence row(s)"),
             "the printed count must describe the list it prints: {}",
             check.message
         );
@@ -4027,7 +4071,9 @@ mod tests {
         let check = foreign_rows_check(Ok(&report), None, 1);
 
         assert!(
-            check.message.contains("unattributed: 2 row(s) (1 open), 1 quarantined locally"),
+            check
+                .message
+                .contains("unattributed: 2 row(s) (1 open), 1 quarantined locally"),
             "{}",
             check.message
         );
@@ -4155,12 +4201,7 @@ mod tests {
     fn one_live_supervisor_session_adds_no_overlap_warning() {
         use crate::types::AgentRole;
         let agents = vec![
-            factory_agent(
-                "sup-a",
-                "supervisor-a",
-                "factory-a",
-                AgentRole::Supervisor,
-            ),
+            factory_agent("sup-a", "supervisor-a", "factory-a", AgentRole::Supervisor),
             factory_agent("worker-a", "worker-a", "factory-a", AgentRole::Worker),
         ];
         assert!(
@@ -4696,6 +4737,52 @@ mod tests {
         );
     }
 
+    /// cas-647c: a registry root that is not a project store at all is
+    /// coverage bookkeeping, not a defect. It must be named in the row and it
+    /// must not turn the row amber — the operator has no failure to clear.
+    #[test]
+    fn foreign_rows_check_stays_ok_when_a_registry_root_is_only_skipped_cas_647c() {
+        use crate::cli::foreign_rows::{ForeignRowReport, SkippedPeer};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 10,
+            peers_compared: vec!["accounting".to_string()],
+            peers_skipped: vec![SkippedPeer {
+                project: "fresh-proxy".to_string(),
+                db_path: std::path::PathBuf::from(
+                    "/home/u/.cas/artifacts/cas-1bfb/fresh-proxy/.cas/cas.db",
+                ),
+                reason: crate::cli::foreign_rows::NOT_A_PROJECT_STORE.to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let check = foreign_rows_check(Ok(&report), None, 0);
+
+        assert!(
+            matches!(check.status, CheckStatus::Ok),
+            "skipped non-stores must not drive WARN: {}",
+            check.message
+        );
+        assert!(check.message.contains("fresh-proxy"), "{}", check.message);
+        assert!(
+            check.message.contains("not a project store"),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("could NOT be read"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cas known-repos forget"),
+            "the row must name the command that clears the row: {}",
+            check.message
+        );
+    }
+
     fn messages(checks: &[Check], name: &str) -> Vec<String> {
         checks
             .iter()
@@ -4953,8 +5040,16 @@ mod tests {
 
         let check = stray_user_skills_check(&strays);
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("mecha-cassy-post"), "{}", check.message);
-        assert!(check.message.contains("mecha-cassy owns it now"), "{}", check.message);
+        assert!(
+            check.message.contains("mecha-cassy-post"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("mecha-cassy owns it now"),
+            "{}",
+            check.message
+        );
         assert_eq!(check.group(), CheckGroup::Config);
         // The guidance must reach doctor's remediation column, not stay buried.
         assert!(check.parts().1.is_some(), "{:?}", check.parts());
@@ -5056,8 +5151,13 @@ mod tests {
         #[cfg(not(unix))]
         return;
 
-        let strays = scan_user_skill_dirs(&[(real.clone(), claude_names()), (linked, claude_names())]);
-        assert_eq!(strays.len(), 1, "symlinked duplicate double-counted: {strays:?}");
+        let strays =
+            scan_user_skill_dirs(&[(real.clone(), claude_names()), (linked, claude_names())]);
+        assert_eq!(
+            strays.len(),
+            1,
+            "symlinked duplicate double-counted: {strays:?}"
+        );
     }
 
     /// `cas-8fad`: the machine-scoped MechaCassy row must land in the
@@ -5074,7 +5174,10 @@ mod tests {
         );
         assert_eq!(check.group(), CheckGroup::Integrations);
         let (message, remediation) = check.parts();
-        assert!(message.contains("not registered on this machine"), "{message}");
+        assert!(
+            message.contains("not registered on this machine"),
+            "{message}"
+        );
         assert_eq!(
             remediation.as_deref(),
             Some("Run `cas integrate mecha-cassy`")
@@ -5357,7 +5460,9 @@ mod tests {
         let second = symbol_index_check(state, now);
         assert_eq!(first.message, second.message);
         assert!(
-            first.message.contains("603/13545 vectorized, 12942 pending"),
+            first
+                .message
+                .contains("603/13545 vectorized, 12942 pending"),
             "message: {}",
             first.message
         );
@@ -5506,7 +5611,11 @@ mod tests {
             ..Default::default()
         });
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("12 unit(s) queued"), "{}", check.message);
+        assert!(
+            check.message.contains("12 unit(s) queued"),
+            "{}",
+            check.message
+        );
         assert!(
             check.message.contains("5 unit(s) quarantined"),
             "the refused units must not be folded into the backlog: {}",
@@ -5518,7 +5627,9 @@ mod tests {
             check.message
         );
         assert!(
-            check.message.contains("cas history embed --retry-quarantined"),
+            check
+                .message
+                .contains("cas history embed --retry-quarantined"),
             "a count without a move is not actionable: {}",
             check.message
         );
@@ -5532,7 +5643,11 @@ mod tests {
             ..Default::default()
         });
         assert!(matches!(drained.status, CheckStatus::Warning));
-        assert!(drained.message.contains("nothing pending"), "{}", drained.message);
+        assert!(
+            drained.message.contains("nothing pending"),
+            "{}",
+            drained.message
+        );
         assert!(
             drained.message.contains("2 unit(s) quarantined"),
             "{}",

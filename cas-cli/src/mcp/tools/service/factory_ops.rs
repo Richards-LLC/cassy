@@ -3220,21 +3220,100 @@ impl CasService {
         let rendered_names: std::collections::BTreeSet<&str> =
             supervisors.iter().map(|a| a.name.as_str()).collect();
 
+        // cas-5087: naming the other live supervisors was only half the answer.
+        // Before a gate an operator needs to know WHAT each of them is in the
+        // middle of, because that is what decides whether a merge, reset or
+        // shutdown collides with somebody's release.
+        //
+        // Read once for the whole block. A failed read is reported as
+        // `Unavailable` on every row rather than silently rendering "no epic":
+        // this surface is checked immediately before destructive actions, so a
+        // missing signal must never read as a reassuring one — and it must
+        // never fail the whole report either (cas-e728's rule for this page).
+        let (supervisor_epics, supervisor_epic_read_failed) = {
+            use crate::store::open_task_store;
+            match open_task_store(&self.inner.cas_root).map_err(|e| e.to_string()) {
+                Ok(ts) => {
+                    let mut epics = Vec::new();
+                    let mut failed = false;
+                    for status in [
+                        cas_types::TaskStatus::Open,
+                        cas_types::TaskStatus::InProgress,
+                        cas_types::TaskStatus::Blocked,
+                    ] {
+                        match ts.list(Some(status)) {
+                            Ok(tasks) => epics.extend(
+                                tasks
+                                    .into_iter()
+                                    .filter(|t| t.task_type == cas_types::TaskType::Epic),
+                            ),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    ?status,
+                                    "cas-5087: worker_status could not read epics for supervisor attribution"
+                                );
+                                failed = true;
+                            }
+                        }
+                    }
+                    (epics, failed)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "cas-5087: worker_status could not open the task store for supervisor attribution"
+                    );
+                    (Vec::new(), true)
+                }
+            }
+        };
+        let supervisor_epic = |agent_id: &str, agent_name: &str, session: Option<&str>| {
+            if supervisor_epic_read_failed {
+                return crate::factory_supervisor_overlap::SupervisorEpic::Unavailable;
+            }
+            let focus = session
+                .map(str::trim)
+                .filter(|session| !session.is_empty())
+                .and_then(crate::ui::factory::preferred_epic_id_from_session_metadata_named);
+            crate::factory_supervisor_overlap::resolve_supervisor_epic(
+                agent_id,
+                agent_name,
+                focus.as_deref(),
+                &supervisor_epics,
+            )
+        };
+
         if !supervisors.is_empty() || live_supervisor_sessions.len() > 1 {
             output.push_str("Supervisors:\n");
             for agent in &supervisors {
                 let elapsed = (now - agent.last_heartbeat).num_seconds();
                 let since = format!("{elapsed}s ago");
-                output.push_str(&format!("  • {} (heartbeat: {})\n", &agent.name, since));
+                let epic = supervisor_epic(
+                    &agent.id,
+                    &agent.name,
+                    agent
+                        .factory_session
+                        .as_deref()
+                        .or(factory_session.as_deref()),
+                );
+                output.push_str(&format!(
+                    "  • {} (heartbeat: {}){}\n",
+                    &agent.name,
+                    since,
+                    epic.render()
+                ));
             }
             for session in &live_supervisor_sessions {
                 if rendered_names.contains(session.name.as_str()) {
                     continue;
                 }
                 let elapsed = (now - session.last_heartbeat).num_seconds();
+                let epic = supervisor_epic(&session.id, &session.name, session.session.as_deref());
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {elapsed}s ago) [other session — shares this clone]\n",
-                    session.label()
+                    "  • {} (heartbeat: {elapsed}s ago) [other session — shares this clone]{}\n",
+                    session.label(),
+                    epic.render()
                 ));
             }
             output.push('\n');

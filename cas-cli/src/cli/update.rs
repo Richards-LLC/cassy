@@ -192,6 +192,11 @@ pub struct UpdateArgs {
     #[arg(long)]
     pub all_projects: bool,
 
+    /// Register an existing project in the host registry so every later
+    /// `cas update` refreshes it without relying on the filesystem scan.
+    #[arg(long, value_name = "PATH")]
+    pub register: Option<PathBuf>,
+
     /// Run the post-swap hook from a freshly installed binary.
     #[arg(long = "post-swap", hide = true)]
     pub post_swap: bool,
@@ -211,6 +216,10 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // binary, otherwise every update would recursively launch updates.
     if args.post_swap {
         return execute_post_swap(args, cli, current_version);
+    }
+
+    if let Some(path) = &args.register {
+        return register_project(path, cli);
     }
 
     // This is also the no-download entry point for a host which already has
@@ -287,6 +296,40 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     Ok(())
 }
 
+/// Add an existing project to the host registry.
+///
+/// The escape hatch for a project the scan cannot reach — one outside `$HOME`
+/// and outside `CAS_PROJECT_ROOTS`, or nested deeper than [`MAX_SCAN_DEPTH`].
+/// Registration is what stops the project from depending on the scan at all.
+fn register_project(path: &Path, cli: &Cli) -> anyhow::Result<()> {
+    let project = canonical_path(path);
+    if !project.join(".cas").is_dir() {
+        anyhow::bail!(
+            "{} is not a Cassy project (no .cas directory) — run `cas init` there first",
+            project.display()
+        );
+    }
+    crate::store::known_repos::ensure_host_schema()
+        .context("could not open the host known-repo registry")?;
+    crate::store::known_repos::register_repo_strict(&project)
+        .with_context(|| format!("could not register {}", project.display()))?;
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::json!({ "registered": project, "store": project.join(".cas") })
+        );
+    } else {
+        let mut out = io::stdout();
+        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+        fmt.success(&format!(
+            "Registered {} — future `cas update` runs refresh it",
+            project.display()
+        ))?;
+    }
+    Ok(())
+}
+
 /// Outcome printed in the final all-projects receipt. Phase failures are kept
 /// as data so one bad checkout never prevents the remaining projects from
 /// becoming current.
@@ -359,6 +402,10 @@ impl ProjectPhase {
 
 struct ProjectRefreshReceipt {
     project: PathBuf,
+    /// Found by the filesystem scan rather than the host registry. Refreshed
+    /// exactly like any other project, then registered so the next run finds
+    /// it without scanning.
+    unregistered: bool,
     migration: ProjectPhase,
     search_index: ProjectPhase,
     skills: ProjectPhase,
@@ -379,6 +426,9 @@ impl ProjectRefreshReceipt {
 struct RefreshReport {
     project_count: usize,
     failed_count: usize,
+    /// Directories carrying a `.cas/` but no store. Counted in the banner so a
+    /// refresh can never claim a clean sweep while leaving stores untouched.
+    skipped_unregistered: usize,
     elapsed: Duration,
 }
 
@@ -684,17 +734,29 @@ fn render_project_phase_details(
     strip_repeated_warning_lines(&selected, warnings, project, verbose, true)
 }
 
-fn print_update_banner_with_formatter(
-    fmt: &mut Formatter<'_>,
-    report: &RefreshReport,
-) -> io::Result<()> {
-    fmt.success(&format!(
-        "Cassy {} · {} projects refreshed · {} failed · {}",
+fn update_banner_text(report: &RefreshReport) -> String {
+    let skipped = if report.skipped_unregistered > 0 {
+        format!(
+            " · {} unregistered store(s) not refreshed",
+            report.skipped_unregistered
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "Cassy {} · {} projects refreshed · {} failed{skipped} · {}",
         env!("CARGO_PKG_VERSION"),
         report.project_count,
         report.failed_count,
         format_elapsed(report.elapsed)
-    ))
+    )
+}
+
+fn print_update_banner_with_formatter(
+    fmt: &mut Formatter<'_>,
+    report: &RefreshReport,
+) -> io::Result<()> {
+    fmt.success(&update_banner_text(report))
 }
 
 fn capture_phase<T>(enabled: bool, operation: impl FnOnce() -> T) -> (T, String) {
@@ -785,10 +847,11 @@ fn refresh_all_projects(
     current_cas_root: Option<&Path>,
 ) -> anyhow::Result<RefreshReport> {
     let started_at = Instant::now();
-    let projects = discover_local_projects(current_cas_root);
-    let mut receipts = Vec::with_capacity(projects.len());
+    let discovery = discover_local_projects(current_cas_root);
+    let mut receipts = Vec::with_capacity(discovery.projects.len());
 
-    for project in projects {
+    for project in &discovery.projects {
+        let project = project.clone();
         let cas_root = project.join(".cas");
         let mut details = String::new();
 
@@ -824,8 +887,17 @@ fn refresh_all_projects(
         details.push_str(&output);
         phase_details.push((cloud.is_ok(), output));
 
+        // Registration is what makes discovery converge: a project the scan had
+        // to find this time is in the registry for every later run, and for
+        // every other Cassy entry point that reads it.
+        let unregistered = discovery.unregistered.contains(&project);
+        if unregistered && !args.dry_run && !migration.failed() {
+            crate::store::known_repos::register_repo(&project);
+        }
+
         receipts.push(ProjectRefreshReceipt {
             project,
+            unregistered,
             migration,
             search_index,
             skills,
@@ -836,20 +908,18 @@ fn refresh_all_projects(
         });
     }
 
-    let (user_builtins, user_details) = capture_phase(!cli.json, || {
-        if args.dry_run {
-            ProjectPhase::Planned("user-level builtins".to_string())
-        } else {
-            match sync_user_builtins(cli) {
-                Ok(()) => ProjectPhase::Ok("user-level builtins".to_string()),
-                Err(error) => ProjectPhase::Failed(error.to_string()),
-            }
-        }
-    });
-    print_project_refresh_summary(&receipts, &user_builtins, &user_details, cli);
+    let (user_level, user_details) =
+        capture_phase(!cli.json, || refresh_user_level_store(args, cli));
+    print_project_refresh_summary(
+        &receipts,
+        &user_level,
+        &user_details,
+        &discovery.skipped_unregistered,
+        cli,
+    );
 
-    let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
-        + usize::from(user_builtins.failed());
+    let failed_count =
+        receipts.iter().filter(|receipt| receipt.failed()).count() + usize::from(user_level.failed());
     if failed_count > 0 {
         anyhow::bail!(
             "one or more projects were not fully refreshed; see the per-project phase summary above"
@@ -858,8 +928,43 @@ fn refresh_all_projects(
     Ok(RefreshReport {
         project_count: receipts.len(),
         failed_count,
+        skipped_unregistered: discovery.skipped_unregistered.len(),
         elapsed: started_at.elapsed(),
     })
+}
+
+/// Refresh the user-level store (`~/.cas`) as its own phase.
+///
+/// Before cas-9d5c the all-projects sweep distributed user-level builtins but
+/// never ran migrations on `~/.cas`, so the host store drifted behind every
+/// project on the machine while the receipt reported a clean run. It is
+/// deliberately not a project: it is never counted in the project totals and
+/// never appears in the project table.
+fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
+    let Some(cas_root) = user_level_store_root() else {
+        return ProjectPhase::Skipped("no home directory".to_string());
+    };
+    if !cas_root.join("cas.db").is_file() {
+        return match sync_user_builtins(cli) {
+            Ok(()) => ProjectPhase::Ok(format!("builtins only — no store at {}", cas_root.display())),
+            Err(error) => ProjectPhase::Failed(error.to_string()),
+        };
+    }
+
+    if args.dry_run {
+        return ProjectPhase::Planned(format!("migrate {} and sync builtins", cas_root.display()));
+    }
+
+    let migration = run_project_phase("user-level migration", false, || {
+        run_schema_migrations(args, cli, Some(&cas_root))
+    });
+    if migration.failed() {
+        return migration;
+    }
+    match sync_user_builtins(cli) {
+        Ok(()) => ProjectPhase::Ok(format!("migrated {} and synced builtins", cas_root.display())),
+        Err(error) => ProjectPhase::Failed(error.to_string()),
+    }
 }
 
 /// Repair the pre-cas-bc42 Tantivy root as part of the native update walk.
@@ -1136,8 +1241,9 @@ fn cloud_phase_from_summaries(summaries: &[SyncSummary]) -> ProjectPhase {
 
 fn print_project_refresh_summary(
     receipts: &[ProjectRefreshReceipt],
-    user_builtins: &ProjectPhase,
+    user_level: &ProjectPhase,
     user_details: &str,
+    skipped_unregistered: &[PathBuf],
     cli: &Cli,
 ) {
     if cli.json {
@@ -1146,6 +1252,8 @@ fn print_project_refresh_summary(
             .map(|receipt| {
                 serde_json::json!({
                     "project": receipt.project,
+                    "store": receipt.project.join(".cas"),
+                    "registered": !receipt.unregistered,
                     "migration": receipt.migration.summary(),
                     "search_index": receipt.search_index.summary(),
                     "skills": receipt.skills.summary(),
@@ -1156,7 +1264,17 @@ fn print_project_refresh_summary(
             .collect::<Vec<_>>();
         println!(
             "{}",
-            serde_json::json!({ "projects": projects, "user_builtins": user_builtins.summary() })
+            serde_json::json!({
+                "projects": projects,
+                "user_level_store": {
+                    "store": user_level_store_root(),
+                    "status": user_level.summary(),
+                },
+                // Retained for compatibility with readers of the pre-cas-9d5c
+                // receipt, which only ever reported the builtin distribution.
+                "user_builtins": user_level.summary(),
+                "skipped_unregistered": skipped_unregistered,
+            })
         );
         return;
     }
@@ -1206,17 +1324,75 @@ fn print_project_refresh_summary(
             }
         }
     }
+
+    // The user-level store is host state, so it gets a named line of its own
+    // rather than a project row it would otherwise be miscounted in.
+    println!(
+        "  [{}] user-level store: {}",
+        user_level.status_label().trim_matches(['[', ']']),
+        user_level.detail()
+    );
+
+    if !skipped_unregistered.is_empty() {
+        println!(
+            "  not refreshed (unregistered): {} — run `cas update` inside them or `cas update --register <path>`",
+            skipped_unregistered.len()
+        );
+        for path in skipped_unregistered.iter().take(5) {
+            println!("    ! {}", path.display());
+        }
+        if skipped_unregistered.len() > 5 {
+            println!("    … and {} more", skipped_unregistered.len() - 5);
+        }
+    }
     print!("{}", warnings.render(cli.verbose));
 }
 
-/// Discovery is the union of the host's known-repo registry and the legacy
-/// helper's scan roots. The latter is deliberately retained for binary-only
-/// machines that have never seeded `known_repos`.
-fn discover_local_projects(current_cas_root: Option<&Path>) -> Vec<PathBuf> {
-    let mut projects = BTreeSet::new();
+/// How far below each scan root discovery will walk. Deep enough for the
+/// `~/Workspace/group/project` shapes real hosts use, shallow enough that a
+/// whole-home walk stays bounded on a machine with a large source tree.
+const MAX_SCAN_DEPTH: usize = 8;
+
+/// What one discovery pass found, split by what the refresh can actually do
+/// with each entry.
+#[derive(Debug, Default)]
+struct ProjectDiscovery {
+    /// Every project the refresh will process: the host registry plus every
+    /// scan-discovered directory that actually holds a store.
+    projects: Vec<PathBuf>,
+    /// The subset of `projects` that the filesystem scan found but the host
+    /// registry does not know about. These are refreshed and then registered,
+    /// so discovery converges without the operator doing anything.
+    unregistered: BTreeSet<PathBuf>,
+    /// Scan-discovered directories carrying a `.cas/` but no `cas.db`. There
+    /// is nothing to migrate, so they are reported rather than refreshed —
+    /// previously they were silently absent from the receipt entirely.
+    skipped_unregistered: Vec<PathBuf>,
+}
+
+/// The host's user-level store (`~/.cas`). It is never a project — it gets its
+/// own refresh phase — but it must be named, because before cas-9d5c it was
+/// neither refreshed nor mentioned.
+fn user_level_store_root() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| canonical_path(&home.join(".cas")))
+}
+
+/// Discovery is the union of the host's known-repo registry and a bounded
+/// filesystem scan. The scan is not a fallback for binary-only machines: the
+/// registry only holds repos some Cassy entry point happened to touch, so a
+/// project cloned and initialized by hand is invisible to it forever.
+///
+/// The scan must keep descending after it records a project. `~/.cas` exists on
+/// every host that has ever run Cassy, and the previous early return meant the
+/// walk recorded `$HOME`, stopped, and then dropped `$HOME` as host state — a
+/// scan that structurally could not discover anything (cas-9d5c). The same
+/// early return also hid every project nested under a parent that is itself a
+/// project, which is the normal monorepo-of-repos layout.
+fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery {
+    let mut registered = BTreeSet::new();
     if let Ok(known) = crate::worktree::discovery::list_tracked_repos() {
         for repo in known.into_iter().filter(|repo| repo.healthy) {
-            projects.insert(canonical_path(&repo.path));
+            registered.insert(canonical_path(&repo.path));
         }
     }
 
@@ -1229,13 +1405,34 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> Vec<PathBuf> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_else(|| dirs::home_dir().into_iter().collect());
+    let mut scanned = BTreeSet::new();
     for root in roots {
-        scan_for_projects(&root, &mut projects);
+        scan_for_projects(&root, MAX_SCAN_DEPTH, &mut scanned);
     }
-    // The user-level store (~/.cas) is never a project: a cwd under the home
-    // directory but outside any project walks up to it, and without this
-    // guard `cas update --all-projects` lists the home directory itself.
-    let user_level_root = dirs::home_dir().map(|home| canonical_path(&home.join(".cas")));
+
+    let user_level_root = user_level_store_root();
+    let home = dirs::home_dir().map(|home| canonical_path(&home));
+
+    let mut projects = registered.clone();
+    let mut unregistered = BTreeSet::new();
+    let mut skipped_unregistered = Vec::new();
+    for candidate in scanned {
+        if Some(&candidate) == home.as_ref() {
+            continue;
+        }
+        if registered.contains(&candidate) {
+            continue;
+        }
+        if candidate.join(".cas").join("cas.db").is_file() {
+            projects.insert(candidate.clone());
+            unregistered.insert(candidate);
+        } else {
+            skipped_unregistered.push(candidate);
+        }
+    }
+
+    // The store the operator is standing in always counts, even if neither the
+    // registry nor the scan roots cover it.
     if let Some(cas_root) = current_cas_root
         && let Some(project) = cas_root.parent()
         && user_level_root.as_deref() != Some(canonical_path(cas_root).as_path())
@@ -1243,21 +1440,37 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> Vec<PathBuf> {
         projects.insert(canonical_path(project));
     }
 
-    // `~/.cas` is host state, not a project. The legacy helper made the same
-    // distinction and migrated it separately.
-    if let Some(home) = dirs::home_dir() {
-        projects.remove(&canonical_path(&home));
+    // `~/.cas` is host state, not a project: it is migrated by its own
+    // user-level phase so it can never be counted in the project totals.
+    if let Some(home) = home {
+        projects.remove(&home);
+        unregistered.remove(&home);
     }
-    projects.into_iter().collect()
+
+    ProjectDiscovery {
+        projects: projects.into_iter().collect(),
+        unregistered,
+        skipped_unregistered,
+    }
 }
 
 fn canonical_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn scan_for_projects(root: &Path, projects: &mut BTreeSet<PathBuf>) {
+/// Record `root` when it carries a `.cas/`, then keep walking its children.
+///
+/// Never descends into a `.cas/` directory itself: factory worktrees
+/// (`.cas/worktrees/<lane>`) and migration backups (`.cas/backup/<stamp>`) both
+/// contain a `cas.db` and are emphatically not separate projects. Hidden
+/// directories are skipped for the same reason plus cost — `~/.cargo`,
+/// `~/.rustup`, and `~/.claude` are large and hold no projects, and anything
+/// genuinely living under one is reachable through the host registry.
+fn scan_for_projects(root: &Path, depth: usize, projects: &mut BTreeSet<PathBuf>) {
     if root.join(".cas").is_dir() {
         projects.insert(canonical_path(root));
+    }
+    if depth == 0 {
         return;
     }
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -1271,28 +1484,26 @@ fn scan_for_projects(root: &Path, projects: &mut BTreeSet<PathBuf>) {
         if !metadata.is_dir() || metadata.is_symlink() {
             continue;
         }
+        let name = path.file_name().and_then(|name| name.to_str());
+        if name.is_none_or(|name| name.starts_with('.')) {
+            continue;
+        }
         if matches!(
-            path.file_name().and_then(|name| name.to_str()),
+            name,
             Some(
                 "node_modules"
                     | "target"
-                    | ".git"
-                    | ".cargo"
-                    | ".cache"
-                    | ".npm"
-                    | ".rustup"
-                    | ".pnpm-store"
-                    | ".venv"
                     | "venv"
                     | "dist"
                     | "build"
-                    | ".next"
-                    | ".turbo"
+                    | "vendor"
+                    | "Library"
+                    | "snap"
             )
         ) {
             continue;
         }
-        scan_for_projects(&path, projects);
+        scan_for_projects(&path, depth - 1, projects);
     }
 }
 
@@ -1809,6 +2020,20 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Prefix every `schema_status` receipt with the store it actually migrated.
+///
+/// Without this a `CAS_ROOT` override, a user-level phase, and a project phase
+/// all emit byte-identical lines, so an operator reading the receipt cannot
+/// tell which store moved — the exact ambiguity behind the "says applied but
+/// didn't" report in cas-9d5c.
+fn schema_status_json(store: Option<&Path>, body: &str) -> String {
+    let store = match store {
+        Some(path) => serde_json::Value::String(path.display().to_string()),
+        None => serde_json::Value::Null,
+    };
+    format!(r#"{{"store":{store},{body}}}"#)
+}
+
 /// Run schema migrations only
 fn run_schema_migrations(
     args: &UpdateArgs,
@@ -1820,7 +2045,13 @@ fn run_schema_migrations(
         Some(path) => path.to_path_buf(),
         None => {
             if cli.json {
-                println!(r#"{{"schema_status":"not_initialized","migrations_applied":0}}"#);
+                println!(
+                    "{}",
+                    schema_status_json(
+                        None,
+                        r#""schema_status":"not_initialized","migrations_applied":0"#
+                    )
+                );
             } else {
                 let mut out = io::stdout();
                 let theme = ActiveTheme::default();
@@ -1850,7 +2081,13 @@ fn run_schema_migrations(
             .unwrap_or(0);
         if table_count < 3 {
             if cli.json {
-                println!(r#"{{"schema_status":"not_initialized","migrations_applied":0}}"#);
+                println!(
+                    "{}",
+                    schema_status_json(
+                        Some(&cas_root),
+                        r#""schema_status":"not_initialized","migrations_applied":0"#
+                    )
+                );
             } else {
                 let mut out = io::stdout();
                 let theme = ActiveTheme::default();
@@ -1879,14 +2116,24 @@ fn run_schema_migrations(
     if !tx.has_changes() {
         if cli.json {
             println!(
-                r#"{{"schema_status":"up_to_date","current_version":{},"migrations_applied":0}}"#,
-                status.current_version
+                "{}",
+                schema_status_json(
+                    Some(&cas_root),
+                    &format!(
+                        r#""schema_status":"up_to_date","current_version":{},"migrations_applied":0"#,
+                        status.current_version
+                    )
+                )
             );
         } else {
             let mut out = io::stdout();
             let theme = ActiveTheme::default();
             let mut fmt = Formatter::stdout(&mut out, theme);
-            fmt.success(&format!("Schema up to date (v{})", status.current_version))?;
+            fmt.success(&format!(
+                "Schema up to date (v{}) — {}",
+                status.current_version,
+                cas_root.display()
+            ))?;
         }
         return Ok(());
     }
@@ -1997,11 +2244,17 @@ fn run_schema_migrations(
             .collect();
 
         println!(
-            r#"{{"schema_status":"updated","current_version":{},"migrations_applied":{},"applied":[{}],"files_updated":{}}}"#,
-            final_status.current_version,
-            result.applied_count,
-            applied_json.join(","),
-            tx.file_change_count()
+            "{}",
+            schema_status_json(
+                Some(&cas_root),
+                &format!(
+                    r#""schema_status":"updated","current_version":{},"migrations_applied":{},"applied":[{}],"files_updated":{}"#,
+                    final_status.current_version,
+                    result.applied_count,
+                    applied_json.join(","),
+                    tx.file_change_count()
+                )
+            )
         );
     } else {
         let mut out = io::stdout();
@@ -2015,8 +2268,9 @@ fn run_schema_migrations(
 
         fmt.newline()?;
         fmt.success(&format!(
-            "Schema updated to v{}",
-            final_status.current_version
+            "Schema updated to v{} — {}",
+            final_status.current_version,
+            cas_root.display()
         ))?;
 
         if args.keep_backup {

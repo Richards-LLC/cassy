@@ -110,6 +110,95 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
     );
 }
 
+/// cas-9d5c: the sweep used to stop descending at the first directory carrying
+/// a `.cas/`, so a project nested inside another project was invisible, and the
+/// user-level store was never migrated at all — while the banner still reported
+/// a clean run.
+#[test]
+fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let projects = root.join("projects");
+    let parent = projects.join("workspace");
+    let nested = parent.join("inner");
+    init_project(root, &parent);
+    init_project(root, &nested);
+    // A `.cas/` with no store: nothing to migrate, so it must be listed rather
+    // than silently dropped from the receipt.
+    std::fs::create_dir_all(projects.join("storeless/.cas")).unwrap();
+
+    let update = cas_cmd(root)
+        .current_dir(root)
+        .env("CAS_ROOT", parent.join(".cas"))
+        .env("CAS_PROJECT_ROOTS", &projects)
+        .args(["update", "--all-projects"])
+        .assert()
+        .success();
+    let output = String::from_utf8_lossy(&update.get_output().stdout);
+
+    assert!(
+        output.contains("workspace/inner"),
+        "a project nested under another project must be refreshed:\n{output}"
+    );
+    assert!(
+        output.contains(&format!(
+            "Cassy {} · 2 projects refreshed · 0 failed · 1 unregistered store(s) not refreshed",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "banner must count the skipped store:\n{output}"
+    );
+    assert!(
+        output.contains("not refreshed (unregistered): 1"),
+        "the storeless directory must be named:\n{output}"
+    );
+    assert!(
+        output.contains("user-level store:"),
+        "the user-level store needs its own reported phase:\n{output}"
+    );
+
+    let json = cas_cmd(root)
+        .current_dir(root)
+        .env("CAS_ROOT", parent.join(".cas"))
+        .env("CAS_PROJECT_ROOTS", &projects)
+        .args(["--json", "update", "--all-projects"])
+        .assert()
+        .success();
+    let json_out = String::from_utf8_lossy(&json.get_output().stdout);
+    let receipt: serde_json::Value = json_out
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| value.get("projects").is_some())
+        .expect("all-projects JSON receipt");
+
+    let stores = receipt["projects"]
+        .as_array()
+        .expect("projects array")
+        .iter()
+        .map(|project| project["store"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        stores
+            .iter()
+            .any(|store| store.ends_with("workspace/inner/.cas")),
+        "every project receipt names the store it migrated: {stores:?}"
+    );
+    assert_eq!(
+        receipt["skipped_unregistered"]
+            .as_array()
+            .expect("skipped_unregistered array")
+            .len(),
+        1,
+        "receipt was: {receipt}"
+    );
+    assert_eq!(
+        receipt["user_level_store"]["store"]
+            .as_str()
+            .expect("user-level store path"),
+        root.join(".test-home/.cas").to_string_lossy(),
+        "receipt was: {receipt}"
+    );
+}
+
 #[test]
 fn all_projects_repairs_stray_search_roots_and_reports_clean_projects() {
     let temp = TempDir::new().unwrap();

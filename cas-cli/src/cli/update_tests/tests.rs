@@ -22,6 +22,7 @@ fn test_is_newer() {
 fn project_table_plain_uses_phase_glyphs_and_compact_project_names() {
     let receipts = vec![ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
+        unregistered: false,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Warning("busy".to_owned()),
         skills: ProjectPhase::Skipped("not installed".to_owned()),
@@ -52,6 +53,7 @@ fn project_table_phase_headers_are_not_truncated_at_supported_widths() {
         project: PathBuf::from(
             "/home/alice/projects/a-project-with-a-deliberately-long-name/another-project",
         ),
+        unregistered: false,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -85,6 +87,7 @@ fn project_table_phase_headers_are_not_truncated_at_supported_widths() {
 fn non_ok_phase_details_include_phase_summary_when_capture_is_empty() {
     let receipt = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
+        unregistered: false,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -113,6 +116,7 @@ fn non_ok_phase_details_include_phase_summary_when_capture_is_empty() {
 fn cloud_warning_summary_stays_under_the_non_ok_project_row() {
     let receipt = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
+        unregistered: false,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),

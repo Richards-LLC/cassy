@@ -5980,6 +5980,207 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------
+    // Task dependency health (cas-095c)
+    // -----------------------------------------------------------------
+
+    /// A task store shaped like the real one: quarantine-filtered lists over an
+    /// unfiltered SQLite table, which is exactly the pairing that made doctor
+    /// call quarantined endpoints "orphaned".
+    fn task_health_store() -> (
+        TempDir,
+        std::sync::Arc<crate::cloud::SyncQueue>,
+        std::sync::Arc<dyn crate::store::TaskStore>,
+    ) {
+        let temp = TempDir::new().unwrap();
+        let inner = crate::store::SqliteTaskStore::open(temp.path()).unwrap();
+        crate::store::TaskStore::init(&inner).unwrap();
+        let queue = std::sync::Arc::new(crate::cloud::SyncQueue::open(temp.path()).unwrap());
+        queue.init().unwrap();
+        let store: std::sync::Arc<dyn crate::store::TaskStore> =
+            std::sync::Arc::new(crate::store::QuarantineFilteringTaskStore::new(
+                std::sync::Arc::new(inner),
+                std::sync::Arc::clone(&queue),
+            ));
+        (temp, queue, store)
+    }
+
+    fn seed_pair(store: &dyn crate::store::TaskStore) {
+        use crate::types::{Dependency, DependencyType, Task};
+        store
+            .add(&Task::new("cas-aaaa".to_string(), "Child".to_string()))
+            .unwrap();
+        store
+            .add(&Task::new("cas-bbbb".to_string(), "Blocker".to_string()))
+            .unwrap();
+        store
+            .add_dependency(&Dependency::new(
+                "cas-aaaa".to_string(),
+                "cas-bbbb".to_string(),
+                DependencyType::Blocks,
+            ))
+            .unwrap();
+    }
+
+    fn health_of(store: &dyn crate::store::TaskStore) -> DependencyEndpointHealth {
+        let tasks = store.list(None).unwrap();
+        let deps = store.list_dependencies(None).unwrap();
+        dependency_endpoint_health(store, &tasks, &deps)
+    }
+
+    fn check_for(store: &dyn crate::store::TaskStore) -> Check {
+        let tasks = store.list(None).unwrap();
+        task_health_check(tasks.len(), "Open: 2", 2, 0, &health_of(store))
+    }
+
+    /// The reported bug: quarantining a task (which `cas doctor
+    /// --fix-cloud-rows` tells the operator to do) must not turn every
+    /// dependency touching it into an "orphan" the operator cannot clear.
+    #[test]
+    fn dependency_rows_pointing_at_quarantined_tasks_are_ok_and_counted_cas_095c() {
+        let (_temp, queue, store) = task_health_store();
+        seed_pair(store.as_ref());
+
+        assert!(
+            queue
+                .quarantine_row(
+                    crate::cloud::QUARANTINE_TASK,
+                    "cas-bbbb",
+                    "unattributed cloud row"
+                )
+                .unwrap()
+        );
+
+        let health = health_of(store.as_ref());
+        assert_eq!(health.quarantined_endpoint_rows, 1);
+        assert!(health.dangling.is_empty(), "{health:?}");
+
+        let check = check_for(store.as_ref());
+        assert!(
+            matches!(check.status, CheckStatus::Ok),
+            "quarantine is not a fault: {}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("1 dependency row(s) reference quarantined tasks"),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("orphaned"),
+            "quarantined endpoints must not be reported as orphans: {}",
+            check.message
+        );
+    }
+
+    /// A row whose endpoint is gone from the `tasks` table entirely is still a
+    /// fault — and the warning has to name a command that clears it.
+    #[test]
+    fn genuinely_dangling_dependency_rows_warn_and_name_a_command_cas_095c() {
+        let (temp, _queue, store) = task_health_store();
+        seed_pair(store.as_ref());
+        delete_task_row_only(temp.path(), "cas-bbbb");
+
+        let health = health_of(store.as_ref());
+        assert_eq!(health.quarantined_endpoint_rows, 0);
+        assert_eq!(
+            health.dangling,
+            vec![("cas-aaaa".to_string(), "cas-bbbb".to_string())]
+        );
+
+        let check = check_for(store.as_ref());
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        let (_message, remediation) = check.parts();
+        let remediation = remediation.expect("a dangling-row warning must carry remediation");
+        assert!(
+            remediation.contains("cas doctor --fix"),
+            "remediation must name the command that clears it: {remediation}"
+        );
+        assert!(
+            check.message.contains("cas-aaaa -> cas-bbbb"),
+            "the warning must name the offending row: {}",
+            check.message
+        );
+    }
+
+    /// The command the warning names must actually clear the warning.
+    #[test]
+    fn doctor_fix_prunes_dangling_dependency_rows_and_clears_the_warning_cas_095c() {
+        let (temp, queue, store) = task_health_store();
+        seed_pair(store.as_ref());
+        // One genuinely dangling row, one quarantined endpoint: the prune must
+        // take the first and leave the second strictly alone.
+        store
+            .add(&crate::types::Task::new(
+                "cas-cccc".to_string(),
+                "Quarantined".to_string(),
+            ))
+            .unwrap();
+        store
+            .add_dependency(&crate::types::Dependency::new(
+                "cas-aaaa".to_string(),
+                "cas-cccc".to_string(),
+                crate::types::DependencyType::Related,
+            ))
+            .unwrap();
+        queue
+            .quarantine_row(
+                crate::cloud::QUARANTINE_TASK,
+                "cas-cccc",
+                "unattributed cloud row",
+            )
+            .unwrap();
+        delete_task_row_only(temp.path(), "cas-bbbb");
+
+        assert!(matches!(
+            check_for(store.as_ref()).status,
+            CheckStatus::Warning
+        ));
+
+        let pruned = prune_dangling_dependencies(store.as_ref()).unwrap();
+        assert_eq!(pruned, 1);
+
+        let check = check_for(store.as_ref());
+        assert!(
+            matches!(check.status, CheckStatus::Ok),
+            "the named command did not clear the warning: {}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("1 dependency row(s) reference quarantined tasks"),
+            "the quarantined row must survive the prune and stay reported: {}",
+            check.message
+        );
+        assert_eq!(store.list_dependencies(None).unwrap().len(), 1);
+    }
+
+    /// A healthy board says exactly what it said before this fix.
+    #[test]
+    fn a_board_with_no_missing_endpoints_reports_the_plain_summary_cas_095c() {
+        let (_temp, _queue, store) = task_health_store();
+        seed_pair(store.as_ref());
+
+        let check = check_for(store.as_ref());
+        assert!(matches!(check.status, CheckStatus::Ok));
+        assert_eq!(check.message, "2 tasks (Open: 2) | 2 open, 0 blocked");
+    }
+
+    /// Delete only the task row, leaving its dependency edges behind. The store
+    /// API cascades, so the state doctor actually meets in the wild (edges
+    /// pulled from cloud whose task never arrived) has to be built by hand.
+    fn delete_task_row_only(cas_dir: &Path, id: &str) {
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute("DELETE FROM tasks WHERE id = ?", [id]).unwrap();
+    }
 }
 
 /// Check Claude Code MCP configuration

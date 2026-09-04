@@ -4358,7 +4358,7 @@ impl FactoryDaemon {
                         self.nudge_pane_only(
                             target,
                             &inbox_source,
-                            &prompt_with_instructions,
+                            Some(queued.id),
                             wake_decision,
                         )
                         .await
@@ -4371,6 +4371,7 @@ impl FactoryDaemon {
                             None,
                             wake_decision,
                             merge_request_task.as_deref(),
+                            Some(queued.id),
                         )
                         .await
                     }

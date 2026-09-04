@@ -3,10 +3,11 @@ use cas::hooks::HookInput;
 use cas::mcp::tools::service::SearchContextRequest;
 use cas::mcp::tools::*;
 use cas_store::{
-    DEFAULT_RETRIEVAL_POLICY, RetrievalHitIdentity, RetrievalStore, SqliteRetrievalStore,
-    SqliteStore, Store,
+    DEFAULT_RETRIEVAL_POLICY, RETRIEVAL_ATTRIBUTION_AUTOMATIC, RETRIEVAL_ATTRIBUTION_JUDGE,
+    RetrievalHitIdentity, RetrievalOutcome, RetrievalStore, SqliteRetrievalStore, SqliteStore,
+    Store,
 };
-use cas_types::Entry;
+use cas_types::{Agent, Entry};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ErrorCode;
 
@@ -707,25 +708,92 @@ async fn retrieval_metrics_filters_by_session_and_rejects_unsupported_filters() 
     let (temp, core) = setup_cas();
     let cas_dir = temp.path().join(".cas");
     let store = SqliteRetrievalStore::open(&cas_dir).expect("retrieval store should open");
+    let agent_store = cas::store::open_agent_store(&cas_dir).expect("agent store should open");
+    for (id, name) in [
+        ("session-a", "worker-a"),
+        ("session-b", "worker-b"),
+        ("session-empty", "worker-empty"),
+    ] {
+        let mut agent = Agent::new(id.to_string(), name.to_string());
+        agent.factory_session = Some("factory-fixture".to_string());
+        agent_store
+            .register(&agent)
+            .expect("fixture agent should register");
+    }
     let hits = [RetrievalHitIdentity {
         result_id: "entry-session-filter".to_string(),
         document_type: "entry".to_string(),
         rank: 0,
     }];
-    for (query_id, session_id) in [
-        ("query-session-a", "session-a"),
-        ("query-session-b", "session-b"),
+    for (query_id, session_id, query_family) in [
+        ("query-session-a", "session-a", "ambient_session_start"),
+        ("query-session-b", "session-b", "context_session_start"),
+        (
+            "query-session-historical",
+            "session-historical",
+            "ambient_transition",
+        ),
     ] {
         store
             .record_query(
                 query_id,
                 "session-filter query",
-                "session-filter",
+                query_family,
                 DEFAULT_RETRIEVAL_POLICY,
                 Some(session_id),
                 &hits,
             )
             .expect("retrieval query should persist");
+    }
+    store
+        .record_outcome_with_attribution(
+            "opened-session-a",
+            "query-session-a",
+            "entry-session-filter",
+            RetrievalOutcome::Used,
+            "automatic-hook",
+            "session-a",
+            None,
+            RETRIEVAL_ATTRIBUTION_AUTOMATIC,
+        )
+        .expect("automatic body pull should persist");
+    store
+        .record_outcome(
+            "used-session-historical",
+            "query-session-historical",
+            "entry-session-filter",
+            RetrievalOutcome::Used,
+            "explicit-agent",
+            "session-historical",
+            None,
+        )
+        .expect("explicit use should persist");
+    for (event_id, query_id, session_id, outcome) in [
+        (
+            "judge-session-a",
+            "query-session-a",
+            "session-a",
+            RetrievalOutcome::Ignored,
+        ),
+        (
+            "judge-session-b",
+            "query-session-b",
+            "session-b",
+            RetrievalOutcome::Helpful,
+        ),
+    ] {
+        store
+            .record_outcome_with_attribution(
+                event_id,
+                query_id,
+                "entry-session-filter",
+                outcome,
+                "fixture-judge",
+                session_id,
+                None,
+                RETRIEVAL_ATTRIBUTION_JUDGE,
+            )
+            .expect("judge label should persist");
     }
 
     let service = CasService::new(core, None);
@@ -743,7 +811,16 @@ async fn retrieval_metrics_filters_by_session_and_rejects_unsupported_filters() 
         .expect("unfiltered metrics should succeed");
     let all: serde_json::Value =
         serde_json::from_str(&extract_text(response)).expect("metrics should be JSON");
-    assert_eq!(all["groups"][0]["results"], 2);
+    assert_eq!(all["groups"].as_array().unwrap().len(), 3);
+    assert_eq!(all["injected_precision_numerator"], 1);
+    assert_eq!(all["injected_precision_denominator"], 2);
+    assert_eq!(all["retrieval_funnel"]["retrieved"], 3);
+    assert_eq!(all["retrieval_funnel"]["injected"], 3);
+    assert_eq!(all["retrieval_funnel"]["opened"], 1);
+    assert_eq!(all["retrieval_funnel"]["used"], 1);
+    assert_eq!(all["retrieval_funnel"]["judged_helpful"], 1);
+    assert_eq!(all["session_scope"]["status"], "available");
+    assert_eq!(all["session_scope"]["identity_kind"], "all_sessions");
 
     let response = service
         .search(Parameters(
@@ -755,6 +832,76 @@ async fn retrieval_metrics_filters_by_session_and_rejects_unsupported_filters() 
     let filtered: serde_json::Value =
         serde_json::from_str(&extract_text(response)).expect("filtered metrics should be JSON");
     assert_eq!(filtered["groups"][0]["results"], 1);
+    assert_eq!(filtered["injected_precision_numerator"], 0);
+    assert_eq!(filtered["injected_precision_denominator"], 1);
+    assert_eq!(filtered["retrieval_funnel"]["retrieved"], 1);
+    assert_eq!(filtered["retrieval_funnel"]["injected"], 1);
+    assert_eq!(filtered["retrieval_funnel"]["opened"], 1);
+    assert_eq!(filtered["retrieval_funnel"]["used"], 0);
+    assert_eq!(filtered["retrieval_funnel"]["judged_helpful"], 0);
+    assert_eq!(filtered["session_scope"]["status"], "available");
+    assert_eq!(filtered["session_scope"]["identity_kind"], "agent_session");
+    assert_eq!(filtered["judge_measurement"]["status"], "available");
+
+    let response = service
+        .search(Parameters(
+            serde_json::from_value(metrics(Some("session-historical")))
+                .expect("historical session request should deserialize"),
+        ))
+        .await
+        .expect("historical session metrics should remain valid from stored evidence");
+    let historical: serde_json::Value =
+        serde_json::from_str(&extract_text(response)).expect("historical metrics should be JSON");
+    assert_eq!(historical["groups"][0]["results"], 1);
+    assert_eq!(historical["retrieval_funnel"]["opened"], 0);
+    assert_eq!(historical["retrieval_funnel"]["used"], 1);
+    assert_eq!(historical["retrieval_funnel"]["judged_helpful"], 0);
+    assert_eq!(historical["session_scope"]["status"], "available");
+    assert_eq!(
+        historical["session_scope"]["identity_kind"],
+        "stored_retrieval_session"
+    );
+
+    let response = service
+        .search(Parameters(
+            serde_json::from_value(metrics(Some("session-empty")))
+                .expect("valid empty session request should deserialize"),
+        ))
+        .await
+        .expect("valid empty session metrics should succeed");
+    let empty: serde_json::Value =
+        serde_json::from_str(&extract_text(response)).expect("empty metrics should be JSON");
+    assert_eq!(empty["groups"], serde_json::json!([]));
+    assert_eq!(empty["session_scope"]["status"], "valid_empty");
+    assert_eq!(empty["session_scope"]["identity_kind"], "agent_session");
+
+    let response = service
+        .search(Parameters(
+            serde_json::from_value(metrics(Some("factory-fixture")))
+                .expect("factory session request should deserialize"),
+        ))
+        .await
+        .expect("factory session metrics should explain the identity mismatch");
+    let factory: serde_json::Value =
+        serde_json::from_str(&extract_text(response)).expect("factory metrics should be JSON");
+    assert_eq!(factory["groups"], serde_json::json!([]));
+    assert_eq!(factory["session_scope"]["status"], "invalid_identity_kind");
+    assert_eq!(factory["session_scope"]["identity_kind"], "factory_session");
+    assert_eq!(factory["session_scope"]["matching_agent_sessions"], 3);
+
+    let response = service
+        .search(Parameters(
+            serde_json::from_value(metrics(Some("worker-a")))
+                .expect("agent name request should deserialize"),
+        ))
+        .await
+        .expect("agent name metrics should explain the identity mismatch");
+    let named: serde_json::Value =
+        serde_json::from_str(&extract_text(response)).expect("named metrics should be JSON");
+    assert_eq!(named["groups"], serde_json::json!([]));
+    assert_eq!(named["session_scope"]["status"], "invalid_identity_kind");
+    assert_eq!(named["session_scope"]["identity_kind"], "agent_name");
+    assert_eq!(named["session_scope"]["canonical_session_id"], "session-a");
 
     let response = service
         .search(Parameters(
@@ -766,6 +913,14 @@ async fn retrieval_metrics_filters_by_session_and_rejects_unsupported_filters() 
     let missing: serde_json::Value =
         serde_json::from_str(&extract_text(response)).expect("missing metrics should be JSON");
     assert_eq!(missing["groups"], serde_json::json!([]));
+    assert_eq!(missing["session_scope"]["status"], "unknown");
+    assert_eq!(missing["session_scope"]["identity_kind"], "unknown");
+    assert_eq!(missing["judge_measurement"]["status"], "unavailable");
+    assert_eq!(missing["judge_measurement"]["reason"], "judge_unconfigured");
+    assert_eq!(
+        missing["judge_measurement"]["scheduled_judge_configured"],
+        false
+    );
 
     let unsupported: SearchContextRequest = serde_json::from_value(serde_json::json!({
         "action": "retrieval_metrics",

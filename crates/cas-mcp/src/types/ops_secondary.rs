@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub struct SearchContextRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'search', 'retrieval_feedback', 'retrieval_metrics' (optional session_id filter; funnel stages use distinct retrieved result rows; quality rates use resolved outcomes; includes rolling judge-labelled injected precision), 'skill_impact' (impact_report alias), 'context', 'context_for_subagent', 'observe', 'entity_list', 'entity_show', 'entity_extract', 'code_search', 'code_show', 'grep', 'blame', 'history' (search indexed git commits by text/path/time)"
+        description = "Action: 'search', 'retrieval_feedback', 'retrieval_metrics' (optional strict agent session_id/CAS_SESSION_ID filter; reports identity and judge availability, distinct retrieved/injected/opened/explicit-used/judge-helpful stages, resolved-outcome quality rates, and session-scoped rolling judge precision), 'skill_impact' (impact_report alias), 'context', 'context_for_subagent', 'observe', 'entity_list', 'entity_show', 'entity_extract', 'code_search', 'code_show', 'grep', 'blame', 'history' (search indexed git commits by text/path/time)"
     )]
     pub action: String,
 
@@ -195,9 +195,9 @@ pub struct SearchContextRequest {
     #[serde(default)]
     pub include_prompts: Option<bool>,
 
-    /// Session ID filter for retrieval_metrics; hashed before comparison.
+    /// Canonical agent session ID filter for retrieval_metrics; hashed before comparison.
     #[schemars(
-        description = "Filter retrieval_metrics rows by session ID (hashed before comparison)"
+        description = "Strictly filter retrieval_metrics by one canonical agent session ID/CAS_SESSION_ID (hashed before comparison); factory-session labels and agent names are diagnosed but never widened"
     )]
     #[serde(default)]
     pub session_id: Option<String>,

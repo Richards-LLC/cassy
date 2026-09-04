@@ -6,6 +6,11 @@ use cas_store::{RelevanceSamplingReport, RetrievalSample, SqliteRetrievalStore};
 
 use crate::error::CasError;
 
+/// The embedded daemon currently has no receiving-agent or scheduled model
+/// adapter. Keep diagnostics tied to this implementation fact so they cannot
+/// claim that a missing label is a measured negative.
+pub const SCHEDULED_RELEVANCE_JUDGE_CONFIGURED: bool = false;
+
 /// Run one injected-relevance sampling pass with a caller-supplied judge.
 ///
 /// The daemon owns cadence, cool-down, and enablement; this function owns the
@@ -33,6 +38,11 @@ pub fn run_unconfigured_injected_relevance_sampling(
     sample_size: usize,
     cooldown_secs: u64,
 ) -> Result<RelevanceSamplingReport, CasError> {
+    if SCHEDULED_RELEVANCE_JUDGE_CONFIGURED {
+        return Err(CasError::Other(
+            "scheduled relevance judge is marked configured but has no runtime adapter".to_string(),
+        ));
+    }
     run_injected_relevance_sampling(cas_root, sample_size, cooldown_secs, |_sample| Ok(None))
 }
 
@@ -73,5 +83,15 @@ mod tests {
             store.rolling_injected_precision(30).unwrap().precision,
             Some(1.0)
         );
+    }
+
+    #[test]
+    fn scheduled_sampling_consumes_the_reported_unconfigured_capability() {
+        let project = TempDir::new().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+
+        assert!(!SCHEDULED_RELEVANCE_JUDGE_CONFIGURED);
+        let report = run_unconfigured_injected_relevance_sampling(&cas_root, 1, 604_800).unwrap();
+        assert_eq!(report.labels_recorded, 0);
     }
 }

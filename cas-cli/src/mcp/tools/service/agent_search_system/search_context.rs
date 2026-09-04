@@ -100,18 +100,46 @@ impl CasService {
 
         let store = SqliteRetrievalStore::open(&self.inner.cas_root)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        let aggregates = match req.session_id.as_deref() {
+        let session_id = req.session_id.as_deref();
+        let aggregates = match session_id {
             Some(session_id) => store.aggregate_for_session(session_id),
             None => store.aggregate(),
         }
         .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        let precision = store
-            .rolling_injected_precision(30)
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let precision = match session_id {
+            Some(session_id) => store.rolling_injected_precision_for_session(30, session_id),
+            None => store.rolling_injected_precision(30),
+        }
+        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let funnel = match session_id {
+            Some(session_id) => store.evidence_funnel_for_session(session_id),
+            None => store.evidence_funnel(),
+        }
+        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let session_scope = Self::retrieval_metrics_session_scope(
+            &self.inner.cas_root,
+            session_id,
+            funnel.retrieved > 0,
+        );
+        let judge_measurement = Self::retrieval_metrics_judge_measurement(
+            &self.inner.cas_root,
+            precision.judged,
+            session_id.is_some(),
+        );
         Ok(Self::success(
             serde_json::json!({
                 "version": 1,
                 "groups": aggregates,
+                "session_scope": session_scope,
+                "retrieval_funnel": funnel,
+                "retrieval_funnel_definitions": {
+                    "retrieved": "distinct query/result rows returned by retrieval",
+                    "injected": "retrieved rows placed in SessionStart or ambient context",
+                    "opened": "body pulled after injection; opening does not prove use",
+                    "used": "explicit caller feedback marked used; opening does not imply this",
+                    "judged_helpful": "helpful label from the relevance judge; use does not imply this",
+                },
+                "judge_measurement": judge_measurement,
                 // Keep the scalar easy to consume while publishing the
                 // numerator/denominator beside it. `null` is intentional
                 // until a judge has produced at least one label.
@@ -124,6 +152,169 @@ impl CasService {
             })
             .to_string(),
         ))
+    }
+
+    fn retrieval_metrics_session_scope(
+        cas_root: &std::path::Path,
+        session_id: Option<&str>,
+        has_retrieval_data: bool,
+    ) -> serde_json::Value {
+        use cas_store::{AgentStore, SqliteAgentStore};
+
+        let Some(requested) = session_id else {
+            return serde_json::json!({
+                "filter": "all",
+                "identity_kind": "all_sessions",
+                "status": "available",
+                "strict": false,
+            });
+        };
+
+        let agents = match SqliteAgentStore::open(cas_root).and_then(|store| store.list(None)) {
+            Ok(agents) => agents,
+            Err(error) => {
+                return serde_json::json!({
+                    "filter": "strict",
+                    "requested_session_id": requested,
+                    "identity_kind": if has_retrieval_data {
+                        "stored_retrieval_session"
+                    } else {
+                        "unresolved"
+                    },
+                    "status": if has_retrieval_data { "available" } else { "unavailable" },
+                    "strict": true,
+                    "reason": if has_retrieval_data {
+                        "stored_retrieval_evidence"
+                    } else {
+                        "agent_registry_unavailable"
+                    },
+                    "detail": error.to_string(),
+                });
+            }
+        };
+
+        if agents
+            .iter()
+            .any(|agent| agent.id == requested || agent.cc_session_id.as_deref() == Some(requested))
+        {
+            return serde_json::json!({
+                "filter": "strict",
+                "requested_session_id": requested,
+                "identity_kind": "agent_session",
+                "status": if has_retrieval_data { "available" } else { "valid_empty" },
+                "strict": true,
+                "reason": if has_retrieval_data {
+                    "stored_retrieval_evidence"
+                } else {
+                    "registered_agent_has_no_retrieval_results"
+                },
+            });
+        }
+
+        // Retrieval rows are durable beyond the live agent registry. Their
+        // presence is sufficient to recognize a historical canonical token.
+        if has_retrieval_data {
+            return serde_json::json!({
+                "filter": "strict",
+                "requested_session_id": requested,
+                "identity_kind": "stored_retrieval_session",
+                "status": "available",
+                "strict": true,
+                "reason": "stored_retrieval_evidence",
+            });
+        }
+
+        let matching_names: Vec<_> = agents
+            .iter()
+            .filter(|agent| agent.name == requested)
+            .collect();
+        if !matching_names.is_empty() {
+            let canonical_session_id =
+                (matching_names.len() == 1).then(|| matching_names[0].id.clone());
+            return serde_json::json!({
+                "filter": "strict",
+                "requested_session_id": requested,
+                "identity_kind": "agent_name",
+                "status": "invalid_identity_kind",
+                "strict": true,
+                "reason": "agent_name_is_not_a_session_id",
+                "canonical_session_id": canonical_session_id,
+                "matching_agent_sessions": matching_names.len(),
+            });
+        }
+
+        let matching_factory_sessions = agents
+            .iter()
+            .filter(|agent| agent.factory_session.as_deref() == Some(requested))
+            .count();
+        if matching_factory_sessions > 0 {
+            return serde_json::json!({
+                "filter": "strict",
+                "requested_session_id": requested,
+                "identity_kind": "factory_session",
+                "status": "invalid_identity_kind",
+                "strict": true,
+                "reason": "factory_session_is_not_an_agent_session_id",
+                "matching_agent_sessions": matching_factory_sessions,
+                "next_action": "query one agent id/CAS_SESSION_ID; this filter never widens to every factory member",
+            });
+        }
+
+        serde_json::json!({
+            "filter": "strict",
+            "requested_session_id": requested,
+            "identity_kind": "unknown",
+            "status": "unknown",
+            "strict": true,
+            "reason": "no_registered_agent_or_stored_retrieval_evidence",
+        })
+    }
+
+    fn retrieval_metrics_judge_measurement(
+        cas_root: &std::path::Path,
+        judged: u64,
+        session_filtered: bool,
+    ) -> serde_json::Value {
+        if judged > 0 {
+            return serde_json::json!({
+                "status": "available",
+                "reason": null,
+                "scope": if session_filtered { "session" } else { "all_sessions" },
+                "labels_in_window": judged,
+                "window_days": 30,
+            });
+        }
+
+        match crate::config::Config::load(cas_root) {
+            Ok(config) => {
+                let sampler_enabled = config.daemon().relevance_sampling_enabled;
+                let judge_configured =
+                    crate::daemon::relevance::SCHEDULED_RELEVANCE_JUDGE_CONFIGURED;
+                serde_json::json!({
+                    "status": "unavailable",
+                    "reason": if !sampler_enabled {
+                        "sampler_disabled"
+                    } else if !judge_configured {
+                        "judge_unconfigured"
+                    } else {
+                        "no_judge_labels_in_window"
+                    },
+                    "scope": if session_filtered { "session" } else { "all_sessions" },
+                    "labels_in_window": 0,
+                    "window_days": 30,
+                    "sampler_enabled": sampler_enabled,
+                    "scheduled_judge_configured": judge_configured,
+                })
+            }
+            Err(error) => serde_json::json!({
+                "status": "unavailable",
+                "reason": "sampler_configuration_unavailable",
+                "scope": if session_filtered { "session" } else { "all_sessions" },
+                "labels_in_window": 0,
+                "window_days": 30,
+                "detail": error.to_string(),
+            }),
+        }
     }
 
     /// Return the first explicitly supplied field that retrieval_metrics does

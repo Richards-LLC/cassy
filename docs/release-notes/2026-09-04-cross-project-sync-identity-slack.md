@@ -2,7 +2,7 @@
 
 Channel: #cas-internal (C0B44GUKDK2)
 
-Status: Draft. Do not post until the v3.15.8 release is published.
+Status: POSTED 2026-09-04T16:47Z via MechaCassy (channel `cas-internal`).
 
 User top-level
 
@@ -23,7 +23,7 @@ User reply
 • *Health check* — Was: health checks did not clearly show when project data was mixed or how to fix duplicate tasks. Now: the check names the problem and gives a clear repair command.
 
 *Install*
-`cas update`, or download the Linux x86_64 or macOS ARM64 archive from the GitHub release. SHA-256: `{{LINUX_SHA256}}` · `{{MACOS_SHA256}}`.
+`cas update`, or download the Linux x86_64 or macOS ARM64 archive from the GitHub release. SHA-256: `93647426687ff766e1cabfda7c15bf00ae4e1d678560c0bc84c5183966c9a470` · `4eda164584e57cfbf45394dcf0e1576d6a940e1388721ae6563347308fcd4819`.
 ```
 
 Dev top-level
@@ -45,5 +45,14 @@ Dev reply
 • *Doctor evidence* — Was: diagnostics lacked root-scoped metadata and collision commands. Now: `cloud identity metadata` compares watermarks, registrations, and knowledge-push identity to the root and prints remediation.
 
 *Validation*
-Release gate and full test suite green on the published tree. Archives: `cas-x86_64-unknown-linux-gnu.tar.gz` (`{{LINUX_SHA256}}`) and `cas-aarch64-apple-darwin.tar.gz` (`{{MACOS_SHA256}}`).
+Release gate and full test suite green on the published tree. Archives: `cas-x86_64-unknown-linux-gnu.tar.gz` (`93647426687ff766e1cabfda7c15bf00ae4e1d678560c0bc84c5183966c9a470`) and `cas-aarch64-apple-darwin.tar.gz` (`4eda164584e57cfbf45394dcf0e1576d6a940e1388721ae6563347308fcd4819`).
 ```
+
+## POSTED
+
+- **Posted at (UTC):** `2026-09-04T16:47Z`
+- **Channel:** `#cas-internal` (`C0B44GUKDK2`)
+- **User top-level:** `message_id=1788540417.203839` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1788540417203839
+- **User reply:** `message_id=1788540423.561269` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1788540423561269?thread_ts=1788540417.203839&cid=C0B44GUKDK2
+- **Dev top-level:** `message_id=1788540427.142239` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1788540427142239
+- **Dev reply:** `message_id=1788540434.179849` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1788540434179849?thread_ts=1788540427.142239&cid=C0B44GUKDK2

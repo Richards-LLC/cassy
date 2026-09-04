@@ -7,7 +7,31 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.15.2] - 2026-09-04
+
 ### Fixed
+- `cas update` no longer reports a project as refreshed while its schema stays
+  behind. A migration whose name had already been recorded under another id
+  (a store migrated by a pre-release build that numbered it differently) made
+  the ledger write fail with "schema was detected but its ledger row could not
+  be recorded" on every run, leaving the project pinned two migrations short.
+  The runner now reconciles such rows — the stale entry is logged to the
+  reconciliation ledger with both ids and removed, the migration is recorded
+  under its current id, and whatever migration now owns the vacated id is
+  re-evaluated honestly (detected or applied). Every pending migration gets
+  its turn before the first failure is reported, and the ledger-write error
+  names both ids involved. Read-only checks still report the wedge; only
+  `cas update` repairs it.
+- `cas update` finds every local project, not just the ones already in its
+  registry. The filesystem scan stopped at the first `.cas` it met — on any
+  machine with a user-level store that was `$HOME` itself — so discovery had
+  silently collapsed to the registry and dozens of projects never received
+  migrations while the summary said "N projects refreshed". The scan now
+  descends (skipping `.cas/`, hidden and vendored directories), refreshed
+  projects are registered so discovery converges, a `.cas` without a database
+  is listed as "not refreshed (unregistered)", the user-level `~/.cas` store
+  gets its own refresh phase, every schema line names the store it migrated,
+  and `cas update --register <path>` adds a project by hand.
 - A `CHANGELOG.md` or project doc saved as UTF-16, or with a UTF-8 byte-order
   mark, is now read instead of skipped. The changelog index no longer fails the
   whole pass on an encoding it can decode, a leading byte-order mark no longer

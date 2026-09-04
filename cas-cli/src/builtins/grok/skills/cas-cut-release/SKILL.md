@@ -32,7 +32,17 @@ and do not claim success without its receipt.
    next patch number. Then prepare one source commit: run `scripts/bump-release-version.sh <version>`,
    `cargo update --workspace --offline`, update CHANGELOG, the runtime-release
    draft, and the previous POSTED receipt; then run
-   `scripts/release-gate.sh <version>` and require every row PASS.
+   `scripts/release-train.sh <version> <epic-worktree> --gate` and require every
+   row PASS. Never hand-write a wrapper with a version-keyed artifacts path:
+   `release-train.sh` owns a per-run directory keyed by version AND worktree
+   (`v<version>-<worktree-basename>`), so two supervisors cutting the same
+   version from different epics cannot overwrite each other's `gate.log` or
+   `gate.done`. It records the gate's PID and refuses to start a second gate
+   for that run; inspect with `--status` and stop with `--stop`, which signals
+   only the recorded PID. Locate a run by its recorded PID, never by a process
+   name pattern: `pgrep -f 'release-gate.sh <version>'` matches every
+   concurrent supervisor's gate, and acting on `head -1` picks by pid order
+   rather than by ownership (cas-5212).
 5. For archive mode, the gate already puts the archive and TMPDIR under
    `/var/tmp/cas-release-gate` — a large real-disk scratch base with no `.cas`
    ancestor, never `/tmp` tmpfs. Set `CAS_RELEASE_GATE_HOME_DIR` only to move
@@ -42,11 +52,18 @@ and do not claim success without its receipt.
    '*/Cargo.toml'`; run outside the checkout with symlinks for
    cargo/rustc/git/sh/bash/jq/python3, no `rg`, and `--workspace-remap`.
    Exclude `component_output_test` only when its source snapshots need checkout.
-6. Push one source branch and open one protected-main PR:
-   `git push -u origin <source-branch>`; `gh pr create --base main --head
-   <source-branch> --fill`; `gh pr merge <pr> --merge`. Verify the PR remains
-   queued, explicitly enqueue it if `isInMergeQueue=false`, and watch the
-   `merge_group` run rather than admission stubs; record retry latency.
+6. Push the source branch and drive it to a landed merge with
+   `scripts/release-train.sh <version> <epic-worktree> --pipeline`, which
+   reuses the gate's run directory and writes `pr-number.txt`,
+   `landed-main.sha` and a terminal `pipeline.done`
+   (MERGED / CHECKS_FAILED / QUEUE_RUN_FAILED / DROPPED_TOO_OFTEN / TIMEOUT).
+   It enqueues only after the pull_request run shows a `bucket == pass` row for
+   BOTH Fast Validation and macOS Check: a push-triggered run contributes rows
+   with the same names and `bucket == skipped`, and enqueuing on those gets the
+   merge-queue entry dropped silently (`mergeQueueEntry` null), which is what
+   cost v3.15.2 its first queue attempt. It also watches for that dropped
+   signature — no entry and no new `merge_group` run — and re-enqueues up to
+   three times before giving up (cas-da81).
 7. After the merge lands, fast-forward and prepare the clean tag worktree:
    `git fetch origin main`; `LANDED_MAIN="$(git rev-parse origin/main)"`;
    `VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' cas-cli/Cargo.toml | head -n1)"`;
@@ -72,7 +89,8 @@ and do not claim success without its receipt.
    done
    # Set CAS_RELEASE_ARTIFACTS_ROOT to the configured [factory] artifacts_root.
    ARTIFACTS_ROOT="${CAS_RELEASE_ARTIFACTS_ROOT:-$HOME/.cas/artifacts}"
-   EVIDENCE_DIR="$ARTIFACTS_ROOT/release/$TAG"
+   # Per-run, not per-version: take the same directory the gate used.
+   EVIDENCE_DIR="$(scripts/release-train.sh "$VERSION" "$EPIC_WORKTREE" --print-run-dir)"
    mkdir -p "$EVIDENCE_DIR"
    LOG="$EVIDENCE_DIR/release.log"
    PID_FILE="$EVIDENCE_DIR/release.pid"; DONE="$EVIDENCE_DIR/release.done"
@@ -105,7 +123,11 @@ and do not claim success without its receipt.
    permalink. If a live Cassy proxy lacks the new registration, use the direct
    configured mecha-cassy MCP or approved bounded one-shot route; do not retry
    `cas`/`mcp_execute` after its authenticated-session rejection. Save `cas
-   update`, `cas --version`, and `cas hub` proof under `EVIDENCE_DIR`.
+   update`, `cas --version`, and `cas hub` proof under `EVIDENCE_DIR`, and
+   require the host `cas update -y --json` receipt to carry
+   `refresh_binary_version` equal to the released version: a different value
+   means the refresh ran with the pre-update binary and the host has not
+   converged (cas-91ba).
 10. Carry the POSTED receipt into the next prep commit. Close only after the
     merge receipt and stranded-branch inspection; if sibling lanes rewrote
     delivered files, use `stranded_branch_override` with proof on main.

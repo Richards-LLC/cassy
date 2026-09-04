@@ -85,6 +85,18 @@ pub(crate) use app::{
 pub(crate) fn preferred_epic_id_from_session_metadata() -> Option<String> {
     app::preferred_epic_focus_from_session_metadata().epic_id
 }
+
+/// The same resolution for a NAMED session rather than this process's own
+/// (cas-5087).
+///
+/// Session metadata lives in one shared `~/.cas/sessions/` directory, so a
+/// supervisor can read what another live supervisor on this clone declared it
+/// is running. That is the whole point: `worker_status` is read before a gate,
+/// and "who else is here" is only half the answer without "and what are they
+/// in the middle of".
+pub(crate) fn preferred_epic_id_from_session_metadata_named(session: &str) -> Option<String> {
+    app::preferred_epic_focus_from_session_metadata_named(session).epic_id
+}
 // cas-bd9d: the parity conformance gate drives these launch intro-prompt paths.
 pub use app::{FactoryApp, FactoryConfig};
 #[cfg(test)]
@@ -93,6 +105,12 @@ pub use boot::{BootConfig, run_boot_screen_client};
 pub use client::{
     attach, find_session_for_project, list_session_summaries, list_session_summaries_for_project,
     list_sessions, list_sessions_for_project,
+};
+/// The delivery wake gate's argument and verdict types (cas-5087), exported
+/// alongside [`FactoryDaemon::supervisor_wake_decision`] so acceptance tests
+/// and diagnostics can drive the real gate instead of restating its rules.
+pub use daemon::runtime::queue_and_events::{
+    PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, ToolCallEvidence, WakeDecision,
 };
 pub use daemon::{
     DaemonConfig, DaemonInitPhase, FactoryDaemon, ForkFirstResult, ForkResult, daemonize,

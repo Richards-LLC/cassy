@@ -7,6 +7,67 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.15.4] - 2026-09-04
+
+### Added
+- `worker_status` now names the epic each live supervisor is running, including
+  supervisors in other factory sessions that share the same checkout. Knowing
+  another supervisor is live was only half of what an operator needs before a
+  merge, reset or shutdown; the other half is what that supervisor is in the
+  middle of. A supervisor running nothing reads "no epic", and a task store that
+  cannot be read this pass says so explicitly rather than being reported as
+  "no epic".
+
+### Fixed
+- A message from one supervisor to another now reaches the recipient's pane
+  instead of waiting in an inbox for a poll. Supervisor-sent messages were
+  labelled with the generic sender "supervisor", which the recipient's delivery
+  path could not match to any registered supervisor, so the wake was declined
+  every time and cross-session coordination depended on the recipient happening
+  to check. Messages between supervisors now name the supervisor that sent them,
+  which is also the only useful label when two of them share a checkout.
+  Messages to workers are unchanged.
+- `cas update` now runs its post-install phases with the binary it just
+  installed. Updating from an older version used to run the schema-migration,
+  all-projects refresh, user-level store and skills-sync phases in the
+  pre-update process image, so the first update reported the *old* version's
+  behaviour and a second `cas update` was needed to converge. The receipt now
+  states `refresh_binary_version`, the version that actually performed the
+  refresh, and `--json` emits a single combined document instead of two.
+- A release no longer fails because the machine cutting it was busy. `cas init`
+  aborts itself after a wall-clock budget so a hang cannot squat a CPU core, and
+  that budget was a fixed 300 seconds with an all-or-nothing opt-out. On a loaded
+  host a test's child `cas init` reached it and took the release gate's
+  archive-mode row down with it, on timing alone — the same tree passed minutes
+  later on a quiet box. The budget is now settable with `CAS_INIT_TIMEOUT_SECS`,
+  and the release gate raises it to 900 seconds for its own children, naming the
+  value in its receipt. An ordinary `cas init` keeps the 300-second watchdog, a
+  meaningless override falls back to it rather than disabling it, and
+  `CAS_INIT_NO_TIMEOUT=1` still turns the watchdog off outright.
+- Concurrent `cas hub start` / `cas hub restart` no longer stall ten seconds
+  and report a spurious failure when another command has already brought up
+  the hub that was asked for: the waiters resolve as soon as a live hub
+  satisfying the request is observed, plain `cas hub stop` is unchanged, and
+  each timeout names the wait that expired. The concurrent lock-owner test now
+  asserts both commands succeed and exactly one owner exists.
+- Release gates run through `scripts/release-train.sh`: each run gets a
+  directory keyed by version and worktree with an attributable receipt, the
+  gate's PID is recorded, a second gate for the same run is refused by name,
+  `--stop` signals only the recorded PID, and no release script locates a
+  process by name pattern. `release-train.sh pipeline` opens the PR, waits for
+  the pull-request checks to actually pass, enqueues, re-enqueues if the queue
+  drops the entry, and records the landed main sha.
+
+### Changed
+- **Behaviour change for automation:** if the newly installed binary cannot be
+  run for the post-install phases, `cas update` now exits **non-zero** with
+  "binary updated to X; refresh did not run — run `cas update` again", and its
+  JSON receipt carries `refresh_binary_version: null` and
+  `refresh_status: "skipped"`. Previously such a run fell back to refreshing
+  with the pre-update image and exited 0, which read as converged when it was
+  not. A run whose refresh is performed by a version other than the one just
+  installed fails the same way.
+
 ## [3.15.3] - 2026-09-04
 
 ### Fixed

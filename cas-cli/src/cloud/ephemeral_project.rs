@@ -19,9 +19,9 @@
 //!  * **An explicit `[project] canonical_id` pin always wins.** Someone stated
 //!    this project's identity on purpose; that is the escape hatch, and it is
 //!    the reason the guard can be strict about everything else.
-//!  * Otherwise a root is ephemeral when it lives under a temp directory, or
-//!    its folder name carries a `mktemp` random suffix, or its database has no
-//!    `tasks` table.
+//!  * Otherwise a root is ephemeral when it has no git remote, lives under a
+//!    temp directory, or its folder name carries a `mktemp` random suffix, or
+//!    its database has no `tasks` table.
 //!
 //! Nothing here deletes or rewrites anything. It only declines to push.
 
@@ -61,16 +61,29 @@ const TEMP_ROOTS: &[&str] = &["/tmp", "/var/tmp", "/private/tmp", "/private/var/
 /// Pure classifier — no IO, so every branch is testable.
 ///
 /// `project_dir` is the project directory (the parent of `.cas`), `has_pin` is
-/// whether `[project] canonical_id` is set, and `has_tasks_table` is whether
-/// the local database carries a `tasks` table (`None` when the database is
-/// absent or unreadable, which is *not* treated as evidence either way).
+/// whether `[project] canonical_id` is set, `has_git_remote` is whether an
+/// `origin` remote exists, and `has_tasks_table` is whether the local database
+/// carries a `tasks` table (`None` when the database is absent or unreadable).
 pub fn classify(
     project_dir: &Path,
     has_pin: bool,
+    has_git_remote: bool,
     has_tasks_table: Option<bool>,
 ) -> ProjectDurability {
     if has_pin {
         return ProjectDurability::Durable;
+    }
+
+    if !has_git_remote {
+        return ProjectDurability::Ephemeral {
+            reason: format!(
+                "it has no `[project] canonical_id` pin or git `origin` remote, so its cloud identity would be the bare folder name `{}`",
+                project_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+            ),
+        };
     }
 
     if let Some(root) = temp_root_of(project_dir) {
@@ -105,7 +118,12 @@ pub fn classify(
 pub fn classify_project_root(cas_root: &Path) -> ProjectDurability {
     let project_dir = cas_root.parent().unwrap_or(cas_root);
     let has_pin = super::config::canonical_id_from_config_toml(cas_root).is_some();
-    classify(project_dir, has_pin, has_tasks_table(cas_root))
+    classify(
+        project_dir,
+        has_pin,
+        super::config::git_origin_url(cas_root).is_some(),
+        has_tasks_table(cas_root),
+    )
 }
 
 fn has_tasks_table(cas_root: &Path) -> Option<bool> {
@@ -170,25 +188,31 @@ mod tests {
     /// The three roots GH #701 names by measurement.
     #[test]
     fn the_probe_roots_named_in_the_issue_are_refused() {
-        let probe = classify(&dir("/var/tmp/mecha-proxy-probe.Tz6bxx"), false, Some(true));
+        let probe = classify(
+            &dir("/var/tmp/mecha-proxy-probe.Tz6bxx"),
+            false,
+            true,
+            Some(true),
+        );
         assert!(probe.is_ephemeral(), "{probe:?}");
 
         // Same shape outside a temp directory: the name alone is enough.
         let named = classify(
             &dir("/home/dev/work/mecha-proxy-probe.Tz6bxx"),
             false,
+            true,
             Some(true),
         );
         assert!(named.is_ephemeral(), "{named:?}");
 
-        let fresh_proxy = classify(&dir("/home/dev/fresh-proxy"), false, Some(false));
+        let fresh_proxy = classify(&dir("/home/dev/fresh-proxy"), false, true, Some(false));
         assert!(fresh_proxy.is_ephemeral(), "{fresh_proxy:?}");
     }
 
     #[test]
     fn mktemp_scratch_directories_are_refused() {
-        assert!(classify(&dir("/tmp/.tmplhQJF8"), false, Some(true)).is_ephemeral());
-        assert!(classify(&dir("/tmp/anything"), false, Some(true)).is_ephemeral());
+        assert!(classify(&dir("/tmp/.tmplhQJF8"), false, true, Some(true)).is_ephemeral());
+        assert!(classify(&dir("/tmp/anything"), false, true, Some(true)).is_ephemeral());
     }
 
     /// The escape hatch. A stated identity is a human decision and outranks
@@ -197,7 +221,7 @@ mod tests {
     #[test]
     fn an_explicit_pin_always_wins() {
         assert_eq!(
-            classify(&dir("/tmp/.tmplhQJF8"), true, Some(false)),
+            classify(&dir("/tmp/.tmplhQJF8"), true, false, Some(false)),
             ProjectDurability::Durable
         );
     }
@@ -219,7 +243,7 @@ mod tests {
             "/tmpfoo/real-project",
         ] {
             assert_eq!(
-                classify(&dir(path), false, Some(true)),
+                classify(&dir(path), false, true, Some(true)),
                 ProjectDurability::Durable,
                 "{path} must stay syncable"
             );
@@ -230,14 +254,23 @@ mod tests {
     #[test]
     fn an_unknown_database_is_not_treated_as_ephemeral() {
         assert_eq!(
-            classify(&dir("/home/dev/real-project"), false, None),
+            classify(&dir("/home/dev/real-project"), false, true, None),
             ProjectDurability::Durable
         );
     }
 
     #[test]
+    fn an_unpinned_store_without_a_git_remote_is_ephemeral() {
+        let verdict = classify(&dir("/home/dev/container"), false, false, Some(true));
+        assert!(
+            verdict.is_ephemeral(),
+            "a bare folder identity must never mint a cloud bucket: {verdict:?}"
+        );
+    }
+
+    #[test]
     fn the_refusal_names_the_override() {
-        let verdict = classify(&dir("/home/dev/fresh-proxy"), false, Some(false));
+        let verdict = classify(&dir("/home/dev/fresh-proxy"), false, true, Some(false));
         let message = verdict.explain("fresh-proxy").expect("ephemeral explains");
         assert!(message.contains("cas cloud project set"), "{message}");
         assert!(message.contains("no `tasks` table"), "{message}");

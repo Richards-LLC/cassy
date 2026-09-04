@@ -224,6 +224,7 @@ impl CheckGroup {
             "canonical id"
             | "canonical id collision"
             | "cloud identity metadata"
+            | "registered project roots"
             | "project aliases"
             | "cloud sync queue"
             | "cross-project rows"
@@ -1325,6 +1326,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     ));
     checks.extend(canonical_alias_checks(&cas_root));
     checks.extend(cloud_identity_metadata_checks(&cas_root));
+    checks.extend(registered_project_root_checks());
 
     recorder.mark("canonical id", &checks);
     // Check 15: residual cross-project contamination from the cas-ed15 pull
@@ -2354,9 +2356,14 @@ fn truncate(text: &str, max: usize) -> String {
 /// failing `cas doctor`.
 fn collect_local_root_identities() -> Result<Vec<crate::cloud::LocalRootIdentity>, String> {
     let repos = crate::worktree::discovery::list_tracked_repos().map_err(|e| e.to_string())?;
+    let known_roots = repos.iter().map(|repo| repo.path.clone()).collect::<Vec<_>>();
     Ok(repos
         .into_iter()
         .filter(|repo| repo.healthy)
+        .filter(|repo| {
+            crate::store::known_repos::registry_skip_for_known_roots(&repo.path, &known_roots)
+                .is_none()
+        })
         .filter_map(|repo| {
             let project_root = repo.path.canonicalize().unwrap_or(repo.path);
             let cas_root = project_root.join(".cas");
@@ -2369,6 +2376,67 @@ fn collect_local_root_identities() -> Result<Vec<crate::cloud::LocalRootIdentity
             })
         })
         .collect())
+}
+
+/// Report registered roots that host-wide `cas update` deliberately excludes.
+/// Keep this separate from the update sweep so doctor can name a stale
+/// registration even when the path is still present and `prune-missing` cannot
+/// remove it.
+fn registered_project_root_checks() -> Vec<Check> {
+    use crate::store::KnownRepoStore as _;
+
+    let store = match crate::store::known_repos::open_host_known_repo_store() {
+        Ok(store) => store,
+        Err(error) => {
+            return vec![Check::new(
+                "registered project roots",
+                CheckStatus::Warning,
+                format!(
+                    "Could not inspect registered project roots: {error}; run `cas known-repos list`"
+                ),
+            )];
+        }
+    };
+    let repos = match store.list() {
+        Ok(repos) => repos,
+        Err(error) => {
+            return vec![Check::new(
+                "registered project roots",
+                CheckStatus::Warning,
+                format!(
+                    "Could not inspect registered project roots: {error}; run `cas known-repos list`"
+                ),
+            )];
+        }
+    };
+    let known_roots = repos.iter().map(|repo| repo.path.clone()).collect::<Vec<_>>();
+    let mut checks = Vec::new();
+    for repo in repos {
+        let Some(skip) = crate::store::known_repos::registry_skip_for_known_roots(
+            &repo.path,
+            &known_roots,
+        ) else {
+            continue;
+        };
+        checks.push(Check::new(
+            "registered project roots",
+            CheckStatus::Warning,
+            format!(
+                "Registered root `{}` is excluded from `cas update` discovery: {}. Remove the stale registration with `cas known-repos forget {}`. If it has a cloud link, run `cas cloud unlink --purge-remote` from that root first; this explicitly removes its remote rows without changing local files.",
+                repo.path.display(),
+                skip.reason(),
+                repo.path.display(),
+            ),
+        ));
+    }
+    if checks.is_empty() {
+        checks.push(Check::new(
+            "registered project roots",
+            CheckStatus::Ok,
+            "no registered project roots are excluded from update discovery",
+        ));
+    }
+    checks
 }
 
 /// Build the canonical-id doctor rows. Pure given the resolved root list, so
@@ -2584,7 +2652,7 @@ fn cloud_identity_metadata_checks(cas_root: &Path) -> Vec<Check> {
         "cloud identity metadata",
         CheckStatus::Warning,
         format!(
-            "foreign cloud scope(s) for project `{current_project}`: {}; run `cas cloud project set {current_project} && cas cloud sync --full`",
+            "foreign cloud scope(s) for project `{current_project}`: {}; run `cas cloud purge-foreign --dry-run`, then `cas cloud purge-foreign`; only after the purge, run `cas cloud sync` to re-register the current project",
             foreign.join(", ")
         ),
     )]
@@ -5116,6 +5184,33 @@ mod tests {
     }
 
     #[test]
+    fn doctor_names_registered_artifact_roots_and_safe_cleanup_commands() {
+        use crate::store::KnownRepoStore as _;
+
+        crate::test_support::TestEnvGuard::run_with_temp_home(|_| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let store = crate::store::known_repos::open_host_known_repo_store().unwrap();
+            let project = PathBuf::from("/home/u/registered-project");
+            let artifact_copy = project.join(".cas/artifacts/cas-1d41/container");
+            store.upsert(&project).unwrap();
+            store.upsert(&artifact_copy).unwrap();
+
+            let checks = registered_project_root_checks();
+            let message = checks
+                .iter()
+                .map(|check| check.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(message.contains("artifact"), "{message}");
+            assert!(message.contains("cas known-repos forget"), "{message}");
+            assert!(
+                message.contains("cas cloud unlink --purge-remote"),
+                "{message}"
+            );
+        });
+    }
+
+    #[test]
     fn canonical_id_check_reports_the_resolved_bucket_and_its_source() {
         let temp = TempDir::new().unwrap();
         let cas_root = temp.path().join("gabber-studio/.cas");
@@ -5162,9 +5257,9 @@ mod tests {
         assert!(row.message.contains("last_team_pull_at_team_project-two"));
         assert!(row.message.contains("team_project_registered_team_project-two"));
         assert!(row.message.contains("last_knowledge_push_project_id=project-two"));
-        assert!(row
-            .message
-            .contains("cas cloud project set project-one && cas cloud sync --full"));
+        assert!(row.message.contains("cas cloud purge-foreign --dry-run"));
+        assert!(row.message.contains("cas cloud purge-foreign"));
+        assert!(row.message.contains("cas cloud sync"));
         assert!(!row.message.contains("last_team_pull_at_team_project-one=current"));
     }
 

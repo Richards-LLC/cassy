@@ -152,9 +152,17 @@ pub enum RegistrySkip {
     Artifacts(PathBuf),
     /// Under `~/.cas/scratch`, the sanctioned home for disposable roots.
     Scratch(PathBuf),
-    /// A Cassy-named disposable root directly under `$TMPDIR` (cas-cb5e's
-    /// [`crate::temp_hygiene::TEMP_ROOT_PREFIXES`]).
+    /// Any initialized project root below a system temporary directory.
     Temp(PathBuf),
+    /// A `.cas` below another registered project's durable artifact tree.
+    NestedArtifacts {
+        project: PathBuf,
+        artifacts: PathBuf,
+    },
+    /// An initialized store whose identity would be derived only from its
+    /// containing folder. Such roots are usually container directories or
+    /// copied fixtures, not operator-owned projects.
+    BareFolderIdentity(PathBuf),
 }
 
 impl RegistrySkip {
@@ -162,6 +170,8 @@ impl RegistrySkip {
     pub fn base(&self) -> &Path {
         match self {
             Self::Artifacts(base) | Self::Scratch(base) | Self::Temp(base) => base,
+            Self::NestedArtifacts { artifacts, .. } => artifacts,
+            Self::BareFolderIdentity(path) => path,
         }
     }
 
@@ -175,6 +185,15 @@ impl RegistrySkip {
             ),
             Self::Scratch(base) => format!("below the scratch root {}", base.display()),
             Self::Temp(base) => format!("a disposable temp root at {}", base.display()),
+            Self::NestedArtifacts { project, artifacts } => format!(
+                "below registered project {}'s artifacts directory {}",
+                project.display(),
+                artifacts.display()
+            ),
+            Self::BareFolderIdentity(path) => format!(
+                "{} has no [project] canonical_id pin and no git origin remote, so its cloud identity would be a bare folder name",
+                path.display()
+            ),
         }
     }
 }
@@ -196,7 +215,44 @@ pub fn registry_skip(repo_path: &Path) -> Option<RegistrySkip> {
     if let Some(base) = matching_base(&candidates, &crate::temp_hygiene::scratch_root_base()) {
         return Some(RegistrySkip::Scratch(base));
     }
-    named_temp_root(&candidates)
+    if let Some(skip) = temp_root(&candidates) {
+        return Some(skip);
+    }
+    let cas_root = repo_path.join(".cas");
+    if cas_root.is_dir()
+        && crate::cloud::canonical_id_from_config_toml(&cas_root).is_none()
+        && crate::cloud::git_origin_url(&cas_root).is_none()
+    {
+        return Some(RegistrySkip::BareFolderIdentity(repo_path.to_path_buf()));
+    }
+    None
+}
+
+/// Classify a registry path with the additional rule that an initialized
+/// `.cas` below another registered project's artifact directory is not itself
+/// a project. The parent list is supplied by the caller so this remains
+/// deterministic and does not recursively read the host registry.
+pub fn registry_skip_for_known_roots(
+    repo_path: &Path,
+    known_roots: &[PathBuf],
+) -> Option<RegistrySkip> {
+    if let Some(skip) = registry_skip(repo_path) {
+        return Some(skip);
+    }
+
+    let candidate = path_spellings(repo_path);
+    for project in known_roots {
+        let project = canonical_path(project);
+        let artifacts = project.join(".cas/artifacts");
+        if candidate.iter().any(|path| {
+            path_spellings(&artifacts)
+                .iter()
+                .any(|base| path.starts_with(base) && path != base)
+        }) {
+            return Some(RegistrySkip::NestedArtifacts { project, artifacts });
+        }
+    }
+    None
 }
 
 /// Every artifacts root this process could plausibly mean: the default
@@ -249,34 +305,39 @@ fn matching_base(candidates: &[PathBuf], base: &Path) -> Option<PathBuf> {
         .then(|| base.to_path_buf())
 }
 
-/// A Cassy-named disposable directory **directly** under `$TMPDIR`.
-///
-/// Deliberately narrow: `$TMPDIR` also holds ordinary temporary checkouts
-/// (every test fixture HOME is one), and skipping those would silently break
-/// registration for anyone whose real work lives on a temp mount. Only the
-/// names Cassy itself creates count.
-fn named_temp_root(candidates: &[PathBuf]) -> Option<RegistrySkip> {
+/// Any directory under the system temporary roots is disposable for host-wide
+/// discovery. A temp checkout can still be used explicitly as the current
+/// project, but it must never be swept merely because a scan found it.
+fn temp_root(candidates: &[PathBuf]) -> Option<RegistrySkip> {
     for base in path_spellings(&std::env::temp_dir()) {
         for candidate in candidates {
             let Ok(rest) = candidate.strip_prefix(&base) else {
                 continue;
             };
-            let Some(name) = rest
-                .components()
-                .next()
-                .and_then(|first| first.as_os_str().to_str())
-            else {
-                continue;
-            };
-            if crate::temp_hygiene::TEMP_ROOT_PREFIXES
-                .iter()
-                .any(|prefix| name.starts_with(prefix))
-            {
-                return Some(RegistrySkip::Temp(base.join(name)));
+            if rest.components().next().is_some() {
+                return Some(RegistrySkip::Temp(base.to_path_buf()));
+            }
+        }
+    }
+    // `std::env::temp_dir()` is normally `/tmp`; include the explicit macOS
+    // spelling and `/var/tmp` because discovery is also used on remote hosts.
+    for base in [
+        Path::new("/tmp"),
+        Path::new("/var/tmp"),
+        Path::new("/private/tmp"),
+        Path::new("/private/var/tmp"),
+    ] {
+        for candidate in candidates {
+            if candidate.starts_with(base) && candidate != base {
+                return Some(RegistrySkip::Temp(base.to_path_buf()));
             }
         }
     }
     None
+}
+
+fn canonical_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Register `repo_path` in the host registry.
@@ -435,7 +496,8 @@ mod tests {
     #[test]
     fn register_repo_strict_creates_host_dir_and_inserts() {
         TestEnvGuard::run_with_temp_home(|home| {
-            let repo = home.join("myproject");
+            let external = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let repo = external.path().join("myproject");
             std::fs::create_dir_all(&repo).unwrap();
 
             // Bootstrap schema first — mirrors the `cas init` contract.
@@ -454,8 +516,9 @@ mod tests {
     fn register_repo_is_non_fatal_on_missing_schema() {
         // Pre-schema: register_repo must NOT panic and must NOT abort;
         // the warn-and-swallow contract is what the hot boot path depends on.
-        TestEnvGuard::run_with_temp_home(|home| {
-            let repo = home.join("pre-init-repo");
+        TestEnvGuard::run_with_temp_home(|_| {
+            let external = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let repo = external.path().join("pre-init-repo");
             std::fs::create_dir_all(&repo).unwrap();
             // Schema intentionally not installed.
             register_repo(&repo); // expect no panic, no abort
@@ -499,7 +562,8 @@ mod tests {
             ensure_host_schema().unwrap();
             let fixture = home.join(".cas/artifacts/cas-1bfb/fresh-proxy");
             std::fs::create_dir_all(fixture.join(".cas")).unwrap();
-            let real = home.join("myproject");
+            let external = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let real = external.path().join("myproject");
             std::fs::create_dir_all(&real).unwrap();
 
             register_repo(&fixture);
@@ -578,11 +642,10 @@ mod tests {
         });
     }
 
-    /// Named disposable roots directly under `$TMPDIR` (the cas-cb5e temp-root
-    /// inventory names) are the third disposable class. An unrelated temp
-    /// directory — including the temp HOME every test runs under — is NOT one.
+    /// Every root under `$TMPDIR` is disposable for host-wide discovery. The
+    /// updater must not mistake test/probe/container directories for projects.
     #[test]
-    fn registry_skip_names_cassy_temp_roots_but_not_arbitrary_temp_paths_cas_647c() {
+    fn registry_skip_names_all_temp_roots_cas_647c() {
         TestEnvGuard::run_with_temp_home(|home| {
             let temp = std::env::temp_dir();
             assert!(matches!(
@@ -593,9 +656,40 @@ mod tests {
                 registry_skip(&temp.join("custom-wt-abcd/erin")),
                 Some(RegistrySkip::Temp(_))
             ));
-            // The temp HOME itself, and repos inside it, are ordinary projects.
-            assert!(registry_skip(home).is_none());
-            assert!(registry_skip(&home.join("myproject")).is_none());
+            assert!(matches!(
+                registry_skip(&temp.join("ordinary-project")),
+                Some(RegistrySkip::Temp(_))
+            ));
+            // The temp HOME itself is also outside the project registry's
+            // intended durable roots.
+            assert!(matches!(registry_skip(home), Some(RegistrySkip::Temp(_))));
+            assert!(matches!(
+                registry_skip(&home.join("myproject")),
+                Some(RegistrySkip::Temp(_))
+            ));
+        });
+    }
+
+    #[test]
+    fn registry_skip_rejects_bare_folder_identity_and_nested_artifacts() {
+        let real_home = dirs::home_dir().expect("test runner has a home directory");
+        TestEnvGuard::run_with_temp_home(|_| {
+            let bare = tempfile::Builder::new()
+                .prefix("cas-1d41-bare-")
+                .tempdir_in(&real_home)
+                .unwrap();
+            std::fs::create_dir_all(bare.path().join(".cas")).unwrap();
+            assert!(matches!(
+                registry_skip(bare.path()),
+                Some(RegistrySkip::BareFolderIdentity(_))
+            ));
+
+            let project = PathBuf::from("/home/u/registered-project");
+            let copy = project.join(".cas/artifacts/cas-1d41/container");
+            assert!(matches!(
+                registry_skip_for_known_roots(&copy, &[project]),
+                Some(RegistrySkip::NestedArtifacts { .. })
+            ));
         });
     }
 

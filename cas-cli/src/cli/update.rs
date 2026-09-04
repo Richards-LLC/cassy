@@ -470,10 +470,19 @@ impl ProjectRefreshReceipt {
 struct RefreshReport {
     project_count: usize,
     failed_count: usize,
-    /// Directories carrying a `.cas/` but no store. Counted in the banner so a
-    /// refresh can never claim a clean sweep while leaving stores untouched.
+    /// Scan or registry roots excluded from refresh. Counted in the banner so
+    /// a refresh cannot claim a clean sweep while leaving stores untouched.
     skipped_unregistered: usize,
     elapsed: Duration,
+}
+
+/// A scan candidate which was deliberately excluded from the refresh. Keep
+/// the reason beside the path so JSON and human output cannot claim that the
+/// directory was refreshed or leave the operator guessing why it was skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkippedProject {
+    project: PathBuf,
+    reason: String,
 }
 
 #[derive(Default)]
@@ -1296,7 +1305,7 @@ fn cloud_phase_from_summaries(summaries: &[SyncSummary]) -> ProjectPhase {
 fn project_refresh_receipt_json(
     receipts: &[ProjectRefreshReceipt],
     user_level: &ProjectPhase,
-    skipped_unregistered: &[PathBuf],
+    skipped_unregistered: &[SkippedProject],
 ) -> serde_json::Value {
     let projects = receipts
         .iter()
@@ -1326,7 +1335,13 @@ fn project_refresh_receipt_json(
         // Retained for compatibility with readers of the pre-cas-9d5c
         // receipt, which only ever reported the builtin distribution.
         "user_builtins": user_level.summary(),
-        "skipped_unregistered": skipped_unregistered,
+        "skipped_unregistered": skipped_unregistered
+            .iter()
+            .map(|skip| serde_json::json!({
+                "project": skip.project,
+                "reason": skip.reason,
+            }))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -1334,7 +1349,7 @@ fn print_project_refresh_summary(
     receipts: &[ProjectRefreshReceipt],
     user_level: &ProjectPhase,
     user_details: &str,
-    skipped_unregistered: &[PathBuf],
+    skipped_unregistered: &[SkippedProject],
     cli: &Cli,
 ) {
     if cli.json {
@@ -1401,11 +1416,11 @@ fn print_project_refresh_summary(
 
     if !skipped_unregistered.is_empty() {
         println!(
-            "  not refreshed (unregistered): {} — run `cas update` inside them or `cas update --register <path>`",
+            "  not refreshed (skipped_unregistered): {} — use `cas known-repos forget <path>` for stale registry rows; intentional projects can be registered explicitly",
             skipped_unregistered.len()
         );
-        for path in skipped_unregistered.iter().take(5) {
-            println!("    ! {}", path.display());
+        for skip in skipped_unregistered.iter().take(5) {
+            println!("    ! {} — {}", skip.project.display(), skip.reason);
         }
         if skipped_unregistered.len() > 5 {
             println!("    … and {} more", skipped_unregistered.len() - 5);
@@ -1430,10 +1445,11 @@ struct ProjectDiscovery {
     /// registry does not know about. These are refreshed and then registered,
     /// so discovery converges without the operator doing anything.
     unregistered: BTreeSet<PathBuf>,
-    /// Scan-discovered directories carrying a `.cas/` but no `cas.db`. There
-    /// is nothing to migrate, so they are reported rather than refreshed —
-    /// previously they were silently absent from the receipt entirely.
-    skipped_unregistered: Vec<PathBuf>,
+    /// Scan-discovered or registered directories which are not safe project
+    /// roots. There is nothing to migrate or sync, so they are reported rather
+    /// than refreshed — previously they were silently absent from the receipt
+    /// entirely.
+    skipped_unregistered: Vec<SkippedProject>,
 }
 
 /// The host's user-level store (`~/.cas`). It is never a project — it gets its
@@ -1455,10 +1471,23 @@ fn user_level_store_root() -> Option<PathBuf> {
 /// early return also hid every project nested under a parent that is itself a
 /// project, which is the normal monorepo-of-repos layout.
 fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery {
+    let known = crate::worktree::discovery::list_tracked_repos().unwrap_or_default();
+    let known_roots = known
+        .iter()
+        .filter(|repo| repo.healthy)
+        .map(|repo| canonical_path(&repo.path))
+        .collect::<Vec<_>>();
     let mut registered = BTreeSet::new();
-    if let Ok(known) = crate::worktree::discovery::list_tracked_repos() {
-        for repo in known.into_iter().filter(|repo| repo.healthy) {
-            registered.insert(canonical_path(&repo.path));
+    let mut skipped_by_path = BTreeMap::new();
+    for repo in known.into_iter().filter(|repo| repo.healthy) {
+        let path = canonical_path(&repo.path);
+        if let Some(skip) = crate::store::known_repos::registry_skip_for_known_roots(
+            &path,
+            &known_roots,
+        ) {
+            skipped_by_path.insert(path, skip.reason());
+        } else {
+            registered.insert(path);
         }
     }
 
@@ -1481,7 +1510,6 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
 
     let mut projects = registered.clone();
     let mut unregistered = BTreeSet::new();
-    let mut skipped_unregistered = Vec::new();
     for candidate in scanned {
         if Some(&candidate) == home.as_ref() {
             continue;
@@ -1490,20 +1518,39 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
             continue;
         }
         if candidate.join(".cas").join("cas.db").is_file() {
-            projects.insert(candidate.clone());
-            unregistered.insert(candidate);
+            if let Some(skip) =
+                crate::store::known_repos::registry_skip_for_known_roots(&candidate, &known_roots)
+            {
+                skipped_by_path.insert(candidate, skip.reason());
+            } else {
+                projects.insert(candidate.clone());
+                unregistered.insert(candidate);
+            }
         } else {
-            skipped_unregistered.push(candidate);
+            skipped_by_path.insert(candidate, "no .cas/cas.db store".to_string());
         }
     }
 
-    // The store the operator is standing in always counts, even if neither the
-    // registry nor the scan roots cover it.
+    // A current root outside the scan is still considered, but the same
+    // exclusion rules apply. This prevents an explicit current path from
+    // bypassing the cloud-identity safety boundary.
     if let Some(cas_root) = current_cas_root
         && let Some(project) = cas_root.parent()
         && user_level_root.as_deref() != Some(canonical_path(cas_root).as_path())
     {
-        projects.insert(canonical_path(project));
+        let project = canonical_path(project);
+        if project.join(".cas/cas.db").is_file() {
+            if let Some(skip) = crate::store::known_repos::registry_skip_for_known_roots(
+                &project,
+                &known_roots,
+            ) {
+                skipped_by_path.insert(project, skip.reason());
+            } else {
+                projects.insert(project);
+            }
+        } else {
+            skipped_by_path.insert(project, "no .cas/cas.db store".to_string());
+        }
     }
 
     // `~/.cas` is host state, not a project: it is migrated by its own
@@ -1516,7 +1563,10 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
     ProjectDiscovery {
         projects: projects.into_iter().collect(),
         unregistered,
-        skipped_unregistered,
+        skipped_unregistered: skipped_by_path
+            .into_iter()
+            .map(|(project, reason)| SkippedProject { project, reason })
+            .collect(),
     }
 }
 

@@ -89,9 +89,12 @@ fn record_project_warning(entity_kind: &str, project: &str, message: &str) {
 /// not abort the rest of a sync; without this boundary the resulting warning
 /// was un-actionable because it named neither the row nor its entity type.
 fn deserialize_pulled_entity<T: DeserializeOwned>(
-    raw: serde_json::Value,
+    mut raw: serde_json::Value,
     entity_type: &str,
 ) -> Result<T, String> {
+    if entity_type == "task" {
+        normalize_legacy_task_nulls(&mut raw);
+    }
     let id = raw
         .get("id")
         .or_else(|| raw.get("entity_id"))
@@ -101,6 +104,94 @@ fn deserialize_pulled_entity<T: DeserializeOwned>(
         .to_owned();
     serde_json::from_value(raw)
         .map_err(|error| format!("{entity_type} deserialize error (id={id}): {error}"))
+}
+
+/// Legacy task rows used nullable JSON columns for fields that are now typed.
+/// An explicit JSON `null` does not trigger serde's `#[serde(default)]`, so
+/// normalize those old values at the wire boundary before deserialization.
+/// `metadata` is retained as an empty object for newer task models that may
+/// expose it; the current task model ignores this compatibility field.
+fn normalize_legacy_task_nulls(raw: &mut serde_json::Value) {
+    let Some(object) = raw.as_object_mut() else {
+        return;
+    };
+    if object
+        .get("metadata")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        object.insert("metadata".to_string(), serde_json::json!({}));
+    }
+    for field in ["depth", "deliverables"] {
+        if object.get(field).is_some_and(serde_json::Value::is_null) {
+            object.remove(field);
+        }
+    }
+}
+
+fn pull_wire_id(raw: &serde_json::Value) -> &str {
+    raw.get("id")
+        .or_else(|| raw.get("entity_id"))
+        .or_else(|| raw.get("commit_hash"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<missing-id>")
+}
+
+fn pull_scope_rejection(
+    raw: &serde_json::Value,
+    current_project_id: &str,
+) -> (&'static str, String) {
+    let id = pull_wire_id(raw);
+    match row_attribution(raw) {
+        Some((project, "origin_project")) => (
+            "pull_foreign_origin",
+            format!(
+                "foreign origin_project '{project}' for {id} (requested scope '{current_project_id}')"
+            ),
+        ),
+        Some((project, _)) => (
+            "pull_project_scope",
+            format!(
+                "project scope '{project}' for {id} does not match requested scope '{current_project_id}'"
+            ),
+        ),
+        None => (
+            "pull_missing_project",
+            format!("no project identity for {id} (requested scope '{current_project_id}')"),
+        ),
+    }
+}
+
+/// Keep a rejected pull row in the local conflict journal and, for tasks, in
+/// the reversible quarantine ledger. The next pull consults that ledger before
+/// applying rows, so a cloud replica or poison row cannot be re-admitted after
+/// purge or retried on every sync. The raw row is nested with its reason so an
+/// operator has both the exact evidence and an actionable explanation.
+fn record_parked_pull_row(
+    queue: &SyncQueue,
+    entity_type: &str,
+    raw: &serde_json::Value,
+    strategy: &str,
+    reason: &str,
+) -> Result<(), CasError> {
+    let entity_id = pull_wire_id(raw);
+    let discarded = serde_json::json!({
+        "row": raw,
+        "reason": reason,
+    })
+    .to_string();
+    queue.record_conflict(
+        entity_type,
+        entity_id,
+        &discarded,
+        "parked",
+        strategy,
+        None,
+        crate::cloud::wire_revision(raw),
+    )?;
+    if entity_type == EntityType::Task.as_str() && entity_id != "<missing-id>" {
+        queue.quarantine_row(EntityType::Task.as_str(), entity_id, reason)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -305,9 +396,20 @@ fn apply_task_dependencies(
         let record: TaskDependencyRecord = match serde_json::from_value(raw.clone()) {
             Ok(record) => record,
             Err(error) => {
-                result.errors.push(format!(
-                    "task dependency deserialize error (id={edge_id}): {error}"
-                ));
+                let reason = format!("task dependency deserialize error (id={edge_id}): {error}");
+                if let Err(parking_error) = record_parked_pull_row(
+                    queue,
+                    EntityType::TaskDependency.as_str(),
+                    raw,
+                    "pull_deserialize",
+                    &reason,
+                ) {
+                    result.errors.push(format!(
+                        "{reason}; could not persist parked row: {parking_error}"
+                    ));
+                } else {
+                    result.errors.push(reason);
+                }
                 continue;
             }
         };
@@ -401,9 +503,9 @@ fn apply_dependency_tombstone(
         &dependency.dep_type.to_string(),
         deleted_at,
     ) {
-        result
-            .errors
-            .push(format!("Task dependency tombstone error ({dependency_id}): {error}"));
+        result.errors.push(format!(
+            "Task dependency tombstone error ({dependency_id}): {error}"
+        ));
     }
     // The server refuses a stale resurrection anyway; dropping the queued row
     // stops every future push from retrying a request that cannot succeed.
@@ -483,9 +585,7 @@ impl CloudSyncer {
                     Err(error) => {
                         // A repair pass that cannot see the cloud's full edge
                         // set must do nothing rather than guess.
-                        tracing::debug!(
-                            "[Cassy sync] dependency reconciliation skipped: {error}"
-                        );
+                        tracing::debug!("[Cassy sync] dependency reconciliation skipped: {error}");
                         None
                     }
                 },
@@ -673,11 +773,8 @@ impl CloudSyncer {
                 }
             }
             None => {
-                self.fetch_pull_json(
-                    Some(project_id),
-                    &["types=task_dependencies".to_string()],
-                )?
-                .0
+                self.fetch_pull_json(Some(project_id), &["types=task_dependencies".to_string()])?
+                    .0
             }
         };
         Ok(body
@@ -1045,7 +1142,8 @@ fn select_owner_task_rows(
             .iter()
             .enumerate()
             .max_by(|(left_index, left), (right_index, right)| {
-                task_wire_is_owner(left).cmp(&task_wire_is_owner(right))
+                task_wire_is_owner(left)
+                    .cmp(&task_wire_is_owner(right))
                     .then_with(|| task_wire_updated_at(left).cmp(&task_wire_updated_at(right)))
                     .then_with(|| left_index.cmp(right_index))
             })
@@ -1417,8 +1515,8 @@ impl CloudSyncer {
             let json = serde_json::to_string(local).map_err(|error| {
                 CasError::Other(format!("Could not serialize sync conflict: {error}"))
             })?;
-            let (local_revision, remote_revision) = revisions
-                .unwrap_or_else(|| self.logged_revisions(entity_type.as_str(), entity_id));
+            let (local_revision, remote_revision) =
+                revisions.unwrap_or_else(|| self.logged_revisions(entity_type.as_str(), entity_id));
             self.queue.record_conflict(
                 entity_type.as_str(),
                 entity_id,
@@ -1642,8 +1740,20 @@ impl CloudSyncer {
 
         // Process tasks
         let task_sync_id = uuid::Uuid::new_v4().to_string();
+        let quarantined_task_ids = self.queue.quarantined_ids(EntityType::Task.as_str())?;
         for mut raw_task in body.tasks.unwrap_or_default() {
+            if quarantined_task_ids.contains(pull_wire_id(&raw_task)) {
+                continue;
+            }
             if !entity_matches_project(&raw_task, &current_project_id, "task") {
+                let (strategy, reason) = pull_scope_rejection(&raw_task, current_project_id);
+                record_parked_pull_row(
+                    &self.queue,
+                    EntityType::Task.as_str(),
+                    &raw_task,
+                    strategy,
+                    &reason,
+                )?;
                 continue;
             }
             // cas-fc52: a teammate's web-initiated close arrives as a soft
@@ -1657,9 +1767,17 @@ impl CloudSyncer {
             }
             render_task_proposal_provenance(&mut raw_task);
             let server_owner = task_wire_cloud_project(&raw_task).map(str::to_owned);
+            let raw_task_for_parking = raw_task.clone();
             let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
+                    record_parked_pull_row(
+                        &self.queue,
+                        EntityType::Task.as_str(),
+                        &raw_task_for_parking,
+                        "pull_deserialize",
+                        &e,
+                    )?;
                     result.errors.push(e);
                     continue;
                 }
@@ -1669,14 +1787,22 @@ impl CloudSyncer {
             // project identity. The request scope is not an ownership stamp.
             if remote_task.origin_project.is_none() {
                 let Some(server_owner) = server_owner else {
+                    let reason = format!(
+                        "no origin_project or server project identity for {}",
+                        remote_task.id
+                    );
                     record_project_warning(
                         "task",
                         "<missing>",
-                        &format!(
-                            "parking task '{}' — no origin_project or server project identity",
-                            remote_task.id
-                        ),
+                        &format!("parking task '{}' — {reason}", remote_task.id),
                     );
+                    record_parked_pull_row(
+                        &self.queue,
+                        EntityType::Task.as_str(),
+                        &raw_task_for_parking,
+                        "pull_missing_origin",
+                        &reason,
+                    )?;
                     continue;
                 };
                 remote_task.origin_project = Some(server_owner);
@@ -1707,9 +1833,9 @@ impl CloudSyncer {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_tasks += 1;
                     if let Some(revision) = task_revision {
-                        let _ = self
-                            .queue
-                            .record_revision(EntityType::Task, &remote_task.id, revision);
+                        let _ =
+                            self.queue
+                                .record_revision(EntityType::Task, &remote_task.id, revision);
                     }
                     if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
                         result.task_status_transitions.push(TaskStatusTransition {
@@ -1746,6 +1872,10 @@ impl CloudSyncer {
             Self::record_dependency_heal(&mut result, report);
         }
 
+        // A quarantined task must remain unsendable after a team pull too;
+        // personal pulls enforce this invariant at their tail.
+        self.reassert_quarantine();
+
         // Process rules
         for raw_rule in body.rules.unwrap_or_default() {
             if !entity_matches_project(&raw_rule, &current_project_id, "rule") {
@@ -1767,9 +1897,9 @@ impl CloudSyncer {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_rules += 1;
                     if let Some(revision) = rule_revision {
-                        let _ = self
-                            .queue
-                            .record_revision(EntityType::Rule, &remote_rule_id, revision);
+                        let _ =
+                            self.queue
+                                .record_revision(EntityType::Rule, &remote_rule_id, revision);
                     }
                 }
                 Ok(UpsertResult::Skipped) => {
@@ -1802,9 +1932,11 @@ impl CloudSyncer {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_skills += 1;
                     if let Some(revision) = skill_revision {
-                        let _ = self
-                            .queue
-                            .record_revision(EntityType::Skill, &remote_skill_id, revision);
+                        let _ = self.queue.record_revision(
+                            EntityType::Skill,
+                            &remote_skill_id,
+                            revision,
+                        );
                     }
                 }
                 Ok(UpsertResult::Skipped) => {
@@ -2666,14 +2798,28 @@ impl CloudSyncer {
         // stale foreign-keyed replica, then apply the same origin-first
         // ownership rule doctor uses. Foreign rows are parked at ingest and
         // never become local contamination.
-        let (raw_tasks, discarded_task_rows) =
-            select_owner_task_rows(body.tasks.unwrap_or_default());
+        let quarantined_task_ids = self.queue.quarantined_ids(EntityType::Task.as_str())?;
+        let raw_tasks = body
+            .tasks
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|raw| !quarantined_task_ids.contains(pull_wire_id(raw)))
+            .collect();
+        let (raw_tasks, discarded_task_rows) = select_owner_task_rows(raw_tasks);
         for (task_id, discarded_row) in discarded_task_rows {
             self.record_owner_conflict_value(&task_id, &discarded_row)?;
             result.record_local_conflict();
         }
         for raw_task in raw_tasks {
             if !entity_matches_project(&raw_task, current_project_id, "task") {
+                let (strategy, reason) = pull_scope_rejection(&raw_task, current_project_id);
+                record_parked_pull_row(
+                    &self.queue,
+                    EntityType::Task.as_str(),
+                    &raw_task,
+                    strategy,
+                    &reason,
+                )?;
                 continue;
             }
             let server_owner = task_wire_cloud_project(&raw_task).map(str::to_owned);
@@ -2684,9 +2830,17 @@ impl CloudSyncer {
             if let Some(id) = raw_task.get("id").and_then(serde_json::Value::as_str) {
                 self.note_incoming_revision(EntityType::Task, id, &raw_task);
             }
+            let raw_task_for_parking = raw_task.clone();
             let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
+                    record_parked_pull_row(
+                        &self.queue,
+                        EntityType::Task.as_str(),
+                        &raw_task_for_parking,
+                        "pull_deserialize",
+                        &e,
+                    )?;
                     result.errors.push(e);
                     continue;
                 }
@@ -2696,14 +2850,22 @@ impl CloudSyncer {
             // row was already rejected by entity_matches_project above.
             if remote_task.origin_project.is_none() {
                 let Some(server_owner) = server_owner else {
+                    let reason = format!(
+                        "no origin_project or server project identity for {}",
+                        remote_task.id
+                    );
                     record_project_warning(
                         "task",
                         "<missing>",
-                        &format!(
-                            "parking task '{}' — no origin_project or server project identity",
-                            remote_task.id
-                        ),
+                        &format!("parking task '{}' — {reason}", remote_task.id),
                     );
+                    record_parked_pull_row(
+                        &self.queue,
+                        EntityType::Task.as_str(),
+                        &raw_task_for_parking,
+                        "pull_missing_origin",
+                        &reason,
+                    )?;
                     continue;
                 };
                 remote_task.origin_project = Some(server_owner);
@@ -2725,9 +2887,9 @@ impl CloudSyncer {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_tasks += 1;
                     if let Some(revision) = team_task_revision {
-                        let _ = self
-                            .queue
-                            .record_revision(EntityType::Task, &remote_task.id, revision);
+                        let _ =
+                            self.queue
+                                .record_revision(EntityType::Task, &remote_task.id, revision);
                     }
                     if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
                         result.task_status_transitions.push(TaskStatusTransition {
@@ -2785,9 +2947,9 @@ impl CloudSyncer {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_rules += 1;
                     if let Some(revision) = rule_revision {
-                        let _ = self
-                            .queue
-                            .record_revision(EntityType::Rule, &remote_rule_id, revision);
+                        let _ =
+                            self.queue
+                                .record_revision(EntityType::Rule, &remote_rule_id, revision);
                     }
                 }
                 Ok(UpsertResult::Skipped) => {
@@ -2820,9 +2982,11 @@ impl CloudSyncer {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_skills += 1;
                     if let Some(revision) = skill_revision {
-                        let _ = self
-                            .queue
-                            .record_revision(EntityType::Skill, &remote_skill_id, revision);
+                        let _ = self.queue.record_revision(
+                            EntityType::Skill,
+                            &remote_skill_id,
+                            revision,
+                        );
                     }
                 }
                 Ok(UpsertResult::Skipped) => {
@@ -2901,6 +3065,25 @@ mod tests {
             task.deliverables.factory_branch_anchor.as_deref(),
             Some("deadbeef")
         );
+    }
+
+    #[test]
+    fn deserialize_task_accepts_null_legacy_metadata_and_depth() {
+        // This is the wire shape of cas-36fd from the gabber-studio team
+        // snapshot. Both fields are nullable in legacy cloud rows; null must
+        // mean the empty/default value rather than poison the whole pull.
+        let mut raw =
+            serde_json::to_value(Task::new("cas-36fd".to_string(), "legacy task".to_string()))
+                .unwrap();
+        raw["origin_project"] = json!("gabber-studio");
+        raw["project_id"] = json!("gabber-studio");
+        raw["metadata"] = serde_json::Value::Null;
+        raw["depth"] = serde_json::Value::Null;
+
+        let task = deserialize_pulled_entity::<Task>(raw, "task")
+            .expect("nullable legacy task metadata must be treated as empty");
+        assert_eq!(task.id, "cas-36fd");
+        assert_eq!(task.depth, crate::types::TaskDepth::Deep);
     }
 
     #[test]

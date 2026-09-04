@@ -204,8 +204,14 @@ fn new_keeps_two_queue_root_identities_separate() {
         CloudSyncerConfig::default(),
     );
 
-    assert_eq!(first_syncer.personal_push_project_id().unwrap(), "project-one");
-    assert_eq!(second_syncer.personal_push_project_id().unwrap(), "project-two");
+    assert_eq!(
+        first_syncer.personal_push_project_id().unwrap(),
+        "project-one"
+    );
+    assert_eq!(
+        second_syncer.personal_push_project_id().unwrap(),
+        "project-two"
+    );
 }
 
 #[test]
@@ -505,7 +511,11 @@ async fn personal_push_keeps_itemized_invalid_revision_visible_in_queue_health()
     let temp = tempdir().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -584,7 +594,11 @@ async fn team_push_serializes_task_dependency_collection() {
     let temp = tempdir().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -624,6 +638,71 @@ async fn team_push_serializes_task_dependency_collection() {
     let payload: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
     assert_eq!(payload["task_dependencies"][0]["from_id"], "cas-616e-from");
     assert_eq!(payload["task_dependencies"][0]["dep_type"], "blocks");
+}
+
+#[tokio::test]
+async fn team_push_failure_includes_body_and_trace_headers() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let team_id = "team-c4c4-failure";
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{team_id}/sync/push")))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .insert_header("x-request-id", "request-c4c4")
+                .insert_header("x-vercel-id", "iad1::request-c4c4")
+                .set_body_string("team dependency batch failed"),
+        )
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::TaskDependency,
+            "cas-c4c4-from:cas-c4c4-to:blocks",
+            SyncOperation::Upsert,
+            Some(
+                r#"{"from_id":"cas-c4c4-from","to_id":"cas-c4c4-to","dep_type":"blocks","created_at":"2026-09-01T12:00:00Z"}"#,
+            ),
+            team_id,
+        )
+        .unwrap();
+
+    let syncer = CloudSyncer::new(
+        queue,
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+    );
+    let result = tokio::task::spawn_blocking(move || syncer.push_team(team_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        result.errors.iter().any(|error| {
+            error.contains("status 500")
+                && error.contains("team dependency batch failed")
+                && error.contains("x-request-id=request-c4c4")
+                && error.contains("x-vercel-id=iad1::request-c4c4")
+        }),
+        "team push error lost response diagnostics: {:?}",
+        result.errors
+    );
 }
 
 #[test]
@@ -718,10 +797,9 @@ fn push_response_parses_complete_per_row_outcomes() {
 
 #[test]
 fn push_response_rejects_incomplete_or_duplicate_per_row_outcomes() {
-    let incomplete: PushResponse = serde_json::from_str(
-        r#"{"entries":{"rows":[{"id":"entry-one","outcome":"inserted"}]}}"#,
-    )
-    .unwrap();
+    let incomplete: PushResponse =
+        serde_json::from_str(r#"{"entries":{"rows":[{"id":"entry-one","outcome":"inserted"}]}}"#)
+            .unwrap();
     let error = incomplete
         .row_results_for(
             "entries",
@@ -737,10 +815,12 @@ fn push_response_rejects_incomplete_or_duplicate_per_row_outcomes() {
         ]}}"#,
     )
     .unwrap();
-    assert!(duplicate
-        .row_results_for("entries", ["entry-one".to_string()].into_iter())
-        .unwrap_err()
-        .contains("duplicate id"));
+    assert!(
+        duplicate
+            .row_results_for("entries", ["entry-one".to_string()].into_iter())
+            .unwrap_err()
+            .contains("duplicate id")
+    );
 }
 
 #[tokio::test]
@@ -762,7 +842,11 @@ async fn push_response_aggregate_skip_acknowledges_the_whole_personal_batch() {
     let temp = tempdir().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -827,7 +911,11 @@ async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors()
     let temp = tempdir().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     for id in ["entry-good", "entry-rejected"] {
@@ -857,16 +945,21 @@ async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors()
     // GH #668: a partially rejected batch reports both halves. The accepted
     // neighbour is counted as pushed and the refusal is still an error, so a
     // per-row rejection no longer erases the rows the cloud did write.
-    assert_eq!(result.pushed_entries, 1, "the accepted neighbour is reported");
+    assert_eq!(
+        result.pushed_entries, 1,
+        "the accepted neighbour is reported"
+    );
     assert_eq!(result.errors.len(), 1);
     let remaining = queue.list_all(10).unwrap();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].entity_id, "entry-rejected");
     assert_eq!(remaining[0].retry_count, 5);
-    assert!(remaining[0]
-        .last_error
-        .as_deref()
-        .is_some_and(|error| error.contains("project_mismatch")));
+    assert!(
+        remaining[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("project_mismatch"))
+    );
 }
 
 #[test]
@@ -875,7 +968,11 @@ fn version_gate_requeues_only_after_minimum_and_is_idempotent() {
         let temp = tempfile::tempdir().unwrap();
         // Pin the scratch root: the ephemeral-project guard refuses an unpinned
         // root under the temp directory, and a TempDir is exactly that.
-        std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[project]\ncanonical_id = \"p\"\n",
+        )
+        .unwrap();
         let queue = SyncQueue::open(temp.path()).unwrap();
         queue.init().unwrap();
         queue
@@ -917,34 +1014,23 @@ fn version_gate_requeues_only_after_minimum_and_is_idempotent() {
         (temp, queue)
     };
 
-    assert_eq!(
+    assert_eq!(queue.requeue_version_gated_failures("3.4.8", 5).unwrap(), 0);
+    assert!(
         queue
-            .requeue_version_gated_failures("3.4.8", 5)
-            .unwrap(),
-        0
+            .list_all(10)
+            .unwrap()
+            .iter()
+            .all(|item| item.retry_count == 5 && item.last_error.is_some())
     );
-    assert!(queue
-        .list_all(10)
-        .unwrap()
-        .iter()
-        .all(|item| item.retry_count == 5 && item.last_error.is_some()));
 
-    assert_eq!(
-        queue
-            .requeue_version_gated_failures("3.5.0", 5)
-            .unwrap(),
-        2
-    );
+    assert_eq!(queue.requeue_version_gated_failures("3.5.0", 5).unwrap(), 2);
     let requeued = queue.list_all(10).unwrap();
-    assert!(requeued.iter().all(|item| {
-        item.retry_count == 0 && item.last_error.is_none()
-    }));
-    assert_eq!(
-        queue
-            .requeue_version_gated_failures("3.5.0", 5)
-            .unwrap(),
-        0
+    assert!(
+        requeued
+            .iter()
+            .all(|item| { item.retry_count == 0 && item.last_error.is_none() })
     );
+    assert_eq!(queue.requeue_version_gated_failures("3.5.0", 5).unwrap(), 0);
 }
 
 #[tokio::test]
@@ -966,7 +1052,11 @@ async fn version_gate_push_requeues_terminal_items_before_reading_pending_queue(
     let temp = tempdir().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -1132,7 +1222,11 @@ async fn pull_team_task_and_dependency_fixtures_with_pull_count(
     let temp = TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     let store = open_store_local(temp.path()).unwrap();
@@ -1257,11 +1351,16 @@ async fn heal_local_task_dependency_enqueues_team_upsert() {
 
     assert_eq!(result.healed_task_dependencies_to_cloud, 1);
     assert_eq!(result.healed_task_dependencies_from_cloud, 0);
-    let pending = queue
-        .pending_for_team("team-cas-2125", 10, 5)
-        .unwrap();
-    assert_eq!(pending.len(), 1, "a local-only edge must be queued for team push");
-    assert_eq!(pending[0].entity_id, "cas-heal-local-from:cas-heal-local-to:blocks");
+    let pending = queue.pending_for_team("team-cas-2125", 10, 5).unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "a local-only edge must be queued for team push"
+    );
+    assert_eq!(
+        pending[0].entity_id,
+        "cas-heal-local-from:cas-heal-local-to:blocks"
+    );
     assert_eq!(pending[0].operation, crate::cloud::SyncOperation::Upsert);
 }
 
@@ -1286,14 +1385,17 @@ async fn heal_cloud_task_dependency_materializes_local_edge() {
 
     assert_eq!(result.healed_task_dependencies_to_cloud, 0);
     assert_eq!(result.healed_task_dependencies_from_cloud, 1);
-    let dependencies = task_store
-        .get_dependencies("cas-heal-cloud-from")
-        .unwrap();
+    let dependencies = task_store.get_dependencies("cas-heal-cloud-from").unwrap();
     assert_eq!(dependencies.len(), 1);
     assert_eq!(dependencies[0].from_id, remote.from_id);
     assert_eq!(dependencies[0].to_id, remote.to_id);
     assert_eq!(dependencies[0].dep_type, remote.dep_type);
-    assert!(queue.pending_for_team("team-cas-2125", 10, 5).unwrap().is_empty());
+    assert!(
+        queue
+            .pending_for_team("team-cas-2125", 10, 5)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1317,14 +1419,17 @@ async fn heal_task_dependencies_with_matching_sets_is_quiet() {
 
     assert_eq!(result.healed_task_dependencies_to_cloud, 0);
     assert_eq!(result.healed_task_dependencies_from_cloud, 0);
-    let dependencies = task_store
-        .get_dependencies("cas-heal-match-from")
-        .unwrap();
+    let dependencies = task_store.get_dependencies("cas-heal-match-from").unwrap();
     assert_eq!(dependencies.len(), 1);
     assert_eq!(dependencies[0].from_id, matching.from_id);
     assert_eq!(dependencies[0].to_id, matching.to_id);
     assert_eq!(dependencies[0].dep_type, matching.dep_type);
-    assert!(queue.pending_for_team("team-cas-2125", 10, 5).unwrap().is_empty());
+    assert!(
+        queue
+            .pending_for_team("team-cas-2125", 10, 5)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1353,8 +1458,18 @@ async fn heal_deleted_task_dependency_does_not_requeue_edge() {
 
     assert_eq!(result.healed_task_dependencies_to_cloud, 0);
     assert_eq!(result.healed_task_dependencies_from_cloud, 0);
-    assert!(task_store.get_dependencies("cas-heal-delete-from").unwrap().is_empty());
-    assert!(queue.pending_for_team("team-cas-2125", 10, 5).unwrap().is_empty());
+    assert!(
+        task_store
+            .get_dependencies("cas-heal-delete-from")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        queue
+            .pending_for_team("team-cas-2125", 10, 5)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1380,7 +1495,11 @@ async fn heal_local_task_dependency_is_idempotent_across_pulls() {
     assert_eq!(result.healed_task_dependencies_to_cloud, 0);
     assert_eq!(result.healed_task_dependencies_from_cloud, 0);
     let pending = queue.pending_for_team("team-cas-2125", 10, 5).unwrap();
-    assert_eq!(pending.len(), 1, "repeated pulls must not duplicate the queue row");
+    assert_eq!(
+        pending.len(),
+        1,
+        "repeated pulls must not duplicate the queue row"
+    );
 }
 
 #[tokio::test]
@@ -1453,6 +1572,44 @@ async fn team_pull_single_foreign_open_row_is_parked_before_local_insert() {
 }
 
 #[tokio::test]
+async fn team_pull_parks_malformed_task_and_continues_to_valid_neighbor() {
+    let valid = team_task_fixture(
+        "cas-c4c4-valid-neighbor",
+        TaskStatus::Open,
+        "owner-project",
+        "owner-project",
+        chrono::Utc::now(),
+    );
+    let mut malformed = team_task_fixture(
+        "cas-36fd",
+        TaskStatus::Open,
+        "owner-project",
+        "owner-project",
+        chrono::Utc::now(),
+    );
+    malformed["status"] = serde_json::json!(42);
+
+    let (_temp, result, task_store, queue) =
+        pull_team_task_fixtures("owner-project", vec![malformed, valid], None).await;
+
+    assert!(
+        result.errors.iter().any(|error| {
+            error.contains("task deserialize error") && error.contains("id=cas-36fd")
+        }),
+        "malformed row must retain its id and reason: {:?}",
+        result.errors
+    );
+    assert!(task_store.get("cas-c4c4-valid-neighbor").is_ok());
+    assert!(task_store.get("cas-36fd").is_err());
+    let conflicts = queue.list_conflicts(10).unwrap();
+    assert!(conflicts.iter().any(|conflict| {
+        conflict.entity_id == "cas-36fd"
+            && conflict.strategy == "pull_deserialize"
+            && conflict.discarded_row_json.contains("cas-36fd")
+    }));
+}
+
+#[tokio::test]
 async fn team_pull_null_origin_uses_server_attested_project_identity() {
     let mut task = serde_json::to_value(Task::new(
         "cas-a1cf-null-origin".to_string(),
@@ -1465,7 +1622,11 @@ async fn team_pull_null_origin_uses_server_attested_project_identity() {
     let (_temp, result, task_store, _queue) =
         pull_team_task_fixtures("server-project", vec![task], None).await;
 
-    assert!(result.errors.is_empty(), "unexpected pull errors: {:?}", result.errors);
+    assert!(
+        result.errors.is_empty(),
+        "unexpected pull errors: {:?}",
+        result.errors
+    );
     assert_eq!(
         task_store
             .get("cas-a1cf-null-origin")
@@ -1490,7 +1651,11 @@ async fn team_pull_task_without_any_project_identity_is_parked() {
     let (_temp, result, task_store, _queue) =
         pull_team_task_fixtures("requested-project", vec![task], None).await;
 
-    assert!(result.errors.is_empty(), "unexpected pull errors: {:?}", result.errors);
+    assert!(
+        result.errors.is_empty(),
+        "unexpected pull errors: {:?}",
+        result.errors
+    );
     assert!(
         task_store.get("cas-a1cf-no-identity").is_err(),
         "a task without an origin or server project must remain parked"
@@ -1611,14 +1776,12 @@ async fn pull_team_dependency_scenario(
         .and(path(format!("/api/teams/{TOMBSTONE_TEAM}/sync/pull")))
         .and(query_param("types", "task_dependencies"))
         .and(query_param_is_missing("since"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "task_dependencies": snapshot_edges.clone().unwrap_or_default(),
-                "pulled_at": "2026-09-03T18:00:00Z",
-                "team_id": TOMBSTONE_TEAM,
-                "status": "ok",
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "task_dependencies": snapshot_edges.clone().unwrap_or_default(),
+            "pulled_at": "2026-09-03T18:00:00Z",
+            "team_id": TOMBSTONE_TEAM,
+            "status": "ok",
+        })))
         .expect(expected_snapshot_calls)
         .mount(&server)
         .await;
@@ -1626,7 +1789,11 @@ async fn pull_team_dependency_scenario(
     let temp = TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     if let Some(watermark) = watermark {
@@ -1820,11 +1987,18 @@ async fn heal_pushes_an_edge_recreated_after_its_tombstone() {
 
     assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 1);
     assert_eq!(fixture.result.skipped_task_dependencies_by_tombstone, 0);
-    let pending = fixture.queue.pending_for_team(TOMBSTONE_TEAM, 10, 5).unwrap();
+    let pending = fixture
+        .queue
+        .pending_for_team(TOMBSTONE_TEAM, 10, 5)
+        .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].entity_id, entity_id);
     assert!(
-        fixture.queue.dependency_tombstone(&entity_id).unwrap().is_none(),
+        fixture
+            .queue
+            .dependency_tombstone(&entity_id)
+            .unwrap()
+            .is_none(),
         "a newer local edge retires its tombstone"
     );
     assert_eq!(
@@ -1891,9 +2065,15 @@ async fn incremental_pull_reconciles_against_the_full_snapshot_when_due() {
     .await;
 
     assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 1);
-    let pending = fixture.queue.pending_for_team(TOMBSTONE_TEAM, 10, 5).unwrap();
+    let pending = fixture
+        .queue
+        .pending_for_team(TOMBSTONE_TEAM, 10, 5)
+        .unwrap();
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].entity_id, "cas-cf1f-due-from:cas-cf1f-due-to:blocks");
+    assert_eq!(
+        pending[0].entity_id,
+        "cas-cf1f-due-from:cas-cf1f-due-to:blocks"
+    );
 }
 
 #[tokio::test]
@@ -1976,7 +2156,11 @@ async fn top_level_rows_ack_lww_skips_and_park_rejections_by_reason() {
     let temp = tempdir().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     for id in ["entry-written", "entry-kept-newer", "entry-refused"] {
@@ -2047,7 +2231,11 @@ async fn responses_without_rows_keep_the_legacy_aggregate_behaviour() {
     let temp = tempdir().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     for id in ["entry-one", "entry-two"] {
@@ -2123,7 +2311,11 @@ fn revision_syncer() -> (tempfile::TempDir, CloudSyncer) {
     let temp = tempfile::TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     let syncer = CloudSyncer::new(
@@ -2232,9 +2424,7 @@ async fn a_missing_revision_on_either_side_keeps_the_timestamp_path_unchanged() 
     // Backward compatibility: a row this client has never pulled, or a cloud
     // build that does not send revisions, must resolve exactly as before —
     // including when the side WITHOUT a revision is the one that wins.
-    for (local_revision, remote_revision) in
-        [(None, None), (Some(9), None), (None, Some(9))]
-    {
+    for (local_revision, remote_revision) in [(None, None), (Some(9), None), (None, Some(9))] {
         assert_eq!(
             syncer.resolve_conflict_with_revisions(
                 "task",
@@ -2318,22 +2508,50 @@ async fn the_revision_ledger_is_monotonic_and_scoped_per_entity_type() {
 
     let (_temp, syncer) = revision_syncer();
     let queue = syncer.queue();
-    queue.record_revision(EntityType::Task, "cas-c32f-led", 5).unwrap();
+    queue
+        .record_revision(EntityType::Task, "cas-c32f-led", 5)
+        .unwrap();
     // A replayed older envelope must not roll the ledger backwards: the base
     // revision we send later is what decides whether our push is accepted.
-    queue.record_revision(EntityType::Task, "cas-c32f-led", 3).unwrap();
-    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), Some(5));
-    queue.record_revision(EntityType::Task, "cas-c32f-led", 6).unwrap();
-    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), Some(6));
+    queue
+        .record_revision(EntityType::Task, "cas-c32f-led", 3)
+        .unwrap();
+    assert_eq!(
+        queue.revision(EntityType::Task, "cas-c32f-led").unwrap(),
+        Some(5)
+    );
+    queue
+        .record_revision(EntityType::Task, "cas-c32f-led", 6)
+        .unwrap();
+    assert_eq!(
+        queue.revision(EntityType::Task, "cas-c32f-led").unwrap(),
+        Some(6)
+    );
 
     // The same id under another entity type is an independent row.
-    assert_eq!(queue.revision(EntityType::Entry, "cas-c32f-led").unwrap(), None);
-    queue.record_revision(EntityType::Entry, "cas-c32f-led", 2).unwrap();
-    assert_eq!(queue.revision(EntityType::Entry, "cas-c32f-led").unwrap(), Some(2));
-    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), Some(6));
+    assert_eq!(
+        queue.revision(EntityType::Entry, "cas-c32f-led").unwrap(),
+        None
+    );
+    queue
+        .record_revision(EntityType::Entry, "cas-c32f-led", 2)
+        .unwrap();
+    assert_eq!(
+        queue.revision(EntityType::Entry, "cas-c32f-led").unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        queue.revision(EntityType::Task, "cas-c32f-led").unwrap(),
+        Some(6)
+    );
 
-    queue.clear_revision(EntityType::Task, "cas-c32f-led").unwrap();
-    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), None);
+    queue
+        .clear_revision(EntityType::Task, "cas-c32f-led")
+        .unwrap();
+    assert_eq!(
+        queue.revision(EntityType::Task, "cas-c32f-led").unwrap(),
+        None
+    );
 }
 
 // --- cas-c32f milestone 2: the base revision on the wire, and the receipts ---
@@ -2396,7 +2614,11 @@ fn accepted_and_conflicting_revisions_are_read_from_either_envelope() {
             Some(&Some(9))
         );
         // A rejection for another reason is not a revision conflict.
-        assert!(!response.revision_conflicts_for("tasks").contains_key("cas-ok"));
+        assert!(
+            !response
+                .revision_conflicts_for("tasks")
+                .contains_key("cas-ok")
+        );
     }
 }
 
@@ -2447,11 +2669,17 @@ async fn push_declares_the_stored_base_revision_and_omits_it_when_unknown() {
     let temp = tempfile::TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     // One row whose revision we have observed, one we have never pulled.
-    queue.record_revision(EntityType::Task, "cas-c32f-known", 7).unwrap();
+    queue
+        .record_revision(EntityType::Task, "cas-c32f-known", 7)
+        .unwrap();
     for id in ["cas-c32f-known", "cas-c32f-new"] {
         queue
             .enqueue(
@@ -2510,8 +2738,14 @@ async fn push_declares_the_stored_base_revision_and_omits_it_when_unknown() {
 
     // The echoed revisions are stored, so the next push declares a base the
     // server will accept without a re-pull first.
-    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-known").unwrap(), Some(8));
-    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-new").unwrap(), Some(1));
+    assert_eq!(
+        queue.revision(EntityType::Task, "cas-c32f-known").unwrap(),
+        Some(8)
+    );
+    assert_eq!(
+        queue.revision(EntityType::Task, "cas-c32f-new").unwrap(),
+        Some(1)
+    );
 }
 
 #[tokio::test]
@@ -2542,10 +2776,16 @@ async fn a_rejected_stale_base_is_forgotten_rather_than_replaced() {
     let temp = tempfile::TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
-    queue.record_revision(EntityType::Task, "cas-c32f-lost", 4).unwrap();
+    queue
+        .record_revision(EntityType::Task, "cas-c32f-lost", 4)
+        .unwrap();
     queue
         .enqueue(
             EntityType::Task,
@@ -2566,12 +2806,17 @@ async fn a_rejected_stale_base_is_forgotten_rather_than_replaced() {
         "p".to_string(),
         temp.path(),
     );
-    let _ = tokio::task::spawn_blocking(move || syncer.push()).await.unwrap();
+    let _ = tokio::task::spawn_blocking(move || syncer.push())
+        .await
+        .unwrap();
 
     // The proven-stale base is dropped, NOT replaced with the server's current
     // revision: adopting a revision whose body we have never seen would let the
     // next push overwrite a change this machine never looked at.
-    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-lost").unwrap(), None);
+    assert_eq!(
+        queue.revision(EntityType::Task, "cas-c32f-lost").unwrap(),
+        None
+    );
     // The edit itself stays queued for the next cycle rather than being parked.
     assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
 }
@@ -2619,7 +2864,11 @@ async fn a_real_pull_lets_a_higher_local_revision_beat_a_newer_remote_timestamp(
     let temp = tempfile::TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     let store = open_store_local(temp.path()).unwrap();
@@ -2632,7 +2881,9 @@ async fn a_real_pull_lets_a_higher_local_revision_beat_a_newer_remote_timestamp(
     local.origin_project = Some(project_id.to_string());
     task_store.add(&local).unwrap();
     // This machine holds revision 7; the incoming row is revision 4.
-    queue.record_revision(EntityType::Task, "cas-c32f-pull", 7).unwrap();
+    queue
+        .record_revision(EntityType::Task, "cas-c32f-pull", 7)
+        .unwrap();
     // A pending local change makes the discarded-row journal fire.
     queue
         .enqueue(

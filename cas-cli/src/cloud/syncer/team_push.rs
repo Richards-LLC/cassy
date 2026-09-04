@@ -5,9 +5,7 @@ use crate::cloud::syncer::{
     CloudSyncer, PushItemizedFailure, PushRowResult, SyncResult, TeamPushResponse,
     itemized_failures_for, row_results_for,
 };
-use crate::cloud::{
-    EntityType, QueuedSync, SyncOperation, canonical_project_id_with_pin,
-};
+use crate::cloud::{EntityType, QueuedSync, SyncOperation, canonical_project_id_with_pin};
 use crate::error::CasError;
 use chrono::Utc;
 
@@ -81,6 +79,25 @@ fn stamp_task_dependency_origin_project(value: &mut serde_json::Value, project_i
             ),
         );
     }
+}
+
+/// Preserve the response diagnostics that ureq otherwise hides behind its
+/// status error. Vercel's request identifiers are the only reliable way to
+/// correlate a client-observed 5xx with the cloud-side logs, especially when
+/// the response body is empty.
+fn team_push_http_failure(status: u16, response: ureq::Response) -> CasError {
+    let request_id = response
+        .header("x-request-id")
+        .unwrap_or("<missing>")
+        .to_owned();
+    let vercel_id = response
+        .header("x-vercel-id")
+        .unwrap_or("<missing>")
+        .to_owned();
+    let body = response.into_string().unwrap_or_default();
+    CasError::Other(format!(
+        "Team push failed with status {status}: {body}; response headers: x-request-id={request_id}, x-vercel-id={vercel_id}"
+    ))
 }
 
 impl CloudSyncer {
@@ -340,16 +357,14 @@ impl CloudSyncer {
                 sub_batch.into_iter().unzip();
             let sent_count = values.len();
 
-            match self
-                .push_team_sub_batch(
-                    team_id,
-                    entity_key,
-                    values,
-                    token,
-                    &target_project,
-                    git_remote,
-                )
-            {
+            match self.push_team_sub_batch(
+                team_id,
+                entity_key,
+                values,
+                token,
+                &target_project,
+                git_remote,
+            ) {
                 Ok(response) => {
                     if let Some(body) = response.as_ref() {
                         self.maybe_adopt_team_canonical_id(body);
@@ -469,11 +484,7 @@ impl CloudSyncer {
                                         rejection.reason.as_str().to_string()
                                     }
                                     PushItemizedFailure::Invalid(invalid) => {
-                                        format!(
-                                            "{}: {}",
-                                            invalid.reason.as_str(),
-                                            invalid.detail
-                                        )
+                                        format!("{}: {}", invalid.reason.as_str(), invalid.detail)
                                     }
                                 };
                                 let diagnostic = match failure {
@@ -641,19 +652,13 @@ impl CloudSyncer {
                     }
 
                     let status = resp.status();
-                    let body = resp.into_string().unwrap_or_default();
-                    last_error = Some(CasError::Other(format!(
-                        "Team push failed with status {status}: {body}"
-                    )));
+                    last_error = Some(team_push_http_failure(status, resp));
                     if (400..500).contains(&status) {
                         break;
                     }
                 }
                 Err(ureq::Error::Status(code, resp)) => {
-                    let body = resp.into_string().unwrap_or_default();
-                    last_error = Some(CasError::Other(format!(
-                        "Team push failed with status {code}: {body}"
-                    )));
+                    last_error = Some(team_push_http_failure(code, resp));
                     if (400..500).contains(&code) {
                         break;
                     }

@@ -8125,6 +8125,45 @@ mod purge_foreign_safety_tests {
     }
 
     #[test]
+    fn pending_purge_rows_do_not_block_but_real_local_edit_still_does() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES
+                ('entry', 'e1', 'update'),
+                ('task', 'cas-0001', 'update'),
+                ('rule', 'r1', 'update'),
+                ('skill', 's1', 'update'),
+                ('task', 'local-edit', 'update');
+            "#,
+        )
+        .unwrap();
+        let delete_set = PurgeDeleteSet {
+            entries: vec![PurgeEntity::with_evidence(
+                "entry", "e1", "Local learning", "origin_project", "other-project",
+            )],
+            tasks: vec![PurgeEntity::with_evidence(
+                "task", "cas-0001", "Fix the purge guard", "origin_project", "other-project",
+            )],
+            rules: vec![PurgeEntity::with_evidence(
+                "rule", "r1", "always verify", "origin_project", "other-project",
+            )],
+            skills: vec![PurgeEntity::with_evidence(
+                "skill", "s1", "release-notes", "origin_project", "other-project",
+            )],
+            dependencies: 0,
+        };
+
+        let pending = pending_content_pushes_excluding(&conn, &delete_set).unwrap();
+        assert_eq!(
+            pending,
+            vec![("task".to_string(), "local-edit".to_string())],
+            "queue rows the purge will delete are not local work that can be lost"
+        );
+    }
+
+    #[test]
     fn session_start_entry_refreshes_do_not_block_purge() {
         let conn = Connection::open_in_memory().unwrap();
         seed_db(&conn);

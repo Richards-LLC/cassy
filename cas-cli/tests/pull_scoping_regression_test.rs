@@ -431,6 +431,8 @@ async fn task_pull_and_direct_writes_remain_isolated_by_store() {
 
     let matching = task_json("cas-project-pull", Some(&expected_project_id));
     let foreign = task_json("cas-foreign-pull", Some("unrelated/product"));
+    let mut replicated = task_json("cas-replicated-pull", Some(&expected_project_id));
+    replicated["origin_project"] = serde_json::json!("unrelated/product");
     let unscoped = task_json("cas-unscoped-pull", None);
 
     Mock::given(method("GET"))
@@ -438,7 +440,7 @@ async fn task_pull_and_direct_writes_remain_isolated_by_store() {
         .and(query_param("project_id", expected_project_id.as_str()))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "entries": [],
-            "tasks": [matching, foreign, unscoped],
+            "tasks": [matching, foreign, replicated, unscoped],
             "rules": [],
             "skills": [],
             "pulled_at": chrono::Utc::now().to_rfc3339(),
@@ -480,11 +482,13 @@ async fn task_pull_and_direct_writes_remain_isolated_by_store() {
         cas::store::open_file_change_store(&project_root).expect("open file change store");
     let commit_link_store =
         cas::store::open_commit_link_store(&project_root).expect("open commit link store");
-    let queue = cas::cloud::SyncQueue::open(&project_root).expect("open queue");
+    let queue = Arc::new(
+        cas::cloud::SyncQueue::open(&project_root).expect("open queue"),
+    );
     queue.init().expect("init queue");
 
     let syncer = cas::cloud::CloudSyncer::new(
-        Arc::new(queue),
+        Arc::clone(&queue),
         cas::cloud::CloudConfig {
             endpoint: server.uri(),
             token: Some("synthetic-test-token".to_string()),
@@ -512,12 +516,23 @@ async fn task_pull_and_direct_writes_remain_isolated_by_store() {
     );
     assert!(project_tasks.get("cas-project-pull").is_ok());
     assert!(project_tasks.get("cas-foreign-pull").is_err());
+    assert!(project_tasks.get("cas-replicated-pull").is_err());
     assert!(project_tasks.get("cas-unscoped-pull").is_err());
     assert!(project_tasks.get("cas-global-only").is_err());
 
     assert!(global_tasks.get("cas-global-only").is_ok());
     assert!(global_tasks.get("cas-project-only").is_err());
     assert!(global_tasks.get("cas-project-pull").is_err());
+
+    let conflicts = queue.list_conflicts(20).expect("pull conflict journal");
+    assert!(
+        conflicts.iter().any(|conflict| {
+            conflict.entity_id == "cas-replicated-pull"
+                && conflict.strategy == "pull_foreign_origin"
+                && conflict.discarded_row_json.contains("unrelated/product")
+        }),
+        "explicit foreign-origin personal rows must be durably parked: {conflicts:?}"
+    );
 }
 
 /// cas-bba4 regression: the 5 entity kinds re-added to `CloudSyncer::pull`

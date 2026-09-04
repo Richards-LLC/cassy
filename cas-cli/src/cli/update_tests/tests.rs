@@ -506,7 +506,7 @@ fn post_swap_refresh_runs_on_the_installed_binary_and_reports_its_version() {
          printf '%s' '{\"refresh_binary_version\":\"9.9.9-stub\",\"projects\":[],\"user_level_store\":{\"status\":\"ok\"},\"skipped_unregistered\":[]}'\n",
     );
 
-    let receipt = run_post_swap_refresh(&installed_binary, "3.15.1", true)
+    let receipt = run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
         .expect("the post-swap refresh must run the installed binary");
 
     assert_eq!(
@@ -526,7 +526,7 @@ fn post_swap_refresh_failure_tells_the_operator_to_run_update_again() {
     let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
     let missing = temp_dir.path().join("cas-not-installed");
 
-    let error = run_post_swap_refresh(&missing, "3.15.1", true)
+    let error = run_post_swap_refresh(&missing, "3.15.1", "3.15.2", true)
         .expect_err("an unusable installed binary must not read as a successful refresh");
     let message = format!("{error:#}");
     assert!(
@@ -567,4 +567,54 @@ fn combined_receipt_merges_the_installed_binary_refresh_into_one_document() {
     let solo = combined_update_receipt("3.15.2", false, None);
     assert_eq!(solo["binary_updated"], false);
     assert!(solo.get("refresh_binary_version").is_none(), "{solo}");
+}
+
+#[cfg(unix)]
+#[test]
+fn post_swap_refresh_rejects_a_child_reporting_a_different_version() {
+    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let installed_binary = temp_dir.path().join("cas-stale");
+    // A stale `cas` answering instead of the binary we just installed.
+    write_stub_binary(
+        &installed_binary,
+        "#!/bin/sh\nprintf '%s' '{\"refresh_binary_version\":\"3.15.1\",\"projects\":[]}'\n",
+    );
+
+    let error = run_post_swap_refresh(&installed_binary, "3.15.0", "3.15.2", true)
+        .expect_err("a refresh performed by the wrong version must not read as converged");
+    let message = format!("{error:#}");
+    assert!(message.contains("3.15.1") && message.contains("3.15.2"), "{message}");
+    assert!(message.contains("cas update"), "{message}");
+}
+
+#[test]
+fn version_verification_accepts_only_the_installed_version() {
+    let binary = Path::new("/usr/local/bin/cas");
+    assert!(verify_refresh_binary_version(Some("3.15.2"), "3.15.2", binary).is_ok());
+    assert!(verify_refresh_binary_version(Some(" 3.15.2 "), "3.15.2", binary).is_ok());
+    assert!(verify_refresh_binary_version(Some("3.15.1"), "3.15.2", binary).is_err());
+    assert!(
+        verify_refresh_binary_version(None, "3.15.2", binary).is_err(),
+        "a child that reports no version proves nothing"
+    );
+}
+
+#[test]
+fn skipped_refresh_receipt_says_the_update_did_not_converge() {
+    let receipt = skipped_refresh_receipt(
+        "3.15.2",
+        "binary updated to 3.15.2; refresh did not run — run `cas update` again",
+    );
+
+    assert_eq!(receipt["binary_updated"], true);
+    assert_eq!(receipt["version"], "3.15.2");
+    assert!(
+        receipt["refresh_binary_version"].is_null(),
+        "nothing refreshed, so no version may be claimed: {receipt}"
+    );
+    assert_eq!(receipt["refresh_status"], "skipped");
+    assert!(
+        receipt["message"].as_str().unwrap().contains("cas update"),
+        "{receipt}"
+    );
 }

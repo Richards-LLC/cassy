@@ -7,6 +7,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+- `cas update` now runs its post-install phases with the binary it just
+  installed. Updating from an older version used to run the schema-migration,
+  all-projects refresh, user-level store and skills-sync phases in the
+  pre-update process image, so the first update reported the *old* version's
+  behaviour and a second `cas update` was needed to converge. The receipt now
+  states `refresh_binary_version`, the version that actually performed the
+  refresh, and `--json` emits a single combined document instead of two.
+
+### Changed
+- **Behaviour change for automation:** if the newly installed binary cannot be
+  run for the post-install phases, `cas update` now exits **non-zero** with
+  "binary updated to X; refresh did not run — run `cas update` again", and its
+  JSON receipt carries `refresh_binary_version: null` and
+  `refresh_status: "skipped"`. Previously such a run fell back to refreshing
+  with the pre-update image and exited 0, which read as converged when it was
+  not. A run whose refresh is performed by a version other than the one just
+  installed fails the same way.
+
 ## [3.15.3] - 2026-09-04
 
 ### Fixed

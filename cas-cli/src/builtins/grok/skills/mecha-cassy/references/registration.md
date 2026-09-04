@@ -18,10 +18,21 @@ is the refresh path, and `cas doctor`'s `mecha-cassy` row states whether this
 machine can post and what to do when it cannot. Setting up a new machine or a
 teammate: `docs/MECHA_CASSY_ONBOARDING.md`.
 
+The command also repairs a project `.cas/proxy.toml` that shadows the machine
+registration: a project file **replaces** the machine allowlist rather than
+widening it, so one left naming retired routes keeps them authoritative no
+matter how often the machine file is rewritten. Where such a file already names
+hub routes, the command corrects them in place — comments, key order, and every
+unrelated server and route survive. It removes the file's own
+`[servers.mecha-cassy]` block only when that block is identical to the machine
+registration which supplies it; a block that differs is an override, such as a
+project aimed at a staging hub, and is kept and named in the receipt rather
+than silently switched. A project file that names *no* hub route is left alone,
+because widening a policy the project declared is not this command's call;
+`cas doctor` names that file and the exact routes to add.
+
 The hand-written shapes below remain the reference for repairing a machine by
-hand or for a project that keeps its own `.cas/proxy.toml` — a project file
-**replaces** the machine allowlist rather than widening it, so such a project
-must name the hub routes itself.
+hand or for a project that has never named the hub routes itself.
 
 ## Cassy proxy — reaches every harness
 

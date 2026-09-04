@@ -2582,14 +2582,11 @@ impl FactoryDaemon {
     /// Deliberately unscoped by session — the whole point is the other session's
     /// supervisor.
     fn source_is_registered_supervisor(&self, source: &str) -> bool {
-        use cas_types::AgentRole;
         crate::store::open_agent_store(self.app.cas_dir())
             .ok()
             .and_then(|store| store.list(None).ok())
             .is_some_and(|agents| {
-                agents.iter().any(|agent| {
-                    agent.role == AgentRole::Supervisor && agent.name.eq_ignore_ascii_case(source)
-                })
+                crate::factory_supervisor_overlap::names_a_registered_supervisor(&agents, source)
             })
     }
 
@@ -2651,7 +2648,11 @@ impl FactoryDaemon {
         // Safe because `source_is_supervisor` is resolved from the agent store
         // by [`Self::source_is_registered_supervisor`], not from the
         // caller-settable `source` string — see that function's note.
-        let peer_supervisor_message = source_is_supervisor && !source.eq_ignore_ascii_case(supervisor_name);
+        let peer_supervisor_message = crate::factory_supervisor_overlap::is_peer_supervisor_message(
+            source,
+            supervisor_name,
+            source_is_supervisor,
+        );
         if !peer_supervisor_message
             && (!is_lifecycle_wake_source(source)
                 || !crate::prompt_revalidation::is_supervisor_wake_envelope(prompt))

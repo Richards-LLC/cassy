@@ -128,6 +128,43 @@ pub fn live_supervisor_sessions(agents: &[Agent], now: DateTime<Utc>) -> Vec<Liv
     sessions
 }
 
+/// Whether `source` names a **registered supervisor agent** on this clone
+/// (cas-15f2).
+///
+/// Deliberately a roster lookup and not a string test: `prompt_queue.source` is
+/// caller-settable (`cas factory message --from …`, bridge `POST /message`), so
+/// a name that merely *looks* like a supervisor's proves nothing. Resolving it
+/// to a row whose role is `Supervisor` is what makes the peer-wake allowance
+/// safe — an arbitrary client can spell any string into `source`, but it cannot
+/// register itself as a supervisor.
+///
+/// Deliberately unscoped by session: the whole point is the OTHER session's
+/// supervisor, which is why `agents` must come from an unscoped roster read.
+pub fn names_a_registered_supervisor(agents: &[Agent], source: &str) -> bool {
+    agents
+        .iter()
+        .any(|agent| agent.role == AgentRole::Supervisor && agent.name.eq_ignore_ascii_case(source))
+}
+
+/// Whether a queued row addressed to `supervisor_name`'s pane is a *peer
+/// supervisor's* message, the one class cas-15f2 made wake-eligible.
+///
+/// Two supervisors sharing a clone have no other channel to each other, and an
+/// inbox-only row is discovered by polling — which is how a release gate went
+/// uncoordinated on 2026-09-04, both messages dying at
+/// `abandoned_unknown_target` with `delivery_attempts=0`. A supervisor's own
+/// outbound rows are excluded: nothing should wake a pane with its own echo.
+///
+/// `source_is_supervisor` must come from [`names_a_registered_supervisor`], not
+/// from the caller-settable source string.
+pub fn is_peer_supervisor_message(
+    source: &str,
+    supervisor_name: &str,
+    source_is_supervisor: bool,
+) -> bool {
+    source_is_supervisor && !source.eq_ignore_ascii_case(supervisor_name)
+}
+
 /// What `worker_status` can say about the epic a live supervisor is running
 /// (cas-5087).
 ///

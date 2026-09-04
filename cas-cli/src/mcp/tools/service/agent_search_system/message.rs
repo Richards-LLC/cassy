@@ -1105,8 +1105,15 @@ impl CasService {
                     resolved_target_agent.as_ref(),
                     factory_session.as_deref(),
                 );
-                let enqueue_outcome = match queue.enqueue_urgent_with_outcome(
+                // cas-5087: and stamp it with a source the recipient's wake
+                // gate can resolve — see `row_source`.
+                let row_source = row_source(
                     &display_name,
+                    agent_from_store.as_ref(),
+                    resolved_target_agent.as_ref(),
+                );
+                let enqueue_outcome = match queue.enqueue_urgent_with_outcome(
+                    &row_source,
                     &resolved_target,
                     &message,
                     row_session.as_deref(),
@@ -2250,6 +2257,35 @@ fn pending_deadline_narrative(
 /// Logical fan-out names stay sender-scoped: `all_workers` is a broadcast to
 /// *this* factory, and `supervisor` / `director` resolve within the caller's own
 /// session. Only a concrete registered agent redirects the stamp.
+/// Which `source` a queued row must carry (cas-5087).
+///
+/// A supervisor's outbound rows are stamped `source="supervisor"` — the right
+/// answer for a worker, which has exactly one and reads "from supervisor" as
+/// its chain of command. It is the WRONG answer for a supervisor recipient:
+/// the peer-supervisor wake allowance (cas-15f2) resolves `source` against the
+/// agent roster by name, and no live supervisor is *named* "supervisor"
+/// (`noble-lynx-44`, `fast-kestrel-6`), so that lookup always failed and the
+/// wake could never fire. Routing the row to the right session then delivered
+/// it into an inbox nobody was woken to read — the polling-discovery failure
+/// the wake slice exists to end.
+///
+/// So when both ends are supervisors, name the sender. It is also the only
+/// legible answer on a clone with two of them, where "from supervisor" does
+/// not say WHICH. Worker-facing rows are untouched.
+fn row_source(
+    display_name: &str,
+    sender: Option<&cas_types::Agent>,
+    target_agent: Option<&cas_types::Agent>,
+) -> String {
+    use cas_types::AgentRole;
+    let both_supervisors = sender.is_some_and(|agent| agent.role == AgentRole::Supervisor)
+        && target_agent.is_some_and(|agent| agent.role == AgentRole::Supervisor);
+    match sender.filter(|_| both_supervisors) {
+        Some(sender) if !sender.name.trim().is_empty() => sender.name.clone(),
+        _ => display_name.to_string(),
+    }
+}
+
 fn row_factory_session(
     resolved_target: &str,
     target_agent: Option<&cas_types::Agent>,
@@ -2321,13 +2357,54 @@ mod pending_deadline_tests {
 
 #[cfg(test)]
 mod cross_session_routing_tests {
-    use super::row_factory_session;
-    use cas_types::Agent;
+    use super::{row_factory_session, row_source};
+    use cas_types::{Agent, AgentRole};
 
     fn agent_in(name: &str, session: Option<&str>) -> Agent {
         let mut agent = Agent::new(format!("id-{name}"), name.to_string());
         agent.factory_session = session.map(str::to_owned);
         agent
+    }
+
+    fn supervisor_in(name: &str, session: Option<&str>) -> Agent {
+        let mut agent = agent_in(name, session);
+        agent.role = AgentRole::Supervisor;
+        agent
+    }
+
+    /// cas-5087: the wake gate resolves `source` against the roster BY NAME,
+    /// and no live supervisor is named "supervisor" — so a collapsed source
+    /// made the cas-15f2 peer wake unreachable in production. Both ends
+    /// supervisors: name the sender.
+    #[test]
+    fn a_supervisor_to_supervisor_row_names_the_sending_supervisor() {
+        let sender = supervisor_in("young-raven-93", Some("cas-src-young-raven-93"));
+        let target = supervisor_in("noble-lynx-44", Some("cas-src-vivid-sparrow-8"));
+
+        assert_eq!(
+            row_source("supervisor", Some(&sender), Some(&target)),
+            "young-raven-93",
+            "a row no daemon can attribute to a registered supervisor cannot wake a pane"
+        );
+    }
+
+    /// Worker-facing rows keep reading "from supervisor": a worker has exactly
+    /// one, and that string is its chain of command.
+    #[test]
+    fn a_worker_facing_row_still_reads_as_from_supervisor() {
+        let sender = supervisor_in("young-raven-93", Some("cas-src-young-raven-93"));
+        let worker = agent_in("swift-fox", Some("cas-src-young-raven-93"));
+
+        assert_eq!(
+            row_source("supervisor", Some(&sender), Some(&worker)),
+            "supervisor"
+        );
+        assert_eq!(row_source("supervisor", Some(&sender), None), "supervisor");
+        assert_eq!(
+            row_source("swift-fox", Some(&worker), Some(&sender)),
+            "swift-fox",
+            "a worker's own name is already its display name"
+        );
     }
 
     /// The cas-15f2 regression: supervisor A in session A messages supervisor B

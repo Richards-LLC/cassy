@@ -277,8 +277,14 @@ mod tests {
             // Seed source: a session JSON pointing at a real repo and a fake one.
             let sessions_dir = home.join(".cas/sessions");
             std::fs::create_dir_all(&sessions_dir).unwrap();
-            let real = home.join("real-repo");
+            let fixtures = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let real = fixtures.path().join("real-repo");
             std::fs::create_dir_all(real.join(".cas")).unwrap();
+            std::fs::write(
+                real.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"real-repo\"\n",
+            )
+            .unwrap();
             let fake = home.join("fake-repo"); // no .cas/
 
             std::fs::write(
@@ -309,12 +315,18 @@ mod tests {
             ensure_host_schema().unwrap();
             let sessions_dir = home.join(".cas/sessions");
             std::fs::create_dir_all(&sessions_dir).unwrap();
-            let real = home.join("real-repo");
+            let fixtures = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let real = fixtures.path().join("real-repo");
             let fixture = home.join(".cas/artifacts/cas-1bfb/fresh-proxy");
             let sandbox = home.join(".cas/scratch/probe");
             for root in [&real, &fixture, &sandbox] {
                 std::fs::create_dir_all(root.join(".cas")).unwrap();
             }
+            std::fs::write(
+                real.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"real-repo\"\n",
+            )
+            .unwrap();
             for (name, root) in [
                 ("a.json", &real),
                 ("b.json", &fixture),
@@ -350,8 +362,14 @@ mod tests {
             ensure_host_schema().unwrap();
             let sessions_dir = home.join(".cas/sessions");
             std::fs::create_dir_all(&sessions_dir).unwrap();
-            let repo = home.join("repo");
+            let fixtures = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let repo = fixtures.path().join("repo");
             std::fs::create_dir_all(repo.join(".cas")).unwrap();
+            std::fs::write(
+                repo.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"repo\"\n",
+            )
+            .unwrap();
             std::fs::write(
                 sessions_dir.join("s.json"),
                 serde_json::json!({ "project_dir": repo.to_string_lossy() }).to_string(),

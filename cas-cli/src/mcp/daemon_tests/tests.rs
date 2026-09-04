@@ -336,6 +336,8 @@ async fn embedded_daemon_cloud_cycle_drains_team_queue() {
 
     let temp = TempDir::new().expect("temp project");
     let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
+    crate::cloud::set_canonical_id_in_config_toml(&cas_root, "daemon-cloud-cycle")
+        .expect("pin the project fixture identity");
     let nonexistent_user_config = temp.path().join("no-user-cloud.json");
     let cas_root_text = cas_root.to_string_lossy().into_owned();
     let user_config_text = nonexistent_user_config.to_string_lossy().into_owned();

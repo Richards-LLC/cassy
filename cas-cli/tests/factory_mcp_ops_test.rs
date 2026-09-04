@@ -8155,6 +8155,53 @@ async fn cas99d2_inbox_poll_marks_redelivered_rows_gh127() {
 // cas-5087 / cas-15f2: cross-session supervisor delivery, end to end
 // =============================================================================
 
+/// A pane that has settled: no operator draft, ready for injection, silent
+/// long enough for even an active-looking recipient, no outstanding tool call.
+/// Built from the daemon's own exported constant so it cannot drift from the
+/// threshold the gate actually applies.
+fn quiet_supervisor_pane() -> cas::ui::factory::PaneWakeState {
+    cas::ui::factory::PaneWakeState {
+        composer_dirty: false,
+        ready_for_injection: true,
+        silent_for: Some(cas::ui::factory::SILENCE_FOR_ACTIVE_RECIPIENT_WAKE),
+        tool_call: cas::ui::factory::ToolCallEvidence::Idle,
+    }
+}
+
+/// The director view one session's daemon holds: its own agents, with no
+/// heartbeat or activity signal, which is what a settled pane looks like.
+fn director_data_for(agents: &[Agent], session: &str) -> cas_factory::DirectorData {
+    cas_factory::DirectorData {
+        ready_tasks: vec![],
+        in_progress_tasks: vec![],
+        epic_tasks: vec![],
+        agents: agents
+            .iter()
+            .filter(|agent| agent.factory_session.as_deref() == Some(session))
+            .map(|agent| cas_factory::AgentSummary {
+                id: agent.id.clone(),
+                name: agent.name.clone(),
+                status: agent.status,
+                registered_at: agent.registered_at,
+                current_task: None,
+                latest_activity: None,
+                last_heartbeat: None,
+                pending_messages: 0,
+                pending_supervisor_messages: 0,
+                latest_supervisor_message_at: None,
+                active_lease: None,
+                effort: None,
+            })
+            .collect(),
+        activity: vec![],
+        agent_id_to_name: HashMap::new(),
+        changes: vec![],
+        git_loaded: true,
+        reminders: vec![],
+        epic_closed_counts: HashMap::new(),
+    }
+}
+
 /// The acceptance evidence for cas-15f2: two supervisors registered in
 /// DIFFERENT factory sessions on ONE clone, and a message from A that actually
 /// reaches B.
@@ -8243,27 +8290,56 @@ async fn cas_5087_a_supervisor_message_crosses_sessions_and_wakes_the_recipient(
         "the sender's own daemon must not also select a row addressed elsewhere: {for_a:?}"
     );
 
-    // (3) The wake gate. Routing alone does not prove the demo — an inbox-only
-    // row is found by polling, which is the failure cas-15f2's wake slice
-    // exists to end. Both predicates below are the daemon's own, reached
-    // through the seam `FactoryDaemon::supervisor_wake_decision` calls.
+    // (3) The wake gate — the real one. Routing alone does not prove the demo:
+    // an inbox-only row is found by polling, which is the failure cas-15f2's
+    // wake slice exists to end. This drives
+    // `FactoryDaemon::supervisor_wake_decision` itself rather than restating
+    // its rules, because a copy of a gate proves nothing about the gate.
     let agents = env.agent_store().list(None).expect("unscoped roster");
     assert_eq!(
         row.source, "young-raven-93",
         "the row must name the SENDING supervisor; a collapsed \"supervisor\" source \
          resolves to no roster row and can never wake a pane"
     );
+    // What B's daemon resolves for this row, by the same store lookup it uses.
+    let source_is_supervisor =
+        cas::factory_supervisor_overlap::names_a_registered_supervisor(&agents, &row.source);
     assert!(
-        cas::factory_supervisor_overlap::names_a_registered_supervisor(&agents, &row.source),
+        source_is_supervisor,
         "B's daemon must resolve the sender to a registered supervisor across sessions"
     );
+    let decision = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
+        &director_data_for(&agents, "cas-src-vivid-sparrow-8"),
+        "noble-lynx-44",
+        "noble-lynx-44",
+        &row.source,
+        &row.prompt,
+        quiet_supervisor_pane(),
+        chrono::Utc::now(),
+        source_is_supervisor,
+    );
     assert!(
-        cas::factory_supervisor_overlap::is_peer_supervisor_message(
-            &row.source,
-            "noble-lynx-44",
-            true
-        ),
-        "a peer supervisor's row must be wake-eligible on B's pane"
+        decision.allowed,
+        "a peer supervisor's row must wake B's quiet pane: {}",
+        decision.reason
+    );
+
+    // The same gate must still refuse a source the roster does not resolve to
+    // a supervisor — cas-dab2's guard is not widened by any of this.
+    let forged = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
+        &director_data_for(&agents, "cas-src-vivid-sparrow-8"),
+        "noble-lynx-44",
+        "noble-lynx-44",
+        "young-raven-93",
+        &row.prompt,
+        quiet_supervisor_pane(),
+        chrono::Utc::now(),
+        false,
+    );
+    assert!(
+        !forged.allowed && forged.reason.contains("cas-dab2"),
+        "an unresolved source must still be inbox-only: {}",
+        forged.reason
     );
 
     // (4) B's daemon delivers it and records what its wake nudge did.

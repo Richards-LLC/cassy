@@ -8,7 +8,7 @@ mod gui_client;
 mod lifecycle;
 mod output;
 pub(super) mod pane_size;
-mod queue_and_events;
+pub mod queue_and_events;
 pub(super) mod relay;
 pub(super) mod session_summarizer;
 pub(crate) mod teams;

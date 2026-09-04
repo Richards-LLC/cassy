@@ -8152,6 +8152,209 @@ async fn cas99d2_inbox_poll_marks_redelivered_rows_gh127() {
 }
 
 // =============================================================================
+// cas-5087 / cas-15f2: cross-session supervisor delivery, end to end
+// =============================================================================
+
+/// The acceptance evidence for cas-15f2: two supervisors registered in
+/// DIFFERENT factory sessions on ONE clone, and a message from A that actually
+/// reaches B.
+///
+/// The incident this pins: notifications 24382 and 24399 were stamped with the
+/// SENDER's session (`cas-src-young-raven-93`) while the target lived in
+/// `cas-src-vivid-sparrow-8`. Every downstream filter selects on
+/// `factory_session = <observer's own session>`, so no daemon ever selected
+/// them; both died at `abandoned_unknown_target` with `delivery_attempts=0`
+/// while two supervisors watched `awaiting_delivery` for fifteen minutes.
+///
+/// This is the deliberate complement of
+/// `crates/cas-factory/tests/concurrent_factory_session_isolation.rs`, which
+/// asserts that an UNADDRESSED row (a same-name worker, an `all_workers`
+/// broadcast) must NOT cross sessions. Both halves are the contract: addressed
+/// cross-session delivers, unaddressed cross-session still cannot leak.
+#[tokio::test]
+async fn cas_5087_a_supervisor_message_crosses_sessions_and_wakes_the_recipient() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "young-raven-93"),
+        ("CAS_FACTORY_SESSION", "cas-src-young-raven-93"),
+    ]);
+    // A is the MCP caller, so its registered row must carry the caller's agent
+    // id — that row is what resolves this sender's identity, exactly as a live
+    // supervisor's own registration does.
+    let env = FactoryTestEnv::with_agent_id("supervisor-a-id");
+    let mut supervisor_a = Agent::new("supervisor-a-id".to_string(), "young-raven-93".to_string());
+    supervisor_a.role = AgentRole::Supervisor;
+    supervisor_a.factory_session = Some("cas-src-young-raven-93".to_string());
+    env.agent_store()
+        .register(&supervisor_a)
+        .expect("register supervisor A");
+    env.register_supervisor_in_session("noble-lynx-44", "cas-src-vivid-sparrow-8");
+
+    // (1) A messages B.
+    let send = get_text(
+        &env.service
+            .coordination(Parameters(coord_msg(
+                "message",
+                "noble-lynx-44",
+                "Release gate: hold the merge queue until my epic lands.",
+                None,
+            )))
+            .await
+            .expect("a supervisor must be able to message a supervisor in another session"),
+    );
+    let notification_id = send
+        .lines()
+        .find_map(|line| line.strip_prefix("notification_id: "))
+        .expect("send response must return a notification_id")
+        .parse::<i64>()
+        .expect("notification_id must be an integer");
+
+    // (2) The row belongs to the RECIPIENT's session. This single stamp is the
+    // whole routing fix — every filter below selects on it.
+    let rows = env.prompt_queue().peek_all(10).expect("peek");
+    let row = rows
+        .iter()
+        .find(|row| row.id == notification_id)
+        .expect("the queued row must be the one the sender was told about");
+    assert_eq!(
+        row.factory_session.as_deref(),
+        Some("cas-src-vivid-sparrow-8"),
+        "the row must carry the RECIPIENT's session, not the sender's: {row:?}"
+    );
+
+    // B's daemon selects it; A's daemon does not. This is the exact query that
+    // returned nothing during the incident.
+    let b_targets = ["noble-lynx-44", "supervisor", "all_workers"];
+    let for_b = env
+        .prompt_queue()
+        .peek_for_targets(&b_targets, Some("cas-src-vivid-sparrow-8"), 10)
+        .expect("peek for B");
+    assert!(
+        for_b.iter().any(|queued| queued.id == notification_id),
+        "the recipient's daemon must select the row: {for_b:?}"
+    );
+    let a_targets = ["young-raven-93", "supervisor", "all_workers"];
+    let for_a = env
+        .prompt_queue()
+        .peek_for_targets(&a_targets, Some("cas-src-young-raven-93"), 10)
+        .expect("peek for A");
+    assert!(
+        !for_a.iter().any(|queued| queued.id == notification_id),
+        "the sender's own daemon must not also select a row addressed elsewhere: {for_a:?}"
+    );
+
+    // (3) The wake gate. Routing alone does not prove the demo — an inbox-only
+    // row is found by polling, which is the failure cas-15f2's wake slice
+    // exists to end. Both predicates below are the daemon's own, reached
+    // through the seam `FactoryDaemon::supervisor_wake_decision` calls.
+    let agents = env.agent_store().list(None).expect("unscoped roster");
+    assert_eq!(
+        row.source, "young-raven-93",
+        "the row must name the SENDING supervisor; a collapsed \"supervisor\" source \
+         resolves to no roster row and can never wake a pane"
+    );
+    assert!(
+        cas::factory_supervisor_overlap::names_a_registered_supervisor(&agents, &row.source),
+        "B's daemon must resolve the sender to a registered supervisor across sessions"
+    );
+    assert!(
+        cas::factory_supervisor_overlap::is_peer_supervisor_message(
+            &row.source,
+            "noble-lynx-44",
+            true
+        ),
+        "a peer supervisor's row must be wake-eligible on B's pane"
+    );
+
+    // (4) B's daemon delivers it and records what its wake nudge did.
+    env.prompt_queue()
+        .record_selected(notification_id)
+        .expect("select");
+    env.prompt_queue()
+        .mark_transport_delivered(notification_id)
+        .expect("transport handoff");
+    env.prompt_queue()
+        .record_wake_attempt(
+            notification_id,
+            cas_store::WakeAttempt::Fired,
+            Some("supervisor pane is quiet and the row is a peer supervisor message"),
+        )
+        .expect("record wake attempt");
+
+    let mut status_req = coord_msg("message_status", "noble-lynx-44", "unused", None);
+    status_req.notification_id = Some(notification_id);
+    let status = get_text(
+        &env.service
+            .coordination(Parameters(status_req))
+            .await
+            .expect("message_status"),
+    );
+    let json: serde_json::Value = serde_json::from_str(
+        &status[status.find('{').expect("status must carry a JSON body")..],
+    )
+    .expect("status JSON must parse");
+
+    assert_eq!(
+        json["factory_session"].as_str(),
+        Some("cas-src-vivid-sparrow-8"),
+        "the report must agree with the row it describes: {status}"
+    );
+    assert!(
+        json["delivered_at"].is_string(),
+        "the message must reach delivered_at, not sit at awaiting_delivery: {status}"
+    );
+    assert_eq!(
+        json["wake_attempt"].as_str(),
+        Some("fired"),
+        "a wake attempt must be recorded, not left at nudge_not_attempted: {status}"
+    );
+    assert!(
+        !status.contains("abandoned"),
+        "the incident's terminal state must not reappear: {status}"
+    );
+}
+
+/// The complement, asserted on the same fixture so the two rules cannot drift:
+/// a row A broadcasts to its OWN workers must stay in A's session even though a
+/// same-named worker exists in B's. Cross-session delivery is addressed-only.
+#[tokio::test]
+async fn cas_5087_an_unaddressed_broadcast_still_cannot_cross_sessions() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "young-raven-93"),
+        ("CAS_FACTORY_SESSION", "cas-src-young-raven-93"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor_in_session("young-raven-93", "cas-src-young-raven-93");
+    env.register_supervisor_in_session("noble-lynx-44", "cas-src-vivid-sparrow-8");
+    env.register_worker_in_session("swift-fox", "cas-src-young-raven-93");
+    env.register_worker_in_session("swift-fox", "cas-src-vivid-sparrow-8");
+
+    env.service
+        .coordination(Parameters(coord_msg(
+            "message",
+            "all_workers",
+            "stand down for the release gate",
+            None,
+        )))
+        .await
+        .expect("broadcast to my own workers");
+
+    let for_b = env
+        .prompt_queue()
+        .peek_for_targets(
+            &["noble-lynx-44", "swift-fox", "all_workers"],
+            Some("cas-src-vivid-sparrow-8"),
+            10,
+        )
+        .expect("peek for B");
+    assert!(
+        for_b.is_empty(),
+        "an all_workers broadcast means THIS factory's workers; it must not reach B: {for_b:?}"
+    );
+}
+
+// =============================================================================
 // GH #699: two live supervisor sessions sharing one clone
 // =============================================================================
 
@@ -8187,6 +8390,87 @@ async fn gh_699_worker_status_names_the_other_live_supervisor_on_this_clone() {
     assert!(
         text.contains("reap the other's workers"),
         "the consequence must be stated: {text}"
+    );
+}
+
+/// cas-5087: knowing another supervisor is live is only half the answer before
+/// a gate. `worker_status` must name the epic each one is running — including
+/// the one in the other session — or the operator still has to go ask.
+#[tokio::test]
+async fn cas_5087_worker_status_names_each_live_supervisors_epic() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "noble-koala-5"),
+        ("CAS_FACTORY_SESSION", "gabber-gentle-hawk-71"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let mine = env.register_supervisor_in_session("noble-koala-5", "gabber-gentle-hawk-71");
+    let theirs = env.register_supervisor_in_session("gentle-falcon-66", "gabber-witty-panda-98");
+
+    let store = env.task_store();
+    for (owner, title) in [
+        (&mine, "EPIC: v3.15.4 update follow-ups"),
+        (&theirs, "EPIC: hub transcript rewrite"),
+    ] {
+        let id = store.generate_id().expect("generate_id");
+        let mut epic = Task::new(id, title.to_string());
+        epic.task_type = TaskType::Epic;
+        epic.status = TaskStatus::InProgress;
+        epic.epic_verification_owner = Some(owner.clone());
+        store.add(&epic).expect("add epic");
+    }
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("worker_status"),
+    );
+
+    assert!(
+        text.contains("noble-koala-5") && text.contains("epic cas"),
+        "the caller's own epic must be named: {text}"
+    );
+    assert!(
+        text.contains("EPIC: v3.15.4 update follow-ups"),
+        "the caller's epic title must be named: {text}"
+    );
+    assert!(
+        text.contains("gabber-witty-panda-98/gentle-falcon-66"),
+        "the other session's supervisor must still be named: {text}"
+    );
+    assert!(
+        text.contains("EPIC: hub transcript rewrite"),
+        "the OTHER supervisor's epic is the point of this row: {text}"
+    );
+}
+
+/// A supervisor running nothing must render cleanly. An empty field would read
+/// as a broken report, and this page is checked before destructive actions.
+#[tokio::test]
+async fn cas_5087_a_supervisor_with_no_epic_renders_cleanly() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "noble-koala-5"),
+        ("CAS_FACTORY_SESSION", "gabber-gentle-hawk-71"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor_in_session("noble-koala-5", "gabber-gentle-hawk-71");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("worker_status"),
+    );
+
+    assert!(
+        text.contains("noble-koala-5") && text.contains("no epic"),
+        "an epic-less supervisor must say so rather than trail an empty field: {text}"
+    );
+    assert!(
+        !text.contains("task store unreadable"),
+        "a readable store with no epics is not an outage: {text}"
     );
 }
 

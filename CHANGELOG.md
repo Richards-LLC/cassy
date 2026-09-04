@@ -7,7 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- `worker_status` now names the epic each live supervisor is running, including
+  supervisors in other factory sessions that share the same checkout. Knowing
+  another supervisor is live was only half of what an operator needs before a
+  merge, reset or shutdown; the other half is what that supervisor is in the
+  middle of. A supervisor running nothing reads "no epic", and a task store that
+  cannot be read this pass says so explicitly rather than being reported as
+  "no epic".
+
 ### Fixed
+- A message from one supervisor to another now reaches the recipient's pane
+  instead of waiting in an inbox for a poll. Supervisor-sent messages were
+  labelled with the generic sender "supervisor", which the recipient's delivery
+  path could not match to any registered supervisor, so the wake was declined
+  every time and cross-session coordination depended on the recipient happening
+  to check. Messages between supervisors now name the supervisor that sent them,
+  which is also the only useful label when two of them share a checkout.
+  Messages to workers are unchanged.
 - `cas update` now runs its post-install phases with the binary it just
   installed. Updating from an older version used to run the schema-migration,
   all-projects refresh, user-level store and skills-sync phases in the

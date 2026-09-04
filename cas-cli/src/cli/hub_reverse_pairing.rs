@@ -918,6 +918,7 @@ mod tests {
     struct RecordingRelay {
         claims: std::sync::Mutex<Vec<(String, String)>>,
         completed_hub_urls: std::sync::Mutex<Vec<String>>,
+        completed_invitation_urls: std::sync::Mutex<Vec<String>>,
         active_claim: std::sync::Mutex<Option<(String, String)>>,
         fail_first_completion: std::sync::atomic::AtomicBool,
     }
@@ -969,6 +970,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(hub_url.to_owned());
+            self.completed_invitation_urls
+                .lock()
+                .unwrap()
+                .push(_invitation_url.to_owned());
             if self
                 .fail_first_completion
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -1119,6 +1124,72 @@ mod tests {
             Some("https://configured.example".to_owned())
         );
         health.join().unwrap();
+    }
+
+    #[test]
+    fn hosted_relay_completion_uses_the_two_key_invitation_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let (port, health) = serve_ready_health_checks(1);
+        write_live_record(&paths, port, Some("https://workstation.tail.example/"));
+
+        let relay = RecordingRelay::default();
+        authorize_with_relay(&authorize_args("K7MW-4H2Q"), &test_cli(), &relay, &paths).unwrap();
+        health.join().unwrap();
+
+        let invitation_url = relay.completed_invitation_urls.lock().unwrap()[0].clone();
+        assert!(!invitation_url.contains("&scopes="), "{invitation_url}");
+        assert!(invitation_url.contains("#pair="), "{invitation_url}");
+        assert!(invitation_url.contains("&hub="), "{invitation_url}");
+        assert_eq!(invitation_url.matches('&').count(), 1, "{invitation_url}");
+    }
+
+    #[test]
+    fn invalid_invitation_reports_the_field_contract_and_sent_shape() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"error":"invalid_invitation","error_description":"malformed or has an invalid expiry"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let relay = RelayClient {
+            endpoint,
+            token: "test-token".to_owned(),
+        };
+        let scopes = Scope::default_read_only();
+        let error = relay
+            .complete(
+                "authorization",
+                "nonce",
+                "https://workstation.tail.example",
+                "machine",
+                "https://commander.example/#pair=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&hub=machine-uuid",
+                "2026-08-11T20:11:30Z".parse().unwrap(),
+                &scopes,
+            )
+            .unwrap_err()
+            .to_string();
+        server.join().unwrap();
+
+        assert!(error.contains("invitation_url"), "{error}");
+        assert!(error.contains("exactly two fragment keys"), "{error}");
+        assert!(
+            error.contains("https://commander.example/#pair=<redacted>&hub=machine-uuid"),
+            "{error}"
+        );
     }
 
     #[test]

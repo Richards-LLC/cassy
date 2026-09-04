@@ -905,7 +905,7 @@ impl FactoryDaemon {
                 // string ("idle gate declined the wake for this pass") was on
                 // 34 of 35 rows during the reported incident and told an
                 // operator nothing about which of six conditions vetoed.
-                &format!("wake gate declined this pass: {}", wake.reason),
+                &wake.status_detail(),
             ));
         }
 
@@ -936,7 +936,7 @@ impl FactoryDaemon {
         if !wake.allowed {
             return Ok(NudgeReport::not_attempted(
                 InjectOutcome::Delivered,
-                &format!("wake gate declined this pass: {}", wake.reason),
+                &wake.status_detail(),
             ));
         }
         self.pty_nudge(target, source, notification_id).await

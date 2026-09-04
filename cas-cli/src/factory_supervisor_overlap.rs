@@ -131,12 +131,17 @@ pub fn live_supervisor_sessions(agents: &[Agent], now: DateTime<Utc>) -> Vec<Liv
 /// Whether `source` names a **registered supervisor agent** on this clone
 /// (cas-15f2).
 ///
-/// Deliberately a roster lookup and not a string test: `prompt_queue.source` is
-/// caller-settable (`cas factory message --from …`, bridge `POST /message`), so
-/// a name that merely *looks* like a supervisor's proves nothing. Resolving it
-/// to a row whose role is `Supervisor` is what makes the peer-wake allowance
-/// safe — an arbitrary client can spell any string into `source`, but it cannot
-/// register itself as a supervisor.
+/// NOT AN AUTHENTICATION CHECK, despite what this comment used to claim
+/// (cas-d9a8). It answers "does this NAME belong to a registered supervisor",
+/// and `prompt_queue.source` is caller-settable — `cas factory message
+/// --from "<any supervisor's name>"` and bridge `POST /message` both put an
+/// arbitrary string there. So an arbitrary client cannot register itself as a
+/// supervisor, but it never needed to: spelling a real supervisor's name was
+/// enough. The wake gate no longer consults this; it keys on the
+/// server-stamped `prompt_queue.origin_agent_id` instead.
+///
+/// Retained as a display/consistency helper. Do not reintroduce it as an
+/// authority.
 ///
 /// Deliberately unscoped by session: the whole point is the OTHER session's
 /// supervisor, which is why `agents` must come from an unscoped roster read.
@@ -157,6 +162,12 @@ pub fn names_a_registered_supervisor(agents: &[Agent], source: &str) -> bool {
 ///
 /// `source_is_supervisor` must come from [`names_a_registered_supervisor`], not
 /// from the caller-settable source string.
+///
+/// cas-d9a8: the wake gate no longer calls this. It is kept for callers that
+/// want the name-shaped question; the pane-wake decision now lives in
+/// `FactoryDaemon::supervisor_wake_class`, keyed on the row's server-stamped
+/// origin, because the name-shaped question could be answered "yes" by anyone
+/// willing to type a supervisor's name into `--from`.
 pub fn is_peer_supervisor_message(
     source: &str,
     supervisor_name: &str,

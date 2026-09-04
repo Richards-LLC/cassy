@@ -8303,22 +8303,44 @@ async fn cas_5087_a_supervisor_message_crosses_sessions_and_wakes_the_recipient(
         "the row must name the SENDING supervisor; a collapsed \"supervisor\" source \
          resolves to no roster row and can never wake a pane"
     );
-    // What B's daemon resolves for this row, by the same store lookup it uses.
-    let source_is_supervisor =
-        cas::factory_supervisor_overlap::names_a_registered_supervisor(&agents, &row.source);
+    // cas-d9a8: the row must carry a SERVER-STAMPED origin, written by the MCP
+    // send path from the sender's registered session — not derived from
+    // `row.source`, which `cas factory message --from …` lets a caller set.
+    let origin = row.origin.clone().expect(
+        "the MCP message path must stamp the sending agent's registry id; without it the \
+         gate below can never allow a peer-supervisor wake in production",
+    );
+    let stamped_id = match &origin {
+        cas_store::QueueOrigin::RegisteredAgent { agent_id } => agent_id.clone(),
+        other => panic!("a supervisor's MCP send must stamp a registered agent, got {other:?}"),
+    };
+    // Exactly the resolution B's daemon performs: look the STAMPED ID up in
+    // the registry and take the role from that row.
+    let resolved = agents
+        .iter()
+        .find(|agent| agent.id == stamped_id)
+        .expect("the stamped id must resolve to a registry row");
+    let sender = cas::ui::factory::FactoryDaemon::wake_sender_from_origin(
+        Some(&origin),
+        Some(resolved),
+    );
     assert!(
-        source_is_supervisor,
-        "B's daemon must resolve the sender to a registered supervisor across sessions"
+        matches!(
+            &sender,
+            cas::ui::factory::WakeSender::Registered { role, .. }
+                if *role == cas_types::AgentRole::Supervisor
+        ),
+        "B's daemon must resolve the STAMPED sender to a registered supervisor: {sender:?}"
     );
     let decision = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
         &director_data_for(&agents, "cas-src-vivid-sparrow-8"),
         "noble-lynx-44",
         "noble-lynx-44",
+        &sender,
         &row.source,
         &row.prompt,
         quiet_supervisor_pane(),
         chrono::Utc::now(),
-        source_is_supervisor,
     );
     assert!(
         decision.allowed,
@@ -8326,21 +8348,24 @@ async fn cas_5087_a_supervisor_message_crosses_sessions_and_wakes_the_recipient(
         decision.reason
     );
 
-    // The same gate must still refuse a source the roster does not resolve to
-    // a supervisor — cas-dab2's guard is not widened by any of this.
+    // cas-d9a8 closes the bypass cas-15f2 shipped with. The SAME source string
+    // — a name the roster really does resolve to a supervisor — buys nothing
+    // once the row carries no server stamp, which is exactly what
+    // `cas factory message --from young-raven-93` and bridge POST /message
+    // produce. Under the old gate this call was allowed.
     let forged = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
         &director_data_for(&agents, "cas-src-vivid-sparrow-8"),
         "noble-lynx-44",
         "noble-lynx-44",
+        &cas::ui::factory::WakeSender::Unstamped,
         "young-raven-93",
         &row.prompt,
         quiet_supervisor_pane(),
         chrono::Utc::now(),
-        false,
     );
     assert!(
-        !forged.allowed && forged.reason.contains("cas-dab2"),
-        "an unresolved source must still be inbox-only: {}",
+        !forged.allowed && forged.reason.contains("no server-stamped sender"),
+        "a caller-settable source that merely NAMES a supervisor must be inbox-only: {}",
         forged.reason
     );
 

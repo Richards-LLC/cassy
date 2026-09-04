@@ -5621,13 +5621,13 @@ This is the body content."#;
                     }
                     if line.contains("cli=codex") {
                         assert!(
-                            [
-                                ("model=gpt-5.6-luna", "effort=xhigh"),
-                                ("model=gpt-5.6-sol", "effort=high")
-                            ]
-                            .iter()
-                                .any(|(model, effort)| line.contains(model) && line.contains(effort)),
-                            "{label}:{} Codex spawn must use the Luna/Sol tier matrix: {line:?}",
+                            embedded_registry().unwrap().recipes.values().any(|recipe| {
+                                recipe.harness == cas_mux::SupervisorCli::Codex
+                                    && recipe.status == cas_factory::routing::RecipeStatus::Active
+                                    && line.contains(&format!("model={}", recipe.model))
+                                    && line.contains(&format!("effort={}", recipe.default_effort))
+                            }),
+                            "{label}:{} Codex spawn must use an active registry recipe: {line:?}",
                             index + 1
                         );
                     }

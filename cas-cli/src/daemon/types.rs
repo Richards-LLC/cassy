@@ -231,4 +231,8 @@ pub struct CodeIndexResult {
     /// failure implies a retry could succeed, and re-reading the same bytes
     /// never will, which is what made the doctor warning permanent.
     pub skipped: Vec<(std::path::PathBuf, String)>,
+    /// What the closing code-vector queue reconcile changed, when one ran.
+    /// `None` means no reconcile was attempted (an inner incremental call);
+    /// `Some(default)` means one ran and found nothing to fix (cas-8a03).
+    pub vector_reconcile: Option<cas_store::CodeVectorReconcile>,
 }

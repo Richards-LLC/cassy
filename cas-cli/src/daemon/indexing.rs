@@ -280,6 +280,59 @@ pub(crate) fn publish_code_symbols(
         .map_err(|e| e.to_string())
 }
 
+/// Whether a publish error is another process holding the tantivy writer lock.
+///
+/// The code BM25 index is a single-writer directory, and `cas serve` caches its
+/// `IndexWriter`, so any second process — a manual `cas index code`, a hook, a
+/// second server — can meet a held lock. Before cas-8a03 that surfaced as
+/// `failed to retire deleted source file: … LockBusy` and was counted as a
+/// permanent file failure, which is how one cas-src project accumulated 592 of
+/// them for files that had been deleted months earlier.
+fn is_index_lock_busy(error: &str) -> bool {
+    let error = error.to_lowercase();
+    error.contains("lockbusy")
+        || error.contains("failed to acquire index lock")
+        || error.contains("failed to acquire lockfile")
+}
+
+/// How long one indexing run may spend, in total, waiting for the BM25 writer.
+const WRITER_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A wait budget for BM25 writer-lock contention, shared by every retirement in
+/// one indexing run.
+///
+/// Per-call retries would multiply: a run retiring 592 files behind a writer
+/// that is held for the whole run would wait its backoff 592 times. The budget
+/// is spent once — after that the run stops waiting and records the failures,
+/// which the next run retries.
+pub(crate) struct WriterLockBudget {
+    remaining: std::time::Duration,
+}
+
+impl WriterLockBudget {
+    pub(crate) fn new(total: std::time::Duration) -> Self {
+        Self { remaining: total }
+    }
+
+    /// Run `attempt`, retrying while it fails on a held writer lock and budget
+    /// remains. Any other error returns immediately: only contention is
+    /// transient.
+    pub(crate) fn run<T>(&mut self, attempt: impl Fn() -> Result<T, String>) -> Result<T, String> {
+        let mut delay = std::time::Duration::from_millis(50);
+        loop {
+            match attempt() {
+                Err(error) if is_index_lock_busy(&error) && !self.remaining.is_zero() => {
+                    let wait = delay.min(self.remaining);
+                    std::thread::sleep(wait);
+                    self.remaining -= wait;
+                    delay = (delay * 2).min(std::time::Duration::from_millis(800));
+                }
+                other => return other,
+            }
+        }
+    }
+}
+
 /// Remove source-code vectors without creating the optional LMDB cache.
 ///
 /// Indexing runs while logged out, so retirement may only open a cache that
@@ -312,6 +365,7 @@ fn retire_code_file(
     cas_root: &Path,
     code_store: &dyn cas_store::CodeStore,
     file: &cas_code::CodeFile,
+    budget: &mut WriterLockBudget,
 ) -> Result<usize, String> {
     let symbol_ids: Vec<String> = code_store
         .get_symbols_in_file(&file.id)
@@ -320,7 +374,7 @@ fn retire_code_file(
         .map(|symbol| symbol.id)
         .collect();
 
-    publish_code_symbols(cas_root, &[], &symbol_ids)?;
+    budget.run(|| publish_code_symbols(cas_root, &[], &symbol_ids))?;
     retire_cached_code_vectors(cas_root, &symbol_ids)?;
     cas_store::SqliteCodeVectorStore::open(cas_root)
         .map_err(|error| error.to_string())?
@@ -564,10 +618,49 @@ pub fn index_code_files_with(
     }
 
     // One BM25 commit for the whole batch — the singular per-symbol form commits per document.
-    if let Err(error) = publish_code_symbols(cas_root, &published, &retired) {
+    // A writer lock held by a concurrent `cas serve` is waited out, not turned
+    // into a lost batch (cas-8a03).
+    let mut writer_budget = WriterLockBudget::new(WRITER_LOCK_BUDGET);
+    if let Err(error) = writer_budget.run(|| publish_code_symbols(cas_root, &published, &retired)) {
         result.errors.push(format!("code search index: {error}"));
     }
     Ok(result)
+}
+
+/// Reconcile the code-vector queue against the symbol table, recording the
+/// outcome on `result`.
+///
+/// This is the step `cas doctor` has been telling operators to run since the
+/// coverage counters landed: incremental indexing only visits files whose
+/// bytes changed, so queue rows for deleted symbols, failed rows, and symbols
+/// that were never queued survive every rerun (cas-8a03). Dropped rows also
+/// lose their cached vector here, so a retired symbol cannot keep answering
+/// semantic queries.
+pub fn reconcile_code_vector_queue(cas_root: &Path, force: bool, result: &mut CodeIndexResult) {
+    let store = match cas_store::SqliteCodeVectorStore::open(cas_root) {
+        Ok(store) => store,
+        Err(error) => {
+            result
+                .errors
+                .push(format!("failed to open code vector queue: {error}"));
+            return;
+        }
+    };
+    let outcome = match store.reconcile(force) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            result
+                .errors
+                .push(format!("failed to reconcile code vector queue: {error}"));
+            return;
+        }
+    };
+    if let Err(error) = retire_cached_code_vectors(cas_root, &outcome.dropped_symbol_ids) {
+        result.errors.push(format!(
+            "failed to retire cached vectors for dropped queue rows: {error}"
+        ));
+    }
+    result.vector_reconcile = Some(outcome);
 }
 
 /// Full-tree reconciliation used on daemon startup and by `cas index code`
@@ -584,6 +677,9 @@ pub fn reconcile_code_tree(
 
     let mut result = index_code_files_with(files, cas_root, force)?;
     let code_store = open_code_store(cas_root)?;
+    // One shared wait budget for the whole retirement sweep: see
+    // [`WriterLockBudget`] — 592 files must not each wait out the same lock.
+    let mut writer_budget = WriterLockBudget::new(WRITER_LOCK_BUDGET);
 
     let mut by_repo: std::collections::HashMap<String, (PathBuf, HashSet<String>)> =
         std::collections::HashMap::new();
@@ -648,7 +744,7 @@ pub fn reconcile_code_tree(
             }
         };
         for stale in stored.iter().filter(|file| !current_ids.contains(&file.id)) {
-            match retire_code_file(cas_root, code_store.as_ref(), stale) {
+            match retire_code_file(cas_root, code_store.as_ref(), stale, &mut writer_budget) {
                 Ok(_) => result.files_deleted += 1,
                 Err(error) => result.errors.push(format!(
                     "{}: failed to retire deleted source file: {error}",
@@ -703,6 +799,10 @@ pub fn reconcile_code_tree(
             ));
         }
     }
+
+    // Last, after every retirement and re-parse has landed: the queue is only
+    // reconcilable against a symbol table this run has finished writing.
+    reconcile_code_vector_queue(cas_root, force, &mut result);
     Ok(result)
 }
 
@@ -729,6 +829,7 @@ pub fn run_code_index_cycle(
 
     if !deleted_paths.is_empty() {
         if let Ok(code_store) = open_code_store(cas_root) {
+            let mut writer_budget = WriterLockBudget::new(WRITER_LOCK_BUDGET);
             for path in &deleted_paths {
                 // Same work-tree-root derivation the writer uses; a mismatch here would look up
                 // a repository that was never written and silently leave the rows behind.
@@ -736,7 +837,8 @@ pub fn run_code_index_cycle(
 
                 let path_str = path.to_string_lossy();
                 if let Ok(Some(file)) = code_store.get_file_by_path(&repo_name, &path_str) {
-                    match retire_code_file(cas_root, code_store.as_ref(), &file) {
+                    match retire_code_file(cas_root, code_store.as_ref(), &file, &mut writer_budget)
+                    {
                         Ok(_) => result.files_deleted += 1,
                         Err(error) => result.errors.push(format!(
                             "{}: failed to retire deleted source file: {error}",

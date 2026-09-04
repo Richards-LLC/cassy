@@ -2467,9 +2467,20 @@ fn code_vector_summary(state: &SymbolIndexState) -> String {
     }
     if state.vector_orphaned > 0 {
         summary.push_str(&format!(
-            "; {} queue row(s) name symbols that no longer exist",
+            "; {} queue row(s) name symbols that no longer exist \
+             (run `cas index code` to drop them)",
             state.vector_orphaned
         ));
+    }
+    // A failure that survived a reconcile is a failure the reconcile refused to
+    // re-arm: its recorded error names input the provider rejects identically
+    // every time. Repeating "run `cas index code`" there is exactly the loop
+    // cas-8a03 is about, so the residual gets its own command.
+    if state.vector_failed > 0 {
+        summary.push_str(
+            "; failed rows are re-armed by `cas index code`, and \
+             `cas index code --force` re-arms even the permanently-rejected ones",
+        );
     }
     if let Some(rebuild) = &state.vector_rebuild {
         summary.push_str(&format!(
@@ -5303,6 +5314,39 @@ mod tests {
             "message: {}",
             check.message
         );
+    }
+
+    /// cas-8a03: every clause has to name a command that actually clears it.
+    /// Orphaned rows are dropped by `cas index code`; failed rows are re-armed
+    /// by it; the residual it deliberately refuses to re-arm names `--force`.
+    #[test]
+    fn symbol_index_check_names_a_command_for_every_vector_residual() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            vector_eligible: 900,
+            vectorized: 340,
+            vector_pending: 557,
+            vector_failed: 3,
+            vector_unqueued: 120,
+            vector_orphaned: 553,
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        for expected in [
+            "120 never queued — run `cas index code` to re-arm them",
+            "553 queue row(s) name symbols that no longer exist (run `cas index code` to drop them)",
+            "failed rows are re-armed by `cas index code`",
+            "`cas index code --force` re-arms even the permanently-rejected ones",
+        ] {
+            assert!(
+                check.message.contains(expected),
+                "missing {expected}: {}",
+                check.message
+            );
+        }
     }
 
     /// A reset that is named is not a reset that lies: after the vector cache

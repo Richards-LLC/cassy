@@ -15,7 +15,9 @@ use clap::{Args, Subcommand};
 
 use crate::cli::Cli;
 use crate::config::Config;
-use crate::daemon::indexing::{collect_source_files, index_code_files_with, reconcile_code_tree};
+use crate::daemon::indexing::{
+    collect_source_files, index_code_files_with, reconcile_code_tree, reconcile_code_vector_queue,
+};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum IndexCommands {
@@ -86,11 +88,18 @@ fn execute_code(args: &IndexCodeArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
     }
 
     let started = Instant::now();
-    let result = if args.paths.is_empty() {
+    let mut result = if args.paths.is_empty() {
         reconcile_code_tree(&files, &roots, cas_root, args.force)?
     } else {
         index_code_files_with(&files, cas_root, args.force)?
     };
+    // Every run ends reconciled, including a path-scoped one: the queue rows
+    // doctor complains about are not owned by any particular file, so scoping
+    // the reconcile to the requested paths would leave the operator with the
+    // same warning and the same command (cas-8a03).
+    if result.vector_reconcile.is_none() {
+        reconcile_code_vector_queue(cas_root, args.force, &mut result);
+    }
     let elapsed = started.elapsed();
 
     // Post-run totals come from the store, not the run, so a no-op incremental pass still
@@ -114,6 +123,15 @@ fn execute_code(args: &IndexCodeArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
                 "total_symbols": total_symbols,
                 "elapsed_ms": elapsed.as_millis(),
                 "errors": result.errors,
+                "vector_reconcile": result.vector_reconcile.as_ref().map(|reconcile| {
+                    serde_json::json!({
+                        "orphaned_dropped": reconcile.orphaned_dropped,
+                        "failed_rearmed": reconcile.failed_rearmed,
+                        "failed_retained": reconcile.failed_retained,
+                        "stale_rearmed": reconcile.stale_rearmed,
+                        "requeued": reconcile.requeued,
+                    })
+                }),
             })
         );
     } else {
@@ -124,6 +142,9 @@ fn execute_code(args: &IndexCodeArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
             elapsed.as_secs_f64()
         );
         println!("Index now holds {total_files} file(s) and {total_symbols} symbol(s).");
+        if let Some(reconcile) = &result.vector_reconcile {
+            println!("{}", reconcile_summary(reconcile));
+        }
         if !result.errors.is_empty() {
             println!("{} file(s) could not be indexed:", result.errors.len());
             for error in result.errors.iter().take(3) {
@@ -133,6 +154,35 @@ fn execute_code(args: &IndexCodeArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
     }
 
     Ok(())
+}
+
+/// One line stating what the closing queue reconcile changed.
+///
+/// The counts are printed even when they are all zero (as "already
+/// consistent"), because the failure this command is fixing was a run that
+/// silently changed nothing while doctor kept naming it as the remedy
+/// (cas-8a03). A retained residual names its own remediation rather than
+/// leaving the operator to re-run the same command forever.
+fn reconcile_summary(reconcile: &cas_store::CodeVectorReconcile) -> String {
+    if reconcile.is_noop() && reconcile.failed_retained == 0 {
+        return "Code-vector queue already consistent: nothing to reconcile.".to_string();
+    }
+    let mut line = format!(
+        "Reconciled code-vector queue: {} orphaned row(s) dropped, {} failed re-armed, \
+         {} stale row(s) re-armed, {} symbol(s) re-queued.",
+        reconcile.orphaned_dropped,
+        reconcile.failed_rearmed,
+        reconcile.stale_rearmed,
+        reconcile.requeued,
+    );
+    if reconcile.failed_retained > 0 {
+        line.push_str(&format!(
+            " {} failed row(s) left alone — their recorded error names input the provider \
+             rejects every time; `cas index code --force` re-arms them anyway.",
+            reconcile.failed_retained
+        ));
+    }
+    line
 }
 
 /// Walk `roots` and collect files whose extension is indexable.

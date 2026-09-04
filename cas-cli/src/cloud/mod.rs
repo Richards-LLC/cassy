@@ -46,6 +46,7 @@ pub use config::{
     TeamInfo, TeamScopeAdoption, adopt_team_scope_for_configs, canonical_id_from_cas_root,
     canonical_id_from_config_toml, canonical_project_id, canonical_project_id_with_pin,
     clear_login_credentials, derive_canonical_id_from_git_remote, detect_canonical_id_collisions,
+    git_origin_url,
     get_project_canonical_id, invalidate_cached_project_alias_class, invalidate_cached_project_id,
     maybe_adopt_team_scope, maybe_mark_personal_scope_notice, normalize_project_canonical_id,
     normalized_git_remote_for_push, personal_scope_notice_for_configs,

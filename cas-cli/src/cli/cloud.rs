@@ -274,6 +274,88 @@ pub struct CloudUnlinkArgs {
     pub dry_run: bool,
 }
 
+const LAST_KNOWLEDGE_PUSH_PROJECT_KEY: &str = "last_knowledge_push_project_id";
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ForeignIdentityMetadataCleanup {
+    team_watermarks: usize,
+    team_registrations: usize,
+    knowledge_project: usize,
+}
+
+impl ForeignIdentityMetadataCleanup {
+    fn total(self) -> usize {
+        self.team_watermarks + self.team_registrations + self.knowledge_project
+    }
+}
+
+/// Return the metadata keys that belong to another cloud identity. The
+/// watermark prefix is intentionally broad: purge-foreign must invalidate
+/// every team pull watermark after deleting local content.
+fn foreign_identity_metadata_keys(
+    metadata: &[(String, String)],
+    current_project: &str,
+) -> Vec<String> {
+    let current_suffix = format!("_{current_project}");
+    metadata
+        .iter()
+        .filter(|(key, value)| {
+            (key.starts_with("last_team_pull_at_")
+                || (key.starts_with("team_project_registered_")
+                    && !key.ends_with(&current_suffix)))
+                || (key == LAST_KNOWLEDGE_PUSH_PROJECT_KEY && value != current_project)
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+fn metadata_cleanup_counts(
+    metadata: &[(String, String)],
+    current_project: &str,
+) -> ForeignIdentityMetadataCleanup {
+    foreign_identity_metadata_keys(metadata, current_project).into_iter().fold(
+        ForeignIdentityMetadataCleanup::default(),
+        |mut counts, key| {
+            if key.starts_with("last_team_pull_at_") {
+                counts.team_watermarks += 1;
+            } else if key.starts_with("team_project_registered_") {
+                counts.team_registrations += 1;
+            } else if key == LAST_KNOWLEDGE_PUSH_PROJECT_KEY {
+                counts.knowledge_project += 1;
+            }
+            counts
+        },
+    )
+}
+
+/// Clear local identity markers after the foreign content rows have been
+/// removed. Keep the prefix delete for team watermarks so newly introduced
+/// team scopes cannot survive a purge merely because this code does not know
+/// their full key shape yet.
+fn clear_foreign_identity_metadata(
+    queue: &crate::cloud::SyncQueue,
+    current_project: &str,
+) -> anyhow::Result<ForeignIdentityMetadataCleanup> {
+    let team_watermarks = queue.delete_metadata_with_prefix("last_team_pull_at_")?;
+    let metadata = queue.list_metadata()?;
+    let mut counts = ForeignIdentityMetadataCleanup {
+        team_watermarks,
+        ..Default::default()
+    };
+    for key in foreign_identity_metadata_keys(&metadata, current_project) {
+        if key.starts_with("last_team_pull_at_") {
+            continue;
+        }
+        queue.delete_metadata(&key)?;
+        if key.starts_with("team_project_registered_") {
+            counts.team_registrations += 1;
+        } else if key == LAST_KNOWLEDGE_PUSH_PROJECT_KEY {
+            counts.knowledge_project += 1;
+        }
+    }
+    Ok(counts)
+}
+
 #[derive(Parser)]
 pub struct CloudQueueArgs {
     /// Show detailed list of queued items
@@ -5960,6 +6042,11 @@ fn execute_purge_foreign(
     let total_before = entries_before + tasks_before + rules_before + skills_before;
 
     let db_path = cas_root.join("cas.db");
+    let metadata_before = SyncQueue::open_read_only(cas_root)
+        .ok()
+        .and_then(|queue| queue.list_metadata().ok())
+        .unwrap_or_default();
+    let metadata_would_clear = metadata_cleanup_counts(&metadata_before, &project_id);
 
     // cas-a034 / GH #132: resolve the concrete delete set and the safety state
     // BEFORE anything destructive happens, so --dry-run can show exactly what
@@ -6021,6 +6108,12 @@ fn execute_purge_foreign(
                         "unattributed_tasks": analysis.unattributed_task_count,
                         "id_collisions": analysis.collision_count,
                         "retained_foreign_tasks": analysis.retained_foreign_tasks.len(),
+                    },
+                    "identity_metadata": {
+                        "would_clear": metadata_would_clear.total(),
+                        "team_watermarks": metadata_would_clear.team_watermarks,
+                        "team_project_registrations": metadata_would_clear.team_registrations,
+                        "last_knowledge_push_project_id": metadata_would_clear.knowledge_project,
                     },
                     "retained_foreign_tasks": analysis
                         .retained_foreign_tasks
@@ -6117,6 +6210,16 @@ fn execute_purge_foreign(
             }
             fmt.write_raw(&format!("    {} dependency edges", delete_set.dependencies))?;
             fmt.newline()?;
+            if metadata_would_clear.total() > 0 {
+                fmt.write_raw(&format!(
+                    "    {} foreign identity metadata marker(s) would be cleared ({} team watermarks, {} project registrations, {} knowledge project id)",
+                    metadata_would_clear.total(),
+                    metadata_would_clear.team_watermarks,
+                    metadata_would_clear.team_registrations,
+                    metadata_would_clear.knowledge_project,
+                ))?;
+                fmt.newline()?;
+            }
 
             if !refusals.is_empty() {
                 fmt.newline()?;
@@ -6188,7 +6291,8 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
     // Purge removes the local evidence used by team-pull watermarks. Clear
     // every scoped watermark so the next team pull cannot skip the rows that
     // need to be re-evaluated under the same ownership rule as doctor.
-    let cleared_team_watermarks = queue.delete_metadata_with_prefix("last_team_pull_at_")?;
+    let cleared_identity_metadata =
+        clear_foreign_identity_metadata(&queue, &project_id)?;
     let syncer = CloudSyncer::new_for_project(
         Arc::new(queue),
         config,
@@ -6220,7 +6324,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
 
     if cli.json {
         println!(
-            r#"{{"project_id":"{}","backup":"{}","entities_before":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"entities_after":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"purged":{},"team_watermarks_cleared":{},"pull_errors":{}}}"#,
+            r#"{{"project_id":"{}","backup":"{}","entities_before":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"entities_after":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"purged":{},"team_watermarks_cleared":{},"team_project_registrations_cleared":{},"last_knowledge_push_project_id_cleared":{},"pull_errors":{}}}"#,
             project_id,
             backup_path.display(),
             entries_before,
@@ -6234,7 +6338,9 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
             skills_after,
             total_after,
             purged,
-            cleared_team_watermarks,
+            cleared_identity_metadata.team_watermarks,
+            cleared_identity_metadata.team_registrations,
+            cleared_identity_metadata.knowledge_project,
             serde_json::to_string(&pull_result.errors).unwrap_or_default(),
         );
     } else {
@@ -6251,7 +6357,12 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
         fmt.write_raw(&format!("{} foreign entities removed", purged))?;
         fmt.newline()?;
         fmt.write_muted("  Team pull watermarks cleared: ")?;
-        fmt.write_raw(&cleared_team_watermarks.to_string())?;
+        fmt.write_raw(&format!(
+            "{} team watermarks, {} project registrations, {} knowledge project id",
+            cleared_identity_metadata.team_watermarks,
+            cleared_identity_metadata.team_registrations,
+            cleared_identity_metadata.knowledge_project,
+        ))?;
         fmt.newline()?;
         fmt.write_muted("  Backup:  ")?;
         fmt.write_raw(&backup_path.to_string_lossy())?;
@@ -6286,6 +6397,85 @@ mod team_cmd_tests {
     use tempfile::TempDir;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn foreign_identity_metadata_cleanup_keeps_current_scope_and_removes_foreign_markers() {
+        let metadata = vec![
+            (
+                "last_team_pull_at_team_project-one".to_string(),
+                "current".to_string(),
+            ),
+            (
+                "last_team_pull_at_team_project-two".to_string(),
+                "foreign".to_string(),
+            ),
+            (
+                "team_project_registered_team_project-one".to_string(),
+                "1".to_string(),
+            ),
+            (
+                "team_project_registered_team_project-two".to_string(),
+                "1".to_string(),
+            ),
+            (
+                LAST_KNOWLEDGE_PUSH_PROJECT_KEY.to_string(),
+                "project-two".to_string(),
+            ),
+        ];
+
+        let keys = foreign_identity_metadata_keys(&metadata, "project-one");
+        assert_eq!(
+            keys,
+            vec![
+                "last_team_pull_at_team_project-one",
+                "last_team_pull_at_team_project-two",
+                "team_project_registered_team_project-two",
+                LAST_KNOWLEDGE_PUSH_PROJECT_KEY,
+            ]
+        );
+        assert_eq!(
+            metadata_cleanup_counts(&metadata, "project-one"),
+            ForeignIdentityMetadataCleanup {
+                team_watermarks: 2,
+                team_registrations: 1,
+                knowledge_project: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn clear_foreign_identity_metadata_deletes_only_foreign_rows() {
+        let temp = TempDir::new().unwrap();
+        let queue = crate::cloud::SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        queue
+            .set_metadata("last_team_pull_at_team_project-one", "current")
+            .unwrap();
+        queue
+            .set_metadata("last_team_pull_at_team_project-two", "foreign")
+            .unwrap();
+        queue
+            .set_metadata("team_project_registered_team_project-one", "1")
+            .unwrap();
+        queue
+            .set_metadata("team_project_registered_team_project-two", "1")
+            .unwrap();
+        queue
+            .set_metadata(LAST_KNOWLEDGE_PUSH_PROJECT_KEY, "project-two")
+            .unwrap();
+
+        let cleared = clear_foreign_identity_metadata(&queue, "project-one").unwrap();
+        assert_eq!(cleared.team_watermarks, 2);
+        assert_eq!(cleared.team_registrations, 1);
+        assert_eq!(cleared.knowledge_project, 1);
+        assert_eq!(
+            queue.list_metadata().unwrap(),
+            vec![(
+                "team_project_registered_team_project-one".to_string(),
+                "1".to_string(),
+            )]
+        );
+    }
 
     #[test]
     fn queue_retry_reason_is_available_as_a_targeted_retry_flag() {

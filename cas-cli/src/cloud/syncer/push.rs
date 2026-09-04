@@ -40,7 +40,7 @@ impl CloudSyncer {
     /// `Some(message)` when this checkout is a scratch/probe root that must not
     /// push (GH #701). Resolution failure yields `None`: an unclassifiable root
     /// syncs, because blocking a real project is the expensive mistake.
-    fn ephemeral_project_refusal(&self) -> Option<String> {
+    pub(super) fn ephemeral_project_refusal(&self) -> Option<String> {
         // Classify the root this syncer was built for, not whatever project the
         // process happens to be running in: on CI the process root is the runner
         // workspace, which is not the project being pushed.
@@ -1183,8 +1183,40 @@ mod ephemeral_guard_root_tests {
         let unpinned = syncer_for(&base.path().join("scratch").join(".cas"), false);
         let refusal = unpinned.ephemeral_project_refusal();
         assert!(
-            refusal.as_deref().is_some_and(|r| r.contains("/tmp")),
+            refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("bare folder name") && r.contains("scratch")),
             "an unpinned /tmp root must be refused by its own path, got {refusal:?}"
         );
+    }
+
+    #[test]
+    fn guard_refuses_an_unpinned_store_with_only_a_bare_folder_identity() {
+        let real_home = dirs::home_dir().expect("test runner has a home directory");
+        let base = tempfile::Builder::new()
+            .prefix("cas-guard-bare-")
+            .tempdir_in(real_home)
+            .unwrap();
+        let syncer = syncer_for(&base.path().join(".cas"), false);
+        let refusal = syncer.ephemeral_project_refusal();
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|message| message.contains("bare folder name")),
+            "an unpinned no-remote store must be refused, got {refusal:?}"
+        );
+    }
+
+    #[test]
+    fn team_push_uses_the_same_bare_folder_guard() {
+        let real_home = dirs::home_dir().expect("test runner has a home directory");
+        let base = tempfile::Builder::new()
+            .prefix("cas-guard-team-")
+            .tempdir_in(real_home)
+            .unwrap();
+        let syncer = syncer_for(&base.path().join(".cas"), false);
+        let result = syncer.push_team("team-test").unwrap();
+        assert_eq!(result.pushed_entries, 0);
+        assert_eq!(result.pushed_tasks, 0);
     }
 }

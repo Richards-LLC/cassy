@@ -55,7 +55,7 @@ pub struct SeedReport {
     /// Paths rejected because `<path>/.cas/` is not a directory.
     pub skipped_missing: Vec<PathBuf>,
     /// Paths rejected as disposable roots (factory artifacts, `~/.cas/scratch`,
-    /// a named temp root), paired with the reason. These have a real `.cas/`
+    /// a temp root or an unpinned no-remote container), paired with the reason. These have a real `.cas/`
     /// — they are copies of a project, not projects (cas-647c).
     pub skipped_disposable: Vec<(PathBuf, String)>,
 }

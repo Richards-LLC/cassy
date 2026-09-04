@@ -94,6 +94,15 @@ impl CloudSyncer {
             return Ok(result);
         }
 
+        // Keep team-scoped writes behind the same per-root identity guard as
+        // personal writes. Otherwise a `cas cloud sync` from an unpinned,
+        // no-remote fixture could still mint a team bucket after personal
+        // push declined the root.
+        if let Some(refusal) = self.ephemeral_project_refusal() {
+            tracing::warn!("[Cassy sync] {refusal}");
+            return Ok(result);
+        }
+
         // Fetch (but do NOT delete) pending team items so we can
         // mark_failed / mark_synced per item after the HTTP call completes.
         // Using drain_by_team here would delete items up-front and then

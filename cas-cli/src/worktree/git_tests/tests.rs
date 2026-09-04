@@ -1551,7 +1551,7 @@ fn close_guard_origin_view_only_sees_the_merge_after_the_target_is_published() {
 
 /// A diverged remote must be reported, never force-pushed over.
 #[test]
-fn publish_branch_to_origin_reports_not_pushed_on_diverged_remote() {
+fn publish_branch_to_origin_reports_non_fast_forward_on_diverged_remote() {
     let (temp, origin_path, local_path, merge_sha) = merged_locally_with_origin_behind();
     advance_origin_main(&temp, &origin_path, 1);
 
@@ -1571,12 +1571,15 @@ fn publish_branch_to_origin_reports_not_pushed_on_diverged_remote() {
     };
 
     let outcome = git.publish_branch_to_origin("main");
+    // cas-42e1: this end-to-end rejection is now classified precisely rather
+    // than collapsed into the generic failure, because the remedy differs in
+    // kind — repeating the push cannot work.
     match &outcome {
-        TargetPushOutcome::NotPushed { sha, reason, .. } => {
-            assert_eq!(sha.as_deref(), Some(merge_sha.as_str()));
+        TargetPushOutcome::NonFastForward { sha, reason, .. } => {
+            assert_eq!(sha, &merge_sha);
             assert!(!reason.is_empty(), "the failure must carry a reason");
         }
-        other => panic!("diverged remote must report NotPushed, got {other:?}"),
+        other => panic!("diverged remote must report NonFastForward, got {other:?}"),
     }
     assert!(!outcome.is_published());
 
@@ -1608,5 +1611,164 @@ fn publish_branch_to_origin_bounds_its_wall_clock() {
     assert!(
         matches!(outcome, TargetPushOutcome::NotPushed { .. }),
         "a timed-out push must report NotPushed, got {outcome:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// cas-42e1 (GH #703 "Also observed"): worktree_merge against a target whose
+// origin has moved.
+//
+// The reported failure: another supervisor's PR landed, so `origin/<target>`
+// was AHEAD; the merge ran against the stale local target, the push was
+// rejected non-fast-forward, and the receipt announced "origin/<target> ... is
+// BEHIND" with `git push origin <target>` as the required next step — the
+// inverse of the real condition, and a command that cannot succeed.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_target_behind_origin_is_fast_forwarded_before_the_merge() {
+    let (temp, origin_path, local_path) = create_repo_with_origin();
+    let old_tip = GitOperations::new(local_path.clone())
+        .resolve_commit("main")
+        .unwrap();
+    advance_origin_main(&temp, &origin_path, 1);
+    let new_tip = {
+        let git = GitOperations::new(local_path.clone());
+        git.fetch_branch("main").unwrap();
+        git.resolve_commit("origin/main").unwrap()
+    };
+
+    let git = GitOperations::new(local_path.clone());
+    let outcome = git.reconcile_target_with_origin("main");
+
+    match outcome {
+        TargetReconcile::FastForwarded {
+            from,
+            to,
+            commits_gained,
+        } => {
+            assert_eq!(from, old_tip);
+            assert_eq!(to, new_tip);
+            assert_eq!(commits_gained, 1);
+        }
+        other => panic!("a strictly-behind target must fast-forward, got {other:?}"),
+    }
+    assert_eq!(
+        git.resolve_commit("main").unwrap(),
+        new_tip,
+        "the local target must actually move, not merely be reported as moved"
+    );
+}
+
+#[test]
+fn a_diverged_target_is_refused_and_left_untouched() {
+    let (temp, origin_path, local_path) = create_repo_with_origin();
+    advance_origin_main(&temp, &origin_path, 1);
+    // A local-only commit on main makes this a true divergence rather than a
+    // fast-forward: both sides now hold work the other lacks.
+    commit_file(&local_path, "local-only.txt", "supervisor's own commit\n");
+    let local_tip = GitOperations::new(local_path.clone())
+        .resolve_commit("main")
+        .unwrap();
+
+    let git = GitOperations::new(local_path.clone());
+    match git.reconcile_target_with_origin("main") {
+        TargetReconcile::Diverged {
+            local,
+            remote,
+            ahead,
+            behind,
+        } => {
+            assert_eq!(local, local_tip);
+            assert_ne!(remote, local_tip);
+            assert_eq!(ahead, 1, "one local-only commit");
+            assert_eq!(behind, 1, "one commit only on origin");
+        }
+        other => panic!("divergence must be refused, got {other:?}"),
+    }
+    assert_eq!(
+        git.resolve_commit("main").unwrap(),
+        local_tip,
+        "a refusal must not move the operator's local target"
+    );
+}
+
+#[test]
+fn an_unreachable_origin_degrades_explicitly_instead_of_blocking_the_merge() {
+    let (_temp, origin_path, local_path) = create_repo_with_origin();
+    // Delete the remote out from under the clone: fetch now fails the way an
+    // offline or auth-broken remote does.
+    std::fs::remove_dir_all(&origin_path).unwrap();
+
+    let git = GitOperations::new(local_path.clone());
+    let local_tip = git.resolve_commit("main").unwrap();
+    match git.reconcile_target_with_origin("main") {
+        TargetReconcile::FetchFailed { local, reason } => {
+            assert_eq!(local.as_deref(), Some(local_tip.as_str()));
+            assert!(!reason.is_empty(), "the failure must carry a diagnostic");
+        }
+        other => panic!("an unreachable origin must degrade, not block, got {other:?}"),
+    }
+    assert_eq!(
+        git.resolve_commit("main").unwrap(),
+        local_tip,
+        "a failed fetch must leave the target exactly where it was"
+    );
+}
+
+#[test]
+fn a_target_already_current_with_origin_reports_no_work() {
+    let (_temp, _origin_path, local_path) = create_repo_with_origin();
+    let git = GitOperations::new(local_path);
+    assert!(
+        matches!(
+            git.reconcile_target_with_origin("main"),
+            TargetReconcile::AlreadyCurrent { .. }
+        ),
+        "an in-sync target needs no reconciliation"
+    );
+}
+
+#[test]
+fn a_non_fast_forward_rejection_is_classified_as_such() {
+    // git's own rejection text, verbatim from a push whose remote moved.
+    let stderr = " ! [rejected]        main -> main (fetch first)\n\
+                  error: failed to push some refs to '/tmp/origin.git'\n\
+                  hint: Updates were rejected because the remote contains work that you do\n\
+                  hint: not have locally.";
+    let outcome = crate::worktree::git::branch_ops::classify_push_rejection(
+        "main",
+        "main",
+        "aaaaaaaaaaaa".to_string(),
+        Some("bbbbbbbbbbbb".to_string()),
+        stderr,
+    );
+    match outcome {
+        TargetPushOutcome::NonFastForward {
+            sha,
+            remote_sha,
+            reason,
+        } => {
+            assert_eq!(sha, "aaaaaaaaaaaa");
+            assert_eq!(remote_sha.as_deref(), Some("bbbbbbbbbbbb"));
+            assert!(reason.contains("rejected"), "{reason}");
+        }
+        other => panic!("a non-fast-forward push must be classified, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_ordinary_push_failure_is_still_a_plain_not_pushed() {
+    // Guard against the new arm swallowing unrelated failures.
+    let outcome = crate::worktree::git::branch_ops::classify_push_rejection(
+        "main",
+        "main",
+        "aaaaaaaaaaaa".to_string(),
+        None,
+        "fatal: could not read Username for 'https://github.com': No such device",
+    );
+    assert!(
+        matches!(outcome, TargetPushOutcome::NotPushed { .. }),
+        "an auth failure is not a non-fast-forward"
     );
 }

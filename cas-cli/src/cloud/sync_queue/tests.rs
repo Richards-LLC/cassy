@@ -142,6 +142,8 @@ fn conflict_journal_retains_the_discarded_row_and_prunes_by_age() {
             r#"{\"id\":\"cas-conflict\",\"notes\":\"local note\"}"#,
             "remote",
             "timestamp_lww",
+            None,
+            None,
         )
         .unwrap();
 
@@ -817,4 +819,273 @@ fn test_team_coalesce_updates() {
     let pending = queue.pending_for_team("team-123", 10, 5).unwrap();
     assert_eq!(pending.len(), 1);
     assert!(pending[0].payload.as_ref().unwrap().contains("v2"));
+}
+
+#[test]
+fn dependency_tombstone_ledger_keeps_the_newest_delete_and_prunes_by_retention() {
+    use chrono::{Duration, Utc};
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue = SyncQueue::open(temp.path()).unwrap();
+    queue.init().unwrap();
+
+    let entity_id = "cas-a:cas-b:blocks";
+    let older = Utc::now() - Duration::hours(5);
+    let newer = Utc::now() - Duration::hours(1);
+    queue
+        .record_dependency_tombstone(entity_id, "cas-a", "cas-b", "blocks", newer)
+        .unwrap();
+    // A replayed older delete must not roll the ledger backwards.
+    queue
+        .record_dependency_tombstone(entity_id, "cas-a", "cas-b", "blocks", older)
+        .unwrap();
+    assert_eq!(
+        queue
+            .dependency_tombstone(entity_id)
+            .unwrap()
+            .unwrap()
+            .timestamp(),
+        newer.timestamp()
+    );
+    assert_eq!(queue.dependency_tombstones().unwrap().len(), 1);
+
+    // A queued upsert for a tombstoned edge is dropped: the server refuses it
+    // anyway, so retrying it forever is pure noise.
+    queue
+        .enqueue(
+            EntityType::TaskDependency,
+            entity_id,
+            SyncOperation::Upsert,
+            Some("{}"),
+        )
+        .unwrap();
+    assert_eq!(queue.drop_queued_dependency_upsert(entity_id).unwrap(), 1);
+    assert!(queue.pending(10, 5).unwrap().is_empty());
+
+    // The cloud prunes tombstones after 90 days; the local ledger follows so it
+    // cannot suppress an edge the cloud has already forgotten.
+    queue
+        .record_dependency_tombstone(
+            "cas-c:cas-d:related",
+            "cas-c",
+            "cas-d",
+            "related",
+            Utc::now() - Duration::days(120),
+        )
+        .unwrap();
+    assert_eq!(queue.prune_dependency_tombstones(Utc::now()).unwrap(), 1);
+    assert!(queue.dependency_tombstone(entity_id).unwrap().is_some());
+    assert!(
+        queue
+            .dependency_tombstone("cas-c:cas-d:related")
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// GH #668: a terminal row keeps the cloud's own verdict, so reporting can say
+/// *why* the row is parked instead of quoting a free-text diagnostic.
+#[test]
+fn record_row_outcome_groups_terminal_rows_by_cloud_reason() {
+    let (_temp, queue) = create_test_queue();
+    const MAX_RETRIES: i32 = 5;
+
+    for (id, reason) in [
+        ("task-a", "project_mismatch"),
+        ("task-b", "project_mismatch"),
+        ("task-c", "revision_conflict"),
+    ] {
+        queue
+            .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
+            .unwrap();
+        let row_id = terminal_row_id(&queue, id, MAX_RETRIES);
+        queue
+            .park_failed(row_id, "cloud rejected", MAX_RETRIES)
+            .unwrap();
+        queue
+            .record_row_outcome(row_id, "rejected", Some(reason))
+            .unwrap();
+    }
+
+    // A transport failure never receives a per-row verdict and must not be
+    // counted as a cloud rejection.
+    queue
+        .enqueue(
+            EntityType::Task,
+            "task-offline",
+            SyncOperation::Upsert,
+            Some("{}"),
+        )
+        .unwrap();
+    let offline = terminal_row_id(&queue, "task-offline", MAX_RETRIES);
+    queue
+        .park_failed(offline, "Network error: connection refused", MAX_RETRIES)
+        .unwrap();
+
+    let counts = queue
+        .rejected_reason_counts_for_entity_type(None, MAX_RETRIES)
+        .unwrap();
+    assert_eq!(counts.get("project_mismatch").copied(), Some(2));
+    assert_eq!(counts.get("revision_conflict").copied(), Some(1));
+    assert_eq!(
+        counts.len(),
+        2,
+        "transport failures are not cloud rejections"
+    );
+}
+
+fn terminal_row_id(queue: &SyncQueue, entity_id: &str, max_retries: i32) -> i64 {
+    queue
+        .pending(100, max_retries)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.entity_id == entity_id)
+        .expect("row is still pending")
+        .id
+}
+
+/// GH #668: rows an older client parked (including rows parked before the
+/// client recorded its build at all) get exactly one fresh attempt after an
+/// upgrade, and a permanent cloud rejection is never resurrected.
+#[test]
+fn stale_client_failures_requeue_once_per_upgrade() {
+    use rusqlite::Connection;
+
+    let temp = TempDir::new().unwrap();
+    let queue = SyncQueue::open(temp.path()).unwrap();
+    queue.init().unwrap();
+    const MAX_RETRIES: i32 = 5;
+
+    for id in ["task-429", "task-permanent", "task-retryable-reason"] {
+        queue
+            .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
+            .unwrap();
+        let row_id = terminal_row_id(&queue, id, MAX_RETRIES);
+        queue
+            .park_failed(row_id, "parked by an older build", MAX_RETRIES)
+            .unwrap();
+        match id {
+            "task-permanent" => queue
+                .record_row_outcome(row_id, "rejected", Some("project_mismatch"))
+                .unwrap(),
+            "task-retryable-reason" => queue
+                .record_row_outcome(row_id, "rejected", Some("revision_conflict"))
+                .unwrap(),
+            _ => {}
+        }
+    }
+
+    // Simulate the on-disk state of a client that predates the stamp column.
+    {
+        let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+        conn.execute("UPDATE sync_queue SET failed_client_version = NULL", [])
+            .unwrap();
+    }
+
+    // The build that records failures is this crate's own version, so the
+    // test must ask the same question production does.
+    let this_build = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        queue
+            .requeue_stale_client_failures(this_build, MAX_RETRIES)
+            .unwrap(),
+        2,
+        "the 429 row and the retryable rejection get one more attempt"
+    );
+    assert_eq!(
+        queue
+            .requeue_stale_client_failures(this_build, MAX_RETRIES)
+            .unwrap(),
+        0,
+        "the same build must not requeue the same rows twice"
+    );
+
+    let pending = queue
+        .pending(10, MAX_RETRIES)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.entity_id)
+        .collect::<Vec<_>>();
+    assert_eq!(pending, vec!["task-429", "task-retryable-reason"]);
+    assert_eq!(
+        queue
+            .rejected_reason_counts_for_entity_type(None, MAX_RETRIES)
+            .unwrap()
+            .get("project_mismatch")
+            .copied(),
+        Some(1),
+        "a permanent rejection stays parked with its reason"
+    );
+
+    // A later build finds the requeued rows terminal again and gives them one
+    // more attempt; the same build does not.
+    for id in ["task-429", "task-retryable-reason"] {
+        let row_id = terminal_row_id(&queue, id, MAX_RETRIES);
+        queue
+            .park_failed(row_id, "still failing", MAX_RETRIES)
+            .unwrap();
+    }
+    assert_eq!(
+        queue
+            .requeue_stale_client_failures(this_build, MAX_RETRIES)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        queue
+            .requeue_stale_client_failures("99.0.0", MAX_RETRIES)
+            .unwrap(),
+        2
+    );
+}
+
+/// A database created before the verdict columns existed gains them on init
+/// without losing its queued rows.
+#[test]
+fn row_outcome_columns_are_added_to_legacy_databases() {
+    use rusqlite::Connection;
+
+    let temp = TempDir::new().unwrap();
+    let db_path = temp.path().join("cas.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
+            INSERT INTO sync_queue
+                (entity_type, entity_id, operation, payload, team_id, created_at, retry_count)
+            VALUES ('task', 'legacy-task', 'upsert', '{}', '', '2026-01-01T00:00:00Z', 5);
+            "#,
+        )
+        .unwrap();
+    }
+
+    let queue = SyncQueue::open(temp.path()).unwrap();
+    queue.init().unwrap();
+
+    assert_eq!(
+        queue
+            .rejected_reason_counts_for_entity_type(None, 5)
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        queue
+            .requeue_stale_client_failures(env!("CARGO_PKG_VERSION"), 5)
+            .unwrap(),
+        1,
+        "a row parked without a build stamp is an older-client failure"
+    );
 }

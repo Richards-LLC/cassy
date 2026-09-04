@@ -8,16 +8,53 @@ use tracing::warn;
 
 use crate::cloud::sync_queue::PendingByType;
 use crate::cloud::syncer::{
-    CloudSyncer, PushBacklog, PushItemizedFailure, PushPlan, PushResponse, PushRowResult,
-    PushScope, SyncResult,
+    CloudSyncer, PushBacklog, PushItemizedFailure, PushPlan, PushResponse, PushRowOutcome,
+    PushRowResult, PushScope, SyncResult,
 };
 use crate::cloud::{QueuedSync, SyncOperation};
 use crate::error::CasError;
 use crate::types::Session;
 
+/// What one entity-typed batch actually settled.
+///
+/// The pushed count alone cannot distinguish a row the cloud wrote from a row
+/// it declined because it already held a newer version. Both leave the queue,
+/// but only the second must be reported as a kept-newer acknowledgement.
+#[derive(Debug, Default, Clone)]
+pub(super) struct PushBatchOutcome {
+    /// Rows removed from the queue (written, or acknowledged as LWW losses).
+    pub synced: usize,
+    /// Rows the cloud kept a newer version of.
+    pub skipped_lww: usize,
+    /// A refusal the server explained per row. This travels with the counts
+    /// rather than as `Err` so a partially rejected batch still reports the
+    /// rows it did settle instead of erasing them behind the first error.
+    pub error: Option<String>,
+}
+
 impl CloudSyncer {
     pub fn push(&self) -> Result<SyncResult, CasError> {
         self.push_scoped(PushScope::All)
+    }
+
+    /// `Some(message)` when this checkout is a scratch/probe root that must not
+    /// push (GH #701). Resolution failure yields `None`: an unclassifiable root
+    /// syncs, because blocking a real project is the expensive mistake.
+    fn ephemeral_project_refusal(&self) -> Option<String> {
+        // Classify the root this syncer was built for, not whatever project the
+        // process happens to be running in: on CI the process root is the runner
+        // workspace, which is not the project being pushed.
+        let cas_root = self
+            .push_cas_root
+            .clone()
+            .or_else(|| crate::store::find_cas_root().ok())?;
+        let verdict = crate::cloud::classify_project_root(&cas_root);
+        let project_id = self
+            .push_project_canonical_id
+            .clone()
+            .or_else(crate::cloud::get_project_canonical_id)
+            .unwrap_or_else(|| cas_root.display().to_string());
+        verdict.explain(&project_id)
     }
 
     /// Describe the exact next queue batch without mutating it.
@@ -92,8 +129,18 @@ impl CloudSyncer {
         let start = Instant::now();
 
         self.requeue_version_gated_items()?;
+        result.requeued_after_upgrade = self.requeue_stale_client_failures()?;
 
         if !self.is_available() {
+            return Ok(result);
+        }
+
+        // GH #701: a throwaway checkout must not mint a cloud identity and
+        // push into the account's shared buckets. Declining is a no-op, not a
+        // failure — the queue is left intact so a later `cas cloud project
+        // set` drains it.
+        if let Some(refusal) = self.ephemeral_project_refusal() {
+            warn!("[Cassy sync] {refusal}");
             return Ok(result);
         }
 
@@ -170,7 +217,13 @@ impl CloudSyncer {
             ($field:ident, $items:expr, $label:literal, $error:literal) => {
                 if !$items.is_empty() {
                     match self.push_batch($items, $label, token) {
-                        Ok(count) => result.$field = count,
+                        Ok(outcome) => {
+                            result.$field = outcome.synced;
+                            result.skipped_lww_acked += outcome.skipped_lww;
+                            if let Some(error) = outcome.error {
+                                result.errors.push(format!(concat!($error, ": {}"), error));
+                            }
+                        }
                         Err(e) => result.errors.push(format!(concat!($error, ": {}"), e)),
                     }
                 }
@@ -263,6 +316,7 @@ impl CloudSyncer {
         target.pushed_agents += source.pushed_agents;
         target.pushed_worktrees += source.pushed_worktrees;
         target.pushed_task_dependencies += source.pushed_task_dependencies;
+        target.skipped_lww_acked += source.skipped_lww_acked;
         target.conflicts_resolved += source.conflicts_resolved;
         target.conflicts_resolved_local += source.conflicts_resolved_local;
         target.conflicts_resolved_remote += source.conflicts_resolved_remote;
@@ -291,6 +345,10 @@ impl CloudSyncer {
                 .pending_count_for_entity_type(scope.entity_type(), self.config.max_retries)?,
             failed,
             failed_errors,
+            rejected_by_reason: self.queue.rejected_reason_counts_for_entity_type(
+                scope.entity_type(),
+                self.config.max_retries,
+            )?,
         })
     }
 
@@ -346,13 +404,65 @@ impl CloudSyncer {
         }
     }
 
+    /// Declare the base revision this upsert is built on.
+    ///
+    /// Sent as a decimal string, the wire form the server parses. When this
+    /// client has never observed a revision for the row the key is OMITTED
+    /// entirely — that is what selects the server's timestamp-LWW compatibility
+    /// path. A placeholder would be actively harmful: the server drops a row
+    /// whose revision it cannot parse, and a fabricated "0" against an existing
+    /// row is a guaranteed conflict.
+    fn with_base_revision(
+        &self,
+        item: &QueuedSync,
+        mut payload: serde_json::Value,
+    ) -> serde_json::Value {
+        let Some(object) = payload.as_object_mut() else {
+            return payload;
+        };
+        // Never let a stale body-embedded revision reach the server; the base
+        // is ours to declare, from the ledger only.
+        object.remove("revision");
+        if let Ok(Some(revision)) = self.queue.revision(item.entity_type, &item.entity_id) {
+            object.insert(
+                "revision".to_string(),
+                serde_json::Value::String(revision.to_string()),
+            );
+        }
+        payload
+    }
+
+    /// Store the revisions the server echoed for accepted rows, and drop a base
+    /// this push proved stale.
+    fn settle_revision_receipts(&self, entity_type: &str, response: &super::PushResponse) {
+        let Some(entity) = crate::cloud::EntityType::from_collection_key(entity_type) else {
+            return;
+        };
+        for (id, revision) in response.accepted_revisions_for(entity_type) {
+            let _ = self.queue.record_revision(entity, &id, revision);
+        }
+        for (id, current_revision) in response.revision_conflicts_for(entity_type) {
+            // Our base lost the race. Forget it rather than replacing it with
+            // the server's current revision: pretending we have seen that row
+            // would let the next push overwrite a change we never looked at.
+            // The next pull records the real revision and resolves the row.
+            let _ = self.queue.clear_revision(entity, &id);
+            tracing::debug!(
+                entity_type = entity_type,
+                entity_id = %id,
+                server_revision = ?current_revision,
+                "cloud rejected a stale base revision; dropped the local base and left the row queued"
+            );
+        }
+    }
+
     fn settle_personal_row_results(
         &self,
         batch_items: &[&QueuedSync],
         entity_type: &str,
         raw_response: &str,
         rows: HashMap<String, PushRowResult>,
-        synced_count: &mut usize,
+        outcome: &mut PushBatchOutcome,
         skip_errors: &mut Vec<String>,
     ) {
         let mut rejected = Vec::new();
@@ -361,16 +471,23 @@ impl CloudSyncer {
                 .get(&item.entity_id)
                 .expect("row_results_for validates every queue identity");
             if row.acknowledges() {
+                if row.outcome == PushRowOutcome::SkippedLww {
+                    outcome.skipped_lww += 1;
+                }
                 let _ = self.queue.mark_synced(item.id);
-                *synced_count += 1;
+                outcome.synced += 1;
                 continue;
             }
 
             let reason = row.reason.as_deref().unwrap_or("unspecified");
             let diagnostic = format!(
-                "cloud rejected {entity_type} {}: reason={reason}; server response: {raw_response}",
-                item.entity_id
+                "cloud rejected {entity_type} {}: reason={reason} ({}); server response: {raw_response}",
+                item.entity_id,
+                crate::cloud::syncer::push_reason_hint(reason)
             );
+            let _ = self
+                .queue
+                .record_row_outcome(item.id, "rejected", Some(reason));
             if row.rejection_is_retryable() {
                 let _ = self.queue.mark_failed(item.id, &diagnostic);
             } else {
@@ -396,7 +513,7 @@ impl CloudSyncer {
         items: &[QueuedSync],
         entity_type: &str,
         token: &str,
-    ) -> Result<usize, CasError> {
+    ) -> Result<PushBatchOutcome, CasError> {
         // Separate upserts and deletes
         let upsert_items: Vec<&QueuedSync> = items
             .iter()
@@ -419,7 +536,7 @@ impl CloudSyncer {
         for item in &upsert_items {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
-                    Ok(v) => upsert_entries.push((*item, v)),
+                    Ok(v) => upsert_entries.push((*item, self.with_base_revision(item, v))),
                     Err(_) => {
                         let _ = self
                             .queue
@@ -434,7 +551,7 @@ impl CloudSyncer {
             }
         }
 
-        let mut synced_count = 0;
+        let mut outcome = PushBatchOutcome::default();
         // A 2xx response that explicitly reports skipped rows is not a fully
         // successful push. Aggregate-only responses leave every row
         // indistinguishable, while itemized rejected/invalid rows identify
@@ -451,6 +568,9 @@ impl CloudSyncer {
 
                 match self.push_sub_batch(values, entity_type, token) {
                     Ok(response) => {
+                        // Independent of how rows settle: a revision receipt is
+                        // the server telling us what it now holds.
+                        self.settle_revision_receipts(entity_type, &response);
                         // Defensive cross-check against the server-side
                         // `ON CONFLICT DO UPDATE ... WHERE false` silent-skip
                         // path (cas-0bdc / cas-d656): an aggregate skipped
@@ -474,7 +594,7 @@ impl CloudSyncer {
                                     entity_type,
                                     &response.raw_body,
                                     rows,
-                                    &mut synced_count,
+                                    &mut outcome,
                                     &mut skip_errors,
                                 );
                                 continue;
@@ -548,8 +668,9 @@ impl CloudSyncer {
                                     );
                                     for item in &batch_items {
                                         let _ = self.queue.mark_synced(item.id);
-                                        synced_count += 1;
+                                        outcome.synced += 1;
                                     }
+                                    outcome.skipped_lww += skipped_count;
                                     continue;
                                 }
                                 Err(error) => {
@@ -608,12 +729,29 @@ impl CloudSyncer {
                                     } else {
                                         let _ = self.queue.mark_failed(item.id, &diagnostic);
                                     }
+                                    let _ = self.queue.record_row_outcome(
+                                        item.id,
+                                        "rejected",
+                                        Some(match failure {
+                                            PushItemizedFailure::Rejection(rejection) => {
+                                                rejection.reason.as_str()
+                                            }
+                                            PushItemizedFailure::Invalid(invalid) => {
+                                                invalid.reason.as_str()
+                                            }
+                                        }),
+                                    );
                                     failure_details.push(format!("{} ({reason})", item.entity_id));
                                 } else {
                                     let _ = self.queue.mark_synced(item.id);
-                                    synced_count += 1;
+                                    outcome.synced += 1;
                                 }
                             }
+                            // Skips the server did not itemize are benign LWW
+                            // losses: they were acknowledged above, so report
+                            // them as kept-newer rather than silent successes.
+                            outcome.skipped_lww +=
+                                skipped_count.saturating_sub(failure_details.len());
                             if !failure_details.is_empty() {
                                 skip_errors.push(format!(
                                     "cloud rejected {} of {} {entity_type} row(s): {}",
@@ -625,7 +763,7 @@ impl CloudSyncer {
                         } else {
                             for item in &batch_items {
                                 let _ = self.queue.mark_synced(item.id);
-                                synced_count += 1;
+                                outcome.synced += 1;
                             }
                         }
                     }
@@ -641,9 +779,7 @@ impl CloudSyncer {
             }
         }
 
-        if let Some(error) = skip_errors.into_iter().next() {
-            return Err(CasError::Other(error));
-        }
+        outcome.error = skip_errors.into_iter().next();
 
         // Send individual delete requests
         for item in deletes {
@@ -697,7 +833,7 @@ impl CloudSyncer {
             match response {
                 Ok(resp) if (200..300).contains(&resp.status()) => {
                     let _ = self.queue.mark_synced(item.id);
-                    synced_count += 1;
+                    outcome.synced += 1;
                 }
                 Ok(resp) => {
                     let status = resp.status();
@@ -709,7 +845,7 @@ impl CloudSyncer {
                 Err(ureq::Error::Status(404, _)) => {
                     // Already absent remotely is the desired final state.
                     let _ = self.queue.mark_synced(item.id);
-                    synced_count += 1;
+                    outcome.synced += 1;
                 }
                 Err(ureq::Error::Status(status, resp)) => {
                     let body = resp.into_string().unwrap_or_default();
@@ -725,7 +861,7 @@ impl CloudSyncer {
             }
         }
 
-        Ok(synced_count)
+        Ok(outcome)
     }
 
     /// Split upsert entries into sub-batches that each stay under max_payload_bytes.
@@ -995,6 +1131,60 @@ impl CloudSyncer {
         payload.insert(
             "client_build".to_string(),
             serde_json::json!(option_env!("CAS_GIT_HASH").unwrap_or("unknown")),
+        );
+    }
+}
+
+#[cfg(test)]
+mod ephemeral_guard_root_tests {
+    use std::sync::Arc;
+
+    use super::super::{CloudSyncer, CloudSyncerConfig};
+    use crate::cloud::CloudConfig;
+    use crate::cloud::sync_queue::SyncQueue;
+
+    fn syncer_for(root: &std::path::Path, pinned: bool) -> CloudSyncer {
+        std::fs::create_dir_all(root).unwrap();
+        if pinned {
+            std::fs::write(
+                root.join("config.toml"),
+                "[project]\ncanonical_id = \"pinned-project\"\n",
+            )
+            .unwrap();
+        }
+        let queue = SyncQueue::open(root).unwrap();
+        queue.init().unwrap();
+        let mut cloud = CloudConfig::default();
+        cloud.endpoint = "http://127.0.0.1:9".to_string();
+        cloud.token = Some("test-token".to_string());
+        CloudSyncer::new_for_project(
+            Arc::new(queue),
+            cloud,
+            CloudSyncerConfig::default(),
+            "pinned-project".to_string(),
+            root,
+        )
+    }
+
+    /// The guard must judge the root the syncer was built for. A pinned
+    /// scratch root is durable; an unpinned one under /tmp is ephemeral —
+    /// regardless of which project the test process itself runs inside.
+    #[test]
+    fn guard_classifies_the_syncers_own_root_not_the_process_root() {
+        let base = tempfile::Builder::new()
+            .prefix("cas-guard-root-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let pinned = syncer_for(&base.path().join("pinned").join(".cas"), true);
+        assert!(
+            pinned.ephemeral_project_refusal().is_none(),
+            "a pinned root is durable wherever it lives"
+        );
+        let unpinned = syncer_for(&base.path().join("scratch").join(".cas"), false);
+        let refusal = unpinned.ephemeral_project_refusal();
+        assert!(
+            refusal.as_deref().is_some_and(|r| r.contains("/tmp")),
+            "an unpinned /tmp root must be refused by its own path, got {refusal:?}"
         );
     }
 }

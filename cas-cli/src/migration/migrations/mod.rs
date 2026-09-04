@@ -224,6 +224,12 @@ mod m245_retrieval_outcomes_add_attribution;
 mod m246_spawn_queue_add_requester_secure_storage_dir;
 mod m247_tasks_add_delivery_mode;
 mod m248_tasks_retire_pending_supervisor_review;
+mod m249_task_dependency_tombstones;
+mod m250_quarantined_rows;
+mod m251_sync_revisions;
+mod m252_sync_conflicts_add_revisions;
+mod m253_history_embedding_error;
+mod m254_code_index_skipped_files;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -484,6 +490,12 @@ pub const MIGRATIONS: &[Migration] = &[
     m246_spawn_queue_add_requester_secure_storage_dir::MIGRATION,
     m247_tasks_add_delivery_mode::MIGRATION,
     m248_tasks_retire_pending_supervisor_review::MIGRATION,
+    m249_task_dependency_tombstones::MIGRATION,
+    m250_quarantined_rows::MIGRATION,
+    m251_sync_revisions::MIGRATION,
+    m252_sync_conflicts_add_revisions::MIGRATION,
+    m253_history_embedding_error::MIGRATION,
+    m254_code_index_skipped_files::MIGRATION,
 ];
 
 #[cfg(test)]

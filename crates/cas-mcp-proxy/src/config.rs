@@ -22,6 +22,22 @@ pub const VIKTOR_CONVERSATION_TOOLS: [&str; 9] = [
     "whoami",
 ];
 
+/// Canonical MechaCassy hub upstream. Both credentials are referenced by
+/// environment-variable *name* (`env:NAME` for the bearer, `env:NAME` for the
+/// edge-bypass header), so this registration is safe to write to disk on a
+/// shared machine and safe to read back in a doctor report.
+pub const MECHA_CASSY_SERVER: &str = "mecha-cassy";
+pub const MECHA_CASSY_MCP_URL: &str = "https://mecha-cassy.vercel.app/mcp/slack";
+/// Default bearer variable for the Cassy proxy client label. A per-machine
+/// label mints `MECHA_SLACK_TOKEN_<LABEL>` instead.
+pub const MECHA_CASSY_DEFAULT_TOKEN_ENV: &str = "MECHA_SLACK_TOKEN_CASSY_PROXY";
+pub const MECHA_CASSY_DEFAULT_BYPASS_ENV: &str = "MECHA_VERCEL_BYPASS";
+pub const MECHA_CASSY_BYPASS_HEADER: &str = "x-vercel-protection-bypass";
+/// The hub's current tool contract, verified against a live authenticated
+/// `tools/list` on 2026-09-03. The retired `slack_*` quartet is deliberately
+/// absent: an allowlist naming it produces "denied by policy" on every call.
+pub const MECHA_CASSY_TOOLS: [&str; 2] = ["mecha_read", "mecha_post"];
+
 /// MCP proxy configuration containing upstream server definitions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Config {
@@ -279,7 +295,12 @@ impl Config {
         Self::load_merged_with_sources_from(user_path.as_deref(), project_path)
     }
 
-    fn load_merged_with_sources_from(
+    /// Merge two explicit paths. Public so a caller that owns both locations
+    /// — `cas integrate mecha-cassy` and its doctor row, which must reason
+    /// about the machine file *and* the project file by hand — can ask the
+    /// same question the runtime asks, and so tests never depend on the real
+    /// user config directory.
+    pub fn load_merged_with_sources_from(
         user_path: Option<&Path>,
         project_path: Option<&Path>,
     ) -> Result<(Config, HashMap<String, PathBuf>)> {
@@ -376,6 +397,91 @@ impl Config {
             changed = true;
         }
         changed
+    }
+
+    /// Install (or correct) the MechaCassy hub registration, referencing both
+    /// credentials by environment-variable name only.
+    ///
+    /// Unlike [`Self::ensure_viktor_managed_default`], a pre-existing server
+    /// entry is *replaced*: the operator ran `cas integrate mecha-cassy` with
+    /// explicit variable names, so those names are authoritative. The
+    /// allowlist keeps every non-MechaCassy route untouched while the
+    /// MechaCassy routes are reduced to exactly [`MECHA_CASSY_TOOLS`], which
+    /// is what evicts the retired `slack_*` entries from an older machine.
+    ///
+    /// Returns `true` when anything changed, so callers can report
+    /// "already configured" without rewriting the file.
+    pub fn ensure_mecha_cassy_registration(
+        &mut self,
+        url: &str,
+        token_env: &str,
+        bypass_env: &str,
+    ) -> bool {
+        let desired_server = ServerConfig::Http {
+            url: url.to_string(),
+            auth: Some(format!("env:{token_env}")),
+            headers: HashMap::from([(
+                MECHA_CASSY_BYPASS_HEADER.to_string(),
+                format!("env:{bypass_env}"),
+            )]),
+            oauth: false,
+        };
+        let mut changed = false;
+        if self.servers.get(MECHA_CASSY_SERVER) != Some(&desired_server) {
+            self.servers
+                .insert(MECHA_CASSY_SERVER.to_string(), desired_server);
+            changed = true;
+        }
+
+        let desired_routes = MECHA_CASSY_TOOLS
+            .iter()
+            .map(|tool| ExternalToolConfig {
+                server: MECHA_CASSY_SERVER.to_string(),
+                tool: (*tool).to_string(),
+            })
+            .collect::<Vec<_>>();
+        if self
+            .allowlist
+            .iter()
+            .filter(|route| route.server == MECHA_CASSY_SERVER)
+            .ne(desired_routes.iter())
+        {
+            self.allowlist
+                .retain(|route| route.server != MECHA_CASSY_SERVER);
+            self.allowlist.extend(desired_routes);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Tool names this configuration admits for the MechaCassy hub, in the
+    /// order they appear. Doctor compares this against the hub's live
+    /// `tools/list` to catch a renamed upstream contract.
+    pub fn mecha_cassy_allowlisted_tools(&self) -> Vec<String> {
+        self.allowlist
+            .iter()
+            .filter(|route| route.server == MECHA_CASSY_SERVER)
+            .map(|route| route.tool.clone())
+            .collect()
+    }
+
+    /// The environment-variable *names* a MechaCassy registration references,
+    /// as `(bearer, bypass-header)`. Never a value: an inline (non-`env:`)
+    /// credential returns `None` for that slot so callers report it as
+    /// unreferenced rather than printing it.
+    pub fn mecha_cassy_env_names(&self) -> Option<(Option<String>, Option<String>)> {
+        let ServerConfig::Http { auth, headers, .. } = self.servers.get(MECHA_CASSY_SERVER)? else {
+            return Some((None, None));
+        };
+        let bearer = auth
+            .as_deref()
+            .and_then(|value| value.strip_prefix("env:"))
+            .map(str::to_string);
+        let bypass = headers
+            .get(MECHA_CASSY_BYPASS_HEADER)
+            .and_then(|value| value.strip_prefix("env:"))
+            .map(str::to_string);
+        Some((bearer, bypass))
     }
 
     /// Refresh the user-scoped managed Viktor default without copying a
@@ -688,6 +794,134 @@ tool = "get_file_download_url"
                 .any(|route| { route.server == "github" && route.tool == "list_issues" })
         );
         assert!(!toml::to_string(&config).unwrap().contains("zt_live"));
+    }
+
+    #[test]
+    fn mecha_cassy_registration_is_env_reference_only_and_idempotent() {
+        let mut config = Config::default();
+        assert!(config.ensure_mecha_cassy_registration(
+            MECHA_CASSY_MCP_URL,
+            "MECHA_SLACK_TOKEN_LAPTOP",
+            MECHA_CASSY_DEFAULT_BYPASS_ENV,
+        ));
+        // Second identical call must be a no-op so the command can report
+        // "already configured" instead of rewriting a machine file.
+        assert!(!config.ensure_mecha_cassy_registration(
+            MECHA_CASSY_MCP_URL,
+            "MECHA_SLACK_TOKEN_LAPTOP",
+            MECHA_CASSY_DEFAULT_BYPASS_ENV,
+        ));
+
+        assert_eq!(
+            config.servers.get(MECHA_CASSY_SERVER),
+            Some(&ServerConfig::Http {
+                url: MECHA_CASSY_MCP_URL.to_string(),
+                auth: Some("env:MECHA_SLACK_TOKEN_LAPTOP".to_string()),
+                headers: HashMap::from([(
+                    MECHA_CASSY_BYPASS_HEADER.to_string(),
+                    format!("env:{MECHA_CASSY_DEFAULT_BYPASS_ENV}"),
+                )]),
+                oauth: false,
+            })
+        );
+        assert_eq!(config.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
+        assert_eq!(
+            config.mecha_cassy_env_names(),
+            Some((
+                Some("MECHA_SLACK_TOKEN_LAPTOP".to_string()),
+                Some(MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string())
+            ))
+        );
+
+        // The serialized machine file names variables and never holds a value.
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(serialized.contains("env:MECHA_SLACK_TOKEN_LAPTOP"));
+        assert!(serialized.contains("mecha-cassy.mecha_read"));
+        assert!(!serialized.contains("xoxb-"));
+    }
+
+    #[test]
+    fn mecha_cassy_registration_evicts_the_retired_slack_tool_routes() {
+        let mut config: Config = toml::from_str(
+            r#"
+allowlist = [
+  "mecha-cassy.slack_post_message",
+  "mecha-cassy.slack_read_channel",
+  "github.list_issues",
+]
+
+[servers.mecha-cassy]
+transport = "http"
+url = "https://mecha-cassy.vercel.app/mcp/slack"
+auth = "env:MECHA_SLACK_TOKEN_CASSY_PROXY"
+"#,
+        )
+        .unwrap();
+
+        assert!(config.ensure_mecha_cassy_registration(
+            MECHA_CASSY_MCP_URL,
+            MECHA_CASSY_DEFAULT_TOKEN_ENV,
+            MECHA_CASSY_DEFAULT_BYPASS_ENV,
+        ));
+        assert_eq!(config.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
+        // An unrelated route belonging to another server is never disturbed.
+        assert!(
+            config
+                .allowlist
+                .iter()
+                .any(|route| route.server == "github" && route.tool == "list_issues")
+        );
+    }
+
+    #[test]
+    fn user_level_mecha_cassy_registration_reaches_a_project_without_its_own_proxy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let mut user_config = Config::default();
+        user_config.ensure_mecha_cassy_registration(
+            MECHA_CASSY_MCP_URL,
+            MECHA_CASSY_DEFAULT_TOKEN_ENV,
+            MECHA_CASSY_DEFAULT_BYPASS_ENV,
+        );
+        user_config.save_to(&user).unwrap();
+
+        // No project `.cas/proxy.toml`: the machine registration is the whole
+        // policy, so any project on this machine can dispatch both hub tools.
+        let (merged, sources) = Config::load_merged_with_sources_from(Some(&user), None).unwrap();
+        assert!(merged.servers.contains_key(MECHA_CASSY_SERVER));
+        assert_eq!(merged.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
+        assert_eq!(sources.get(MECHA_CASSY_SERVER), Some(&user));
+    }
+
+    #[test]
+    fn project_proxy_file_inherits_the_user_hub_server_but_not_its_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        let mut user_config = Config::default();
+        user_config.ensure_mecha_cassy_registration(
+            MECHA_CASSY_MCP_URL,
+            MECHA_CASSY_DEFAULT_TOKEN_ENV,
+            MECHA_CASSY_DEFAULT_BYPASS_ENV,
+        );
+        user_config.save_to(&user).unwrap();
+        std::fs::write(
+            &project,
+            r#"
+allowlist = ["neon.run_sql"]
+"#,
+        )
+        .unwrap();
+
+        let (merged, sources) =
+            Config::load_merged_with_sources_from(Some(&user), Some(&project)).unwrap();
+        // The upstream itself is machine-wide: the project inherits it.
+        assert!(merged.servers.contains_key(MECHA_CASSY_SERVER));
+        assert_eq!(sources.get(MECHA_CASSY_SERVER), Some(&user));
+        // Dispatch policy is not widened by a machine file — a project that
+        // declares its own allowlist must name the hub routes itself. This is
+        // the exact condition `cas doctor`'s mecha-cassy row has to report.
+        assert!(merged.mecha_cassy_allowlisted_tools().is_empty());
     }
 
     #[test]

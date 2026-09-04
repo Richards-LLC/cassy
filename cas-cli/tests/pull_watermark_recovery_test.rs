@@ -91,6 +91,9 @@ async fn empty_first_pull_then_corrected_bucket_backfills_without_metadata_surge
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path().join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
     let store = open_store_local(&cas_root).unwrap();
@@ -206,6 +209,9 @@ async fn unattributed_terminal_reopen_is_journaled_once_and_not_retried_next_pul
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path().join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
     let store = open_store_local(&cas_root).unwrap();

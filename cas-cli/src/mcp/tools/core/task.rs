@@ -46,14 +46,36 @@ mod origin_project_tests {
     }
 }
 
+/// Gate a lifecycle action on task ownership.
+///
+/// Returns `Ok(Some(project_id))` when the row carries **no** origin at all and
+/// the caller should adopt it into the current project before proceeding; the
+/// caller owns that write so the repair is durable (see `cas_task_start`).
+///
+/// cas-a0d2 / GH #690: refusing an unattributed row here contradicted
+/// [`task_visible_in_project`], which lists exactly those rows as this
+/// project's work. A task created by any client that does not stamp
+/// `origin_project` — an older `cas serve` still running after an upgrade, a
+/// pre-m241 database, a hand-inserted row — therefore appeared on the board,
+/// on `task ready`, and in `task show`, but could never be started or claimed,
+/// and no MCP-exposed field let a worker fix it. An unattributed row cannot be
+/// owned by anyone else, so the current project adopts it instead. Rows naming
+/// a *different* project are still refused.
 pub(crate) fn ensure_task_origin(
     task: &cas_types::Task,
     cas_root: &std::path::Path,
     action: &str,
-) -> Result<(), rmcp::ErrorData> {
+) -> Result<Option<String>, rmcp::ErrorData> {
     let project_id = current_project_id(cas_root);
     if task_belongs_to_project(task, project_id.as_deref()) {
-        return Ok(());
+        return Ok(None);
+    }
+
+    if task.origin_project.is_none() {
+        // Adopt when this project has an identity to stamp; when it has none
+        // either, there is still no competing owner to protect, so proceed
+        // without a write rather than wedging local work.
+        return Ok(project_id);
     }
 
     let origin = task
@@ -66,8 +88,8 @@ pub(crate) fn ensure_task_origin(
     Err(rmcp::ErrorData {
         code: rmcp::model::ErrorCode::INVALID_PARAMS,
         message: std::borrow::Cow::from(format!(
-            "Cannot {action} task {}: origin project `{origin}` does not match current project `{current}`. Foreign or unassigned legacy tasks are excluded from this project; use an authorized supervisor task update to reassign the origin explicitly.",
-            task.id
+            "Cannot {action} task {}: origin project `{origin}` does not match current project `{current}`. This row is owned by another project; use an authorized supervisor `task action=update id={} origin_project=<canonical id>` to reassign it explicitly.",
+            task.id, task.id
         )),
         data: None,
     })

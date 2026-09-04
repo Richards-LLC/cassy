@@ -1278,6 +1278,113 @@ async fn test_task_ready_excludes_foreign_origin_project_and_show_exposes_it() {
     );
 }
 
+/// GH #690 (cas-a0d2): a task created through MCP must carry this project's
+/// canonical origin, and the agent that starts it must be accepted on the
+/// first attempt — no "origin project does not match current project" wedge.
+#[tokio::test]
+async fn create_stamps_canonical_origin_and_start_accepts_it_first_try() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let project = cas::cloud::resolve_canonical_id(&cas_dir).expect("project identity resolves");
+
+    let created = core
+        .cas_task_create(Parameters(basic_create("Origin stamped on create", None)))
+        .await
+        .expect("create task");
+    let task_id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+
+    let store = open_task_store(&cas_dir).expect("task store");
+    assert_eq!(
+        store
+            .get(&task_id)
+            .expect("created row")
+            .origin_project
+            .as_deref(),
+        Some(project.as_str()),
+        "create must stamp the canonical project identity"
+    );
+
+    core.cas_task_start(Parameters(IdRequest {
+        id: task_id.clone(),
+    }))
+    .await
+    .expect("start must be accepted on the first attempt");
+}
+
+/// GH #690 (cas-a0d2): a row with no origin attribution (written by a client
+/// that predates origin stamping, or by a still-running older `cas serve`) is
+/// listed on this project's board. `start` must therefore adopt it instead of
+/// refusing it as an "unassigned legacy row" — that refusal wedged the
+/// pixel-hive factory with no MCP-exposed repair for a worker.
+#[tokio::test]
+async fn start_adopts_an_unattributed_legacy_row_into_the_current_project() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let project = cas::cloud::resolve_canonical_id(&cas_dir).expect("project identity resolves");
+
+    // Opened without a default origin so the NULL column survives the insert.
+    let fixture_store = SqliteTaskStore::open(&cas_dir).expect("fixture task store");
+    fixture_store.init().expect("fixture task store init");
+    let mut legacy = Task::new("cas-lg01".to_string(), "Legacy unattributed task".to_string());
+    legacy.origin_project = None;
+    fixture_store.add(&legacy).expect("add legacy row");
+
+    let started = core
+        .cas_task_start(Parameters(IdRequest {
+            id: "cas-lg01".to_string(),
+        }))
+        .await
+        .expect("an unattributed local row must start in its own project");
+    assert!(
+        extract_text(started).contains("claimed"),
+        "start should claim the adopted row"
+    );
+
+    let store = open_task_store(&cas_dir).expect("task store");
+    assert_eq!(
+        store
+            .get("cas-lg01")
+            .expect("legacy row")
+            .origin_project
+            .as_deref(),
+        Some(project.as_str()),
+        "start must persist the adoption so later ownership checks agree"
+    );
+}
+
+/// The adoption above must not soften the real ownership gate: a row that
+/// names a different project is still refused.
+#[tokio::test]
+async fn start_still_refuses_a_row_owned_by_another_project() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+
+    let created = core
+        .cas_task_create(Parameters(basic_create("Foreign owned task", None)))
+        .await
+        .expect("create task");
+    let task_id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+
+    let store = open_task_store(&cas_dir).expect("task store");
+    let mut foreign = store.get(&task_id).expect("created row");
+    foreign.origin_project = Some("acme/other".to_string());
+    store.update(&foreign).expect("mark row foreign");
+
+    let error = core
+        .cas_task_start(Parameters(IdRequest { id: task_id }))
+        .await
+        .expect_err("a row owned by another project must not start here");
+    assert!(
+        error.message.contains("does not match current project"),
+        "unexpected refusal: {}",
+        error.message
+    );
+}
+
 #[tokio::test]
 async fn test_task_board_hides_foreign_rows_by_default_and_supports_include_foreign() {
     let (temp, core) = setup_cas();

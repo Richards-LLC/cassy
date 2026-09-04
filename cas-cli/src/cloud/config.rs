@@ -27,6 +27,12 @@ use crate::store::find_cas_root;
 /// startup or early session hooks from permanently disabling project scoping.
 static CACHED_PROJECT_ID: Mutex<Option<String>> = Mutex::new(None);
 
+/// Cached alias class of the current project (canonical id + the server's
+/// `aliases` record as mirrored into `.cas/config.toml`). `None` means "not
+/// resolved yet"; an empty `Vec` is a real answer and is cached, because a
+/// project with no registered aliases must not re-read config.toml per row.
+static CACHED_PROJECT_ALIAS_CLASS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
 /// Get the canonical project ID for the current Cassy project.
 ///
 /// See [`resolve_canonical_id`] for the full read chain: explicit
@@ -164,15 +170,76 @@ pub fn canonical_id_from_config_toml(cas_root: &Path) -> Option<String> {
 /// boundary. [`canonical_project_id_with_pin`] adds the explicit-pin alias
 /// rule for callers that are comparing a stored identity to the current
 /// project.
+///
+/// # Contract with the cloud (GH #669)
+///
+/// This function is the byte-for-byte twin of the server's
+/// `canonicalizeProjectIdentity` (`petra-stella-cloud`
+/// `lib/project-identity.ts`) and of its PostgreSQL projection
+/// `canonicalProjectIdentitySql`, which is what the alias-merge migration
+/// rewrote stored identities with. The steps below are transcribed in the
+/// server's order; changing one without the other forks every bucket.
+///
+/// Two of those steps used to be client-only approximations, and both are now
+/// fixed here:
+///  - `.git` is stripped **case-insensitively** (`Repo.GIT` is `repo`), and
+///  - `.git` is stripped from **every** shape, not only from a recognized
+///    remote URL. A bare `gabber-studio.git` and a `git://…/repo.git` (whose
+///    scheme deliberately survives, because `git://` is not a recognized
+///    transport on either side) both lose the suffix.
 pub fn canonical_project_id(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let normalized = normalize_git_remote_url(trimmed)
-        .or_else(|| normalize_git_remote_url(&trimmed.to_ascii_lowercase()))
-        .unwrap_or_else(|| trimmed.to_string());
-    Some(normalized.trim_matches('/').to_ascii_lowercase())
+
+    // `.replace(/^https?:\/\//i, "")`
+    let mut value = strip_prefix_ascii_case_insensitive(trimmed, "https://")
+        .or_else(|| strip_prefix_ascii_case_insensitive(trimmed, "http://"))
+        .unwrap_or(trimmed)
+        .to_string();
+
+    // `.replace(/^ssh:\/\/git@/i, "")`
+    if let Some(rest) = strip_prefix_ascii_case_insensitive(&value, "ssh://git@") {
+        value = rest.to_string();
+    }
+
+    // `.replace(/^git@([^:]+):/i, "$1/")` — the host run is `[^:]+`, so a
+    // `git@` with no colon is left alone exactly as the regex leaves it.
+    if let Some(rest) = strip_prefix_ascii_case_insensitive(&value, "git@")
+        && let Some((host, path)) = rest.split_once(':')
+        && !host.is_empty()
+    {
+        value = format!("{host}/{path}");
+    }
+
+    // `.replace(/\/+$/, "").replace(/\.git$/i, "").replace(/\/+$/, "")`
+    let trimmed_tail = value.trim_end_matches('/');
+    let without_dot_git = if trimmed_tail.len() >= 4
+        && trimmed_tail.is_char_boundary(trimmed_tail.len() - 4)
+        && trimmed_tail[trimmed_tail.len() - 4..].eq_ignore_ascii_case(".git")
+    {
+        &trimmed_tail[..trimmed_tail.len() - 4]
+    } else {
+        trimmed_tail
+    };
+
+    // `.replace(/^\/+|\/+$/g, "").toLowerCase()`
+    let cleaned = without_dot_git.trim_matches('/').to_ascii_lowercase();
+    if cleaned.is_empty() { None } else { Some(cleaned) }
+}
+
+/// `str::strip_prefix` that ignores ASCII case, so the server's `/…/i` regex
+/// anchors can be transcribed literally.
+fn strip_prefix_ascii_case_insensitive<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    if value.len() >= prefix.len()
+        && value.is_char_boundary(prefix.len())
+        && value[..prefix.len()].eq_ignore_ascii_case(prefix)
+    {
+        Some(&value[prefix.len()..])
+    } else {
+        None
+    }
 }
 
 /// Normalize an identity while treating an explicit project pin as the
@@ -199,6 +266,27 @@ pub fn canonical_project_id_with_pin(value: &str, pinned_id: Option<&str>) -> Op
 /// spelling to emit, while ownership checks must recognize both spellings
 /// without changing the current project's selected identity.
 pub fn project_ids_match(candidate: &str, current: &str) -> bool {
+    project_ids_match_with_aliases(candidate, current, &cached_project_alias_class())
+}
+
+/// [`project_ids_match`] with the registered alias class supplied explicitly.
+///
+/// `alias_class` is the complete set of spellings the cloud registry folds into
+/// **one** project — its canonical id plus every active row of the server's
+/// `project_aliases` record (GH #669). Two identities match when they are both
+/// members of that class, which is the only way `ozer-health` and `ozer` can
+/// ever be recognized as the same project: no normalizer folds them, because
+/// the fold is registry data, not syntax.
+///
+/// Membership is the *conjunction* of both sides, so an alias record can only
+/// ever merge spellings of the project it belongs to. It can never make two
+/// different projects match, and an identity the migration deliberately left
+/// unmapped (`penguinz`, `pippenz`) stays foreign because it is in no class.
+pub fn project_ids_match_with_aliases(
+    candidate: &str,
+    current: &str,
+    alias_class: &[String],
+) -> bool {
     let Some(candidate) = canonical_project_id(candidate) else {
         return false;
     };
@@ -206,9 +294,20 @@ pub fn project_ids_match(candidate: &str, current: &str) -> bool {
         return false;
     };
 
-    candidate == current
+    if candidate == current
         || project_id_aliases(&candidate, &current)
         || project_id_aliases(&current, &candidate)
+    {
+        return true;
+    }
+
+    let in_class = |value: &str| {
+        alias_class
+            .iter()
+            .filter_map(|alias| canonical_project_id(alias))
+            .any(|alias| alias == value)
+    };
+    in_class(&candidate) && in_class(&current)
 }
 
 /// Backwards-compatible name retained for cloud callers outside this module.
@@ -225,6 +324,134 @@ fn project_id_aliases(candidate: &str, pinned: &str) -> bool {
     let pinned_is_remote = pinned.matches('/').count() >= 2;
 
     candidate_is_remote && !pinned_is_remote && final_segment(candidate) == pinned
+}
+
+/// Read `[project] aliases` from `<cas_root>/config.toml` — the locally cached
+/// copy of the server's per-project `aliases` record (GH #669). Best-effort:
+/// a missing file, a parse failure, or a non-array value yields an empty list,
+/// which degrades to the pre-#669 syntax-only matching rather than to a wrong
+/// attribution.
+pub fn project_aliases_from_config_toml(cas_root: &Path) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(cas_root.join("config.toml")) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = toml::from_str::<toml::Value>(&content) else {
+        return Vec::new();
+    };
+    parsed
+        .get("project")
+        .and_then(|project| project.get("aliases"))
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .filter_map(canonical_project_id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Persist the server's per-project `aliases` record into
+/// `<cas_root>/config.toml` as `[project] aliases`.
+///
+/// Values are canonicalized and de-duplicated on the way in, and the current
+/// project's own canonical id is not written back as an alias of itself. Every
+/// other `[project]` key (notably the `canonical_id` pin) is preserved.
+///
+/// Returns the list that was written.
+pub fn set_project_aliases_in_config_toml(
+    cas_root: &Path,
+    aliases: &[String],
+) -> Result<Vec<String>, CasError> {
+    let own_id = resolve_canonical_id(cas_root);
+    let mut normalized: Vec<String> = Vec::new();
+    for alias in aliases {
+        let Some(alias) = canonical_project_id(alias) else {
+            continue;
+        };
+        if Some(&alias) == own_id.as_ref() || normalized.contains(&alias) {
+            continue;
+        }
+        normalized.push(alias);
+    }
+    normalized.sort();
+
+    let toml_path = cas_root.join("config.toml");
+    let mut doc: toml::Value = match std::fs::read_to_string(&toml_path) {
+        Ok(content) => toml::from_str(&content)
+            .map_err(|e| CasError::Other(format!("Failed to parse config.toml: {e}")))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            toml::Value::Table(toml::value::Table::new())
+        }
+        Err(e) => return Err(CasError::Other(format!("Failed to read config.toml: {e}"))),
+    };
+    let table = doc
+        .as_table_mut()
+        .ok_or_else(|| CasError::Other("config.toml root is not a table".to_string()))?;
+    let project = table
+        .entry("project".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| CasError::Other("config.toml [project] is not a table".to_string()))?;
+    project.insert(
+        "aliases".to_string(),
+        toml::Value::Array(
+            normalized
+                .iter()
+                .map(|alias| toml::Value::String(alias.clone()))
+                .collect(),
+        ),
+    );
+
+    let serialized = toml::to_string_pretty(&doc)
+        .map_err(|e| CasError::Other(format!("Failed to serialize config.toml: {e}")))?;
+    if let Some(parent) = toml_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CasError::Other(format!("Failed to create {parent:?}: {e}")))?;
+    }
+    std::fs::write(&toml_path, serialized)
+        .map_err(|e| CasError::Other(format!("Failed to write config.toml: {e}")))?;
+    invalidate_cached_project_alias_class();
+    Ok(normalized)
+}
+
+/// The full alias class of the current project: its canonical id plus every
+/// alias cached from the server's record. Cached for the process lifetime the
+/// same way [`get_project_canonical_id`] is, because `project_ids_match` runs
+/// once per pulled row.
+fn cached_project_alias_class() -> Vec<String> {
+    let mut cached = CACHED_PROJECT_ALIAS_CLASS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(class) = cached.as_ref() {
+        return class.clone();
+    }
+    let Ok(cas_root) = find_cas_root() else {
+        // Outside a project there is nothing to resolve; retry next call rather
+        // than caching an empty class for the process lifetime.
+        return Vec::new();
+    };
+    let mut class = Vec::new();
+    if let Some(id) = resolve_canonical_id(&cas_root) {
+        class.push(id);
+    }
+    for alias in project_aliases_from_config_toml(&cas_root) {
+        if !class.contains(&alias) {
+            class.push(alias);
+        }
+    }
+    *cached = Some(class.clone());
+    class
+}
+
+/// Drop the cached alias class so the next ownership check re-reads
+/// `[project] aliases` from disk. Called after a pull refreshes the record.
+pub fn invalidate_cached_project_alias_class() {
+    let mut cached = CACHED_PROJECT_ALIAS_CLASS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *cached = None;
 }
 
 /// Write `[project] canonical_id = "<value>"` to `<cas_root>/config.toml`,

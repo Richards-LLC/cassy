@@ -16,7 +16,7 @@ mod knowledge;
 pub use knowledge::{
     KNOWLEDGE_ENTITY, KnowledgePageRecord, KnowledgePullReport, knowledge_share_scope,
 };
-mod pull;
+pub(crate) mod pull;
 pub(crate) use pull::{SyncWarningSummary, collect_sync_warnings, entity_matches_project};
 mod push;
 mod team_push;
@@ -32,6 +32,10 @@ pub struct PushBacklog {
     pub failed: usize,
     /// Operator-facing diagnostics from retained failed rows.
     pub failed_errors: Vec<String>,
+    /// Terminal rows the cloud explicitly rejected, grouped by its reason.
+    /// These are a subset of `failed`: the remainder are transport or payload
+    /// failures that never received a per-row verdict.
+    pub rejected_by_reason: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -64,6 +68,14 @@ pub struct SyncResult {
     pub pushed_task_dependencies: usize,
     /// Number of distilled knowledge pages pushed (T5)
     pub pushed_knowledge_pages: usize,
+    /// Rows the cloud kept a newer version of and the client therefore removed
+    /// from the queue. These are successful outcomes, not failures: reporting
+    /// them separately is what stops a benign LWW loss reading as "rows
+    /// failed".
+    pub skipped_lww_acked: usize,
+    /// Terminal rows requeued once because only an older client build had
+    /// parked them.
+    pub requeued_after_upgrade: usize,
     /// Number of entries pulled
     pub pulled_entries: usize,
     /// Number of tasks pulled
@@ -84,6 +96,12 @@ pub struct SyncResult {
     pub pulled_commit_links: usize,
     /// Number of task dependency edges pulled
     pub pulled_task_dependencies: usize,
+    /// Number of local dependency edges removed by a cloud deletion tombstone.
+    pub deleted_task_dependencies: usize,
+    /// Number of local edges a tombstone kept out of the push queue. These are
+    /// edges another machine deleted; re-pushing them is the resurrection this
+    /// client exists to prevent.
+    pub skipped_task_dependencies_by_tombstone: usize,
     /// Number of local task dependency edges queued for cloud healing.
     pub healed_task_dependencies_to_cloud: usize,
     /// Number of task dependency edges materialized from the cloud during
@@ -225,13 +243,29 @@ impl SyncResult {
     /// Render the one-line dependency healing receipt when reconciliation did
     /// work. A quiet no-op is intentional for steady-state pulls.
     pub fn dependency_heal_summary(&self) -> Option<String> {
-        (self.healed_task_dependencies_to_cloud > 0 || self.healed_task_dependencies_from_cloud > 0)
+        (self.healed_task_dependencies_to_cloud > 0
+            || self.healed_task_dependencies_from_cloud > 0
+            || self.deleted_task_dependencies > 0
+            || self.skipped_task_dependencies_by_tombstone > 0)
             .then(|| {
-                format!(
+                let mut parts = vec![format!(
                     "healed {} edge(s) to cloud, {} from cloud",
                     self.healed_task_dependencies_to_cloud,
                     self.healed_task_dependencies_from_cloud
-                )
+                )];
+                if self.deleted_task_dependencies > 0 {
+                    parts.push(format!(
+                        "{} deleted by tombstone",
+                        self.deleted_task_dependencies
+                    ));
+                }
+                if self.skipped_task_dependencies_by_tombstone > 0 {
+                    parts.push(format!(
+                        "{} skipped by tombstone",
+                        self.skipped_task_dependencies_by_tombstone
+                    ));
+                }
+                parts.join(", ")
             })
     }
 
@@ -363,6 +397,10 @@ pub struct SyncConflict {
     pub local_updated: chrono::DateTime<chrono::Utc>,
     /// Remote timestamp
     pub remote_updated: chrono::DateTime<chrono::Utc>,
+    /// Server revision this client last observed for the local row.
+    pub local_revision: Option<i64>,
+    /// Server revision carried by the incoming row.
+    pub remote_revision: Option<i64>,
     /// How it was resolved
     pub resolution: ConflictResolution,
     /// Action taken
@@ -372,15 +410,40 @@ pub struct SyncConflict {
 impl SyncConflict {
     /// Log this conflict for debugging without writing directly to stderr.
     pub fn log(&self) {
+        // Name the revisions when they exist: with revisions in play the
+        // timestamps alone can look like the wrong side won, and that is
+        // exactly the reading this feature exists to correct.
+        let render = |revision: Option<i64>| {
+            revision.map_or_else(|| "-".to_string(), |revision| revision.to_string())
+        };
         tracing::debug!(
-            "[Cassy sync] Conflict resolved: {} {} local={} remote={} strategy={:?} action={:?}",
+            "[Cassy sync] Conflict resolved: {} {} local={} remote={} rev_local={} rev_remote={} strategy={:?} action={:?}",
             self.entity_type,
             self.entity_id,
             self.local_updated.format("%H:%M:%S"),
             self.remote_updated.format("%H:%M:%S"),
+            render(self.local_revision),
+            render(self.remote_revision),
             self.resolution,
             self.action,
         );
+    }
+
+    /// Whether the winner was chosen by revision rather than by clock.
+    pub fn decided_by_revision(&self) -> bool {
+        matches!(
+            (self.local_revision, self.remote_revision),
+            (Some(local), Some(remote)) if local != remote
+        ) && self.resolution == ConflictResolution::KeepRecent
+    }
+
+    /// Journal strategy label, so an audit can tell the two regimes apart.
+    pub fn strategy_label(&self) -> &'static str {
+        if self.decided_by_revision() {
+            "revision"
+        } else {
+            self.resolution.as_str()
+        }
     }
 
 }
@@ -442,9 +505,21 @@ pub struct CloudSyncer {
     /// Optional normalized `origin` identity sent with personal pushes.
     /// Missing/non-git remotes deliberately remain absent from the envelope.
     personal_push_git_remote: Option<String>,
+    /// The `.cas` root this syncer pushes for (cas-ee57 ephemeral guard): the
+    /// explicit root for `new_for_project`, the queue's own directory for `new`.
+    push_cas_root: Option<std::path::PathBuf>,
     /// Conflict decisions are collected during pull application and folded
     /// into the returned `SyncResult` after the operation completes.
     conflict_log: Arc<Mutex<Vec<SyncConflict>>>,
+    /// Server revisions carried by the rows of the pull currently being
+    /// applied, keyed by (entity type, id).
+    ///
+    /// The revision travels on the raw wire row, but conflict resolution
+    /// happens deep inside typed upsert helpers. Staging it here lets every
+    /// entity kind consult it without threading an extra argument through six
+    /// upsert signatures — and, more importantly, without one of them being
+    /// forgotten and silently falling back to clock comparison.
+    incoming_revisions: Arc<Mutex<HashMap<(String, String), i64>>>,
 }
 
 impl CloudSyncer {
@@ -457,13 +532,18 @@ impl CloudSyncer {
         let personal_push_git_remote = crate::store::find_cas_root()
             .ok()
             .and_then(|cas_root| crate::cloud::normalized_git_remote_for_push(&cas_root));
+        // The queue lives in the project's own .cas, so the push guard judges that
+        // root rather than whatever project the process happens to run inside.
+        let push_cas_root = Some(queue.cas_dir().to_path_buf());
         Self {
             config,
             queue,
             cloud_config,
             push_project_canonical_id: None,
             personal_push_git_remote,
+            push_cas_root,
             conflict_log: Arc::new(Mutex::new(Vec::new())),
+            incoming_revisions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -482,7 +562,9 @@ impl CloudSyncer {
             cloud_config,
             push_project_canonical_id: Some(project_canonical_id),
             personal_push_git_remote: crate::cloud::normalized_git_remote_for_push(cas_root),
+            push_cas_root: Some(cas_root.to_path_buf()),
             conflict_log: Arc::new(Mutex::new(Vec::new())),
+            incoming_revisions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -514,12 +596,30 @@ impl CloudSyncer {
         Ok(requeued)
     }
 
+    /// Give rows that only an older client build parked one fresh attempt.
+    ///
+    /// This is the general form of the version-gate requeue: a row parked by
+    /// a 429 storm, a transport failure, or a server refusal an older client
+    /// could not classify is not evidence that this build cannot push it.
+    /// Permanent per-row rejections are excluded by the queue itself.
+    pub(crate) fn requeue_stale_client_failures(&self) -> Result<usize, CasError> {
+        let requeued = self
+            .queue
+            .requeue_stale_client_failures(env!("CARGO_PKG_VERSION"), self.config.max_retries)?;
+        if requeued > 0 {
+            tracing::debug!("requeued {requeued} item(s) parked by an older client build");
+        }
+        Ok(requeued)
+    }
+
     /// Get the sync queue
     pub fn queue(&self) -> &SyncQueue {
         &self.queue
     }
 
-    /// Resolve a sync conflict using the given strategy
+    /// Resolve a sync conflict using the given strategy.
+    ///
+    /// Revision-free callers keep the historical timestamp behaviour exactly.
     fn resolve_conflict(
         &self,
         entity_type: &str,
@@ -528,17 +628,122 @@ impl CloudSyncer {
         remote_time: chrono::DateTime<chrono::Utc>,
         strategy: ConflictResolution,
     ) -> ConflictAction {
+        let local_revision = EntityType::parse(entity_type)
+            .and_then(|entity| self.queue.revision(entity, entity_id).ok().flatten());
+        let remote_revision = self
+            .incoming_revisions
+            .lock()
+            .ok()
+            .and_then(|revisions| {
+                revisions
+                    .get(&(entity_type.to_string(), entity_id.to_string()))
+                    .copied()
+            });
+        self.resolve_conflict_with_revisions(
+            entity_type,
+            entity_id,
+            local_time,
+            remote_time,
+            local_revision,
+            remote_revision,
+            strategy,
+        )
+    }
+
+    /// Whether an incoming row supersedes the local one.
+    ///
+    /// The same rule the conflict resolver applies, for the paths that compare
+    /// timestamps inline rather than going through `resolve_conflict`: server
+    /// revisions decide when both sides have one, and the clock decides only
+    /// when they do not. Those paths are the common case for personal pulls,
+    /// so leaving them on the raw timestamp comparison would have made this
+    /// feature reachable in tests and absent in practice.
+    pub(crate) fn remote_supersedes_local(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        local_time: chrono::DateTime<chrono::Utc>,
+        remote_time: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        let local_revision = self.queue.revision(entity_type, entity_id).ok().flatten();
+        let remote_revision = self.incoming_revisions.lock().ok().and_then(|revisions| {
+            revisions
+                .get(&(entity_type.as_str().to_string(), entity_id.to_string()))
+                .copied()
+        });
+        match (local_revision, remote_revision) {
+            (Some(local), Some(remote)) if local != remote => remote > local,
+            _ => remote_time > local_time,
+        }
+    }
+
+    /// Stage the server revision carried by a row about to be applied.
+    pub(crate) fn note_incoming_revision(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        raw: &serde_json::Value,
+    ) {
+        let Some(revision) = crate::cloud::wire_revision(raw) else {
+            return;
+        };
+        if let Ok(mut revisions) = self.incoming_revisions.lock() {
+            revisions.insert(
+                (entity_type.as_str().to_string(), entity_id.to_string()),
+                revision,
+            );
+        }
+    }
+
+    pub(crate) fn clear_incoming_revisions(&self) {
+        if let Ok(mut revisions) = self.incoming_revisions.lock() {
+            revisions.clear();
+        }
+    }
+
+    /// Resolve a sync conflict, preferring the server's per-row revisions over
+    /// either machine's clock.
+    ///
+    /// Revisions are server-owned and monotonic, so when both sides carry one
+    /// they are the truth about which row is newer and the timestamps are not
+    /// consulted at all — that is what stops a machine with a wrong clock from
+    /// silently winning or losing. When the revisions are equal, or when either
+    /// side has none (a row this client has never pulled, or a cloud build that
+    /// does not send them), the original timestamp comparison runs unchanged.
+    ///
+    /// `RemoteWins`/`LocalWins` are explicit operator choices and stay
+    /// authoritative: revisions only arbitrate the "keep whichever is newer"
+    /// question that `KeepRecent` asks.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_conflict_with_revisions(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        local_time: chrono::DateTime<chrono::Utc>,
+        remote_time: chrono::DateTime<chrono::Utc>,
+        local_revision: Option<i64>,
+        remote_revision: Option<i64>,
+        strategy: ConflictResolution,
+    ) -> ConflictAction {
         let action = match strategy {
             ConflictResolution::RemoteWins => ConflictAction::UseRemote,
             ConflictResolution::LocalWins => ConflictAction::UseLocal,
             ConflictResolution::KeepRecent => {
-                if remote_time > local_time {
-                    ConflictAction::UseRemote
-                } else if local_time > remote_time {
-                    ConflictAction::UseLocal
-                } else {
-                    // Same timestamp, skip to avoid unnecessary writes
-                    ConflictAction::Skip
+                match (local_revision, remote_revision) {
+                    (Some(local), Some(remote)) if remote > local => ConflictAction::UseRemote,
+                    (Some(local), Some(remote)) if local > remote => ConflictAction::UseLocal,
+                    // Equal revisions mean the same server state; fall through
+                    // so an unpushed local edit can still be recognised.
+                    _ => {
+                        if remote_time > local_time {
+                            ConflictAction::UseRemote
+                        } else if local_time > remote_time {
+                            ConflictAction::UseLocal
+                        } else {
+                            // Same timestamp, skip to avoid unnecessary writes
+                            ConflictAction::Skip
+                        }
+                    }
                 }
             }
         };
@@ -549,6 +754,8 @@ impl CloudSyncer {
             entity_id: entity_id.to_string(),
             local_updated: local_time,
             remote_updated: remote_time,
+            local_revision,
+            remote_revision,
             resolution: strategy,
             action,
         };
@@ -800,7 +1007,10 @@ impl PushRowResult {
         };
         matches!(
             reason.to_ascii_lowercase().as_str(),
-            "retryable"
+            // A stale base revision is a lost race, not a bad row: the next
+            // cycle pulls the winning state and retries from a valid base.
+            "revision_conflict"
+                | "retryable"
                 | "temporary"
                 | "transient"
                 | "server_error"
@@ -809,6 +1019,43 @@ impl PushRowResult {
                 | "rate_limited"
                 | "timeout"
         )
+    }
+}
+
+/// Whether a cloud rejection reason describes a condition no client retry can
+/// repair. Permanent reasons must survive a client upgrade: requeueing them
+/// only replays the same refusal and hides the row's real diagnosis.
+pub(crate) fn push_reason_is_permanent(reason: &str) -> bool {
+    matches!(
+        reason.trim().to_ascii_lowercase().as_str(),
+        "project_mismatch" | "scope_mismatch"
+    )
+}
+
+/// The operator-facing next step for one cloud rejection reason.
+///
+/// Reporting a rejection without the repair leaves an operator with a count
+/// and no move; an unknown reason is named honestly rather than guessed at.
+pub fn push_reason_hint(reason: &str) -> &'static str {
+    match reason.trim().to_ascii_lowercase().as_str() {
+        "project_mismatch" => {
+            "another project already owns this id in the cloud; re-link with `cas cloud link`, then `cas cloud queue --retry-reason project_mismatch`"
+        }
+        "scope_mismatch" => {
+            "the cloud row belongs to a different sync scope (personal vs team); push it from the owning scope, then `cas cloud queue --retry-reason scope_mismatch`"
+        }
+        "revision_conflict" | "invalid_revision" => {
+            "the cloud holds a newer revision; run `cas cloud pull`, then `cas cloud queue --retry`"
+        }
+        "version_gate" => {
+            "this build is below the cloud's minimum client version; upgrade cas — the rows requeue themselves on the first push after the upgrade"
+        }
+        "sync_limit_exceeded" => {
+            "the plan entity quota is exhausted; raise the plan limit or prune synced entities, then `cas cloud queue --retry`"
+        }
+        _ => {
+            "unrecognized cloud reason; inspect `cas cloud queue --verbose` and report the diagnostic"
+        }
     }
 }
 
@@ -1089,6 +1336,73 @@ impl PushResponse {
             return Ok(None);
         };
         itemized_failures_for(entity, entity_type, skipped, queued_ids)
+    }
+
+    /// Locate the per-type detail object for `entity_type`.
+    ///
+    /// The personal route puts per-type keys at the top level; the team route
+    /// nests them under `synced`. Both are checked so revision handling works
+    /// on either envelope.
+    fn entity_detail(&self, entity_type: &str) -> Option<&serde_json::Value> {
+        self.fields.get(entity_type).or_else(|| {
+            self.fields
+                .get("synced")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|synced| synced.get(entity_type))
+        })
+    }
+
+    /// Server revisions echoed for rows this push accepted.
+    ///
+    /// Shape: `<type>.accepted[<id>] = {revision, canonical_id}`. Storing these
+    /// keeps the client's base revision current without a follow-up pull; the
+    /// next push for the row then declares a base the server will accept.
+    pub(crate) fn accepted_revisions_for(&self, entity_type: &str) -> HashMap<String, i64> {
+        let mut revisions = HashMap::new();
+        let Some(accepted) = self
+            .entity_detail(entity_type)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|entity| entity.get("accepted"))
+            .and_then(serde_json::Value::as_object)
+        else {
+            return revisions;
+        };
+        for (id, receipt) in accepted {
+            if let Some(revision) = crate::cloud::parse_wire_revision(receipt.get("revision")) {
+                revisions.insert(id.clone(), revision);
+            }
+        }
+        revisions
+    }
+
+    /// Rows the server refused because our base revision was stale, mapped to
+    /// the revision the server actually holds.
+    pub(crate) fn revision_conflicts_for(&self, entity_type: &str) -> HashMap<String, Option<i64>> {
+        let mut conflicts = HashMap::new();
+        let Some(rejected) = self
+            .entity_detail(entity_type)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|entity| entity.get("rejected"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            return conflicts;
+        };
+        for rejection in rejected {
+            let is_revision_conflict = rejection
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|reason| reason == "revision_conflict");
+            if !is_revision_conflict {
+                continue;
+            }
+            if let Some(id) = rejection.get("id").and_then(serde_json::Value::as_str) {
+                conflicts.insert(
+                    id.to_string(),
+                    crate::cloud::parse_wire_revision(rejection.get("current_revision")),
+                );
+            }
+        }
+        conflicts
     }
 
     pub(crate) fn row_results_for(

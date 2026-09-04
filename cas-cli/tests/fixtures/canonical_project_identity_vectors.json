@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "description": "Shared client/server canonical project-identity vectors (GH #669). The `syntax` list is the byte-for-byte contract between the Cassy client's `cas::cloud::canonical_project_id` and the petra-stella-cloud server's `canonicalizeProjectIdentity` / `canonicalProjectIdentitySql`. Do not edit one side without the other.",
+  "server_source": {
+    "repo": "Richards-LLC/petra-stella-cloud",
+    "module": "lib/project-identity.ts",
+    "test": "tests/lib/project-identity.test.ts",
+    "ref": "ee422ceceb688edb2c6736037988924638a4dfa1",
+    "shipped_by": "PR #60 (closes issues #57/#58/#59), merged 2026-09-03T17:24Z; recovery PR #61 + PR #62"
+  },
+  "algorithm": [
+    "trim; empty -> null",
+    "strip leading /^https?:\\/\\//i",
+    "strip leading /^ssh:\\/\\/git@/i",
+    "rewrite /^git@([^:]+):/i to \"$1/\"",
+    "strip trailing /\\/+$/",
+    "strip trailing /\\.git$/i   (CASE-INSENSITIVE, and applied to every shape, not only recognized remote URLs)",
+    "strip trailing /\\/+$/",
+    "strip leading and trailing /^\\/+|\\/+$/g",
+    "lowercase; empty -> null"
+  ],
+  "syntax": [
+    { "input": null, "expected": null, "note": "non-string" },
+    { "input": "", "expected": null },
+    { "input": "   ", "expected": null },
+    { "input": "  Petra-Stella-Cloud  ", "expected": "petra-stella-cloud", "source": "server fixture" },
+    { "input": "/GitHub.com/Richards-LLC/Petra-Stella-Cloud/", "expected": "github.com/richards-llc/petra-stella-cloud", "source": "server fixture" },
+    { "input": "https://GitHub.com/Richards-LLC/Petra-Stella-Cloud.git", "expected": "github.com/richards-llc/petra-stella-cloud", "source": "server fixture" },
+    { "input": "http://github.com/Richards-LLC/Petra-Stella-Cloud.git/", "expected": "github.com/richards-llc/petra-stella-cloud", "source": "server fixture" },
+    { "input": "ssh://git@github.com/Richards-LLC/Petra-Stella-Cloud.git///", "expected": "github.com/richards-llc/petra-stella-cloud", "source": "server fixture" },
+    { "input": "git@github.com:Richards-LLC/Petra-Stella-Cloud.git", "expected": "github.com/richards-llc/petra-stella-cloud", "source": "server fixture" },
+    { "input": "https://gitlab.example/Group/Subgroup/Repo.git", "expected": "gitlab.example/group/subgroup/repo", "source": "server fixture" },
+    { "input": "../Local/Repo", "expected": "../local/repo", "source": "server fixture" },
+    { "input": "git://GitHub.com/Richards-LLC/Petra-Stella-Cloud.git", "expected": "git://github.com/richards-llc/petra-stella-cloud", "source": "server fixture", "note": "git:// is deliberately NOT a recognized transport: the scheme survives, but the terminal .git is still stripped and the value lowercased. This is the case the client got wrong before GH #669." },
+
+    { "input": "gabber-studio.git", "expected": "gabber-studio", "note": "bare slug: .git is stripped even though the value is not a recognized remote URL" },
+    { "input": "https://GitHub.com/Richards-LLC/Gabber-Studio.GIT", "expected": "github.com/richards-llc/gabber-studio", "note": ".git suffix match is case-insensitive" },
+    { "input": "GitHub.com/Richards-LLC/Gabber-Studio", "expected": "github.com/richards-llc/gabber-studio", "source": "server migration fixture (tests/scripts/migrate-project-aliases.test.ts)" },
+    { "input": "git@GitHub.com:Richards-LLC/Ozer-Health.git", "expected": "github.com/richards-llc/ozer-health" },
+    { "input": "PENGUINZ", "expected": "penguinz" },
+    { "input": "pippenz/", "expected": "pippenz" },
+    { "input": "local:abcd1234ef567890", "expected": "local:abcd1234ef567890", "note": "path-hash fallback bucket must survive canonicalization unchanged" }
+  ],
+  "alias_families": {
+    "description": "Registry-level folding measured in the server's alias-migration design doc (docs/specs/2026-09-03-project-identity-alias-migration.md). These spellings do NOT collapse by syntax — only the per-project `aliases` record folds them, which is why the client must consume it.",
+    "families": [
+      {
+        "canonical_id": "ozer",
+        "scope": "team",
+        "aliases": ["github.com/richards-llc/ozer-health", "ozer-health"],
+        "exposed_by": "GET /api/account/projects and GET /api/teams/:teamId/projects"
+      },
+      {
+        "canonical_id": "gabber-studio",
+        "scope": "personal",
+        "aliases": ["github.com/richards-llc/gabber-studio"],
+        "exposed_by": null,
+        "note": "personal_project_aliases has no API exposure as of ee422ce; recorded here so the client test vector documents the gap"
+      },
+      {
+        "canonical_id": "pixel-hive",
+        "scope": "personal",
+        "aliases": ["github.com/richards-llc/pixel-hive"],
+        "exposed_by": null
+      },
+      {
+        "canonical_id": "petra-stella-cloud",
+        "scope": "personal",
+        "aliases": ["github.com/richards-llc/petra-stella-cloud"],
+        "exposed_by": null
+      }
+    ],
+    "unmapped": {
+      "identities": ["penguinz", "pippenz"],
+      "disposition": "untouched",
+      "note": "legacy catch-all buckets; the migration deliberately left them alone, so they must never be folded into a repository project by the client either"
+    }
+  }
+}

@@ -54,6 +54,12 @@ pub mod integrations;
 pub mod keep_block;
 pub mod lock;
 pub mod md;
+/// Machine-scoped MechaCassy setup. Gated on `mcp-proxy` because the whole
+/// point of the command is to write a proxy registration and prove it with an
+/// authenticated `tools/list`; without that feature there is nothing to write
+/// against, so the subcommand reports the rebuild instead of half-working.
+#[cfg(feature = "mcp-proxy")]
+pub mod mecha_cassy;
 pub mod neon;
 #[cfg(test)]
 mod neon_parsers_test;
@@ -89,6 +95,15 @@ pub enum IntegrateCommands {
         #[command(subcommand)]
         action: github::GithubAction,
     },
+    /// Set this machine up for the MechaCassy Slack hub: one user-level proxy
+    /// registration (every project inherits it), the Claude Code and Codex MCP
+    /// entries, and an authenticated `tools/list` as the receipt.
+    ///
+    /// Takes no `init|refresh|verify` verb: the operation is idempotent, so
+    /// re-running it *is* refresh, and it always ends in a verification.
+    #[cfg(feature = "mcp-proxy")]
+    #[command(name = "mecha-cassy")]
+    MechaCassy(mecha_cassy::MechaCassyArgs),
 }
 
 /// `cas integrate <platform> <action>` — pick an action.
@@ -119,6 +134,8 @@ pub fn execute(cmd: &IntegrateCommands, _cli: &Cli) -> anyhow::Result<()> {
         IntegrateCommands::Vercel { action } => vercel::execute((*action).into())?,
         IntegrateCommands::Neon { action } => neon::execute((*action).into())?,
         IntegrateCommands::Github { action } => github::execute(action.clone())?,
+        #[cfg(feature = "mcp-proxy")]
+        IntegrateCommands::MechaCassy(args) => mecha_cassy::execute(args, _cli.json)?,
     };
     render_outcome(&outcome);
     Ok(())
@@ -165,6 +182,14 @@ mod tests {
             IntegrateCommands::Vercel { action } => vercel::execute((*action).into()),
             IntegrateCommands::Neon { action } => neon::execute((*action).into()),
             IntegrateCommands::Github { action } => github::execute(action.clone()),
+            // Deliberately not dispatched here: `mecha-cassy` writes to
+            // machine-scoped paths outside the repo, so the parser-level tests
+            // in this module must never execute it. Its behaviour is covered
+            // against a tempdir + fake environment in `mecha_cassy::tests`.
+            #[cfg(feature = "mcp-proxy")]
+            IntegrateCommands::MechaCassy(_) => {
+                anyhow::bail!("mecha-cassy is exercised in mecha_cassy::tests, not via dispatch")
+            }
         }
     }
 

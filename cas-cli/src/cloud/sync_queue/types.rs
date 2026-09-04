@@ -67,6 +67,29 @@ impl EntityType {
         }
     }
 
+    /// Resolve the entity type from a push/pull envelope collection key
+    /// (`"tasks"`, `"entries"`, …), the plural form the wire uses.
+    pub fn from_collection_key(key: &str) -> Option<EntityType> {
+        [
+            EntityType::Entry,
+            EntityType::Task,
+            EntityType::Rule,
+            EntityType::Skill,
+            EntityType::Session,
+            EntityType::Verification,
+            EntityType::Event,
+            EntityType::Prompt,
+            EntityType::FileChange,
+            EntityType::CommitLink,
+            EntityType::Agent,
+            EntityType::Worktree,
+            EntityType::TaskDependency,
+            EntityType::KnowledgePage,
+        ]
+        .into_iter()
+        .find(|entity_type| entity_type.collection_key() == key)
+    }
+
     /// Collection key used by personal/team push JSON envelopes.
     pub fn collection_key(&self) -> &'static str {
         match self {
@@ -199,6 +222,10 @@ pub struct SyncConflictRecord {
     pub winner_side: String,
     pub strategy: String,
     pub resolved_at: String,
+    /// Server revisions the decision was made on; `None` when the conflict was
+    /// settled by timestamp because one side had no revision.
+    pub local_revision: Option<i64>,
+    pub remote_revision: Option<i64>,
 }
 
 /// Pending items grouped by entity type

@@ -15,6 +15,12 @@ pub enum Platform {
     Vercel,
     Neon,
     Github,
+    /// The MechaCassy Slack hub. Unlike the other three this one is a
+    /// *machine*-scoped integration: it writes no project SKILL.md and is
+    /// therefore absent from [`super::doctor::collect_reports`], which walks
+    /// per-project keep blocks. Its doctor row is produced directly by
+    /// [`super::mecha_cassy::doctor_row`].
+    MechaCassy,
 }
 
 impl Platform {
@@ -23,6 +29,7 @@ impl Platform {
             Platform::Vercel => "vercel",
             Platform::Neon => "neon",
             Platform::Github => "github",
+            Platform::MechaCassy => "mecha-cassy",
         }
     }
 
@@ -33,6 +40,7 @@ impl Platform {
             Platform::Vercel => "cas-8e37",
             Platform::Neon => "cas-1ece",
             Platform::Github => "cas-f425",
+            Platform::MechaCassy => "cas-8fad",
         }
     }
 }

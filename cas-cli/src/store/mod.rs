@@ -147,6 +147,7 @@ mod notifying_entry;
 mod notifying_rule;
 mod notifying_skill;
 mod notifying_task;
+mod quarantine_task;
 // `cli/memory.rs` (T5 cas-07d7) and the syncing-store wrappers all
 // call the predicate directly — keeping it in one `pub(crate)` module
 // is how the retroactive backfill CLI and the auto-promote write path
@@ -172,6 +173,7 @@ pub use notifying_entry::NotifyingEntryStore;
 pub use notifying_rule::NotifyingRuleStore;
 pub use notifying_skill::NotifyingSkillStore;
 pub use notifying_task::NotifyingTaskStore;
+pub use quarantine_task::QuarantineFilteringTaskStore;
 pub use syncing::SyncingRuleStore;
 pub use syncing_entry::SyncingEntryStore;
 pub use syncing_skill::SyncingSkillStore;

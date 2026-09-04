@@ -45,6 +45,11 @@ use crate::history_provenance::{
 use crate::shared_db;
 
 /// Canonical DDL for the history subsystem, in `execute_batch` form.
+/// `embedding_error` is declared LAST on purpose: an upgraded store receives it
+/// from an `ALTER TABLE ... ADD COLUMN` (m250), which can only append, and m224's
+/// shape guard compares column ORDER between a migrated store and a fresh one.
+/// Keep any new column at the end, and keep comments out of the DDL text —
+/// SQLite re-parses the stored `CREATE TABLE` on `DROP COLUMN` and fails on one.
 pub const HISTORY_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS history_commits (
     sha TEXT PRIMARY KEY,
@@ -62,7 +67,8 @@ CREATE TABLE IF NOT EXISTS history_commits (
     pending_embedding INTEGER NOT NULL DEFAULT 1,
     indexed_at TEXT NOT NULL,
     scope TEXT NOT NULL DEFAULT 'project',
-    symbol_mapping TEXT NOT NULL DEFAULT 'pending'
+    symbol_mapping TEXT NOT NULL DEFAULT 'pending',
+    embedding_error TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_commits_committed_at
@@ -138,7 +144,8 @@ pub const HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
         pending_embedding INTEGER NOT NULL DEFAULT 1,
         indexed_at TEXT NOT NULL,
         scope TEXT NOT NULL DEFAULT 'project',
-        symbol_mapping TEXT NOT NULL DEFAULT 'pending'
+        symbol_mapping TEXT NOT NULL DEFAULT 'pending',
+        embedding_error TEXT
     )",
     "CREATE INDEX IF NOT EXISTS idx_history_commits_committed_at
         ON history_commits(committed_at DESC)",
@@ -195,6 +202,11 @@ pub const HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
 /// produced them. They also keep a multi-repo store from blending two projects'
 /// issues into one corpus, which is the same reason `history_commits` carries
 /// `repository`.
+/// `embedding_error` is declared LAST on purpose: an upgraded store receives it
+/// from an `ALTER TABLE ... ADD COLUMN` (m250), which can only append, and m224's
+/// shape guard compares column ORDER between a migrated store and a fresh one.
+/// Keep any new column at the end, and keep comments out of the DDL text —
+/// SQLite re-parses the stored `CREATE TABLE` on `DROP COLUMN` and fails on one.
 pub const HISTORY_DOCS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS history_docs (
     id TEXT PRIMARY KEY,
@@ -213,7 +225,8 @@ CREATE TABLE IF NOT EXISTS history_docs (
     source TEXT NOT NULL,
     pending_embedding INTEGER NOT NULL DEFAULT 1,
     fetched_at TEXT NOT NULL,
-    scope TEXT NOT NULL DEFAULT 'project'
+    scope TEXT NOT NULL DEFAULT 'project',
+    embedding_error TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_docs_kind
@@ -246,7 +259,8 @@ pub const HISTORY_DOCS_SCHEMA_STATEMENTS: &[&str] = &[
         source TEXT NOT NULL,
         pending_embedding INTEGER NOT NULL DEFAULT 1,
         fetched_at TEXT NOT NULL,
-        scope TEXT NOT NULL DEFAULT 'project'
+        scope TEXT NOT NULL DEFAULT 'project',
+        embedding_error TEXT
     )",
     "CREATE INDEX IF NOT EXISTS idx_history_docs_kind
         ON history_docs(doc_kind)",
@@ -925,6 +939,37 @@ pub trait HistoryStore: Send + Sync {
     /// `(commits, docs)` still awaiting a vector, store-wide.
     fn count_pending_embedding(&self) -> Result<(i64, i64)>;
 
+    /// Retire a unit the provider refused, keeping the refusal on the row.
+    ///
+    /// Distinct from both [`Self::mark_commit_embedded`] and
+    /// [`Self::skip_commit_embedding`]: the unit has no vector, was not
+    /// excluded by policy, and retrying the identical payload cannot change the
+    /// answer (GH #695: a 138k-char commit body over the model's token cap).
+    /// Leaving it pending pins the whole queue behind it; clearing it silently
+    /// loses the only evidence of why the corpus is incomplete. Quarantine
+    /// removes it from `pending` and keeps the provider's message for
+    /// [`Self::count_quarantined_embedding`] and the retry path.
+    fn quarantine_commit_embedding(&self, sha: &str, error: &str) -> Result<()>;
+
+    /// [`Self::quarantine_commit_embedding`] for a doc.
+    fn quarantine_doc_embedding(&self, id: &str, error: &str) -> Result<()>;
+
+    /// `(commits, docs)` retired with a provider refusal recorded.
+    fn count_quarantined_embedding(&self) -> Result<(i64, i64)>;
+
+    /// The most recent provider refusal recorded on any quarantined unit.
+    ///
+    /// Reporting the count without the reason gives an operator a number and no
+    /// move; this is the sentence that names what the provider actually said.
+    fn last_quarantined_embedding_error(&self) -> Result<Option<String>>;
+
+    /// Re-arm every quarantined unit and return how many were requeued.
+    ///
+    /// The operator escape hatch: a provider cap that has been raised, or a
+    /// client-side cap that now truncates the payload, makes a previously
+    /// refused unit embeddable again.
+    fn requeue_quarantined_embeddings(&self) -> Result<usize>;
+
     /// Re-arm every commit and doc for embedding.
     ///
     /// Called when the embedding model changes: vectors from two models are not
@@ -1050,10 +1095,15 @@ impl SqliteHistoryStore {
 
     /// Shared body of "this commit is no longer awaiting a vector", whether
     /// because it got one or because it never will (M7).
+    /// Retire a commit from the embedding queue.
+    ///
+    /// Clears `embedding_error` too: a unit that just succeeded (or was
+    /// excluded by policy) is not quarantined any more, and a stale refusal
+    /// would keep counting against the corpus forever.
     fn clear_commit_pending(&self, sha: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "UPDATE history_commits SET pending_embedding = 0 WHERE sha = ?1",
+            "UPDATE history_commits SET pending_embedding = 0, embedding_error = NULL WHERE sha = ?1",
             params![sha],
         )?;
         Ok(())
@@ -1350,6 +1400,20 @@ impl HistoryStore for SqliteHistoryStore {
                 "ALTER TABLE history_commits
                      ADD COLUMN symbol_mapping TEXT NOT NULL DEFAULT 'pending'",
             )?;
+        }
+        // Same idempotent-ALTER reasoning as `symbol_mapping` above. A unit the
+        // provider refuses needs a state that is neither "pending" nor
+        // "embedded": without it a rejected unit can only be retried forever
+        // (the GH #695 shape) or cleared silently, and neither is reportable.
+        for table in ["history_commits", "history_docs"] {
+            let has_column = conn
+                .prepare(&format!(
+                    "SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'embedding_error'"
+                ))?
+                .exists([])?;
+            if !has_column {
+                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN embedding_error TEXT"))?;
+            }
         }
         conn.execute_batch(HISTORY_EPOCHS_SCHEMA)?;
         Ok(())
@@ -1809,29 +1873,35 @@ impl HistoryStore for SqliteHistoryStore {
 
         // --- Edge 1: the exact anchor. The high-confidence figure IS this one.
         if has_tasks {
+            // The anchors are materialized once and joined, rather than being
+            // recomputed inside a correlated `EXISTS` per commit. The
+            // correlated form parses every task's `deliverables` JSON once per
+            // (commit, task) pair: on the GH #700 store — 8,509 commits,
+            // 4,465 tasks, kilobyte payloads — that single query measured
+            // 77.6s, and `cas doctor` spent 121s of 126s in this function.
+            // Same rows, same count, 0.02s (cas-ba01).
             let mut stmt = conn.prepare(
-                "SELECT c.sha FROM history_commits c
-                  WHERE c.repository = ?1
-                    AND EXISTS (
-                        SELECT 1 FROM tasks t
-                         WHERE json_extract(t.deliverables, '$.factory_branch_anchor') = c.sha
-                    )",
+                "WITH anchors AS (
+                     SELECT DISTINCT
+                            json_extract(deliverables, '$.factory_branch_anchor') AS anchor
+                       FROM tasks
+                      WHERE json_extract(deliverables, '$.factory_branch_anchor') IS NOT NULL
+                 )
+                 SELECT c.sha FROM history_commits c
+                   JOIN anchors a ON a.anchor = c.sha
+                  WHERE c.repository = ?1",
             )?;
             let anchored: Vec<String> = stmt
                 .query_map(params![repository], |row| row.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
-            let anchor_total: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM tasks
-                  WHERE json_extract(deliverables, '$.factory_branch_anchor') IS NOT NULL",
-                [],
-                |row| row.get(0),
-            )?;
-            let anchor_distinct: i64 = conn.query_row(
-                "SELECT COUNT(DISTINCT json_extract(deliverables, '$.factory_branch_anchor'))
+            // One pass over `tasks` for both figures, for the same reason.
+            let (anchor_total, anchor_distinct): (i64, i64) = conn.query_row(
+                "SELECT COUNT(*),
+                        COUNT(DISTINCT json_extract(deliverables, '$.factory_branch_anchor'))
                    FROM tasks
                   WHERE json_extract(deliverables, '$.factory_branch_anchor') IS NOT NULL",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             high_confidence = Some(anchored.len() as i64);
             by_method.push((LINK_METHOD_FACTORY_ANCHOR.to_string(), anchored.len() as i64));
@@ -2509,10 +2579,78 @@ impl HistoryStore for SqliteHistoryStore {
     fn mark_doc_embedded(&self, id: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "UPDATE history_docs SET pending_embedding = 0 WHERE id = ?1",
+            "UPDATE history_docs SET pending_embedding = 0, embedding_error = NULL WHERE id = ?1",
             params![id],
         )?;
         Ok(())
+    }
+
+    fn quarantine_commit_embedding(&self, sha: &str, error: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE history_commits SET pending_embedding = 0, embedding_error = ?2 WHERE sha = ?1",
+            params![sha, error],
+        )?;
+        Ok(())
+    }
+
+    fn quarantine_doc_embedding(&self, id: &str, error: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE history_docs SET pending_embedding = 0, embedding_error = ?2 WHERE id = ?1",
+            params![id, error],
+        )?;
+        Ok(())
+    }
+
+    fn count_quarantined_embedding(&self) -> Result<(i64, i64)> {
+        let conn = self.lock();
+        let commits: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM history_commits WHERE embedding_error IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        let docs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM history_docs WHERE embedding_error IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok((commits, docs))
+    }
+
+    fn last_quarantined_embedding_error(&self) -> Result<Option<String>> {
+        let conn = self.lock();
+        let error: Option<String> = conn
+            .query_row(
+                "SELECT embedding_error FROM (
+                     SELECT embedding_error, committed_at AS at FROM history_commits
+                         WHERE embedding_error IS NOT NULL
+                     UNION ALL
+                     SELECT embedding_error, COALESCE(updated_at, created_at, '') AS at
+                         FROM history_docs WHERE embedding_error IS NOT NULL
+                 ) ORDER BY at DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(error)
+    }
+
+    fn requeue_quarantined_embeddings(&self) -> Result<usize> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let commits = tx.execute(
+            "UPDATE history_commits SET pending_embedding = 1, embedding_error = NULL
+             WHERE embedding_error IS NOT NULL",
+            [],
+        )?;
+        let docs = tx.execute(
+            "UPDATE history_docs SET pending_embedding = 1, embedding_error = NULL
+             WHERE embedding_error IS NOT NULL",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(commits + docs)
     }
 
     fn count_pending_embedding(&self) -> Result<(i64, i64)> {
@@ -2533,8 +2671,16 @@ impl HistoryStore for SqliteHistoryStore {
     fn mark_all_pending_embedding(&self) -> Result<()> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
-        tx.execute("UPDATE history_commits SET pending_embedding = 1", [])?;
-        tx.execute("UPDATE history_docs SET pending_embedding = 1", [])?;
+        // A model change invalidates the refusals too: a different model has a
+        // different input cap, so a unit this one refused may embed cleanly.
+        tx.execute(
+            "UPDATE history_commits SET pending_embedding = 1, embedding_error = NULL",
+            [],
+        )?;
+        tx.execute(
+            "UPDATE history_docs SET pending_embedding = 1, embedding_error = NULL",
+            [],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -3853,6 +3999,63 @@ mod tests {
         );
     }
 
+    /// GH #700 / cas-ba01: the anchor edge used to be a correlated
+    /// `EXISTS (SELECT 1 FROM tasks WHERE json_extract(...) = c.sha)`, which
+    /// evaluates `json_extract` once per (commit, task) pair. On the reporting
+    /// store — 8,509 commits and 4,465 tasks — that one query measured 77.6s,
+    /// and `cas doctor` spent 121s of its 126s inside this call.
+    ///
+    /// The budget is 1s for 4M pairs. The rewritten shape does this in
+    /// milliseconds, and the old one is measured below the assertion, so the
+    /// margin is against machine speed, not against the defect.
+    #[test]
+    fn provenance_coverage_stays_linear_in_tasks_not_commits_times_tasks() {
+        let (_t, store) = store();
+        let commits: Vec<HistoryCommit> = (0..2_000)
+            .map(|i| commit(&format!("{i:040x}")))
+            .collect();
+        {
+            let conn = store.lock();
+            conn.execute_batch(
+                "CREATE TABLE tasks (id TEXT PRIMARY KEY, deliverables TEXT NOT NULL DEFAULT '{}');",
+            )
+            .unwrap();
+            conn.execute_batch("BEGIN").unwrap();
+            // Real `deliverables` payloads are kilobytes of receipts, and the
+            // cost of the old shape was one JSON parse of that payload per
+            // (commit, task) pair. A synthetic store with two-field payloads
+            // does not reproduce the defect.
+            let filler = "x".repeat(2_000);
+            for i in 0..2_000 {
+                conn.execute(
+                    "INSERT INTO tasks (id, deliverables)
+                     VALUES (?1, json_object('factory_branch_anchor', ?2, 'notes', ?3))",
+                    params![format!("cas-{i}"), format!("{i:040x}"), filler],
+                )
+                .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+        }
+        let tip = commits.last().unwrap().sha.clone();
+        store.commit_batch("/repo", &commits, &[], &tip, true).unwrap();
+
+        let started = std::time::Instant::now();
+        let cov = store.provenance_coverage("/repo").unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(cov.total_commits, 2_000);
+        assert_eq!(
+            cov.high_confidence_linked,
+            Some(2_000),
+            "every commit has an anchoring task"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(1_000),
+            "provenance coverage took {elapsed:?} for 2,000 commits x 2,000 tasks — the anchor \
+             edge is quadratic again"
+        );
+    }
+
     // ---- Binary epochs (spec §9, EPIC cas-6212 / cas-8d2a, M8) ----
 
     fn epoch(started: &str, pid: i64) -> HistoryEpoch {
@@ -4945,4 +5148,100 @@ mod tests {
                 .contains(&(LINK_METHOD_WORKER_EVENT_PREFIX.to_string(), 1))
         );
     }
+
+    /// GH #695: a unit the provider refuses must leave the pending queue while
+    /// keeping the refusal, so the backlog can reach zero, the reason survives
+    /// for reporting, and an operator can re-arm it after the cause is fixed.
+    #[test]
+    fn quarantined_units_leave_pending_keep_their_reason_and_can_be_requeued() {
+        let (_t, store) = store();
+        let poison = "a".repeat(40);
+        let healthy = "b".repeat(40);
+        store
+            .commit_batch(
+                "/repo",
+                &[commit(&poison), commit(&healthy)],
+                &[],
+                &healthy,
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(store.count_pending_embedding().unwrap(), (2, 0));
+
+        store
+            .quarantine_commit_embedding(&poison, "provider refused: input over token cap")
+            .unwrap();
+
+        assert_eq!(
+            store.count_pending_embedding().unwrap(),
+            (1, 0),
+            "a refused unit must stop blocking the queue"
+        );
+        assert_eq!(store.count_quarantined_embedding().unwrap(), (1, 0));
+        assert_eq!(
+            store.last_quarantined_embedding_error().unwrap().as_deref(),
+            Some("provider refused: input over token cap")
+        );
+        let still_pending = store.list_pending_embedding_commits(10).unwrap();
+        assert_eq!(still_pending.len(), 1);
+        assert_eq!(still_pending[0].sha, healthy, "the healthy unit still drains");
+
+        // Re-arming is the operator escape hatch once the cause is repaired.
+        assert_eq!(store.requeue_quarantined_embeddings().unwrap(), 1);
+        assert_eq!(store.count_quarantined_embedding().unwrap(), (0, 0));
+        assert_eq!(store.count_pending_embedding().unwrap(), (2, 0));
+        assert_eq!(store.last_quarantined_embedding_error().unwrap(), None);
+
+        // A later success must clear the refusal rather than leave it counting.
+        store
+            .quarantine_commit_embedding(&poison, "provider refused again")
+            .unwrap();
+        store.mark_commit_embedded(&poison).unwrap();
+        assert_eq!(store.count_quarantined_embedding().unwrap(), (0, 0));
+    }
+
+    /// A store created before the column existed gains it on open, keeping its
+    /// rows — the upgrade path every reporting host is on.
+    #[test]
+    fn embedding_error_column_is_added_to_a_legacy_history_store() {
+        let temp = TempDir::new().unwrap();
+        {
+            let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE history_commits (
+                     sha TEXT PRIMARY KEY,
+                     short_sha TEXT NOT NULL,
+                     parent_shas TEXT NOT NULL DEFAULT '[]',
+                     is_merge INTEGER NOT NULL DEFAULT 0,
+                     author_name TEXT,
+                     author_email TEXT,
+                     authored_at TEXT,
+                     committed_at TEXT NOT NULL,
+                     subject TEXT NOT NULL,
+                     body TEXT,
+                     branch_hint TEXT,
+                     repository TEXT NOT NULL,
+                     pending_embedding INTEGER NOT NULL DEFAULT 1,
+                     indexed_at TEXT NOT NULL,
+                     scope TEXT NOT NULL DEFAULT 'project'
+                 );
+                 INSERT INTO history_commits
+                     (sha, short_sha, committed_at, subject, repository, indexed_at)
+                 VALUES ('legacy', 'legacy', '2026-01-01T00:00:00Z', 's', '/repo', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+
+        let store = SqliteHistoryStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        assert_eq!(store.count_pending_embedding().unwrap().0, 1);
+        assert_eq!(store.count_quarantined_embedding().unwrap(), (0, 0));
+        store
+            .quarantine_commit_embedding("legacy", "refused")
+            .unwrap();
+        assert_eq!(store.count_quarantined_embedding().unwrap(), (1, 0));
+    }
+
 }

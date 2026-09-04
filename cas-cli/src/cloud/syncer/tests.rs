@@ -72,6 +72,8 @@ fn conflict_recording_tracks_directional_counts_and_details() {
         entity_id: "local-wins".to_string(),
         local_updated: now,
         remote_updated: now,
+        local_revision: None,
+        remote_revision: None,
         resolution: ConflictResolution::KeepRecent,
         action: ConflictAction::UseLocal,
     });
@@ -80,6 +82,8 @@ fn conflict_recording_tracks_directional_counts_and_details() {
         entity_id: "remote-wins".to_string(),
         local_updated: now,
         remote_updated: now,
+        local_revision: None,
+        remote_revision: None,
         resolution: ConflictResolution::RemoteWins,
         action: ConflictAction::UseRemote,
     });
@@ -179,6 +183,8 @@ fn test_sync_conflict_creation() {
         entity_id: "test-123".to_string(),
         local_updated: Utc::now(),
         remote_updated: Utc::now(),
+        local_revision: None,
+        remote_revision: None,
         resolution: ConflictResolution::RemoteWins,
         action: ConflictAction::UseRemote,
     };
@@ -456,6 +462,9 @@ async fn personal_push_keeps_itemized_invalid_revision_visible_in_queue_health()
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -489,8 +498,8 @@ async fn personal_push_keeps_itemized_invalid_revision_visible_in_queue_health()
     let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
 
     assert_eq!(
-        result.pushed_entries, 0,
-        "the batch reports its queue error"
+        result.pushed_entries, 1,
+        "the valid neighbour is still reported as pushed"
     );
     assert_eq!(result.errors.len(), 1);
     assert!(result.errors[0].contains("cas-invalid-entry"));
@@ -532,6 +541,9 @@ async fn team_push_serializes_task_dependency_collection() {
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -707,6 +719,9 @@ async fn push_response_aggregate_skip_acknowledges_the_whole_personal_batch() {
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -769,6 +784,9 @@ async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors()
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     for id in ["entry-good", "entry-rejected"] {
@@ -795,7 +813,10 @@ async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors()
     );
     let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
 
-    assert_eq!(result.pushed_entries, 0, "the batch reports its queue error");
+    // GH #668: a partially rejected batch reports both halves. The accepted
+    // neighbour is counted as pushed and the refusal is still an error, so a
+    // per-row rejection no longer erases the rows the cloud did write.
+    assert_eq!(result.pushed_entries, 1, "the accepted neighbour is reported");
     assert_eq!(result.errors.len(), 1);
     let remaining = queue.list_all(10).unwrap();
     assert_eq!(remaining.len(), 1);
@@ -811,6 +832,9 @@ async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors()
 fn version_gate_requeues_only_after_minimum_and_is_idempotent() {
     let (_temp, queue) = {
         let temp = tempfile::tempdir().unwrap();
+        // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+        // root under the temp directory, and a TempDir is exactly that.
+        std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
         let queue = SyncQueue::open(temp.path()).unwrap();
         queue.init().unwrap();
         queue
@@ -899,6 +923,9 @@ async fn version_gate_push_requeues_terminal_items_before_reading_pending_queue(
         .await;
 
     let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -1062,6 +1089,9 @@ async fn pull_team_task_and_dependency_fixtures_with_pull_count(
         .await;
 
     let temp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     let store = open_store_local(temp.path()).unwrap();
@@ -1402,5 +1432,1151 @@ async fn team_pull_foreign_open_row_cannot_reopen_local_owner_close() {
     assert_eq!(
         task_store.get("cas-2125-local-closed").unwrap().status,
         TaskStatus::Closed
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GH #640 client half (cas-cf1f): deletion tombstones and snapshot-scoped heal.
+//
+// The cloud's `task_dependencies` collection is filtered by `since` exactly
+// like every other entity, so an incremental envelope is NOT a statement about
+// which edges the cloud holds. Diffing the full local edge set against it made
+// every untouched local edge look cloud-missing and re-queued it on every pull
+// (measured on this host: 1,371 rows enqueued by a single pull). Reconciliation
+// therefore runs only against a complete snapshot, and received tombstones are
+// persisted so a later local push cannot resurrect a deleted edge.
+// ---------------------------------------------------------------------------
+
+const TOMBSTONE_TEAM: &str = "team-cas-cf1f";
+
+fn dependency_tombstone_fixture(
+    dependency: &crate::types::Dependency,
+    project_id: &str,
+    deleted_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    // Shape pinned by petra-stella-cloud PR #60: the live row is updated in
+    // place, so a tombstone keeps from_id/to_id/dep_type/created_at and adds
+    // `deleted`/`deleted_at` while `updated_at` becomes the delete time.
+    let mut raw = team_dependency_fixture(dependency, project_id, None);
+    raw["deleted"] = serde_json::json!(true);
+    raw["deleted_at"] = serde_json::json!(deleted_at.to_rfc3339());
+    raw["updated_at"] = serde_json::json!(deleted_at.to_rfc3339());
+    raw
+}
+
+struct DependencyPullFixture {
+    _temp: tempfile::TempDir,
+    result: SyncResult,
+    task_store: Arc<dyn TaskStore>,
+    queue: Arc<SyncQueue>,
+    _server: wiremock::MockServer,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn pull_team_dependency_scenario(
+    project_id: &str,
+    local_tasks: Vec<Task>,
+    local_dependencies: Vec<crate::types::Dependency>,
+    envelope_edges: Vec<serde_json::Value>,
+    snapshot_edges: Option<Vec<serde_json::Value>>,
+    expected_snapshot_calls: u64,
+    watermark: Option<&str>,
+    reconciled_at: Option<&str>,
+    ledger: Vec<(String, chrono::DateTime<chrono::Utc>)>,
+) -> DependencyPullFixture {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig};
+    use crate::store::{
+        open_rule_store_local, open_skill_store_local, open_store_local, open_task_store_local,
+    };
+    use tempfile::TempDir;
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let envelope = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "entries": [],
+        "tasks": [],
+        "rules": [],
+        "skills": [],
+        "task_dependencies": envelope_edges,
+        "pulled_at": "2026-09-03T18:00:00Z",
+        "team_id": TOMBSTONE_TEAM,
+        "status": "ok",
+    }));
+    // The incremental envelope and the reconciliation snapshot are separate
+    // requests with disjoint matchers, so a test can prove which one ran.
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TOMBSTONE_TEAM}/sync/pull")))
+        .and(query_param("project_id", project_id))
+        .and(query_param_is_missing("types"))
+        .respond_with(envelope)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TOMBSTONE_TEAM}/sync/pull")))
+        .and(query_param("types", "task_dependencies"))
+        .and(query_param_is_missing("since"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "task_dependencies": snapshot_edges.clone().unwrap_or_default(),
+                "pulled_at": "2026-09-03T18:00:00Z",
+                "team_id": TOMBSTONE_TEAM,
+                "status": "ok",
+            })),
+        )
+        .expect(expected_snapshot_calls)
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    if let Some(watermark) = watermark {
+        queue
+            .set_metadata(
+                &format!("last_team_pull_at_{TOMBSTONE_TEAM}_{project_id}"),
+                watermark,
+            )
+            .unwrap();
+    }
+    if let Some(reconciled_at) = reconciled_at {
+        queue
+            .set_metadata(
+                &format!("last_dependency_reconcile_at_{TOMBSTONE_TEAM}_{project_id}"),
+                reconciled_at,
+            )
+            .unwrap();
+    }
+    let store = open_store_local(temp.path()).unwrap();
+    let task_store = open_task_store_local(temp.path()).unwrap();
+    for task in local_tasks {
+        task_store.add(&task).unwrap();
+    }
+    for dependency in &local_dependencies {
+        task_store.add_dependency(dependency).unwrap();
+    }
+    for (entity_id, deleted_at) in ledger {
+        let mut parts = entity_id.splitn(3, ':');
+        let from_id = parts.next().unwrap_or_default().to_string();
+        let to_id = parts.next().unwrap_or_default().to_string();
+        let dep_type = parts.next().unwrap_or_default().to_string();
+        queue
+            .record_dependency_tombstone(&entity_id, &from_id, &to_id, &dep_type, deleted_at)
+            .unwrap();
+    }
+    let rule_store = open_rule_store_local(temp.path()).unwrap();
+    let skill_store = open_skill_store_local(temp.path()).unwrap();
+    let syncer = CloudSyncer::new(
+        Arc::clone(&queue),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+    );
+    let result = syncer
+        .pull_team(
+            TOMBSTONE_TEAM,
+            project_id,
+            store.as_ref(),
+            task_store.as_ref(),
+            rule_store.as_ref(),
+            skill_store.as_ref(),
+        )
+        .unwrap();
+
+    DependencyPullFixture {
+        _temp: temp,
+        result,
+        task_store,
+        queue,
+        _server: server,
+    }
+}
+
+#[tokio::test]
+async fn pulled_tombstone_deletes_the_local_edge_and_pins_it() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-to".to_string(), "to".to_string());
+    let mut local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::ParentChild);
+    local.created_at = chrono::Utc::now() - chrono::Duration::hours(4);
+    let deleted_at = chrono::Utc::now() - chrono::Duration::hours(1);
+    let tombstone = dependency_tombstone_fixture(&local, project_id, deleted_at);
+
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from.clone(), to],
+        vec![local.clone()],
+        vec![tombstone],
+        None,
+        0,
+        None,
+        None,
+        Vec::new(),
+    )
+    .await;
+
+    assert!(
+        fixture.result.errors.is_empty(),
+        "unexpected errors: {:?}",
+        fixture.result.errors
+    );
+    assert_eq!(fixture.result.deleted_task_dependencies, 1);
+    assert!(
+        fixture
+            .task_store
+            .get_dependencies(&from.id)
+            .unwrap()
+            .is_empty(),
+        "the tombstoned edge must be gone locally"
+    );
+    let recorded = fixture
+        .queue
+        .dependency_tombstone("cas-cf1f-from:cas-cf1f-to:parent-child")
+        .unwrap()
+        .expect("the tombstone must be persisted so a later push cannot resurrect the edge");
+    assert_eq!(recorded.timestamp(), deleted_at.timestamp());
+    assert!(
+        fixture
+            .queue
+            .pending_for_team(TOMBSTONE_TEAM, 10, 5)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn heal_never_repushes_an_edge_a_recorded_tombstone_deleted() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-stale-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-stale-to".to_string(), "to".to_string());
+    let mut local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+    local.created_at = chrono::Utc::now() - chrono::Duration::days(2);
+    let entity_id = "cas-cf1f-stale-from:cas-cf1f-stale-to:blocks".to_string();
+
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from.clone(), to],
+        vec![local],
+        Vec::new(),
+        None,
+        0,
+        None,
+        None,
+        vec![(entity_id, chrono::Utc::now() - chrono::Duration::hours(6))],
+    )
+    .await;
+
+    assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 0);
+    assert_eq!(fixture.result.skipped_task_dependencies_by_tombstone, 1);
+    assert!(
+        fixture
+            .queue
+            .pending_for_team(TOMBSTONE_TEAM, 10, 5)
+            .unwrap()
+            .is_empty(),
+        "a tombstoned edge must never be queued back to the cloud"
+    );
+    assert!(
+        fixture
+            .task_store
+            .get_dependencies(&from.id)
+            .unwrap()
+            .is_empty(),
+        "the local edge converges to deleted rather than lingering unsynced"
+    );
+}
+
+#[tokio::test]
+async fn heal_pushes_an_edge_recreated_after_its_tombstone() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-readd-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-readd-to".to_string(), "to".to_string());
+    let mut local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+    local.created_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let entity_id = "cas-cf1f-readd-from:cas-cf1f-readd-to:blocks".to_string();
+
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from.clone(), to],
+        vec![local],
+        Vec::new(),
+        None,
+        0,
+        None,
+        None,
+        vec![(
+            entity_id.clone(),
+            chrono::Utc::now() - chrono::Duration::hours(3),
+        )],
+    )
+    .await;
+
+    assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 1);
+    assert_eq!(fixture.result.skipped_task_dependencies_by_tombstone, 0);
+    let pending = fixture.queue.pending_for_team(TOMBSTONE_TEAM, 10, 5).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].entity_id, entity_id);
+    assert!(
+        fixture.queue.dependency_tombstone(&entity_id).unwrap().is_none(),
+        "a newer local edge retires its tombstone"
+    );
+    assert_eq!(
+        fixture.task_store.get_dependencies(&from.id).unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn incremental_pull_does_not_reheal_edges_outside_the_since_window() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-churn-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-churn-to".to_string(), "to".to_string());
+    let local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::ParentChild);
+
+    // Watermarked pull, reconciliation already done minutes ago: the partial
+    // envelope must not be mistaken for the cloud's full edge set.
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from, to],
+        vec![local],
+        Vec::new(),
+        Some(Vec::new()),
+        0,
+        Some("2026-09-03T17:48:41.321Z"),
+        Some(&(chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339()),
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 0);
+    assert!(
+        fixture
+            .queue
+            .pending_for_team(TOMBSTONE_TEAM, 10, 5)
+            .unwrap()
+            .is_empty(),
+        "an incremental envelope must never re-queue the local edge set"
+    );
+}
+
+#[tokio::test]
+async fn incremental_pull_reconciles_against_the_full_snapshot_when_due() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-due-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-due-to".to_string(), "to".to_string());
+    let local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from, to],
+        vec![local],
+        Vec::new(),
+        Some(Vec::new()),
+        1,
+        Some("2026-09-03T17:48:41.321Z"),
+        Some(&(chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339()),
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 1);
+    let pending = fixture.queue.pending_for_team(TOMBSTONE_TEAM, 10, 5).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].entity_id, "cas-cf1f-due-from:cas-cf1f-due-to:blocks");
+}
+
+#[tokio::test]
+async fn reconciliation_snapshot_tombstone_deletes_the_local_edge() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "tombstone-project";
+    let from = Task::new("cas-cf1f-snap-from".to_string(), "from".to_string());
+    let to = Task::new("cas-cf1f-snap-to".to_string(), "to".to_string());
+    let mut local = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+    local.created_at = chrono::Utc::now() - chrono::Duration::days(1);
+    let tombstone = dependency_tombstone_fixture(
+        &local,
+        project_id,
+        chrono::Utc::now() - chrono::Duration::hours(2),
+    );
+
+    let fixture = pull_team_dependency_scenario(
+        project_id,
+        vec![from.clone(), to],
+        vec![local],
+        Vec::new(),
+        Some(vec![tombstone]),
+        1,
+        Some("2026-09-03T17:48:41.321Z"),
+        None,
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(fixture.result.deleted_task_dependencies, 1);
+    assert_eq!(fixture.result.healed_task_dependencies_to_cloud, 0);
+    assert!(
+        fixture
+            .task_store
+            .get_dependencies(&from.id)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .queue
+            .dependency_tombstone("cas-cf1f-snap-from:cas-cf1f-snap-to:blocks")
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// GH #668: the deployed cloud returns per-row verdicts in a TOP-LEVEL `rows`
+/// array (verified against /api/sync/push on 2026-09-03). A row the cloud kept
+/// a newer version of leaves the queue and is reported as an acknowledgement,
+/// not as a failure.
+#[tokio::test]
+async fn top_level_rows_ack_lww_skips_and_park_rejections_by_reason() {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": {"inserted": 1, "updated": 0, "skipped": 2},
+            "rows": [
+                {"entity_type": "entries", "id": "entry-written", "outcome": "inserted"},
+                {"entity_type": "entries", "id": "entry-kept-newer", "outcome": "skipped_lww"},
+                {
+                    "entity_type": "entries",
+                    "id": "entry-refused",
+                    "outcome": "rejected",
+                    "reason": "project_mismatch"
+                }
+            ],
+            "canonical_id": "test-project"
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    for id in ["entry-written", "entry-kept-newer", "entry-refused"] {
+        queue
+            .enqueue(
+                EntityType::Entry,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}"}}"#)),
+            )
+            .unwrap();
+    }
+
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "test-project".to_string(),
+        temp.path(),
+    );
+    let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
+
+    assert_eq!(
+        result.skipped_lww_acked, 1,
+        "the LWW loss is an acknowledgement"
+    );
+    let remaining = queue.list_all(10).unwrap();
+    assert_eq!(remaining.len(), 1, "only the refused row is retained");
+    assert_eq!(remaining[0].entity_id, "entry-refused");
+    assert_eq!(
+        result
+            .remaining_backlog
+            .rejected_by_reason
+            .get("project_mismatch")
+            .copied(),
+        Some(1),
+        "the cloud's reason is persisted for reporting"
+    );
+    assert!(
+        result.remaining_backlog.failed_errors[0].contains("cas cloud link"),
+        "the diagnostic carries the remediation for its reason: {:?}",
+        result.remaining_backlog.failed_errors
+    );
+}
+
+/// A cloud build that answers with aggregate counts only must behave exactly as
+/// it did before per-row results existed.
+#[tokio::test]
+async fn responses_without_rows_keep_the_legacy_aggregate_behaviour() {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": {"inserted": 1, "updated": 0, "skipped": 1}
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    for id in ["entry-one", "entry-two"] {
+        queue
+            .enqueue(
+                EntityType::Entry,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}"}}"#)),
+            )
+            .unwrap();
+    }
+
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "test-project".to_string(),
+        temp.path(),
+    );
+    let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
+
+    assert!(result.errors.is_empty());
+    assert_eq!(result.pushed_entries, 2);
+    assert_eq!(
+        result.skipped_lww_acked, 1,
+        "an aggregate skip is still reported as a kept-newer row"
+    );
+    assert!(queue.list_all(10).unwrap().is_empty());
+    assert!(result.remaining_backlog.rejected_by_reason.is_empty());
+}
+
+/// Every reason the deployed cloud can return maps to a distinct, actionable
+/// remediation; an unknown reason says so instead of inventing a fix.
+#[test]
+fn every_push_reason_has_its_own_remediation() {
+    for reason in [
+        "project_mismatch",
+        "scope_mismatch",
+        "revision_conflict",
+        "version_gate",
+        "sync_limit_exceeded",
+    ] {
+        let hint = push_reason_hint(reason);
+        assert!(
+            !hint.starts_with("unrecognized"),
+            "{reason} must name its own repair"
+        );
+    }
+    assert!(push_reason_hint("brand_new_server_reason").starts_with("unrecognized"));
+    assert!(push_reason_is_permanent("project_mismatch"));
+    assert!(push_reason_is_permanent("SCOPE_MISMATCH"));
+    assert!(!push_reason_is_permanent("revision_conflict"));
+}
+
+// ---------------------------------------------------------------------------
+// cas-c32f: revision-based conflict resolution.
+//
+// The cloud owns a monotonic per-row `revision` and increments it on every
+// accepted write, so it is the only trustworthy answer to "which side is
+// newer". Comparing it BEFORE `updated_at` is what stops a machine with a
+// wrong clock from silently winning or losing a conflict. When either side has
+// no revision the timestamp path must behave exactly as it always did.
+// ---------------------------------------------------------------------------
+
+fn revision_syncer() -> (tempfile::TempDir, CloudSyncer) {
+    use crate::cloud::{CloudConfig, CloudSyncerConfig};
+
+    let temp = tempfile::TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let syncer = CloudSyncer::new(
+        queue,
+        CloudConfig {
+            endpoint: "https://cloud.invalid".to_string(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+    );
+    (temp, syncer)
+}
+
+#[tokio::test]
+async fn a_slow_clock_cannot_lose_a_conflict_it_wins_on_revision() {
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    // Local machine's clock is an hour behind, but it holds the newer server
+    // revision. Under pure timestamp LWW the remote row would win and the
+    // local edit would be silently discarded.
+    let action = syncer.resolve_conflict_with_revisions(
+        "task",
+        "cas-c32f-slow-clock",
+        now - chrono::Duration::hours(1),
+        now,
+        Some(9),
+        Some(8),
+        ConflictResolution::KeepRecent,
+    );
+    assert_eq!(action, ConflictAction::UseLocal);
+
+    let conflicts = syncer.take_conflict_log();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].local_revision, Some(9));
+    assert_eq!(conflicts[0].remote_revision, Some(8));
+    assert!(conflicts[0].decided_by_revision());
+    assert_eq!(conflicts[0].strategy_label(), "revision");
+}
+
+#[tokio::test]
+async fn a_fast_clock_cannot_win_a_conflict_it_loses_on_revision() {
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    // The mirror image: the local clock runs an hour ahead, but the remote row
+    // carries the newer revision and must win anyway.
+    let action = syncer.resolve_conflict_with_revisions(
+        "task",
+        "cas-c32f-fast-clock",
+        now + chrono::Duration::hours(1),
+        now,
+        Some(3),
+        Some(4),
+        ConflictResolution::KeepRecent,
+    );
+    assert_eq!(action, ConflictAction::UseRemote);
+    assert!(syncer.take_conflict_log()[0].decided_by_revision());
+}
+
+#[tokio::test]
+async fn revision_ten_beats_revision_nine() {
+    // Guards the wire format: `revision` arrives as a decimal STRING, so a
+    // lexicographic comparison would rank "9" above "10" and invert every
+    // conflict from a row's tenth edit onward.
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    let action = syncer.resolve_conflict_with_revisions(
+        "task",
+        "cas-c32f-ten",
+        now,
+        now - chrono::Duration::minutes(1),
+        crate::cloud::parse_wire_revision(Some(&serde_json::json!("9"))),
+        crate::cloud::parse_wire_revision(Some(&serde_json::json!("10"))),
+        ConflictResolution::KeepRecent,
+    );
+    assert_eq!(action, ConflictAction::UseRemote);
+}
+
+#[tokio::test]
+async fn equal_revisions_fall_through_to_the_timestamp_comparison() {
+    // Equal revisions mean both sides descend from the same server state, so
+    // an unpushed local edit must still be recognisable by its timestamp.
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    let action = syncer.resolve_conflict_with_revisions(
+        "task",
+        "cas-c32f-equal",
+        now,
+        now - chrono::Duration::minutes(5),
+        Some(4),
+        Some(4),
+        ConflictResolution::KeepRecent,
+    );
+    assert_eq!(action, ConflictAction::UseLocal);
+    let conflict = &syncer.take_conflict_log()[0];
+    assert!(!conflict.decided_by_revision());
+    assert_eq!(conflict.strategy_label(), "timestamp_lww");
+}
+
+#[tokio::test]
+async fn a_missing_revision_on_either_side_keeps_the_timestamp_path_unchanged() {
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    let older = now - chrono::Duration::hours(1);
+
+    // Backward compatibility: a row this client has never pulled, or a cloud
+    // build that does not send revisions, must resolve exactly as before —
+    // including when the side WITHOUT a revision is the one that wins.
+    for (local_revision, remote_revision) in
+        [(None, None), (Some(9), None), (None, Some(9))]
+    {
+        assert_eq!(
+            syncer.resolve_conflict_with_revisions(
+                "task",
+                "cas-c32f-compat",
+                older,
+                now,
+                local_revision,
+                remote_revision,
+                ConflictResolution::KeepRecent,
+            ),
+            ConflictAction::UseRemote,
+            "newer remote timestamp must win when revisions are incomplete"
+        );
+        assert_eq!(
+            syncer.resolve_conflict_with_revisions(
+                "task",
+                "cas-c32f-compat",
+                now,
+                older,
+                local_revision,
+                remote_revision,
+                ConflictResolution::KeepRecent,
+            ),
+            ConflictAction::UseLocal,
+            "newer local timestamp must win when revisions are incomplete"
+        );
+        assert_eq!(
+            syncer.resolve_conflict_with_revisions(
+                "task",
+                "cas-c32f-compat",
+                now,
+                now,
+                local_revision,
+                remote_revision,
+                ConflictResolution::KeepRecent,
+            ),
+            ConflictAction::Skip,
+            "identical timestamps must still skip the write"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_explicit_operator_strategy_outranks_the_revisions() {
+    // RemoteWins/LocalWins are deliberate operator choices, not a guess about
+    // which row is newer, so revisions must not override them.
+    let (_temp, syncer) = revision_syncer();
+    let now = chrono::Utc::now();
+    assert_eq!(
+        syncer.resolve_conflict_with_revisions(
+            "task",
+            "cas-c32f-operator",
+            now,
+            now,
+            Some(99),
+            Some(1),
+            ConflictResolution::RemoteWins,
+        ),
+        ConflictAction::UseRemote
+    );
+    assert_eq!(
+        syncer.resolve_conflict_with_revisions(
+            "task",
+            "cas-c32f-operator",
+            now,
+            now,
+            Some(1),
+            Some(99),
+            ConflictResolution::LocalWins,
+        ),
+        ConflictAction::UseLocal
+    );
+    for conflict in syncer.take_conflict_log() {
+        assert!(!conflict.decided_by_revision());
+    }
+}
+
+#[tokio::test]
+async fn the_revision_ledger_is_monotonic_and_scoped_per_entity_type() {
+    use crate::cloud::EntityType;
+
+    let (_temp, syncer) = revision_syncer();
+    let queue = syncer.queue();
+    queue.record_revision(EntityType::Task, "cas-c32f-led", 5).unwrap();
+    // A replayed older envelope must not roll the ledger backwards: the base
+    // revision we send later is what decides whether our push is accepted.
+    queue.record_revision(EntityType::Task, "cas-c32f-led", 3).unwrap();
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), Some(5));
+    queue.record_revision(EntityType::Task, "cas-c32f-led", 6).unwrap();
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), Some(6));
+
+    // The same id under another entity type is an independent row.
+    assert_eq!(queue.revision(EntityType::Entry, "cas-c32f-led").unwrap(), None);
+    queue.record_revision(EntityType::Entry, "cas-c32f-led", 2).unwrap();
+    assert_eq!(queue.revision(EntityType::Entry, "cas-c32f-led").unwrap(), Some(2));
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), Some(6));
+
+    queue.clear_revision(EntityType::Task, "cas-c32f-led").unwrap();
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-led").unwrap(), None);
+}
+
+// --- cas-c32f milestone 2: the base revision on the wire, and the receipts ---
+
+fn decode_push_body(request: &wiremock::Request) -> serde_json::Value {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let mut decoder = GzDecoder::new(request.body.as_slice());
+    let mut decoded = Vec::new();
+    if decoder.read_to_end(&mut decoded).is_ok() {
+        if let Ok(value) = serde_json::from_slice(&decoded) {
+            return value;
+        }
+    }
+    serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null)
+}
+
+#[test]
+fn accepted_and_conflicting_revisions_are_read_from_either_envelope() {
+    // Personal puts per-type keys at the top level; team nests them under
+    // `synced`. Both must yield the same receipts, or team pushes would
+    // silently never learn a revision.
+    let personal: PushResponse = serde_json::from_value(serde_json::json!({
+        "tasks": {
+            "inserted": 1, "updated": 0, "skipped": 1,
+            "accepted": {"cas-ok": {"revision": "6", "canonical_id": "cas-src"}},
+            "rejected": [{
+                "id": "cas-stale", "reason": "revision_conflict",
+                "existing_canonical_id": "cas-src", "current_revision": "9"
+            }]
+        },
+        "rows": [
+            {"entity_type": "tasks", "id": "cas-ok", "outcome": "updated"},
+            {"entity_type": "tasks", "id": "cas-stale", "outcome": "rejected", "reason": "revision_conflict"}
+        ]
+    }))
+    .unwrap();
+    let team: PushResponse = serde_json::from_value(serde_json::json!({
+        "synced": {
+            "tasks": {
+                "inserted": 1, "updated": 0, "skipped": 1,
+                "accepted": {"cas-ok": {"revision": "6", "canonical_id": "cas-src"}},
+                "rejected": [{
+                    "id": "cas-stale", "reason": "revision_conflict",
+                    "existing_canonical_id": "cas-src", "current_revision": "9"
+                }]
+            }
+        }
+    }))
+    .unwrap();
+
+    for response in [&personal, &team] {
+        assert_eq!(
+            response.accepted_revisions_for("tasks").get("cas-ok"),
+            Some(&6)
+        );
+        assert_eq!(
+            response.revision_conflicts_for("tasks").get("cas-stale"),
+            Some(&Some(9))
+        );
+        // A rejection for another reason is not a revision conflict.
+        assert!(!response.revision_conflicts_for("tasks").contains_key("cas-ok"));
+    }
+}
+
+#[test]
+fn a_stale_base_is_retryable_rather_than_parked() {
+    // Losing the race is a stale base, not a bad row: parking it would strand
+    // the user's edit behind a manual requeue.
+    let conflict = PushRowResult {
+        id: "cas-stale".to_string(),
+        outcome: PushRowOutcome::Rejected,
+        reason: Some("revision_conflict".to_string()),
+    };
+    assert!(conflict.rejection_is_retryable());
+    // An unknown reason still parks — losing a diagnostic row is worse.
+    let unknown = PushRowResult {
+        id: "cas-unknown".to_string(),
+        outcome: PushRowOutcome::Rejected,
+        reason: Some("something_new".to_string()),
+    };
+    assert!(!unknown.rejection_is_retryable());
+}
+
+#[tokio::test]
+async fn push_declares_the_stored_base_revision_and_omits_it_when_unknown() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tasks": {
+                "inserted": 0, "updated": 2, "skipped": 0,
+                "accepted": {
+                    "cas-c32f-known": {"revision": "8", "canonical_id": "p"},
+                    "cas-c32f-new": {"revision": "1", "canonical_id": "p"}
+                }
+            },
+            "rows": [
+                {"entity_type": "tasks", "id": "cas-c32f-known", "outcome": "updated"},
+                {"entity_type": "tasks", "id": "cas-c32f-new", "outcome": "inserted"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    // One row whose revision we have observed, one we have never pulled.
+    queue.record_revision(EntityType::Task, "cas-c32f-known", 7).unwrap();
+    for id in ["cas-c32f-known", "cas-c32f-new"] {
+        queue
+            .enqueue(
+                EntityType::Task,
+                id,
+                crate::cloud::SyncOperation::Upsert,
+                Some(&serde_json::json!({"id": id, "title": "t"}).to_string()),
+            )
+            .unwrap();
+    }
+
+    let syncer = CloudSyncer::new_for_project(
+        Arc::clone(&queue),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "p".to_string(),
+        temp.path(),
+    );
+    tokio::task::spawn_blocking(move || syncer.push())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = requests
+        .iter()
+        .find_map(|request| {
+            let decoded = decode_push_body(request);
+            decoded
+                .get("tasks")
+                .is_some_and(|tasks| !tasks.as_array().unwrap_or(&vec![]).is_empty())
+                .then_some(decoded)
+        })
+        .expect("a task push must have been sent");
+    let tasks = body["tasks"].as_array().unwrap();
+    let known = tasks
+        .iter()
+        .find(|task| task["id"] == "cas-c32f-known")
+        .unwrap();
+    let fresh = tasks
+        .iter()
+        .find(|task| task["id"] == "cas-c32f-new")
+        .unwrap();
+    // Known row declares its base as a decimal STRING; unknown row omits the
+    // key entirely, which is what selects the server's timestamp path. A
+    // placeholder would be dropped by the server as an unparseable revision.
+    assert_eq!(known["revision"], serde_json::json!("7"));
+    assert!(
+        fresh.get("revision").is_none(),
+        "a row with no observed revision must omit the key, not send a placeholder"
+    );
+
+    // The echoed revisions are stored, so the next push declares a base the
+    // server will accept without a re-pull first.
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-known").unwrap(), Some(8));
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-new").unwrap(), Some(1));
+}
+
+#[tokio::test]
+async fn a_rejected_stale_base_is_forgotten_rather_than_replaced() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tasks": {
+                "inserted": 0, "updated": 0, "skipped": 1,
+                "rejected": [{
+                    "id": "cas-c32f-lost", "reason": "revision_conflict",
+                    "existing_canonical_id": "p", "current_revision": "12"
+                }]
+            },
+            "rows": [{
+                "entity_type": "tasks", "id": "cas-c32f-lost",
+                "outcome": "rejected", "reason": "revision_conflict"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    queue.record_revision(EntityType::Task, "cas-c32f-lost", 4).unwrap();
+    queue
+        .enqueue(
+            EntityType::Task,
+            "cas-c32f-lost",
+            crate::cloud::SyncOperation::Upsert,
+            Some(&serde_json::json!({"id": "cas-c32f-lost", "title": "t"}).to_string()),
+        )
+        .unwrap();
+
+    let syncer = CloudSyncer::new_for_project(
+        Arc::clone(&queue),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "p".to_string(),
+        temp.path(),
+    );
+    let _ = tokio::task::spawn_blocking(move || syncer.push()).await.unwrap();
+
+    // The proven-stale base is dropped, NOT replaced with the server's current
+    // revision: adopting a revision whose body we have never seen would let the
+    // next push overwrite a change this machine never looked at.
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-lost").unwrap(), None);
+    // The edit itself stays queued for the next cycle rather than being parked.
+    assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+}
+
+/// The comparison has to fire on a REAL pull, not only through the unit-level
+/// API: the revision travels on the raw wire row while the decision is taken
+/// deep inside a typed upsert helper. This drives a whole team pull to prove
+/// the two ends are actually connected.
+#[tokio::test]
+async fn a_real_pull_lets_a_higher_local_revision_beat_a_newer_remote_timestamp() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
+    use crate::store::{
+        open_rule_store_local, open_skill_store_local, open_store_local, open_task_store_local,
+    };
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let project_id = "revision-pull-project";
+    let team_id = "team-cas-c32f";
+    let now = chrono::Utc::now();
+
+    // The cloud row is an hour NEWER by the clock but a revision BEHIND: this
+    // is the skewed-clock case, and the local row must survive it.
+    let mut remote = Task::new("cas-c32f-pull".to_string(), "remote title".to_string());
+    remote.updated_at = now + chrono::Duration::hours(1);
+    remote.origin_project = Some(project_id.to_string());
+    let mut wire = serde_json::to_value(&remote).unwrap();
+    wire["project_id"] = serde_json::json!(project_id);
+    wire["revision"] = serde_json::json!("4");
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{team_id}/sync/pull")))
+        .and(query_param("project_id", project_id))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [wire], "rules": [], "skills": [],
+            "task_dependencies": [],
+            "pulled_at": "2026-09-03T22:00:00Z",
+            "team_id": team_id,
+            "status": "ok",
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let store = open_store_local(temp.path()).unwrap();
+    let task_store = open_task_store_local(temp.path()).unwrap();
+    let rule_store = open_rule_store_local(temp.path()).unwrap();
+    let skill_store = open_skill_store_local(temp.path()).unwrap();
+
+    let mut local = Task::new("cas-c32f-pull".to_string(), "local title".to_string());
+    local.updated_at = now;
+    local.origin_project = Some(project_id.to_string());
+    task_store.add(&local).unwrap();
+    // This machine holds revision 7; the incoming row is revision 4.
+    queue.record_revision(EntityType::Task, "cas-c32f-pull", 7).unwrap();
+    // A pending local change makes the discarded-row journal fire.
+    queue
+        .enqueue(
+            EntityType::Task,
+            "cas-c32f-pull",
+            SyncOperation::Upsert,
+            Some("{}"),
+        )
+        .unwrap();
+
+    let syncer = CloudSyncer::new(
+        Arc::clone(&queue),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig {
+            // "keep whichever is newer" is the question revisions arbitrate.
+            // The default team strategy is RemoteWins, a deliberate operator
+            // choice that revisions must NOT override.
+            team_conflict_resolution: ConflictResolution::KeepRecent,
+            ..CloudSyncerConfig::default()
+        },
+    );
+    syncer
+        .pull_team(
+            team_id,
+            project_id,
+            store.as_ref(),
+            task_store.as_ref(),
+            rule_store.as_ref(),
+            skill_store.as_ref(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        task_store.get("cas-c32f-pull").unwrap().title,
+        "local title",
+        "a newer remote TIMESTAMP must not overwrite a higher local REVISION"
     );
 }

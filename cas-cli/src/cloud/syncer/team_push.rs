@@ -549,9 +549,13 @@ impl CloudSyncer {
 
             let reason = row.reason.as_deref().unwrap_or("unspecified");
             let diagnostic = format!(
-                "cloud rejected team {entity_key} {}: reason={reason}; server response: {raw_response}",
-                item.entity_id
+                "cloud rejected team {entity_key} {}: reason={reason} ({}); server response: {raw_response}",
+                item.entity_id,
+                crate::cloud::syncer::push_reason_hint(reason)
             );
+            let _ = self
+                .queue
+                .record_row_outcome(item.id, "rejected", Some(reason));
             if row.rejection_is_retryable() {
                 let _ = self.queue.mark_failed(item.id, &diagnostic);
             } else {

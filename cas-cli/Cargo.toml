@@ -1,6 +1,6 @@
 [package]
 name = "cas"
-version = "3.14.0"
+version = "3.15.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Coding Agent System - unified tasks, memory, rules, and skills for AI agents"
@@ -90,6 +90,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 toml = "0.9"
+# Format-preserving TOML edits. `toml` round-trips values but discards
+# comments and ordering; a harness config.toml an operator maintains by hand
+# (Codex's runs to thousands of lines) must survive `cas integrate` untouched
+# outside the one table we own. Already in the lock via `toml`.
+toml_edit = "0.23"
 
 # Error Handling
 thiserror.workspace = true

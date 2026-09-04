@@ -3194,11 +3194,24 @@ impl FactoryDaemon {
                             .unwrap_or(self.app.cas_dir())
                             .to_path_buf()
                     });
-                let git = revalidate_merge_request(
-                    &repo_root,
-                    &envelope.branch_tip,
-                    &envelope.target_branch,
-                );
+                // cas-b17c (GH #703): the envelope's branch_tip is evidence
+                // about compose time, and a queued request can sit across
+                // further pushes, so resolve the tip live here too — through
+                // the same helper the compose path uses, so the two cannot
+                // drift apart. Falls back to the envelope tip only when the
+                // branch itself no longer resolves.
+                let live_branch_tip =
+                    crate::prompt_revalidation::merge_request_branch(task.as_ref())
+                        .and_then(|branch| {
+                            crate::prompt_revalidation::resolve_live_branch_tip(
+                                &repo_root,
+                                &branch,
+                                Some(envelope.branch_tip.as_str()),
+                            )
+                        })
+                        .unwrap_or_else(|| envelope.branch_tip.clone());
+                let git =
+                    revalidate_merge_request(&repo_root, &live_branch_tip, &envelope.target_branch);
 
                 let (suppress_detail, guidance, summary) =
                     match merge_request_delivery_decision(task.as_ref(), &envelope, &git) {

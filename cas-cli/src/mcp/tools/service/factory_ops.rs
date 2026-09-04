@@ -2026,6 +2026,27 @@ impl CasService {
             "\nWARNING — NON-ISOLATED SHARED-CHECKOUT RISK: every spawned worker uses the same working directory and mutable HEAD. Another worker can switch HEAD between tool calls, causing commits to land on a foreign factory branch; an explicit HEAD:<mine> push can graft that worker's commits onto the caller's remote branch; and SKILL.md guidance can change on disk mid-session. Prefer isolate=true. Commit/merge/push guards will refuse unless the checkout is still on the calling worker's exact factory/<name> branch.".to_string()
         };
 
+        // GH #699: spawning while a second supervisor session is live on this
+        // clone puts two fleets on one `.cas/` state, where either supervisor's
+        // reset/merge/shutdown can reap the other's workers. Say so in the
+        // receipt, before the workers exist rather than after one is reaped.
+        //
+        // A warning, not a refusal: an operator may deliberately run two panes
+        // on one checkout, and grounding their spawn on a heuristic would be a
+        // worse failure than an unmissable notice.
+        let shared_clone_notice = open_agent_store(&self.inner.cas_root)
+            .ok()
+            .and_then(|store| store.list(None).ok())
+            .and_then(|agents| {
+                crate::factory_supervisor_overlap::shared_clone_warning(
+                    &agents,
+                    &self.inner.cas_root,
+                    chrono::Utc::now(),
+                )
+            })
+            .map(|warning| format!("\nWARNING — SHARED-CLONE SUPERVISOR OVERLAP: {warning}"))
+            .unwrap_or_default();
+
         let factory_session = current_factory_session();
         if let Some(delivery_mode) = requested_delivery_mode {
             let session = factory_session.as_deref().ok_or_else(|| {
@@ -2136,11 +2157,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{delivery_mode_notice}{task_id_note}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{delivery_mode_notice}{task_id_note}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -2848,10 +2869,36 @@ impl CasService {
             .unwrap_or_default();
         let undelivered_section = format_undelivered_relay_section(&undelivered_relays);
 
+        // GH #699: `agents` is scoped to the caller's factory session, so a
+        // second supervisor live on this same clone never appeared here — yet
+        // both share this `.cas/` state and either one's reset, merge or
+        // shutdown can reap the other's workers. Re-read the roster unscoped
+        // so every surface below can name every live supervisor session on the
+        // checkout, including the "no agents of my own" path that the second
+        // supervisor lands on first.
+        let now = chrono::Utc::now();
+        let live_supervisor_sessions: Vec<_> = store
+            .list(None)
+            .map(|all| crate::factory_supervisor_overlap::live_supervisor_sessions(&all, now))
+            .unwrap_or_default();
+        let shared_clone_warning = (live_supervisor_sessions.len() > 1).then(|| {
+            format!(
+                "⚠ {}\n\n",
+                crate::factory_supervisor_overlap::render_shared_clone_warning(
+                    &live_supervisor_sessions,
+                    &self.inner.cas_root,
+                )
+            )
+        });
+
         if agents.is_empty() {
             let mut msg = String::from(
                 "No active agents registered.\n\nNote: Factory TUI must be running for agents to be registered.",
             );
+            if let Some(warning) = shared_clone_warning.as_deref() {
+                msg.push_str("\n\n");
+                msg.push_str(warning);
+            }
             msg.push_str(&undelivered_section);
             msg.push_str(&spawn_section);
             msg.push_str(&died_section);
@@ -3083,14 +3130,34 @@ impl CasService {
             })
             .collect();
 
-        if !supervisors.is_empty() {
+        // The roster above is session-scoped; the unscoped read hoisted before
+        // the empty-agents branch supplies every other live supervisor on this
+        // clone (GH #699), so this section names them instead of hiding them.
+        let rendered_names: std::collections::BTreeSet<&str> =
+            supervisors.iter().map(|a| a.name.as_str()).collect();
+
+        if !supervisors.is_empty() || live_supervisor_sessions.len() > 1 {
             output.push_str("Supervisors:\n");
-            for agent in supervisors {
-                let elapsed = (chrono::Utc::now() - agent.last_heartbeat).num_seconds();
+            for agent in &supervisors {
+                let elapsed = (now - agent.last_heartbeat).num_seconds();
                 let since = format!("{elapsed}s ago");
                 output.push_str(&format!("  • {} (heartbeat: {})\n", &agent.name, since));
             }
+            for session in &live_supervisor_sessions {
+                if rendered_names.contains(session.name.as_str()) {
+                    continue;
+                }
+                let elapsed = (now - session.last_heartbeat).num_seconds();
+                output.push_str(&format!(
+                    "  • {} (heartbeat: {elapsed}s ago) [other session — shares this clone]\n",
+                    session.label()
+                ));
+            }
             output.push('\n');
+        }
+
+        if let Some(warning) = shared_clone_warning.as_deref() {
+            output.push_str(warning);
         }
 
         if workers.is_empty() {
@@ -4748,6 +4815,32 @@ impl CasService {
         }
         out.push_str(&orphan_processes.render());
         out.push_str(&artifact_report.render());
+        // GH #704: leaked disposable roots under $TMPDIR filled a 32 GB tmpfs
+        // and broke every live session's shell output. Name them here, with
+        // age and size, before the filesystem fills. Read-only by contract.
+        out.push_str(
+            &crate::temp_hygiene::scan_stale_temp_roots(
+                &std::env::temp_dir(),
+                std::time::Duration::from_secs(
+                    req.older_than_secs
+                        .and_then(|secs| u64::try_from(secs).ok())
+                        .unwrap_or(crate::temp_hygiene::DEFAULT_TEMP_ROOT_STALE_SECS),
+                ),
+                std::time::SystemTime::now(),
+            )
+            .render(),
+        );
+        // Same incident, other half: a Cassy root that itself sits on RAM.
+        // Reported, never enforced here — gc_report is read-only.
+        if let Some(message) = crate::temp_hygiene::inspect_isolated_root(
+            &self.inner.cas_root,
+            crate::temp_hygiene::root_holds_bulk_dirs(&self.inner.cas_root),
+            &crate::temp_hygiene::HostMountProbe,
+        )
+        .message()
+        {
+            out.push_str(&format!("Active Cassy root placement: {message}\n"));
+        }
 
         if !live_viktor_watches.is_empty() {
             out.push_str("\nLive Viktor watches:\n");

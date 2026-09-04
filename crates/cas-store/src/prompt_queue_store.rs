@@ -344,6 +344,36 @@ const PROMPT_QUEUE_ATTRIBUTION_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN attribution_json TEXT;
 "#;
 
+/// Server-stamped sender provenance (cas-d9a8).
+///
+/// `source` is caller-settable (`cas factory message --from …`, bridge
+/// POST /message), and `attribution_json` above is caller-SUPPLIED — both state
+/// what a sender claims. Neither can answer "who actually wrote this row",
+/// which is the only question a pane-wake decision may safely turn on: a wake
+/// is a PTY write into someone's terminal.
+///
+/// These two columns are written ONLY by CAS's own enqueue path, from an
+/// already-authenticated caller. No request field reaches them. A route that
+/// cannot attribute its caller leaves them NULL, and NULL never wakes, so the
+/// unattributable paths degrade to today's inbox-only behaviour instead of
+/// being trusted by default.
+///
+/// Nullable and additive on purpose: legacy rows carry NULL and are treated as
+/// unattributed. There is deliberately no backfill — inventing provenance for
+/// rows whose sender was never recorded is exactly the fiction this column
+/// exists to prevent.
+const PROMPT_QUEUE_ORIGIN_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN origin_agent_id TEXT;
+"#;
+
+/// Coarse class of the stamped origin (`registered_agent`, `daemon`,
+/// `unattributed`). Kept beside the id so the wake gate can reason about the
+/// class without a registry lookup on the hot path, while the id remains the
+/// authority for role resolution.
+const PROMPT_QUEUE_ORIGIN_KIND_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN origin_kind TEXT;
+"#;
+
 /// Indexes supporting two-lane `peek_for_targets` selection (cas-2bcb).
 /// Partial indexes keep the path bounded to pending rows only.
 const PROMPT_QUEUE_TWO_LANE_INDEXES: &str = r#"
@@ -390,6 +420,56 @@ CREATE INDEX IF NOT EXISTS idx_prompt_queue_ack_counterparty
     WHERE transport_delivered_at IS NOT NULL
       AND acked_at IS NULL;
 "#;
+
+/// Who actually wrote a queue row, as established by CAS rather than claimed
+/// by the sender (cas-d9a8).
+///
+/// Constructed only inside CAS's enqueue paths from an already-authenticated
+/// caller. It is deliberately NOT parsed from, defaulted from, or cross-checked
+/// against `source`, `attribution_json`, or any request body: the whole point
+/// is that it cannot be influenced by what a caller types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueOrigin {
+    /// An agent whose identity was resolved from the authenticated session at
+    /// enqueue time. `agent_id` is the registry id, not a display name, so a
+    /// later role lookup cannot be spoofed by naming someone.
+    RegisteredAgent { agent_id: String },
+    /// CAS's own machinery (lifecycle push, daemon relays, orphan recovery).
+    Daemon,
+    /// A route that cannot attribute its caller — `cas factory message`, bridge
+    /// POST /message. Recorded explicitly rather than left implicit so an
+    /// operator reading a row can tell "nobody was authenticated" apart from
+    /// "this predates the column".
+    Unattributed,
+}
+
+impl QueueOrigin {
+    /// Column value for `origin_kind`.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::RegisteredAgent { .. } => "registered_agent",
+            Self::Daemon => "daemon",
+            Self::Unattributed => "unattributed",
+        }
+    }
+
+    /// Column value for `origin_agent_id`, when there is one.
+    pub fn agent_id(&self) -> Option<&str> {
+        match self {
+            Self::RegisteredAgent { agent_id } => Some(agent_id.as_str()),
+            Self::Daemon | Self::Unattributed => None,
+        }
+    }
+
+    /// Can a row from this origin be considered for a pane wake at all?
+    ///
+    /// This answers only "is the sender established", never "should this
+    /// particular row wake" — the envelope class is a separate, second factor
+    /// applied by the wake gate. Both must hold.
+    pub fn is_attributed(&self) -> bool {
+        matches!(self, Self::RegisteredAgent { .. } | Self::Daemon)
+    }
+}
 
 /// Result of a normal queue enqueue that may collapse a recent worker resend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2299,6 +2379,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ("acked_at", PROMPT_QUEUE_ACKED_AT_MIGRATION),
                 ("urgent", PROMPT_QUEUE_URGENT_MIGRATION),
                 ("attribution_json", PROMPT_QUEUE_ATTRIBUTION_MIGRATION),
+                ("origin_agent_id", PROMPT_QUEUE_ORIGIN_MIGRATION),
+                ("origin_kind", PROMPT_QUEUE_ORIGIN_KIND_MIGRATION),
                 ("selected_at", PROMPT_QUEUE_SELECTED_AT_MIGRATION),
                 ("last_pending_reason", PROMPT_QUEUE_PENDING_REASON_MIGRATION),
                 ("last_pending_detail", PROMPT_QUEUE_PENDING_DETAIL_MIGRATION),
@@ -4593,6 +4675,48 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    /// cas-d9a8: the stamped-origin columns exist and default to unattributed.
+    #[test]
+    fn origin_columns_are_added_and_default_to_null_for_every_existing_path() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("worker-1", "supervisor", "merge request").unwrap();
+        let conn = store.conn.lock().unwrap();
+        let (agent, kind): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT origin_agent_id, origin_kind FROM prompt_queue WHERE id = ?",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        // Every pre-existing enqueue path must leave the stamp empty. A column
+        // that quietly defaulted to something attributable would hand every
+        // legacy and unauthenticated row a wake it never earned.
+        assert_eq!(agent, None, "no enqueue path may invent an origin agent");
+        assert_eq!(kind, None, "no enqueue path may invent an origin kind");
+    }
+
+    /// The classification the wake gate will depend on, pinned before the gate
+    /// is re-keyed onto it (cas-d9a8).
+    #[test]
+    fn only_established_origins_are_attributed() {
+        assert!(
+            QueueOrigin::RegisteredAgent { agent_id: "agent-7".into() }.is_attributed(),
+            "an authenticated registered agent is the case this exists to allow"
+        );
+        assert!(QueueOrigin::Daemon.is_attributed());
+        assert!(
+            !QueueOrigin::Unattributed.is_attributed(),
+            "`cas factory message` and bridge POST cannot attribute a caller, so they must not wake"
+        );
+        assert_eq!(
+            QueueOrigin::RegisteredAgent { agent_id: "agent-7".into() }.agent_id(),
+            Some("agent-7"),
+            "role resolution must key off the registry id, never a display name"
+        );
+        assert_eq!(QueueOrigin::Daemon.agent_id(), None);
+        assert_eq!(QueueOrigin::Unattributed.kind_str(), "unattributed");
     }
 
     fn register_bounce_sender(store: &SqlitePromptQueueStore, name: &str, session: &str) {

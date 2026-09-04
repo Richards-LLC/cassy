@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.15.6] - 2026-09-04
+
 ### Fixed
 - Updating no longer ends with a false alarm. After the new version installed
   and its post-install work ran correctly, the update still failed with a

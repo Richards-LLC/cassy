@@ -81,6 +81,27 @@ cd "$repo_root"
 
 cargo_bin="${CARGO:-cargo}"
 reference_history_script="${RELEASE_GATE_GEN_REFERENCE_HISTORY:-$repo_root/scripts/gen-builtin-reference-history.sh}"
+
+# Scratch base for the two checks that must build OUTSIDE every checkout
+# (archive-mode, snapshot-portability).
+#
+# The old default was $HOME/.cache/cas-release-gate. On any machine where the
+# operator has a user-level ~/.cas store — which is every machine Cassy is
+# actually installed on — that base has a .cas ancestor, so the gate's own
+# assert_no_cas_ancestor refused those two rows and the release could not be
+# cut until the operator exported CAS_RELEASE_GATE_HOME_DIR by hand. cas-4ccc
+# fixed that for the self-test only; cas-c736 fixes the gate itself, so the
+# variable becomes an override rather than a prerequisite. /var/tmp mirrors the
+# merge-queue runner: outside every checkout and outside $HOME.
+readonly scratch_base_default='/var/tmp/cas-release-gate'
+if [[ -n "${CAS_RELEASE_GATE_HOME_DIR:-}" ]]; then
+    scratch_base="$CAS_RELEASE_GATE_HOME_DIR"
+    scratch_base_origin='CAS_RELEASE_GATE_HOME_DIR'
+else
+    scratch_base="$scratch_base_default"
+    scratch_base_origin='default'
+fi
+readonly scratch_base scratch_base_origin
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/cas-release-gate.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -260,12 +281,16 @@ assert_no_cas_ancestor() {
     probe="$(cd "$(dirname "$base")" 2>/dev/null && pwd -P || printf '%s' "$(dirname "$base")")"
     while [[ "$probe" != "/" && -n "$probe" ]]; do
         if [[ -d "$probe/.cas" ]]; then
-            printf 'scratch base %s has a .cas ancestor at %s; set CAS_RELEASE_GATE_HOME_DIR to a path with no .cas ancestor (the queue runner has none)\n' "$base" "$probe/.cas"
+            printf 'scratch base %s (from %s) has a .cas ancestor at %s; set CAS_RELEASE_GATE_HOME_DIR to a path with no .cas ancestor (the queue runner has none)\n' \
+                "$base" "$scratch_base_origin" "$probe/.cas"
             return 1
         fi
         probe="$(dirname "$probe")"
     done
-    [[ -d "/.cas" ]] && { printf 'scratch base %s has a .cas ancestor at /.cas\n' "$base"; return 1; }
+    [[ -d "/.cas" ]] && {
+        printf 'scratch base %s (from %s) has a .cas ancestor at /.cas\n' "$base" "$scratch_base_origin"
+        return 1
+    }
     return 0
 }
 
@@ -284,7 +309,7 @@ make_archive_path() {
 
 check_archive_mode() {
     local archive_base archive_dir archive remap archive_tmp archive_path manifest package_dir status
-    archive_base="${CAS_RELEASE_GATE_HOME_DIR:-${HOME:?}/.cache/cas-release-gate}"
+    archive_base="$scratch_base"
     mkdir -p "$(dirname "$archive_base")"
     assert_no_cas_ancestor "$archive_base" || return 1
     archive_dir="$(mktemp -d "${archive_base}.XXXXXX")"
@@ -346,7 +371,7 @@ check_snapshot_portability() {
     # The deep TMPDIR must live OUTSIDE every checkout: worktrees sit under the
     # main repo's .cas/, so a temp dir inside the tree lets find_cas_root walk
     # up into the real project store and the snapshot captures live data.
-    local deep_base="${CAS_RELEASE_GATE_HOME_DIR:-${HOME:?}/.cache/cas-release-gate}"
+    local deep_base="$scratch_base"
     mkdir -p "$(dirname "$deep_base")"
     assert_no_cas_ancestor "$deep_base" || return 1
     local deep_tmp
@@ -468,6 +493,7 @@ check_working_tree() {
 printf '=== CAS RELEASE GATE RECEIPT ===\n'
 printf 'version: %s\n' "$version"
 printf 'repository: %s\n' "$repo_root"
+printf 'scratch base: %s (from %s)\n' "$scratch_base" "$scratch_base_origin"
 neutralize_ancestor_proxy_config
 
 run_check failure-log \

@@ -667,22 +667,61 @@ fn builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime() {
             }
         }
     }
-    let fixture_forbidden = [
-        concat!("tempdir_in(env!(\"", "CARGO_MANIFEST_DIR", "\"))"),
-        concat!("TempDir::new_in(env!(\"", "CARGO_MANIFEST_DIR", "\"))"),
+    let fixture_constructors = [
+        concat!("tempdir", "_in("),
+        concat!("TempDir", "::new_in("),
     ];
+    let forbidden_fixture_parents = [
+        concat!("env!(\"", "CARGO_MANIFEST_DIR"),
+        concat!("\"/", "tmp"),
+        concat!("\"/var/", "tmp"),
+    ];
+    let fixture_source_is_forbidden = |source: &str| {
+        fixture_constructors
+            .iter()
+            .any(|constructor| source.contains(constructor))
+            && forbidden_fixture_parents
+                .iter()
+                .any(|parent| source.contains(parent))
+    };
+    for unsafe_fixture in [
+        concat!("tempdir", "_in(Path::new(\"/", "tmp\"))"),
+        concat!("TempDir", "::new_in(\"/var/", "tmp\")"),
+        concat!("tempdir", "_in(\n env!(\"", "CARGO_MANIFEST_DIR", "\"))"),
+    ] {
+        assert!(
+            fixture_source_is_forbidden(unsafe_fixture),
+            "fixture source scan does not cover {unsafe_fixture}"
+        );
+    }
+    for allowed_text in [
+        "documentation says /tmp is disposable",
+        "assert!(path.starts_with(\"/var/tmp\"))",
+        "cas::test_paths::runtime_fixture_parent()",
+    ] {
+        assert!(
+            !fixture_source_is_forbidden(allowed_text),
+            "fixture source scan false-positive: {allowed_text}"
+        );
+    }
     for (name, source) in FIXTURE_SOURCES {
-        for (line_number, line) in source.lines().enumerate() {
-            for needle in fixture_forbidden {
-                if line.contains(needle) {
-                    violations.push(format!("{name}:{}: {needle}", line_number + 1));
+        let lines: Vec<_> = source.lines().collect();
+        for (line_number, line) in lines.iter().enumerate() {
+            if fixture_constructors
+                .iter()
+                .any(|constructor| line.contains(constructor))
+            {
+                let snippet = lines[line_number..lines.len().min(line_number + 4)].join("\n");
+                if fixture_source_is_forbidden(&snippet) {
+                    violations.push(format!("{name}:{}: forbidden fixture parent", line_number + 1));
                 }
             }
         }
     }
     assert!(
         violations.is_empty(),
-        "builtin archive tests must not resolve source files from the checkout:\n  {}",
+        "real-project fixtures must use cas::test_paths::runtime_fixture_parent(); \
+         archive tests must not resolve source files from the producer checkout:\n  {}",
         violations.join("\n  ")
     );
 }

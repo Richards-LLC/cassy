@@ -470,11 +470,24 @@ impl CasCore {
                     data: None,
                 })?;
 
-            let tx = conn.unchecked_transaction().map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to begin transaction: {e}")),
-                data: None,
-            })?;
+            // BEGIN IMMEDIATE, not the DEFERRED default. The block below reads
+            // (the dispatch, the capability) before it writes, so a deferred
+            // transaction would hold a read snapshot and have to UPGRADE to a
+            // writer — and SQLite refuses that upgrade with SQLITE_BUSY without
+            // ever calling the busy handler, because waiting there could
+            // deadlock. That is why four consecutive verification writes failed
+            // in milliseconds with a 5s busy_timeout configured, while
+            // single-statement writes in the same seconds succeeded (cas-759f).
+            // Taking the write lock up front puts the wait where the busy
+            // handler applies; the retry inside covers a holder that outlives
+            // one timeout window, and stops before the body runs, so nothing
+            // here is executed twice.
+            let tx =
+                cas_store::shared_db::begin_immediate_with_retry(&conn).map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to begin transaction: {e}")),
+                    data: None,
+                })?;
 
             let dispatch = if let Some(capability_token) = req.verifier_capability.as_deref() {
                 let capability = cas_store::consume_verifier_capability_with_conn(

@@ -7,7 +7,7 @@
 # printed even when one check fails so the failure can be pasted into the epic
 # close note without relying on supervisor memory.
 #
-# Usage: scripts/release-gate.sh <version>
+# Usage: scripts/release-gate.sh <version> [--only <row,row>]
 
 set -euo pipefail
 
@@ -18,14 +18,14 @@ failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-
 failure_log_codex_rel='cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md'
 failure_log_grok_rel='cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
-    version-literals workspace-tests nextest doctests archive-mode
-    snapshot-portability builtin-projections changelog-and-versions
-    working-tree release-script procedure-guardrails failure-log
-    ancestor-proxy-config epic-worktree-fresh epic-worktree-zig
+    scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config
+    version-literals fixture-paths workspace-tests nextest doctests archive-mode
+    snapshot-portability builtin-projections changelog-and-versions release-script
+    procedure-guardrails working-tree
 )
 
 usage() {
-    printf 'Usage: %s <version>\n' "$0"
+    printf 'Usage: %s <version> [--only <row,row>]\n' "$0"
     printf '       %s --learn "<symptom>" "<cause>" "<check-id>"\n' "$0"
 }
 
@@ -58,6 +58,10 @@ learn() {
         fi
         rm -f "$before"
     done
+    if [[ -x "$repo_root/scripts/gen-builtin-reference-history.sh" ]]; then
+        "$repo_root/scripts/gen-builtin-reference-history.sh"
+        printf 'Regenerated builtin reference history after --learn; commit the ledger before starting a gate.\n'
+    fi
     printf 'Learned release failure in all three mirrors. Add or extend check %s and its fixture self-test in this same commit; record the same text with mcp__cas__memory action=remember tags=release before retrying.\n' "$check_id"
 }
 
@@ -70,12 +74,17 @@ if [[ "${1:-}" == '--learn' ]]; then
     exit $?
 fi
 
-if [[ "$#" -ne 1 || ! "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [[ "$#" -ne 1 && "$#" -ne 3 ]] || [[ ! "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    usage >&2
+    exit 2
+fi
+if [[ "$#" -eq 3 && "$2" != '--only' ]]; then
     usage >&2
     exit 2
 fi
 
 version="$1"
+only_rows="${3:-}"
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
@@ -102,6 +111,9 @@ else
     scratch_base_origin='default'
 fi
 readonly scratch_base scratch_base_origin
+scratch_archive_history_file="$(dirname "$scratch_base")/.cas-release-gate-last-archive-size-bytes"
+archive_size_file="${CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE:-}"
+readonly scratch_archive_history_file archive_size_file
 
 # The gate IS the "slow CI environment" the `cas init` watchdog names.
 #
@@ -135,6 +147,11 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 failures=()
 
+row_selected() {
+    local name="$1"
+    [[ -z "$only_rows" || ",$only_rows," == *",$name,"* ]]
+}
+
 print_result() {
     local status="$1" name="$2" command="$3"
     printf '%s %s — %s\n' "$status" "$name" "$command"
@@ -142,6 +159,7 @@ print_result() {
 
 run_check() {
     local name="$1" command="$2" function_name="$3" log status
+    row_selected "$name" || return 0
     log="$tmp_dir/$name.log"
     if "$function_name" >"$log" 2>&1; then
         print_result PASS "$name" "$command"
@@ -162,6 +180,97 @@ is_gate_check_id() {
         [[ "$candidate" == "$known" ]] && return 0
     done
     return 1
+}
+
+if [[ "$#" -eq 3 && -z "$only_rows" ]]; then
+    printf 'error: --only requires at least one release-gate row\n' >&2
+    exit 2
+fi
+if [[ -n "$only_rows" ]]; then
+    IFS=',' read -r -a requested_rows <<<"$only_rows"
+    for requested in "${requested_rows[@]}"; do
+        if [[ -z "$requested" ]] || ! is_gate_check_id "$requested"; then
+            printf 'error: unknown --only release-gate row %s\n' "${requested:-<empty>}" >&2
+            exit 2
+        fi
+    done
+fi
+selected_rows_summary=''
+if [[ -n "$only_rows" ]]; then
+    for requested in "${gate_check_ids[@]}"; do
+        if row_selected "$requested"; then
+            selected_rows_summary="${selected_rows_summary:+$selected_rows_summary,}$requested"
+        fi
+    done
+fi
+
+# This is deliberately the first receipt row. It must reject a bad scratch
+# location in seconds, before a Cargo process can spend a gate cycle filling the
+# wrong filesystem. Test-only numeric seams make mount and capacity failures
+# deterministic without requiring privileged fixture mounts.
+check_scratch_base() {
+    local parent probe_file parent_writable checkout_device scratch_device
+    local free_bytes free_kib last_archive_bytes required_bytes
+    parent="$(dirname "$scratch_base")"
+    [[ -d "$parent" ]] || {
+        printf 'scratch-base: parent %s does not exist; create it before the gate\n' "$parent"
+        return 1
+    }
+    parent_writable="${CAS_RELEASE_GATE_PARENT_WRITABLE:-}"
+    if [[ -z "$parent_writable" ]]; then
+        probe_file="$(mktemp "$parent/.cas-release-gate-write.XXXXXX" 2>/dev/null || true)"
+        if [[ -n "$probe_file" ]]; then
+            rm -f "$probe_file"
+            parent_writable=1
+        else
+            parent_writable=0
+        fi
+    fi
+    if [[ "$parent_writable" != 1 ]]; then
+        printf 'scratch-base: parent %s is not writable; mktemp creates siblings of %s there\n' \
+            "$parent" "$scratch_base"
+        return 1
+    fi
+
+    assert_no_cas_ancestor "$scratch_base" || return 1
+    checkout_device="${CAS_RELEASE_GATE_CHECKOUT_DEVICE:-$(stat -c %d "$repo_root" 2>/dev/null || true)}"
+    scratch_device="${CAS_RELEASE_GATE_SCRATCH_DEVICE:-$(stat -c %d "$parent" 2>/dev/null || true)}"
+    if [[ -z "$checkout_device" || -z "$scratch_device" || "$checkout_device" != "$scratch_device" ]]; then
+        printf 'scratch-base: filesystem boundary: checkout device=%s scratch-parent device=%s; use a base on the checkout mount\n' \
+            "${checkout_device:-unknown}" "${scratch_device:-unknown}"
+        return 1
+    fi
+
+    last_archive_bytes="${CAS_RELEASE_GATE_LAST_ARCHIVE_BYTES:-}"
+    if [[ -z "$last_archive_bytes" && -s "$scratch_archive_history_file" ]]; then
+        last_archive_bytes="$(tr -d '[:space:]' <"$scratch_archive_history_file")"
+        [[ "$last_archive_bytes" =~ ^[0-9]+$ ]] || {
+            printf 'scratch-base: invalid prior archive-size receipt %s\n' "$scratch_archive_history_file"
+            return 1
+        }
+    fi
+    free_bytes="${CAS_RELEASE_GATE_FREE_BYTES:-}"
+    if [[ -z "$free_bytes" ]]; then
+        free_kib="$(df -Pk "$parent" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+        [[ "$free_kib" =~ ^[0-9]+$ ]] && free_bytes=$((free_kib * 1024))
+    fi
+    [[ "$free_bytes" =~ ^[0-9]+$ ]] || {
+        printf 'scratch-base: could not measure free bytes on %s\n' "$parent"
+        return 1
+    }
+    if [[ "$last_archive_bytes" =~ ^[0-9]+$ && "$last_archive_bytes" -gt 0 ]]; then
+        required_bytes=$((last_archive_bytes * 2))
+        if (( free_bytes < required_bytes )); then
+            printf 'scratch-base: %s bytes free, need at least %s (2x last archive %s)\n' \
+                "$free_bytes" "$required_bytes" "$last_archive_bytes"
+            return 1
+        fi
+        printf 'scratch-base: parent writable; same device %s; %s bytes free >= 2x last archive %s\n' \
+            "$scratch_device" "$free_bytes" "$last_archive_bytes"
+    else
+        printf 'scratch-base: parent writable; same device %s; %s bytes free; no prior archive size recorded\n' \
+            "$scratch_device" "$free_bytes"
+    fi
 }
 
 # `worktree_merge` advances the shared epic ref, but a second worktree with
@@ -296,6 +405,11 @@ check_version_literals() {
         printf 'version-literals: source/test files contain %s; use env!("CARGO_PKG_VERSION") or a fixture value\n' "$version"
         return 1
     fi
+}
+
+check_fixture_paths() {
+    "$cargo_bin" nextest run -p cas --test builtin_archive_portability_test \
+        builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime
 }
 
 check_workspace_tests() {
@@ -448,6 +562,17 @@ check_archive_mode() {
         printf 'archive-mode: nextest did not create %s\n' "$archive"
         return 1
     }
+    local archive_bytes
+    archive_bytes="$(wc -c <"$archive" | tr -d '[:space:]')"
+    printf '%s\n' "$archive_bytes" >"$scratch_archive_history_file.tmp.$$"
+    mv "$scratch_archive_history_file.tmp.$$" "$scratch_archive_history_file"
+    if [[ -n "$archive_size_file" ]]; then
+        mkdir -p "$(dirname "$archive_size_file")"
+        printf '%s\n' "$archive_bytes" >"$archive_size_file.tmp.$$"
+        mv "$archive_size_file.tmp.$$" "$archive_size_file"
+    fi
+    printf 'archive-mode: archive size %s bytes recorded%s\n' "$archive_bytes" \
+        "${archive_size_file:+ in $archive_size_file}"
     # Extraction is deliberately on the home disk, not a small /tmp tmpfs.
     # The remap has every package cwd but no source; snapshot tests read
     # source-tree .snap files and are excluded rather than "fixed".
@@ -577,6 +702,12 @@ check_procedure_guardrails() {
     grep -qF 'stranded_branch_override' "$skill"
     grep -qF 'release-published-receipt.sh --write-draft' "$skill"
     grep -qF 'cas --version' "$skill"
+    grep -qF 'Scoped Validation' "$skill"
+    grep -qF 'ledger is the last prep step' "$skill"
+    grep -qF 'cause class' "$skill"
+    grep -qF '9.99.x' "$skill"
+    grep -qF 'workers never poll CI' "$skill"
+    grep -qF 'reviewed snapshot update' "$skill"
 }
 
 check_working_tree() {
@@ -603,10 +734,15 @@ printf '=== CAS RELEASE GATE RECEIPT ===\n'
 printf 'version: %s\n' "$version"
 printf 'repository: %s\n' "$repo_root"
 printf 'scratch base: %s (from %s)\n' "$scratch_base" "$scratch_base_origin"
+printf 'archive size receipts: prior=%s per-run=%s\n' "$scratch_archive_history_file" \
+    "${archive_size_file:-not-configured}"
 printf 'init watchdog budget: %ss (from %s; cas init clamps at 3600s)\n' \
     "$CAS_INIT_TIMEOUT_SECS" "$init_timeout_origin"
 neutralize_ancestor_proxy_config
 
+run_check scratch-base \
+    'parent writable; same mount as checkout; no .cas ancestor; free bytes >= 2x last archive' \
+    check_scratch_base
 run_check epic-worktree-fresh \
     'epic worktree is clean and HEAD matches its claimed epic ref' \
     check_epic_worktree_fresh
@@ -622,6 +758,9 @@ run_check ancestor-proxy-config \
 run_check version-literals \
     'find source/test files for <version> (excluding manifests, CHANGELOG, reference-history, failure-log)' \
     check_version_literals
+run_check fixture-paths \
+    "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime" \
+    check_fixture_paths
 run_check workspace-tests \
     "$cargo_bin check --workspace --tests" \
     check_workspace_tests
@@ -658,4 +797,8 @@ if [[ "${#failures[@]}" -gt 0 ]]; then
     exit 1
 fi
 
-printf 'RELEASE GATE PASSED: all checks are green for %s\n' "$version"
+if [[ -n "$only_rows" ]]; then
+    printf 'RELEASE GATE PASSED: selected checks are green for %s: %s\n' "$version" "$selected_rows_summary"
+else
+    printf 'RELEASE GATE PASSED: all checks are green for %s\n' "$version"
+fi

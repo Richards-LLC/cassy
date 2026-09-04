@@ -33,7 +33,18 @@ new_worktree() {
       git config user.email test@test.invalid
       git config user.name 'Release Train Test'
       echo seed > seed.txt
+      mkdir -p scripts cas-cli/src/builtins
+      : > cas-cli/src/builtins/reference-history.json
+      cat > scripts/gen-builtin-reference-history.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${TRAIN_FIXTURE_LEDGER_DIRTY:-}" == 1 ]]; then
+  printf 'changed ledger\n' > cas-cli/src/builtins/reference-history.json
+fi
+EOF
+      chmod +x scripts/gen-builtin-reference-history.sh
       git add seed.txt
+      git add scripts cas-cli
       git -c commit.gpgsign=false commit -q -m seed ) >/dev/null
     printf '%s\n' "$dir"
 }
@@ -44,11 +55,25 @@ new_gate_stub() {
     local path="$1" exit_code="$2" sleep_for="${3:-0}"
     cat >"$path" <<EOF
 #!/usr/bin/env bash
-printf 'stub gate version=%s cwd=%s\n' "\$1" "\$PWD"
-sleep $sleep_for
+printf 'stub gate version=%s cwd=%s args=%s\n' "\$1" "\$PWD" "\$*"
+if [[ $sleep_for -gt 0 ]]; then
+  sleep $sleep_for &
+  child=\$!
+  [[ -z "\${GATE_STUB_CHILD_PID_FILE:-}" ]] || printf '%s\n' "\$child" >"\$GATE_STUB_CHILD_PID_FILE"
+  wait "\$child"
+fi
 exit $exit_code
 EOF
     chmod +x "$path"
+}
+
+wait_gate_done() {
+    local run_dir="$1"
+    for _ in $(seq 1 100); do
+        [[ -s "$run_dir/gate.done" ]] && return 0
+        sleep 0.05
+    done
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -57,15 +82,15 @@ EOF
 wt_a="$(new_worktree epic-a-merge)"
 wt_b="$(new_worktree epic-b-merge)"
 
-dir_a="$("$train" 3.15.2 "$wt_a" --print-run-dir)"
-dir_b="$("$train" 3.15.2 "$wt_b" --print-run-dir)"
+dir_a="$("$train" 9.99.0 "$wt_a" --print-run-dir)"
+dir_b="$("$train" 9.99.0 "$wt_b" --print-run-dir)"
 
 if [[ "$dir_a" != "$dir_b" ]]; then
     ok 'two worktrees at the same version resolve to different run directories'
 else
     bad "both worktrees resolved to $dir_a"
 fi
-if [[ "$dir_a" == *"3.15.2"* && "$dir_a" == *"epic-a-merge"* ]]; then
+if [[ "$dir_a" == *"9.99.0"* && "$dir_a" == *"epic-a-merge"* ]]; then
     ok 'the run directory names both the version and the worktree'
 else
     bad "run directory does not identify the run: $dir_a"
@@ -76,7 +101,8 @@ fi
 # ---------------------------------------------------------------------------
 gate_ok="$tmp/gate-ok.sh"
 new_gate_stub "$gate_ok" 0
-CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 3.15.2 "$wt_a" --gate >/dev/null 2>&1 || true
+CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.0 "$wt_a" --gate >/dev/null 2>&1 || true
+wait_gate_done "$dir_a" || true
 
 if [[ "$(cat "$dir_a/gate.done" 2>/dev/null)" == "0" ]]; then
     ok 'a successful gate records its exit status in gate.done'
@@ -88,7 +114,7 @@ if grep -q "$wt_a" "$dir_a/run.env" 2>/dev/null; then
 else
     bad "run.env does not name the worktree: $(cat "$dir_a/run.env" 2>/dev/null || echo absent)"
 fi
-if grep -q "stub gate version=3.15.2" "$dir_a/gate.log" 2>/dev/null; then
+if grep -q "stub gate version=9.99.0" "$dir_a/gate.log" 2>/dev/null; then
     ok 'the gate log lands in the run directory'
 else
     bad "gate.log missing or empty: $(cat "$dir_a/gate.log" 2>/dev/null || echo absent)"
@@ -111,9 +137,10 @@ printf 'CAS_RELEASE_GATE_HOME_DIR=%s\n' "${CAS_RELEASE_GATE_HOME_DIR:-unset}"
 EOF
 chmod +x "$gate_env"
 wt_env="$(new_worktree epic-env-merge)"
-dir_env="$("$train" 3.15.2 "$wt_env" --print-run-dir)"
+dir_env="$("$train" 9.99.0 "$wt_env" --print-run-dir)"
 CAS_RELEASE_TRAIN_GATE_CMD="$gate_env" CAS_INIT_TIMEOUT_SECS=900 \
-    "$train" 3.15.2 "$wt_env" --gate >/dev/null 2>&1 || true
+    "$train" 9.99.0 "$wt_env" --gate >/dev/null 2>&1 || true
+wait_gate_done "$dir_env" || true
 
 if grep -qx 'CAS_INIT_TIMEOUT_SECS=900' "$dir_env/gate.log" 2>/dev/null; then
     ok 'the train hands the gate its environment, so the raised init budget survives'
@@ -126,21 +153,105 @@ else
     bad "the gate ran without a scratch base: $(cat "$dir_env/gate.log" 2>/dev/null || echo absent)"
 fi
 
+# The ledger is regenerated synchronously, after every merge/learn opportunity
+# and before any detached process starts.
+wt_ledger="$(new_worktree epic-ledger-merge)"
+dir_ledger="$("$train" 9.99.1 "$wt_ledger" --print-run-dir)"
+out="$(TRAIN_FIXTURE_LEDGER_DIRTY=1 CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" \
+    "$train" 9.99.1 "$wt_ledger" --gate 2>&1 || true)"
+if [[ "$out" == *'commit the ledger before starting the detached gate'* ]] \
+    && [[ ! -e "$dir_ledger/gate.pid" ]]; then
+    ok 'ledger regeneration refuses with the commit-ledger message before detach'
+else
+    bad "ledger drift did not refuse before detach: $out"
+fi
+
+# A targeted rerun forwards only known non-empty rows to the gate.
+wt_only="$(new_worktree epic-only-merge)"
+dir_only="$("$train" 9.99.2 "$wt_only" --print-run-dir)"
+CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.2 "$wt_only" \
+    --gate --only nextest,doctests >/dev/null 2>&1
+wait_gate_done "$dir_only" || true
+if grep -qF 'args=9.99.2 --only nextest,doctests' "$dir_only/gate.log"; then
+    ok '--gate --only forwards the selected rows to the detached gate'
+else
+    bad "--only was not forwarded: $(cat "$dir_only/gate.log" 2>/dev/null || echo absent)"
+fi
+for invalid in '' not-a-row; do
+    wt_invalid="$(new_worktree "epic-only-invalid-${invalid:-empty}")"
+    out="$(CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.3 "$wt_invalid" \
+        --gate --only "$invalid" 2>&1 || true)"
+    if grep -qE 'non-empty|unknown --only' <<<"$out"; then
+        ok "release-train --only rejects ${invalid:-an empty row list} before detach"
+    else
+        bad "release-train --only accepted '$invalid': $out"
+    fi
+done
+
+# --check-lane binds the branch name and exact tip to its own push-triggered
+# Scoped Validation run; missing, pending, skipped, and red all refuse.
+wt_lane="$(new_worktree lane-ci)"
+lane_sha="$(git -C "$wt_lane" rev-parse HEAD)"
+lane_calls="$tmp/lane-gh.calls"
+lane_runs="$tmp/lane-gh.json"
+cat >"$tmp/lane-gh.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$LANE_GH_CALLS"
+cat "$LANE_GH_RUNS"
+EOF
+chmod +x "$tmp/lane-gh.sh"
+run_lane_check() {
+    LANE_GH_CALLS="$lane_calls" LANE_GH_RUNS="$lane_runs" \
+    CAS_RELEASE_TRAIN_GH="$tmp/lane-gh.sh" "$train" 9.99.4 "$wt_lane" --check-lane main 2>&1
+}
+printf '[]\n' >"$lane_runs"
+out="$(run_lane_check || true)"
+[[ "$out" == *MISSING* ]] && ok '--check-lane distinguishes a missing run' \
+    || bad "missing lane run was not refused: $out"
+printf '[{"databaseId":1,"headBranch":"main","headSha":"%s","status":"in_progress","conclusion":null,"event":"push","workflowName":"Scoped Validation"}]\n' "$lane_sha" >"$lane_runs"
+out="$(run_lane_check || true)"
+[[ "$out" == *PENDING* ]] && ok '--check-lane distinguishes a pending run' \
+    || bad "pending lane run was not refused: $out"
+printf '[{"databaseId":2,"headBranch":"main","headSha":"%s","status":"completed","conclusion":"failure","event":"push","workflowName":"Scoped Validation"}]\n' "$lane_sha" >"$lane_runs"
+out="$(run_lane_check || true)"
+[[ "$out" == *'RED (failure)'* ]] && ok '--check-lane distinguishes a red run' \
+    || bad "red lane run was not refused: $out"
+printf '[{"databaseId":3,"headBranch":"main","headSha":"%s","status":"completed","conclusion":"skipped","event":"push","workflowName":"Scoped Validation"}]\n' "$lane_sha" >"$lane_runs"
+out="$(run_lane_check || true)"
+[[ "$out" == *'RED (skipped)'* ]] && ok '--check-lane never accepts a skipped push row' \
+    || bad "skipped lane run was accepted: $out"
+printf '[{"databaseId":4,"headBranch":"other","headSha":"%s","status":"completed","conclusion":"success","event":"push","workflowName":"Scoped Validation"},{"databaseId":5,"headBranch":"main","headSha":"%s","status":"completed","conclusion":"success","event":"push","workflowName":"Scoped Validation"}]\n' "$lane_sha" "$lane_sha" >"$lane_runs"
+out="$(run_lane_check)"
+[[ "$out" == *GREEN* ]] && ok '--check-lane accepts the branch tip own green run' \
+    || bad "green lane run was refused: $out"
+if grep -q -- '--workflow Scoped Validation --branch main --event push' "$lane_calls"; then
+    ok '--check-lane scopes the GitHub query to branch push CI'
+else
+    bad "--check-lane query was not branch/event scoped: $(cat "$lane_calls")"
+fi
+
 # ---------------------------------------------------------------------------
 # A second start refuses while the first run's recorded pid is alive, and says
 # whose run it is and what to do about it.
 # ---------------------------------------------------------------------------
 gate_slow="$tmp/gate-slow.sh"
 new_gate_stub "$gate_slow" 0 30
-CAS_RELEASE_TRAIN_GATE_CMD="$gate_slow" "$train" 3.15.2 "$wt_b" --gate >/dev/null 2>&1 &
-runner_b=$!
+start_epoch="$(date +%s)"
+GATE_STUB_CHILD_PID_FILE="$tmp/child-b.pid" CAS_RELEASE_TRAIN_GATE_CMD="$gate_slow" \
+    "$train" 9.99.0 "$wt_b" --gate >/dev/null 2>&1
+runner_b=''
+if (( $(date +%s) - start_epoch < 5 )); then
+    ok '--gate returns after launching a detached gate'
+else
+    bad '--gate blocked instead of returning after detach'
+fi
 for _ in $(seq 1 50); do
     [[ -f "$dir_b/gate.pid" ]] && break
     sleep 0.1
 done
 held_pid="$(cat "$dir_b/gate.pid" 2>/dev/null || true)"
 
-refusal="$(CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 3.15.2 "$wt_b" --gate 2>&1 || true)"
+refusal="$(CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.0 "$wt_b" --gate 2>&1 || true)"
 if [[ "$refusal" == *"already"* || "$refusal" == *"in progress"* ]]; then
     ok 'a second gate for the same worktree refuses while the first is live'
 else
@@ -158,8 +269,9 @@ fi
 # ---------------------------------------------------------------------------
 # The earlier successful run left its (dead) pid file behind, so wait for a
 # pid that is actually alive rather than for the file to exist.
-CAS_RELEASE_TRAIN_GATE_CMD="$gate_slow" "$train" 3.15.2 "$wt_a" --gate >/dev/null 2>&1 &
-runner_a=$!
+GATE_STUB_CHILD_PID_FILE="$tmp/child-a.pid" CAS_RELEASE_TRAIN_GATE_CMD="$gate_slow" \
+    "$train" 9.99.0 "$wt_a" --gate >/dev/null 2>&1
+runner_a=''
 sibling_pid=""
 for _ in $(seq 1 50); do
     candidate="$(cat "$dir_a/gate.pid" 2>/dev/null || true)"
@@ -170,7 +282,7 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 
-"$train" 3.15.2 "$wt_b" --stop >/dev/null 2>&1 || true
+"$train" 9.99.0 "$wt_b" --stop >/dev/null 2>&1 || true
 sleep 0.5
 
 if [[ -n "$held_pid" ]] && ! kill -0 "$held_pid" 2>/dev/null; then
@@ -178,21 +290,44 @@ if [[ -n "$held_pid" ]] && ! kill -0 "$held_pid" 2>/dev/null; then
 else
     bad "--stop did not terminate its own gate (pid $held_pid)"
 fi
+held_child="$(cat "$tmp/child-b.pid" 2>/dev/null || true)"
+if [[ -n "$held_child" ]] && ! kill -0 "$held_child" 2>/dev/null; then
+    ok '--stop terminates the recorded gate process group children'
+else
+    bad "--stop left its gate child alive (pid ${held_child:-missing})"
+fi
 if [[ -n "$sibling_pid" ]] && kill -0 "$sibling_pid" 2>/dev/null; then
     ok 'a concurrent run for another worktree survives its sibling being stopped'
 else
     bad "the sibling run (pid $sibling_pid) died with its sibling"
 fi
 
-"$train" 3.15.2 "$wt_a" --stop >/dev/null 2>&1 || true
-wait "$runner_a" 2>/dev/null || true
-wait "$runner_b" 2>/dev/null || true
+"$train" 9.99.0 "$wt_a" --stop >/dev/null 2>&1 || true
+[[ -z "$runner_a" ]] || wait "$runner_a" 2>/dev/null || true
+[[ -z "$runner_b" ]] || wait "$runner_b" 2>/dev/null || true
 
-status="$("$train" 3.15.2 "$wt_a" --status 2>&1 || true)"
+status="$("$train" 9.99.0 "$wt_a" --status 2>&1 || true)"
 if [[ "$status" == *"$dir_a"* ]]; then
     ok '--status reports the run directory it is talking about'
 else
     bad "--status did not identify the run: $status"
+fi
+
+printf 'FAIL nextest — fixture\nFAIL archive-mode — fixture\n' >"$dir_a/gate.log"
+printf '100\n' >"$dir_a/gate.green.epoch"
+printf '145\n' >"$dir_a/release.published.epoch"
+status="$("$train" 9.99.0 "$wt_a" --status 2>&1 || true)"
+if [[ "$status" == *'rows_failed=nextest,archive-mode'* ]] \
+    && [[ "$status" == *'cause_class=<product|fixture|environment|procedure>'* ]] \
+    && [[ "$status" == *'blocking_step=<step>'* ]]; then
+    ok '--status prints the required per-run epic-note template'
+else
+    bad "--status omitted timeline fields: $status"
+fi
+if [[ "$status" == *'green-to-published latency: 45s'* ]]; then
+    ok '--status names green-to-published latency'
+else
+    bad "--status omitted green-to-published latency: $status"
 fi
 
 # ---------------------------------------------------------------------------
@@ -230,6 +365,15 @@ for flavour in skills codex/skills grok/skills; do
     else
         bad "cas-cut-release ($flavour) does not forbid a version-keyed artifacts path"
     fi
+    for marker in 'Scoped Validation' 'ledger is the last prep step' 'scratch-base' \
+        'detached process group' 'runtime_fixture_parent' 'reviewed snapshot update' \
+        '9.99.x' 'cause class' 'workers never poll CI'; do
+        if grep -qF "$marker" "$skill" 2>/dev/null; then
+            ok "cas-cut-release ($flavour) carries marker: $marker"
+        else
+            bad "cas-cut-release ($flavour) missing marker: $marker"
+        fi
+    done
 done
 
 
@@ -312,7 +456,7 @@ new_pipeline_fixture() {
     printf '%s\n' "$dir"
 }
 
-pipeline_run_dir() { "$train" 9.9.9 "$1" --print-run-dir; }
+pipeline_run_dir() { "$train" 9.99.9 "$1" --print-run-dir; }
 
 seed_gate_receipt() {
     local run_dir="$1" status="${2:-0}"
@@ -329,7 +473,7 @@ run_pipeline() {
     CAS_RELEASE_TRAIN_POLL_SECS=0 \
     CAS_RELEASE_TRAIN_CHECK_TRIES=4 \
     CAS_RELEASE_TRAIN_WATCH_TRIES=6 \
-        "$train" 9.9.9 "$worktree" --pipeline 2>&1
+        "$train" 9.99.9 "$worktree" --pipeline 2>&1
 }
 
 new_gh_stub "$tmp/gh-stub.sh" "$tmp/gh-state-unused"
@@ -554,12 +698,12 @@ pub_env="$tmp/release.env"
 printf 'CAS_TEST_TOKEN=super-secret-value\nCAS_TEST_OTHER=another-secret\n' > "$pub_env"
 
 # --- happy path: receipts land in the run dir and name the real status -----
-wt_pub="$(new_publish_fixture publish-ok 9.9.9)"
+wt_pub="$(new_publish_fixture publish-ok 9.99.9)"
 run_pub_dir="$(pipeline_run_dir "$wt_pub")"
 mkdir -p "$run_pub_dir"
 landed="$(git -C "$wt_pub" rev-parse HEAD)"
 new_publish_stub "$tmp/publisher-ok.sh" 0
-out="$(run_publish "$wt_pub" 9.9.9 "$landed" "$tmp/publisher-ok.sh" "$pub_env" || true)"
+out="$(run_publish "$wt_pub" 9.99.9 "$landed" "$tmp/publisher-ok.sh" "$pub_env" || true)"
 
 if [[ "$(cat "$run_pub_dir/release.done" 2>/dev/null)" == "0" ]]; then
     ok 'a successful publish records release.done=0 in the run directory'
@@ -583,12 +727,12 @@ else
 fi
 
 # --- a failing publisher is recorded, not swallowed ------------------------
-wt_fail="$(new_publish_fixture publish-fails 9.9.9)"
+wt_fail="$(new_publish_fixture publish-fails 9.99.9)"
 run_fail_dir="$(pipeline_run_dir "$wt_fail")"
 mkdir -p "$run_fail_dir"
 landed_fail="$(git -C "$wt_fail" rev-parse HEAD)"
 new_publish_stub "$tmp/publisher-bad.sh" 7
-run_publish "$wt_fail" 9.9.9 "$landed_fail" "$tmp/publisher-bad.sh" "$pub_env" >/dev/null 2>&1 || true
+run_publish "$wt_fail" 9.99.9 "$landed_fail" "$tmp/publisher-bad.sh" "$pub_env" >/dev/null 2>&1 || true
 if [[ "$(cat "$run_fail_dir/release.done" 2>/dev/null)" == "7" ]]; then
     ok 'a failing publisher exit status is recorded verbatim'
 else
@@ -596,35 +740,35 @@ else
 fi
 
 # --- refusals happen before any worktree or publisher exists ---------------
-wt_sha="$(new_publish_fixture publish-sha-mismatch 9.9.9)"
+wt_sha="$(new_publish_fixture publish-sha-mismatch 9.99.9)"
 run_sha_dir="$(pipeline_run_dir "$wt_sha")"
 mkdir -p "$run_sha_dir"
-out="$(run_publish "$wt_sha" 9.9.9 0000000000000000000000000000000000000000 "$tmp/publisher-ok.sh" "$pub_env" || true)"
+out="$(run_publish "$wt_sha" 9.99.9 0000000000000000000000000000000000000000 "$tmp/publisher-ok.sh" "$pub_env" || true)"
 if [[ "$out" == *"origin/main"* ]] && [[ ! -e "$run_sha_dir/release.done" ]] \
-   && [[ ! -d "$wt_sha/.cas/release-v9.9.9" ]]; then
+   && [[ ! -d "$wt_sha/.cas/release-v9.99.9" ]]; then
     ok 'a landed sha that is not origin/main refuses before creating a worktree'
 else
     bad "sha mismatch did not refuse cleanly: $out"
 fi
 
-wt_ver="$(new_publish_fixture publish-version-mismatch 1.2.3)"
+wt_ver="$(new_publish_fixture publish-version-mismatch 9.99.3)"
 run_ver_dir="$(pipeline_run_dir "$wt_ver")"
 mkdir -p "$run_ver_dir"
 landed_ver="$(git -C "$wt_ver" rev-parse HEAD)"
-out="$(run_publish "$wt_ver" 9.9.9 "$landed_ver" "$tmp/publisher-ok.sh" "$pub_env" || true)"
-if [[ "$out" == *"1.2.3"* && "$out" == *"9.9.9"* ]] && [[ ! -e "$run_ver_dir/release.done" ]]; then
+out="$(run_publish "$wt_ver" 9.99.9 "$landed_ver" "$tmp/publisher-ok.sh" "$pub_env" || true)"
+if [[ "$out" == *"9.99.3"* && "$out" == *"9.99.9"* ]] && [[ ! -e "$run_ver_dir/release.done" ]]; then
     ok 'a version mismatch refuses and names both the expected and actual version'
 else
     bad "version mismatch did not refuse with both versions: $out"
 fi
 
 # --- the sha defaults to what the pipeline already recorded ----------------
-wt_default="$(new_publish_fixture publish-default-sha 9.9.9)"
+wt_default="$(new_publish_fixture publish-default-sha 9.99.9)"
 run_default_dir="$(pipeline_run_dir "$wt_default")"
 mkdir -p "$run_default_dir"
 git -C "$wt_default" rev-parse HEAD > "$run_default_dir/landed-main.sha"
 CAS_RELEASE_TRAIN_PUBLISH_CMD="$tmp/publisher-ok.sh" CAS_RELEASE_ENV_FILE="$pub_env" \
-    "$train" 9.9.9 "$wt_default" --publish >/dev/null 2>&1 || true
+    "$train" 9.99.9 "$wt_default" --publish >/dev/null 2>&1 || true
 if [[ "$(cat "$run_default_dir/release.done" 2>/dev/null)" == "0" ]]; then
     ok 'publish falls back to the landed-main.sha the pipeline recorded'
 else

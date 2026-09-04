@@ -15,10 +15,12 @@
 # The rules this script exists to make unbreakable:
 #   * the run directory is keyed by version AND worktree, never version alone;
 #   * a run is located by a PID this script recorded, never by a name pattern;
-#   * `--stop` signals only that recorded pid, so a sibling run survives.
+#   * `--stop` signals only that recorded process group, so its children die
+#     and a sibling run survives.
 #
 # Usage:
-#   scripts/release-train.sh <version> <epic-worktree> --gate
+#   scripts/release-train.sh <version> <epic-worktree> --check-lane <branch>
+#   scripts/release-train.sh <version> <epic-worktree> --gate [--only <row,row>]
 #   scripts/release-train.sh <version> <epic-worktree> --pipeline
 #   scripts/release-train.sh <version> <epic-worktree> --publish [<landed-sha>]
 #   scripts/release-train.sh <version> <epic-worktree> --status
@@ -39,7 +41,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s <version> <epic-worktree> [--gate|--pipeline|--publish [sha]|--status|--stop|--print-run-dir]\n' "$0"
+    printf 'Usage: %s <version> <epic-worktree> [--check-lane <branch>|--gate [--only <row,row>]|--pipeline|--publish [sha]|--status|--stop|--print-run-dir]\n' "$0"
 }
 
 version="${1:-}"
@@ -62,6 +64,20 @@ artifacts_root="${CAS_RELEASE_ARTIFACTS_ROOT:-$HOME/.cas/artifacts/release}"
 # cutting the same version from different epics get different directories.
 run_dir="$artifacts_root/v$version-$worktree_name"
 pid_file="$run_dir/gate.pid"
+readonly -a gate_rows=(
+    scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config
+    version-literals fixture-paths workspace-tests nextest doctests archive-mode
+    snapshot-portability builtin-projections changelog-and-versions release-script
+    procedure-guardrails working-tree
+)
+
+valid_gate_row() {
+    local candidate="$1" row
+    for row in "${gate_rows[@]}"; do
+        [[ "$candidate" == "$row" ]] && return 0
+    done
+    return 1
+}
 
 # The pid recorded for this run, if it is still alive. Liveness is asked of the
 # recorded pid directly — never inferred from a process name.
@@ -99,6 +115,45 @@ EOF
 # queue run" to recover. Both halves are enforced below.
 # --------------------------------------------------------------------------
 gh_cmd() { "${CAS_RELEASE_TRAIN_GH:-gh}" "$@"; }
+
+check_lane() {
+    local branch="$1" repo_slug sha runs row status conclusion run_id
+    [[ -n "$branch" ]] || {
+        printf 'error: --check-lane requires a branch\n' >&2
+        return 2
+    }
+    repo_slug="${CAS_RELEASE_TRAIN_REPO:-Richards-LLC/cassy}"
+    sha="$(git -C "$worktree" rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" 2>/dev/null \
+        || git -C "$worktree" rev-parse --verify --quiet "$branch^{commit}" 2>/dev/null || true)"
+    [[ -n "$sha" ]] || {
+        printf 'lane %s: MISSING (branch tip not found locally)\n' "$branch"
+        return 1
+    }
+    runs="$(gh_cmd run list -R "$repo_slug" --workflow 'Scoped Validation' --branch "$branch" \
+        --event push --limit 20 --json databaseId,headBranch,headSha,status,conclusion,event,workflowName 2>/dev/null \
+        || printf '[]')"
+    row="$(printf '%s' "$runs" | jq -c --arg branch "$branch" --arg sha "$sha" '
+        [.[] | select(.headBranch == $branch and .headSha == $sha and .event == "push"
+          and .workflowName == "Scoped Validation")] | first // empty' 2>/dev/null || true)"
+    if [[ -z "$row" ]]; then
+        printf 'lane %s at %s: MISSING Scoped Validation push run\n' "$branch" "$sha"
+        return 1
+    fi
+    status="$(printf '%s' "$row" | jq -r '.status // "unknown"')"
+    conclusion="$(printf '%s' "$row" | jq -r '.conclusion // "pending"')"
+    run_id="$(printf '%s' "$row" | jq -r '.databaseId // "unknown"')"
+    printf 'lane %s at %s: Scoped Validation run %s status=%s conclusion=%s\n' \
+        "$branch" "$sha" "$run_id" "$status" "$conclusion"
+    if [[ "$status" != completed ]]; then
+        printf 'lane %s: PENDING; refusing release-bound merge\n' "$branch"
+        return 1
+    fi
+    if [[ "$conclusion" != success ]]; then
+        printf 'lane %s: RED (%s); refusing release-bound merge\n' "$branch" "$conclusion"
+        return 1
+    fi
+    printf 'lane %s: GREEN; eligible for release-bound merge\n' "$branch"
+}
 
 pipeline_log() { printf '%s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
 
@@ -353,6 +408,9 @@ run_publish() {
     local rc=$?
     set -e
     printf '%s\n' "$rc" >"$run_dir/release.done"
+    if [[ "$rc" -eq 0 ]]; then
+        date -u +%s >"$run_dir/release.published.epoch"
+    fi
     printf 'publisher done status=%s at %s\n' "$rc" "$(date -u +%H:%M:%SZ)"
     return "$rc"
 }
@@ -376,13 +434,26 @@ case "$action" in
         else
             printf 'gate: not running\n'
         fi
+        if [[ -s "$run_dir/gate.log" ]]; then
+            failed_rows="$(sed -n 's/^FAIL \([^ ]*\).*/\1/p' "$run_dir/gate.log" | paste -sd, -)"
+            tip="$(sed -n 's/^tip=//p' "$run_dir/run.env" 2>/dev/null || printf unknown)"
+            printf 'epic-note template: tip=%s rows_failed=%s cause_class=<product|fixture|environment|procedure> blocking_step=<step>\n' \
+                "${tip:-unknown}" "${failed_rows:-none}"
+        fi
+        if [[ -s "$run_dir/gate.green.epoch" && -s "$run_dir/release.published.epoch" ]]; then
+            green_epoch="$(cat "$run_dir/gate.green.epoch")"
+            published_epoch="$(cat "$run_dir/release.published.epoch")"
+            printf 'green-to-published latency: %ss\n' "$((published_epoch - green_epoch))"
+        fi
         exit 0
         ;;
     --stop)
         if pid="$(live_gate_pid)"; then
-            # Only ever the pid this run recorded. No pattern, no `head -1`.
-            kill -TERM "$pid"
-            printf 'signalled gate pid %s for %s\n' "$pid" "$run_dir"
+            # The detached gate owns a fresh session/process group whose id is
+            # the recorded pid. Signal that group so nextest/git descendants do
+            # not survive their parent gate.
+            kill -TERM -- "-$pid"
+            printf 'signalled gate process group %s for %s\n' "$pid" "$run_dir"
             exit 0
         fi
         printf 'no live gate recorded for %s; nothing signalled\n' "$run_dir" >&2
@@ -401,7 +472,30 @@ case "$action" in
         run_publish "${4:-}" 2>&1 | tee -a "$run_dir/publish.log"
         exit "${PIPESTATUS[0]}"
         ;;
-    --gate) ;;
+    --check-lane)
+        check_lane "${4:-}"
+        exit $?
+        ;;
+    --gate)
+        only_rows=''
+        if [[ "${4:-}" == '--only' ]]; then
+            only_rows="${5:-}"
+            [[ -n "$only_rows" && "$#" -eq 5 ]] || {
+                printf 'error: --only requires a non-empty comma-separated row list\n' >&2
+                exit 2
+            }
+            IFS=',' read -r -a requested_rows <<<"$only_rows"
+            for requested in "${requested_rows[@]}"; do
+                if [[ -z "$requested" ]] || ! valid_gate_row "$requested"; then
+                    printf 'error: unknown --only release-gate row %s\n' "${requested:-<empty>}" >&2
+                    exit 2
+                fi
+            done
+        elif [[ "$#" -ne 3 ]]; then
+            usage >&2
+            exit 2
+        fi
+        ;;
     *)
         usage >&2
         exit 2
@@ -409,6 +503,19 @@ case "$action" in
 esac
 
 mkdir -p "$run_dir"
+
+# Builtin reference history is a content ledger, so it is regenerated only
+# after every merge and --learn edit is complete. Refuse before detaching a
+# slow gate when the generated bytes are not committed.
+reference_history_script="$worktree/scripts/gen-builtin-reference-history.sh"
+if [[ -x "$reference_history_script" ]]; then
+    (cd "$worktree" && "$reference_history_script")
+    if ! git -C "$worktree" diff --quiet -- cas-cli/src/builtins/reference-history.json; then
+        printf 'error: builtin reference history changed; commit the ledger before starting the detached gate\n' >&2
+        git -C "$worktree" diff --stat -- cas-cli/src/builtins/reference-history.json >&2
+        exit 4
+    fi
+fi
 
 # Refuse rather than race. The check is against the pid this run recorded, so a
 # sibling supervisor's gate is invisible here — as it should be.
@@ -427,47 +534,33 @@ if [[ ! -x "$gate_cmd" ]]; then
     exit 2
 fi
 
-# The host-local .cas/proxy.toml leaks into hermetic proxy tests through the
-# ancestor lookup (cas-4ccc), so it is moved aside for the run and restored on
-# exit — including when the gate is killed.
-main_checkout="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's#/\.git$##' || true)"
-proxy_toml="${CAS_RELEASE_TRAIN_PROXY_TOML:-${main_checkout:-$worktree}/.cas/proxy.toml}"
-proxy_aside="$proxy_toml.gate-aside"
-
-restore_proxy() {
-    if [[ -f "$proxy_aside" ]]; then
-        mv "$proxy_aside" "$proxy_toml"
-        printf 'proxy.toml restored %s\n' "$(date -u +%H:%M:%SZ)"
-    fi
-}
-trap restore_proxy EXIT
-
-if [[ -f "$proxy_toml" ]]; then
-    mv "$proxy_toml" "$proxy_aside"
-    printf 'proxy.toml moved aside %s\n' "$(date -u +%H:%M:%SZ)"
-fi
-
 write_run_env
-rm -f "$run_dir/gate.done"
+rm -f "$run_dir/gate.done" "$run_dir/gate.green.epoch"
 
 printf 'gate start %s version=%s worktree=%s tip=%s\n' \
     "$(date -u +%H:%M:%SZ)" "$version" "$worktree" \
     "$(git -C "$worktree" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 printf 'run directory: %s\n' "$run_dir"
 
-(
-    cd "$worktree"
+export CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-/var/tmp/cas-release-gate}"
+export CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$run_dir/archive-size-bytes"
+gate_args=("$version")
+if [[ -n "${only_rows:-}" ]]; then
+    gate_args+=(--only "$only_rows")
+fi
+nohup setsid bash -c '
+    worktree=$1; done_file=$2; green_file=$3; shift 3
+    cd "$worktree" || exit 125
     [[ -x "$PWD/.context/zig/zig" ]] && export ZIG="$PWD/.context/zig/zig"
-    export CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-/var/tmp/cas-release-gate}"
-    exec "$gate_cmd" "$version"
-) >"$run_dir/gate.log" 2>&1 &
+    set +e
+    "$@"
+    rc=$?
+    printf "%s\n" "$rc" >"$done_file"
+    if [[ "$rc" -eq 0 ]]; then date -u +%s >"$green_file"; fi
+    exit "$rc"
+' bash "$worktree" "$run_dir/gate.done" "$run_dir/gate.green.epoch" \
+    "$gate_cmd" "${gate_args[@]}" >"$run_dir/gate.log" 2>&1 </dev/null &
 gate_pid=$!
 printf '%s\n' "$gate_pid" >"$pid_file"
-
-set +e
-wait "$gate_pid"
-rc=$?
-set -e
-printf '%s\n' "$rc" >"$run_dir/gate.done"
-printf 'gate rc=%s end %s\n' "$rc" "$(date -u +%H:%M:%SZ)"
-exit "$rc"
+printf 'gate detached pid=%s; use coordination remind, then --status (never a shell watcher)\n' "$gate_pid"
+exit 0

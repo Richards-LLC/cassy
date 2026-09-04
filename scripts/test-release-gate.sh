@@ -20,7 +20,7 @@ trap 'rm -rf "$tmp"' EXIT
 # rather than a prerequisite; it is kept so the harness is deterministic even
 # when an operator has the variable exported to somewhere else. The
 # default-scratch-base fixture below deliberately runs with it UNSET.
-: "${CAS_RELEASE_GATE_HOME_DIR:=/var/tmp/cas-release-gate}"
+: "${CAS_RELEASE_GATE_HOME_DIR:=$tmp/gate-scratch/base}"
 export CAS_RELEASE_GATE_HOME_DIR
 mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
 
@@ -83,6 +83,8 @@ EOF
 Use when cutting a release.
 Run the full suite on the assembled tree. Use nohup, kill -0, stranded_branch_override,
 release-published-receipt.sh --write-draft, and cas --version.
+Require Scoped Validation; the ledger is the last prep step; record a cause class.
+Use 9.99.x fixtures; workers never poll CI; commit a reviewed snapshot update.
 EOF
     cat >"$repo/scripts/release.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -102,12 +104,12 @@ EOF
         local file
         if [[ "$crate" == cas-cli ]]; then file="$repo/cas-cli/Cargo.toml"; else file="$repo/crates/$crate/Cargo.toml"; fi
         mkdir -p "$(dirname "$file")"
-        printf '[package]\nname = "%s"\nversion = "9.8.7"\n' "$crate" >"$file"
+        printf '[package]\nname = "%s"\nversion = "9.99.7"\n' "$crate" >"$file"
     done
     cat >"$repo/CHANGELOG.md" <<'EOF'
 ## [Unreleased]
 
-## [9.8.7] - 2026-09-02
+## [9.99.7] - 2026-09-02
 
 - Fixture release.
 EOF
@@ -127,6 +129,7 @@ printf 'ZIG=%s :: %s\n' "${ZIG:-unset}" "$*" \
   >>"${GATE_FIXTURE_ZIG_LOG:-/dev/null}"
 if [[ "$*" == 'check --workspace --tests' && "${GATE_FIXTURE_CHECK_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'nextest run -p cas'* && "${GATE_FIXTURE_NEXTEST_FAIL:-}" == 1 ]]; then exit 1; fi
+if [[ "$*" == *'builtin_archive_portability_test'* && "${GATE_FIXTURE_FIXTURE_PATHS_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'test -p cas --doc' && "${GATE_FIXTURE_DOCTEST_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "${GATE_FIXTURE_SNAPSHOT_FAIL:-}" == 1 ]]; then
   case "$*" in *component_output_test*) exit 1;; esac
@@ -184,9 +187,9 @@ assert_named_failure() {
 
 assert_all_pass() {
     local output="$1"
-    for name in epic-worktree-fresh epic-worktree-zig failure-log version-literals workspace-tests nextest doctests archive-mode \
-        snapshot-portability builtin-projections changelog-and-versions release-script \
-        procedure-guardrails working-tree; do
+    for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config \
+        version-literals fixture-paths workspace-tests nextest doctests archive-mode snapshot-portability \
+        builtin-projections changelog-and-versions release-script procedure-guardrails working-tree; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
             return
@@ -202,14 +205,14 @@ assert_all_pass() {
 run_scenario() {
     local name="$1" variable="$2" repo output
     repo="$(new_fixture "$name")"
-    output="$(run_gate "$repo" "$variable" "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+    output="$(run_gate "$repo" "$variable" "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
     assert_named_failure "$3" "$output"
 }
 
 # 1-7. Each mechanical or command-backed failure is isolated in its own repo.
 repo="$(new_fixture version-literal)"
-printf 'const VERSION: &str = "9.8.7";\n' >"$repo/cas-cli/src/version.rs"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+printf 'const VERSION: &str = "9.99.7-rc.1";\n' >"$repo/cas-cli/src/version.rs"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 assert_named_failure version-literals "$output"
 
 run_scenario workspace-check GATE_FIXTURE_CHECK_FAIL workspace-tests
@@ -218,6 +221,7 @@ run_scenario doctest-run GATE_FIXTURE_DOCTEST_FAIL doctests
 run_scenario archive-run GATE_FIXTURE_ARCHIVE_FAIL archive-mode
 run_scenario snapshot-run GATE_FIXTURE_SNAPSHOT_FAIL snapshot-portability
 run_scenario projection-run GATE_FIXTURE_DRIFT_FAIL builtin-projections
+run_scenario fixture-paths-run GATE_FIXTURE_FIXTURE_PATHS_FAIL fixture-paths
 
 # 8. Ledger regeneration must be compared to the committed file.
 run_scenario reference-ledger GATE_FIXTURE_REFERENCE_FAIL builtin-projections
@@ -225,17 +229,17 @@ run_scenario reference-ledger GATE_FIXTURE_REFERENCE_FAIL builtin-projections
 # 9. Changelog/version contract and clean-tree contract are independent.
 repo="$(new_fixture changelog-failure)"
 sed -i '/Fixture release/d' "$repo/CHANGELOG.md"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 assert_named_failure changelog-and-versions "$output"
 
 repo="$(new_fixture dirty-tree)"
 printf 'untracked\n' >"$repo/untracked.txt"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 assert_named_failure working-tree "$output"
 
 repo="$(new_fixture invalid-failure-log)"
 printf '%s\n' '- 2026-09-02 — **not-a-gate-check** — Symptom: unparseable. Root cause: fixture. Release: fixture.' >>"$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 assert_named_failure failure-log "$output"
 
 # cas-8b90. A worktree that is dirty or no longer matches its claimed epic ref
@@ -243,7 +247,7 @@ assert_named_failure failure-log "$output"
 # can refresh the exact worktree that failed the freshness check.
 repo="$(new_fixture stale-epic-worktree)"
 printf 'stale worktree\n' >"$repo/stale.txt"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 assert_named_failure epic-worktree-fresh "$output"
 if grep -qF "reset command: git -C $repo reset --hard HEAD" <<<"$output"; then
     ok 'stale epic worktree receipt names the exact reset command'
@@ -255,7 +259,7 @@ fi
 # candidate. Remove it to prove the refusal is named and actionable.
 repo="$(new_fixture missing-epic-zig)"
 rm -f "$repo/.context/zig/zig"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 assert_named_failure epic-worktree-zig "$output"
 if grep -qF './scripts/bootstrap-zig.sh' <<<"$output"; then
     ok 'missing epic-worktree Zig receipt names bootstrap-zig.sh'
@@ -277,7 +281,7 @@ output="$(cd "$epic_worktree" && \
     GATE_FIXTURE_ZIG_LOG="$zig_log" \
     CARGO="$epic_worktree/scripts/cargo-stub" \
     RELEASE_GATE_GEN_REFERENCE_HISTORY="$epic_worktree/scripts/gen-builtin-reference-history.sh" \
-    "$epic_worktree/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+    "$epic_worktree/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 git -C "$repo" worktree remove --force "$epic_worktree" >/dev/null
 if grep -qF 'PASS epic-worktree-zig' <<<"$output" \
     && grep -qF "ZIG=$repo/.context/zig/zig ::" "$zig_log"; then
@@ -287,8 +291,11 @@ else
 fi
 
 repo="$(new_fixture learn-mode)"
-learn_output="$(cd "$repo" && "$repo/scripts/release-gate.sh" --learn 'new release symptom' 'new release cause' 'procedure-guardrails' 2>&1)"
+learn_output="$(cd "$repo" && GATE_FIXTURE_REFERENCE_FAIL=1 \
+    "$repo/scripts/release-gate.sh" --learn 'new release symptom' 'new release cause' 'procedure-guardrails' 2>&1)"
 grep -qF 'Learned release failure in all three mirrors' <<<"$learn_output"
+grep -qF 'Regenerated builtin reference history after --learn' <<<"$learn_output"
+grep -qF 'changed ledger' "$repo/cas-cli/src/builtins/reference-history.json"
 grep -qF 'new release symptom' "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md"
 cmp "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
     "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md"
@@ -304,7 +311,7 @@ repo="$(new_fixture ancestor-proxy)"
 mkdir -p "$(dirname "$repo")/.cas"
 printf '[servers.mecha-cassy]\ntype = "http"\nurl = "https://example.invalid/mcp"\n' \
     >"$(dirname "$repo")/.cas/proxy.toml"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 if grep -qF 'FAIL ancestor-proxy-config' <<<"$output"; then
     bad 'ancestor proxy.toml must be neutralized, not refused'
 else
@@ -326,7 +333,7 @@ repo="$(new_fixture own-proxy)"
 mkdir -p "$repo/.cas"
 printf '[servers.local]\ntype = "http"\nurl = "https://example.invalid/mcp"\n' \
     >"$repo/.cas/proxy.toml"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 if grep -qF 'FAIL ancestor-proxy-config' <<<"$output"; then
     bad "the repository's own .cas/proxy.toml must not trip the ancestor check"
 else
@@ -343,10 +350,11 @@ run_gate_unset_home() {
     local repo="$1"
     (cd "$repo" && \
       env -u CAS_RELEASE_GATE_HOME_DIR \
+      CAS_RELEASE_GATE_CHECKOUT_DEVICE=1 CAS_RELEASE_GATE_SCRATCH_DEVICE=1 \
       GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
       CARGO="$repo/scripts/cargo-stub" \
       RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
-      "$repo/scripts/release-gate.sh" 9.8.7)
+      "$repo/scripts/release-gate.sh" 9.99.7)
 }
 
 repo="$(new_fixture default-scratch-base)"
@@ -368,11 +376,91 @@ output="$(cd "$repo" && env CAS_RELEASE_GATE_HOME_DIR="$override/base" \
     GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
     CARGO="$repo/scripts/cargo-stub" \
     RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
-    "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+    "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 if grep -qF "scratch base: $override/base (from CAS_RELEASE_GATE_HOME_DIR)" <<<"$output"; then
     ok 'an explicit CAS_RELEASE_GATE_HOME_DIR still wins over the default'
 else
     bad "explicit CAS_RELEASE_GATE_HOME_DIR was not honoured (output: $output)"
+fi
+
+# The scratch preflight is the first receipt row and rejects each host
+# condition without dispatching Cargo.
+repo="$(new_fixture scratch-preflight)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only scratch-base 2>&1)"
+first_row="$(grep -m1 -E '^(PASS|FAIL) ' <<<"$output")"
+if [[ "$first_row" == PASS\ scratch-base* ]]; then
+    ok 'scratch-base is the first release-gate receipt row'
+else
+    bad "scratch-base was not first: $output"
+fi
+
+output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base" \
+    CAS_RELEASE_GATE_PARENT_WRITABLE=0 "$repo/scripts/release-gate.sh" 9.99.7 --only scratch-base 2>&1 || true)"
+assert_named_failure scratch-base "$output"
+grep -qF 'parent' <<<"$output" && ok 'scratch-base names an unwritable parent' \
+    || bad "scratch-base omitted the unwritable parent: $output"
+
+output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base" \
+    CAS_RELEASE_GATE_CHECKOUT_DEVICE=11 CAS_RELEASE_GATE_SCRATCH_DEVICE=22 \
+    "$repo/scripts/release-gate.sh" 9.99.7 --only scratch-base 2>&1 || true)"
+assert_named_failure scratch-base "$output"
+grep -qF 'filesystem boundary' <<<"$output" && ok 'scratch-base names a cross-device base' \
+    || bad "scratch-base omitted the filesystem boundary: $output"
+
+output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base" \
+    CAS_RELEASE_GATE_CHECKOUT_DEVICE=11 CAS_RELEASE_GATE_SCRATCH_DEVICE=11 \
+    CAS_RELEASE_GATE_LAST_ARCHIVE_BYTES=100 CAS_RELEASE_GATE_FREE_BYTES=199 \
+    "$repo/scripts/release-gate.sh" 9.99.7 --only scratch-base 2>&1 || true)"
+assert_named_failure scratch-base "$output"
+if grep -qF 'need at least 200 (2x last archive 100)' <<<"$output"; then
+    ok 'scratch-base enforces free bytes >= 2x the recorded archive size'
+else
+    bad "scratch-base omitted the capacity formula: $output"
+fi
+
+unsafe="$tmp/unsafe-scratch"
+mkdir -p "$unsafe/.cas" "$unsafe/child"
+output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$unsafe/child/base" \
+    "$repo/scripts/release-gate.sh" 9.99.7 --only scratch-base 2>&1 || true)"
+assert_named_failure scratch-base "$output"
+grep -qF '.cas ancestor' <<<"$output" && ok 'scratch-base rejects a .cas ancestor' \
+    || bad "scratch-base omitted the .cas ancestor: $output"
+
+# --only validates its selection synchronously, executes in canonical row
+# order, and names the selected set in the terminal receipt.
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only version-literals,scratch-base 2>&1)"
+rows="$(grep '^PASS ' <<<"$output" | awk '{print $2}' | paste -sd, -)"
+if [[ "$rows" == 'scratch-base,version-literals' ]] \
+    && grep -qF 'selected checks are green for 9.99.7: scratch-base,version-literals' <<<"$output"; then
+    ok '--only preserves canonical row order and prints the selected-row summary'
+else
+    bad "--only row order or summary drifted: $output"
+fi
+for invalid in '' not-a-row; do
+    output="$(cd "$repo" && "$repo/scripts/release-gate.sh" 9.99.7 --only "$invalid" 2>&1 || true)"
+    if grep -qE 'requires at least one|unknown --only' <<<"$output"; then
+        ok "--only rejects ${invalid:-an empty row list}"
+    else
+        bad "--only accepted invalid rows '$invalid': $output"
+    fi
+done
+
+archive_receipt="$tmp/archive-size-bytes"
+output="$(cd "$repo" && GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+    CARGO="$repo/scripts/cargo-stub" CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$archive_receipt" \
+    "$repo/scripts/release-gate.sh" 9.99.7 --only archive-mode 2>&1)"
+if [[ "$(cat "$archive_receipt" 2>/dev/null)" == 7 ]] \
+    && grep -qF "per-run=$archive_receipt" <<<"$output"; then
+    ok 'archive-mode records the measured archive size in the per-run receipt source'
+else
+    bad "archive-mode did not record its measured size: $output"
+fi
+output="$(cd "$repo" && CAS_RELEASE_GATE_FREE_BYTES=13 \
+    "$repo/scripts/release-gate.sh" 9.99.7 --only scratch-base 2>&1 || true)"
+if grep -qF 'need at least 14 (2x last archive 7)' <<<"$output"; then
+    ok 'scratch-base reads the last archive-size source written by archive-mode'
+else
+    bad "scratch-base did not read the recorded archive size: $output"
 fi
 
 # cas-c0411. The `cas init` watchdog budget the gate hands its children is the
@@ -390,7 +478,7 @@ run_gate_with_env_log() {
       GATE_FIXTURE_ENV_LOG="$env_log" \
       CARGO="$repo/scripts/cargo-stub" \
       RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
-      "$repo/scripts/release-gate.sh" 9.8.7)
+      "$repo/scripts/release-gate.sh" 9.99.7)
 }
 
 env_log="$tmp/init-timeout.log"
@@ -436,7 +524,7 @@ scratch_leftovers() {
 }
 repo="$(new_fixture scratch-cleanup)"
 leftovers_before="$(scratch_leftovers)"
-run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 >/dev/null 2>&1 || true
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >/dev/null 2>&1 || true
 leftovers_after="$(scratch_leftovers)"
 if [[ "$leftovers_after" -eq "$leftovers_before" ]]; then
     ok 'a gate run leaves no scratch directory behind under its base'
@@ -445,7 +533,7 @@ else
 fi
 
 repo="$(new_fixture passing)"
-output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1)"
 assert_all_pass "$output"
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

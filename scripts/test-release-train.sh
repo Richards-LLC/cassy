@@ -200,5 +200,241 @@ for flavour in skills codex/skills grok/skills; do
     fi
 done
 
+
+# ===========================================================================
+# `pipeline` — the port of the hand-written pipeline.sh (cas-da81).
+#
+# The centre of this suite is the mistake that dropped a merge-queue entry on
+# 2026-09-04: a push-triggered CI run contributes rows with the required check
+# NAMES but bucket "skipped", and treating those as satisfied enqueued the PR
+# before the pull_request run existed, so the entry vanished silently.
+# ===========================================================================
+
+# A stub `gh` that answers from a scripted sequence. Each invocation appends
+# its argv to calls.log and reads the current step from step.txt, so a test can
+# make the same query answer differently on later polls.
+new_gh_stub() {
+    local path="$1" state_dir="$2"
+    mkdir -p "$state_dir"
+    cat >"$path" <<'STUB'
+#!/usr/bin/env bash
+state="$GH_STUB_STATE"
+printf '%s\n' "$*" >> "$state/calls.log"
+step="$(cat "$state/step.txt" 2>/dev/null || echo 1)"
+printf '%s\n' "$((step + 1))" > "$state/step.txt"
+case "$1 $2" in
+"pr list")
+    cat "$state/pr-list.json" 2>/dev/null || printf ''
+    ;;
+"pr create")
+    printf 'https://github.com/o/r/pull/%s\n' "$(cat "$state/pr-number.txt" 2>/dev/null || echo 4242)"
+    ;;
+"pr comment")
+    cat > /dev/null
+    printf 'commented\n'
+    ;;
+"pr checks")
+    if [[ -f "$state/checks-$step.json" ]]; then cat "$state/checks-$step.json";
+    else cat "$state/checks-default.json" 2>/dev/null || printf '[]\n'; fi
+    ;;
+"pr view")
+    if [[ -f "$state/prview-$step.json" ]]; then cat "$state/prview-$step.json";
+    else cat "$state/prview-default.json" 2>/dev/null || printf '{}\n'; fi
+    ;;
+"api graphql")
+    if printf '%s' "$*" | grep -q enqueuePullRequest; then
+        cat "$state/enqueue.json" 2>/dev/null || printf '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED"}}}}\n'
+    else
+        if [[ -f "$state/entry-$step.txt" ]]; then cat "$state/entry-$step.txt";
+        else cat "$state/entry-default.txt" 2>/dev/null || printf 'QUEUED\n'; fi
+    fi
+    ;;
+"run list")
+    if [[ -f "$state/runlist-$step.json" ]]; then cat "$state/runlist-$step.json";
+    else cat "$state/runlist-default.json" 2>/dev/null || printf '[]\n'; fi
+    ;;
+*)
+    printf ''
+    ;;
+esac
+STUB
+    chmod +x "$path"
+}
+
+# An epic worktree on a branch, with a real bare remote so the push is genuine.
+new_pipeline_fixture() {
+    local name="$1"
+    local dir="$tmp/$name"
+    local remote="$tmp/$name-remote.git"
+    git init -q --bare "$remote"
+    mkdir -p "$dir"
+    ( cd "$dir"
+      git init -q -b main .
+      git config user.email test@test.invalid
+      git config user.name 'Release Train Test'
+      echo seed > seed.txt
+      git add seed.txt
+      git -c commit.gpgsign=false commit -q -m seed
+      git checkout -q -b "epic/epic-$name"
+      git remote add origin "$remote" ) >/dev/null
+    printf '%s\n' "$dir"
+}
+
+pipeline_run_dir() { "$train" 9.9.9 "$1" --print-run-dir; }
+
+seed_gate_receipt() {
+    local run_dir="$1" status="${2:-0}"
+    mkdir -p "$run_dir"
+    printf 'PASS version-literals\nPASS nextest\n' > "$run_dir/gate.log"
+    printf '%s\n' "$status" > "$run_dir/gate.done"
+    printf 'release body\n' > "$run_dir/pr-body.md"
+}
+
+run_pipeline() {
+    local worktree="$1" state="$2"
+    GH_STUB_STATE="$state" \
+    CAS_RELEASE_TRAIN_GH="$tmp/gh-stub.sh" \
+    CAS_RELEASE_TRAIN_POLL_SECS=0 \
+    CAS_RELEASE_TRAIN_CHECK_TRIES=4 \
+    CAS_RELEASE_TRAIN_WATCH_TRIES=6 \
+        "$train" 9.9.9 "$worktree" --pipeline 2>&1
+}
+
+new_gh_stub "$tmp/gh-stub.sh" "$tmp/gh-state-unused"
+
+# --- refuses while the gate is not green -----------------------------------
+wt_gate="$(new_pipeline_fixture gate-not-green)"
+run_gate_dir="$(pipeline_run_dir "$wt_gate")"
+seed_gate_receipt "$run_gate_dir" 1
+state="$tmp/state-gate"; mkdir -p "$state"
+out="$(run_pipeline "$wt_gate" "$state" || true)"
+if [[ "$out" == *"GATE_NOT_GREEN"* ]]; then
+    ok 'pipeline refuses to run while the gate is not green'
+else
+    bad "pipeline ran without a green gate: $out"
+fi
+
+# --- the incident: SKIPPED rows must not satisfy the required checks -------
+wt_skip="$(new_pipeline_fixture skipped-rows)"
+run_skip_dir="$(pipeline_run_dir "$wt_skip")"
+seed_gate_receipt "$run_skip_dir"
+state="$tmp/state-skip"; mkdir -p "$state"
+printf '' > "$state/pr-list.json"
+printf '4242\n' > "$state/pr-number.txt"
+# Every checks poll returns the push-triggered run's SKIPPED rows only.
+cat > "$state/checks-default.json" <<'JSON'
+[{"name":"Fast Validation","bucket":"skipped"},{"name":"macOS Check","bucket":"skipped"}]
+JSON
+printf '{"state":"OPEN","mergeCommit":null,"id":"PR_id"}\n' > "$state/prview-default.json"
+out="$(run_pipeline "$wt_skip" "$state" || true)"
+if [[ "$out" == *"CHECKS_NEVER_PASSED"* || "$(cat "$run_skip_dir/pipeline.done" 2>/dev/null)" == "CHECKS_FAILED" ]]; then
+    ok 'SKIPPED rows from a push-triggered run do not satisfy the required checks'
+else
+    bad "skipped rows were treated as passing: $out"
+fi
+if ! grep -q 'enqueuePullRequest' "$state/calls.log" 2>/dev/null; then
+    ok 'no enqueue is attempted before the required checks pass'
+else
+    bad 'the pipeline enqueued before the required checks passed'
+fi
+
+# --- happy path: create PR, comment, wait, enqueue, watch to MERGED --------
+wt_ok="$(new_pipeline_fixture happy-path)"
+run_ok_dir="$(pipeline_run_dir "$wt_ok")"
+seed_gate_receipt "$run_ok_dir"
+state="$tmp/state-ok"; mkdir -p "$state"
+printf '' > "$state/pr-list.json"
+printf '4242\n' > "$state/pr-number.txt"
+cat > "$state/checks-default.json" <<'JSON'
+[{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]
+JSON
+printf '{"state":"MERGED","mergeCommit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},"id":"PR_id"}\n' > "$state/prview-default.json"
+out="$(run_pipeline "$wt_ok" "$state" || true)"
+if [[ "$(cat "$run_ok_dir/pipeline.done" 2>/dev/null)" == "MERGED" ]]; then
+    ok 'a merged PR ends the pipeline with MERGED'
+else
+    bad "pipeline.done is $(cat "$run_ok_dir/pipeline.done" 2>/dev/null || echo absent): $out"
+fi
+if [[ "$(cat "$run_ok_dir/pr-number.txt" 2>/dev/null)" == "4242" ]]; then
+    ok 'the PR number is recorded in the run directory'
+else
+    bad "pr-number.txt is $(cat "$run_ok_dir/pr-number.txt" 2>/dev/null || echo absent)"
+fi
+if [[ -s "$run_ok_dir/landed-main.sha" ]]; then
+    ok 'the landed main sha is recorded for the publish step'
+else
+    bad 'landed-main.sha was not recorded'
+fi
+if grep -q 'pr comment' "$state/calls.log"; then
+    ok 'the gate receipt is commented on the PR'
+else
+    bad 'no gate receipt comment was posted'
+fi
+
+# --- an existing PR is reused, never duplicated ----------------------------
+wt_reuse="$(new_pipeline_fixture reuse-pr)"
+run_reuse_dir="$(pipeline_run_dir "$wt_reuse")"
+seed_gate_receipt "$run_reuse_dir"
+state="$tmp/state-reuse"; mkdir -p "$state"
+printf '[{"number":777}]\n' > "$state/pr-list.json"
+cat > "$state/checks-default.json" <<'JSON'
+[{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]
+JSON
+printf '{"state":"MERGED","mergeCommit":{"oid":"cafebabecafebabecafebabecafebabecafebabe"},"id":"PR_id"}\n' > "$state/prview-default.json"
+run_pipeline "$wt_reuse" "$state" >/dev/null 2>&1 || true
+if [[ "$(cat "$run_reuse_dir/pr-number.txt" 2>/dev/null)" == "777" ]] && ! grep -q '^pr create' "$state/calls.log"; then
+    ok 'an existing PR for the head branch is reused, not recreated'
+else
+    bad "existing PR was not reused: $(cat "$run_reuse_dir/pr-number.txt" 2>/dev/null)"
+fi
+
+# --- a dropped merge-queue entry is re-enqueued, then given up on ----------
+wt_drop="$(new_pipeline_fixture dropped-entry)"
+run_drop_dir="$(pipeline_run_dir "$wt_drop")"
+seed_gate_receipt "$run_drop_dir"
+state="$tmp/state-drop"; mkdir -p "$state"
+printf '' > "$state/pr-list.json"
+printf '4242\n' > "$state/pr-number.txt"
+cat > "$state/checks-default.json" <<'JSON'
+[{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]
+JSON
+printf '{"state":"OPEN","mergeCommit":null,"id":"PR_id"}\n' > "$state/prview-default.json"
+printf 'no-entry\n' > "$state/entry-default.txt"
+printf '[]\n' > "$state/runlist-default.json"
+out="$(run_pipeline "$wt_drop" "$state" || true)"
+if [[ "$(cat "$run_drop_dir/pipeline.done" 2>/dev/null)" == "DROPPED_TOO_OFTEN" ]]; then
+    ok 'an entry that keeps vanishing ends as DROPPED_TOO_OFTEN'
+else
+    bad "pipeline.done is $(cat "$run_drop_dir/pipeline.done" 2>/dev/null || echo absent): $out"
+fi
+requeues="$(grep -c 'enqueuePullRequest' "$state/calls.log" || true)"
+if [[ "$requeues" -ge 2 && "$requeues" -le 4 ]]; then
+    ok "a dropped entry is re-enqueued a bounded number of times ($requeues)"
+else
+    bad "unexpected enqueue count: $requeues"
+fi
+
+# --- a failed merge_group run is terminal ----------------------------------
+wt_qfail="$(new_pipeline_fixture queue-failed)"
+run_qfail_dir="$(pipeline_run_dir "$wt_qfail")"
+seed_gate_receipt "$run_qfail_dir"
+state="$tmp/state-qfail"; mkdir -p "$state"
+printf '' > "$state/pr-list.json"
+printf '4242\n' > "$state/pr-number.txt"
+cat > "$state/checks-default.json" <<'JSON'
+[{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]
+JSON
+printf '{"state":"OPEN","mergeCommit":null,"id":"PR_id"}\n' > "$state/prview-default.json"
+printf 'QUEUED\n' > "$state/entry-default.txt"
+cat > "$state/runlist-default.json" <<'JSON'
+[{"databaseId":99,"status":"completed","conclusion":"failure","createdAt":"2099-01-01T00:00:00Z"}]
+JSON
+out="$(run_pipeline "$wt_qfail" "$state" || true)"
+if [[ "$(cat "$run_qfail_dir/pipeline.done" 2>/dev/null)" == "QUEUE_RUN_FAILED" ]]; then
+    ok 'a failed merge_group run ends as QUEUE_RUN_FAILED'
+else
+    bad "pipeline.done is $(cat "$run_qfail_dir/pipeline.done" 2>/dev/null || echo absent): $out"
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

@@ -474,3 +474,74 @@ fn post_swap_mode_is_a_terminal_update_path() {
 
     execute(&args, &cli, None).expect("post-swap mode must not re-enter binary update");
 }
+
+// =============================================================================
+// cas-91ba: the post-install phases must run on the NEWLY installed binary.
+// Installing 3.15.2 from 3.15.1 refreshed with the 3.15.1 image: 16 projects
+// instead of 43, no user_level_store, and gabber-studio's ledger wedge still
+// reported — a second `cas update` was needed to converge.
+// =============================================================================
+
+#[cfg(unix)]
+fn write_stub_binary(path: &Path, body: &str) {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(path, body).expect("write stub binary");
+    let mut permissions = fs::metadata(path).expect("stat stub binary").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("make stub binary executable");
+}
+
+#[cfg(unix)]
+#[test]
+fn post_swap_refresh_runs_on_the_installed_binary_and_reports_its_version() {
+    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let installed_binary = temp_dir.path().join("cas-new");
+    // The stub stands in for the freshly installed binary: it records its argv
+    // and prints the refresh receipt the real child would print.
+    write_stub_binary(
+        &installed_binary,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n\
+         printf '%s' '{\"refresh_binary_version\":\"9.9.9-stub\",\"projects\":[],\"user_level_store\":{\"status\":\"ok\"},\"skipped_unregistered\":[]}'\n",
+    );
+
+    let receipt = run_post_swap_refresh(&installed_binary, "3.15.1", true)
+        .expect("the post-swap refresh must run the installed binary");
+
+    assert_eq!(
+        receipt["refresh_binary_version"], "9.9.9-stub",
+        "the receipt must name the binary that actually refreshed: {receipt}"
+    );
+    let args = std::fs::read_to_string(installed_binary.with_extension("args"))
+        .expect("stub binary should have recorded its arguments");
+    assert!(args.contains("--post-swap"), "{args}");
+    assert!(args.contains("3.15.1"), "{args}");
+    assert!(args.contains("--json"), "{args}");
+}
+
+#[cfg(unix)]
+#[test]
+fn post_swap_refresh_failure_tells_the_operator_to_run_update_again() {
+    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let missing = temp_dir.path().join("cas-not-installed");
+
+    let error = run_post_swap_refresh(&missing, "3.15.1", true)
+        .expect_err("an unusable installed binary must not read as a successful refresh");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("cas update"),
+        "the operator must be told to run cas update again: {message}"
+    );
+}
+
+#[test]
+fn refresh_receipt_names_the_binary_that_ran_it() {
+    let receipt = project_refresh_receipt_json(&[], &ProjectPhase::Ok(String::new()), &[]);
+
+    assert_eq!(
+        receipt["refresh_binary_version"],
+        env!("CARGO_PKG_VERSION"),
+        "every refresh receipt must name the binary version that produced it: {receipt}"
+    );
+}

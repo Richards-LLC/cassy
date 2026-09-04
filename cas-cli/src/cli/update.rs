@@ -1245,6 +1245,43 @@ fn cloud_phase_from_summaries(summaries: &[SyncSummary]) -> ProjectPhase {
     }
 }
 
+/// The machine-readable refresh receipt.
+///
+/// Split out of the printer so the shape is testable, and so the post-swap
+/// child and the in-process path emit exactly the same document (cas-91ba).
+fn project_refresh_receipt_json(
+    receipts: &[ProjectRefreshReceipt],
+    user_level: &ProjectPhase,
+    skipped_unregistered: &[PathBuf],
+) -> serde_json::Value {
+    let projects = receipts
+        .iter()
+        .map(|receipt| {
+            serde_json::json!({
+                "project": receipt.project,
+                "store": receipt.project.join(".cas"),
+                "registered": !receipt.unregistered,
+                "migration": receipt.migration.summary(),
+                "search_index": receipt.search_index.summary(),
+                "skills": receipt.skills.summary(),
+                "membership": receipt.membership.summary(),
+                "cloud_sync": receipt.cloud.summary(),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "projects": projects,
+        "user_level_store": {
+            "store": user_level_store_root(),
+            "status": user_level.summary(),
+        },
+        // Retained for compatibility with readers of the pre-cas-9d5c
+        // receipt, which only ever reported the builtin distribution.
+        "user_builtins": user_level.summary(),
+        "skipped_unregistered": skipped_unregistered,
+    })
+}
+
 fn print_project_refresh_summary(
     receipts: &[ProjectRefreshReceipt],
     user_level: &ProjectPhase,
@@ -1253,34 +1290,9 @@ fn print_project_refresh_summary(
     cli: &Cli,
 ) {
     if cli.json {
-        let projects = receipts
-            .iter()
-            .map(|receipt| {
-                serde_json::json!({
-                    "project": receipt.project,
-                    "store": receipt.project.join(".cas"),
-                    "registered": !receipt.unregistered,
-                    "migration": receipt.migration.summary(),
-                    "search_index": receipt.search_index.summary(),
-                    "skills": receipt.skills.summary(),
-                    "membership": receipt.membership.summary(),
-                    "cloud_sync": receipt.cloud.summary(),
-                })
-            })
-            .collect::<Vec<_>>();
         println!(
             "{}",
-            serde_json::json!({
-                "projects": projects,
-                "user_level_store": {
-                    "store": user_level_store_root(),
-                    "status": user_level.summary(),
-                },
-                // Retained for compatibility with readers of the pre-cas-9d5c
-                // receipt, which only ever reported the builtin distribution.
-                "user_builtins": user_level.summary(),
-                "skipped_unregistered": skipped_unregistered,
-            })
+            project_refresh_receipt_json(receipts, user_level, skipped_unregistered)
         );
         return;
     }
@@ -2542,6 +2554,19 @@ fn build_post_swap_command(
         command.arg("--json");
     }
     command
+}
+
+/// Run the post-install phases with the freshly installed binary (cas-91ba).
+///
+/// Skeleton: currently delegates to the legacy hook, which only restarts the
+/// hub, and returns no receipt.
+fn run_post_swap_refresh(
+    installed_binary: &Path,
+    previous_version: &str,
+    json: bool,
+) -> anyhow::Result<serde_json::Value> {
+    run_post_swap_hook(installed_binary, previous_version, json)?;
+    Ok(serde_json::json!({}))
 }
 
 fn strip_deleted_suffix(path: std::path::PathBuf) -> std::path::PathBuf {

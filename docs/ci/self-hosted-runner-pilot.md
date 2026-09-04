@@ -214,11 +214,29 @@ timestamped rollback directory and mounting the bind. Keep that rollback tree
 until both units are healthy, a newly-created target artifact resolves to the
 Shockwave device, and a CI smoke run completes.
 
+After preseed, run the checked-in operator cutover from the trusted checkout as
+the logged-in GitHub operator; it uses `sudo` only for the bounded host writes:
+
+```bash
+sudo -v
+scripts/cutover-cassy-actions-cache.sh cutover
+```
+
+The command records the original route values and host-file backups under the
+task artifact root, performs the final drain/copy/verification, and prints the
+timestamped rollback path and state file. It never deletes that rollback tree.
+
 Rollback is the reverse, while routing stays disabled: stop both units,
 unmount `/var/lib/cassy-actions/cache`, remove the bind line from the backed-up
 fstab, rename the timestamped root directory back to `cache`, run
 `systemctl daemon-reload`, and start both units. Re-enable route variables only
 after both runners report online and idle.
+The mechanically verified rollback entry point is:
+
+```bash
+scripts/cutover-cassy-actions-cache.sh rollback \
+  /home/pippenz/.cas/artifacts/cas-a352/operator-cutover-YYYYMMDDTHHMMSSZ.env
+```
 
 ## Provision and audit
 

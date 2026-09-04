@@ -61,8 +61,13 @@ fn proxy_vercel_client_round_trip_against_fixture_mcp_server() {
         fixture.display()
     );
 
-    let tmp = tempfile::TempDir::new().unwrap();
-    let config_dir = tmp.path().join(".config").join("code-mode-mcp");
+    // `temp_home` owns the HOME *and* pins the project root inside it
+    // (cas-4ccc). Setting HOME by hand here is what let the main checkout's
+    // .cas/proxy.toml reach this test through ancestor lookup: the loader
+    // preferred that project config over the user-level fixture below and
+    // built a real http client, panicking with "No provider set".
+    let mut env = TestEnvGuard::temp_home();
+    let config_dir = env.home().join(".config").join("code-mode-mcp");
     std::fs::create_dir_all(&config_dir).unwrap();
     // Write a proxy.toml referencing the fixture as the "vercel" upstream.
     let toml = format!(
@@ -76,9 +81,8 @@ args = ["{}"]
     );
     std::fs::write(config_dir.join("config.toml"), toml).unwrap();
 
-    let mut env = TestEnvGuard::new();
-    env.set("HOME", tmp.path());
-    env.set("XDG_CONFIG_HOME", tmp.path().join(".config"));
+    let xdg = env.home().join(".config");
+    env.set("XDG_CONFIG_HOME", xdg);
     {
         let client = vercel::default_client();
 

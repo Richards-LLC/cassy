@@ -115,6 +115,9 @@ async fn cross_project_second_pull_sends_no_since() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path();
     init_stores(cas_root);
     let syncer = syncer_for(server.uri(), cas_root);
@@ -211,6 +214,9 @@ async fn same_scope_second_pull_sends_recorded_since() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path();
     init_stores(cas_root);
 
@@ -269,6 +275,9 @@ async fn same_scope_second_pull_sends_recorded_since() {
 #[tokio::test]
 async fn full_flag_clears_only_current_scope_watermark() {
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
 
@@ -314,6 +323,9 @@ async fn old_global_per_team_key_is_deleted_on_first_new_write() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path();
     init_stores(cas_root);
 

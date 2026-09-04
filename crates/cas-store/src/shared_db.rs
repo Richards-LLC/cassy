@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 
@@ -134,6 +134,9 @@ pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>
          PRAGMA mmap_size=268435456;\
          PRAGMA cache_size=-8000;",
     )?;
+    // Bound the WAL file so a long-lived writer fleet cannot leave a journal
+    // orders of magnitude larger than its live frames (cas-759f).
+    conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
 
     let shared = Arc::new(Mutex::new(conn));
     map.insert(canonical, Arc::downgrade(&shared));
@@ -181,6 +184,116 @@ impl<'a> std::ops::Deref for ImmediateTx<'a> {
     fn deref(&self) -> &Connection {
         self.conn
     }
+}
+
+/// Cap on the WAL file left behind after a checkpoint (64 MiB).
+///
+/// SQLite only truncates the WAL when a limit is set; without one the file
+/// grows to its historical high-water mark and stays there. The store on this
+/// host was carrying a 389 MB WAL for 1,137 live frames (cas-759f). This is a
+/// size cap, not a checkpoint policy: it costs nothing at runtime and cannot
+/// stall a writer, which is why it is the half of the WAL problem worth fixing
+/// on the connection-open path.
+pub const WAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
+/// Default backoff for a contended write transaction, in milliseconds.
+const WRITE_TXN_BACKOFF_MS: &[u64] = &[50, 100, 200, 400, 800];
+
+/// Acquire a `BEGIN IMMEDIATE` write transaction, waiting out a foreign write
+/// lock instead of failing on the first collision.
+///
+/// Why this exists rather than `Connection::transaction()`: rusqlite's default
+/// is DEFERRED, so a block that reads before it writes takes a read snapshot
+/// and must later *upgrade* to a writer. SQLite answers that upgrade with
+/// SQLITE_BUSY **without ever calling the busy handler** — blocking there could
+/// deadlock two readers upgrading at once — so the connection's `busy_timeout`
+/// is silently irrelevant and the caller fails in milliseconds under a burst of
+/// contention. That is exactly how four consecutive verification writes failed
+/// while single-statement writes in the same seconds succeeded (cas-759f).
+///
+/// Taking the write lock up front puts the wait somewhere the busy handler
+/// applies, and the bounded jittered retry here covers the case where the
+/// holder outlives one `busy_timeout` window.
+///
+/// Nothing is retried once the transaction is open: the caller's body runs
+/// exactly once, so a body that consumes a single-use token cannot consume it
+/// twice.
+pub fn begin_immediate_with_retry(conn: &Connection) -> crate::Result<ImmediateTx<'_>> {
+    begin_immediate_with_retry_bounded(conn, WRITE_TXN_BACKOFF_MS)
+}
+
+/// [`begin_immediate_with_retry`] with an explicit backoff schedule, so tests
+/// can exhaust the budget without waiting seconds for it.
+pub fn begin_immediate_with_retry_bounded<'a>(
+    conn: &'a Connection,
+    backoff_ms: &[u64],
+) -> crate::Result<ImmediateTx<'a>> {
+    let started = Instant::now();
+    let mut attempts = 0usize;
+    let mut last_busy: Option<rusqlite::Error> = None;
+
+    for base_ms in backoff_ms.iter().copied().chain(std::iter::once(0)) {
+        attempts += 1;
+        let is_final = attempts > backoff_ms.len();
+
+        match ImmediateTx::new(conn) {
+            Ok(tx) => return Ok(tx),
+            Err(error) if is_busy_error(&error) => {
+                last_busy = Some(error);
+                if is_final {
+                    break;
+                }
+                // ±50% jitter, matching `with_write_retry`: without it a fleet
+                // of daemons wakes and collides on the same instant.
+                let jitter_range = base_ms / 2;
+                let jitter = cheap_random_u64() % (jitter_range * 2 + 1);
+                let delay_ms = base_ms - jitter_range + jitter;
+                tracing::warn!(
+                    base_ms,
+                    delay_ms,
+                    attempts,
+                    "write lock held by another connection, retrying after backoff with jitter"
+                );
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
+            Err(error) => return Err(StoreError::Database(error)),
+        }
+    }
+
+    // The bare "database is locked" is what made the original report
+    // un-triageable: it does not say whether anything waited. State it.
+    Err(StoreError::Other(format!(
+        "database busy for {:.1}s across {attempts} attempt(s); another connection held the \
+         write lock for the whole wait{}",
+        started.elapsed().as_secs_f64(),
+        last_busy
+            .map(|error| format!(" (last: {error})"))
+            .unwrap_or_default(),
+    )))
+}
+
+/// Run `body` inside a write transaction acquired by
+/// [`begin_immediate_with_retry`], committing on success.
+pub fn with_immediate_write_txn<T, F>(conn: &Connection, body: F) -> crate::Result<T>
+where
+    F: FnOnce(&ImmediateTx<'_>) -> crate::Result<T>,
+{
+    with_immediate_write_txn_bounded(conn, WRITE_TXN_BACKOFF_MS, body)
+}
+
+/// [`with_immediate_write_txn`] with an explicit backoff schedule.
+pub fn with_immediate_write_txn_bounded<T, F>(
+    conn: &Connection,
+    backoff_ms: &[u64],
+    body: F,
+) -> crate::Result<T>
+where
+    F: FnOnce(&ImmediateTx<'_>) -> crate::Result<T>,
+{
+    let tx = begin_immediate_with_retry_bounded(conn, backoff_ms)?;
+    let value = body(&tx)?;
+    tx.commit()?;
+    Ok(value)
 }
 
 /// Atomically fetch-and-increment a named sequence, returning the next value.
@@ -844,6 +957,196 @@ mod tests {
             .unwrap();
         assert_eq!(item_count, 2);
         assert_eq!(log_count, 1);
+    }
+
+    /// Prepare a WAL database with one row, plus a connection configured the
+    /// way the store configures its own (5s busy timeout).
+    fn contended_db(temp: &tempfile::TempDir) -> (std::path::PathBuf, Connection) {
+        let db_path = temp.path().join("contended.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;\
+             CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);\
+             INSERT INTO t VALUES (1, 'seed');",
+        )
+        .unwrap();
+        (db_path, conn)
+    }
+
+    /// Hold a write lock on `db_path` for `hold`, signalling once it is held.
+    fn hold_write_lock(
+        db_path: std::path::PathBuf,
+        hold: Duration,
+    ) -> (std::sync::mpsc::Receiver<()>, std::thread::JoinHandle<()>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let other = Connection::open(&db_path).unwrap();
+            other.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
+            other.execute_batch("BEGIN IMMEDIATE").unwrap();
+            other.execute("INSERT INTO t VALUES (99, 'foreign')", []).unwrap();
+            tx.send(()).unwrap();
+            std::thread::sleep(hold);
+            other.execute_batch("COMMIT").unwrap();
+        });
+        (rx, handle)
+    }
+
+    /// cas-759f / the GH-reported "database is locked": a DEFERRED transaction
+    /// that reads before it writes holds a read snapshot, and SQLite refuses
+    /// the upgrade to a writer WITHOUT consulting the busy handler — waiting
+    /// there could deadlock. So a 5s busy timeout buys nothing and the caller
+    /// fails in milliseconds. This test pins the mechanism, because the fix
+    /// only makes sense against it.
+    #[test]
+    fn a_deferred_read_then_write_fails_instantly_despite_the_busy_timeout() {
+        let temp = TempDir::new().unwrap();
+        let (db_path, conn) = contended_db(&temp);
+
+        conn.execute_batch("BEGIN").unwrap();
+        // Take the read snapshot first, exactly as the verification handler did.
+        let _: i64 = conn
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+
+        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(50));
+        ready.recv().unwrap();
+        holder.join().unwrap();
+
+        let started = Instant::now();
+        let result = conn.execute("INSERT INTO t VALUES (2, 'ours')", []);
+        let waited = started.elapsed();
+        let _ = conn.execute_batch("ROLLBACK");
+
+        let error = result.expect_err("the upgrade must be refused");
+        assert!(is_busy_error(&error), "unexpected error: {error}");
+        assert!(
+            waited < Duration::from_millis(500),
+            "the busy handler was expected to be skipped entirely, but it waited {waited:?}"
+        );
+    }
+
+    /// The fix: take the write lock up front, where the busy handler DOES
+    /// apply, and the same caller waits through a foreign lock instead of
+    /// failing.
+    #[test]
+    fn immediate_write_txn_waits_through_a_one_second_foreign_lock() {
+        let temp = TempDir::new().unwrap();
+        let (db_path, conn) = contended_db(&temp);
+
+        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(1_000));
+        ready.recv().unwrap();
+
+        let started = Instant::now();
+        let rows: i64 = with_immediate_write_txn(&conn, |tx| {
+            // Reads inside the write transaction are safe: the lock is ours.
+            let count: i64 = tx.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))?;
+            tx.execute("INSERT INTO t VALUES (2, 'ours')", [])?;
+            Ok(count)
+        })
+        .expect("must wait through the foreign lock, not fail");
+        let waited = started.elapsed();
+
+        holder.join().unwrap();
+        assert!(
+            waited >= Duration::from_millis(900),
+            "expected to wait for the holder, waited only {waited:?}"
+        );
+        assert!(rows >= 1);
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 3, "seed + foreign + ours");
+    }
+
+    /// Eight long-lived connections is the real fleet shape on this host (six
+    /// worker daemons, the supervisor, and the session launcher all share one
+    /// store), so the policy is exercised at that width rather than at two.
+    #[test]
+    fn eight_concurrent_writers_all_commit() {
+        let temp = TempDir::new().unwrap();
+        let (db_path, _conn) = contended_db(&temp);
+
+        let mut handles = Vec::new();
+        for worker in 0..8 {
+            let path = db_path.clone();
+            handles.push(std::thread::spawn(move || {
+                let conn = Connection::open(&path).unwrap();
+                conn.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
+                for round in 0..5 {
+                    with_immediate_write_txn(&conn, |tx| {
+                        let _: i64 = tx.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))?;
+                        tx.execute(
+                            "INSERT INTO t (v) VALUES (?1)",
+                            rusqlite::params![format!("w{worker}-r{round}")],
+                        )?;
+                        Ok(())
+                    })
+                    .unwrap_or_else(|e| panic!("worker {worker} round {round} failed: {e}"));
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let conn = Connection::open(&db_path).unwrap();
+        let written: i64 = conn
+            .query_row("SELECT COUNT(*) FROM t WHERE v LIKE 'w%'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(written, 40, "8 writers x 5 rounds must all land");
+    }
+
+    /// When the wait genuinely runs out, the caller is told what was attempted.
+    /// "database is locked" alone told the supervisor nothing about whether
+    /// anything had waited at all — which is why the original report needed a
+    /// manual `BEGIN IMMEDIATE` probe to establish that the lock was a burst.
+    #[test]
+    fn giving_up_names_the_wait_that_was_attempted() {
+        let temp = TempDir::new().unwrap();
+        let (db_path, conn) = contended_db(&temp);
+        // A tiny budget keeps the test fast; the shape of the message is what
+        // is being asserted, not the specific duration.
+        conn.busy_timeout(Duration::from_millis(20)).unwrap();
+
+        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(3_000));
+        ready.recv().unwrap();
+
+        let result: crate::Result<()> = with_immediate_write_txn_bounded(
+            &conn,
+            &[10, 10],
+            |tx| {
+                tx.execute("INSERT INTO t VALUES (2, 'ours')", [])?;
+                Ok(())
+            },
+        );
+        let message = result.expect_err("the holder outlasts the budget").to_string();
+        holder.join().unwrap();
+
+        assert!(
+            message.contains("database busy for"),
+            "the error must state the wait attempted: {message}"
+        );
+        assert!(
+            message.contains("attempt"),
+            "the error must state how many attempts were made: {message}"
+        );
+    }
+
+    /// A store connection must cap the WAL file so a long-lived writer fleet
+    /// cannot leave a 389 MB journal behind for 1,137 live frames (cas-759f).
+    #[test]
+    fn shared_connections_cap_the_wal_file_size() {
+        let temp = TempDir::new().unwrap();
+        let db_path = temp.path().join("cas.db");
+        let shared = shared_connection(&db_path).unwrap();
+        let conn = shared.lock().unwrap();
+        let limit: i64 = conn
+            .query_row("PRAGMA journal_size_limit", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(limit, WAL_SIZE_LIMIT_BYTES);
     }
 
     // ── is_busy_error ───────────────────────────────────────────────

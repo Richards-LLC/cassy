@@ -12,17 +12,14 @@
 //! single artifact that has to be copied, and a drift shows up as a failing
 //! client test instead of as silently forked cloud buckets.
 
-use std::path::PathBuf;
 
 use cas::cloud::{canonical_project_id, project_ids_match_with_aliases};
 
 fn vectors() -> serde_json::Value {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/canonical_project_identity_vectors.json");
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()))
+    // Embedded at compile time: CI suite shards run on a different runner than
+    // the build, so a CARGO_MANIFEST_DIR path does not exist there.
+    serde_json::from_str(include_str!("fixtures/canonical_project_identity_vectors.json"))
+        .unwrap_or_else(|e| panic!("canonical_project_identity_vectors.json is not valid JSON: {e}"))
 }
 
 #[test]

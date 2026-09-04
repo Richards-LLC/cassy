@@ -146,20 +146,31 @@ pub fn reindex_pages(cas_root: &Path) -> Result<PageIndexReport> {
     let knowledge_dir = cas_root.join(cas_store::KNOWLEDGE_DIR_NAME);
     let mut indexed: Vec<(i64, String, String)> = Vec::new();
 
-    // One transaction: a half-rebuilt FTS index is worse than a stale one.
-    let tx = conn.unchecked_transaction()?;
+    // Read every body BEFORE the write transaction opens (cas-759f). Reading
+    // them inside it held the store's write lock across N filesystem reads,
+    // which on a shared store means every other writer on the host waits on
+    // this command's disk IO. The bodies are already durable rows of this same
+    // database, so holding them briefly in memory costs nothing the store was
+    // not already paying.
+    let mut pending: Vec<(i64, &str, &str, &str, String)> = Vec::with_capacity(rows.len());
     for (row_id, id, title, snippet, rel_path) in &rows {
         let body_path = knowledge_dir.join(rel_path);
-        let body = match std::fs::read_to_string(&body_path) {
-            Ok(body) => body,
+        match std::fs::read_to_string(&body_path) {
+            Ok(body) => pending.push((*row_id, id, title, snippet, body)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 report.missing_bodies.push(rel_path.clone());
-                continue;
             }
             Err(e) => {
                 return Err(e).with_context(|| format!("reading {}", body_path.display()));
             }
-        };
+        }
+    }
+
+    // One transaction: a half-rebuilt FTS index is worse than a stale one.
+    // IMMEDIATE rather than the DEFERRED default so the lock is taken where
+    // SQLite's busy handler still applies.
+    let tx = cas_store::shared_db::begin_immediate_with_retry(&conn)?;
+    for (row_id, id, title, snippet, body) in &pending {
         tx.execute(
             "DELETE FROM knowledge_pages_fts WHERE rowid = ?1",
             params![row_id],
@@ -171,8 +182,8 @@ pub fn reindex_pages(cas_root: &Path) -> Result<PageIndexReport> {
         report.reindexed += 1;
         indexed.push((
             *row_id,
-            id.clone(),
-            probe_token([title, snippet, &body]).unwrap_or_default(),
+            (*id).to_string(),
+            probe_token([*title, *snippet, body.as_str()]).unwrap_or_default(),
         ));
     }
     tx.commit()?;

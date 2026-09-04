@@ -152,6 +152,39 @@ the merge action after fetching the PR landing so Cassy can reconcile delivery.
   - **No ticket numbers.** No `cas-xxxx`, no epic IDs. Describe the change, not the tracking artifact.
   - Lead with the before→after punch; keep it tight.
 
+### User thread first: plain language
+
+Write the User top-level and reply first as a product changelog for someone who
+has never seen the codebase. Describe what the person sees and what changed for
+them. On the User side, forbid function, struct, and file names; flags the user
+does not type; table or column names; and the words `watermark`, `metadata`,
+`ingest`, `upsert`, `envelope`, `scope stamp`, `canonical id`, `team pull`,
+`purge-foreign`, `cloud identity`, `registration`, `registrations`, `harness`,
+`agent`, `factory`, `worker`, `supervisor`, `epic`, and `lane`. Apply a
+read-aloud test: if a bullet needs the codebase to make sense, rewrite it.
+
+### Formatting (Slack mrkdwn, glance test)
+
+Slack receives `text` verbatim. Every runtime and diary post or reply MUST use
+Slack mrkdwn only:
+
+- Use `*bold*`, `_italic_`, backtick code, and `•` bullets on their own lines.
+- Put a blank line between bullet groups. Do not use `**`, lines beginning with
+  `#`, markdown tables, or `[label](url)` links; use bare URLs or `<url|label>`.
+- A top-level message is exactly two lines. Line 1 is
+  `*Live on production — User — Cassy vX.Y.Z*` (or `Staging` / `Dev`). Line 2
+  is a Was → Now punch of 25 words or fewer.
+- A reply has one bullet per shipped change, with no item cap. Each bullet
+  starts `• *Short label* —`, contains Was → Now, stays within two lines, and
+  is separated from the next bullet by a blank line. Never chain items with
+  semicolons. Put the install or validation trailer last, after a blank line,
+  as plain lines exempt from Was → Now, with digests in backticks. If a reply
+  grows past roughly 12 bullets, group them under bold sub-headings on their
+  own lines instead of dropping changes.
+- The glance test passes when every item's bold label is findable within five
+  seconds. Put every body exactly as posted inside fenced blocks in the draft;
+  the fenced text is the reviewed text.
+
 ## Harness-diary updates: one parent + three replies
 
 After any update to the Claude, Codex, or Grok changelog diary merges to `main`,

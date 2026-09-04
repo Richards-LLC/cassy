@@ -1963,8 +1963,8 @@ pub fn doctor_row(
         ProbeOutcome::Unreachable { code } => DoctorRow {
             severity: DoctorSeverity::Warning,
             message: format!(
-                "registered, but the hub did not answer ({code}); run `cas integrate mecha-cassy` \
-                 once connectivity is back"
+                "registered, but {}; run `cas integrate mecha-cassy` once connectivity is back",
+                probe_failure_detail(&code)
             ),
         },
         ProbeOutcome::Skipped { reason } => DoctorRow {
@@ -1972,6 +1972,21 @@ pub fn doctor_row(
             message: format!("registered, but not verified ({reason})"),
         },
     }
+}
+
+fn probe_failure_detail(code: &str) -> String {
+    let Some(name) = code.strip_prefix("missing_credential_env:") else {
+        return format!("the hub did not answer ({code})");
+    };
+    if name.is_empty()
+        || name.len() > 256
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return "a credential environment variable is unset".to_string();
+    }
+    format!("credential environment variable {name} is unset")
 }
 
 // ---------------------------------------------------------------------------
@@ -2931,6 +2946,33 @@ mod tests {
         );
         assert!(row.message.contains("unset"), "{row:?}");
         assert!(row.message.contains("credentials file"), "{row:?}");
+    }
+
+    #[test]
+    fn doctor_names_missing_proxy_credential_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = MechaCassyArgs {
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            ..test_args()
+        };
+        run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
+
+        let row = doctor_row(
+            None,
+            &paths,
+            &env,
+            &FakeProbe(ProbeOutcome::Unreachable {
+                code: format!("missing_credential_env:{TEST_TOKEN_ENV}"),
+            }),
+        );
+        assert_eq!(row.severity, DoctorSeverity::Warning);
+        assert!(row.message.contains(TEST_TOKEN_ENV), "{row:?}");
+        assert!(row.message.contains("unset"), "{row:?}");
+        assert!(!row.message.contains("connection_failed"), "{row:?}");
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod codex;
 mod grok;
 mod opencode;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::harness::{HarnessCapabilities, SupervisorCli};
@@ -114,6 +115,72 @@ pub(super) fn finish_worker_config(
             "CAS_FACTORY_WORKER_ACCOUNT_DIR".to_string(),
             account_dir.to_string(),
         ));
+    }
+    config.env.extend(machine_registration_credentials());
+}
+
+/// Pass the supervisor's machine-registration credentials to each worker.
+///
+/// The MCP proxy configuration stores only `env:VARIABLE` references. Workers
+/// run in panes whose environment is assembled explicitly, so the supervisor
+/// must resolve the references before spawning them. This intentionally reads
+/// only the managed MechaCassy registration: unrelated upstream credentials
+/// must not be copied into every worker environment.
+fn machine_registration_credentials() -> Vec<(String, String)> {
+    let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+    else {
+        return Vec::new();
+    };
+    let path = config_home.join("code-mode-mcp").join("config.toml");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let document = match toml::from_str::<toml::Value>(&contents) {
+        Ok(document) => document,
+        Err(_) => return Vec::new(),
+    };
+    let Some(server) = document
+        .get("servers")
+        .and_then(toml::Value::as_table)
+        .and_then(|servers| servers.get("mecha-cassy"))
+    else {
+        return Vec::new();
+    };
+
+    let mut names = BTreeSet::new();
+    collect_env_references(server, &mut names);
+    names
+        .into_iter()
+        .filter_map(|name| {
+            std::env::var_os(&name)
+                .and_then(|value| value.into_string().ok().map(|value| (name, value)))
+        })
+        .collect()
+}
+
+fn collect_env_references(value: &toml::Value, names: &mut BTreeSet<String>) {
+    match value {
+        toml::Value::String(value) => {
+            if let Some(name) = value.strip_prefix("env:").filter(|name| !name.is_empty()) {
+                names.insert(name.to_string());
+            }
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                collect_env_references(value, names);
+            }
+        }
+        toml::Value::Table(values) => {
+            for value in values.values() {
+                collect_env_references(value, names);
+            }
+        }
+        toml::Value::Boolean(_)
+        | toml::Value::Datetime(_)
+        | toml::Value::Integer(_)
+        | toml::Value::Float(_) => {}
     }
 }
 

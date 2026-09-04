@@ -2539,8 +2539,27 @@ fn perform_update(
     // phases are delegated to it and its receipt is the authoritative one.
     let mut post_install_refresh = None;
     if matches!(&status, Status::Updated(_)) {
-        post_install_refresh =
-            Some(run_post_swap_refresh(&installed_binary, current_version, cli.json)?);
+        let installed_version = match &status {
+            Status::UpToDate(v) | Status::Updated(v) => v.trim_start_matches('v').to_owned(),
+        };
+        match run_post_swap_refresh(
+            &installed_binary,
+            current_version,
+            &installed_version,
+            cli.json,
+        ) {
+            Ok(receipt) => post_install_refresh = Some(receipt),
+            Err(error) => {
+                // The binary IS updated, but the phases that make the update
+                // take effect did not run. Say so and fail: a partial update
+                // must never read as converged to a script (cas-91ba).
+                let reason = format!("{error:#}");
+                if cli.json {
+                    println!("{}", skipped_refresh_receipt(&installed_version, &reason));
+                }
+                return Err(error);
+            }
+        }
     }
 
     if cli.json {
@@ -2654,14 +2673,11 @@ fn build_post_swap_command(
 fn run_post_swap_refresh(
     installed_binary: &Path,
     previous_version: &str,
+    installed_version: &str,
     json: bool,
 ) -> anyhow::Result<serde_json::Value> {
     let mut command = build_post_swap_command(installed_binary, previous_version, json);
-    let rerun_hint = format!(
-        "the refresh phases did not run with the newly installed binary at {}; \
-         run `cas update` again to converge",
-        installed_binary.display()
-    );
+    let rerun_hint = post_swap_rerun_hint(installed_version, installed_binary);
 
     if !json {
         let status = command
@@ -2670,6 +2686,13 @@ fn run_post_swap_refresh(
         if !status.success() {
             anyhow::bail!("{rerun_hint} (exit status {status})");
         }
+        // The child inherited stdio, so there is no receipt to read the
+        // version out of; ask the same path what it is instead.
+        verify_refresh_binary_version(
+            reported_binary_version(installed_binary).as_deref(),
+            installed_version,
+            installed_binary,
+        )?;
         return Ok(serde_json::Value::Null);
     }
 
@@ -2690,7 +2713,64 @@ fn run_post_swap_refresh(
         .ok_or_else(|| {
             anyhow::anyhow!("{rerun_hint} (its output carried no JSON receipt: {})", stdout.trim())
         })?;
+    verify_refresh_binary_version(
+        receipt.get("refresh_binary_version").and_then(|v| v.as_str()),
+        installed_version,
+        installed_binary,
+    )?;
     Ok(receipt)
+}
+
+/// `<binary> --version` reduced to the bare semver, or None when it cannot be
+/// asked.
+fn reported_binary_version(binary: &Path) -> Option<String> {
+    let output = std::process::Command::new(binary).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .last()
+        .map(|version| version.trim_start_matches('v').to_string())
+}
+
+/// The operator-facing line for a swap whose post-install phases did not run.
+fn post_swap_rerun_hint(installed_version: &str, installed_binary: &Path) -> String {
+    format!(
+        "binary updated to {installed_version}; refresh did not run — run `cas update` again \
+         (the installed binary at {} could not perform the post-install phases)",
+        installed_binary.display()
+    )
+}
+
+/// The child must be the binary we just installed. A version it does not
+/// report — or reports differently — means something else answered (a stale
+/// `cas` earlier on PATH, a wrapper script), and its refresh proves nothing.
+fn verify_refresh_binary_version(
+    reported: Option<&str>,
+    installed_version: &str,
+    installed_binary: &Path,
+) -> anyhow::Result<()> {
+    let reported = reported.map(str::trim).unwrap_or_default();
+    if reported == installed_version.trim() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "the refresh ran as version {reported:?} but {} was just installed as {installed_version}; \
+         refusing to report a converged update — run `cas update` again",
+        installed_binary.display()
+    )
+}
+
+/// The receipt for a swap whose post-install phases could not run (cas-91ba).
+fn skipped_refresh_receipt(installed_version: &str, reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "binary_updated": true,
+        "version": installed_version,
+        "refresh_binary_version": serde_json::Value::Null,
+        "refresh_status": "skipped",
+        "message": reason,
+    })
 }
 
 fn strip_deleted_suffix(path: std::path::PathBuf) -> std::path::PathBuf {

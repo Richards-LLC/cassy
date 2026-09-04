@@ -40,6 +40,7 @@ state_file=
 rollback_path=
 renamed=0
 host_mutated=0
+services_may_be_stopped=0
 routes_captured=0
 pruner_existed=0
 mount_guard_existed=0
@@ -100,7 +101,7 @@ restore_routes() {
 disable_routes() {
     local name
     for name in "${route_vars[@]}"; do
-        gh variable set "$name" --repo "$repo" --body disabled
+        gh variable set "$name" --repo "$repo" --body disabled || return 1
     done
 }
 
@@ -143,10 +144,11 @@ assert_no_active_jobs() {
 }
 
 drain_and_stop_for_cutover() {
-    wait_for_idle_online || fail 'both runners did not become online and idle while routing was disabled'
-    assert_no_active_jobs
-    sudo systemctl stop "${services[@]}"
-    prove_no_job_process
+    wait_for_idle_online || { fail 'both runners did not become online and idle while routing was disabled'; return 1; }
+    assert_no_active_jobs || return 1
+    services_may_be_stopped=1
+    sudo systemctl stop "${services[@]}" || return 1
+    prove_no_job_process || return 1
 }
 
 drain_and_stop_for_rollback() {
@@ -156,25 +158,42 @@ drain_and_stop_for_rollback() {
             active=$((active + 1))
         fi
     done
-    [[ "$active" == 0 ]] && { prove_no_job_process; return; }
+    [[ "$active" == 0 ]] && { prove_no_job_process || return 1; return 0; }
 
     for attempt in {1..60}; do
         if busy="$(busy_runner_count)" && [[ "$busy" == 0 ]] \
             && ! pgrep -u "$runner_user" -f 'Runner.Worker' >/dev/null; then
-            sudo systemctl stop "${services[@]}"
-            prove_no_job_process
-            return
+            sudo systemctl stop "${services[@]}" || return 1
+            prove_no_job_process || return 1
+            return 0
         fi
         sleep 1
     done
     fail 'rollback refused to stop services because active-job absence was not proven'
 }
 
+verify_destination_on_shockwave() {
+    local volume_device dest_device volume_real dest_real dest_mount expected_dest
+    mountpoint -q "$volume_path" || fail "$volume_path is not a mount point"
+    volume_real="$(realpath -e "$volume_path")" || return 1
+    dest_real="$(realpath -e "$dest_path")" || return 1
+    expected_dest="$volume_real/home/pippenz/cassy-actions/cache"
+    [[ "$dest_real" == "$expected_dest" ]] \
+        || fail "destination resolves to $dest_real, expected exact Shockwave subtree $expected_dest"
+    volume_device="$(findmnt -n -o MAJ:MIN -T "$volume_path")" || return 1
+    dest_device="$(findmnt -n -o MAJ:MIN -T "$dest_path")" || return 1
+    [[ "$dest_device" == "$volume_device" ]] \
+        || fail "destination device $dest_device differs from Shockwave device $volume_device"
+    dest_mount="$(findmnt -n -o TARGET -T "$dest_path")" || return 1
+    [[ "$(realpath -e "$dest_mount")" == "$volume_real" ]] \
+        || fail "destination is mounted through $dest_mount, not exact Shockwave mount $volume_real"
+}
+
 verify_devices() {
     local cache_device volume_device dest_device cache_target cache_root volume_root
     local dest_real volume_real relative expected_root
     mountpoint -q "$source_path" || fail "$source_path is not a mount point"
-    mountpoint -q "$volume_path" || fail "$volume_path is not a mount point"
+    verify_destination_on_shockwave
     cache_device="$(findmnt -n -o MAJ:MIN -T "$source_path")"
     volume_device="$(findmnt -n -o MAJ:MIN -T "$volume_path")"
     dest_device="$(findmnt -n -o MAJ:MIN -T "$dest_path")"
@@ -196,6 +215,21 @@ verify_devices() {
     fi
     [[ "$cache_root" == "$expected_root" ]] \
         || fail "cache bind root $cache_root does not match Shockwave subtree $expected_root"
+}
+
+require_services_active() {
+    local service
+    for service in "${services[@]}"; do
+        systemctl is-active --quiet "$service" \
+            || fail "$service must be active before cutover"
+    done
+}
+
+restore_pre_cutover_services() {
+    sudo systemctl start "${services[@]}" || return 1
+    wait_for_idle_online || return 1
+    services_may_be_stopped=0
+    restore_routes || return 1
 }
 
 record_tree_shape() {
@@ -273,6 +307,7 @@ rollback_host() {
         printf 'rollback restored host but exact route restoration failed\n' >&2
         return 1
     }
+    services_may_be_stopped=0
 }
 
 on_cutover_error() {
@@ -282,6 +317,9 @@ on_cutover_error() {
     printf 'cutover failed (status %s); restoring original state\n' "$status" >&2
     if [[ "$host_mutated" == 1 ]]; then
         rollback_host
+        rollback_status=$?
+    elif [[ "$services_may_be_stopped" == 1 ]]; then
+        restore_pre_cutover_services
         rollback_status=$?
     else
         restore_routes
@@ -312,6 +350,8 @@ cutover() {
     gh api user >/dev/null 2>&1 || fail 'gh API authentication is required'
     [[ -d "$source_path" && -d "$dest_path" ]] || fail 'exact source and destination must already exist'
     mountpoint -q "$volume_path" || fail 'Shockwave is not mounted'
+    verify_destination_on_shockwave
+    require_services_active
 
     if mountpoint -q "$source_path"; then
         verify_devices
@@ -348,6 +388,7 @@ cutover() {
     runner_snapshot | tee "$state_file.runners-before"
     drain_and_stop_for_cutover
 
+    verify_destination_on_shockwave
     sudo rsync -aHAX --numeric-ids --delete --info=stats2 \
         "$source_path/" "$dest_path/" | tee "$state_file.rsync"
     zero_diff="$state_file.zero-diff"
@@ -359,6 +400,7 @@ cutover() {
         record_tree_shape "$dest_path"
         verify_representative_hashes
     } | tee "$state_file.copy-proof"
+    inject_test_failure pre-rename
 
     sudo mv "$source_path" "$rollback_path"
     renamed=1
@@ -380,6 +422,7 @@ cutover() {
     sudo systemctl daemon-reload
     sudo systemd-analyze verify "$systemd_dir/cassy-actions-runner.service" "$systemd_dir/cassy-actions-runner-2.service"
     sudo systemctl start "${services[@]}"
+    services_may_be_stopped=0
     inject_test_failure service-restart
     wait_for_idle_online || fail 'both runners did not return online and idle within 60 seconds'
 

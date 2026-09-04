@@ -11,6 +11,31 @@ gate="$script_dir/release-gate.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# The gate refuses any scratch base with a .cas ancestor, and its own default is
+# $HOME/.cache/cas-release-gate — which on a developer machine sits under the
+# user-level ~/.cas. Unset, this self-test therefore died mid-run on the two
+# rows that build a scratch base, printing no summary and reading as a broken
+# script rather than the host condition it is (cas-4ccc). Default to a base
+# with no .cas above it, matching the queue runner, and let an explicit value
+# win so the variable stays overridable.
+: "${CAS_RELEASE_GATE_HOME_DIR:=/var/tmp/cas-release-gate}"
+export CAS_RELEASE_GATE_HOME_DIR
+mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
+
+# Fail loudly rather than silently reintroducing the same class: if the chosen
+# base has a .cas ancestor, every scratch row would refuse and the reader would
+# be back to debugging the gate instead of the release.
+probe="$CAS_RELEASE_GATE_HOME_DIR"
+while [[ "$probe" != "/" && -n "$probe" ]]; do
+    if [[ -d "$probe/.cas" ]]; then
+        printf 'CAS_RELEASE_GATE_HOME_DIR=%s has a .cas ancestor at %s; pick a path with none\n' \
+            "$CAS_RELEASE_GATE_HOME_DIR" "$probe/.cas" >&2
+        exit 1
+    fi
+    probe="$(dirname "$probe")"
+done
+unset probe
+
 pass=0
 fail=0
 
@@ -204,6 +229,43 @@ cmp "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md
 cmp "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
     "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"
 ok '--learn appends and mirrors a dated failure entry'
+
+# cas-4ccc. A populated .cas/proxy.toml ABOVE the worktree is readable by any
+# test that resolves project config by walking up from its cwd. The gate must
+# neutralize it and name it — never refuse, because blocking a release on the
+# operator's own MCP configuration is how the original hour was lost.
+repo="$(new_fixture ancestor-proxy)"
+mkdir -p "$(dirname "$repo")/.cas"
+printf '[servers.mecha-cassy]\ntype = "http"\nurl = "https://example.invalid/mcp"\n' \
+    >"$(dirname "$repo")/.cas/proxy.toml"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+if grep -qF 'FAIL ancestor-proxy-config' <<<"$output"; then
+    bad 'ancestor proxy.toml must be neutralized, not refused'
+else
+    ok 'ancestor proxy.toml is neutralized rather than blocking the release'
+fi
+if grep -qF '.cas/proxy.toml' <<<"$output" && grep -qF 'CAS_ROOT=' <<<"$output"; then
+    ok 'ancestor proxy.toml is named in the receipt with the override that neutralized it'
+else
+    bad 'ancestor proxy.toml was not named with its override in the receipt'
+fi
+# Remove the whole directory, not just the file: later scenarios assert that no
+# ancestor of their scratch base holds a .cas store at all, and an empty
+# leftover would fail them for this fixture's reason.
+rm -rf "$(dirname "$repo")/.cas"
+
+# The repository's OWN .cas/proxy.toml is where a project config belongs and
+# must not be treated as an ancestor leak.
+repo="$(new_fixture own-proxy)"
+mkdir -p "$repo/.cas"
+printf '[servers.local]\ntype = "http"\nurl = "https://example.invalid/mcp"\n' \
+    >"$repo/.cas/proxy.toml"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1 || true)"
+if grep -qF 'FAIL ancestor-proxy-config' <<<"$output"; then
+    bad "the repository's own .cas/proxy.toml must not trip the ancestor check"
+else
+    ok "the repository's own .cas/proxy.toml is not treated as an ancestor leak"
+fi
 
 repo="$(new_fixture passing)"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.8.7 2>&1)"

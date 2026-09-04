@@ -21,6 +21,7 @@ readonly -a gate_check_ids=(
     version-literals workspace-tests nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions
     working-tree release-script procedure-guardrails failure-log
+    ancestor-proxy-config
 )
 
 usage() {
@@ -185,6 +186,70 @@ check_nextest() {
 
 check_doctests() {
     "$cargo_bin" test -p cas --doc
+}
+
+# A populated proxy.toml in an ancestor .cas is visible to any test that
+# resolves project config by walking up from its cwd — release worktrees live at
+# <repo>/.cas/worktrees/<name>, so the main checkout is always an ancestor.
+#
+# On 2026-09-03 that made three hermetic proxy tests fail during the v3.14.0
+# gate. The suite is now immune (TestEnvGuard pins CAS_ROOT inside its temp
+# HOME, cas-4ccc); this row covers whatever does not use that guard.
+#
+# The gate neutralizes rather than refuses: a release must not be blocked by the
+# operator's own MCP configuration, and telling a human to move their files
+# aside is how the original hour was lost. `CAS_ROOT` is the loader's documented
+# override and wins ahead of both the worktree mapping and the ancestor walk, so
+# pointing it at an empty directory makes the ancestor file unreachable for
+# every child process. The file is named in the receipt either way, and never
+# touched.
+ancestor_proxy_config_files() {
+    local probe files=()
+    probe="$(cd "$repo_root" && pwd -P)"
+    while [[ "$probe" != "/" && -n "$probe" ]]; do
+        if [[ -s "$probe/.cas/proxy.toml" && "$probe/.cas" != "$repo_root/.cas" ]]; then
+            files+=("$probe/.cas/proxy.toml")
+        fi
+        probe="$(dirname "$probe")"
+    done
+    (( ${#files[@]} )) && printf '%s\n' "${files[@]}"
+    return 0
+}
+
+neutralize_ancestor_proxy_config() {
+    local files=()
+    while IFS= read -r line; do [[ -n "$line" ]] && files+=("$line"); done \
+        < <(ancestor_proxy_config_files)
+    (( ${#files[@]} )) || return 0
+
+    hermetic_cas_root="$tmp_dir/hermetic-cas-root"
+    mkdir -p "$hermetic_cas_root"
+    export CAS_ROOT="$hermetic_cas_root"
+    local file
+    for file in "${files[@]}"; do
+        printf 'note: ancestor .cas/proxy.toml visible to this worktree: %s\n' "$file"
+    done
+    printf 'note: running with CAS_ROOT=%s so ancestor-walking tests cannot read it\n' \
+        "$hermetic_cas_root"
+}
+
+check_ancestor_proxy_config() {
+    local files=()
+    while IFS= read -r line; do [[ -n "$line" ]] && files+=("$line"); done \
+        < <(ancestor_proxy_config_files)
+    if (( ${#files[@]} == 0 )); then
+        printf 'no ancestor .cas/proxy.toml above this worktree\n'
+        return 0
+    fi
+    # Present, so the override must be in force and itself empty.
+    if [[ -z "${CAS_ROOT:-}" || ! -d "${CAS_ROOT:-}" || -s "${CAS_ROOT:-}/proxy.toml" ]]; then
+        printf 'ancestor .cas/proxy.toml is readable and CAS_ROOT is not pinned to an empty root: %s\n' \
+            "${files[*]}"
+        return 1
+    fi
+    printf 'neutralized %s ancestor proxy.toml file(s) with CAS_ROOT=%s: %s\n' \
+        "${#files[@]}" "$CAS_ROOT" "${files[*]}"
+    return 0
 }
 
 # Scratch bases must mirror the merge-queue runner: no ancestor directory may
@@ -403,10 +468,14 @@ check_working_tree() {
 printf '=== CAS RELEASE GATE RECEIPT ===\n'
 printf 'version: %s\n' "$version"
 printf 'repository: %s\n' "$repo_root"
+neutralize_ancestor_proxy_config
 
 run_check failure-log \
     "parse $failure_log_rel; every entry maps to a gate check id or manual:" \
     check_failure_log
+run_check ancestor-proxy-config \
+    'no populated .cas/proxy.toml above this worktree that ancestor-walking tests could read' \
+    check_ancestor_proxy_config
 run_check version-literals \
     'find source/test files for <version> (excluding manifests, CHANGELOG, reference-history, failure-log)' \
     check_version_literals

@@ -143,13 +143,16 @@ pub(crate) mod test_support {
 
     #[test]
     fn test_env_guard_scrubs_ambient_cas_and_factory_environment() {
-        let _guard = TestEnvGuard::temp_home();
+        let guard = TestEnvGuard::temp_home();
         assert!(
             std::env::vars_os().all(|(key, _)| {
                 let Some(key) = key.to_str() else {
                     return true;
                 };
-                !key.starts_with("CAS_")
+                // CAS_ROOT is the one CAS_* the guard sets itself, to pin the
+                // project root inside the temp HOME (cas-4ccc). It is checked
+                // below rather than exempted silently.
+                (!key.starts_with("CAS_") || key == "CAS_ROOT")
                     && !matches!(
                         key,
                         "CLAUDE_CONFIG_DIR"
@@ -159,6 +162,16 @@ pub(crate) mod test_support {
                     )
             }),
             "TestEnvGuard must not inherit ambient CAS/factory environment"
+        );
+
+        // The stronger half of the same property: whatever CAS_ROOT holds must
+        // be the guard's own temp path, never the host's. A leaked ambient
+        // value would point outside the temp HOME and fail here.
+        let pinned = std::env::var_os("CAS_ROOT").expect("temp_home pins CAS_ROOT");
+        assert_eq!(
+            std::path::Path::new(&pinned),
+            guard.home().join(".cas"),
+            "CAS_ROOT must be the hermetic root inside the temp HOME"
         );
     }
 

@@ -1098,11 +1098,18 @@ impl CasService {
                     }
                 }
             } else {
+                // cas-15f2: stamp the row with the RECIPIENT's session, not the
+                // sender's, so the recipient's daemon and inbox can select it.
+                let row_session = row_factory_session(
+                    &resolved_target,
+                    resolved_target_agent.as_ref(),
+                    factory_session.as_deref(),
+                );
                 let enqueue_outcome = match queue.enqueue_urgent_with_outcome(
                     &display_name,
                     &resolved_target,
                     &message,
-                    factory_session.as_deref(),
+                    row_session.as_deref(),
                     Some(summary.as_str()),
                     priority,
                     urgent,
@@ -2161,6 +2168,129 @@ fn enrich_report_from_harness_artifact(
         report.reaction = ObservationStatus::Observed;
         report.reaction_observed_at = Some(reaction.at);
         report.reaction_evidence = Some(reaction.evidence);
+    }
+}
+
+/// Which `factory_session` a queued row must carry (cas-15f2).
+///
+/// The row is stamped with the **recipient's** session, never the sender's.
+/// Every downstream filter — the daemon's `peek_for_targets`, `inbox_poll`'s
+/// `drain_unseen_for_recipient`, turn-start surfacing, and the `worker_status`
+/// unseen counter — selects on `factory_session = <observer's own session>`.
+/// Stamping at enqueue with the target's session is therefore the single change
+/// that makes all four see the row, and it keeps every cross-session isolation
+/// test true: the row genuinely belongs to the recipient's session, so nothing
+/// leaks into a session that was not addressed.
+///
+/// Before this, `message_send` stamped the sender's `CAS_FACTORY_SESSION` while
+/// validating the target against a session-blind name lookup, so a supervisor
+/// addressing a supervisor in another session got an optimistic "enqueued
+/// (target is registered)" for a row no daemon could ever select: the sender's
+/// daemon matched the session but not its roster, the recipient's daemon
+/// matched its roster but not the session. The row sat at
+/// `stage=enqueued / awaiting_delivery` until the sender-side 15-minute poison
+/// sweep abandoned it as `abandoned_unknown_target`.
+///
+/// Logical fan-out names stay sender-scoped: `all_workers` is a broadcast to
+/// *this* factory, and `supervisor` / `director` resolve within the caller's own
+/// session. Only a concrete registered agent redirects the stamp.
+fn row_factory_session(
+    resolved_target: &str,
+    target_agent: Option<&cas_types::Agent>,
+    sender_session: Option<&str>,
+) -> Option<String> {
+    if matches!(
+        resolved_target.to_ascii_lowercase().as_str(),
+        "all_workers" | "supervisor" | "director"
+    ) {
+        return sender_session.map(str::to_owned);
+    }
+    target_agent
+        .and_then(|agent| agent.factory_session.clone())
+        .filter(|session| !session.trim().is_empty())
+        .or_else(|| sender_session.map(str::to_owned))
+}
+
+#[cfg(test)]
+mod cross_session_routing_tests {
+    use super::row_factory_session;
+    use cas_types::Agent;
+
+    fn agent_in(name: &str, session: Option<&str>) -> Agent {
+        let mut agent = Agent::new(format!("id-{name}"), name.to_string());
+        agent.factory_session = session.map(str::to_owned);
+        agent
+    }
+
+    /// The cas-15f2 regression: supervisor A in session A messages supervisor B
+    /// in session B. The row must belong to B, or no daemon ever selects it.
+    #[test]
+    fn a_message_to_an_agent_in_another_session_is_stamped_with_the_recipients_session() {
+        let target = agent_in("noble-lynx-44", Some("cas-src-vivid-sparrow-8"));
+
+        let session = row_factory_session(
+            "noble-lynx-44",
+            Some(&target),
+            Some("cas-src-young-raven-93"),
+        );
+
+        assert_eq!(session.as_deref(), Some("cas-src-vivid-sparrow-8"));
+    }
+
+    #[test]
+    fn a_same_session_message_is_unchanged() {
+        let target = agent_in("daring-marten-11", Some("cas-src-young-raven-93"));
+
+        let session = row_factory_session(
+            "daring-marten-11",
+            Some(&target),
+            Some("cas-src-young-raven-93"),
+        );
+
+        assert_eq!(session.as_deref(), Some("cas-src-young-raven-93"));
+    }
+
+    /// `all_workers` means "this factory's workers". Redirecting it to some
+    /// other session's roster would be a broadcast into a factory the caller
+    /// does not run.
+    #[test]
+    fn logical_fanout_names_stay_scoped_to_the_sender() {
+        for name in ["all_workers", "supervisor", "director", "ALL_WORKERS"] {
+            let stray = agent_in(name, Some("cas-src-other-session"));
+            let session = row_factory_session(name, Some(&stray), Some("cas-src-mine"));
+            assert_eq!(
+                session.as_deref(),
+                Some("cas-src-mine"),
+                "{name} must not redirect the stamp"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unregistered_or_sessionless_target_keeps_the_senders_session() {
+        assert_eq!(
+            row_factory_session("ghost", None, Some("cas-src-mine")).as_deref(),
+            Some("cas-src-mine")
+        );
+        let legacy = agent_in("legacy", None);
+        assert_eq!(
+            row_factory_session("legacy", Some(&legacy), Some("cas-src-mine")).as_deref(),
+            Some("cas-src-mine")
+        );
+        let blank = agent_in("blank", Some("   "));
+        assert_eq!(
+            row_factory_session("blank", Some(&blank), Some("cas-src-mine")).as_deref(),
+            Some("cas-src-mine")
+        );
+    }
+
+    #[test]
+    fn a_sessionless_sender_still_routes_to_the_recipients_session() {
+        let target = agent_in("noble-lynx-44", Some("cas-src-vivid-sparrow-8"));
+        assert_eq!(
+            row_factory_session("noble-lynx-44", Some(&target), None).as_deref(),
+            Some("cas-src-vivid-sparrow-8")
+        );
     }
 }
 

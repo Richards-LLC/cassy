@@ -246,6 +246,112 @@ fn decide_live_start(
     }
 }
 
+/// Does an already-running hub satisfy the launch we were about to perform?
+///
+/// cas-bf90. Two concurrent lifecycle commands (`hub start` and `hub restart`)
+/// both stop the old hub and both try to launch a replacement. Whichever
+/// arrives second then waits on the machine lock — but the winner's brand-new
+/// hub legitimately *holds* that lock, so the loser's wait condition can never
+/// become true. It burned the full [`HUB_LIFECYCLE_TIMEOUT`] and then reported
+/// failure, even though the state it wanted ("a hub matching my flags is
+/// running") had already been reached. Measured before this predicate existed:
+/// the losing command failed in ~80% of concurrent iterations, always after a
+/// full 10 s stall.
+///
+/// The waiters asked "is the lock free?" when what they care about is "is a
+/// satisfying hub live?". This answers the second question.
+///
+/// Deliberately NOT [`decide_live_start`]: that function drives whether to
+/// restart, and its `record.port != args.port` comparison is right there and
+/// must not change. Here an ephemeral request (`--port 0`) means "any port is
+/// acceptable", so a hub on a kernel-assigned port does satisfy it — otherwise
+/// this predicate could never be true for the `--port 0` callers that hit the
+/// race most often.
+fn running_hub_satisfies_request(
+    record: &HubProcessRecord,
+    args: &HubServeArgs,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+    binary_version: &str,
+) -> bool {
+    if record.version != binary_version || record.bind != args.bind.to_string() {
+        return false;
+    }
+    // Port 0 asks the kernel to choose; any concrete port honours that request.
+    if args.port != 0 && record.port != args.port {
+        return false;
+    }
+    if tailscale_enabled(record) != tailscale_serve {
+        return false;
+    }
+    // A specific Serve port was requested: the live hub must be using it.
+    if tailscale_serve
+        && record
+            .tailscale_serve_port
+            .is_some_and(|port| port != tailscale_port)
+    {
+        return false;
+    }
+    true
+}
+
+/// How a launch attempt resolved its race with a concurrent lifecycle command.
+enum LaunchWait {
+    /// We hold the machine lock and are responsible for launching.
+    Acquired(crate::hub::HubInstanceLock),
+    /// Someone else already launched the hub we wanted; nothing left to do.
+    AlreadySatisfied(Box<HubProcessRecord>),
+}
+
+/// Wait for the machine lock, but stop early if the state we wanted arrives.
+///
+/// cas-bf90. [`crate::hub::HubRuntimePaths::wait_for_instance_lock`] asks only
+/// "is the lock free?". When a concurrent `hub start`/`hub restart` has just
+/// launched a healthy replacement, that replacement holds the lock for its
+/// whole life, so the question can never become true and the caller fails after
+/// the full timeout — despite the outcome it wanted already existing. This asks
+/// the question the caller actually cares about alongside the lock.
+///
+/// The liveness probe is deliberately last: it is an HTTP health call, so the
+/// cheap record/flag comparison rejects non-matching hubs first, and the probe
+/// only runs while we are genuinely contended.
+fn wait_for_lock_or_satisfying_hub(
+    paths: &HubRuntimePaths,
+    timeout: Duration,
+    args: &HubServeArgs,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+) -> Result<LaunchWait> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(lock) = paths.try_acquire_instance_lock()? {
+            return Ok(LaunchWait::Acquired(lock));
+        }
+        if let Ok(record) = paths.read_process_record()
+            && running_hub_satisfies_request(
+                &record,
+                args,
+                tailscale_serve,
+                tailscale_port,
+                env!("CARGO_PKG_VERSION"),
+            )
+            && record_is_live(&record)
+        {
+            return Ok(LaunchWait::AlreadySatisfied(Box::new(record)));
+        }
+        if Instant::now() >= deadline {
+            // Distinct from the runtime's generic lock-wait message on purpose:
+            // three separate sites could previously emit identical text, so an
+            // operator (or a test) could not tell which wait actually expired.
+            anyhow::bail!(
+                "cas hub launch waiter: machine lock remained held after {:.1}s and no running hub matched the requested flags; no replacement was started",
+                timeout.as_secs_f64()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn restart_spec_for_record(
     record: &HubProcessRecord,
     binary_version: &str,
@@ -412,7 +518,32 @@ fn start_with_output_from(
     // A missing/stale PID record is not ownership evidence. Acquire the
     // authoritative machine lock before cleaning stale state or launching a
     // replacement, then release it immediately before the child takes over.
-    let launch_guard = paths.wait_for_instance_lock(HUB_LIFECYCLE_TIMEOUT)?;
+    //
+    // cas-bf90: race a concurrent lifecycle command rather than only the lock.
+    // If that command's replacement hub is already up and satisfies what we
+    // were about to launch, we are done — waiting out the full timeout on a
+    // lock its healthy hub legitimately holds produced a guaranteed stall and a
+    // spurious failure.
+    let launch_guard = match wait_for_lock_or_satisfying_hub(
+        &paths,
+        HUB_LIFECYCLE_TIMEOUT,
+        args,
+        tailscale_serve,
+        tailscale_port,
+    )? {
+        LaunchWait::Acquired(lock) => lock,
+        LaunchWait::AlreadySatisfied(record) => {
+            if emit_output && cli.json {
+                println!("{}", serde_json::to_string(&record)?);
+            } else if emit_output {
+                println!(
+                    "hub already running (pid {}, version {}) — a concurrent start won the race",
+                    record.pid, record.version
+                );
+            }
+            return Ok(());
+        }
+    };
     let stale_cgroup = paths
         .read_process_record()
         .ok()
@@ -1237,6 +1368,120 @@ mod tests {
     #[test]
     fn bare_hub_defaults_to_status() {
         assert!(matches!(default_hub_command(), HubCommands::Status));
+    }
+
+    /// cas-bf90: the predicate that lets a losing concurrent lifecycle command
+    /// stop waiting on a lock the winner's healthy hub legitimately holds.
+    mod running_hub_satisfies {
+        use super::*;
+
+        const VERSION: &str = env!("CARGO_PKG_VERSION");
+        /// The Serve port default, mirrored from `record.tailscale_serve_port.unwrap_or(443)`.
+        const TS_PORT: u16 = 443;
+
+        fn ephemeral_args() -> HubServeArgs {
+            let mut args = HubServeArgs::default();
+            args.port = 0;
+            args
+        }
+
+        #[test]
+        fn an_ephemeral_request_is_satisfied_by_any_kernel_assigned_port() {
+            // The case that matters: `--port 0` is what the concurrent
+            // lifecycle callers use, so if this were false the fix would be a
+            // no-op exactly where the race happens.
+            let live = record(VERSION, 35053, None);
+            assert!(running_hub_satisfies_request(
+                &live,
+                &ephemeral_args(),
+                false,
+                TS_PORT,
+                VERSION
+            ));
+        }
+
+        #[test]
+        fn an_explicit_port_request_is_not_satisfied_by_a_different_port() {
+            let mut args = HubServeArgs::default();
+            args.port = 4173;
+            let live = record(VERSION, 35053, None);
+            assert!(!running_hub_satisfies_request(
+                &live,
+                &args,
+                false,
+                TS_PORT,
+                VERSION
+            ));
+        }
+
+        #[test]
+        fn a_version_mismatch_is_never_satisfying() {
+            // Version drift must still force a restart: accepting an old binary
+            // here would silently keep a stale hub alive.
+            let stale = record("0.0.1-old", 35053, None);
+            assert!(!running_hub_satisfies_request(
+                &stale,
+                &ephemeral_args(),
+                false,
+                TS_PORT,
+                VERSION
+            ));
+        }
+
+        #[test]
+        fn tailscale_flag_drift_in_either_direction_is_not_satisfying() {
+            let with_ts = record(VERSION, 35053, Some(TS_PORT));
+            let without_ts = record(VERSION, 35053, None);
+            // Wanted plain, found Serve-enabled.
+            assert!(!running_hub_satisfies_request(
+                &with_ts,
+                &ephemeral_args(),
+                false,
+                TS_PORT,
+                VERSION
+            ));
+            // Wanted Serve, found plain.
+            assert!(!running_hub_satisfies_request(
+                &without_ts,
+                &ephemeral_args(),
+                true,
+                TS_PORT,
+                VERSION
+            ));
+            // Wanted Serve, found Serve on the same port.
+            assert!(running_hub_satisfies_request(
+                &with_ts,
+                &ephemeral_args(),
+                true,
+                TS_PORT,
+                VERSION
+            ));
+        }
+
+        #[test]
+        fn a_different_tailscale_serve_port_is_not_satisfying() {
+            let other_port = record(VERSION, 35053, Some(8443));
+            assert!(!running_hub_satisfies_request(
+                &other_port,
+                &ephemeral_args(),
+                true,
+                TS_PORT,
+                VERSION
+            ));
+        }
+
+        #[test]
+        fn a_different_bind_address_is_not_satisfying() {
+            let mut live = record(VERSION, 35053, None);
+            live.bind = "0.0.0.0".to_owned();
+            assert!(!running_hub_satisfies_request(
+                &live,
+                &ephemeral_args(),
+                false,
+                TS_PORT,
+                VERSION
+            ));
+        }
     }
 
     #[test]

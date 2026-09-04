@@ -165,9 +165,10 @@ impl CasCore {
         // degrades to nothing when not logged in / no team / offline so it
         // never blocks or fails `task show`.
         {
+            let cas_root = self.cas_root.clone();
             let comment_task_id = req.id.clone();
             let comments = tokio::task::spawn_blocking(move || {
-                crate::cloud::comments::fetch_task_comments(&comment_task_id)
+                crate::cloud::comments::fetch_task_comments(&cas_root, &comment_task_id)
             })
             .await
             .unwrap_or_default();

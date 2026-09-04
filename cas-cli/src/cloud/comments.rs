@@ -87,8 +87,8 @@ pub fn parse_comments(raw: &str) -> Vec<TaskComment> {
 /// failure (not logged in, no team resolved, network/HTTP/parse error) yields
 /// an empty list so callers never fail because of comments. A short timeout
 /// keeps `task show` responsive when the cloud is slow or unreachable.
-pub fn fetch_task_comments(task_id: &str) -> Vec<TaskComment> {
-    let config = match CloudConfig::load() {
+pub fn fetch_task_comments(cas_root: &std::path::Path, task_id: &str) -> Vec<TaskComment> {
+    let config = match CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };

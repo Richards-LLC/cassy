@@ -112,6 +112,20 @@ pub struct KnowledgePageRecord {
 impl KnowledgePageRecord {
     /// Build a wire record from a stored page plus its body.
     pub fn from_page(page: &KnowledgePage, body: String, share: ShareScope) -> Self {
+        Self::from_page_for_project(page, body, share, get_project_canonical_id())
+    }
+
+    /// Build a wire record with the identity of the project being synced.
+    ///
+    /// The compatibility [`Self::from_page`] helper remains for callers that
+    /// construct an isolated record, but network push paths must use this
+    /// root-explicit form so a multi-root refresh cannot inherit process cwd.
+    pub fn from_page_for_project(
+        page: &KnowledgePage,
+        body: String,
+        share: ShareScope,
+        project_canonical_id: Option<String>,
+    ) -> Self {
         Self {
             id: page.id.clone(),
             page_type: page.page_type.clone(),
@@ -124,7 +138,7 @@ impl KnowledgePageRecord {
             created_at: page.created_at,
             updated_at: page.updated_at,
             share: Some(share),
-            project_canonical_id: get_project_canonical_id(),
+            project_canonical_id,
         }
     }
 
@@ -266,9 +280,14 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            records.push(serde_json::to_value(KnowledgePageRecord::from_page(
-                &page, body, share,
-            ))?);
+            records.push(serde_json::to_value(
+                KnowledgePageRecord::from_page_for_project(
+                    &page,
+                    body,
+                    share,
+                    Some(self.personal_push_project_id()?),
+                ),
+            )?);
         }
 
         if records.is_empty() && tombstones.is_empty() {
@@ -326,11 +345,10 @@ impl CloudSyncer {
             .set_metadata(LAST_PUSH_KEY, &Utc::now().to_rfc3339());
         // Record WHICH project id the server accepted pages under. If pulls
         // later go silent, this is half of the evidence that names the cause.
-        if let Some(project_id) = get_project_canonical_id() {
-            let _ = self
-                .queue()
-                .set_metadata(LAST_PUSH_PROJECT_KEY, &project_id);
-        }
+        let project_id = self.personal_push_project_id()?;
+        let _ = self
+            .queue()
+            .set_metadata(LAST_PUSH_PROJECT_KEY, &project_id);
         Ok(count)
     }
 
@@ -374,8 +392,12 @@ impl CloudSyncer {
         // defence below. Asking the server for one project's pages and then
         // trusting whatever comes back is exactly the gap that let a foreign
         // page overwrite a local one (cas-2cc5).
-        let (url, project_id) =
-            super::pull::build_scoped_pull_url(&self.cloud_config.endpoint, &params)?;
+        let project_id = self.personal_push_project_id()?;
+        let (url, project_id) = super::pull::build_scoped_pull_url_with(
+            &self.cloud_config.endpoint,
+            &params,
+            || Some(project_id),
+        )?;
 
         let response = ureq::get(&url)
             .timeout(self.config.timeout)
@@ -639,6 +661,12 @@ mod tests {
     use std::sync::Arc;
 
     fn syncer(endpoint: Option<&str>, root: &std::path::Path) -> CloudSyncer {
+        // These fixtures are constructed through the legacy `from_page` helper,
+        // whose records intentionally carry the current checkout's identity.
+        // Pin the synthetic queue root to that same identity so the tests model
+        // an explicitly configured project rather than an unrelated temp path.
+        let fixture_project_id = get_project_canonical_id().expect("tests run in a Cassy project");
+        crate::cloud::set_canonical_id_in_config_toml(root, &fixture_project_id).unwrap();
         let queue = Arc::new(SyncQueue::open(root).unwrap());
         queue.init().unwrap();
         let config = CloudConfig {

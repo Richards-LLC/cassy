@@ -276,13 +276,13 @@ pub fn build_context_with_token_budget(
     // Inject personal patterns and team suggestions from cloud (if logged in)
     let context = {
         let mut ctx = context;
-        if let Ok(patterns_section) = fetch_personal_patterns_for_context() {
+        if let Ok(patterns_section) = fetch_personal_patterns_for_context(cas_root) {
             if !patterns_section.is_empty() {
                 ctx.push_str("\n\n");
                 ctx.push_str(&patterns_section);
             }
         }
-        if let Ok(suggestions_section) = fetch_team_suggestions_for_context() {
+        if let Ok(suggestions_section) = fetch_team_suggestions_for_context(cas_root) {
             if !suggestions_section.is_empty() {
                 ctx.push_str("\n\n");
                 ctx.push_str(&suggestions_section);
@@ -888,10 +888,11 @@ fn call_claude_for_selection(prompt: &str, model: &str) -> Result<String, MemErr
 ///
 /// Returns empty string if not logged in, no patterns, or on any error.
 /// Failures are silent — personal patterns are optional enhancement.
-fn fetch_personal_patterns_for_context() -> Result<String, MemError> {
+fn fetch_personal_patterns_for_context(cas_root: &Path) -> Result<String, MemError> {
     use crate::cloud::CloudConfig;
 
-    let cloud_config = CloudConfig::load().map_err(|e| MemError::Other(e.to_string()))?;
+    let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)
+        .map_err(|e| MemError::Other(e.to_string()))?;
 
     if !cloud_config.is_logged_in() {
         return Ok(String::new());
@@ -981,10 +982,11 @@ fn fetch_personal_patterns_for_context() -> Result<String, MemError> {
 /// Only shows pending (not yet adopted/dismissed) suggestions.
 /// Returns empty string if not in a team, no suggestions, or on any error.
 /// Failures are silent — team suggestions are optional enhancement.
-fn fetch_team_suggestions_for_context() -> Result<String, MemError> {
+fn fetch_team_suggestions_for_context(cas_root: &Path) -> Result<String, MemError> {
     use crate::cloud::CloudConfig;
 
-    let cloud_config = CloudConfig::load().map_err(|e| MemError::Other(e.to_string()))?;
+    let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)
+        .map_err(|e| MemError::Other(e.to_string()))?;
 
     if !cloud_config.is_logged_in() {
         return Ok(String::new());

@@ -4,6 +4,14 @@ use crate::cloud::sync_queue::SyncQueue;
 use crate::error::CasError;
 
 impl SyncQueue {
+    /// List all sync metadata entries in stable key order.
+    pub fn list_metadata(&self) -> Result<Vec<(String, String)>, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT key, value FROM sync_metadata ORDER BY key")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Get sync metadata value.
     pub fn get_metadata(&self, key: &str) -> Result<Option<String>, CasError> {
         let conn = self.conn.lock().unwrap();

@@ -20,13 +20,6 @@ use crate::store::find_cas_root;
 
 // `dirs` used by `user_config_path()` / `load_user()` / `save_user()`
 
-/// Cached project canonical ID. Only `Some` results are cached; if resolution
-/// returns `None` (e.g. `find_cas_root()` fails because the process started
-/// outside a Cassy project), the next call retries instead of locking in `None`
-/// for the process lifetime. This prevents transient failures during daemon
-/// startup or early session hooks from permanently disabling project scoping.
-static CACHED_PROJECT_ID: Mutex<Option<String>> = Mutex::new(None);
-
 /// Cached alias class of the current project (canonical id + the server's
 /// `aliases` record as mirrored into `.cas/config.toml`). `None` means "not
 /// resolved yet"; an empty `Vec` is a real answer and is cached, because a
@@ -49,33 +42,19 @@ static CACHED_PROJECT_ALIAS_CLASS: Mutex<Option<Vec<String>>> = Mutex::new(None)
 /// has a stable, unique `project_id` for cloud sync scoping.
 ///
 /// Returns `None` only if not inside a Cassy project directory at all.
-/// Successful results are cached for the process lifetime; `None` results
-/// are retried on each call so transient failures don't stick.
+/// This compatibility helper resolves the process's current root on every
+/// call. Root-owning code must use [`resolve_canonical_id`] with its explicit
+/// root instead; a process-wide identity cannot be correct while one process
+/// refreshes several projects.
 pub fn get_project_canonical_id() -> Option<String> {
-    let mut cached = CACHED_PROJECT_ID.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(ref id) = *cached {
-        return Some(id.clone());
-    }
-    // Not yet resolved — try now. Only cache Some results.
-    let result = find_cas_root()
+    find_cas_root()
         .ok()
-        .and_then(|root| resolve_canonical_id(&root));
-    if result.is_some() {
-        *cached = result.clone();
-    }
-    result
+        .and_then(|root| resolve_canonical_id(&root))
 }
 
-/// Clear the process-lifetime canonical-id cache so the next
-/// `get_project_canonical_id` re-resolves from disk.
-///
-/// Call after writing a new `[project] canonical_id` mid-process (e.g. the
-/// cas-8ca5 adoption that fires on a successful team push) so a subsequent
-/// pull in the same `cas cloud sync` run uses the freshly-adopted id rather
-/// than the stale value cached at process start.
+/// Retained for API compatibility. Canonical ids are no longer cached, so
+/// there is nothing to invalidate after writing a new project pin.
 pub fn invalidate_cached_project_id() {
-    let mut cached = CACHED_PROJECT_ID.lock().unwrap_or_else(|e| e.into_inner());
-    *cached = None;
 }
 
 /// Where a resolved canonical id came from. Reported by
@@ -106,8 +85,8 @@ impl CanonicalIdSource {
 }
 
 /// Pure composition of the canonical-id resolution chain.
-/// Extracted from `get_project_canonical_id` so the chain is testable
-/// without the `OnceLock` static — callers should prefer the cached public API.
+/// Extracted from `get_project_canonical_id` so the chain is testable without
+/// consulting the process's current working directory.
 ///
 /// Resolution order (highest priority first):
 ///  1. `.cas/config.toml [project] canonical_id` — explicit source of truth,
@@ -123,6 +102,36 @@ impl CanonicalIdSource {
 ///  4. Path-hash fallback — for the `.cas/` at filesystem root edge case.
 pub fn resolve_canonical_id(cas_root: &Path) -> Option<String> {
     resolve_canonical_id_with_source(cas_root).map(|(id, _)| id)
+}
+
+/// Resolve and validate the identity used by a sync rooted at `cas_root`.
+///
+/// An explicit config pin remains authoritative, including the supported
+/// legacy bare-repository alias. When a git remote is available, however, a
+/// pin for a different repository is an unsafe split-brain configuration: the
+/// caller must refuse network sync rather than silently sending rows to the
+/// pinned bucket. This check is deliberately rooted in the supplied path and
+/// never consults the process cwd.
+pub fn resolve_canonical_id_for_sync(cas_root: &Path) -> Result<String, CasError> {
+    let resolved = resolve_canonical_id(cas_root).ok_or_else(|| {
+        CasError::Other(format!(
+            "Cannot sync `{}`: no canonical project id could be resolved",
+            cas_root.display()
+        ))
+    })?;
+
+    if let Some(pin) = canonical_id_from_config_toml(cas_root)
+        && let Some(remote) = normalized_git_remote_for_push(cas_root)
+        && canonical_project_id_with_pin(&remote, Some(&pin)).as_deref() != Some(pin.as_str())
+    {
+        return Err(CasError::Other(format!(
+            "Cannot sync `{}`: resolved identity `{remote}` disagrees with pinned \
+             [project] canonical_id `{pin}`; run `cas cloud project set {remote}`",
+            cas_root.display()
+        )));
+    }
+
+    Ok(resolved)
 }
 
 /// [`resolve_canonical_id`] plus the step that produced the value.
@@ -519,9 +528,8 @@ pub fn set_canonical_id_in_config_toml(
 /// folder-name fallback.
 ///
 /// Cost note: this spawns `git`. It only runs when `.cas/config.toml` holds no
-/// pin, and the production entry point [`get_project_canonical_id`] caches the
-/// first `Some` for the process lifetime, so a hook or CLI invocation pays at
-/// most one `git` call.
+/// pin. Root-owned sync paths resolve through their explicit root and retain
+/// that identity for the operation.
 pub fn derive_canonical_id_from_git_remote(cas_root: &Path) -> Option<String> {
     use std::process::Command;
 
@@ -2898,6 +2906,24 @@ mod tests {
         let (id, source) = resolve_canonical_id_with_source(&cas_dir).unwrap();
         assert_eq!(id, "pinned-id");
         assert_eq!(source, CanonicalIdSource::ConfigToml);
+    }
+
+    #[test]
+    fn sync_identity_refuses_a_pin_for_a_different_git_remote() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = git_project_with_remote(
+            temp.path(),
+            "ledger",
+            "git@github.com:acme/ledger.git",
+        );
+        set_canonical_id_in_config_toml(&cas_dir, "github.com/other/other-repo").unwrap();
+
+        let error = resolve_canonical_id_for_sync(&cas_dir)
+            .expect_err("a pinned identity for another repository must fail closed")
+            .to_string();
+        assert!(error.contains("github.com/acme/ledger"), "error: {error}");
+        assert!(error.contains("github.com/other/other-repo"), "error: {error}");
+        assert!(error.contains("cas cloud project set"), "error: {error}");
     }
 
     #[test]

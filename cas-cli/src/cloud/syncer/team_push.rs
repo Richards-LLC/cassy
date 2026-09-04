@@ -6,7 +6,7 @@ use crate::cloud::syncer::{
     itemized_failures_for, row_results_for,
 };
 use crate::cloud::{
-    EntityType, QueuedSync, SyncOperation, canonical_project_id_with_pin, get_project_canonical_id,
+    EntityType, QueuedSync, SyncOperation, canonical_project_id_with_pin,
 };
 use crate::error::CasError;
 use chrono::Utc;
@@ -155,17 +155,16 @@ impl CloudSyncer {
         }
 
         // Include project_canonical_id (required for project scoping)
-        let project_id = get_project_canonical_id().ok_or_else(|| {
-            CasError::Other("Cannot sync: not inside a Cassy project directory".to_string())
-        })?;
+        let project_id = self.personal_push_project_id()?;
 
         // cas-8ca5 / contract §5: include the normalized git remote so the
         // server's project resolver can map an unpinned machine onto the team's
         // canonical bucket instead of fragmenting onto github.com/<org>/<repo>.
         // Lowercased to match the server's `normalizeGitRemote` rule.
-        let git_remote = crate::store::find_cas_root()
-            .ok()
-            .and_then(|cas_root| crate::cloud::normalized_git_remote_for_push(&cas_root));
+        let git_remote = self
+            .push_cas_root
+            .as_deref()
+            .and_then(crate::cloud::normalized_git_remote_for_push);
 
         let has_deletes = queued
             .iter()
@@ -784,7 +783,7 @@ impl CloudSyncer {
         // remote matches the returned git_remote. Stops an unpinned machine from
         // continuing to sync the fragmented per-remote bucket instead of the
         // team's slug.
-        if let Ok(cas_root) = crate::store::find_cas_root() {
+        if let Some(cas_root) = self.push_cas_root.as_deref() {
             let local_remote = crate::cloud::derive_canonical_id_from_git_remote(&cas_root);
             let current_pin = crate::cloud::canonical_id_from_config_toml(&cas_root);
             if let Some(adopted) = crate::cloud::should_adopt_canonical_id(
@@ -795,7 +794,6 @@ impl CloudSyncer {
             ) {
                 match crate::cloud::set_canonical_id_in_config_toml(&cas_root, &adopted) {
                     Ok(()) => {
-                        crate::cloud::invalidate_cached_project_id();
                         tracing::info!(
                             canonical_id = %adopted,
                             "cas-8ca5: adopted server canonical project id"

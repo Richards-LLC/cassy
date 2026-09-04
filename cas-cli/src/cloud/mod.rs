@@ -50,7 +50,8 @@ pub use config::{
     maybe_adopt_team_scope, maybe_mark_personal_scope_notice, normalize_project_canonical_id,
     normalized_git_remote_for_push, personal_scope_notice_for_configs,
     project_aliases_from_config_toml, project_ids_match, project_ids_match_with_aliases,
-    resolve_canonical_id, resolve_canonical_id_with_source, set_canonical_id_in_config_toml,
+    resolve_canonical_id, resolve_canonical_id_for_sync, resolve_canonical_id_with_source,
+    set_canonical_id_in_config_toml,
     set_project_aliases_in_config_toml, should_adopt_canonical_id, store_login_credentials,
 };
 pub use ephemeral_project::{ProjectDurability, classify_project_root};

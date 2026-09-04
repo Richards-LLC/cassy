@@ -174,6 +174,91 @@ async fn cross_project_second_pull_sends_no_since() {
     // verifies the expectations when it goes out of scope at function end.
 }
 
+/// AC: two independently rooted syncers in one process must send the
+/// identity pinned by their own queue root. This is the `cas update` refresh
+/// shape: the caller iterates projects without changing process cwd between
+/// roots, so a process-wide identity cache would send both requests to the
+/// first project's bucket.
+#[tokio::test]
+async fn two_queue_roots_send_their_own_project_scopes() {
+    let server = MockServer::start().await;
+
+    for project_id in ["project-alpha", "project-beta"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/teams/{TEST_TEAM}/sync/pull")))
+            .and(query_param("project_id", project_id))
+            .and(query_param_is_missing("since"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "pulled_at": "2026-05-13T14:30:00Z",
+                "team_id": TEST_TEAM,
+                "status": "ok",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let first = TempDir::new().unwrap();
+    let second = TempDir::new().unwrap();
+    std::fs::write(
+        first.path().join("config.toml"),
+        "[project]\ncanonical_id = \"project-alpha\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        second.path().join("config.toml"),
+        "[project]\ncanonical_id = \"project-beta\"\n",
+    )
+    .unwrap();
+    init_stores(first.path());
+    init_stores(second.path());
+
+    let server_uri = server.uri();
+    let first_root = first.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let syncer = syncer_for(server_uri, &first_root);
+        let store = open_store(&first_root).unwrap();
+        let task_store = open_task_store(&first_root).unwrap();
+        let rule_store = open_rule_store(&first_root).unwrap();
+        let skill_store = open_skill_store(&first_root).unwrap();
+        syncer
+            .pull_team(
+                TEST_TEAM,
+                "project-alpha",
+                &*store,
+                &*task_store,
+                &*rule_store,
+                &*skill_store,
+            )
+            .unwrap();
+    })
+    .await
+    .unwrap();
+
+    let server_uri = server.uri();
+    let second_root = second.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let syncer = syncer_for(server_uri, &second_root);
+        let store = open_store(&second_root).unwrap();
+        let task_store = open_task_store(&second_root).unwrap();
+        let rule_store = open_rule_store(&second_root).unwrap();
+        let skill_store = open_skill_store(&second_root).unwrap();
+        syncer
+            .pull_team(
+                TEST_TEAM,
+                "project-beta",
+                &*store,
+                &*task_store,
+                &*rule_store,
+                &*skill_store,
+            )
+            .unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 /// AC: same-scope incremental — second call into the same (team, project)
 /// scope must send `since=<first call's pulled_at>`. This is the steady-state
 /// behavior; without it the team pull is permanently full-backfilling every

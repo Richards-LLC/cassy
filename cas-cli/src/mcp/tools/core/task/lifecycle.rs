@@ -1270,7 +1270,9 @@ impl CasCore {
                         .unwrap_or(true),
                     None => false,
                 },
-                cloud_sync_configured: crate::cloud::CloudConfig::load()
+                cloud_sync_configured: crate::cloud::CloudConfig::load_from_cas_dir_inheriting_user_credentials(
+                    &self.cas_root,
+                )
                     .map(|config| config.is_logged_in())
                     .unwrap_or(false),
             };
@@ -1278,7 +1280,7 @@ impl CasCore {
                 Some(super::repo_context::unanchored_task_start_warning(
                     &req.id,
                     &self.cas_root,
-                    crate::cloud::get_project_canonical_id().as_deref(),
+                    crate::cloud::resolve_canonical_id(&self.cas_root).as_deref(),
                 ))
             } else {
                 None

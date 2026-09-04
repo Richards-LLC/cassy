@@ -654,7 +654,10 @@ impl CasService {
         {
             use crate::cloud::CloudConfig;
 
-            let cloud_config = CloudConfig::load().map_err(|e| {
+            let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(
+                &self.inner.cas_root,
+            )
+            .map_err(|e| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!("Failed to load cloud config: {e}"),

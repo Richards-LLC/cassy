@@ -223,6 +223,7 @@ impl CheckGroup {
             | "code history index" => Self::Indexes,
             "canonical id"
             | "canonical id collision"
+            | "cloud identity metadata"
             | "project aliases"
             | "cloud sync queue"
             | "cross-project rows"
@@ -1323,6 +1324,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         collect_local_root_identities(),
     ));
     checks.extend(canonical_alias_checks(&cas_root));
+    checks.extend(cloud_identity_metadata_checks(&cas_root));
 
     recorder.mark("canonical id", &checks);
     // Check 15: residual cross-project contamination from the cas-ed15 pull
@@ -2524,6 +2526,68 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
             }),
     );
     checks
+}
+
+/// Report cloud watermarks and registration markers that belong to another
+/// project identity. These values are local evidence of the old multi-root
+/// cache leak; sync itself now writes only the current root's scope.
+fn cloud_identity_metadata_checks(cas_root: &Path) -> Vec<Check> {
+    let Some(current_project) = crate::cloud::resolve_canonical_id(cas_root) else {
+        return Vec::new();
+    };
+    if !cas_root.join("cas.db").is_file() {
+        return Vec::new();
+    }
+
+    let queue = match crate::cloud::SyncQueue::open_read_only(cas_root) {
+        Ok(queue) => queue,
+        Err(error) => {
+            return vec![Check::new(
+                "cloud identity metadata",
+                CheckStatus::Warning,
+                format!(
+                    "Could not inspect cloud identity metadata: {error}; run `cas doctor --fix`"
+                ),
+            )];
+        }
+    };
+    let metadata = match queue.list_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.to_string().contains("no such table") => return Vec::new(),
+        Err(error) => {
+            return vec![Check::new(
+                "cloud identity metadata",
+                CheckStatus::Warning,
+                format!(
+                    "Could not inspect cloud identity metadata: {error}; run `cas doctor --fix`"
+                ),
+            )];
+        }
+    };
+
+    let current_suffix = format!("_{current_project}");
+    let mut foreign = Vec::new();
+    for (key, value) in metadata {
+        let scoped_key = key.starts_with("last_team_pull_at_")
+            || key.starts_with("team_project_registered_");
+        if scoped_key && !key.ends_with(&current_suffix) {
+            foreign.push(format!("{key}={value}"));
+        } else if key == "last_knowledge_push_project_id" && value != current_project {
+            foreign.push(format!("{key}={value}"));
+        }
+    }
+    if foreign.is_empty() {
+        return Vec::new();
+    }
+
+    vec![Check::new(
+        "cloud identity metadata",
+        CheckStatus::Warning,
+        format!(
+            "foreign cloud scope(s) for project `{current_project}`: {}; run `cas cloud project set {current_project} && cas cloud sync --full`",
+            foreign.join(", ")
+        ),
+    )]
 }
 
 /// Report the cloud's per-project `aliases` record as mirrored into
@@ -5063,6 +5127,45 @@ mod tests {
         assert!(msg.contains("folder name"), "got: {msg}");
         // No collision row when only one root is known.
         assert!(messages(&checks, "canonical id collision").is_empty());
+    }
+
+    #[test]
+    fn cloud_identity_metadata_check_reports_foreign_scopes_and_remediation() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path();
+        fs::write(
+            cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"project-one\"\n",
+        )
+        .unwrap();
+        let queue = crate::cloud::SyncQueue::open(cas_root).unwrap();
+        queue.init().unwrap();
+        queue
+            .set_metadata("last_team_pull_at_team_project-one", "current")
+            .unwrap();
+        queue
+            .set_metadata("last_team_pull_at_team_project-two", "foreign")
+            .unwrap();
+        queue
+            .set_metadata("team_project_registered_team_project-two", "1")
+            .unwrap();
+        queue
+            .set_metadata("last_knowledge_push_project_id", "project-two")
+            .unwrap();
+
+        let checks = cloud_identity_metadata_checks(cas_root);
+        let row = checks
+            .iter()
+            .find(|check| check.name == "cloud identity metadata")
+            .expect("foreign cloud metadata must produce a doctor row");
+        assert!(matches!(row.status, CheckStatus::Warning));
+        assert!(row.message.contains("last_team_pull_at_team_project-two"));
+        assert!(row.message.contains("team_project_registered_team_project-two"));
+        assert!(row.message.contains("last_knowledge_push_project_id=project-two"));
+        assert!(row
+            .message
+            .contains("cas cloud project set project-one && cas cloud sync --full"));
+        assert!(!row.message.contains("last_team_pull_at_team_project-one=current"));
     }
 
     #[test]

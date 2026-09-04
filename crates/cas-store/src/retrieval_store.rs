@@ -639,7 +639,7 @@ impl SqliteRetrievalStore {
                      WHEN o.outcome = 'used' AND o.attribution = 'automatic'
                      THEN r.query_id || char(0) || r.result_id END),
                  COUNT(DISTINCT CASE
-                     WHEN o.outcome = 'used' AND o.attribution != 'automatic'
+                     WHEN o.outcome = 'used' AND o.attribution = 'explicit'
                      THEN r.query_id || char(0) || r.result_id END),
                  COUNT(DISTINCT CASE
                      WHEN o.outcome = 'helpful' AND o.attribution = 'judge'
@@ -1559,6 +1559,23 @@ mod tests {
                     session_id,
                     None,
                     RETRIEVAL_ATTRIBUTION_JUDGE,
+                )
+                .unwrap();
+        }
+        for (event_id, attribution) in [
+            ("judge-used-b", RETRIEVAL_ATTRIBUTION_JUDGE),
+            ("custom-used-b", "future-signal"),
+        ] {
+            store
+                .record_outcome_with_attribution(
+                    event_id,
+                    "query-b",
+                    "entry",
+                    RetrievalOutcome::Used,
+                    "non-caller",
+                    "session-b",
+                    None,
+                    attribution,
                 )
                 .unwrap();
         }

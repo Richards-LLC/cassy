@@ -795,6 +795,23 @@ async fn retrieval_metrics_filters_by_session_and_rejects_unsupported_filters() 
             )
             .expect("judge label should persist");
     }
+    for (event_id, attribution) in [
+        ("judge-used-session-b", RETRIEVAL_ATTRIBUTION_JUDGE),
+        ("custom-used-session-b", "future-signal"),
+    ] {
+        store
+            .record_outcome_with_attribution(
+                event_id,
+                "query-session-b",
+                "entry-session-filter",
+                RetrievalOutcome::Used,
+                "non-caller",
+                "session-b",
+                None,
+                attribution,
+            )
+            .expect("non-explicit Used control should persist");
+    }
 
     let service = CasService::new(core, None);
     let metrics = |session_id: Option<&str>| {

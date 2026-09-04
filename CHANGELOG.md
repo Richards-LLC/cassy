@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.15.7] - 2026-09-04
+
+### Added
+- A worker's blocker now reaches an idle supervisor's screen. Sending a message
+  with `blocker=true` wraps it in a marker that Cassy itself attaches, and the
+  supervisor's screen wakes for it the same way it does for a merge request.
+  Typing the word "blocker" into an ordinary message changes nothing: without
+  the flag it waits in the inbox as before.
+- When a worker's close is parked for verification, Cassy now delivers the
+  verification handoff to the supervisor itself, at the moment it creates the
+  dispatch, and wakes the supervisor with it. The worker no longer has to
+  forward the dispatch id by hand, and the handoff can no longer sit unread
+  while it blocks the close. If that delivery fails, the worker still sees the
+  forwarding instructions as before.
+
 ## [3.15.6] - 2026-09-04
 
 ### Fixed

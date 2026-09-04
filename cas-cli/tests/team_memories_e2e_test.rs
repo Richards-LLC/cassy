@@ -73,6 +73,9 @@ async fn retroactive_share_all_then_team_push_surfaces_preexisting_entries() {
     mock_push_endpoint().mount(&server).await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_dir = tmp.path();
 
     // Stage 1: cold start — NO team configured, no cloud.json.
@@ -208,6 +211,9 @@ async fn share_since_filter_selects_only_recent_entries() {
     const SINCE_WINDOW: &str = "48h";
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_dir = tmp.path();
 
     // Match the real retroactive-backfill scenario: entries are
@@ -357,6 +363,9 @@ async fn fresh_teammate_pull_applies_team_memories_to_local_store() {
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_dir = tmp.path();
 
     // Fresh teammate — empty stores, team configured.

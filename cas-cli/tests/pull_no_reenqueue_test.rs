@@ -35,6 +35,9 @@ fn production_source_root() -> PathBuf {
 
 fn make_logged_in_cas_root(endpoint: &str) -> TempDir {
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path();
     // Force SQLite store files into existence.
     let _ = open_store_local(cas_root).unwrap();
@@ -170,6 +173,9 @@ async fn pull_via_local_openers_does_not_grow_sync_queue() {
 #[test]
 fn open_store_still_enqueues_local_writes_when_logged_in() {
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path();
     let _ = open_store_local(cas_root).unwrap();
 

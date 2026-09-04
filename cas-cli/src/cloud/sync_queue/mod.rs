@@ -37,6 +37,9 @@ pub use types::{
 /// Persistent sync queue backed by SQLite
 pub struct SyncQueue {
     conn: Mutex<Connection>,
+    /// The `.cas` directory this queue lives in — the project root the push
+    /// guard classifies when a syncer is built without an explicit root.
+    cas_dir: std::path::PathBuf,
 }
 
 impl SyncQueue {
@@ -50,6 +53,7 @@ impl SyncQueue {
 
         Ok(Self {
             conn: Mutex::new(conn),
+            cas_dir: cas_dir.to_path_buf(),
         })
     }
 
@@ -62,7 +66,13 @@ impl SyncQueue {
         let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            cas_dir: cas_dir.to_path_buf(),
         })
+    }
+
+    /// The `.cas` directory this queue was opened in.
+    pub fn cas_dir(&self) -> &Path {
+        &self.cas_dir
     }
 
     /// Initialize the sync queue tables

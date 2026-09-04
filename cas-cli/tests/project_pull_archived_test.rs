@@ -168,6 +168,9 @@ struct PullHarness {
 impl PullHarness {
     fn new(endpoint: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
+        // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+        // root under the temp directory, and a TempDir is exactly that.
+        std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
         let root = tmp.path();
         let store = open_store_local(root).unwrap();
         Self::from_store(tmp, endpoint, store)
@@ -175,6 +178,9 @@ impl PullHarness {
 
     fn with_duplicate_race(endpoint: &str, concurrent_entry: Entry) -> Self {
         let tmp = tempfile::tempdir().unwrap();
+        // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+        // root under the temp directory, and a TempDir is exactly that.
+        std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
         let root = tmp.path();
         let inner = SqliteStore::open(root).unwrap();
         inner.init().unwrap();

@@ -111,6 +111,9 @@ async fn team_pull_reconciles_same_id_entries_with_lww_and_skips_foreign_rows() 
         .await;
 
     let tmp = TempDir::new().unwrap();
+    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
+    // root under the temp directory, and a TempDir is exactly that.
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let queue = Arc::new(cas::cloud::SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
     let store = open_store_local(tmp.path()).unwrap();

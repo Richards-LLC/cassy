@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn a_session_focus_pin_names_the_epic_with_its_title() {
         let epics = vec![
-            epic("cas-cfd3", "EPIC: v3.15.4 update follow-ups", None),
+            epic("cas-cfd3", "EPIC: update follow-ups (fixture)", None),
             epic("cas-other", "EPIC: something else", Some("id-noble-koala-5")),
         ];
 
@@ -434,11 +434,11 @@ mod tests {
             resolved,
             SupervisorEpic::Running {
                 id: "cas-cfd3".to_string(),
-                title: Some("EPIC: v3.15.4 update follow-ups".to_string()),
+                title: Some("EPIC: update follow-ups (fixture)".to_string()),
             },
             "the pin must beat the owned epic"
         );
-        assert!(resolved.render().contains("epic cas-cfd3: EPIC: v3.15.4"));
+        assert!(resolved.render().contains("epic cas-cfd3: EPIC: update follow-ups (fixture)"));
     }
 
     /// A pin whose epic is not in the candidate list still names the epic. The

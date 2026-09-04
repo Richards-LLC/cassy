@@ -8485,7 +8485,7 @@ async fn cas_5087_worker_status_names_each_live_supervisors_epic() {
 
     let store = env.task_store();
     for (owner, title) in [
-        (&mine, "EPIC: v3.15.4 update follow-ups"),
+        (&mine, "EPIC: update follow-ups (fixture)"),
         (&theirs, "EPIC: hub transcript rewrite"),
     ] {
         let id = store.generate_id().expect("generate_id");
@@ -8508,7 +8508,7 @@ async fn cas_5087_worker_status_names_each_live_supervisors_epic() {
         "the caller's own epic must be named: {text}"
     );
     assert!(
-        text.contains("EPIC: v3.15.4 update follow-ups"),
+        text.contains("EPIC: update follow-ups (fixture)"),
         "the caller's epic title must be named: {text}"
     );
     assert!(

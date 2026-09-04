@@ -20,6 +20,7 @@
 # Usage:
 #   scripts/release-train.sh <version> <epic-worktree> --gate
 #   scripts/release-train.sh <version> <epic-worktree> --pipeline
+#   scripts/release-train.sh <version> <epic-worktree> --publish [<landed-sha>]
 #   scripts/release-train.sh <version> <epic-worktree> --status
 #   scripts/release-train.sh <version> <epic-worktree> --stop
 #   scripts/release-train.sh <version> <epic-worktree> --print-run-dir
@@ -33,10 +34,12 @@
 #   CAS_RELEASE_TRAIN_POLL_SECS   default 45 (checks) / 60 (queue watch)
 #   CAS_RELEASE_TRAIN_CHECK_TRIES default 40
 #   CAS_RELEASE_TRAIN_WATCH_TRIES default 60
+#   CAS_RELEASE_TRAIN_PUBLISH_CMD default <tag worktree>/scripts/release.sh
+#   CAS_RELEASE_ENV_FILE          default ~/.cas/release.env
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s <version> <epic-worktree> [--gate|--pipeline|--status|--stop|--print-run-dir]\n' "$0"
+    printf 'Usage: %s <version> <epic-worktree> [--gate|--pipeline|--publish [sha]|--status|--stop|--print-run-dir]\n' "$0"
 }
 
 version="${1:-}"
@@ -251,6 +254,109 @@ run_pipeline() {
     return 1
 }
 
+# --------------------------------------------------------------------------
+# publish: tag worktree at the landed sha -> release.sh --publish-tag (cas-c1cd)
+#
+# Ported from publish-wrapper.sh. Every refusal fires BEFORE a tag worktree
+# exists or a publisher starts, because publishing the wrong tree is not
+# undone by retrying. The receipts live in the run directory rather than a
+# version-keyed path, and the publisher is waited on by the PID recorded for
+# it — the same discipline the gate uses.
+# --------------------------------------------------------------------------
+run_publish() {
+    local landed="${1:-}"
+    if [[ -z "$landed" ]]; then
+        landed="$(cat "$run_dir/landed-main.sha" 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+    if [[ -z "$landed" ]]; then
+        printf 'error: no landed sha given and %s/landed-main.sha is absent; run --pipeline first\n' \
+            "$run_dir" >&2
+        return 2
+    fi
+
+    git -C "$worktree" fetch -q origin main 2>/dev/null || true
+    local origin_main
+    origin_main="$(git -C "$worktree" rev-parse origin/main 2>/dev/null || true)"
+    if [[ "$origin_main" != "$landed" ]]; then
+        printf 'error: origin/main is %s, not the landed sha %s; refusing to publish\n' \
+            "${origin_main:-unknown}" "$landed" >&2
+        return 3
+    fi
+
+    # Read the version out of the landed commit itself rather than the working
+    # tree, so a dirty epic worktree cannot vouch for what is being tagged.
+    local landed_version
+    landed_version="$(git -C "$worktree" show "$landed:cas-cli/Cargo.toml" 2>/dev/null \
+        | sed -n 's/^version = "\([^"]*\)"/\1/p' | head -n1)"
+    if [[ "$landed_version" != "$version" ]]; then
+        printf 'error: the landed tree at %s declares version %s, but this run is publishing %s; refusing\n' \
+            "$landed" "${landed_version:-unknown}" "$version" >&2
+        return 4
+    fi
+
+    local tag="v$version"
+    local main_checkout_dir
+    main_checkout_dir="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's#/\.git$##')"
+    main_checkout_dir="${main_checkout_dir:-$worktree}"
+    local tag_worktree="$main_checkout_dir/.cas/release-$tag"
+
+    if [[ ! -d "$tag_worktree" ]]; then
+        git -C "$worktree" worktree add --detach "$tag_worktree" "$landed" >/dev/null 2>&1 || {
+            printf 'error: could not create the tag worktree at %s\n' "$tag_worktree" >&2
+            return 5
+        }
+    fi
+    if [[ "$(git -C "$tag_worktree" rev-parse HEAD 2>/dev/null)" != "$landed" ]]; then
+        printf 'error: tag worktree %s is not at %s; refusing to publish\n' "$tag_worktree" "$landed" >&2
+        return 6
+    fi
+
+    # The zig toolchain is hardlinked rather than copied: same bytes, no second
+    # multi-hundred-megabyte tree per release.
+    if [[ -d "$main_checkout_dir/.context/zig" && ! -e "$tag_worktree/.context/zig" ]]; then
+        mkdir -p "$tag_worktree/.context"
+        cp -al "$main_checkout_dir/.context/zig" "$tag_worktree/.context/zig" 2>/dev/null || true
+    fi
+    [[ -x "$tag_worktree/.context/zig/zig" ]] && export ZIG="$tag_worktree/.context/zig/zig"
+
+    local env_file="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}"
+    if [[ -f "$env_file" ]]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "$env_file"
+        set +a
+        # Names and set/unset state only: a release receipt must never carry a
+        # credential value.
+        printf 'release env names: %s\n' \
+            "$(grep -oE '^(export )?[A-Z_]+=' "$env_file" | sed 's/=$//; s/^export //' | tr '\n' ' ')"
+    else
+        printf 'release env file %s absent; publishing with the ambient environment\n' "$env_file"
+    fi
+
+    local publish_cmd="${CAS_RELEASE_TRAIN_PUBLISH_CMD:-$tag_worktree/scripts/release.sh}"
+    if [[ ! -x "$publish_cmd" ]]; then
+        printf 'error: publish command %s is not executable\n' "$publish_cmd" >&2
+        return 7
+    fi
+
+    printf 'publisher start %s sha=%s tag=%s worktree=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$landed" "$tag" "$tag_worktree"
+    printf 'run directory: %s\n' "$run_dir"
+
+    ( cd "$tag_worktree" && exec "$publish_cmd" --publish-tag ) \
+        >"$run_dir/release.log" 2>&1 &
+    local publish_pid=$!
+    printf '%s\n' "$publish_pid" >"$run_dir/release.pid"
+
+    set +e
+    wait "$publish_pid"
+    local rc=$?
+    set -e
+    printf '%s\n' "$rc" >"$run_dir/release.done"
+    printf 'publisher done status=%s at %s\n' "$rc" "$(date -u +%H:%M:%SZ)"
+    return "$rc"
+}
+
 case "$action" in
     --print-run-dir)
         printf '%s\n' "$run_dir"
@@ -288,6 +394,11 @@ case "$action" in
         # a Monitor tailing pipeline.log must see every line the run wrote,
         # including the terminal one.
         run_pipeline 2>&1 | tee -a "$run_dir/pipeline.log"
+        exit "${PIPESTATUS[0]}"
+        ;;
+    --publish)
+        mkdir -p "$run_dir"
+        run_publish "${4:-}" 2>&1 | tee -a "$run_dir/publish.log"
         exit "${PIPESTATUS[0]}"
         ;;
     --gate) ;;

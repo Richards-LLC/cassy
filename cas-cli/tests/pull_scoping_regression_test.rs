@@ -20,6 +20,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const FIXTURE_PROJECT_ID: &str = "p";
+
 /// Roots that contain shipped source code. Tests, fixtures, and benches are
 /// excluded — they are allowed to construct pull URLs freely.
 fn production_source_root() -> PathBuf {
@@ -292,8 +294,8 @@ fn scoped_pull_builder_appends_project_id() {
         pull_rs.display(),
     );
     assert!(
-        src.contains("get_project_canonical_id"),
-        "{} must call `get_project_canonical_id()` to resolve the project scope.",
+        src.contains("resolve_canonical_id_for_sync"),
+        "{} must resolve the project scope from the sync root, not process cwd.",
         pull_rs.display(),
     );
     // cas-0be9: the builder must FAIL CLOSED. Dropping `project_id=` when the
@@ -318,13 +320,9 @@ async fn cloud_syncer_pull_request_carries_project_id_on_the_wire() {
     // in the runtime contract `execute_pull` now depends on.
     let server = MockServer::start().await;
 
-    // Resolve the canonical project ID using the same code path the syncer
-    // does. From inside `cas-cli/tests/`, `find_cas_root_from_cas_worktree`
-    // does not fire (no `.cas/worktrees/` segment), so the resolver walks
-    // up until it finds the repo's `.cas/` and returns its folder name —
-    // which is `cas-src` for this checkout.
-    let expected_project_id = cas::cloud::get_project_canonical_id()
-        .expect("get_project_canonical_id should succeed inside the cas-src checkout");
+    // The syncer resolves identity from its queue root. This fixture pins that
+    // root to `p`, independently of the integration-test process cwd.
+    let expected_project_id = FIXTURE_PROJECT_ID.to_string();
 
     Mock::given(method("GET"))
         .and(path("/api/sync/pull"))
@@ -354,6 +352,11 @@ async fn cloud_syncer_pull_request_carries_project_id_on_the_wire() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cas_root = tmp.path().join(".cas");
     std::fs::create_dir_all(&cas_root).expect("mkdir .cas");
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .expect("pin fixture project identity");
 
     let store = cas::store::open_store(&cas_root).expect("open store");
     let task_store = cas::store::open_task_store(&cas_root).expect("open task store");
@@ -412,8 +415,7 @@ async fn task_pull_and_direct_writes_remain_isolated_by_store() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
-    let expected_project_id = cas::cloud::get_project_canonical_id()
-        .expect("get_project_canonical_id should succeed inside the cas-src checkout");
+    let expected_project_id = FIXTURE_PROJECT_ID.to_string();
 
     let task_json = |id: &str, project_id: Option<&str>| {
         let mut value = serde_json::to_value(Task::new(id.to_string(), format!("task {id}")))
@@ -450,6 +452,11 @@ async fn task_pull_and_direct_writes_remain_isolated_by_store() {
     let global_root = tmp.path().join("global").join(".cas");
     std::fs::create_dir_all(&project_root).expect("mkdir project .cas");
     std::fs::create_dir_all(&global_root).expect("mkdir global .cas");
+    std::fs::write(
+        project_root.join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .expect("pin project fixture identity");
 
     let project_tasks =
         cas::store::open_task_store_local(&project_root).expect("open isolated project task store");
@@ -529,8 +536,7 @@ async fn new_entity_kinds_skip_foreign_project_rows() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
-    let expected_project_id = cas::cloud::get_project_canonical_id()
-        .expect("get_project_canonical_id should succeed inside the cas-src checkout");
+    let expected_project_id = FIXTURE_PROJECT_ID.to_string();
 
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -672,6 +678,11 @@ async fn new_entity_kinds_skip_foreign_project_rows() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cas_root = tmp.path().join(".cas");
     std::fs::create_dir_all(&cas_root).expect("mkdir .cas");
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .expect("pin fixture project identity");
 
     let store = cas::store::open_store(&cas_root).expect("open store");
     let task_store = cas::store::open_task_store(&cas_root).expect("open task store");

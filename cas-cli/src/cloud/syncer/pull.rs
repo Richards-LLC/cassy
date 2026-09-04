@@ -11,8 +11,7 @@ use crate::cloud::syncer::{
     TaskStatusTransition, TeamPullResponse, UpsertResult,
 };
 use crate::cloud::{
-    EntityType, SyncOperation, SyncQueue, get_project_canonical_id,
-    project_ids_match as canonical_project_ids_match,
+    EntityType, SyncOperation, SyncQueue, project_ids_match as canonical_project_ids_match,
 };
 use crate::error::CasError;
 use crate::store::{
@@ -854,30 +853,8 @@ fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
 }
 
 /// Build a project-scoped `/api/sync/pull` URL, **failing closed** when the
-/// project scope cannot be resolved.
-///
-/// `extra_params` are appended verbatim (already `key=value` encoded); the
-/// `project_id=` parameter is always appended by this function. If
-/// `get_project_canonical_id()` returns `None` — i.e. the caller is not inside
-/// a CAS project directory, which is the realistic daemon / cwd-independent
-/// case — no URL is produced at all and the pull aborts. Omitting the scope
-/// would ask the server for *every* project's rows, which is exactly the
-/// cross-project contamination this path exists to prevent.
-///
-/// Returns `(url, resolved_project_id)`; callers that also filter the response
-/// client-side reuse the resolved id rather than resolving it a second time.
-pub(crate) fn build_scoped_pull_url(
-    endpoint: &str,
-    extra_params: &[String],
-) -> Result<(String, String), CasError> {
-    build_scoped_pull_url_with(endpoint, extra_params, get_project_canonical_id)
-}
-
-/// [`build_scoped_pull_url`] with an injectable project-scope resolver.
-///
-/// The resolver is a parameter purely so tests can exercise the unresolvable
-/// (`None`) branch without depending on the process-wide cache inside
-/// `get_project_canonical_id` or on the test's working directory.
+/// supplied project scope cannot be resolved. The resolver parameter is kept
+/// as a small test seam for the unresolvable (`None`) branch.
 pub(crate) fn build_scoped_pull_url_with(
     endpoint: &str,
     extra_params: &[String],
@@ -1006,20 +983,27 @@ fn task_wire_origin_project(raw: &serde_json::Value) -> Option<&str> {
         .and_then(serde_json::Value::as_str)
 }
 
-/// Return the project key that owns a task row on the cloud. The team pull
-/// endpoint currently exposes this as `project_id` (some builds use
-/// `project_canonical_id`); when it is absent, the requested scope is the
-/// only available signal and is therefore used as a documented fallback.
-fn task_wire_cloud_project<'a>(raw: &'a serde_json::Value, requested_project: &'a str) -> &'a str {
-    raw.get("project_canonical_id")
-        .or_else(|| raw.get("project_id"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(requested_project)
+/// Return the server-attested project key for a task row, when one exists.
+///
+/// The requested scope is deliberately not a fallback: on a team pull the
+/// response may contain a replica from another project, and stamping that row
+/// with the request would make it look native to doctor. A legacy row with no
+/// origin and no server project is parked by the caller.
+fn task_wire_cloud_project(raw: &serde_json::Value) -> Option<&str> {
+    ["project_canonical_id", "project_id"]
+        .into_iter()
+        .find_map(|field| {
+            raw.get(field)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|project| !project.is_empty())
+        })
 }
 
-fn task_wire_is_owner(raw: &serde_json::Value, requested_project: &str) -> bool {
+fn task_wire_is_owner(raw: &serde_json::Value) -> bool {
     task_wire_origin_project(raw).is_some_and(|origin| {
-        project_ids_match(origin, task_wire_cloud_project(raw, requested_project))
+        task_wire_cloud_project(raw)
+            .is_some_and(|cloud_project| project_ids_match(origin, cloud_project))
     })
 }
 
@@ -1038,7 +1022,6 @@ fn task_wire_updated_at(raw: &serde_json::Value) -> Option<DateTime<Utc>> {
 /// reduced to one row so wire order cannot make the result nondeterministic.
 fn select_owner_task_rows(
     raw_tasks: Vec<serde_json::Value>,
-    requested_project: &str,
 ) -> (Vec<serde_json::Value>, Vec<(String, serde_json::Value)>) {
     let mut grouped = BTreeMap::<String, Vec<serde_json::Value>>::new();
     let mut unkeyed = Vec::new();
@@ -1062,8 +1045,7 @@ fn select_owner_task_rows(
             .iter()
             .enumerate()
             .max_by(|(left_index, left), (right_index, right)| {
-                task_wire_is_owner(left, requested_project)
-                    .cmp(&task_wire_is_owner(right, requested_project))
+                task_wire_is_owner(left).cmp(&task_wire_is_owner(right))
                     .then_with(|| task_wire_updated_at(left).cmp(&task_wire_updated_at(right)))
                     .then_with(|| left_index.cmp(right_index))
             })
@@ -1503,7 +1485,12 @@ impl CloudSyncer {
                     Some(project_id.to_owned())
                 })?
             }
-            None => build_scoped_pull_url(&self.cloud_config.endpoint, params)?,
+            None => {
+                let project_id = self.personal_push_project_id()?;
+                build_scoped_pull_url_with(&self.cloud_config.endpoint, params, || {
+                    Some(project_id)
+                })?
+            }
         };
         let token = self
             .cloud_config
@@ -1538,17 +1525,13 @@ impl CloudSyncer {
     /// Deliberately infallible: identity refresh is an optimization of
     /// *attribution*, never a precondition for syncing rows.
     fn refresh_project_alias_record(&self) {
-        let Ok(cas_root) = crate::store::find_cas_root() else {
+        let Some(cas_root) = self.push_cas_root.as_deref() else {
             return;
         };
         let Some(token) = self.cloud_config.token.as_deref() else {
             return;
         };
-        let Some(project_id) = self
-            .push_project_canonical_id
-            .clone()
-            .or_else(crate::cloud::get_project_canonical_id)
-        else {
+        let Ok(project_id) = self.personal_push_project_id() else {
             return;
         };
         match crate::cloud::refresh_project_alias_record(
@@ -1673,6 +1656,7 @@ impl CloudSyncer {
                 self.note_incoming_revision(EntityType::Task, id, &raw_task);
             }
             render_task_proposal_provenance(&mut raw_task);
+            let server_owner = task_wire_cloud_project(&raw_task).map(str::to_owned);
             let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
@@ -1681,9 +1665,21 @@ impl CloudSyncer {
                 }
             };
             // The scoped response proves which project supplied a legacy row;
-            // preserve an explicit origin stamped by the cloud.
+            // preserve an explicit origin or use only the server-attested
+            // project identity. The request scope is not an ownership stamp.
             if remote_task.origin_project.is_none() {
-                remote_task.origin_project = Some(current_project_id.to_string());
+                let Some(server_owner) = server_owner else {
+                    record_project_warning(
+                        "task",
+                        "<missing>",
+                        &format!(
+                            "parking task '{}' — no origin_project or server project identity",
+                            remote_task.id
+                        ),
+                    );
+                    continue;
+                };
+                remote_task.origin_project = Some(server_owner);
             }
             let incoming_is_owner = remote_task
                 .origin_project
@@ -2518,20 +2514,19 @@ impl CloudSyncer {
     /// Pull team data from cloud and merge into local store.
     ///
     /// `project_id` is the canonical project ID for the current scope
-    /// (typically `cas::cloud::get_project_canonical_id()` at the caller
     /// site). Taking it as a parameter (rather than resolving inside the
-    /// function) keeps the watermark scope explicit AND avoids the
-    /// process-wide cache in `get_project_canonical_id` which would make
-    /// it impossible to exercise the cross-project watermark behavior
-    /// in a single test process. The value is used for:
+    /// function) keeps the watermark scope explicit and makes it possible to
+    /// exercise cross-project watermark behavior in one process. The value is
+    /// used for:
     /// - The `last_team_pull_at_{team_id}_{project_id}` metadata key
     ///   (cas-53d5 — per-(team, project) watermark scoping, fixes the
     ///   "second project sees stale `since=` from the first" regression
     ///   that surfaced as hypothesis #2 of the cas-ffc4 bug doc).
     /// - The `project_id=` URL query param.
     /// - The client-side `entity_matches_project` filter for non-task rows.
-    ///   Task rows retain their wire project/origin identity so duplicate
-    ///   owner rows can win over stale replica copies.
+    ///   Task rows are accepted only when their explicit origin belongs to the
+    ///   requested project. A null origin may use a server-attested project
+    ///   field, but never the requesting scope as an implicit owner.
     pub fn pull_team(
         &self,
         team_id: &str,
@@ -2548,6 +2543,22 @@ impl CloudSyncer {
 
         if !self.is_available() {
             return Ok(result);
+        }
+
+        // A team-pull caller may supply an explicit scope, but the syncer
+        // still owns a concrete queue root. Validate that root before any
+        // network request when its pinned identity disagrees with a resolved
+        // git identity; this keeps a stale process-cwd id fail-closed.
+        if let Some(cas_root) = self.push_cas_root.as_deref()
+            && crate::cloud::normalized_git_remote_for_push(cas_root).is_some()
+        {
+            let resolved = crate::cloud::resolve_canonical_id_for_sync(cas_root)?;
+            if resolved != project_id {
+                return Err(CasError::Other(format!(
+                    "Cannot team-sync `{}`: requested identity `{project_id}` does not match root identity `{resolved}`",
+                    cas_root.display()
+                )));
+            }
         }
 
         let token = self
@@ -2651,18 +2662,24 @@ impl CloudSyncer {
 
         // Process tasks
         let task_sync_id = uuid::Uuid::new_v4().to_string();
-        // Unlike entries/rules/skills, team tasks may be replicas keyed by a
-        // different project. Group them before any project filtering so the
-        // owner row can win over a stale foreign-keyed row.
+        // Group duplicate IDs before filtering so an owner row can win over a
+        // stale foreign-keyed replica, then apply the same origin-first
+        // ownership rule doctor uses. Foreign rows are parked at ingest and
+        // never become local contamination.
         let (raw_tasks, discarded_task_rows) =
-            select_owner_task_rows(body.tasks.unwrap_or_default(), current_project_id);
+            select_owner_task_rows(body.tasks.unwrap_or_default());
         for (task_id, discarded_row) in discarded_task_rows {
             self.record_owner_conflict_value(&task_id, &discarded_row)?;
             result.record_local_conflict();
         }
-        for mut raw_task in raw_tasks {
+        for raw_task in raw_tasks {
+            if !entity_matches_project(&raw_task, current_project_id, "task") {
+                continue;
+            }
+            let server_owner = task_wire_cloud_project(&raw_task).map(str::to_owned);
+            let mut raw_task = raw_task;
             render_task_proposal_provenance(&mut raw_task);
-            let wire_is_owner = task_wire_is_owner(&raw_task, current_project_id);
+            let wire_is_owner = task_wire_is_owner(&raw_task);
             let team_task_revision = crate::cloud::wire_revision(&raw_task);
             if let Some(id) = raw_task.get("id").and_then(serde_json::Value::as_str) {
                 self.note_incoming_revision(EntityType::Task, id, &raw_task);
@@ -2674,10 +2691,22 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            // Preserve the cloud's owner identity. For legacy rows without an
-            // origin, the requested scope is the only available signal.
+            // Preserve explicit origin. For legacy rows without an origin,
+            // only a server-attested project is safe to persist; an unscoped
+            // row was already rejected by entity_matches_project above.
             if remote_task.origin_project.is_none() {
-                remote_task.origin_project = Some(current_project_id.to_string());
+                let Some(server_owner) = server_owner else {
+                    record_project_warning(
+                        "task",
+                        "<missing>",
+                        &format!(
+                            "parking task '{}' — no origin_project or server project identity",
+                            remote_task.id
+                        ),
+                    );
+                    continue;
+                };
+                remote_task.origin_project = Some(server_owner);
             }
             let incoming_is_owner = wire_is_owner
                 || remote_task

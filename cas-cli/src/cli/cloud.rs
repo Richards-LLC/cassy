@@ -332,7 +332,7 @@ pub fn execute(cmd: &CloudCommands, cli: &Cli, cas_root: &Path) -> anyhow::Resul
                 anyhow::bail!("`cas cloud project` requires a subcommand or --adopt-aliases")
             }
         }
-        CloudCommands::Projects(args) => execute_projects(args, cli),
+        CloudCommands::Projects(args) => execute_projects(args, cli, cas_root),
         CloudCommands::TeamMemories(args) => execute_team_memories(args, cli, cas_root),
         CloudCommands::Unlink(args) => execute_unlink(args, cli, cas_root),
         CloudCommands::PurgeForeign(args) => execute_purge_foreign(args, cli, cas_root),
@@ -383,9 +383,8 @@ fn execute_unlink(
             config.inherit_credentials_from(&user_config);
         }
     }
-    let project_id = crate::cloud::resolve_canonical_id(cas_root).ok_or_else(|| {
-        anyhow::anyhow!("Cannot unlink: project canonical id could not be resolved")
-    })?;
+    let project_id = crate::cloud::resolve_canonical_id_for_sync(cas_root)
+        .map_err(|error| anyhow::anyhow!("Cannot unlink: {error}"))?;
 
     if args.purge_remote {
         let token = config
@@ -975,7 +974,7 @@ pub fn execute_team(cmd: &CloudTeamCommands, cli: &Cli, cas_root: &Path) -> anyh
         CloudTeamCommands::Set(args) => execute_team_set(args, cli, cas_root),
         CloudTeamCommands::Auto(cmd) => execute_team_auto(cmd, cli, cas_root),
         CloudTeamCommands::Show => execute_team_show(cli, cas_root).map(|_| ()),
-        CloudTeamCommands::Clear => execute_team_clear(cli),
+        CloudTeamCommands::Clear => execute_team_clear(cli, cas_root),
     }
 }
 
@@ -1807,11 +1806,11 @@ fn execute_team_show(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn execute_team_clear(cli: &Cli) -> anyhow::Result<()> {
-    let mut config = CloudConfig::load()?;
+fn execute_team_clear(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+    let mut config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
     let was_set = config.team_id.is_some();
     config.clear_team();
-    config.save()?;
+    config.save_to_cas_dir(cas_root)?;
 
     if cli.json {
         let out = serde_json::json!({ "status": "ok", "was_set": was_set });
@@ -1928,7 +1927,7 @@ fn sync_project_knowledge_with_output(
     use crate::cloud::embeddings::{
         DEFAULT_EMBED_BATCH, KnowledgeEmbedder, KnowledgeVectorCache, embed_pending_pages,
     };
-    use crate::cloud::{CloudSyncer, CloudSyncerConfig};
+    use crate::cloud::{CloudSyncer, CloudSyncerConfig, resolve_canonical_id_for_sync};
     use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
     use std::sync::Arc;
 
@@ -1947,7 +1946,15 @@ fn sync_project_knowledge_with_output(
 
     let queue = Arc::new(SyncQueue::open(cas_root)?);
     queue.init()?;
-    let syncer = CloudSyncer::new(queue, config.clone(), CloudSyncerConfig::default());
+    let project_id = resolve_canonical_id_for_sync(cas_root)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let syncer = CloudSyncer::new_for_project(
+        queue,
+        config.clone(),
+        CloudSyncerConfig::default(),
+        project_id,
+        cas_root,
+    );
 
     let pushed = match syncer.push_knowledge_pages(&store) {
         Ok(count) => count,
@@ -2096,7 +2103,7 @@ fn sync_project_knowledge_with_output(
 }
 
 fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
-    let config = CloudConfig::load()?;
+    let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
 
     if config.token.is_none() {
         if cli.json {
@@ -3250,14 +3257,14 @@ fn execute_push_with_output(
 ) -> anyhow::Result<SyncSummary> {
     use std::sync::Arc;
 
-    use crate::cloud::{CloudSyncer, PushScope, resolve_canonical_id};
+    use crate::cloud::{CloudSyncer, PushScope, resolve_canonical_id_for_sync};
 
     let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
     if config.token.is_none() {
         anyhow::bail!("Not logged in. Run 'cas login' first");
     }
-    let project_id = resolve_canonical_id(cas_root)
-        .ok_or_else(|| anyhow::anyhow!("Cannot sync: not inside a Cassy project directory"))?;
+    let project_id = resolve_canonical_id_for_sync(cas_root)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let scope = if args.entries_only {
         PushScope::EntriesOnly
     } else if args.tasks_only {
@@ -3492,7 +3499,7 @@ fn execute_pull_with_output(
 
         // Construct the scoped syncer. Same pattern as `execute_sync` /
         // `execute_purge_foreign` (cli/cloud.rs:2106). `CloudSyncer::pull`
-        // hard-fails when `get_project_canonical_id()` is `None` and always
+        // hard-fails when the supplied root has no canonical identity and always
         // appends `?project_id=<urlencoded>` to `/api/sync/pull`.
         let queue = SyncQueue::open(cas_root)?;
         queue.init()?;
@@ -3511,23 +3518,25 @@ fn execute_pull_with_output(
         // `--full` would either be half-broken (personal cleared, team
         // kept its old watermark) or over-broad (nukes every project's
         // team-pull watermark).
+        let project_id = crate::cloud::resolve_canonical_id_for_sync(cas_root)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         if args.full {
             queue.delete_metadata("last_pull_at")?;
             queue.delete_metadata("last_knowledge_pull_at")?;
             queue.delete_metadata("knowledge_empty_pull_streak")?;
             if let Some(team_id) = config.active_team_id() {
-                if let Some(project_id) = crate::cloud::get_project_canonical_id() {
-                    queue.delete_metadata(&format!("last_team_pull_at_{team_id}_{project_id}"))?;
-                }
+                queue.delete_metadata(&format!("last_team_pull_at_{team_id}_{project_id}"))?;
             }
         }
 
-        let syncer = CloudSyncer::new(
+        let syncer = CloudSyncer::new_for_project(
             Arc::new(queue),
             // Clone: the outer `config` is reused after this scope to call
             // `execute_team_pull` (cas-6ec7 wire-up).
             config.clone(),
             CloudSyncerConfig::default(),
+            project_id,
+            cas_root,
         );
 
         let pull_result = syncer.pull(
@@ -3928,10 +3937,9 @@ fn ensure_team_project_registration_with_output(
 
     // Same resolver the team push uses (`cloud/syncer/team_push.rs`), so the
     // bucket we register is exactly the bucket rows are pushed into.
-    let canonical_id = crate::cloud::get_project_canonical_id().ok_or_else(|| {
+    let canonical_id = crate::cloud::resolve_canonical_id_for_sync(cas_root).map_err(|error| {
         anyhow::anyhow!(
-            "Cannot register this project with team {team_id}: no canonical project id could \
-             be resolved. Run `cas cloud project set <canonical-id>` (see `cas cloud projects`)."
+            "Cannot register this project with team {team_id}: {error}. Run `cas cloud project set <canonical-id>` (see `cas cloud projects`)."
         )
     })?;
 
@@ -3958,9 +3966,7 @@ fn ensure_team_project_registration_with_output(
     // cas-8ca5 contract §5 — same remote the team push sends, so the server's
     // resolver maps us onto the team's existing bucket rather than forking a
     // new one.
-    let git_remote = crate::store::find_cas_root()
-        .ok()
-        .and_then(|root| crate::cloud::normalized_git_remote_for_push(&root));
+    let git_remote = crate::cloud::normalized_git_remote_for_push(cas_root);
 
     let pinned_canonical_id = crate::cloud::canonical_id_from_config_toml(cas_root);
     let registration =
@@ -4139,10 +4145,28 @@ fn execute_team_push_with_output(
         }
     };
 
-    let syncer = crate::cloud::CloudSyncer::new(
+    let project_id = match crate::cloud::resolve_canonical_id_for_sync(cas_root) {
+        Ok(id) => id,
+        Err(e) => {
+            if emit_output {
+                let _ = report_team_push_error(cli, &e.to_string());
+            }
+            return Ok(Some(SyncSummary::push(
+                &crate::cloud::SyncResult {
+                    errors: vec![e.to_string()],
+                    ..Default::default()
+                },
+                crate::cloud::PushScope::All,
+                None,
+            )));
+        }
+    };
+    let syncer = crate::cloud::CloudSyncer::new_for_project(
         std::sync::Arc::new(queue),
         cloud_config.clone(),
         crate::cloud::CloudSyncerConfig::default(),
+        project_id,
+        cas_root,
     );
 
     // `let _ =` on reporter calls: a formatter/IO error from the display
@@ -4420,36 +4444,32 @@ fn execute_team_pull_with_output(
         }
     };
 
-    let syncer = crate::cloud::CloudSyncer::new(
-        std::sync::Arc::new(queue),
-        cloud_config.clone(),
-        crate::cloud::CloudSyncerConfig::default(),
-    );
-
     // cas-53d5: `pull_team` now takes the canonical project_id explicitly
     // so its watermark is scoped per (team_id, project_id). Resolve here at
     // the caller and bail with the same isolation contract if we can't —
     // pull_team would otherwise have failed at its old internal resolve.
-    let project_id = match crate::cloud::get_project_canonical_id() {
-        Some(id) => id,
-        None => {
+    let project_id = match crate::cloud::resolve_canonical_id_for_sync(cas_root) {
+        Ok(id) => id,
+        Err(e) => {
             if emit_output {
-                let _ = report_team_pull_error(
-                    cli,
-                    "Team pull skipped: not inside a Cassy project directory",
-                );
+                let _ = report_team_pull_error(cli, &e.to_string());
             }
             return Ok(Some(SyncSummary::pull(
                 &crate::cloud::SyncResult {
-                    errors: vec![
-                        "Team pull skipped: not inside a Cassy project directory".to_string(),
-                    ],
+                    errors: vec![e.to_string()],
                     ..Default::default()
                 },
                 true,
             )));
         }
     };
+    let syncer = crate::cloud::CloudSyncer::new_for_project(
+        std::sync::Arc::new(queue),
+        cloud_config.clone(),
+        crate::cloud::CloudSyncerConfig::default(),
+        project_id.clone(),
+        cas_root,
+    );
 
     // `let _ =` on reporter calls: a formatter/IO error from the display
     // path must not propagate out and block subsequent caller steps.
@@ -4620,8 +4640,8 @@ fn report_team_pull_error(cli: &Cli, msg: &str) -> anyhow::Result<()> {
 // PROJECTS - List team projects
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn execute_projects(args: &CloudProjectsArgs, cli: &Cli) -> anyhow::Result<()> {
-    let config = CloudConfig::load()?;
+fn execute_projects(args: &CloudProjectsArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+    let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
     let token = config
         .token
         .as_ref()
@@ -4769,7 +4789,7 @@ fn execute_team_memories(
     use crate::cloud::{TeamMemoriesResponse, TeamProjectsResponse};
     use crate::ui::components::{Spinner, clear_inline, render_inline_view};
 
-    let mut config = CloudConfig::load()?;
+    let mut config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
 
     let team_id = config
         .team_id
@@ -4779,8 +4799,8 @@ fn execute_team_memories(
         })?
         .clone();
 
-    let canonical_id = crate::cloud::get_project_canonical_id()
-        .ok_or_else(|| anyhow::anyhow!("Not inside a Cassy project directory."))?;
+    let canonical_id = crate::cloud::resolve_canonical_id_for_sync(cas_root)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
     let token = config
         .token
@@ -5024,7 +5044,7 @@ fn execute_team_memories(
     // Save sync timestamp
     if let Some(pulled_at) = &body.pulled_at {
         config.set_team_memory_sync(&canonical_id, pulled_at);
-        config.save()?;
+        config.save_to_cas_dir(cas_root)?;
     }
 
     if prev_lines > 0 {
@@ -5187,13 +5207,28 @@ impl PurgeDeleteSet {
     }
 }
 
-/// A foreign row found by doctor but intentionally retained by purge. These
-/// are cross-project proposal materializations, not accidental replicas.
+/// A foreign row found by doctor but intentionally retained by purge because
+/// the classifier cannot safely decide ownership (for example, an id
+/// collision or an unattributed replica).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PurgeRetainedTask {
     pub id: String,
     pub title: String,
     pub reason: String,
+}
+
+impl PurgeRetainedTask {
+    /// A collision cannot be auto-deleted because the short task id may name
+    /// two different tasks. Give the operator the safe, explicit reassignment
+    /// path after they confirm the local `(id, title)` owner.
+    fn operator_command(&self) -> Option<String> {
+        self.reason.starts_with("id collision").then(|| {
+            format!(
+                "cas task show id={}; then mcp__cs__task action=update id={} origin_project=<confirmed canonical id>",
+                self.id, self.id
+            )
+        })
+    }
 }
 
 /// The shared result consumed by purge and doctor's cross-project check. The
@@ -5811,6 +5846,12 @@ fn evaluate_purge_safety(
 
 /// Queued-but-unpushed local changes for the entity kinds a purge deletes.
 ///
+/// Entry access reinforcement is observational metadata written by
+/// `SessionStart` through `SyncingEntryStore`; it is not a content mutation
+/// that this purge can safely classify from the queue row alone. Tasks, rules,
+/// and skills remain guarded because their queued rows represent content or
+/// ownership changes.
+///
 /// Fails CLOSED. Only an absent `sync_queue` table is "no pending pushes";
 /// every other read failure (schema drift, corruption, a row that will not
 /// decode) is propagated so the purge refuses loudly. Silently returning zero
@@ -5821,7 +5862,6 @@ pub(crate) fn pending_content_pushes(
 ) -> anyhow::Result<Vec<(String, String)>> {
     let mut stmt = match conn.prepare(
         "SELECT entity_type, entity_id FROM sync_queue
-         WHERE lower(entity_type) IN ('entry', 'task', 'rule', 'skill')
          ORDER BY id",
     ) {
         Ok(s) => s,
@@ -5843,9 +5883,12 @@ pub(crate) fn pending_content_pushes(
     for row in rows {
         // No .flatten(): a row that fails to decode must not vanish into a
         // shorter "pending" list that reads as safe.
-        out.push(row.map_err(|e| {
+        let (entity_type, entity_id) = row.map_err(|e| {
             anyhow::anyhow!("unreadable row in the sync queue while checking unpushed changes: {e}")
-        })?);
+        })?;
+        if matches!(entity_type.to_ascii_lowercase().as_str(), "task" | "rule" | "skill") {
+            out.push((entity_type, entity_id));
+        }
     }
     Ok(out)
 }
@@ -5882,15 +5925,15 @@ fn execute_purge_foreign(
 ) -> anyhow::Result<()> {
     use std::sync::Arc;
 
-    use crate::cloud::{CloudSyncer, CloudSyncerConfig, SyncQueue, get_project_canonical_id};
+    use crate::cloud::{CloudSyncer, CloudSyncerConfig, SyncQueue, resolve_canonical_id_for_sync};
 
-    let config = CloudConfig::load()?;
+    let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
     if config.token.is_none() {
         anyhow::bail!("Not logged in. Run 'cas login' first");
     }
 
-    let project_id = get_project_canonical_id()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine project ID. Not inside a Cassy project?"))?;
+    let project_id = resolve_canonical_id_for_sync(cas_root)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
     // cas-7fbb: delete + re-pull must use local openers so the re-pull does
     // not re-feed SyncQueue.
@@ -5986,6 +6029,7 @@ fn execute_purge_foreign(
                             "id": row.id,
                             "title": row.title,
                             "reason": row.reason,
+                            "operator_command": row.operator_command(),
                         }))
                         .collect::<Vec<_>>(),
                     "refusals": refusals.iter()
@@ -6057,6 +6101,19 @@ fn execute_purge_foreign(
                     analysis.collision_count
                 ))?;
                 fmt.newline()?;
+                for retained in &analysis.retained_foreign_tasks {
+                    let Some(operator_command) = retained.operator_command() else {
+                        continue;
+                    };
+                    fmt.write_muted("      - ")?;
+                    fmt.write_raw(&format!(
+                        "{}  {} [{}]",
+                        retained.id, retained.title, retained.reason
+                    ))?;
+                    fmt.newline()?;
+                    fmt.write_raw(&format!("        operator: {operator_command}"))?;
+                    fmt.newline()?;
+                }
             }
             fmt.write_raw(&format!("    {} dependency edges", delete_set.dependencies))?;
             fmt.newline()?;
@@ -6128,7 +6185,17 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
     // Step 3: Re-pull from cloud with project-scoped filtering
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
-    let syncer = CloudSyncer::new(Arc::new(queue), config, CloudSyncerConfig::default());
+    // Purge removes the local evidence used by team-pull watermarks. Clear
+    // every scoped watermark so the next team pull cannot skip the rows that
+    // need to be re-evaluated under the same ownership rule as doctor.
+    let cleared_team_watermarks = queue.delete_metadata_with_prefix("last_team_pull_at_")?;
+    let syncer = CloudSyncer::new_for_project(
+        Arc::new(queue),
+        config,
+        CloudSyncerConfig::default(),
+        project_id.clone(),
+        cas_root,
+    );
 
     let pull_result = syncer.pull(
         store.as_ref(),
@@ -6153,7 +6220,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
 
     if cli.json {
         println!(
-            r#"{{"project_id":"{}","backup":"{}","entities_before":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"entities_after":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"purged":{},"pull_errors":{}}}"#,
+            r#"{{"project_id":"{}","backup":"{}","entities_before":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"entities_after":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}},"purged":{},"team_watermarks_cleared":{},"pull_errors":{}}}"#,
             project_id,
             backup_path.display(),
             entries_before,
@@ -6167,6 +6234,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
             skills_after,
             total_after,
             purged,
+            cleared_team_watermarks,
             serde_json::to_string(&pull_result.errors).unwrap_or_default(),
         );
     } else {
@@ -6181,6 +6249,9 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
         fmt.newline()?;
         fmt.write_muted("  Purged:  ")?;
         fmt.write_raw(&format!("{} foreign entities removed", purged))?;
+        fmt.newline()?;
+        fmt.write_muted("  Team pull watermarks cleared: ")?;
+        fmt.write_raw(&cleared_team_watermarks.to_string())?;
         fmt.newline()?;
         fmt.write_muted("  Backup:  ")?;
         fmt.write_raw(&backup_path.to_string_lossy())?;
@@ -7855,15 +7926,26 @@ mod purge_foreign_safety_tests {
 
         let pending = pending_content_pushes(&conn).unwrap();
 
-        // Content kinds only (case-insensitively); events survive a purge and
-        // must not trip the guard.
+        // Task/rule/skill content kinds only (case-insensitively); entry access
+        // refreshes and events survive a purge and must not trip the guard.
         assert_eq!(
             pending,
-            vec![
-                ("entry".to_string(), "e1".to_string()),
-                ("Task".to_string(), "cas-0001".to_string()),
-            ]
+            vec![("Task".to_string(), "cas-0001".to_string())]
         );
+    }
+
+    #[test]
+    fn session_start_entry_refreshes_do_not_block_purge() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation)
+             VALUES ('entry', 'e1', 'update')",
+            [],
+        )
+        .unwrap();
+
+        assert!(pending_content_pushes(&conn).unwrap().is_empty());
     }
 
     #[test]
@@ -7897,7 +7979,7 @@ mod purge_foreign_safety_tests {
         seed_db(&conn);
         conn.execute(
             "INSERT INTO sync_queue (entity_type, entity_id, operation)
-             VALUES ('entry', X'FF', 'create')",
+             VALUES (X'FF', 'cas-0001', 'create')",
             [],
         )
         .unwrap();

@@ -211,6 +211,44 @@ fn test_metadata() {
 }
 
 #[test]
+fn delete_metadata_with_prefix_removes_only_matching_watermarks() {
+    let (_temp, queue) = create_test_queue();
+
+    queue
+        .set_metadata("last_team_pull_at_team-a_project-a", "2024-01-01T00:00:00Z")
+        .unwrap();
+    queue
+        .set_metadata("last_team_pull_at_team-b_project-b", "2024-01-02T00:00:00Z")
+        .unwrap();
+    queue
+        .set_metadata("last_team_pull_at%team-c", "should-not-match")
+        .unwrap();
+    queue
+        .set_metadata("last_pull_at", "2024-01-03T00:00:00Z")
+        .unwrap();
+
+    assert_eq!(
+        queue
+            .delete_metadata_with_prefix("last_team_pull_at_")
+            .unwrap(),
+        2
+    );
+    assert!(queue
+        .get_metadata("last_team_pull_at_team-a_project-a")
+        .unwrap()
+        .is_none());
+    assert!(queue
+        .get_metadata("last_team_pull_at_team-b_project-b")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        queue.get_metadata("last_team_pull_at%team-c").unwrap(),
+        Some("should-not-match".to_string())
+    );
+    assert!(queue.get_metadata("last_pull_at").unwrap().is_some());
+}
+
+#[test]
 fn test_pending_by_type() {
     let (_temp, queue) = create_test_queue();
 

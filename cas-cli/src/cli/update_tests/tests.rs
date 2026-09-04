@@ -600,6 +600,57 @@ fn version_verification_accepts_only_the_installed_version() {
 }
 
 #[test]
+fn reported_version_is_the_semver_not_the_build_date() {
+    // The real shapes `cas --version` prints.
+    assert_eq!(
+        parse_reported_version("cas 3.15.5 (a94b6ac 2026-09-04)\n").as_deref(),
+        Some("3.15.5")
+    );
+    assert_eq!(
+        parse_reported_version("cas 2.27.0 (9b52e17-dirty 2026-07-16)\n").as_deref(),
+        Some("2.27.0")
+    );
+    assert_eq!(parse_reported_version("cas 3.15.5\n").as_deref(), Some("3.15.5"));
+    assert_eq!(parse_reported_version("v3.15.5").as_deref(), Some("3.15.5"));
+    assert_eq!(
+        parse_reported_version("cas 3.16.0-rc.1 (a94b6ac 2026-09-04)").as_deref(),
+        Some("3.16.0-rc.1")
+    );
+
+    // Nothing that is a version means we cannot vouch for the child.
+    assert_eq!(parse_reported_version("cas (a94b6ac 2026-09-04)"), None);
+    assert_eq!(parse_reported_version(""), None);
+    assert_eq!(parse_reported_version("2026-09-04"), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn post_swap_refresh_accepts_the_real_version_line_and_still_rejects_a_stale_binary() {
+    let temp_dir = tempfile::tempdir().expect("create post-swap version test directory");
+
+    // The interactive path asks the installed binary for its version.
+    let installed_binary = temp_dir.path().join("cas-current");
+    write_stub_binary(
+        &installed_binary,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then \
+         printf 'cas 3.15.5 (a94b6ac 2026-09-04)\\n'; fi\nexit 0\n",
+    );
+    run_post_swap_refresh(&installed_binary, "3.15.4", "3.15.5", false)
+        .expect("a correct refresh under the installed binary must read as converged");
+
+    let stale_binary = temp_dir.path().join("cas-stale");
+    write_stub_binary(
+        &stale_binary,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then \
+         printf 'cas 3.15.4 (0000000 2026-09-03)\\n'; fi\nexit 0\n",
+    );
+    let error = run_post_swap_refresh(&stale_binary, "3.15.4", "3.15.5", false)
+        .expect_err("a refresh performed by the wrong version must not read as converged");
+    let message = format!("{error:#}");
+    assert!(message.contains("3.15.4") && message.contains("3.15.5"), "{message}");
+}
+
+#[test]
 fn skipped_refresh_receipt_says_the_update_did_not_converge() {
     let receipt = skipped_refresh_receipt(
         "3.15.2",

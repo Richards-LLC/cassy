@@ -938,9 +938,14 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
     // (cas update, doctor --fix, MCP startup, init) treat Err as failure — but
     // the store keeps whatever progress the other migrations made.
     if let Some((name, reason)) = result.errors.first() {
+        let others = result.errors.len() - 1;
         return Err(CasError::MigrationFailed {
             name: name.clone(),
-            reason: reason.clone(),
+            reason: if others > 0 {
+                format!("{reason} ({others} further migration(s) also failed this run)")
+            } else {
+                reason.clone()
+            },
         });
     }
 
@@ -2550,6 +2555,49 @@ mod tests {
             cas_store::shared_db::column_exists(&conn, "history_docs", "embedding_error"),
             "a name match with the schema absent must APPLY the migration, not assume it"
         );
+        assert_eq!(
+            ledger_name(&conn, 253).as_deref(),
+            Some("history_embedding_error")
+        );
+        assert_eq!(check_migrations(&cas_dir).unwrap().pending_count(), 0);
+    }
+
+    /// Supervisor ruling (4): two registry migrations whose names are swapped
+    /// in the ledger must both resolve in a SINGLE run — neither id can be
+    /// written while the other holds its name.
+    #[test]
+    fn swapped_ledger_names_resolve_in_one_run() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path().join("swapped-ledger");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::store::init_cas_dir(&project).unwrap();
+        let cas_dir = project.join(".cas");
+
+        {
+            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+            conn.execute("DELETE FROM cas_migrations WHERE id IN (250, 253)", [])
+                .unwrap();
+            // 250 holds 253's name and 253 holds 250's.
+            conn.execute(
+                "INSERT INTO cas_migrations (id, name, subsystem, applied_at)
+                 VALUES (250, 'history_embedding_error', 'code', 'DETECTED'),
+                        (253, 'quarantined_rows', 'tasks', 'DETECTED')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = run_migrations(&cas_dir, false).expect("one run must untangle both rows");
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.reconciliations.len(),
+            2,
+            "both rows must be reported: {:?}",
+            result.reconciliations
+        );
+
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        assert_eq!(ledger_name(&conn, 250).as_deref(), Some("quarantined_rows"));
         assert_eq!(
             ledger_name(&conn, 253).as_deref(),
             Some("history_embedding_error")

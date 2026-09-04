@@ -269,16 +269,47 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // Full update: binary + every local project's migration/sync/cloud state.
     let mut steps = UpdateStepTracker::new(2, !cli.json);
-    steps.run("Updating Cassy binary", || {
-        let installed_version = perform_update(args, current_version, cli)?;
-        super::hub::restart_stale_hub(&installed_version, cli)?;
-        Ok(installed_version)
+    let outcome = steps.run("Updating Cassy binary", || {
+        let outcome = perform_update(args, current_version, cli)?;
+        super::hub::restart_stale_hub(&outcome.version, cli)?;
+        Ok(outcome)
     })?;
     if !cli.json {
         let mut out = io::stdout();
         let theme = ActiveTheme::default();
         let mut fmt = Formatter::stdout(&mut out, theme);
         fmt.newline()?;
+    }
+
+    // cas-91ba: after a swap the installed binary has already run the
+    // post-install phases. Re-running them here would replay the pre-update
+    // image's behaviour and overwrite an accurate receipt with a stale one.
+    if let Some(refresh) = outcome.post_install_refresh {
+        if cli.json {
+            let mut combined = serde_json::json!({
+                "binary_updated": outcome.updated,
+                "version": outcome.version,
+            });
+            if let (Some(combined), Some(refresh)) =
+                (combined.as_object_mut(), refresh.as_object())
+            {
+                for (key, value) in refresh {
+                    combined.insert(key.clone(), value.clone());
+                }
+            }
+            println!("{combined}");
+        }
+        return Ok(());
+    }
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "binary_updated": outcome.updated,
+                "version": outcome.version,
+            })
+        );
     }
 
     let report = steps.run("Refreshing all local Cassy projects", || {
@@ -1270,6 +1301,10 @@ fn project_refresh_receipt_json(
         })
         .collect::<Vec<_>>();
     serde_json::json!({
+        // cas-91ba: name the binary that actually performed this refresh. A
+        // receipt from the pre-update image is what made an operator's first
+        // `cas update` look converged when it was not.
+        "refresh_binary_version": env!("CARGO_PKG_VERSION"),
         "projects": projects,
         "user_level_store": {
             "store": user_level_store_root(),
@@ -2413,7 +2448,11 @@ fn check_for_updates(
 }
 
 /// Download and install the latest (or specified) version
-fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow::Result<String> {
+fn perform_update(
+    args: &UpdateArgs,
+    current_version: &str,
+    cli: &Cli,
+) -> anyhow::Result<BinaryUpdateOutcome> {
     use self_update::Status;
     use self_update::backends::github::Update;
     use self_update::update::ReleaseUpdate;
@@ -2466,7 +2505,11 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
             fmt.newline()?;
             fmt.write_raw("  ")?;
             fmt.success("Already on the latest version")?;
-            return Ok(current_version.to_owned());
+            return Ok(BinaryUpdateOutcome {
+                version: current_version.to_owned(),
+                updated: false,
+                post_install_refresh: None,
+            });
         }
 
         fmt.newline()?;
@@ -2477,12 +2520,14 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
     // Perform the update
     let status = updater.update()?;
 
+    // cas-91ba: once the binary is swapped, THIS process is the old image.
+    // Everything the new release changes — discovery, the user-level store,
+    // migration repair — must run in the installed binary, so the remaining
+    // phases are delegated to it and its receipt is the authoritative one.
+    let mut post_install_refresh = None;
     if matches!(&status, Status::Updated(_)) {
-        if let Err(error) = run_post_swap_hook(&installed_binary, current_version, cli.json) {
-            eprintln!(
-                "Post-update hook unavailable ({error}); using in-process hub restart fallback"
-            );
-        }
+        post_install_refresh =
+            Some(run_post_swap_refresh(&installed_binary, current_version, cli.json)?);
     }
 
     if cli.json {
@@ -2490,18 +2535,18 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
             Status::UpToDate(v) => (false, v.as_str()),
             Status::Updated(v) => (true, v.as_str()),
         };
-        println!(
-            r#"{{"binary_updated":{},"version":"{}"}}"#,
+        return Ok(BinaryUpdateOutcome {
+            version: version.trim_start_matches('v').to_owned(),
             updated,
-            version.trim_start_matches('v')
-        );
-        return Ok(version.trim_start_matches('v').to_owned());
+            post_install_refresh,
+        });
     }
 
     let mut out = io::stdout();
     let theme = ActiveTheme::default();
     let mut fmt = Formatter::stdout(&mut out, theme);
 
+    let binary_was_updated = matches!(status, Status::Updated(_));
     let installed_version = match status {
         Status::UpToDate(v) => {
             fmt.newline()?;
@@ -2528,7 +2573,22 @@ fn perform_update(args: &UpdateArgs, current_version: &str, cli: &Cli) -> anyhow
         }
     };
 
-    Ok(installed_version)
+    Ok(BinaryUpdateOutcome {
+        version: installed_version,
+        updated: binary_was_updated,
+        post_install_refresh,
+    })
+}
+
+/// What the binary phase produced, including the refresh the newly installed
+/// binary already performed on our behalf (cas-91ba).
+struct BinaryUpdateOutcome {
+    version: String,
+    updated: bool,
+    /// `Some` when the installed binary ran the post-install phases. In
+    /// `--json` it holds that child's receipt; otherwise `Null`, because the
+    /// child printed its own human output.
+    post_install_refresh: Option<serde_json::Value>,
 }
 
 fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> anyhow::Result<()> {
@@ -2538,7 +2598,17 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
         .from
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("post-swap mode requires --from"))?;
+    // The hub goes first so it picks up the new binary immediately rather than
+    // waiting behind a full refresh.
     super::hub::restart_stale_hub(current_version, cli)?;
+
+    // These are the phases that must not run in the pre-update image.
+    let report = refresh_all_projects(args, cli, None)?;
+    if !cli.json {
+        let mut out = io::stdout();
+        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+        print_update_banner_with_formatter(&mut fmt, &report)?;
+    }
     Ok(())
 }
 
@@ -2558,15 +2628,56 @@ fn build_post_swap_command(
 
 /// Run the post-install phases with the freshly installed binary (cas-91ba).
 ///
-/// Skeleton: currently delegates to the legacy hook, which only restarts the
-/// hub, and returns no receipt.
+/// The phases after the swap — schema migrations, the all-projects refresh,
+/// the user-level store and skills sync — are exactly the behaviour the new
+/// release changes, so running them in the pre-update process image reports
+/// the old version's results and forces the operator to run `cas update`
+/// twice. The child is the newly installed binary, so its receipt is the
+/// authoritative one.
+///
+/// In `--json` the child's stdout is captured and returned so the parent can
+/// emit ONE combined document; otherwise the child inherits stdio and the
+/// operator watches the phases live.
 fn run_post_swap_refresh(
     installed_binary: &Path,
     previous_version: &str,
     json: bool,
 ) -> anyhow::Result<serde_json::Value> {
-    run_post_swap_hook(installed_binary, previous_version, json)?;
-    Ok(serde_json::json!({}))
+    let mut command = build_post_swap_command(installed_binary, previous_version, json);
+    let rerun_hint = format!(
+        "the refresh phases did not run with the newly installed binary at {}; \
+         run `cas update` again to converge",
+        installed_binary.display()
+    );
+
+    if !json {
+        let status = command
+            .status()
+            .with_context(|| format!("{rerun_hint} (could not start the installed binary)"))?;
+        if !status.success() {
+            anyhow::bail!("{rerun_hint} (exit status {status})");
+        }
+        return Ok(serde_json::Value::Null);
+    }
+
+    let output = command
+        .output()
+        .with_context(|| format!("{rerun_hint} (could not start the installed binary)"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("{rerun_hint} (exit status {}): {}", output.status, stderr.trim());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The child may print progress lines before its receipt; the receipt is
+    // the last JSON document on stdout.
+    let receipt = stdout
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("{rerun_hint} (its output carried no JSON receipt: {})", stdout.trim())
+        })?;
+    Ok(receipt)
 }
 
 fn strip_deleted_suffix(path: std::path::PathBuf) -> std::path::PathBuf {

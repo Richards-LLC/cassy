@@ -101,7 +101,11 @@ and do not claim success without its receipt.
    permalink. If a live Cassy proxy lacks the new registration, use the direct
    configured mecha-cassy MCP or approved bounded one-shot route; do not retry
    `cas`/`mcp_execute` after its authenticated-session rejection. Save `cas
-   update`, `cas --version`, and `cas hub` proof under `EVIDENCE_DIR`.
+   update`, `cas --version`, and `cas hub` proof under `EVIDENCE_DIR`, and
+   require the host `cas update -y --json` receipt to carry
+   `refresh_binary_version` equal to the released version: a different value
+   means the refresh ran with the pre-update binary and the host has not
+   converged (cas-91ba).
 10. Carry the POSTED receipt into the next prep commit. Close only after the
     merge receipt and stranded-branch inspection; if sibling lanes rewrote
     delivered files, use `stranded_branch_override` with proof on main.

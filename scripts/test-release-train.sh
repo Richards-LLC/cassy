@@ -470,5 +470,134 @@ else
     bad "pipeline.log is missing, unstamped, or truncated: $(head -3 "$run_stale_dir/pipeline.log" 2>/dev/null || echo absent)"
 fi
 
+
+# ===========================================================================
+# `publish` — the port of publish-wrapper.sh (cas-c1cd).
+#
+# Everything that can refuse must refuse BEFORE a tag worktree exists or a
+# publish process starts: publishing the wrong tree is not recoverable by
+# retrying, and the receipts must say which process actually ran.
+# ===========================================================================
+
+# A fixture whose origin/main really carries the landed commit, plus a
+# cas-cli/Cargo.toml the version check can read.
+new_publish_fixture() {
+    local name="$1" version="$2"
+    local dir="$tmp/$name"
+    local remote="$tmp/$name-remote.git"
+    git init -q --bare "$remote"
+    mkdir -p "$dir"
+    ( cd "$dir"
+      git init -q -b main .
+      git config user.email test@test.invalid
+      git config user.name 'Release Train Test'
+      mkdir -p cas-cli scripts
+      printf 'version = "%s"\n' "$version" > cas-cli/Cargo.toml
+      printf 'seed\n' > seed.txt
+      git add -A
+      git -c commit.gpgsign=false commit -q -m "release $version"
+      git remote add origin "$remote"
+      git push -q origin main ) >/dev/null
+    printf '%s\n' "$dir"
+}
+
+new_publish_stub() {
+    local path="$1" exit_code="$2"
+    cat >"$path" <<EOF
+#!/usr/bin/env bash
+printf 'stub publisher args=%s cwd=%s\n' "\$*" "\$PWD"
+exit $exit_code
+EOF
+    chmod +x "$path"
+}
+
+run_publish() {
+    local worktree="$1" version="$2" sha="$3" publish_cmd="$4" env_file="$5"
+    CAS_RELEASE_TRAIN_PUBLISH_CMD="$publish_cmd" \
+    CAS_RELEASE_ENV_FILE="$env_file" \
+        "$train" "$version" "$worktree" --publish "$sha" 2>&1
+}
+
+pub_env="$tmp/release.env"
+printf 'CAS_TEST_TOKEN=super-secret-value\nCAS_TEST_OTHER=another-secret\n' > "$pub_env"
+
+# --- happy path: receipts land in the run dir and name the real status -----
+wt_pub="$(new_publish_fixture publish-ok 9.9.9)"
+run_pub_dir="$(pipeline_run_dir "$wt_pub")"
+mkdir -p "$run_pub_dir"
+landed="$(git -C "$wt_pub" rev-parse HEAD)"
+new_publish_stub "$tmp/publisher-ok.sh" 0
+out="$(run_publish "$wt_pub" 9.9.9 "$landed" "$tmp/publisher-ok.sh" "$pub_env" || true)"
+
+if [[ "$(cat "$run_pub_dir/release.done" 2>/dev/null)" == "0" ]]; then
+    ok 'a successful publish records release.done=0 in the run directory'
+else
+    bad "release.done is $(cat "$run_pub_dir/release.done" 2>/dev/null || echo absent): $out"
+fi
+if [[ -s "$run_pub_dir/release.pid" ]] && [[ -s "$run_pub_dir/release.log" ]]; then
+    ok 'the publisher PID and log are recorded in the run directory'
+else
+    bad 'release.pid or release.log missing from the run directory'
+fi
+if grep -q 'stub publisher' "$run_pub_dir/release.log" 2>/dev/null; then
+    ok 'the publisher output is captured'
+else
+    bad "release.log does not hold the publisher output: $(cat "$run_pub_dir/release.log" 2>/dev/null || echo absent)"
+fi
+if [[ "$out" == *"CAS_TEST_TOKEN"* && "$out" != *"super-secret-value"* ]]; then
+    ok 'the credential proof prints variable names but never values'
+else
+    bad 'the credential proof leaked a value or named nothing'
+fi
+
+# --- a failing publisher is recorded, not swallowed ------------------------
+wt_fail="$(new_publish_fixture publish-fails 9.9.9)"
+run_fail_dir="$(pipeline_run_dir "$wt_fail")"
+mkdir -p "$run_fail_dir"
+landed_fail="$(git -C "$wt_fail" rev-parse HEAD)"
+new_publish_stub "$tmp/publisher-bad.sh" 7
+run_publish "$wt_fail" 9.9.9 "$landed_fail" "$tmp/publisher-bad.sh" "$pub_env" >/dev/null 2>&1 || true
+if [[ "$(cat "$run_fail_dir/release.done" 2>/dev/null)" == "7" ]]; then
+    ok 'a failing publisher exit status is recorded verbatim'
+else
+    bad "release.done is $(cat "$run_fail_dir/release.done" 2>/dev/null || echo absent), expected 7"
+fi
+
+# --- refusals happen before any worktree or publisher exists ---------------
+wt_sha="$(new_publish_fixture publish-sha-mismatch 9.9.9)"
+run_sha_dir="$(pipeline_run_dir "$wt_sha")"
+mkdir -p "$run_sha_dir"
+out="$(run_publish "$wt_sha" 9.9.9 0000000000000000000000000000000000000000 "$tmp/publisher-ok.sh" "$pub_env" || true)"
+if [[ "$out" == *"origin/main"* ]] && [[ ! -e "$run_sha_dir/release.done" ]] \
+   && [[ ! -d "$wt_sha/.cas/release-v9.9.9" ]]; then
+    ok 'a landed sha that is not origin/main refuses before creating a worktree'
+else
+    bad "sha mismatch did not refuse cleanly: $out"
+fi
+
+wt_ver="$(new_publish_fixture publish-version-mismatch 1.2.3)"
+run_ver_dir="$(pipeline_run_dir "$wt_ver")"
+mkdir -p "$run_ver_dir"
+landed_ver="$(git -C "$wt_ver" rev-parse HEAD)"
+out="$(run_publish "$wt_ver" 9.9.9 "$landed_ver" "$tmp/publisher-ok.sh" "$pub_env" || true)"
+if [[ "$out" == *"1.2.3"* && "$out" == *"9.9.9"* ]] && [[ ! -e "$run_ver_dir/release.done" ]]; then
+    ok 'a version mismatch refuses and names both the expected and actual version'
+else
+    bad "version mismatch did not refuse with both versions: $out"
+fi
+
+# --- the sha defaults to what the pipeline already recorded ----------------
+wt_default="$(new_publish_fixture publish-default-sha 9.9.9)"
+run_default_dir="$(pipeline_run_dir "$wt_default")"
+mkdir -p "$run_default_dir"
+git -C "$wt_default" rev-parse HEAD > "$run_default_dir/landed-main.sha"
+CAS_RELEASE_TRAIN_PUBLISH_CMD="$tmp/publisher-ok.sh" CAS_RELEASE_ENV_FILE="$pub_env" \
+    "$train" 9.9.9 "$wt_default" --publish >/dev/null 2>&1 || true
+if [[ "$(cat "$run_default_dir/release.done" 2>/dev/null)" == "0" ]]; then
+    ok 'publish falls back to the landed-main.sha the pipeline recorded'
+else
+    bad "publish did not use the recorded landed sha: $(cat "$run_default_dir/release.done" 2>/dev/null || echo absent)"
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

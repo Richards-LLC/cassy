@@ -106,6 +106,12 @@ pub use client::{
     attach, find_session_for_project, list_session_summaries, list_session_summaries_for_project,
     list_sessions, list_sessions_for_project,
 };
+/// The delivery wake gate's argument and verdict types (cas-5087), exported
+/// alongside [`FactoryDaemon::supervisor_wake_decision`] so acceptance tests
+/// and diagnostics can drive the real gate instead of restating its rules.
+pub use daemon::runtime::queue_and_events::{
+    PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, ToolCallEvidence, WakeDecision,
+};
 pub use daemon::{
     DaemonConfig, DaemonInitPhase, FactoryDaemon, ForkFirstResult, ForkResult, daemonize,
     fork_first_daemon, fork_into_daemon, run_daemon, run_daemon_after_fork,

@@ -1,0 +1,956 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>2026-09-04 · Cassy codebase audit</title><style>
+:root{color-scheme:light dark;--bg:#f7f8fa;--paper:#fff;--ink:#202b38;--muted:#4b596b;--accent:#174e88;--border:#b1bbc7;--soft:#edf2f7;--focus:#6a3600}
+@media(prefers-color-scheme:dark){:root{--bg:#111820;--paper:#19232e;--ink:#eef3f9;--muted:#c3cfdd;--accent:#9dcdff;--border:#728397;--soft:#263343;--focus:#ffd18b}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:1160px;margin:auto;padding:2.5rem 2.2rem 4rem;background:var(--paper)}h1{font-size:clamp(1.65rem,3.3vw,2.65rem);line-height:1.17;max-width:29ch;margin:0 0 1.1rem}h2{font-size:1.65rem;line-height:1.3;margin:2.4rem 0 .85rem;border-top:2px solid var(--border);padding-top:1.2rem}h3{font-size:1.2rem;line-height:1.4;margin:1.9rem 0 .5rem}p{max-width:92ch;margin:.7rem 0 1rem}a{color:var(--accent);text-underline-offset:.18em}a:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--focus);outline-offset:4px}code{font:.87em/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}pre{background:var(--soft);padding:1rem;border:1px solid var(--border);white-space:pre-wrap;overflow-wrap:anywhere;font-size:.94rem}pre code{font-size:.87em}.table-wrap{overflow:auto;margin:1.2rem 0 1.7rem}table{border-collapse:collapse;width:100%;font-size:.85rem;line-height:1.5}caption{text-align:left;color:var(--muted);font-size:.82rem;padding:.4rem 0 .6rem}th,td{padding:.65rem .7rem;border:1px solid var(--border);text-align:left;vertical-align:top;overflow-wrap:anywhere}th{background:var(--soft);font-weight:650}tbody tr:nth-child(even){background:var(--bg)}.overview th:first-child,.overview td:first-child{width:8rem;overflow-wrap:normal}.ranked th:nth-child(1){width:12%}.ranked th:nth-child(2){width:27%}.ranked th:nth-child(3){width:24%}.ranked th:nth-child(4){width:12%}.ranked th:nth-child(5){width:7%}.ranked th:nth-child(6){width:18%}section{scroll-margin-top:1rem}footer{max-width:1160px;margin:auto;padding:1rem 2rem 2rem;color:var(--muted);font-size:.8rem}.skip{position:absolute;top:-100px;left:1rem;background:var(--paper);padding:.5rem}.skip:focus{top:.5rem}
+@media(max-width:650px){main{padding:1.4rem 1rem 2.2rem}body{font-size:15px}table{min-width:760px}header+ p{font-size:1rem}h2{font-size:1.4rem}.table-wrap:first-of-type table{min-width:0}pre{padding:.65rem}footer{padding:1rem}.overview th:first-child,.overview td:first-child{width:5.8rem}}
+@media print{:root{--bg:#fff;--paper:#fff;--ink:#000;--muted:#333;--accent:#000;--border:#777;--soft:#fff;color-scheme:light}body{font-size:10pt;line-height:1.45;background:#fff}main{max-width:none;padding:0}h1{font-size:24pt}h2{font-size:16pt}h3{font-size:12pt}h1,h2,h3{break-after:avoid}.table-wrap{overflow:visible;margin:.7rem 0}table{min-width:0!important;table-layout:fixed;font-size:8pt}th,td{padding:.3rem}tr,pre{break-inside:avoid}thead{display:table-header-group;break-after:avoid}.overview th:first-child,.overview td:first-child{width:18%}a[href^="http"]::after{content:" (" attr(href) ")"}pre{font-size:9pt}footer{padding:.5rem 0}.skip{display:none}*{box-shadow:none!important}p{orphans:3;widows:3}}
+@page{size:A4;margin:16mm}
+</style></head><body><a class="skip" href="#content">Skip to report</a><main id="content"><header><h1 id="cassy-needs-targeted-repairs-to-failure-boundaries-and-lifecycle-interfaces">Cassy
+needs targeted repairs to failure boundaries and lifecycle
+interfaces</h1></header>
+<p><strong>Verdict — high confidence in the cited code facts; moderate
+confidence in repository-wide prioritization.</strong> This audit found
+reproducible edge-case failures and substantial lifecycle coupling.
+Prioritize durable sync intent, valid generated frontmatter, and Slack
+session identity; follow with a clearer close service. Broad deletion or
+a repository rewrite is not supported by this evidence.</p>
+<div aria-label="Overview — baseline bbc1629b, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="overview"><caption>Overview — baseline bbc1629b, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">Overview</th>
+<th scope="col">Assessment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Question</td>
+<td>Where does cas-src contain concrete correctness, maintainability,
+performance, or operational debt?</td>
+</tr>
+<tr>
+<td>Verdict</td>
+<td>Repair the verified boundaries first; deepen lifecycle interfaces
+incrementally.</td>
+</tr>
+<tr>
+<td>Confidence</td>
+<td>High for reproduced results and inspected control flow; medium for
+predicted production impact and effort.</td>
+</tr>
+<tr>
+<td>Scope</td>
+<td>Whole tracked-file inventory, followed by risk-based source sampling
+across Rust, shell, YAML, Markdown generators, hub-web and slack-bridge.
+This is not a line-by-line review of every file.</td>
+</tr>
+<tr>
+<td>Baseline</td>
+<td><code>bbc1629b85ba891e248f6b328d9b78a9a45beaba</code>, both checkout
+HEAD and origin/main at audit start; commit time
+<code>2026-09-04T22:12:34Z</code>.</td>
+</tr>
+<tr>
+<td>Date / author</td>
+<td>2026-09-04 UTC / Codex, fair-swan-9, practitioner
+Investigation/Diagnostic.</td>
+</tr>
+<tr>
+<td>Changes</td>
+<td>This delivery adds only the Markdown and HTML report. Product files
+are unchanged.</td>
+</tr>
+</tbody>
+</table></div>
+<section aria-labelledby="ranked-evidence"><h2 id="ranked-evidence">Ranked evidence</h2>
+<p>P1 means address before relying more heavily on the affected
+workflow; P2 means bounded follow-up; P3 means opportunistic cleanup.
+Priorities are audit judgments, not incident severity. Effort is an
+estimate: S is a localized patch and focused tests; M crosses a
+component seam; L requires staged migration and integration proof.
+Confidence concerns the stated finding, not the frequency of incidents.
+Every row includes a concrete falsifier; none is a claim that an
+incident occurred in production.</p>
+<div aria-label="Ranked evidence — baseline bbc1629b, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="ranked"><caption>Ranked evidence — baseline bbc1629b, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">Rank / class</th>
+<th scope="col">Finding and verified source</th>
+<th scope="col">Impact and reachability</th>
+<th scope="col">Confidence</th>
+<th scope="col">Effort</th>
+<th scope="col">Falsifier</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1 · P1 · correctness / error handling</td>
+<td>Task persistence discards outbox errors.
+<code>cas-cli/src/store/syncing_task.rs:53</code>, <code>:80</code>,
+<code>:229</code>;
+<code>cas-cli/src/cloud/sync_queue/queue_ops.rs:117</code>.</td>
+<td>A successful local write can have no retryable sync intent. Active
+when cloud wrapping is enabled.</td>
+<td>High control-flow; failure not injected into Rust wrapper.</td>
+<td>M</td>
+<td>Failed enqueue leaves a durable repair marker or is surfaced to the
+caller on every path.</td>
+</tr>
+<tr>
+<td>2 · P1 · correctness / DRY</td>
+<td>Duplicated skill YAML escaping produces invalid frontmatter.
+<code>cas-cli/src/sync/skills.rs:432</code>;
+<code>crates/cas-core/src/sync/skills.rs:379</code>.</td>
+<td>Ordinary descriptions containing a Windows path and colon can become
+unreadable YAML. Both implementations have live consumers.</td>
+<td>High; extracted Rust helper reproduced.</td>
+<td>S–M</td>
+<td>Generated description round-trips unchanged through the actual YAML
+reader.</td>
+</tr>
+<tr>
+<td>3 · P2 · correctness / domain identity</td>
+<td>Slack session IDs truncate timestamp bytes.
+<code>slack-bridge/src/daemon.ts:87</code>, <code>:98</code>,
+<code>:126</code>.</td>
+<td>Distinct threads can request the same session ID; bookkeeping also
+loses established sessions on daemon restart. Active message path.</td>
+<td>High collision; restart consequence inferred from source.</td>
+<td>S–M</td>
+<td>Distinct scoped thread keys map to distinct IDs, and restart
+recovers existing-session state.</td>
+</tr>
+<tr>
+<td>4 · P2 · architecture / operability</td>
+<td>Slack direct execution coexists with an unwired factory/SSE design.
+<code>slack-bridge/src/daemon-main.ts:151</code>, <code>:193</code>;
+<code>slack-bridge/src/daemon.ts:101</code>, <code>:118</code>,
+<code>:201</code>.</td>
+<td>Commands launch a permission-skipping child outside factory
+orchestration; handler calls are not serialized per thread. Dormant
+subscription logic obscures the actual contract.</td>
+<td>High code facts; no live Slack or harness invocation.</td>
+<td>M</td>
+<td>Production selects and tests an explicit execution policy with
+per-thread serialization and recovery.</td>
+</tr>
+<tr>
+<td>5 · P2 · build / I/O</td>
+<td>Build script watches directory paths beneath a worktree
+<code>.git</code> file. <code>cas-cli/build.rs:49</code>,
+<code>:50</code>.</td>
+<td>Missing watched paths invalidate unchanged builds; version metadata
+uses the wrong Git topology.</td>
+<td>High analogous Cargo probe; full cas compile cost unmeasured.</td>
+<td>S</td>
+<td>Two unchanged worktree builds keep the build script fresh while a
+real ref change updates provenance.</td>
+</tr>
+<tr>
+<td>6 · P2 · architecture / testability</td>
+<td>Task close combines lifecycle policy, evidence collection,
+persistence and presentation.
+<code>cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs:1964</code>,
+<code>:2740</code>, <code>:3243</code>, <code>:4107</code>,
+<code>:4367</code>.</td>
+<td>A change must preserve eight caller obligations across five
+dependency categories; effects and transport errors are
+interleaved.</td>
+<td>High structural; no latency or regression-rate claim.</td>
+<td>L</td>
+<td>A transport-independent close interface owns the invariants and
+supports real-store integration tests without MCP/environment
+setup.</td>
+</tr>
+<tr>
+<td>7 · P2 · correctness / CI</td>
+<td>Classifier reports <code>empty</code> after failed
+<code>git diff</code>. <code>scripts/classify-ci-diff.sh:17</code>;
+<code>.github/actions/classify-required-diff/action.yml:50</code>,
+<code>:68</code>.</td>
+<td>Reproduced false success in helper. Normal action guards invalid
+bases first; a subsequent diff failure can still be misclassified.</td>
+<td>High helper result; narrower CI exposure.</td>
+<td>S</td>
+<td>A Git failure returns nonzero or conservatively reports
+<code>rust-touched</code>.</td>
+</tr>
+<tr>
+<td>8 · P2 · latent correctness / tests</td>
+<td>Upload staging rejects a symlink after overwriting its target.
+<code>slack-bridge/src/file-handler.ts:123</code>, <code>:128</code>;
+<code>slack-bridge/src/file-handler.test.ts:153</code>.</td>
+<td>Outside fixture data changes despite failure result. Currently
+test-only code, not a demonstrated remote upload vulnerability.</td>
+<td>High native Node reproduction; dormant reachability.</td>
+<td>S–M</td>
+<td>Rejection preserves outside bytes and rejects symlinked ancestors
+before any write.</td>
+</tr>
+<tr>
+<td>9 · P2 · architecture / complexity</td>
+<td>Commander rendering retains a large implicit state interface.
+<code>hub-web/src/main.ts:1626</code>, <code>:1648</code>,
+<code>:1685</code>, <code>:1746</code>, <code>:1863</code>.</td>
+<td>UI policy and DOM shell construction share mutable module state;
+review and targeted testing require knowing that state.</td>
+<td>High source/complexity; no measured rendering slowdown.</td>
+<td>M–L</td>
+<td>A bounded view model covers the render inputs and DOM tests exercise
+its observable transitions.</td>
+</tr>
+<tr>
+<td>10 · P3 · DRY / I/O ownership</td>
+<td>IndexedDB transaction cleanup is duplicated.
+<code>hub-web/src/storage.ts:19</code>, <code>:29</code>,
+<code>:204</code>, <code>:213</code>.</td>
+<td>Abort, error, connection closure and settlement rules must evolve
+together in two paths.</td>
+<td>High Fallow clone and source match.</td>
+<td>S–M</td>
+<td>A shared lifecycle primitive owns both paths while preserving atomic
+read-modify-write.</td>
+</tr>
+<tr>
+<td>11 · P3 · operability / distribution</td>
+<td>Shell installer installs and de-quarantines a downloaded archive
+without digest verification. <code>scripts/cas-install.sh:225</code>,
+<code>:238</code>, <code>:249</code>, <code>:257</code>.</td>
+<td>Installer trust is HTTPS plus the release asset; package
+substitution is not checked against an independent receipt.</td>
+<td>High inspected flow; no compromise alleged.</td>
+<td>M</td>
+<td>A trusted digest/signature/attestation is verified before extraction
+and executable replacement.</td>
+</tr>
+</tbody>
+</table></div>
+</section><section aria-labelledby="reasoning-chain"><h2 id="reasoning-chain">Reasoning chain</h2>
+<p>The verdict follows three distinct evidence classes.
+<strong>Reproduced behavior:</strong> invalid skill YAML, colliding
+Slack IDs, classifier false success, and a dormant staging overwrite; an
+analogous Cargo fixture demonstrates the worktree invalidation
+mechanism. <strong>Inspected active control flow:</strong> sync intent
+can be discarded, Slack starts a direct child, and the installer has no
+artifact-integrity step. <strong>Structural debt:</strong> close
+orchestration, renderer inputs, and repeated transaction cleanup expose
+avoidable knowledge to maintainers. These classes are separated so a
+static complexity score never poses as a runtime defect.</p>
+<p>The pattern is incomplete ownership of an operation: a local write
+succeeds before sync intent is durable; staging decides whether a write
+was permitted after performing it; a shell helper loses its producer's
+error; and close requires knowledge of multiple state machines through
+one transport handler. The justified response is to strengthen those
+interfaces and their observable guarantees. The inventory and
+false-positive checks do not support indiscriminate abstraction
+removal.</p>
+<h3 id="1-persist-sync-intent-with-the-task-mutation">1. Persist sync
+intent with the task mutation</h3>
+<p><code>SyncingTaskStore::add</code> commits through
+<code>inner.add</code>, reloads the stored task, calls a void
+<code>queue_upsert</code>, then returns <code>Ok(())</code>
+(<code>cas-cli/src/store/syncing_task.rs:229–233</code>). Personal
+enqueue uses <code>let _ = self.queue.enqueue(...)</code> at line 80;
+team enqueue does the same at line 68. <code>SyncQueue</code> executes
+fallible SQLite SQL and propagates its error internally
+(<code>cas-cli/src/cloud/sync_queue/queue_ops.rs:105–140</code>), which
+the wrapper then discards. <code>update</code> repeats the order at
+<code>syncing_task.rs:265–287</code>.</p>
+<p>This is an actual active seam:
+<code>cas-cli/src/store/detect.rs:406–422</code> enables the wrapper for
+logged-in configuration, but also silently falls back to the base store
+if opening the queue fails. Personal push consumes pending queue rows
+(<code>cas-cli/src/cloud/syncer/push.rs:63</code>); its retry mechanism
+cannot retry an intent that never reached the queue. This audit did not
+inject a SQLite failure into the complete Rust wrapper and does not
+claim measured data loss. A later mutation may enqueue a fresh state,
+but that is not a guarantee for an otherwise untouched task.</p>
+<p><strong>Remediation direction:</strong> make local mutation plus
+outbox intent one durable operation where possible. Otherwise persist a
+reconciliation marker and explicitly report degraded sync without
+pretending the local commit failed. Simply adding <code>?</code> after
+the committed write creates an ambiguous retry contract. Pin success,
+queue failure, team/personal partial failure, and restart reconciliation
+through the store interface with real SQLite.</p>
+<h3 id="2-replace-duplicated-scalar-escaping-with-a-proven-serializer">2.
+Replace duplicated scalar escaping with a proven serializer</h3>
+<p>The two skill writers contain the same <code>escape_yaml</code>
+function. When a string contains a colon, the helper surrounds it with
+double quotes but escapes only double quotes and newlines; backslashes
+remain raw (<code>cas-cli/src/sync/skills.rs:432–437</code>;
+<code>crates/cas-core/src/sync/skills.rs:379–384</code>). Compiling the
+actual extracted Rust function and passing
+<code>Use C:\project: inspect</code> produced:</p>
+<pre class="text"><code>description: "Use C:\project: inspect"
+YAML parser: found unknown escape character 'p'</code></pre>
+<p>This is not dead legacy duplication: the CLI imports its local
+<code>SkillSyncer</code> (<code>cas-cli/src/cli/update.rs:36</code>,
+<code>:1799</code>), while the MCP server imports
+<code>cas_core::SkillSyncer</code>
+(<code>cas-cli/src/mcp/server/mod.rs:18</code>). The CLI writer emits
+the escaped description at <code>cas-cli/src/sync/skills.rs:71</code>
+and writes the generated document at line 310. The spec writer already
+escapes backslashes
+(<code>crates/cas-core/src/sync/specs.rs:270–282</code>), demonstrating
+drift between nearby policies; it is not evidence that the skill writers
+are safe.</p>
+<p><strong>Remediation direction:</strong> share scalar serialization
+and round-trip tests, including backslashes, quotes, YAML implicit
+scalars, leading punctuation, newlines and Unicode. Keep differing
+harness metadata policy explicit. The deletion test favors deleting
+duplicate escaping, not deleting one entire skill implementation before
+comparing its behavior. The reproduced YAML rejection used PyYAML; no
+harness parser was invoked, so user-visible rejection remains a
+protocol-level consequence to confirm in integration.</p>
+<h3 id="3-scope-and-persist-slack-thread-identity">3. Scope and persist
+Slack thread identity</h3>
+<p><code>threadTsToSessionId</code> converts the timestamp string to hex
+and keeps only 32 hex characters, which preserves only 16 original ASCII
+bytes (<code>slack-bridge/src/daemon.ts:87–91</code>). The following two
+inputs yielded exactly the same ID when the function was extracted from
+the inspected source and executed:</p>
+<div aria-label="3. Scope and persist
+Slack thread identity — baseline bbc1629b, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="data"><caption>3. Scope and persist
+Slack thread identity — baseline bbc1629b, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">Input timestamp</th>
+<th scope="col">Generated session ID</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>1757020000.123451</code></td>
+<td><code>31373537-3032-3030-3030-2e3132333435</code></td>
+</tr>
+<tr>
+<td><code>1757020000.123459</code></td>
+<td><code>31373537-3032-3030-3030-2e3132333435</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Source: <code>thread-session-proof.json</code>, source function at
+the baseline commit; synthetic inputs, not actual Slack messages. The
+raw timestamp alone also omits channel and project scope. Router message
+construction carries both
+(<code>slack-bridge/src/router.ts:120–127</code>), so that scope is
+available.</p>
+<p>The in-memory <code>threadSessions</code> set
+(<code>daemon.ts:81</code>) decides new versus resume at line 99 and
+marks a thread started immediately after spawn at line 126, before
+success. A failed spawn or restart can therefore disagree with persisted
+harness session state. This is a source-derived recovery risk, not a
+reproduced harness failure. <strong>Remediation direction:</strong>
+derive or persist an ID from the full scoped key, record successful
+establishment, serialize same-thread requests, and test collisions,
+startup failure and restart recovery using an injected process
+runner.</p>
+<h3 id="4-give-the-bridge-one-explicit-execution-contract">4. Give the
+bridge one explicit execution contract</h3>
+<p>The live handler calls <code>injectMessage</code> directly
+(<code>slack-bridge/src/daemon-main.ts:193</code>), and that
+implementation starts <code>claude</code> with
+<code>--dangerously-skip-permissions</code>, fixed effort, fixed turn
+limit and fixed timeout
+(<code>slack-bridge/src/daemon.ts:101–123</code>). These are operational
+policy choices embedded in the transport adapter. Socket handling
+invokes promises independently (<code>daemon.ts:195–203</code>), so
+multiple messages may spawn overlapping work for the same thread.</p>
+<p>Meanwhile <code>ensureSubscription</code> at
+<code>daemon-main.ts:151</code> has no call site in that file or the
+repository search; its subscription map is populated only inside that
+function. SSE routing and shutdown machinery thus describe a path the
+active handler does not enter. Router channel and user allowlists are
+real (<code>router.ts:102–117</code>) and explicitly rule out a claim
+that arbitrary Slack users can invoke this path. No live Slack API
+calls, messages, or Claude child invocations were performed for this
+audit.</p>
+<p><strong>Remediation direction:</strong> decide whether the supported
+operation is factory dispatch or isolated direct execution, then expose
+that choice through an executor interface with explicit limits,
+cancellation, serialization and resume outcomes. An adapter seam is
+justified if both execution modes remain supported; if only direct
+execution is intended, deleting the dormant SSE orchestration reduces
+the interface without redistributing useful behavior. Avoid keeping an
+unused second architecture “for flexibility.”</p>
+<h3 id="5-resolve-real-git-paths-before-registering-build-inputs">5.
+Resolve real Git paths before registering build inputs</h3>
+<p><code>cas-cli/build.rs:49–50</code> registers
+<code>../.git/HEAD</code> and <code>../.git/index</code>. This
+checkout's <code>.git</code> is a file, as in a linked Git worktree.
+Those descendants do not exist. A dependency-free Cargo fixture using
+the exact two directives and an analogous <code>.git</code> file was
+checked twice. The second unchanged check reported:</p>
+<pre class="text"><code>Dirty audit-build-fixture: the file `../.git/HEAD` is missing
+Compiling audit-build-fixture
+Running .../build-script-build
+Finished `dev` profile ...</code></pre>
+<p>Source: <code>build-probe-second.log</code>. Fixture elapsed times
+are not a Cassy rebuild benchmark or predicted saving. This mechanism is
+relevant to the project's isolated worktrees even though hardlink target
+seeding and same-path sccache reduce other costs. Missing optional
+<code>.env</code> watches in the same script may also invalidate builds;
+they were not separately benchmarked here.</p>
+<p><strong>Remediation direction:</strong> resolve the worktree-aware
+paths with Git, watch existing relevant files including the symbolic
+branch reference, and define how dirty-state changes should refresh
+embedded metadata. Test normal checkout and linked worktree behavior on
+two unchanged builds and after a commit. Do not remove provenance simply
+to make Cargo report “fresh.”</p>
+<h3 id="6-deepen-the-close-service-preserving-its-real-policy">6. Deepen
+the close service, preserving its real policy</h3>
+<p><code>cas_task_close_with_completion</code> occupies lines 1964–4530,
+<strong>2,567 physical lines including comments and whitespace</strong>.
+This interval is the handler itself, not its colocated tests. The
+containing file has 23,381 lines, which includes substantial tests and
+is not a complexity metric. The reason to restructure is the interface
+burden, not either line count.</p>
+<p>Eight caller obligations are visible: <strong>identity</strong>,
+<strong>task/epic ownership</strong>, <strong>task type and
+execution-depth contract</strong>, <strong>repository/target
+selection</strong>, <strong>content attribution</strong>,
+<strong>verification-cycle binding</strong>, <strong>override
+authority</strong>, and <strong>receipt/retry interpretation</strong>.
+These are audit groupings, not an automated count of parameters. The
+public request starts at
+<code>cas-cli/src/mcp/tools/types/task.rs:173</code>; three more
+optional inputs appear at <code>close_ops.rs:1967–1969</code>.
+Environment-derived identity appears at <code>:2261</code>, policy at
+<code>:2740</code>, Git merge validation at <code>:2647</code>, dispatch
+creation at <code>:3243</code>, final task persistence at
+<code>:4107</code>, and lease release at <code>:4367</code>.</p>
+<div aria-label="6. Deepen
+the close service, preserving its real policy — baseline bbc1629b, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="data"><caption>6. Deepen
+the close service, preserving its real policy — baseline bbc1629b, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">Dependency category</th>
+<th scope="col">Evidence / current responsibility</th>
+<th scope="col">Proposed test boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>In-process domain rules and types</td>
+<td><code>close_ops.rs:2259</code>, <code>:2740</code>: ownership and
+harness verification policy</td>
+<td>Pure policy outcomes with explicit resolved context.</td>
+</tr>
+<tr>
+<td>Local SQLite stores and queues</td>
+<td><code>close_ops.rs:1971</code>, <code>:3243</code>,
+<code>:4107</code>, <code>:4367</code>: task, dispatch and lease
+state</td>
+<td>Real temporary stores; verify committed and reverse/retry
+states.</td>
+</tr>
+<tr>
+<td>Local Git and filesystem</td>
+<td><code>close_ops.rs:2647</code>, <code>:6216</code>: merge
+conflict/evidence checks</td>
+<td>Real disposable repositories, explicit evidence snapshot.</td>
+</tr>
+<tr>
+<td>Process environment and configuration</td>
+<td><code>close_ops.rs:2262</code>, <code>:2739</code>: caller identity
+and mode</td>
+<td>Resolve once at transport boundary and inject typed context.</td>
+</tr>
+<tr>
+<td>Local daemon transport</td>
+<td><code>close_ops.rs:3226–3232</code>: notification event
+emission</td>
+<td>Explicit post-commit effects with observable
+delivery/degradation.</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Deletion test:</strong> deleting this handler would make
+policy complexity reappear across callers. It has earned its
+responsibility; the seam has insufficient locality. Keep the domain
+operation and separate evidence collection, transition decision, durable
+application and response rendering behind a small application-service
+interface. A mere file split would not reduce caller knowledge. A
+generic configurable gate/plugin engine would add ordering and
+configuration facts without a demonstrated second use case. Prefer
+staged extraction with existing integration contracts, including
+rejected close, verification timeout, reopen and idempotent retry. No
+claim of missing tests is made:
+<code>cas-cli/tests/mcp_tools_test/task_tools/verification_flow.rs</code>
+itself contains 9,183 physical lines in the inventory.</p>
+<h3 id="7-preserve-producer-failures-in-the-ci-classifier">7. Preserve
+producer failures in the CI classifier</h3>
+<p>The classifier reads <code>git diff</code> through process
+substitution (<code>scripts/classify-ci-diff.sh:17–19</code>). Bash
+<code>set -euo pipefail</code> does not make the enclosing loop fail
+when that producer fails. With a nonexistent base, the helper printed
+<code>empty</code> and exited zero, alongside Git's fatal error. Exact
+command:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb3-1"><a aria-hidden="true" href="#cb3-1" tabindex="-1"></a><span class="fu">bash</span> scripts/classify-ci-diff.sh audit-nonexistent-base HEAD</span>
+<span id="cb3-2"><a aria-hidden="true" href="#cb3-2" tabindex="-1"></a><span class="co"># exit 0; stdout: empty; stderr: fatal: ambiguous argument ...</span></span></code></pre></div>
+<p>The normal composite action calls <code>git merge-base</code> first
+and falls back to the Rust tier if it fails
+(<code>.github/actions/classify-required-diff/action.yml:50–54</code>).
+Therefore the invalid-base fixture does <strong>not</strong> demonstrate
+that normal CI skips checks for an invalid base. The remaining concern
+is the helper's broken contract and failures after successful base
+resolution: the action trusts a returned <code>empty</code> at lines
+68–70. <strong>Remediation direction:</strong> capture the diff with an
+explicitly checked status before iterating; test invalid refs and an
+injected failing Git executable after base resolution. Preserve the
+documented scoped/full CI policy.</p>
+<h3 id="8-fix-staging-before-wiring-it-into-production">8. Fix staging
+before wiring it into production</h3>
+<p>Native Node 24 imported <code>stageFile</code> directly from the
+TypeScript source. In a disposable directory,
+<code>uploads/report.txt</code> was a symlink to
+<code>outside.txt</code>. After staging, the result was
+<code>ok: false</code>, while <code>outside.txt</code> contained
+<code>OVERWRITTEN</code>. The symlink remained because the ESM error
+path calls CommonJS <code>require</code>, whose failure is caught and
+replaced with “Failed to verify staged file”
+(<code>slack-bridge/src/file-handler.ts:132–144</code>).</p>
+<p>The defect is in ordering: <code>writeFileSync</code> at line 123
+follows the link before <code>lstatSync</code> at line 128. The existing
+test explicitly acknowledges the write but checks only rejection
+(<code>slack-bridge/src/file-handler.test.ts:153–157</code>), so it does
+not enforce the intended non-modification guarantee. No test-suite pass
+is asserted; the native import probe differs from Vitest's module
+handling.</p>
+<p><strong>Reachability limit:</strong> source searches show this helper
+is referenced by its tests, with no active router/daemon call. Filename
+sanitization is present, and the router drops non-regular message
+subtypes (<code>router.ts:94</code>). Thus this is a verified latent
+file-integrity defect, not evidence of an exploitable live upload
+endpoint. <strong>Remediation direction:</strong> either delete the
+unused feature or implement safe pre-write directory/file handling and
+atomic creation, including ancestor symlinks and collisions. Test
+outside bytes remain unchanged. The download helper also buffers the
+full response before staging's size check
+(<code>file-handler.ts:171</code>); this is a related unbounded-I/O
+concern only if the feature is activated.</p>
+<h3 id="9-reduce-commanders-implicit-rendering-interface">9. Reduce
+Commander's implicit rendering interface</h3>
+<p>Fallow 3.15.0 reports <code>render</code> at
+<code>hub-web/src/main.ts:1626</code> with cyclomatic complexity
+<strong>131</strong> and cognitive complexity <strong>121</strong>;
+<code>renderSessionState</code> at line 1018 has <strong>77 /
+111</strong>. These are tool-specific static metrics, not performance
+measurements. <code>render</code> computes send policy, lease/control
+state, session navigation, attention, pairing and markup from module
+state (<code>main.ts:1648</code>, <code>:1680</code>,
+<code>:1685</code>).</p>
+<p>The code already has meaningful seams: <code>renderDecision</code>
+can avoid rebuilding the shell (<code>main.ts:1746–1751</code>),
+<code>renderRegions</code> updates current regions (<code>:1863</code>),
+and terminal modules own their own behavior. This falsifies “every
+heartbeat rebuilds the whole UI.” <strong>Remediation
+direction:</strong> make each region consume a bounded view model,
+keeping side effects out of model construction. Test the observable DOM
+and transitions through those interfaces. Do not add a framework or
+split functions solely to reduce Fallow's number. Deleting the renderer
+would push real behavior elsewhere; the target is a smaller interface,
+not fewer files.</p>
+<h3 id="10-share-transaction-lifecycle-not-transaction-semantics">10.
+Share transaction lifecycle, not transaction semantics</h3>
+<p>Fallow found a 16-line clone between
+<code>hub-web/src/storage.ts:28–43</code> and <code>:212–227</code>.
+Source review confirms duplicated settlement, abort listener, error
+handling and database closure. Both paths open a database and close it
+independently. The general helper handles a single request; the machine
+backend performs an atomic read-modify-write
+(<code>storage.ts:228–233</code>).</p>
+<p><strong>Remediation direction:</strong> share private
+transaction-lifecycle handling, allowing the operation body to issue the
+required requests. Replacing the backend update with two general
+<code>transact</code> calls would break atomicity. Test real IndexedDB
+behavior or a faithful local implementation at the catalog interface,
+including cancellation before open, cancellation during work, request
+failure and successful commit. The deletion test favors one internal
+lifecycle owner; it does not justify exposing database requests to
+catalog callers. No current connection leak is claimed.</p>
+<h3 id="11-state-the-installers-artifact-trust-explicitly">11. State the
+installer's artifact trust explicitly</h3>
+<p><code>download_and_install</code> downloads over HTTPS, extracts,
+installs and on macOS removes quarantine
+(<code>scripts/cas-install.sh:211–259</code>). The subsequent
+<code>verify_install</code> begins at line 447; the inspected installer
+has no checksum/signature validation step. The evidence is the complete
+function and source search, not a network attack or release
+incident.</p>
+<p><strong>Remediation direction:</strong> verify an artifact receipt
+before extraction/replacement and preserve the prior executable until
+verification succeeds. A checksum fetched from the same compromised
+publishing authority detects corruption but does not independently
+authenticate that authority; specify the trust root for a
+signature/attestation if substitution resistance is the goal. HTTPS and
+an explicitly selected version are existing protections, so this finding
+is narrower than “unauthenticated download.” Whether the present trust
+model is acceptable is an operator decision; quarantine removal
+increases the value of making it explicit.</p>
+</section><section aria-labelledby="checked-and-rejected-candidates"><h2 id="checked-and-rejected-candidates">Checked and rejected
+candidates</h2>
+<div aria-label="Checked and rejected
+candidates — baseline bbc1629b, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="data"><caption>Checked and rejected
+candidates — baseline bbc1629b, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">Candidate</th>
+<th scope="col">Evidence checked</th>
+<th scope="col">Why it was rejected or narrowed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>“Store wrappers are useless pass-through modules.”</td>
+<td><code>cas-cli/src/store/quarantine_task.rs:3–19</code>,
+<code>:103–120</code>; <code>store/detect.rs:379–400</code>.</td>
+<td>Quarantine filtering protects multiple list callers while keeping ID
+lookup inspectable. Deletion spreads real policy; forwarding methods
+alone do not make the module shallow.</td>
+</tr>
+<tr>
+<td>“Disabled task notifications still fire in production.”</td>
+<td><code>cas-cli/src/store/notifying_task.rs:34–64</code>;
+<code>store/detect.rs:394</code>.</td>
+<td>Transition branches omit an internal enabled check, but production
+wrapper construction requires notifications enabled. No production bug
+established.</td>
+</tr>
+<tr>
+<td>“Fallow proves large amounts of dead code.”</td>
+<td>Both raw JSON reports;
+<code>hub-web/src/connection-state-view.ts:37</code>,
+<code>connection-state.ts:62</code>; tests and import search.</td>
+<td>The duplicate <code>elapsedSeconds</code> exports accept different
+snapshot shapes and deliberately delegate. Test-only exports, interface
+members and internal uses require case-by-case review. No bulk deletion
+list is endorsed.</td>
+</tr>
+<tr>
+<td>“Fallow measured low production test coverage.”</td>
+<td>Both health summaries report
+<code>coverage_model: static_estimated</code>.</td>
+<td>No runtime coverage was supplied. CRAP/severity labels were not
+treated as measured coverage or incident severity.</td>
+</tr>
+<tr>
+<td>“Checked-in web assets are avoidable duplication.”</td>
+<td><code>cas-cli/src/hub/server.rs:157–199</code>;
+<code>.github/workflows/ci.yml:362–370</code>.</td>
+<td>Rust embeds dist assets; CI rebuilds and rejects drift. They are
+required offline build inputs.</td>
+</tr>
+<tr>
+<td>“Shared live Cargo target would solve worker build cost.”</td>
+<td><code>CLAUDE.md:60–89</code>;
+<code>scripts/refresh-worker-build-cache.sh:35–46</code>.</td>
+<td>The repo deliberately publishes a quiescent snapshot and uses
+private targets. A shared live Cargo target reintroduces serialization;
+this audit did not remeasure the documented sccache result.</td>
+</tr>
+<tr>
+<td>“Release panic settings are reckless overhead.”</td>
+<td><code>Cargo.toml:37–56</code>; <code>cas-cli/src/lib.rs</code> panic
+guard; <code>CLAUDE.md:94</code>.</td>
+<td>Unwinding is required by the MCP panic catcher. No abort
+optimization is recommended.</td>
+</tr>
+<tr>
+<td>“Reference-history scanning should use only current content.”</td>
+<td><code>scripts/gen-builtin-reference-history.sh:4–10</code>,
+<code>:34–48</code>; <code>generator-inventory.json</code>.</td>
+<td>The history is needed to recognize previously shipped files. There
+are 141 reference paths / 47 canonical groups; 28 groups are
+byte-identical across all three current flavors. Repeated Git/hash
+subprocesses are a candidate for batching, but historical blobs can
+differ and no elapsed-time hotspot was measured. Deferred below ranked
+work.</td>
+</tr>
+<tr>
+<td>“Workspace crates form a cyclic dependency graph.”</td>
+<td>Root and member Cargo manifests, recorded
+<code>workspace-dependencies.json</code>.</td>
+<td>No cycle among the inspected workspace path dependencies. The
+evidenced boundary problems are inside application composition and the
+bridge execution path; a clean crate DAG does not prove clean internal
+architecture.</td>
+</tr>
+<tr>
+<td>“All correctness defects are production vulnerabilities.”</td>
+<td>Router allowlists, normal CI base guard, helper import searches,
+fixture-only outputs.</td>
+<td>Staging is dormant, CI's invalid-base case is guarded, and no
+production data or external service was exercised.</td>
+</tr>
+</tbody>
+</table></div>
+</section><section aria-labelledby="what-would-falsify-this-verdict"><h2 id="what-would-falsify-this-verdict">What would falsify this
+verdict</h2>
+<p>The central verdict would weaken if integration evidence showed sync
+intent survives queue failures, generated frontmatter round-trips
+representative strings, and the active bridge recovers scoped identity
+and serializes requests. A close API that already exposes all effects
+and invariants independently of transport would overturn the proposed
+architectural priority. Those outcomes require execution at the
+identified boundaries, not a low aggregate linter score.</p>
+<p>For each row, the ranked table states the more local falsifier.
+Evidence of real production frequency, operational cost or existing
+recovery paths could change priorities without changing the reproduced
+code facts. This audit establishes no regression start date, throughput
+loss, exploitable remote boundary, or exhaustive unused-code
+inventory.</p>
+</section><section aria-labelledby="prioritized-next-actions"><h2 id="prioritized-next-actions">Prioritized next actions</h2>
+<p>Owners below are suggested component responsibilities, not assigned
+people or created tasks.</p>
+<div aria-label="Prioritized next actions — baseline bbc1629b, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="data"><caption>Prioritized next actions — baseline bbc1629b, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">Order</th>
+<th scope="col">Suggested owner</th>
+<th scope="col">Concrete next action</th>
+<th scope="col">Acceptance evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Store/cloud maintainer</td>
+<td>Design durable mutation/outbox semantics for finding 1.</td>
+<td>Real SQLite fault and restart tests; local success is
+distinguishable from degraded sync.</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Managed-artifact maintainer</td>
+<td>Share YAML scalar serialization for finding 2.</td>
+<td>Both active writers round-trip hostile and ordinary scalar inputs
+through their readers.</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Bridge maintainer</td>
+<td>Repair scoped session identity and choose the supported execution
+policy, findings 3–4.</td>
+<td>No live Slack needed: fake process runner plus socket tests for
+concurrency, failure and restart.</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Build/CI maintainer</td>
+<td>Resolve Git paths and propagate classifier failure, findings 5 and
+7.</td>
+<td>Two unchanged builds stay fresh; changed refs refresh metadata;
+injected Git errors run the conservative tier.</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Lifecycle maintainer</td>
+<td>Extract one close service increment at a time, finding 6.</td>
+<td>Existing gate contracts plus temporary Git/SQLite tests for success,
+refusal, reverse state and retry.</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Bridge maintainer</td>
+<td>Delete or repair dormant staging before activation, finding 8.</td>
+<td>Outside bytes unchanged; symlink ancestors, collisions and bounded
+downloads covered.</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Commander maintainer</td>
+<td>Introduce bounded region models, then share transaction lifecycle,
+findings 9–10.</td>
+<td>Observable DOM transitions and real transaction atomicity/abort
+tests; no metric-only acceptance.</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Release maintainer</td>
+<td>Decide and encode artifact trust for finding 11.</td>
+<td>Invalid artifact rejected before extraction or replacing the
+installed binary.</td>
+</tr>
+</tbody>
+</table></div>
+</section><section aria-labelledby="provenance-and-method"><h2 id="provenance-and-method">Provenance and method</h2>
+<p><strong>Source of truth:</strong>
+<code>docs/reports/2026-09-04-cas-src-codebase-audit.md</code>; the
+adjacent HTML is generated from this Markdown. <strong>Repository
+snapshot:</strong>
+<code>bbc1629b85ba891e248f6b328d9b78a9a45beaba</code>. Analysis date is
+2026-09-04 UTC; evidence is a point-in-time source audit and synthetic
+local probes, not an operational telemetry window. No production
+database, credential file, cloud API or Slack account was read or
+changed.</p>
+<p>The tracked inventory contains <strong>4,019 paths</strong>.
+Excluding <code>vendor/</code> and <code>.cas/</code>, extension counts
+include <strong>1,219 <code>.rs</code>, 84 <code>.ts</code>, 82
+<code>.sh</code>, 12 <code>.yml</code>, 3 <code>.yaml</code>, and 719
+<code>.md</code> files</strong>. Paths are counted, not executable
+modules; extension counts include tests and documentation. Vendor
+source, generated bundles, historical reports and binaries were
+inventoried but not subjected to a claim of complete manual review.
+Risk-based reading focused on active stores, lifecycle orchestration,
+build/CI scripts, managed artifact writers, Commander rendering/storage,
+and bridge routing/execution/staging.</p>
+<div aria-label="Provenance and method — baseline bbc1629b, 2026-09-04" class="table-wrap" role="region" tabindex="0"><table class="data"><caption>Provenance and method — baseline bbc1629b, 2026-09-04</caption>
+<thead>
+<tr>
+<th scope="col">Fallow package</th>
+<th scope="col">Dead-code/API candidates</th>
+<th scope="col">Clone groups / duplicated lines</th>
+<th scope="col">Complexity findings</th>
+<th scope="col">Analysis time</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>hub-web</td>
+<td>60: 31 exports, 2 types, 26 class members, 1 duplicate export</td>
+<td>6 / 108</td>
+<td>51</td>
+<td>3692 ms</td>
+</tr>
+<tr>
+<td>slack-bridge</td>
+<td>10: 6 exports, 4 class members</td>
+<td>2 / 46</td>
+<td>7</td>
+<td>3511 ms</td>
+</tr>
+</tbody>
+</table></div>
+<p>Source: <code>fallow-hub-web.json</code> and
+<code>fallow-slack-bridge.json</code>, Fallow <strong>3.15.0</strong>,
+schema <strong>10</strong>, baseline above, default analysis without
+runtime coverage or custom boundary rules. The elapsed times are
+Fallow's own elapsed counters, not a benchmark. Zero reported boundary
+violations means no configured violations were found, not that
+architectural boundaries were proven sound. Fallow analyzed different
+file sets for clones and complexity: hub-web 44 clone-source files / 69
+health files; slack-bridge 11 / 17. Test inclusion and entrypoint
+inference explain why these are not inventory totals.</p>
+<p><strong>Tools:</strong> Node <code>v24.19.0</code>; rustc
+<code>1.95.0 (59807616e 2026-04-14)</code>; cargo
+<code>1.95.0 (f2d3ce0bd 2026-03-21)</code>; Pandoc <code>3.7.0.2</code>.
+Fallow was run only in the two actual JS/TS packages. Shell/Rust
+findings came from code inspection and bounded probes, not Fallow. No
+product build, full Rust suite or production benchmark was run for this
+report-only change.</p>
+<h3 id="commands-and-durable-evidence">Commands and durable
+evidence</h3>
+<p>Durable supporting receipts are under
+<code>/home/pippenz/.cas/artifacts/cas-1939/</code>. They are
+supplemental: all conclusions, qualifications and important probe
+outputs are included in this report, which remains readable offline
+without those files. Probe source and build scratch live under
+<code>target/cas-1939-probes/</code> in the audit worktree.
+<code>probe-receipts.json</code> records commands, exit codes and
+outputs; <code>source-evidence.txt</code> preserves numbered source
+slices.</p>
+<p>The following inventory and discovery commands were run, followed by
+numbered reads of the exact cited files:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb4-1"><a aria-hidden="true" href="#cb4-1" tabindex="-1"></a><span class="fu">git</span> status <span class="at">--short</span></span>
+<span id="cb4-2"><a aria-hidden="true" href="#cb4-2" tabindex="-1"></a><span class="fu">git</span> rev-parse HEAD origin/main</span>
+<span id="cb4-3"><a aria-hidden="true" href="#cb4-3" tabindex="-1"></a><span class="fu">git</span> log <span class="at">-1</span> <span class="at">--format</span><span class="op">=</span><span class="st">'%H %cI %s'</span></span>
+<span id="cb4-4"><a aria-hidden="true" href="#cb4-4" tabindex="-1"></a><span class="fu">git</span> ls-files</span>
+<span id="cb4-5"><a aria-hidden="true" href="#cb4-5" tabindex="-1"></a><span class="ex">rg</span> <span class="at">--files</span> <span class="at">-g</span> <span class="st">'package.json'</span> <span class="at">-g</span> <span class="st">'*.[jt]s'</span> <span class="at">-g</span> <span class="st">'*.tsx'</span> <span class="at">-g</span> <span class="st">'*.jsx'</span> <span class="at">-g</span> <span class="st">'Cargo.toml'</span></span>
+<span id="cb4-6"><a aria-hidden="true" href="#cb4-6" tabindex="-1"></a><span class="ex">rg</span> <span class="at">-n</span> <span class="st">'SkillSyncer'</span> cas-cli/src <span class="at">--glob</span> <span class="st">'!skills.rs'</span></span>
+<span id="cb4-7"><a aria-hidden="true" href="#cb4-7" tabindex="-1"></a><span class="ex">rg</span> <span class="at">-n</span> <span class="st">'stageFile|downloadSlackFile|injectMessage'</span> slack-bridge/src</span>
+<span id="cb4-8"><a aria-hidden="true" href="#cb4-8" tabindex="-1"></a><span class="ex">rg</span> <span class="at">-n</span> <span class="st">'ensureSubscription|threadRouting.set|activeSubscriptions.set'</span> slack-bridge/src/daemon-main.ts</span>
+<span id="cb4-9"><a aria-hidden="true" href="#cb4-9" tabindex="-1"></a><span class="ex">rg</span> <span class="at">-n</span> <span class="st">'fn escape_yaml'</span> crates/cas-core/src cas-cli/src</span>
+<span id="cb4-10"><a aria-hidden="true" href="#cb4-10" tabindex="-1"></a><span class="ex">rg</span> <span class="at">-n</span> <span class="st">'sha256|checksum|verify'</span> scripts/cas-install.sh</span>
+<span id="cb4-11"><a aria-hidden="true" href="#cb4-11" tabindex="-1"></a><span class="ex">rg</span> <span class="at">-n</span> <span class="st">'classify-ci-diff|rev-parse|empty|web-check-needed'</span> .github/actions/<span class="pp">*</span>/action.yml</span></code></pre></div>
+<p>Fallow commands, run from each named package directory (stdout
+preserved; <code>|| true</code> follows the installed skill's
+convention):</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb5-1"><a aria-hidden="true" href="#cb5-1" tabindex="-1"></a><span class="co"># cwd: hub-web</span></span>
+<span id="cb5-2"><a aria-hidden="true" href="#cb5-2" tabindex="-1"></a><span class="ex">fallow</span> <span class="at">--format</span> json <span class="at">--quiet</span> <span class="at">--explain</span> <span class="op">&gt;</span> /home/pippenz/.cas/artifacts/cas-1939/fallow-hub-web.json <span class="dv">2</span><span class="op">&gt;</span>/dev/null <span class="kw">||</span> <span class="fu">true</span></span>
+<span id="cb5-3"><a aria-hidden="true" href="#cb5-3" tabindex="-1"></a><span class="co"># cwd: slack-bridge</span></span>
+<span id="cb5-4"><a aria-hidden="true" href="#cb5-4" tabindex="-1"></a><span class="ex">fallow</span> <span class="at">--format</span> json <span class="at">--quiet</span> <span class="at">--explain</span> <span class="op">&gt;</span> /home/pippenz/.cas/artifacts/cas-1939/fallow-slack-bridge.json <span class="dv">2</span><span class="op">&gt;</span>/dev/null <span class="kw">||</span> <span class="fu">true</span></span></code></pre></div>
+<p>Both files parsed successfully as non-error combined schema-10
+results. The shell command masks Fallow's underlying exit code, so no
+claim is made about that exit code. Summary counts were extracted from
+<code>check</code>, <code>dupes.stats</code>, and
+<code>health.summary</code>, with selected findings compared to source
+and imports; no automatic fixes or suppressions were applied.</p>
+<p>The reproducible probe runner,
+<code>target/cas-1939-probes/run-probes.py</code>, executes the
+following operations and writes receipts. A durable copy accompanies the
+receipts for reviewers; it reads the audited source and confines fixture
+mutations to the task's probe directories.</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb6-1"><a aria-hidden="true" href="#cb6-1" tabindex="-1"></a><span class="ex">python3</span> target/cas-1939-probes/run-probes.py</span>
+<span id="cb6-2"><a aria-hidden="true" href="#cb6-2" tabindex="-1"></a><span class="co"># classifier-invalid-ref.json: helper exit 0, stdout empty, fatal Git error</span></span>
+<span id="cb6-3"><a aria-hidden="true" href="#cb6-3" tabindex="-1"></a><span class="co"># thread-session-proof.json: two distinct inputs, same session ID</span></span>
+<span id="cb6-4"><a aria-hidden="true" href="#cb6-4" tabindex="-1"></a><span class="co"># staging-proof.json: ok:false, outsideContent:OVERWRITTEN, symlinkRemains:true</span></span>
+<span id="cb6-5"><a aria-hidden="true" href="#cb6-5" tabindex="-1"></a><span class="co"># yaml-proof.json: actual extracted Rust helper emits invalid YAML</span></span>
+<span id="cb6-6"><a aria-hidden="true" href="#cb6-6" tabindex="-1"></a><span class="co"># build-probe-second.log: unchanged fixture dirty because ../.git/HEAD is missing</span></span></code></pre></div>
+<p>The YAML probe compiles the function extracted from
+<code>cas-cli/src/sync/skills.rs</code> using <code>rustc</code>, then
+parses its emitted frontmatter with PyYAML. The thread probe extracts
+the actual function from <code>daemon.ts</code> and strips TypeScript
+types with Node's built-in API; it does not import or run a harness. The
+staging probe imports the actual <code>file-handler.ts</code>. The Cargo
+fixture contains the exact two <code>rerun-if-changed</code> directives
+and an analogous <code>.git</code> file; it is deliberately not the full
+cas build. The runner's assertions treat these observed defective
+outcomes as successful reproductions, not successful product
+behavior.</p>
+<h3 id="report-validation">Report validation</h3>
+<p>The final HTML is <strong>56072 bytes</strong>, below the 500 KB
+limit. It contains inline CSS, system fonts, no scripts and no external
+runtime resources. Source fidelity is checked by comparing normalized
+text from a fresh Pandoc render with the HTML main content after
+removing presentation-only table captions. Heading order, table
+captions/header scope, source hash and the two-file diff are checked by
+<code>validate-report.py</code>.</p>
+<p><strong>Browser proof:</strong> Google Chrome
+<code>152.0.7977.82</code>, headless, opened the local file with offline
+browser contexts. Desktop 1280 px, mobile 360 px and dark-theme desktop
+1280 px each had document scroll width equal to viewport width, zero
+HTTP(S) requests, and identical main-content text. Mobile and dark
+contexts disabled JavaScript before navigation. Wide evidence tables
+scroll inside named keyboard-focusable regions; the page itself does not
+scroll sideways. Keyboard Tab reaches the skip link, and visible focus
+styles are defined. Static palette checks cover body/link/caption
+contrast on all report backgrounds in both themes. These are bounded
+accessibility checks, not a screen-reader audit or a claim of formal
+WCAG conformance.</p>
+<p><strong>Print proof:</strong> A4 print-media PDF, <strong>13
+pages</strong>, with no overflowing table container; text extraction
+checks the major sections and PDF text bounding boxes against page
+bounds. Desktop, mobile and first/middle/last print-page images were
+visually inspected for legibility and clipping. Print forces a light
+theme and repeats table headings. The generated PDF is a validation
+artifact; the accessible HTML is the deliverable.</p>
+<p>The connector's headed launch failed before navigation with
+<code>Error: server: Failed to launch the browser process.</code> and
+<code>Missing X server or $DISPLAY</code>; its guidance was
+<code>Looks like you launched a headed browser without having a XServer running.</code>
+The receipt is <code>headed-browser-error.txt</code>. No display server
+was installed or restarted. Local headless Playwright supplied the
+checks instead. The supervisor subsequently reported successful opening
+in the operator's interactive Chrome at 22:46:35 UTC: exit 0,
+<code>Opening in existing browser session.</code> This is a
+supervisor-supplied launch receipt, not an independent visual check of
+that window. The earlier failure is specific to the connector's display
+configuration; an operator desktop exists.</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb7-1"><a aria-hidden="true" href="#cb7-1" tabindex="-1"></a><span class="ex">python3</span> target/cas-1939-probes/render-report.py</span>
+<span id="cb7-2"><a aria-hidden="true" href="#cb7-2" tabindex="-1"></a><span class="ex">python3</span> target/cas-1939-probes/validate-report.py</span>
+<span id="cb7-3"><a aria-hidden="true" href="#cb7-3" tabindex="-1"></a><span class="ex">node</span> target/cas-1939-probes/browser-check.cjs</span>
+<span id="cb7-4"><a aria-hidden="true" href="#cb7-4" tabindex="-1"></a><span class="ex">pdfinfo</span> /home/pippenz/.cas/artifacts/cas-1939/report-print.pdf</span>
+<span id="cb7-5"><a aria-hidden="true" href="#cb7-5" tabindex="-1"></a><span class="ex">pdftotext</span> <span class="at">-layout</span> /home/pippenz/.cas/artifacts/cas-1939/report-print.pdf /home/pippenz/.cas/artifacts/cas-1939/print-text.txt</span></code></pre></div>
+<p>Receipts: <code>report-validation.json</code>,
+<code>browser-proof.json</code>, <code>report-print.pdf</code>,
+<code>print-text.txt</code>, <code>desktop.png</code>,
+<code>mobile.png</code>, <code>dark.png</code>, and
+<code>print-page-1.png</code> / <code>print-page-middle.png</code> /
+<code>print-page-last.png</code> under the durable artifact directory.
+Browser and renderer scripts are preserved there as supporting evidence.
+The report can be reopened directly at
+<code>docs/reports/2026-09-04-cas-src-codebase-audit.html</code>; no
+server or build is required.</p>
+</section></main><footer>Markdown source: <a href="2026-09-04-cas-src-codebase-audit.md">2026-09-04-cas-src-codebase-audit.md</a>. Audit snapshot: bbc1629b85ba891e248f6b328d9b78a9a45beaba. Source SHA-256: <code>5477c9f309dad7ba2039fd4cea711dcaceee1df0b6ec162a96fa8cb9afb00e29</code>.</footer></body></html>

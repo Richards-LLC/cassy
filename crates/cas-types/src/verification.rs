@@ -496,12 +496,24 @@ impl FromStr for VerificationRecoveryAction {
 /// The digest covers the exact worktree contents (including untracked files)
 /// while deliberately excluding CAS's own `.cas` state. The canonical paths
 /// prevent a proof captured in one worktree from being replayed in another.
+///
+/// `anchor_commits` names the delivered commit identity this proof cycle is
+/// really about (cas-5c33): the resolved commit receipt and, when the worktree
+/// carries work beyond its integration base, the delivered tip. Delivered
+/// content is immutable under its commit id, so a worker that later merges or
+/// fast-forwards its branch — to start the next task — moves `head_commit`
+/// without touching what the verifier reviewed. When anchors are bound, a
+/// proof holds while every anchor stays reachable; when the list is empty
+/// (nothing delivered yet) the whole boundary must still match exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryProofBoundary {
     pub repository_root: String,
     pub worktree_root: String,
     pub head_commit: String,
     pub state_digest: String,
+    /// Empty for pre-cas-5c33 rows and for closes with nothing delivered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchor_commits: Vec<String>,
 }
 
 /// Immutable external identity attached to a verification proof cycle.

@@ -236,6 +236,242 @@ async fn test_legacy_isolated_verdict_is_bound_to_repository_proof() {
     legacy_repository_proof_rejects_drift(true).await;
 }
 
+// =============================================================================
+// cas-5c33: a dispatch is bound to the DELIVERED commits, not the branch tip.
+// A worker that merges or fast-forwards to start its next task used to
+// invalidate the verdict on already-merged work, and the close retry then
+// replayed the same spent dispatch id forever.
+// =============================================================================
+
+/// Build a task whose isolated worktree carries one delivered commit beyond
+/// its integration base, and return (temp, worker service, cas_dir, task id,
+/// worktree path).
+async fn delivered_worktree_fixture(
+    worker_branch: &str,
+) -> (
+    TempDir,
+    cas::mcp::CasCore,
+    std::path::PathBuf,
+    String,
+    TempDir,
+    std::sync::MutexGuard<'static, ()>,
+) {
+    let (temp, service) = setup_cas();
+    // Ordering contract from support::setup_cas: take the env lock only after
+    // setup_cas has released its own brief hold, or this deadlocks.
+    let env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n",
+    )
+    .expect("verification config");
+
+    proof_boundary_git(temp.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(temp.path().join(".gitignore"), ".cas/\n").unwrap();
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    proof_boundary_git(temp.path(), &["add", ".gitignore", "seed.txt"]);
+    proof_boundary_git(temp.path(), &["commit", "-q", "-m", "seed"]);
+
+    let worker_dir = TempDir::new().unwrap();
+    proof_boundary_git(temp.path(), &["branch", worker_branch]);
+    proof_boundary_git(
+        temp.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            worker_dir.path().to_str().unwrap(),
+            worker_branch,
+        ],
+    );
+    // The delivered work: one commit beyond main, which is what the verifier
+    // is actually asked to review.
+    std::fs::write(worker_dir.path().join("delivered.txt"), "delivered\n").unwrap();
+    proof_boundary_git(worker_dir.path(), &["add", "delivered.txt"]);
+    proof_boundary_git(worker_dir.path(), &["commit", "-q", "-m", "deliver work"]);
+
+    let created = service
+        .cas_task_create(Parameters(simple_task_req("Delivered work under review")))
+        .await
+        .expect("create task");
+    let task_id = extract_task_id(&extract_text(created)).unwrap().to_string();
+    service
+        .cas_task_start(Parameters(IdRequest {
+            id: task_id.clone(),
+        }))
+        .await
+        .expect("start task");
+
+    let store = open_worktree_store(&cas_dir).unwrap();
+    store.init().unwrap();
+    let worktree_id = Worktree::generate_id();
+    store
+        .add(&Worktree::new(
+            worktree_id.clone(),
+            worker_branch.to_string(),
+            "main".to_string(),
+            worker_dir.path().to_path_buf(),
+        ))
+        .unwrap();
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let mut task = task_store.get(&task_id).unwrap();
+    task.worktree_id = Some(worktree_id);
+    task_store.update(&task).unwrap();
+
+    (temp, service, cas_dir, task_id, worker_dir, env_lock)
+}
+
+fn close_request(task_id: &str, reason: &str) -> TaskCloseRequest {
+    TaskCloseRequest {
+        stranded_branch_override: None,
+        id: task_id.to_string(),
+        reason: Some(reason.to_string()),
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
+        search_manifest: None,
+        commit_receipt: None,
+    }
+}
+
+async fn registered_supervisor(cas_dir: &std::path::Path, name: &str) -> cas::mcp::CasCore {
+    let mut supervisor = cas::types::Agent::new(name.to_string(), name.to_string());
+    supervisor.role = AgentRole::Supervisor;
+    open_agent_store(cas_dir)
+        .unwrap()
+        .register(&supervisor)
+        .unwrap();
+    let core = cas::mcp::CasCore::with_daemon(cas_dir.to_path_buf(), None, None);
+    core.set_agent_id_for_testing(name.to_string());
+    core
+}
+
+#[tokio::test]
+async fn test_verdict_survives_the_worker_branch_advancing_after_dispatch() {
+    let (_temp, service, cas_dir, task_id, worker_dir, _env_lock) =
+        delivered_worktree_fixture("factory/proof-mover").await;
+
+    let first = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "delivered work")))
+            .await
+            .expect("first close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("dispatch");
+    let repository = dispatch
+        .repository
+        .as_ref()
+        .expect("a Git worktree binds a repository proof");
+    assert!(
+        !repository.anchor_commits.is_empty(),
+        "the delivered commit must be bound as the proof anchor: {repository:?}"
+    );
+
+    // The worker moves on: its next task's commit lands on the same branch.
+    // The delivered commit is untouched and still reachable.
+    std::fs::write(worker_dir.path().join("next-task.txt"), "next\n").unwrap();
+    proof_boundary_git(worker_dir.path(), &["add", "next-task.txt"]);
+    proof_boundary_git(worker_dir.path(), &["commit", "-q", "-m", "next task"]);
+
+    let supervisor = registered_supervisor(&cas_dir, "proof-mover-supervisor").await;
+    supervisor
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "reviewed the delivered commit".to_string(),
+            confidence: Some(0.99),
+            issues: None,
+            files_reviewed: Some("delivered.txt".to_string()),
+            duration_ms: Some(5),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id.clone()),
+        }))
+        .await
+        .expect("a branch advance that keeps delivered commits reachable must not void the verdict");
+
+    // The verdict record carries both digests so the moved tree is visible.
+    let recorded = open_verification_store(&cas_dir)
+        .unwrap()
+        .get_latest_for_task(&task_id)
+        .unwrap()
+        .expect("verdict recorded");
+    assert!(
+        recorded.summary.contains(&repository.state_digest),
+        "verdict must name the digest the verifier was handed: {}",
+        recorded.summary
+    );
+    assert!(
+        recorded.summary.contains("current head"),
+        "verdict must name the digest and head the tree moved to: {}",
+        recorded.summary
+    );
+
+    let second = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "delivered work")))
+            .await
+            .expect("second close"),
+    );
+    assert!(
+        !second.contains("VERIFICATION REQUIRED"),
+        "an approved dispatch must not be re-demanded after a harmless branch advance: {second}"
+    );
+}
+
+#[tokio::test]
+async fn test_close_remints_a_fresh_dispatch_when_the_bound_proof_is_dead() {
+    let (_temp, service, cas_dir, task_id, worker_dir, _env_lock) =
+        delivered_worktree_fixture("factory/proof-rewriter").await;
+
+    let first = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "delivered work")))
+            .await
+            .expect("first close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let stale = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("first dispatch");
+
+    // The delivered commit is rewritten away: the bound proof is now dead and
+    // no verdict can ever resolve it.
+    proof_boundary_git(worker_dir.path(), &["reset", "-q", "--hard", "main"]);
+    std::fs::write(worker_dir.path().join("replacement.txt"), "different\n").unwrap();
+    proof_boundary_git(worker_dir.path(), &["add", "replacement.txt"]);
+    proof_boundary_git(worker_dir.path(), &["commit", "-q", "-m", "rewritten"]);
+
+    let retry = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "delivered work")))
+            .await
+            .expect("retry close"),
+    );
+    assert!(retry.contains("VERIFICATION REQUIRED"), "{retry}");
+    let fresh = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("fresh dispatch");
+    assert_ne!(
+        fresh.id, stale.id,
+        "a dead dispatch must be retired and replaced, never replayed: {retry}"
+    );
+    assert!(
+        retry.contains(&fresh.id),
+        "the refusal must name the dispatch that can actually be resolved: {retry}"
+    );
+    assert_eq!(
+        cas_store::get_verification_dispatch(&cas_dir, &stale.id)
+            .unwrap()
+            .state,
+        cas::types::VerificationDispatchState::Invalidated,
+        "the stale dispatch must be retired, not left pending"
+    );
+}
+
 #[tokio::test]
 async fn test_worker_main_loop_cannot_self_attest_verification() {
     let (temp, service) = setup_cas();

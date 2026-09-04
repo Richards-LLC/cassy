@@ -1881,11 +1881,41 @@ impl CasCore {
                             req.id, timed_out.id, req.id, timed_out.id
                         )));
                     }
-                    let sup_ver = supervisor_verification_tool();
-                    return Ok(Self::tool_error(format!(
-                        "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict. If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
-                        req.id, dispatch.id, sup_ver, req.id, dispatch.id
-                    )));
+                    // cas-5c33: a dispatch whose bound proof no longer holds
+                    // can never be resolved — `verification action=add`
+                    // refuses it — so replaying its id wedges the task
+                    // forever. Retire it here and fall through to mint a
+                    // fresh cycle bound to the current state.
+                    if let Some(repository) = dispatch.repository.as_ref()
+                        && let Err(drift) = crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(
+                            repository,
+                        )
+                    {
+                        cas_store::invalidate_verification_dispatch_for_repository_drift(
+                            &self.cas_root,
+                            &dispatch.id,
+                        )
+                        .map_err(|error| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!(
+                                "Failed to retire the changed repository proof on dispatch {}: {error}",
+                                dispatch.id
+                            )),
+                            data: None,
+                        })?;
+                        tracing::info!(
+                            task_id = %req.id,
+                            dispatch_id = %dispatch.id,
+                            drift = %drift,
+                            "retired a drifted verification dispatch; minting a fresh cycle"
+                        );
+                    } else {
+                        let sup_ver = supervisor_verification_tool();
+                        return Ok(Self::tool_error(format!(
+                            "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict. If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
+                            req.id, dispatch.id, sup_ver, req.id, dispatch.id
+                        )));
+                    }
                 }
                 Ok(Some(dispatch))
                     if dispatch.state == cas_types::VerificationDispatchState::TimedOut =>
@@ -2864,9 +2894,22 @@ impl CasCore {
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
                                 &proof_worktree,
                             ) {
-                                let repository_proof = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof(
+                                // cas-5c33: bind the delivered commit identity
+                                // alongside the tree snapshot. A worker that
+                                // later merges or fast-forwards to start its
+                                // next task moves HEAD without touching what
+                                // the verifier reviewed; with nothing
+                                // delivered the anchor list is empty and the
+                                // strict whole-boundary contract still holds.
+                                let anchor_commits = crate::mcp::tools::core::task::lifecycle::repository_proof::delivered_anchor_commits(
+                                    &proof_worktree,
+                                    Some(resolved_parent_branch.as_str()),
+                                    req.commit_receipt.as_deref(),
+                                );
+                                let repository_proof = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_with_anchors(
                                     &close_project_root,
                                     &proof_worktree,
+                                    anchor_commits,
                                 )
                                 .map_err(|error| McpError {
                                     code: ErrorCode::INVALID_PARAMS,

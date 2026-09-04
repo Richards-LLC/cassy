@@ -769,21 +769,25 @@ effort = "high"
     fn doctor_accepts_astra_taste_spec_and_requires_codex() {
         let _home = crate::test_support::TestEnvGuard::temp_home();
         let directory = tempfile::tempdir().unwrap();
-        let decision = cas_factory::resolve_lane("taste", &CapabilitySnapshot::default()).unwrap();
-        let args = FactoryArgs {
-            workers: 1,
-            worker_spec: vec![serde_json::to_string(&decision.spec).unwrap()],
-            ..FactoryArgs::default()
-        };
-        let required = required_harnesses(&args, directory.path()).unwrap();
-        assert!(required.contains(&SupervisorCli::Codex));
+        let mut decision =
+            cas_factory::resolve_lane("taste", &CapabilitySnapshot::default()).unwrap();
+        for effort in [cas_mux::Effort::Medium, cas_mux::Effort::High] {
+            decision.spec.effort = Some(effort);
+            let args = FactoryArgs {
+                workers: 1,
+                worker_spec: vec![serde_json::to_string(&decision.spec).unwrap()],
+                ..FactoryArgs::default()
+            };
+            let required = required_harnesses(&args, directory.path()).unwrap();
+            assert!(required.contains(&SupervisorCli::Codex));
+        }
     }
 
     #[test]
-    fn doctor_rejects_astra_outside_taste_effort() {
+    fn doctor_rejects_astra_invalid_effort() {
         let error =
-            doctor_routing_error(r#"{"cli":"codex","model":"gpt-6-astra","effort":"high"}"#);
-        assert!(error.contains("allowed efforts are medium"), "{error}");
+            doctor_routing_error(r#"{"cli":"codex","model":"gpt-6-astra","effort":"ultra"}"#);
+        assert!(error.contains("effort"), "{error}");
     }
 
     #[test]

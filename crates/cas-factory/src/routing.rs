@@ -1201,7 +1201,7 @@ candidates = ["codex_luna"]
         let recipe = &registry.recipes["codex_astra"];
         assert_eq!(recipe.provider, "openai");
         assert_eq!(recipe.required_capability.as_deref(), Some("codex-account"));
-        assert_eq!(recipe.allowed_efforts, [Effort::Medium]);
+        assert!(recipe.allowed_efforts.contains(&Effort::Medium));
         let now = CapabilitySnapshot::now_ms();
         for availability in [
             CapabilityAvailability::Unknown,
@@ -1219,14 +1219,17 @@ candidates = ["codex_luna"]
                 assert_eq!(decision.spec.effort, Some(Effort::Medium));
                 assert!(decision.warnings.is_empty());
                 validate_explicit(&decision.spec, &snapshot).unwrap();
-                let mut invalid = decision.spec;
-                invalid.effort = Some(Effort::High);
-                assert!(
-                    validate_explicit(&invalid, &snapshot)
-                        .unwrap_err()
-                        .to_string()
-                        .contains("allowed efforts are medium")
-                );
+                let mut explicit = decision.spec;
+                for effort in [
+                    Effort::Minimal,
+                    Effort::Low,
+                    Effort::Medium,
+                    Effort::High,
+                    Effort::XHigh,
+                ] {
+                    explicit.effort = Some(effort);
+                    validate_explicit(&explicit, &snapshot).unwrap();
+                }
             }
         }
         let mut snapshot = CapabilitySnapshot::default();

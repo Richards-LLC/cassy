@@ -10609,11 +10609,16 @@ mod tests {
             Some(cas_mux::SupervisorCli::Codex)
         );
         for cli in [None, Some("codex")] {
-            let json = build_spawn_spec_json(cli, Some("gpt-6-astra"), Some("medium")).unwrap();
-            let spec = decoded_spawn_spec(&json);
-            assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-            assert_eq!(spec.model.as_deref(), Some("gpt-6-astra"));
-            assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+            for effort in ["minimal", "low", "medium", "high", "xhigh"] {
+                let json = build_spawn_spec_json(cli, Some("gpt-6-astra"), Some(effort)).unwrap();
+                let spec = decoded_spawn_spec(&json);
+                assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
+                assert_eq!(spec.model.as_deref(), Some("gpt-6-astra"));
+                assert_eq!(
+                    spec.effort,
+                    Some(effort.parse::<cas_mux::Effort>().unwrap())
+                );
+            }
         }
         for cli in ["claude", "grok", "opencode"] {
             let error =
@@ -10621,8 +10626,8 @@ mod tests {
             assert!(error.contains("cli=codex"), "{error}");
         }
         let error =
-            build_spawn_spec_json(Some("codex"), Some("gpt-6-astra"), Some("high")).unwrap_err();
-        assert!(error.contains("allowed efforts are medium"), "{error}");
+            build_spawn_spec_json(Some("codex"), Some("gpt-6-astra"), Some("ultra")).unwrap_err();
+        assert!(error.contains("effort"), "{error}");
     }
 
     #[test]

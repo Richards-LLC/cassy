@@ -26,6 +26,8 @@ runner_pruner="$repo_root/scripts/prune-cassy-actions-cache.sh"
 runner_pruner_test="$repo_root/scripts/test-prune-cassy-actions-cache.sh"
 runner_mount_guard="$repo_root/scripts/check-cassy-actions-cache-mount.sh"
 runner_mount_guard_test="$repo_root/scripts/test-check-cassy-actions-cache-mount.sh"
+runner_cutover="$repo_root/scripts/cutover-cassy-actions-cache.sh"
+runner_cutover_test="$repo_root/scripts/test-cutover-cassy-actions-cache.sh"
 rust_setup="$repo_root/scripts/setup-cassy-actions-rust.sh"
 release_runner_trust="$repo_root/scripts/check-release-runner-trust.sh"
 stale_queue_watchdog="$repo_root/.github/workflows/stale-queued-run-watchdog.yml"
@@ -234,6 +236,14 @@ if [[ -x "$runner_mount_guard" && -x "$runner_mount_guard_test" ]] && "$runner_m
     pass=$((pass + 1))
 else
     printf 'FAIL runner cache mount guard behavior test must be executable and pass\n'
+    fail=$((fail + 1))
+fi
+
+if [[ -x "$runner_cutover" && -x "$runner_cutover_test" ]] && "$runner_cutover_test" >/dev/null; then
+    printf 'ok   runner cache cutover failure-injection test passes\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL runner cache cutover and failure-injection test must be executable and pass\n'
     fail=$((fail + 1))
 fi
 

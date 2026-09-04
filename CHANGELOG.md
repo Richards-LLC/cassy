@@ -7,6 +7,52 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.16.0] - 2026-09-04
+
+### Added
+- `cas integrate mecha-cassy` onboards a machine in one command. The label is
+  derived from the hostname (`MECHA_SLACK_TOKEN_<HOSTNAME>`), the bearer is
+  minted through the hub with your existing Cassy Cloud login, the bypass is
+  read from the hub or Vercel or asked for once without echo, the credentials
+  file is written with `0600` permissions and sourced from the login-shell
+  profile so every process inherits it, and the registration is verified in
+  the same run. It fails closed, naming the missing hub route, until the hub
+  ships its half; no value is ever printed or written outside the credentials
+  file. `--label` remains only an override.
+- `cas cloud purge-foreign --allow-majority-foreign --yes`: an explicit
+  operator override for stores where more than half of the local tasks are
+  foreign replicas. It lifts only the ratio guard, re-verifies a fresh dry-run
+  delete set before deleting anything, records the ratio, backup path, and the
+  operator decision in the receipt, and leaves every other guard in place.
+- `cas doctor` names registered project roots that must never sync (artifact
+  fixtures, probes, temp directories, folder containers) and the command that
+  removes the stale registration; `cas known-repos forget <path>` does it.
+
+### Fixed
+- `cas update` no longer refreshes test-fixture database copies, probe stores,
+  temp directories, or unpinned folder containers as if they were projects, and
+  cloud push refuses any store whose identity would be a bare folder name. The
+  `control`, `project`, and `apps` cloud scopes were minted that way; skipped
+  roots are now listed with their reason.
+- Purge-foreign also clears foreign team registrations and a foreign
+  knowledge-push identity, and the doctor's cloud-identity advice now points at
+  the purge instead of a command that cleared nothing.
+- The per-project pull no longer re-admits another project's rows that sit in
+  this project's own cloud scope; a malformed cloud row (for example a task with
+  a null `metadata`) is parked with its reason instead of aborting the whole
+  pull; push failures now log the status, body, and request ids so a bare
+  `500` can be traced.
+- Hosted Commander pairing works again. Since v3.14.0 the invitation carried a
+  third fragment key (`scopes`) that the cloud relay's parser rejected as
+  "malformed or has an invalid expiry"; the relay now receives the two-key
+  invitation it expects, and a relay rejection names the actual field.
+- Factory workers inherit the MechaCassy credential names from the machine
+  registration, and a missing variable is reported by name in proxy health and
+  in the doctor instead of as a bare connection failure.
+- Release gate: the epic worktree must be clean and at its branch tip, and a
+  Zig toolchain must resolve, before the gate runs; the pipeline's `pr-body.md`
+  input is documented.
+
 ## [3.15.8] - 2026-09-04
 
 ### Fixed

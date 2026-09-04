@@ -6648,6 +6648,34 @@ This is the body content."#;
             assert!(skill.content.contains("references/failure-log.md in full"));
             assert!(skill.content.contains("release-gate.sh --learn"));
             assert!(skill.content.contains(&format!("{prefix}memory")));
+            for marker in [
+                "--check-lane",
+                "Scoped Validation",
+                "workers never poll CI",
+                "ledger is the last prep step",
+                "scratch-base",
+                "detached process group",
+                "--only <row,row>",
+                "runtime_fixture_parent",
+                "reviewed snapshot update",
+                "9.99.x",
+                "cause class",
+                "green-to-published latency",
+                "competing release",
+                "merge-queue GraphQL query",
+                "CAS_RELEASE_ENV_FILE",
+                "annotated tag peels",
+                "four Slack POSTED",
+                "refresh_binary_version",
+                "stranded_branch_override",
+                "release.tag-complete.epoch",
+                "release-published.receipt",
+            ] {
+                assert!(
+                    skill.content.contains(marker),
+                    "{label} cas-cut-release skill missing required marker: {marker}"
+                );
+            }
             let failure_log = catalog
                 .iter()
                 .find(|b| b.path == "skills/cas-cut-release/references/failure-log.md")
@@ -6656,6 +6684,22 @@ This is the body content."#;
                 failure_log.content.lines().filter(|line| line.starts_with("- ")).count() >= 22,
                 "{label} failure log must seed every known release failure (the log only grows via release-gate.sh --learn)"
             );
+            for marker in [
+                "manual:lane-ci",
+                "last prep step",
+                "scratch-base",
+                "process group",
+                "fixture-paths",
+                "reviewed doctor-row",
+                "9.99.x range",
+                "manual:operator-timeline",
+                "manual:worker-handling",
+            ] {
+                assert!(
+                    failure_log.content.contains(marker),
+                    "{label} cas-cut-release failure log missing lesson marker: {marker}"
+                );
+            }
         }
     }
 }

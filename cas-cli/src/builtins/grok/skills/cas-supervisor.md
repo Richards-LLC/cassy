@@ -57,6 +57,7 @@ skills/cas-cut-release/SKILL.md; it owns the mechanical gate, merge queue,
 publish receipt, Slack POSTED block, and host verification. The Slack transport
 itself is skills/mecha-cassy/SKILL.md — the default for every harness, so route
 a worker to it rather than taking its draft back by hand.
+Until worker proxy credentials are repaired, use the `cas-cut-release` fallback: the supervisor may post through the direct configured MechaCassy MCP.
 
 ## References
 

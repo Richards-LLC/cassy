@@ -29,6 +29,15 @@ pub fn crate_root() -> PathBuf {
     workspace_root().join("cas-cli")
 }
 
+/// Returns the runtime parent for temporary test fixtures.
+///
+/// `CARGO_MANIFEST_DIR` records the path on the machine that built an
+/// archived test. Nextest executes the archive from a checkout at a different
+/// path, so fixture directories must be created beneath the process cwd.
+pub fn runtime_fixture_parent() -> PathBuf {
+    std::env::current_dir().expect("test current directory")
+}
+
 /// Finds the `cas` executable supplied alongside an archived test binary.
 ///
 /// Unlike `assert_cmd::cargo::cargo_bin!`, this never embeds Cargo's producer

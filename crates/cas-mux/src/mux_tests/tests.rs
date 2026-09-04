@@ -45,6 +45,59 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
         .map(|(_, v)| v.as_str())
 }
 
+#[test]
+fn factory_pane_configs_propagates_machine_registration_credentials() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let config_home = tempfile::tempdir().expect("temporary config home");
+    let config_path = config_home.path().join("code-mode-mcp/config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        r#"
+[servers.mecha-cassy]
+transport = "http"
+auth = "env:MECHA_SLACK_TOKEN_TEST_WORKER"
+
+[servers.mecha-cassy.headers]
+x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS_TEST_WORKER"
+
+[servers.unrelated]
+auth = "env:UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE"
+"#,
+    )
+    .unwrap();
+    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    let _token = RestoreEnv::set("MECHA_SLACK_TOKEN_TEST_WORKER", "token-value");
+    let _bypass = RestoreEnv::set("MECHA_VERCEL_BYPASS_TEST_WORKER", "bypass-value");
+    let _unrelated = RestoreEnv::set("UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE", "unrelated");
+
+    let config = MuxConfig {
+        cwd: PathBuf::from("/tmp/test"),
+        workers: 1,
+        include_director: false,
+        ..MuxConfig::default()
+    };
+    let configs = Mux::factory_pane_configs(&config);
+    let (_, worker_config) = configs
+        .iter()
+        .find(|(name, _)| name == "worker-1")
+        .expect("worker config must be present");
+
+    assert_eq!(
+        env_value(worker_config, "MECHA_SLACK_TOKEN_TEST_WORKER"),
+        Some("token-value")
+    );
+    assert_eq!(
+        env_value(worker_config, "MECHA_VERCEL_BYPASS_TEST_WORKER"),
+        Some("bypass-value")
+    );
+    assert_eq!(
+        env_value(worker_config, "UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE"),
+        None,
+        "only machine-registration credentials belong in worker panes"
+    );
+}
+
 fn codex_factory_session_arg(config: &crate::pty::PtyConfig) -> Option<&str> {
     config
         .args

@@ -4341,7 +4341,7 @@ This is the body content."#;
             for required in [
                 // All three harness registrations, by env reference only.
                 "[servers.mecha-cassy]",
-                "auth = \"env:MECHA_SLACK_TOKEN_CASSY_PROXY\"",
+                "auth = \"env:MECHA_SLACK_TOKEN_<LABEL>\"",
                 // The allowlist must name the live contract; a retired route
                 // is what produced "denied by policy" on every call.
                 "mecha-cassy.mecha_read",

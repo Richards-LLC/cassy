@@ -34,6 +34,7 @@ tokio = { version = "1", features = ["full", "sync"] }
 # Error handling
 thiserror.workspace = true
 anyhow.workspace = true
+toml = "0.9"
 
 # Logging
 tracing = "0.1"
@@ -54,6 +55,7 @@ default = []
 tokio-test = "0.4"
 criterion = "0.6"
 fs2 = "0.4"
+tempfile = "3.14"
 
 [[bench]]
 name = "alt_screen_scan"

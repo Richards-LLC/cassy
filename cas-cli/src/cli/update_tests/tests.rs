@@ -1,5 +1,6 @@
 use crate::cli::update::*;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Mutex, OnceLock};
@@ -220,7 +221,8 @@ fn discovery_finds_sibling_projects_below_a_parent_that_is_itself_a_project() {
     make_project(&workspace.join("beta"));
     make_project(&workspace.join("nested").join("deep"));
 
-    let discovery = discover_local_projects(None);
+    let mut scanned = BTreeSet::new();
+    scan_for_projects(&home, MAX_SCAN_DEPTH, &mut scanned);
 
     for expected in [
         workspace.clone(),
@@ -229,16 +231,15 @@ fn discovery_finds_sibling_projects_below_a_parent_that_is_itself_a_project() {
         workspace.join("nested").join("deep"),
     ] {
         assert!(
-            discovery.projects.contains(&expected),
+            scanned.contains(&expected),
             "{} missing from discovery: {:?}",
             expected.display(),
-            discovery.projects
+            scanned
         );
     }
     assert!(
-        !discovery.projects.contains(&home),
-        "the home directory is host state, not a project: {:?}",
-        discovery.projects
+        scanned.contains(&home),
+        "the scanner should see home before discovery classifies host state"
     );
 }
 
@@ -270,21 +271,19 @@ fn discovery_does_not_descend_into_cas_internal_directories() {
     std::fs::create_dir_all(&backup).expect("create fixture backup");
     std::fs::write(backup.join("cas.db"), b"").expect("create fixture backup store");
 
-    let discovery = discover_local_projects(None);
+    let mut scanned = BTreeSet::new();
+    scan_for_projects(&home, MAX_SCAN_DEPTH, &mut scanned);
 
-    assert!(discovery.projects.contains(&project));
+    assert!(scanned.contains(&project));
     assert!(
-        !discovery.projects.contains(&worktree),
+        !scanned.contains(&worktree),
         "factory worktrees under .cas/ are not separate projects: {:?}",
-        discovery.projects
+        scanned
     );
     assert!(
-        !discovery
-            .projects
-            .iter()
-            .any(|path| path.starts_with(&backup)),
+        !scanned.iter().any(|path| path.starts_with(&backup)),
         "migration backups under .cas/ are not projects: {:?}",
-        discovery.projects
+        scanned
     );
 }
 
@@ -297,16 +296,35 @@ fn discovery_separates_registered_projects_from_scan_only_and_storeless_ones() {
     make_project(&with_store);
     let storeless = workspace.join("storeless");
     std::fs::create_dir_all(storeless.join(".cas")).expect("create storeless fixture");
+    crate::store::known_repos::ensure_host_schema().expect("bootstrap known-repos schema");
+    crate::store::known_repos::register_repo_strict(&with_store)
+        .expect("register temp-root fixture");
 
     let discovery = discover_local_projects(None);
 
     assert!(
-        discovery.unregistered.contains(&with_store),
-        "a project found only by the filesystem scan is unregistered: {:?}",
+        !discovery.projects.contains(&with_store),
+        "a temp-root project must not be refreshed by host discovery: {:?}",
+        discovery.projects
+    );
+    assert!(
+        discovery
+            .skipped_unregistered
+            .iter()
+            .any(|skip| skip.project == with_store && skip.reason.contains("temp")),
+        "a registered temp-root project must be reported with its exclusion reason: {:?}",
+        discovery.skipped_unregistered
+    );
+    assert!(
+        !discovery.unregistered.contains(&with_store),
+        "a registered temp-root project must not be relabeled as scan-only: {:?}",
         discovery.unregistered
     );
     assert!(
-        discovery.skipped_unregistered.contains(&storeless),
+        discovery
+            .skipped_unregistered
+            .iter()
+            .any(|skip| skip.project == storeless),
         "a scan-only directory with no cas.db must be listed, not silently dropped: {:?}",
         discovery.skipped_unregistered
     );
@@ -360,6 +378,24 @@ fn update_banner_reports_projects_failures_and_skipped_unregistered_stores() {
         !clean.contains("unregistered"),
         "a clean run stays quiet: {clean}"
     );
+}
+
+#[test]
+fn refresh_receipt_names_each_skipped_project_and_why_it_was_not_refreshed() {
+    let receipt = project_refresh_receipt_json(
+        &[],
+        &ProjectPhase::Ok("up to date".to_string()),
+        &[SkippedProject {
+            project: PathBuf::from("/tmp/container-copy"),
+            reason: "its .cas has no [project] canonical_id pin and no git origin remote".to_string(),
+        }],
+    );
+
+    assert_eq!(receipt["skipped_unregistered"][0]["project"], "/tmp/container-copy");
+    assert!(receipt["skipped_unregistered"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("no git origin remote"));
 }
 
 #[test]
@@ -613,8 +649,8 @@ fn reported_version_is_the_semver_not_the_build_date() {
     assert_eq!(parse_reported_version("cas 3.15.5\n").as_deref(), Some("3.15.5"));
     assert_eq!(parse_reported_version("v3.15.5").as_deref(), Some("3.15.5"));
     assert_eq!(
-        parse_reported_version("cas 3.16.0-rc.1 (a94b6ac 2026-09-04)").as_deref(),
-        Some("3.16.0-rc.1")
+        parse_reported_version("cas 9.99.0-rc.1 (a94b6ac 2026-09-04)").as_deref(),
+        Some("9.99.0-rc.1")
     );
 
     // Nothing that is a version means we cannot vouch for the child.

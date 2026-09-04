@@ -46,7 +46,10 @@ fn git(repo: &std::path::Path, args: &[&str]) {
 }
 
 fn project(with_mcp: bool) -> TempDir {
-    let dir = TempDir::new().unwrap();
+    // This is a real registered project fixture, so keep it beneath the
+    // runtime test cwd rather than a system temp root that discovery treats as
+    // disposable.
+    let dir = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
     git(
         dir.path(),
@@ -74,7 +77,12 @@ fn project(with_mcp: bool) -> TempDir {
 }
 
 fn command(project: &TempDir, home: &TempDir) -> Command {
-    command_at(project.path(), home)
+    let mut command = command_at(project.path(), home);
+    command.args([
+        "--cas-root",
+        project.path().join(".cas").to_str().unwrap(),
+    ]);
+    command
 }
 
 fn command_at(cwd: &std::path::Path, home: &TempDir) -> Command {

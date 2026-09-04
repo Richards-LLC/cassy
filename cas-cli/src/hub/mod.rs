@@ -27,6 +27,7 @@ mod state;
 mod tailscale;
 
 pub(crate) use attention::spawn_attention_enricher;
+pub(crate) use auth::PairingInvitationTarget;
 pub use auth::{
     AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, LeaseSummary,
     PairingExchange, PairingInvitation, PublicJwk, Scope, WsTicket, required_scope,

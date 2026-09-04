@@ -1081,10 +1081,12 @@ mod tests {
 
     #[test]
     fn bounded_registry_fails_closed_before_scanning_too_many_host_repos() {
-        TestEnvGuard::run_with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|_home| {
             crate::store::known_repos::ensure_host_schema().unwrap();
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             for index in 0..3 {
-                let repo = home.join(format!("repo-{index}"));
+                let repo = fixtures.path().join(format!("repo-{index}"));
                 std::fs::create_dir(&repo).unwrap();
                 crate::store::known_repos::register_repo_strict(&repo).unwrap();
             }
@@ -1246,7 +1248,9 @@ mod tests {
     fn explicit_target_is_normalized_registered_and_path_free_when_serialized() {
         TestEnvGuard::run_with_temp_home(|home| {
             crate::store::known_repos::ensure_host_schema().unwrap();
-            let repo = home.join("checkout");
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+            let repo = fixtures.path().join("checkout");
             std::fs::create_dir(&repo).unwrap();
             git(&repo, &["init", "-q", "-b", "main"]);
             git(
@@ -1293,10 +1297,12 @@ mod tests {
 
     #[test]
     fn declared_repo_b_resolves_from_repo_a_spawn_context() {
-        TestEnvGuard::run_with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|_home| {
             crate::store::known_repos::ensure_host_schema().unwrap();
-            let repo_a = home.join("spawn-a");
-            let repo_b = home.join("work-b");
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+            let repo_a = fixtures.path().join("spawn-a");
+            let repo_b = fixtures.path().join("work-b");
             for (repo, remote) in [
                 (&repo_a, "git@github.com:org/spawn-a.git"),
                 (&repo_b, "git@github.com:org/work-b.git"),
@@ -1323,8 +1329,9 @@ mod tests {
     fn duplicate_selector_binding_survives_restart_and_never_falls_back() {
         let mut guard = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
-        let repo_a = guard.home().join("clone-a");
-        let repo_b = guard.home().join("clone-b");
+        let fixtures = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+        let repo_a = fixtures.path().join("clone-a");
+        let repo_b = fixtures.path().join("clone-b");
         for repo in [&repo_a, &repo_b] {
             std::fs::create_dir(repo).unwrap();
             git(repo, &["init", "-q", "-b", "main"]);
@@ -1833,10 +1840,12 @@ mod tests {
         };
         use crate::types::{Task, TaskStatus};
 
-        TestEnvGuard::run_with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|_home| {
             crate::store::known_repos::ensure_host_schema().unwrap();
-            let repo_a = home.join("spawn-a");
-            let repo_b = home.join("work-b");
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+            let repo_a = fixtures.path().join("spawn-a");
+            let repo_b = fixtures.path().join("work-b");
             for (repo, remote) in [
                 (&repo_a, "git@github.com:org/spawn-a.git"),
                 (&repo_b, "git@github.com:org/work-b.git"),

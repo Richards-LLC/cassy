@@ -220,6 +220,48 @@ pub struct PairingInvitation {
     pub url: String,
     pub expires_at: DateTime<Utc>,
     pub scopes: BTreeSet<Scope>,
+    #[serde(skip_serializing)]
+    controller_origin: String,
+    #[serde(skip_serializing)]
+    hub_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairingInvitationTarget {
+    LocalCommander,
+    HostedRelay,
+}
+
+impl PairingInvitation {
+    pub(crate) fn url_for(&self, target: PairingInvitationTarget) -> String {
+        pairing_invitation_url(
+            target,
+            &self.controller_origin,
+            &self.token,
+            &self.hub_id,
+            &self.scopes,
+        )
+    }
+}
+
+fn pairing_invitation_url(
+    target: PairingInvitationTarget,
+    controller_origin: &str,
+    token: &str,
+    hub_id: &str,
+    scopes: &BTreeSet<Scope>,
+) -> String {
+    let mut url = format!("{controller_origin}/#pair={token}&hub={hub_id}");
+    if target == PairingInvitationTarget::LocalCommander {
+        let declared_scopes = scopes
+            .iter()
+            .map(|scope| scope.as_wire())
+            .collect::<Vec<_>>()
+            .join(",");
+        url.push_str("&scopes=");
+        url.push_str(&declared_scopes);
+    }
+    url
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -473,22 +515,19 @@ impl AuthStore {
             failed_attempts: 0,
         });
         self.persist(&state)?;
-        // Commander preselects exactly the scopes named here. Without the
-        // ceiling in the link the form has to guess, and a guess above the
-        // ceiling is refused by `exchange_pairing` with an opaque 401.
-        let declared_scopes = max_scopes
-            .iter()
-            .map(|scope| scope.as_wire())
-            .collect::<Vec<_>>()
-            .join(",");
         Ok(PairingInvitation {
-            url: format!(
-                "{controller_origin}/#pair={token}&hub={}&scopes={declared_scopes}",
-                self.0.machine_id
+            url: pairing_invitation_url(
+                PairingInvitationTarget::LocalCommander,
+                controller_origin,
+                &token,
+                &self.0.machine_id,
+                &max_scopes,
             ),
             token,
             expires_at,
             scopes: max_scopes,
+            controller_origin: controller_origin.to_owned(),
+            hub_id: self.0.machine_id.clone(),
         })
     }
 

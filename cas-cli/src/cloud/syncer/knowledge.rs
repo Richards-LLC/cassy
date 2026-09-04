@@ -238,6 +238,12 @@ impl CloudSyncer {
         if !self.is_available() {
             return Ok(0);
         }
+        // Knowledge pages are another outbound cloud identity surface. Keep
+        // them behind the same root-bound guard as queued personal/team rows.
+        if let Some(refusal) = self.ephemeral_project_refusal() {
+            warn!("[Cassy sync] {refusal}");
+            return Ok(0);
+        }
         let token = self
             .cloud_config
             .token
@@ -743,6 +749,8 @@ mod tests {
         project_config.token = Some("test-token".to_string());
         tokio::task::spawn_blocking(move || {
             let store = seeded_store(&root);
+            crate::cloud::set_canonical_id_in_config_toml(&root, "knowledge-test-project")
+                .unwrap();
             let queue = Arc::new(SyncQueue::open(&root).unwrap());
             queue.init().unwrap();
             let syncer = CloudSyncer::new(queue, project_config, CloudSyncerConfig::default());

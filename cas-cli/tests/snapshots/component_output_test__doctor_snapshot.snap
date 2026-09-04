@@ -1,5 +1,6 @@
 ---
 source: cas-cli/tests/component_output_test.rs
+assertion_line: 209
 expression: redacted
 ---
 cas doctor · [PROJECT] · [VERSION]
@@ -10,10 +11,10 @@ Indexes       [OK] legacy search index  [OK] embedding drain  [OK] embeddings
   [WARN] symbol index        nothing indexed for this project (0 symbol(s) in the store across all repositories); the code search index is missing. The daemon only indexes while idle
   → run `cas index code` to catch up now.
   [WARN] code history index  cannot check code history index: not a git repository: [TEMP_PATH] ([GIT_NOT_REPOSITORY])
-Cloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [OK] cloud sync queue  [OK] cross-project rows
+Cloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [OK] registered project roots  [OK] cloud sync queue  [OK] cross-project rows
 Config        [OK] configuration  [OK] MCP stdio upstreams  [OK] sync target  [OK] mcp config  [OK] user skills
 Integrations  [OK] integrations
   [WARN] mecha-cassy  not registered on this machine ([TEMP_PATH] has no mecha-cassy server)
   → Run `cas integrate mecha-cassy`
 
-23 ok · 4 warnings · 0 errors · [DURATION]
+24 ok · 4 warnings · 0 errors · [DURATION]

@@ -1,8 +1,9 @@
 # Register the MechaCassy hub
 
 Every request carries two headers: `Authorization: Bearer <per-client token>`,
-minted per client label and stored hub-side as a hash so labels revoke
-individually, and `x-vercel-protection-bypass: <secret>`, checked at the edge.
+issued by the hub for a client label and stored hub-side as a hash so labels
+revoke individually, and `x-vercel-protection-bypass: <secret>`, checked at
+the edge.
 Both values live in the machine's credentials file as
 `MECHA_SLACK_TOKEN_<LABEL>` and `MECHA_VERCEL_BYPASS` and are exported into the
 environment by the login shell. Configurations below name those variables and
@@ -10,7 +11,7 @@ never hold their values.
 
 ## One command, once per machine
 
-`cas integrate mecha-cassy --label <MACHINE>` writes all three registrations
+After `cas login`, `cas integrate mecha-cassy` writes all three registrations
 below — a machine-scoped proxy registration under the user config directory
 that every project inherits, plus the Codex and Claude Code entries — refusing
 to claim success without an authenticated `tools/list` receipt. Re-running it
@@ -31,6 +32,17 @@ than silently switched. A project file that names *no* hub route is left alone,
 because widening a policy the project declared is not this command's call;
 `cas doctor` names that file and the exact routes to add.
 
+The default client label is the uppercased hostname with non-alphanumeric
+characters folded to `_`. `--label <MACHINE>` is only an override. The command
+sends the existing Cassy Cloud bearer to `POST /api/clients` with
+`{"label":"…","connector":"slack"}`. A `409 label_taken` retries once with
+the first six characters of `~/.config/cas/device.json`'s device ID appended.
+The optional bypass in the create response is used first; otherwise
+`GET /api/bypass`, a read-only Vercel lookup, and one hidden prompt are tried
+in that order. The Vercel PATCH endpoint is never used because it rotates the
+shared secret. If `POST /api/clients` is absent, setup fails closed naming
+`mecha-cassy#5` and never mints locally.
+
 The hand-written shapes below remain the reference for repairing a machine by
 hand or for a project that has never named the hub routes itself.
 
@@ -47,7 +59,7 @@ allowlist = [
 [servers.mecha-cassy]
 transport = "http"
 url = "https://mecha-cassy.vercel.app/mcp/slack"
-auth = "env:MECHA_SLACK_TOKEN_CASSY_PROXY"
+auth = "env:MECHA_SLACK_TOKEN_<LABEL>"
 
 [servers.mecha-cassy.headers]
 x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"
@@ -72,7 +84,7 @@ generated cache, not source configuration.
 ```toml
 [mcp_servers.mecha-cassy]
 url = "https://mecha-cassy.vercel.app/mcp/slack"
-bearer_token_env_var = "MECHA_SLACK_TOKEN_CASSY_PROXY"
+bearer_token_env_var = "MECHA_SLACK_TOKEN_<LABEL>"
 env_http_headers = { "x-vercel-protection-bypass" = "MECHA_VERCEL_BYPASS" }
 ```
 

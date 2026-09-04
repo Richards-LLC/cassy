@@ -533,6 +533,12 @@ pub fn set_canonical_id_in_config_toml(
 /// pin. Root-owned sync paths resolve through their explicit root and retain
 /// that identity for the operation.
 pub fn derive_canonical_id_from_git_remote(cas_root: &Path) -> Option<String> {
+    git_origin_url(cas_root).and_then(|raw| normalize_git_remote_url(&raw))
+}
+
+/// Read the configured `origin` URL, whether or not it is one of the
+/// host/owner/repository forms Cassy can use as a cloud identity.
+pub fn git_origin_url(cas_root: &Path) -> Option<String> {
     use std::process::Command;
 
     let output = Command::new("git")
@@ -541,12 +547,11 @@ pub fn derive_canonical_id_from_git_remote(cas_root: &Path) -> Option<String> {
         .args(["remote", "get-url", "origin"])
         .output()
         .ok()?;
-
     if !output.status.success() {
         return None;
     }
     let raw = String::from_utf8(output.stdout).ok()?;
-    normalize_git_remote_url(raw.trim())
+    (!raw.trim().is_empty()).then(|| raw.trim().to_string())
 }
 
 /// Resolve `origin` to the normalized, lowercased wire identity used by both

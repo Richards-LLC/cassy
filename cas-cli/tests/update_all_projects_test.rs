@@ -56,7 +56,7 @@ fn seed_stray_memory(project: &Path) -> String {
 
 #[test]
 fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
-    let temp = TempDir::new().unwrap();
+    let temp = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     let root = temp.path();
     let projects = root.join("projects");
     let first = projects.join("first");
@@ -116,7 +116,7 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
 /// a clean run.
 #[test]
 fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
-    let temp = TempDir::new().unwrap();
+    let temp = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     let root = temp.path();
     let projects = root.join("projects");
     let parent = projects.join("workspace");
@@ -148,7 +148,7 @@ fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
         "banner must count the skipped store:\n{output}"
     );
     assert!(
-        output.contains("not refreshed (unregistered): 1"),
+        output.contains("not refreshed (skipped_unregistered): 1"),
         "the storeless directory must be named:\n{output}"
     );
     assert!(
@@ -205,7 +205,7 @@ fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
 /// while the banner claimed every project was refreshed.
 #[test]
 fn all_projects_runs_migrations_against_the_user_level_store() {
-    let temp = TempDir::new().unwrap();
+    let temp = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     let root = temp.path();
     let home = root.join(".test-home");
     let projects = root.join("projects");
@@ -249,7 +249,7 @@ fn all_projects_runs_migrations_against_the_user_level_store() {
 
 #[test]
 fn all_projects_repairs_stray_search_roots_and_reports_clean_projects() {
-    let temp = TempDir::new().unwrap();
+    let temp = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     let root = temp.path();
     let projects = root.join("projects");
     let stranded = projects.join("stranded");
@@ -302,7 +302,7 @@ fn all_projects_repairs_stray_search_roots_and_reports_clean_projects() {
 
 #[test]
 fn all_projects_warns_on_a_held_legacy_lock_but_still_succeeds() {
-    let temp = TempDir::new().unwrap();
+    let temp = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     let root = temp.path();
     let projects = root.join("projects");
     let project = projects.join("busy");
@@ -317,7 +317,7 @@ fn all_projects_warns_on_a_held_legacy_lock_but_still_succeeds() {
     let update = cas_cmd(root)
         .current_dir(root)
         // Pin the current project to the fixture so discovery never walks up
-        // from a TMPDIR under $HOME into the real user-level ~/.cas.
+        // from the fixture into the real user-level ~/.cas.
         .env("CAS_ROOT", project.join(".cas"))
         .env("CAS_PROJECT_ROOTS", &projects)
         .args(["update", "--all-projects"])

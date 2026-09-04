@@ -54,6 +54,8 @@ and do not claim success without its receipt.
    Exclude `component_output_test` only when its source snapshots need checkout.
 6. Push the source branch and drive it to a landed merge with
    `scripts/release-train.sh <version> <epic-worktree> --pipeline`, which
+   reads the supervisor-authored `pr-body.md` from the run directory (author
+   that file before invoking `--pipeline`),
    reuses the gate's run directory and writes `pr-number.txt`,
    `landed-main.sha` and a terminal `pipeline.done`
    (MERGED / CHECKS_FAILED / QUEUE_RUN_FAILED / DROPPED_TOO_OFTEN / TIMEOUT).

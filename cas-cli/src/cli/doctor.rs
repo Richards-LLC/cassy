@@ -1412,45 +1412,90 @@ struct DependencyEndpointHealth {
     quarantined_endpoint_rows: usize,
     /// `(from_id, to_id)` of rows with an endpoint no longer in `tasks`.
     dangling: Vec<(String, String)>,
+    /// `(from_id, to_id)` of rows whose endpoint the store could not answer
+    /// for. Never pruned and never counted as dangling.
+    unresolved: Vec<(String, String)>,
+    /// The first store failure behind `unresolved`, verbatim.
+    unresolved_reason: Option<String>,
+}
+
+/// What a lookup of an off-board endpoint established.
+///
+/// The third arm is the whole point: "the store could not answer" is not
+/// "the row is gone". Collapsing them would let a `database is locked` during
+/// `cas doctor --fix` delete live edges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EndpointResolution {
+    /// Present in `tasks`, merely hidden from the board by quarantine.
+    Present,
+    /// Genuinely absent: the store said "not found".
+    Absent,
+    /// The store failed to answer, verbatim reason attached.
+    Unresolved(String),
+}
+
+/// Resolve one off-board id through the store.
+///
+/// Only an explicit not-found verdict counts as absence. Every other error —
+/// a locked database, an I/O failure, a parse error on a corrupt row — is
+/// `Unresolved`, because a check that guesses here is a check that deletes
+/// data on a transient fault.
+fn resolve_endpoint(store: &dyn crate::store::TaskStore, id: &str) -> EndpointResolution {
+    match store.get(id) {
+        Ok(_) => EndpointResolution::Present,
+        Err(crate::store::StoreError::TaskNotFound(_) | crate::store::StoreError::NotFound(_)) => {
+            EndpointResolution::Absent
+        }
+        Err(error) => EndpointResolution::Unresolved(error.to_string()),
+    }
 }
 
 /// Classify every dependency row against the board.
 ///
-/// `still_present` resolves an id that is not on the board. In production it is
-/// `TaskStore::get`, which deliberately does not filter quarantine — that is the
-/// seam that answers "does this row exist?" without leaking a hidden row onto
-/// any list surface.
+/// `resolve` answers for an id that is not on the board. In production it is
+/// [`resolve_endpoint`] over `TaskStore::get`, which deliberately does not
+/// filter quarantine — that is the seam that answers "does this row exist?"
+/// without leaking a hidden row onto any list surface.
 fn classify_dependency_endpoints(
     tasks: &[crate::types::Task],
     deps: &[crate::types::Dependency],
-    mut still_present: impl FnMut(&str) -> bool,
+    mut resolve: impl FnMut(&str) -> EndpointResolution,
 ) -> DependencyEndpointHealth {
     let board: std::collections::HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
     // One resolve per distinct off-board id, not per row: a quarantine sweep
     // leaves dozens of rows pointing at the same handful of ids.
-    let mut resolved: BTreeMap<String, bool> = BTreeMap::new();
+    let mut resolved: BTreeMap<String, EndpointResolution> = BTreeMap::new();
     let mut health = DependencyEndpointHealth::default();
 
     for dep in deps {
         let mut hidden = false;
         let mut missing = false;
+        let mut unresolved = false;
         for endpoint in [&dep.from_id, &dep.to_id] {
             if board.contains(endpoint.as_str()) {
                 continue;
             }
-            let present = *resolved
+            let resolution = resolved
                 .entry(endpoint.clone())
-                .or_insert_with(|| still_present(endpoint));
-            if present {
-                hidden = true;
-            } else {
-                missing = true;
+                .or_insert_with(|| resolve(endpoint))
+                .clone();
+            match resolution {
+                EndpointResolution::Present => hidden = true,
+                EndpointResolution::Absent => missing = true,
+                EndpointResolution::Unresolved(reason) => {
+                    unresolved = true;
+                    health.unresolved_reason.get_or_insert(reason);
+                }
             }
         }
 
-        // A row with one missing endpoint is dangling whatever the other
-        // endpoint is: the fault dominates.
-        if missing {
+        // Precedence is deliberate: a row we could not check is never called
+        // dangling, because dangling rows are the ones `--fix` deletes.
+        if unresolved {
+            health
+                .unresolved
+                .push((dep.from_id.clone(), dep.to_id.clone()));
+        } else if missing {
             health
                 .dangling
                 .push((dep.from_id.clone(), dep.to_id.clone()));
@@ -1468,7 +1513,7 @@ fn dependency_endpoint_health(
     tasks: &[crate::types::Task],
     deps: &[crate::types::Dependency],
 ) -> DependencyEndpointHealth {
-    classify_dependency_endpoints(tasks, deps, |id| store.get(id).is_ok())
+    classify_dependency_endpoints(tasks, deps, |id| resolve_endpoint(store, id))
 }
 
 /// The `tasks` row: counts, plus dependency endpoints reported for what they
@@ -1491,7 +1536,7 @@ fn task_health_check(
         ));
     }
 
-    if health.dangling.is_empty() {
+    if health.dangling.is_empty() && health.unresolved.is_empty() {
         return Check {
             name: "tasks".to_string(),
             status: CheckStatus::Ok,
@@ -1499,23 +1544,30 @@ fn task_health_check(
         };
     }
 
-    let sample = health
-        .dangling
-        .iter()
-        .take(3)
-        .map(|(from, to)| format!("{from} -> {to}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let remainder = health.dangling.len().saturating_sub(3);
-    let remainder = if remainder > 0 {
-        format!(", +{remainder} more")
+    if !health.dangling.is_empty() {
+        message.push_str(&format!(
+            " | {} dependency row(s) point at a task id that is not in this database ({})",
+            health.dangling.len(),
+            sample_rows(&health.dangling)
+        ));
+    }
+
+    // An unreadable endpoint suspends the prune entirely: `--fix` must not
+    // delete the rows it *could* classify while the store is answering some
+    // lookups with errors, because the next read could reclassify them.
+    if !health.unresolved.is_empty() {
+        let reason = health
+            .unresolved_reason
+            .as_deref()
+            .unwrap_or("store lookup failed");
+        message.push_str(&format!(
+            " | {} dependency row(s) could not be checked ({}): {reason}; Run `cas doctor --fix` once that error clears — nothing is pruned while any endpoint is unreadable",
+            health.unresolved.len(),
+            sample_rows(&health.unresolved)
+        ));
     } else {
-        String::new()
-    };
-    message.push_str(&format!(
-        " | {} dependency row(s) point at a task id that is not in this database ({sample}{remainder}); Run `cas doctor --fix` to prune them",
-        health.dangling.len()
-    ));
+        message.push_str("; Run `cas doctor --fix` to prune them");
+    }
 
     Check {
         name: "tasks".to_string(),
@@ -1524,19 +1576,56 @@ fn task_health_check(
     }
 }
 
+/// `a -> b, c -> d, +7 more`: name the rows, bound the line.
+fn sample_rows(rows: &[(String, String)]) -> String {
+    let sample = rows
+        .iter()
+        .take(3)
+        .map(|(from, to)| format!("{from} -> {to}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match rows.len().saturating_sub(3) {
+        0 => sample,
+        remainder => format!("{sample}, +{remainder} more"),
+    }
+}
+
+/// What one prune attempt did.
+#[derive(Debug, PartialEq, Eq)]
+enum PruneOutcome {
+    Pruned(usize),
+    /// At least one endpoint could not be read, so nothing was deleted.
+    Skipped { reason: String, rows: usize },
+}
+
 /// Delete dependency rows whose endpoints are absent from `tasks`.
 ///
 /// Quarantined endpoints are left strictly alone: quarantine is reversible, and
 /// pruning its edges would make releasing a row restore it without its graph.
-fn prune_dangling_dependencies(store: &dyn crate::store::TaskStore) -> anyhow::Result<usize> {
+///
+/// If any endpoint lookup fails, the whole prune is skipped rather than run on
+/// a partial picture — deleting rows is irreversible and a locked database is
+/// not evidence of anything.
+fn prune_dangling_dependencies(
+    store: &dyn crate::store::TaskStore,
+) -> anyhow::Result<PruneOutcome> {
     let tasks = store.list(None)?;
     let deps = store.list_dependencies(None)?;
     let health = dependency_endpoint_health(store, &tasks, &deps);
 
+    if !health.unresolved.is_empty() {
+        return Ok(PruneOutcome::Skipped {
+            reason: health
+                .unresolved_reason
+                .unwrap_or_else(|| "store lookup failed".to_string()),
+            rows: health.unresolved.len(),
+        });
+    }
+
     for (from, to) in &health.dangling {
         store.remove_dependency(from, to)?;
     }
-    Ok(health.dangling.len())
+    Ok(PruneOutcome::Pruned(health.dangling.len()))
 }
 
 /// The `cas doctor --fix` dangling-dependency prune, as one renderable Check.
@@ -1549,12 +1638,19 @@ fn prune_dangling_dependencies(store: &dyn crate::store::TaskStore) -> anyhow::R
 fn dangling_dependency_autofix(cas_root: &Path) -> Option<Check> {
     let store = crate::store::open_task_store_local(cas_root).ok()?;
     match prune_dangling_dependencies(store.as_ref()) {
-        Ok(0) => None,
-        Ok(pruned) => Some(Check {
+        Ok(PruneOutcome::Pruned(0)) => None,
+        Ok(PruneOutcome::Pruned(pruned)) => Some(Check {
             name: "auto-fix".to_string(),
             status: CheckStatus::Ok,
             message: format!(
                 "Pruned {pruned} dependency row(s) pointing at task ids that are not in this database"
+            ),
+        }),
+        Ok(PruneOutcome::Skipped { reason, rows }) => Some(Check {
+            name: "auto-fix".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "Skipped the dangling-dependency prune: {rows} endpoint lookup(s) failed ({reason}); no dependency rows were deleted"
             ),
         }),
         Err(error) => Some(Check {
@@ -6298,7 +6394,7 @@ mod tests {
         ));
 
         let pruned = prune_dangling_dependencies(store.as_ref()).unwrap();
-        assert_eq!(pruned, 1);
+        assert_eq!(pruned, PruneOutcome::Pruned(1));
 
         let check = check_for(store.as_ref());
         assert!(
@@ -6333,6 +6429,233 @@ mod tests {
     fn delete_task_row_only(cas_dir: &Path, id: &str) {
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
         conn.execute("DELETE FROM tasks WHERE id = ?", [id]).unwrap();
+    }
+
+    /// A store that answers one id's `get` with a non-not-found failure — the
+    /// `database is locked` case. Everything else passes through, so the test
+    /// exercises the real classification path rather than a stubbed verdict.
+    struct FailingGetStore {
+        inner: std::sync::Arc<dyn crate::store::TaskStore>,
+        failing_id: String,
+    }
+
+    impl crate::store::TaskStore for FailingGetStore {
+        fn init(&self) -> crate::store::Result<()> {
+            self.inner.init()
+        }
+        fn project_id(&self) -> Option<&str> {
+            self.inner.project_id()
+        }
+        fn generate_id(&self) -> crate::store::Result<String> {
+            self.inner.generate_id()
+        }
+        fn add(&self, task: &crate::types::Task) -> crate::store::Result<()> {
+            self.inner.add(task)
+        }
+        fn create_atomic(
+            &self,
+            task: &crate::types::Task,
+            blocked_by: &[String],
+            epic_id: Option<&str>,
+            created_by: Option<&str>,
+        ) -> crate::store::Result<()> {
+            self.inner
+                .create_atomic(task, blocked_by, epic_id, created_by)
+        }
+        fn get(&self, id: &str) -> crate::store::Result<crate::types::Task> {
+            if id == self.failing_id {
+                return Err(crate::store::StoreError::Database(
+                    rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(5), // SQLITE_BUSY
+                        Some("database is locked".to_string()),
+                    ),
+                ));
+            }
+            self.inner.get(id)
+        }
+        fn get_execution_state(
+            &self,
+            task_id: &str,
+        ) -> crate::store::Result<Option<serde_json::Value>> {
+            self.inner.get_execution_state(task_id)
+        }
+        fn patch_execution_state(
+            &self,
+            task_id: &str,
+            patch: &serde_json::Value,
+        ) -> crate::store::Result<serde_json::Value> {
+            self.inner.patch_execution_state(task_id, patch)
+        }
+        fn update(
+            &self,
+            task: &crate::types::Task,
+        ) -> crate::store::Result<chrono::DateTime<chrono::Utc>> {
+            self.inner.update(task)
+        }
+        fn delete(&self, id: &str) -> crate::store::Result<()> {
+            self.inner.delete(id)
+        }
+        fn list(
+            &self,
+            status: Option<crate::types::TaskStatus>,
+        ) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.list(status)
+        }
+        fn list_ready(&self) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.list_ready()
+        }
+        fn list_blocked(
+            &self,
+        ) -> crate::store::Result<Vec<(crate::types::Task, Vec<crate::types::Task>)>> {
+            self.inner.list_blocked()
+        }
+        fn list_pending_verification(&self) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.list_pending_verification()
+        }
+        fn list_pending_worktree_merge(&self) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.list_pending_worktree_merge()
+        }
+        fn close(&self) -> crate::store::Result<()> {
+            self.inner.close()
+        }
+        fn add_dependency(&self, dep: &crate::types::Dependency) -> crate::store::Result<()> {
+            self.inner.add_dependency(dep)
+        }
+        fn remove_dependency(&self, from_id: &str, to_id: &str) -> crate::store::Result<()> {
+            self.inner.remove_dependency(from_id, to_id)
+        }
+        fn remove_dependency_of_type(
+            &self,
+            from_id: &str,
+            to_id: &str,
+            dep_type: crate::types::DependencyType,
+        ) -> crate::store::Result<bool> {
+            self.inner
+                .remove_dependency_of_type(from_id, to_id, dep_type)
+        }
+        fn get_dependencies(
+            &self,
+            task_id: &str,
+        ) -> crate::store::Result<Vec<crate::types::Dependency>> {
+            self.inner.get_dependencies(task_id)
+        }
+        fn get_dependents(
+            &self,
+            task_id: &str,
+        ) -> crate::store::Result<Vec<crate::types::Dependency>> {
+            self.inner.get_dependents(task_id)
+        }
+        fn get_blockers(&self, task_id: &str) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.get_blockers(task_id)
+        }
+        fn would_create_cycle(&self, from_id: &str, to_id: &str) -> crate::store::Result<bool> {
+            self.inner.would_create_cycle(from_id, to_id)
+        }
+        fn list_dependencies(
+            &self,
+            dep_type: Option<crate::types::DependencyType>,
+        ) -> crate::store::Result<Vec<crate::types::Dependency>> {
+            self.inner.list_dependencies(dep_type)
+        }
+        fn get_subtasks(&self, parent_id: &str) -> crate::store::Result<Vec<crate::types::Task>> {
+            self.inner.get_subtasks(parent_id)
+        }
+        fn get_sibling_notes(
+            &self,
+            epic_id: &str,
+            exclude_task_id: &str,
+        ) -> crate::store::Result<Vec<(String, String, String)>> {
+            self.inner.get_sibling_notes(epic_id, exclude_task_id)
+        }
+        fn get_parent_epic(
+            &self,
+            task_id: &str,
+        ) -> crate::store::Result<Option<crate::types::Task>> {
+            self.inner.get_parent_epic(task_id)
+        }
+    }
+
+    /// A store error is not evidence of absence. `database is locked` during
+    /// `--fix` must not delete a live edge: the row is reported as unchecked,
+    /// the prune is skipped whole, and the warning says so.
+    #[test]
+    fn an_unreadable_endpoint_is_never_pruned_and_the_warning_names_the_error_cas_095c() {
+        let (temp, _queue, store) = task_health_store();
+        seed_pair(store.as_ref());
+        // A second, genuinely dangling row: even a correctly-classified
+        // deletion must wait while any endpoint is unreadable.
+        store
+            .add(&crate::types::Task::new(
+                "cas-dddd".to_string(),
+                "Deleted".to_string(),
+            ))
+            .unwrap();
+        store
+            .add_dependency(&crate::types::Dependency::new(
+                "cas-aaaa".to_string(),
+                "cas-dddd".to_string(),
+                crate::types::DependencyType::Related,
+            ))
+            .unwrap();
+        delete_task_row_only(temp.path(), "cas-dddd");
+        delete_task_row_only(temp.path(), "cas-bbbb");
+
+        let failing: std::sync::Arc<dyn crate::store::TaskStore> =
+            std::sync::Arc::new(FailingGetStore {
+                inner: std::sync::Arc::clone(&store),
+                failing_id: "cas-bbbb".to_string(),
+            });
+
+        let health = health_of(failing.as_ref());
+        assert_eq!(
+            health.unresolved,
+            vec![("cas-aaaa".to_string(), "cas-bbbb".to_string())],
+            "an unreadable endpoint must land in its own bucket"
+        );
+        assert_eq!(
+            health.dangling,
+            vec![("cas-aaaa".to_string(), "cas-dddd".to_string())],
+            "readable endpoints are still classified honestly"
+        );
+
+        let check = check_for(failing.as_ref());
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("could not be checked"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("database is locked"),
+            "the warning must name the error: {}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("nothing is pruned while any endpoint is unreadable"),
+            "{}",
+            check.message
+        );
+
+        // The prune is skipped whole — including the row it could classify.
+        let outcome = prune_dangling_dependencies(failing.as_ref()).unwrap();
+        assert_eq!(
+            outcome,
+            PruneOutcome::Skipped {
+                reason: "database error: database is locked".to_string(),
+                rows: 1,
+            }
+        );
+        assert_eq!(
+            store.list_dependencies(None).unwrap().len(),
+            2,
+            "no dependency row may be deleted on a transient store failure"
+        );
     }
 }
 

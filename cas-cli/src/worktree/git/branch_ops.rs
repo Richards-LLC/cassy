@@ -176,6 +176,17 @@ pub enum TargetReconcile {
         ahead: u32,
         behind: u32,
     },
+    /// The local target holds commits origin does not, and origin holds none
+    /// the local target lacks. This is NOT divergence: origin has not moved,
+    /// so a later push fast-forwards. There is nothing to reconcile and no
+    /// merge to refuse — the caller states the unpublished commits and
+    /// proceeds. Kept separate from `Diverged` precisely because the
+    /// divergence recovery recipe is a no-op here (cas-26c7).
+    AheadOfRemote {
+        local: String,
+        remote: String,
+        ahead: u32,
+    },
     /// `origin` could not be reached. The merge proceeds against the local
     /// target — being offline must not block a merge — but the caller has to
     /// say so, because the push may still be rejected.
@@ -832,12 +843,28 @@ impl GitOperations {
 
         let behind = self.commits_behind(&local, &remote).unwrap_or(0);
         let ahead = self.commits_behind(&remote, &local).unwrap_or(0);
-        if ahead > 0 {
+        // cas-26c7: divergence requires BOTH sides to hold commits the other
+        // lacks. Testing `ahead > 0` alone reported a target that is merely
+        // unpublished as diverged, and the caller then printed a recovery
+        // recipe (`git merge origin/<target>`) that is a no-op in that state —
+        // an operator who followed it got the identical refusal back, with no
+        // exit that did not bypass the tool.
+        if ahead > 0 && behind > 0 {
             return TargetReconcile::Diverged {
                 local,
                 remote,
                 ahead,
                 behind,
+            };
+        }
+        if ahead > 0 {
+            // behind == 0: origin has not moved, so a later push is a
+            // fast-forward. Nothing to reconcile — the target simply carries
+            // commits that have not been published yet.
+            return TargetReconcile::AheadOfRemote {
+                local,
+                remote,
+                ahead,
             };
         }
         if behind == 0 {

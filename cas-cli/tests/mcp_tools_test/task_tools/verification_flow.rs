@@ -1961,6 +1961,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     reference: None,
                 }),
                 None,
+                None,
             )
             .await
             .unwrap(),
@@ -2013,6 +2014,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     reference: None,
                 }),
                 None,
+                None,
             )
             .await
             .unwrap(),
@@ -2051,6 +2053,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     artifact_path: Some(proof.display().to_string()),
                     reference: Some(reference.to_string()),
                 }),
+                None,
                 None,
             )
             .await
@@ -6556,6 +6559,230 @@ async fn no_code_close_ignores_inherited_base_and_accepts_inline_external_ref_ca
     assert_eq!(
         starting_head.stdout, ending_head.stdout,
         "task authored no commit"
+    );
+}
+
+/// cas-099d (recurrence of GH #272, #294, #304, and #333): the unified
+/// close surface accepts `execution_note`, so no-code intent supplied there
+/// must participate in the same close attempt. In particular, the first close
+/// attempt must persist it before an exact verification dispatch freezes the
+/// reviewed scope, and a task whose dispatch is already approved must still be
+/// closable without a supervisor reopen. Ordinary zero-commit code tasks stay
+/// refused with a recovery command that works in their current state.
+#[tokio::test]
+async fn inline_no_code_intent_survives_dispatch_and_approved_proof_cas_099d() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n[worktrees]\nenabled = false\n",
+    )
+    .expect("write config");
+
+    let worker_path = temp.path().join("no-code-worker");
+    std::fs::create_dir_all(&worker_path).expect("create worker checkout");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&worker_path)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "cas@example.test")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "cas@example.test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(worker_path.join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "seed.txt"]);
+    git(&["commit", "-q", "-m", "seed"]);
+    git(&["checkout", "-q", "-b", "factory/no-code-worker"]);
+
+    let worktree_store = open_worktree_store(&cas_dir).expect("open worktree store");
+    worktree_store.init().expect("init worktree store");
+    let worktree_id = Worktree::generate_id();
+    worktree_store
+        .add(&Worktree::new(
+            worktree_id.clone(),
+            "factory/no-code-worker".to_string(),
+            "main".to_string(),
+            worker_path,
+        ))
+        .expect("record worktree");
+
+    let service = CasService::new(core, None);
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    macro_rules! create_zero_commit_bug {
+        ($title:expr, $depth:expr) => {{
+            let created = service
+                .task(Parameters(task_req(serde_json::json!({
+                    "action": "create",
+                    "title": $title,
+                    "priority": 2,
+                    "task_type": "bug",
+                    "depth": $depth
+                }))))
+                .await
+                .expect("create zero-commit bug task");
+            let id = extract_task_id(&extract_text(created))
+                .expect("task id")
+                .to_string();
+            service
+                .task(Parameters(task_req(serde_json::json!({
+                    "action": "start",
+                    "id": id
+                }))))
+                .await
+                .expect("start zero-commit bug task");
+            let mut task = task_store.get(&id).expect("task exists");
+            task.worktree_id = Some(worktree_id.clone());
+            task_store.update(&task).expect("attach zero-commit checkout");
+            id
+        }};
+    }
+
+    // Before dispatch: a light task reaches the close gate directly and may
+    // declare no-code intent on the close request itself.
+    let before_dispatch = create_zero_commit_bug!("No-code before dispatch", "light");
+    let response = extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": before_dispatch,
+                "reason": "Published the operational disposition",
+                "execution_note": "no-code",
+                "external_ref": "artifact:cas-099d/before-dispatch"
+            }))))
+            .await
+            .expect("inline no-code close before dispatch"),
+    );
+    assert!(response.contains("Closed task:"), "{response}");
+    assert_eq!(
+        task_store
+            .get(&before_dispatch)
+            .expect("closed task")
+            .execution_note
+            .as_deref(),
+        Some("no-code")
+    );
+
+    // After dispatch: the first deep close creates an exact dispatch. The
+    // inline intent must already be durable before that proof boundary locks.
+    let after_dispatch = create_zero_commit_bug!("No-code after dispatch", "deep");
+    let first = extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": after_dispatch,
+                "reason": "Published the operational disposition",
+                "execution_note": "no-code",
+                "external_ref": "artifact:cas-099d/after-dispatch"
+            }))))
+            .await
+            .expect("first close creates dispatch"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &after_dispatch)
+        .expect("dispatch lookup")
+        .expect("exact dispatch");
+    assert_eq!(
+        task_store
+            .get(&after_dispatch)
+            .expect("dispatched task")
+            .execution_note
+            .as_deref(),
+        Some("no-code"),
+        "close metadata must be stored before verification locks its scope"
+    );
+    add_exact_supervisor_fixture_verdict(
+        &cas_dir,
+        Verification::approved(
+            "ver-cas-099d-after-dispatch".to_string(),
+            after_dispatch.clone(),
+            "no-code disposition approved".to_string(),
+        ),
+        Some(&dispatch.id),
+    );
+    let closed = extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": after_dispatch,
+                "reason": "Published the operational disposition",
+                "external_ref": "artifact:cas-099d/after-dispatch"
+            }))))
+            .await
+            .expect("close after approved dispatch"),
+    );
+    assert!(closed.contains("Closed task:"), "{closed}");
+
+    // After approval: reproduce the reported trap by approving a task whose
+    // stored execution_note is still empty, then supply the intent on close.
+    let after_approval = create_zero_commit_bug!("No-code after approval", "deep");
+    add_exact_supervisor_fixture_verdict(
+        &cas_dir,
+        Verification::approved(
+            "ver-cas-099d-before-inline-intent".to_string(),
+            after_approval.clone(),
+            "existing no-code evidence approved".to_string(),
+        ),
+        None,
+    );
+    let closed = extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": after_approval,
+                "reason": "Published the operational disposition",
+                "execution_note": "no-code",
+                "external_ref": "artifact:cas-099d/after-approval"
+            }))))
+            .await
+            .expect("approved no-code close without supervisor reopen"),
+    );
+    assert!(closed.contains("Closed task:"), "{closed}");
+    assert_eq!(
+        task_store
+            .get(&after_approval)
+            .expect("closed approved task")
+            .execution_note
+            .as_deref(),
+        Some("no-code")
+    );
+
+    // Negative control: a real code task cannot use absence of commits as
+    // evidence of completion, and its recovery command must work even when an
+    // approved proof would lock ordinary task.update.
+    let code_task = create_zero_commit_bug!("Real code task with no commits", "light");
+    let refused = extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": code_task,
+                "reason": "No code was committed"
+            }))))
+            .await
+            .expect("zero-commit code refusal"),
+    );
+    assert!(refused.contains("ZERO-COMMIT CLOSE ON CODE TASK"), "{refused}");
+    assert!(!refused.contains("no no execution_note"), "{refused}");
+    assert!(
+        refused.contains(&format!(
+            "task action=close id={code_task} execution_note=no-code external_ref=<portable-reference>"
+        )),
+        "the refusal must name the close-time recovery that works under proof lock: {refused}"
+    );
+    assert_eq!(
+        task_store.get(&code_task).expect("refused task").status,
+        TaskStatus::InProgress
     );
 }
 

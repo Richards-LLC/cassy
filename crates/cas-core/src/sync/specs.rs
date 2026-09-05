@@ -266,23 +266,13 @@ impl SpecSyncer {
     }
 }
 
-/// Escape a string for YAML
+/// Escape a string for YAML.
+///
+/// Delegates to the single shared serializer (cas-d731). This copy escaped
+/// backslashes while the skill writers' copy did not — the drift that proved
+/// hand-rolled escaping had stopped being one policy.
 fn escape_yaml(s: &str) -> String {
-    if s.contains(':')
-        || s.contains('#')
-        || s.contains('\n')
-        || s.starts_with(' ')
-        || s.contains('"')
-    {
-        format!(
-            "\"{}\"",
-            s.replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-        )
-    } else {
-        s.to_string()
-    }
+    crate::sync::yaml_scalar(s)
 }
 
 #[cfg(test)]
@@ -446,14 +436,40 @@ mod tests {
         assert_eq!(syncer.target_dir(), temp.path().join("specs"));
     }
 
+    /// cas-d731. This used to assert one hand-rolled spelling per input, which
+    /// is how the three escapers drifted without anyone noticing: the
+    /// assertions pinned the shape of the escape rather than the property that
+    /// matters. Now the contract is stated directly — quoting is whatever the
+    /// shared emitter chooses, provided a real parser reads the value back
+    /// unchanged on a single line.
     #[test]
-    fn test_escape_yaml() {
+    fn test_escape_yaml_round_trips_through_a_real_parser() {
+        for value in [
+            "simple",
+            "with: colon",
+            "with # hash",
+            "with\nnewline",
+            " leading space",
+            "with \"quotes\"",
+            "with 'apostrophes'",
+            "C:\\spec\\path: inspect",
+            "true",
+        ] {
+            let scalar = escape_yaml(value);
+            assert!(!scalar.contains('\n'), "{value:?} -> {scalar:?}");
+
+            let document = format!("title: {scalar}\n");
+            let parsed: serde_yaml::Value = serde_yaml::from_str(&document)
+                .unwrap_or_else(|e| panic!("invalid YAML for {value:?}: {e}\n{document}"));
+            assert_eq!(
+                parsed.get("title").and_then(|v| v.as_str()),
+                Some(value),
+                "value changed on the way through YAML: {document}"
+            );
+        }
+
+        // Ordinary text still reads plainly in the generated file.
         assert_eq!(escape_yaml("simple"), "simple");
-        assert_eq!(escape_yaml("with: colon"), "\"with: colon\"");
-        assert_eq!(escape_yaml("with # hash"), "\"with # hash\"");
-        assert_eq!(escape_yaml("with\nnewline"), "\"with\\nnewline\"");
-        assert_eq!(escape_yaml(" leading space"), "\" leading space\"");
-        assert_eq!(escape_yaml("with \"quotes\""), "\"with \\\"quotes\\\"\"");
     }
 
     #[test]

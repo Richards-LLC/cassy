@@ -375,13 +375,14 @@ fn skill_dir_name(name: &str) -> String {
     }
 }
 
-/// Escape a string for YAML
+/// Escape a string for YAML.
+///
+/// Delegates to the single shared serializer (cas-d731). The hand-rolled copy
+/// that used to live here left backslashes raw inside a quoted scalar, so a
+/// description like `Use C:\project: inspect` produced frontmatter a YAML
+/// reader rejects.
 fn escape_yaml(s: &str) -> String {
-    if s.contains(':') || s.contains('#') || s.contains('\n') || s.starts_with(' ') {
-        format!("\"{}\"", s.replace('\"', "\\\"").replace('\n', "\\n"))
-    } else {
-        s.to_string()
-    }
+    crate::sync::yaml_scalar(s)
 }
 
 /// Generate the built-in CAS skill content

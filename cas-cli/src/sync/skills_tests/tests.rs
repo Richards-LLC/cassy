@@ -40,6 +40,25 @@ fn create_test_skill(name: &str, enabled: bool) -> Skill {
     }
 }
 
+/// cas-d731. `argument-hint: [title]` is not a string in YAML — the brackets
+/// make it a flow sequence, so a real parser returned a one-element list where
+/// every consumer expects text. The shared serializer quotes it, so this
+/// asserts the value a parser actually yields rather than the raw bytes the
+/// old escaper happened to write.
+fn assert_frontmatter_string(content: &str, key: &str, expected: &str) {
+    let frontmatter = content
+        .split("---")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no frontmatter in:\n{content}"));
+    let parsed: serde_yaml::Value = serde_yaml::from_str(frontmatter)
+        .unwrap_or_else(|e| panic!("frontmatter is not valid YAML: {e}\n{frontmatter}"));
+    assert_eq!(
+        parsed.get(key).and_then(|v| v.as_str()),
+        Some(expected),
+        "{key} must read back as the string {expected:?}:\n{frontmatter}"
+    );
+}
+
 #[test]
 fn test_is_enabled() {
     let syncer = SkillSyncer::new(PathBuf::from("/tmp/test"));
@@ -127,7 +146,7 @@ fn test_sync_invokable_skill() {
     syncer.sync_skill(&skill).unwrap();
 
     let content = fs::read_to_string(target.join("cas-my-task/SKILL.md")).unwrap();
-    assert!(content.contains("argument-hint: [title]"));
+    assert_frontmatter_string(&content, "argument-hint", "[title]");
 }
 
 #[test]
@@ -162,7 +181,7 @@ fn test_sync_invokable_skill_no_user_invocable_false() {
     let content = fs::read_to_string(target.join("cas-invokable-skill/SKILL.md")).unwrap();
     // Invokable skills should NOT have user-invocable: false
     assert!(!content.contains("user-invocable: false"));
-    assert!(content.contains("argument-hint: [query]"));
+    assert_frontmatter_string(&content, "argument-hint", "[query]");
 }
 
 #[test]
@@ -236,7 +255,7 @@ fn test_sync_skill_with_all_frontmatter_fields() {
     let content = fs::read_to_string(target.join("cas-full-skill/SKILL.md")).unwrap();
     // Should have all frontmatter fields
     assert!(content.contains("name: cas-full-skill"));
-    assert!(content.contains("argument-hint: [file]"));
+    assert_frontmatter_string(&content, "argument-hint", "[file]");
     assert!(content.contains("context: fork"));
     assert!(content.contains("agent: Explore"));
     assert!(content.contains("allowed-tools:"));
@@ -383,4 +402,55 @@ fn test_sync_skill_disallowed_tools_omitted_when_empty() {
 
     let content = fs::read_to_string(target.join("cas-open-skill/SKILL.md")).unwrap();
     assert!(!content.contains("disallowed-tools:"), "disallowed-tools must NOT be emitted when empty");
+}
+
+/// cas-d731. The end-to-end claim: a skill whose summary contains the
+/// characters that broke the old escaper is written to disk as frontmatter a
+/// real YAML parser accepts, with the value intact. The reported defect —
+/// `Use C:\project: inspect` — produced `description: "Use C:\project:
+/// inspect"`, which a parser rejects with `found unknown escape character
+/// 'p'`.
+#[test]
+fn a_synced_skill_writes_frontmatter_a_real_yaml_parser_accepts() {
+    for summary in [
+        "Use C:\\project: inspect",
+        "Windows path C:\\Users\\dev and a colon: here",
+        "quotes \" and ' together",
+        "true",
+        "- leading dash",
+        "trailing space ",
+        "multi\nline summary",
+        "unicode — café 日本語 🎯",
+    ] {
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join(".claude/skills");
+        let syncer = SkillSyncer::new(target.clone());
+
+        let mut skill = create_test_skill("hostile", true);
+        skill.summary = summary.to_string();
+        assert!(syncer.sync_skill(&skill).unwrap());
+
+        let content = fs::read_to_string(target.join("cas-hostile/SKILL.md")).unwrap();
+        let frontmatter = content
+            .split("---")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no frontmatter written for {summary:?}:\n{content}"));
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(frontmatter).unwrap_or_else(|e| {
+            panic!("generated frontmatter is not valid YAML for {summary:?}: {e}\n{frontmatter}")
+        });
+        assert_eq!(
+            parsed.get("description").and_then(|v| v.as_str()),
+            Some(summary),
+            "the description changed on the way to disk:\n{frontmatter}"
+        );
+
+        // The frontmatter stays line-oriented: one `description:` line, no
+        // block scalar continuation, so line-based readers still see the value.
+        let description_lines = frontmatter
+            .lines()
+            .filter(|l| l.starts_with("description:"))
+            .count();
+        assert_eq!(description_lines, 1, "{frontmatter}");
+    }
 }

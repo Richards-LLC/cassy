@@ -40,6 +40,11 @@ impl Notifier {
     /// Get notification metadata for an event type
     fn event_meta(event: &DirectorEvent) -> Option<NotificationMeta> {
         match event {
+            DirectorEvent::SupervisorStalled { .. } => Some(NotificationMeta {
+                title: "Supervisor Stalled",
+                icon: "dialog-warning",
+                urgency: Urgency::Normal,
+            }),
             DirectorEvent::TaskCompleted { .. } => Some(NotificationMeta {
                 title: "Task Completed",
                 icon: "emblem-ok-symbolic",

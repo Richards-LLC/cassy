@@ -3352,23 +3352,28 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
         "cas-receipt-unleased".to_string(),
         "Unleased receipt caller".to_string(),
     );
-    unleased_task.status = TaskStatus::InProgress;
+    unleased_task.status = TaskStatus::AwaitingMerge;
     unleased_task.depth = TaskDepth::Deep;
     unleased_task.assignee = Some("orphan".to_string());
+    let stale_unleased_anchor = "e".repeat(40);
+    unleased_task.deliverables.factory_branch_anchor = Some(stale_unleased_anchor.clone());
     unleased_task.deliverables.work_target = task.deliverables.work_target.clone();
     task_store.add(&unleased_task).unwrap();
     let unleased_receipt = delivery_receipt(&unleased_task.id, unleased_id, &repo, "alice");
     let before_unleased = durable_close_snapshot(&cas_root);
     let unleased = delivery_service(&cas_root, unleased_id)
         .task(Parameters(task_req(serde_json::json!({
-            "action": "close",
-            "id": unleased_task.id,
-            "reason": "no lease is not authority",
-            "completion_receipt": serde_json::to_string(&unleased_receipt).unwrap(),
+                "action": "close",
+                "id": unleased_task.id,
+                "reason": "no lease is not authority",
+                "completion_receipt": serde_json::to_string(&unleased_receipt).unwrap(),
         }))))
         .await
         .expect("unleased receipt returns a typed rejection");
-    assert!(get_text(&unleased).contains("exact active task lease"));
+    let unleased_text = get_text(&unleased);
+    assert!(unleased_text.contains("exact active task lease"));
+    assert!(unleased_text.contains(&stale_unleased_anchor));
+    assert!(unleased_text.contains("commit_receipt=<current merged commit>"));
     assert_eq!(durable_close_snapshot(&cas_root), before_unleased);
 
     // A receipt may establish its immutable recovery boundary before task
@@ -3681,6 +3686,139 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
         durable_close_snapshot(&cas_root),
         before_replacement,
         "replacement receipt B must not mutate task/deliverables/lease/receipt/transaction/event/dispatch/verdict/outbox state"
+    );
+}
+
+/// cas-e159: a fresh continuation must be able to close an AwaitingMerge task
+/// with the current merged delivery receipt even when the task still exposes a
+/// parked branch anchor captured by an earlier dead continuation.
+#[tokio::test]
+async fn awaiting_merge_reclose_uses_current_commit_receipt_cas_e159() {
+    let mut env = test_env();
+    let home = TempDir::new().expect("temp HOME");
+    env.set("HOME", home.path());
+    let repo = GitRepo::new();
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/e159.git"],
+        &repo.root,
+    );
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init CAS");
+    disable_system_a(&cas_root);
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[worktrees]\nenabled = false\n[verification]\nenabled = false\n",
+    )
+    .expect("disable verification for direct re-close fixture");
+
+    let factory_session = "e159-factory-session";
+    let worker_id = "e159-current-worker-session";
+    register_delivery_agent(
+        &cas_root,
+        worker_id,
+        "alice",
+        AgentRole::Worker,
+        factory_session,
+    );
+    let worker_path = cas_root.join("worktrees").join("alice");
+    repo.add_worktree(&worker_path, "factory/alice");
+
+    let task_store = open_task_store(&cas_root).expect("task store");
+    let mut task = Task::new(
+        "cas-e159-reclose".to_string(),
+        "Current merged delivery re-close".to_string(),
+    );
+    // Keep the synthetic delivery inside the task lifetime while making its
+    // commit timestamp unambiguously predate the later continuation claim.
+    task.created_at = chrono::Utc::now() - chrono::Duration::seconds(60);
+    task.updated_at = task.created_at;
+    task.status = TaskStatus::InProgress;
+    task.depth = TaskDepth::Deep;
+    task.assignee = Some("alice".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/e159".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add AwaitingMerge task");
+
+    // This commit is the stale anchor from the prior continuation. It remains
+    // a valid object but is deliberately not part of the current worker lane
+    // or the target branch.
+    run_git(&["checkout", "-b", "factory/hv-sigill-release"], &repo.root);
+    std::fs::write(repo.root.join("stale.txt"), "old continuation\n").unwrap();
+    run_git(&["add", "stale.txt"], &repo.root);
+    run_git(&["commit", "-m", "old continuation anchor"], &repo.root);
+    let stale_anchor = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
+    run_git(&["checkout", "main"], &repo.root);
+
+    // The current continuation writes the actual delivery on its current lane,
+    // then the supervisor merges that lane to the resolved close target.
+    let old_commit_time = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    let _author_date = VarGuard::set(&env, "GIT_AUTHOR_DATE", &old_commit_time);
+    let _committer_date = VarGuard::set(&env, "GIT_COMMITTER_DATE", &old_commit_time);
+    std::fs::write(worker_path.join("current.rs"), "pub fn current() {}\n").unwrap();
+    run_git(&["add", "current.rs"], &worker_path);
+    run_git(
+        &["commit", "-m", "current continuation delivery"],
+        &worker_path,
+    );
+    let current_receipt = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+    run_git(
+        &[
+            "merge",
+            "--no-ff",
+            "factory/alice",
+            "-m",
+            "merge current continuation delivery",
+        ],
+        &repo.root,
+    );
+    let stale_reachable = Command::new("git")
+        .args(["merge-base", "--is-ancestor", &stale_anchor, "main"])
+        .current_dir(&repo.root)
+        .status()
+        .expect("check stale anchor reachability")
+        .success();
+    assert!(
+        !stale_reachable,
+        "the stale prior-continuation anchor must remain outside the target"
+    );
+
+    // The current continuation claimed and then released the task after the
+    // delivery commit was created. This advances the receipt window beyond
+    // the commit while leaving the task in the post-merge, no-active-lease
+    // state that a fresh worker sees after its start is refused.
+    let agent_store = open_agent_store(&cas_root).expect("agent store");
+    agent_store
+        .try_claim(&task.id, worker_id, 600, Some("current continuation"))
+        .expect("claim current continuation");
+    agent_store
+        .release_lease_for_task(&task.id, "current continuation released")
+        .expect("release current continuation lease");
+    task.status = TaskStatus::AwaitingMerge;
+
+    task.deliverables.factory_branch_anchor = Some(stale_anchor.clone());
+    task.deliverables.parked_branch = Some("factory/hv-sigill-release".to_string());
+    task_store
+        .update(&task)
+        .expect("persist stale parked anchor");
+
+    let close = delivery_service(&cas_root, worker_id)
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": task.id,
+            "reason": "current continuation delivery is merged",
+            "commit_receipt": current_receipt,
+        }))))
+        .await
+        .expect("current merged receipt re-close");
+    let close_text = get_text(&close);
+    assert!(
+        close_text.contains("Closed task:"),
+        "a current merged receipt must clear a stale parked anchor: {close_text}"
+    );
+    assert_eq!(
+        task_store.get(&task.id).expect("closed task").status,
+        TaskStatus::Closed
     );
 }
 

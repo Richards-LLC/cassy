@@ -178,6 +178,7 @@ pub(super) fn execute_daemon(
             .unwrap_or(false),
         // cas-9829: activity-based stall detection threshold.
         stall_threshold_secs: cas_config.factory().stall_threshold_secs,
+        stall_after_secs: cas_config.factory().stall_after_secs,
         ai_enrichment: cas_config.factory().ai_enrichment,
     };
 

@@ -462,7 +462,15 @@ pub fn create_metadata(
         })
         .unwrap_or_default();
     let delivery_mode = previous_metadata
+        .as_ref()
         .map(|metadata| metadata.delivery_mode)
+        .unwrap_or_default();
+    let last_supervisor_mcp_call_at = previous_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.last_supervisor_mcp_call_at);
+    let supervisor_stall = previous_metadata
+        .as_ref()
+        .map(|metadata| metadata.supervisor_stall.clone())
         .unwrap_or_default();
     held_workers.sort();
     held_workers.dedup();
@@ -506,6 +514,8 @@ pub fn create_metadata(
         pinned_epic_id: None,
         delivery_mode,
         held_workers,
+        last_supervisor_mcp_call_at,
+        supervisor_stall,
         project_dir: project_dir.map(|s| s.to_string()),
         team_name: None,
     }

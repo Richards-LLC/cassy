@@ -162,6 +162,10 @@ fn default_true() -> bool {
 /// `events.rs` already tolerates gaps up to 120s for the idle gate).
 pub const DEFAULT_STALL_THRESHOLD_SECS: u64 = 300;
 
+/// Default supervisor-silence window before actionable epic state wakes the
+/// supervisor. This is intentionally distinct from worker stall detection.
+pub const DEFAULT_SUPERVISOR_STALL_AFTER_SECS: u64 = 10 * 60;
+
 /// Auto-prompting configuration for factory mode events
 ///
 /// Controls which events trigger automatic prompt injection into agent terminals.
@@ -275,6 +279,9 @@ pub struct FactoryConfig {
     /// (cas-9829). Sourced from `.cas/config.toml` `[factory]
     /// stall_threshold_secs`; defaults to [`DEFAULT_STALL_THRESHOLD_SECS`].
     pub stall_threshold_secs: u64,
+    /// Seconds of supervisor MCP silence required before the forward-motion
+    /// detector wakes the supervisor for an actionable focused epic.
+    pub stall_after_secs: u64,
     /// Shared AI enrichment for Commander summaries and event enrichment.
     /// Default off because terminal excerpts may be sent to a third-party API.
     pub ai_enrichment: AiEnrichmentConfig,
@@ -306,6 +313,7 @@ impl Default for FactoryConfig {
             resolved_worker_specs: vec![],
             resolved_supervisor_spec: None,
             stall_threshold_secs: DEFAULT_STALL_THRESHOLD_SECS,
+            stall_after_secs: DEFAULT_SUPERVISOR_STALL_AFTER_SECS,
             ai_enrichment: AiEnrichmentConfig::default(),
         }
     }

@@ -30,9 +30,12 @@
 //! That is valid YAML, but frontmatter here is also read by line-oriented
 //! consumers, which would see only the first physical line. So a value that
 //! cannot be expressed on one line by the emitter is written as an escaped
-//! double-quoted scalar instead. The correctness of that fallback is not
-//! asserted by inspection: the tests below feed a hostile corpus through a
-//! real parser and require every value back byte-identical.
+//! double-quoted scalar instead — produced by `serde_json`, because a JSON
+//! string literal is a valid YAML double-quoted scalar. That keeps every path
+//! through this module backed by a real serializer rather than a second
+//! hand-rolled escaper. The claim is not asserted by inspection: the tests
+//! below feed a hostile corpus through a real YAML parser and require every
+//! value back byte-identical.
 
 /// Renders `value` as a single-line YAML scalar, suitable for the right-hand
 /// side of a `key: ` in generated frontmatter.
@@ -47,32 +50,24 @@ pub fn yaml_scalar(value: &str) -> String {
             return single.to_string();
         }
     }
-    double_quoted(value)
+    json_string_as_yaml_scalar(value)
 }
 
-/// The single-line escape used when the emitter would go multi-line.
+/// The single-line form used when the YAML emitter would go multi-line.
 ///
-/// Deliberately conservative: it escapes what YAML's double-quoted style
-/// requires and encodes every other control character as `\uXXXX`, rather than
-/// passing bytes through and hoping a reader tolerates them.
-fn double_quoted(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || c == '\u{7f}' => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+/// This is still a real serializer, not a hand-rolled escaper: a JSON string
+/// literal *is* a YAML double-quoted scalar (YAML 1.2 is a superset of JSON,
+/// and YAML's double-quoted style accepts the same `\n`, `\t`, `\"`, `\\` and
+/// `\uXXXX` escapes JSON emits). `serde_json` already ships in this crate, it
+/// never emits a raw newline, and it escapes every control character — so it
+/// answers exactly the question this fallback needs answered. The corpus test
+/// verifies that claim against a YAML parser rather than asserting it.
+fn json_string_as_yaml_scalar(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| {
+        // serde_json only fails here on an allocation error; a plain empty
+        // scalar is the safest thing to write in that case.
+        "\"\"".to_string()
+    })
 }
 
 #[cfg(test)]
@@ -223,5 +218,27 @@ mod tests {
         let scalar = yaml_scalar("line\nbreak");
         assert_eq!(scalar, "\"line\\nbreak\"");
         assert!(!scalar.contains('\n'));
+    }
+
+    /// The fallback's premise, stated as a test rather than a comment: what
+    /// serde_json writes for a hostile value is accepted by a YAML parser and
+    /// read back unchanged. If that ever stops holding, this fails here rather
+    /// than in generated files.
+    #[test]
+    fn json_string_literals_are_valid_yaml_scalars() {
+        for value in HOSTILE_CORPUS {
+            let scalar = super::json_string_as_yaml_scalar(value);
+            assert!(!scalar.contains('\n'), "{value:?} -> {scalar:?}");
+
+            let document = format!("description: {scalar}\n");
+            let parsed: serde_yaml::Value = serde_yaml::from_str(&document).unwrap_or_else(|e| {
+                panic!("serde_json output is not valid YAML for {value:?}: {e}\n{document}")
+            });
+            assert_eq!(
+                parsed.get("description").and_then(|v| v.as_str()),
+                Some(*value),
+                "value changed through the JSON-literal fallback: {document}"
+            );
+        }
     }
 }

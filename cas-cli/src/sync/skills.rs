@@ -597,7 +597,52 @@ fn extract_body(content: &str) -> String {
 }
 
 /// Extract a single value from YAML frontmatter
+/// Reads one scalar out of generated frontmatter.
+///
+/// cas-d731. The writer now emits real YAML, which means a value can carry
+/// real YAML quoting and escapes. The scan below cannot decode those — it
+/// trims quote characters and returns the rest verbatim — so a parser is asked
+/// first and the scan survives only for files the parser rejects.
+///
+/// That fallback is not defensive habit: every `SKILL.md` written before this
+/// change by the old escaper is exactly such a file. `Use C:\project: inspect`
+/// was written as `description: "Use C:\project: inspect"`, which no YAML
+/// parser accepts, and those files are on disk in every checkout that has run
+/// a sync. Dropping the scan would make CAS stop reading its own history.
+///
+/// The fallback is narrow by construction: it runs only when the frontmatter
+/// fails to parse as YAML. A document that parses but lacks the key, or holds
+/// a value that is not a scalar, returns `None` — the parser's answer stands.
 fn extract_yaml_value(frontmatter: &str, key: &str) -> Option<String> {
+    match serde_yaml::from_str::<serde_yaml::Value>(frontmatter) {
+        Ok(parsed) => scalar_field(&parsed, key),
+        // Only a document YAML cannot read at all falls through to the legacy
+        // scan, because only the pre-fix writer produced those.
+        Err(_) => legacy_line_scan(frontmatter, key),
+    }
+}
+
+/// Exact-key scalar lookup that preserves the typed-field behaviour callers
+/// already depend on: `user-invocable: false` and `disable-model-invocation:
+/// true` are compared as the strings `"false"` and `"true"` upstream, so a
+/// YAML boolean has to read back as that text rather than as `None`.
+fn scalar_field(parsed: &serde_yaml::Value, key: &str) -> Option<String> {
+    let value = parsed.get(key)?;
+    let text = match value {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        // A sequence, mapping or null is not a scalar. Reporting it as absent
+        // is the honest answer and matches what the old scan did with a list.
+        _ => return None,
+    };
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// The pre-cas-d731 reader, kept verbatim for frontmatter that is not valid
+/// YAML. Prefix-matches the key exactly as it always did, so files it could
+/// read before are read identically now.
+fn legacy_line_scan(frontmatter: &str, key: &str) -> Option<String> {
     for line in frontmatter.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with(key) {

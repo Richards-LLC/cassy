@@ -454,3 +454,104 @@ fn a_synced_skill_writes_frontmatter_a_real_yaml_parser_accepts() {
         assert_eq!(description_lines, 1, "{frontmatter}");
     }
 }
+
+/// cas-d731. The other half of the round trip: what the writer puts on disk,
+/// CAS's own reader must read back. External parser agreement is not enough —
+/// the reader is line-oriented and decodes no escapes, so a writer fix that
+/// ignored it would trade an invalid file for a silently wrong value.
+#[test]
+fn cas_reads_back_the_hostile_values_it_wrote() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path();
+    let target = project.join(".claude/skills");
+    let syncer = SkillSyncer::new(target.clone());
+
+    let cases = [
+        ("windows", "Use C:\\project: inspect"),
+        ("quotes", "quotes \" and ' together"),
+        ("implicit", "true"),
+        ("dash", "- leading dash"),
+        ("newline", "multi\nline summary"),
+        ("unicode", "unicode — café 日本語 🎯"),
+    ];
+    for (name, summary) in cases {
+        let mut skill = create_test_skill(name, true);
+        skill.summary = summary.to_string();
+        assert!(syncer.sync_skill(&skill).unwrap());
+    }
+
+    let read_back = read_skills_from_files(project).unwrap();
+    for (name, summary) in cases {
+        let found = read_back
+            .iter()
+            .find(|s| s.name == format!("cas-{name}"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "CAS could not read back the skill it wrote for {summary:?}; got {:?}",
+                    read_back.iter().map(|s| &s.name).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            found.summary, summary,
+            "CAS's own reader changed the value it had just written for {name}"
+        );
+    }
+}
+
+/// The narrow legacy fallback, justified by a real fixture rather than by
+/// caution: this is exactly what the old escaper wrote for the reported
+/// defect, and it is not valid YAML. Files like it exist in every checkout
+/// that ran a sync before the fix, so the reader must still understand them.
+#[test]
+fn a_legacy_invalid_yaml_skill_file_is_still_readable() {
+    let temp = TempDir::new().unwrap();
+    let skill_dir = temp.path().join(".claude/skills/cas-legacy");
+    fs::create_dir_all(&skill_dir).unwrap();
+    // Verbatim pre-cas-d731 output: the raw backslash makes this invalid YAML.
+    let legacy = "---\nname: cas-legacy\ndescription: \"Use C:\\project: inspect\"\n---\n\nBody.\n";
+    assert!(
+        serde_yaml::from_str::<serde_yaml::Value>(
+            legacy.split("---").nth(1).unwrap()
+        )
+        .is_err(),
+        "this fixture is only meaningful if a parser really rejects it"
+    );
+    fs::write(skill_dir.join("SKILL.md"), legacy).unwrap();
+
+    let read_back = read_skills_from_files(temp.path()).unwrap();
+    let skill = read_back
+        .iter()
+        .find(|s| s.name == "cas-legacy")
+        .expect("a legacy file must not become unreadable");
+    assert!(
+        skill.summary.contains("Use C:"),
+        "the legacy scan must still recover the description, got {:?}",
+        skill.summary
+    );
+}
+
+/// A document that parses but omits the key returns None: the parser's answer
+/// stands, and the legacy scan must not be used to invent a value.
+#[test]
+fn valid_yaml_without_the_key_does_not_fall_back_to_scanning() {
+    let temp = TempDir::new().unwrap();
+    let skill_dir = temp.path().join(".claude/skills/cas-nodesc");
+    fs::create_dir_all(&skill_dir).unwrap();
+    // `description_extra` would satisfy the legacy prefix scan for the key
+    // `description`; a parsed document must not be reinterpreted that way.
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: cas-nodesc\ndescription_extra: leaked\n---\n\nBody.\n",
+    )
+    .unwrap();
+
+    let read_back = read_skills_from_files(temp.path()).unwrap();
+    let skill = read_back
+        .iter()
+        .find(|s| s.name == "cas-nodesc")
+        .expect("the file itself is valid and must still be read");
+    assert_eq!(
+        skill.summary, "",
+        "a missing key must read as absent, not as a prefix match"
+    );
+}

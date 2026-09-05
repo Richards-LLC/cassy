@@ -1,0 +1,209 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::{Command, Output},
+};
+
+use tempfile::TempDir;
+
+fn run_git(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git should start");
+    assert_success("git", args, &output);
+    String::from_utf8(output.stdout).expect("git output should be UTF-8")
+}
+
+fn assert_success(program: &str, args: &[&str], output: &Output) {
+    assert!(
+        output.status.success(),
+        "{program} {args:?} failed ({}):\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn cargo_bin() -> PathBuf {
+    std::env::var_os("CARGO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("cargo"))
+}
+
+fn run_cargo(package_root: &Path, target_dir: &Path, args: &[&str]) -> String {
+    let manifest = package_root.join("Cargo.toml");
+    let mut cargo_args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+    cargo_args.extend([
+        "--manifest-path".to_string(),
+        manifest.display().to_string(),
+    ]);
+    if args.first() != Some(&"generate-lockfile") {
+        cargo_args.extend(["--target-dir".to_string(), target_dir.display().to_string()]);
+    }
+    let output = Command::new(cargo_bin())
+        .args(&cargo_args)
+        .current_dir(package_root)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .expect("cargo should start");
+    assert_success("cargo", args, &output);
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn cargo_run_hash(package_root: &Path, target_dir: &Path) -> String {
+    let output = run_cargo(package_root, target_dir, &["run", "--quiet"]);
+    output.trim().to_string()
+}
+
+fn assert_no_missing_input(output: &str) {
+    assert!(
+        !output.contains("Dirty") || !output.contains("missing"),
+        "Cargo reported a missing rerun input:\n{output}"
+    );
+}
+
+fn create_fixture() -> (TempDir, PathBuf, PathBuf) {
+    let repo = tempfile::tempdir().expect("fixture tempdir");
+    let package = repo.path().join("cas-cli");
+    let source = package.join("src");
+    let dist = repo.path().join("hub-web/dist");
+    fs::create_dir_all(&source).expect("fixture source directory");
+    fs::create_dir_all(&dist).expect("fixture dist directory");
+
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"),
+        package.join("build.rs"),
+    )
+    .expect("copy production build script");
+    fs::write(
+        package.join("Cargo.toml"),
+        r#"[package]
+name = "build-watch-fixture"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[build-dependencies]
+chrono = "0.4"
+dotenvy = "0.15"
+"#,
+    )
+    .expect("fixture manifest");
+    fs::write(
+        source.join("main.rs"),
+        r#"fn main() {
+    println!("{}", option_env!("CAS_GIT_HASH").unwrap_or("unknown"));
+    println!("{}", option_env!("CAS_POSTHOG_API_KEY").unwrap_or("missing"));
+}
+"#,
+    )
+    .expect("fixture source");
+    for asset in [
+        "index.html",
+        "app.js",
+        "app.css",
+        "ghostty-vt.wasm",
+        "ghostty-write-pty.wasm",
+        "symbols.woff2",
+    ] {
+        fs::write(dist.join(asset), asset).expect("fixture Hub asset");
+    }
+
+    run_git(repo.path(), &["init", "-q", "-b", "main"]);
+    run_git(repo.path(), &["config", "user.name", "CAS build test"]);
+    run_git(
+        repo.path(),
+        &["config", "user.email", "cas-build-test@example.invalid"],
+    );
+    run_git(repo.path(), &["add", "."]);
+    run_git(repo.path(), &["commit", "-q", "-m", "fixture"]);
+
+    let linked = repo.path().join("linked");
+    run_git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    (repo, package, linked.join("cas-cli"))
+}
+
+#[test]
+fn cargo_build_script_stays_fresh_and_tracks_worktree_transitions() {
+    let (repo, normal_package, linked_package) = create_fixture();
+    let targets = tempfile::tempdir().expect("target tempdir");
+    let normal_target = targets.path().join("normal-target");
+    let linked_target = targets.path().join("linked-target");
+    // Generate each worktree's lockfile before the first build. Cargo creates
+    // it lazily otherwise, which is itself a parent-inventory transition.
+    run_cargo(&normal_package, &normal_target, &["generate-lockfile"]);
+    run_cargo(&linked_package, &linked_target, &["generate-lockfile"]);
+
+    let normal_first = run_cargo(&normal_package, &normal_target, &["check"]);
+    assert_no_missing_input(&normal_first);
+    let normal_second = run_cargo(&normal_package, &normal_target, &["check"]);
+    assert_no_missing_input(&normal_second);
+    assert!(
+        !normal_second.contains("Compiling build-watch-fixture"),
+        "unchanged normal checkout reran its build script:\n{normal_second}"
+    );
+
+    let linked_first = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&linked_first);
+    let linked_second = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&linked_second);
+    assert!(
+        !linked_second.contains("Compiling build-watch-fixture"),
+        "unchanged linked checkout reran its build script:\n{linked_second}"
+    );
+
+    run_git(
+        repo.path(),
+        &["-C", "linked", "pack-refs", "--all", "--prune"],
+    );
+    run_cargo(&linked_package, &linked_target, &["check"]);
+    let packed_hash = cargo_run_hash(&linked_package, &linked_target);
+
+    run_git(
+        &repo.path().join("linked"),
+        &["commit", "--allow-empty", "-q", "-m", "packed-to-loose"],
+    );
+    let loose_transition = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&loose_transition);
+    let loose_hash = cargo_run_hash(&linked_package, &linked_target);
+    assert_ne!(
+        loose_hash, packed_hash,
+        "packed-to-loose branch update did not refresh embedded metadata"
+    );
+
+    fs::write(
+        repo.path().join("linked/.env"),
+        "CAS_POSTHOG_API_KEY=created\n",
+    )
+    .expect("create optional .env");
+    let env_transition = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&env_transition);
+    let env_output = cargo_run_hash(&linked_package, &linked_target);
+    assert!(
+        env_output.lines().any(|line| line == "created"),
+        "creating an absent .env did not invalidate the build:\n{env_output}"
+    );
+    let env_repeat = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&env_repeat);
+    assert!(
+        !env_repeat.contains("Compiling build-watch-fixture"),
+        "unchanged linked checkout after .env creation reran its build script:\n{env_repeat}"
+    );
+}

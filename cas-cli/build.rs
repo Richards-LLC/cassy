@@ -9,16 +9,12 @@ use std::{
 };
 
 fn main() {
-    for path in [
-        "../hub-web/dist/index.html",
-        "../hub-web/dist/app.js",
-        "../hub-web/dist/app.css",
-        "../hub-web/dist/ghostty-vt.wasm",
-        "../hub-web/dist/ghostty-write-pty.wasm",
-        "../hub-web/dist/symbols.woff2",
-    ] {
-        watch_if_exists(Path::new(path));
-    }
+    println!("cargo:rerun-if-changed=../hub-web/dist/index.html");
+    println!("cargo:rerun-if-changed=../hub-web/dist/app.js");
+    println!("cargo:rerun-if-changed=../hub-web/dist/app.css");
+    println!("cargo:rerun-if-changed=../hub-web/dist/ghostty-vt.wasm");
+    println!("cargo:rerun-if-changed=../hub-web/dist/ghostty-write-pty.wasm");
+    println!("cargo:rerun-if-changed=../hub-web/dist/symbols.woff2");
     // Load .env file if present (for telemetry keys)
     load_env_file();
 
@@ -59,13 +55,42 @@ fn main() {
     watch_git_paths();
 
     // Rebuild if .env changes
-    watch_if_exists(Path::new("../.env"));
-    watch_if_exists(Path::new(".env"));
+    watch_optional_path(Path::new("../.env"));
+    watch_optional_path(Path::new(".env"));
 }
 
 fn watch_if_exists(path: &Path) {
     if path.exists() {
         println!("cargo:rerun-if-changed={}", path.display());
+    }
+}
+
+fn watch_optional_path(path: &Path) {
+    watch_if_exists(path);
+
+    // Cargo cannot observe a file that does not exist yet. Watching the
+    // nearest existing parent gives creation/deletion transitions a bounded
+    // inventory signal without making the missing file itself permanently
+    // dirty.
+    if let Some(parent) = path.parent() {
+        watch_existing_ancestor(parent);
+    }
+}
+
+fn watch_existing_ancestor(path: &Path) {
+    let mut candidate = path;
+    loop {
+        if candidate.exists() {
+            watch_if_exists(candidate);
+            return;
+        }
+        let Some(parent) = candidate.parent() else {
+            return;
+        };
+        if parent == candidate {
+            return;
+        }
+        candidate = parent;
     }
 }
 
@@ -83,7 +108,9 @@ fn watch_git_paths() {
     if let Some(symbolic_head) = git_output(&["symbolic-ref", "--quiet", "HEAD"])
         && symbolic_head.starts_with("refs/")
     {
-        watch_if_exists(&git_common_dir.join(symbolic_head));
+        let branch_ref = git_common_dir.join(symbolic_head);
+        watch_if_exists(&branch_ref);
+        watch_existing_ancestor(branch_ref.parent().unwrap_or(&git_common_dir));
     }
 
     // A branch ref can be packed instead of having a loose file. Registering

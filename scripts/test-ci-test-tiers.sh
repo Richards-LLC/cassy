@@ -6,6 +6,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ci="$repo_root/.github/workflows/ci.yml"
 self_hosted="$repo_root/.github/workflows/self-hosted-fast-validation.yml"
 release="$repo_root/.github/workflows/release.yml"
+install_path_proof="$repo_root/.github/workflows/install-path-proof.yml"
 setup="$repo_root/.github/actions/setup-rust-linux/action.yml"
 fallback="$repo_root/scripts/sccache-unavailable.sh"
 ruleset="$repo_root/docs/branch-protection/main-ruleset.json"
@@ -1151,6 +1152,7 @@ fi
 require_text "$ci_text" 'SCCACHE_GHA_ENABLED: "true"' 'CI enables GitHub cache-v2 backend'
 require_text "$(<"$release")" 'SCCACHE_GHA_ENABLED: "true"' 'release enables GitHub cache-v2 backend'
 release_text="$(<"$release")"
+install_path_proof_text="$(<"$install_path_proof")"
 release_verify="$(release_job_block verify)"
 release_linux="$(release_job_block build)"
 release_macos="$(release_job_block build-macos)"
@@ -1177,6 +1179,25 @@ require_text "$release_text" 'macos_artifact_url:' 'manual signature receipt acc
 require_text "$release_signature_receipt" 'runs-on: macos-26' 'signature receipt runs on macOS'
 require_text "$release_signature_receipt" 'codesign -dv "$package/cas"' 'signature receipt prints macOS signature details'
 require_text "$release_signature_receipt" 'codesign --verify --verbose=4 "$package/cas"' 'signature receipt rejects an invalid macOS signature'
+require_text "$release_publish" 'actions: write' 'release publication can dispatch the install-path proof'
+require_text "$release_publish" 'gh workflow run install-path-proof.yml' 'release publication explicitly dispatches the install-path proof'
+require_text "$release_publish" '--ref "$VERSION"' 'install-path dispatch targets the published release tag'
+require_text "$release_publish" '-f version="$VERSION"' 'install-path dispatch passes the published release tag input'
+require_text "$release_publish" 'proof_run_id=' 'release publication captures the install-path proof run id'
+require_text "$release_publish" 'GITHUB_STEP_SUMMARY' 'release publication records the install-path proof receipt'
+create_release_position="$(named_step_position "$release_publish" 'Create Release')"
+install_path_dispatch_position="$(named_step_position "$release_publish" 'Dispatch install path proof')"
+if [[ -n "$create_release_position" && -n "$install_path_dispatch_position" \
+    && "$install_path_dispatch_position" -gt "$create_release_position" ]]; then
+    printf 'ok   install-path proof dispatch runs after release publication\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL install-path proof dispatch must run after release publication\n'
+    fail=$((fail + 1))
+fi
+require_text "$install_path_proof_text" 'release:' 'install-path proof retains release event support'
+require_text "$install_path_proof_text" 'types: [published]' 'install-path proof runs for published releases'
+require_text "$install_path_proof_text" 'workflow_dispatch:' 'install-path proof retains manual dispatch support'
 require_text "$scoped_validation" './scripts/test-cas-install.sh' 'Scoped Validation runs portable installer fixtures'
 require_text "$fast_preflight" './scripts/test-cas-install.sh' 'Fast Validation preflight runs portable installer fixtures'
 require_absent "$(<"$release")" 'gh release delete' 'release never replaces published assets after a receipt'
@@ -1190,6 +1211,7 @@ require_text "$(<"$repo_root/docs/RELEASE_SLACK_RUBRIC.md")" '### Recovering a f
 # still proceed to its one normal create operation.
 release_create_body="$(awk '
     $0 == "      - name: Create Release" { in_step = 1; next }
+    in_step && $0 ~ /^      - name:/ { exit }
     in_step && $0 == "        run: |" { in_body = 1; next }
     in_body { sub(/^          /, ""); print }
 ' "$release" | sed -E 's/\$\{\{[^}]+\}\}/workflow-expression/g')"

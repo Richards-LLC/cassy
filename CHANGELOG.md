@@ -7,6 +7,48 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.17.1] - 2026-09-05
+
+### Changed
+- The shared `taste` route now selects Codex GPT-6 Astra at medium effort and
+  fails closed when that route is unavailable. The canonical registry,
+  generated supervisor guidance, CLI and MCP resolution, doctor, and preflight
+  now agree on that choice. Explicit Astra effort choices from minimal through
+  xhigh remain supported, as does explicit Claude Opus selection outside the
+  `taste` route.
+
+### Fixed
+- The installer now requires the selected GitHub release asset's published
+  SHA-256 before extraction or executable replacement. A missing, malformed,
+  or mismatched receipt leaves the existing installation untouched. This is
+  corruption detection against the same publishing authority, not independent
+  signature or attestation authentication.
+- Concurrent project-config updates are serialized across processes and
+  committed through a private same-directory temporary file, sync, and atomic
+  rename. Existing permissions and unrelated TOML sections are preserved, and
+  a failed commit leaves the prior valid config in place.
+- Slack bridge sessions are keyed by the full channel, thread, and project
+  tuple instead of a truncated timestamp prefix. Successful establishment is
+  retained across restart, same-thread requests are serialized, corrupt saved
+  state fails closed, and an in-process session remains known if persistence
+  fails after the child succeeds. The identity migration starts a fresh child
+  conversation once for threads already live during the upgrade; later
+  requests resume the new conversation.
+- Worker pull-request status distinguishes a failed or unavailable lookup from
+  a definite absence, reporting a redacted `unknown` reason instead of the
+  false `none` result.
+- Linked-worktree builds watch the real per-worktree and shared Git metadata
+  instead of nonexistent `.git` descendants or broad checkout directories.
+  Unchanged builds remain fresh while ref, detached-HEAD, and existing optional
+  environment-file transitions still invalidate precisely; creating a
+  previously absent optional environment file requires another ordinary build
+  trigger or clean rebuild.
+- A separately supplied external-production verification receipt can satisfy
+  only the zero-commit delivery-evidence check after exact authority, task,
+  parent, active-session, gate, completed/pass verdict, and portable-evidence
+  validation. All other close gates and the worker completion receipt remain
+  unchanged, and accepted evidence is audited.
+
 ## [3.17.0] - 2026-09-05
 
 ### Added

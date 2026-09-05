@@ -604,15 +604,20 @@ fn extract_body(content: &str) -> String {
 /// trims quote characters and returns the rest verbatim — so a parser is asked
 /// first and the scan survives only for files the parser rejects.
 ///
-/// That fallback is not defensive habit: every `SKILL.md` written before this
-/// change by the old escaper is exactly such a file. `Use C:\project: inspect`
-/// was written as `description: "Use C:\project: inspect"`, which no YAML
-/// parser accepts, and those files are on disk in every checkout that has run
-/// a sync. Dropping the scan would make CAS stop reading its own history.
+/// That fallback is evidenced, not defensive habit. The old escaper wrote
+/// `Use C:\project: inspect` as `description: "Use C:\project: inspect"`,
+/// which no YAML parser accepts; files in that exact shape were produced
+/// wherever a skill with such a value was synced before this change, and the
+/// fixture in the tests is that output verbatim. Dropping the scan would make
+/// those files unreadable.
 ///
-/// The fallback is narrow by construction: it runs only when the frontmatter
-/// fails to parse as YAML. A document that parses but lacks the key, or holds
-/// a value that is not a scalar, returns `None` — the parser's answer stands.
+/// The fallback is narrow by construction:
+/// - it runs only when the frontmatter fails to parse as YAML at all;
+/// - it matches an unindented, exact `key:` at the start of a line, so an
+///   unrelated malformed document cannot let `description_extra` answer for
+///   `description`;
+/// - a document that parses but lacks the key, or holds a non-scalar value,
+///   returns `None`. The parser's answer stands.
 fn extract_yaml_value(frontmatter: &str, key: &str) -> Option<String> {
     match serde_yaml::from_str::<serde_yaml::Value>(frontmatter) {
         Ok(parsed) => scalar_field(&parsed, key),
@@ -639,21 +644,32 @@ fn scalar_field(parsed: &serde_yaml::Value, key: &str) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
-/// The pre-cas-d731 reader, kept verbatim for frontmatter that is not valid
-/// YAML. Prefix-matches the key exactly as it always did, so files it could
-/// read before are read identically now.
+/// Recovers one scalar from frontmatter no YAML parser will accept.
+///
+/// Deliberately narrower than the reader it replaces. The old scan accepted
+/// any line whose trimmed text merely *started with* the key, so `description`
+/// could be answered by `description_extra`. Here the line must be
+/// unindented — the shape the old writer emitted for a top-level key — and the
+/// key must be followed immediately by `:`. The value handling is unchanged
+/// from the old scan, because that is what the legacy bytes on disk need.
 fn legacy_line_scan(frontmatter: &str, key: &str) -> Option<String> {
     for line in frontmatter.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(key) {
-            if let Some(colon_pos) = trimmed.find(':') {
-                let value = trimmed[colon_pos + 1..].trim();
-                // Remove quotes if present
-                let value = value.trim_matches('"').trim_matches('\'');
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
+        // A top-level key, as the old writer wrote it: no leading whitespace.
+        if line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix(key) else {
+            continue;
+        };
+        // Exact key, not a prefix of a longer one.
+        let Some(value) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let value = value.trim();
+        // Remove quotes if present
+        let value = value.trim_matches('"').trim_matches('\'');
+        if !value.is_empty() {
+            return Some(value.to_string());
         }
     }
     None

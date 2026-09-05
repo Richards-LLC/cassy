@@ -523,9 +523,62 @@ fn a_legacy_invalid_yaml_skill_file_is_still_readable() {
         .iter()
         .find(|s| s.name == "cas-legacy")
         .expect("a legacy file must not become unreadable");
+    // Byte-equality, not a substring: the recovered value is exactly what the
+    // old scan returned for these bytes, quotes trimmed and nothing decoded.
+    assert_eq!(skill.summary, "Use C:\\project: inspect");
+}
+
+/// The fallback must not become a second, looser reader. A document that no
+/// parser accepts still may not answer `description` from `description_extra`:
+/// legacy recovery is keyed exactly, on an unindented top-level line.
+#[test]
+fn malformed_yaml_does_not_prefix_match_a_different_key() {
+    let temp = TempDir::new().unwrap();
+    let skill_dir = temp.path().join(".claude/skills/cas-malformed");
+    fs::create_dir_all(&skill_dir).unwrap();
+    // Unparseable for a reason unrelated to the key in question, and the only
+    // description-ish key present is a longer one.
+    let malformed = "---\nname: cas-malformed\ndescription_extra: \"leaked C:\\path\"\nbroken: \"unterminated\n---\n\nBody.\n";
     assert!(
-        skill.summary.contains("Use C:"),
-        "the legacy scan must still recover the description, got {:?}",
+        serde_yaml::from_str::<serde_yaml::Value>(malformed.split("---").nth(1).unwrap()).is_err(),
+        "this fixture is only meaningful if a parser really rejects it"
+    );
+    fs::write(skill_dir.join("SKILL.md"), malformed).unwrap();
+
+    let read_back = read_skills_from_files(temp.path()).unwrap();
+    let skill = read_back
+        .iter()
+        .find(|s| s.name == "cas-malformed")
+        .expect("the file must still be listed");
+    assert_eq!(
+        skill.summary, "",
+        "description_extra must not answer for description, got {:?}",
+        skill.summary
+    );
+}
+
+/// Legacy recovery is top-level only: an indented key belongs to some nested
+/// structure and must not be lifted out of it.
+#[test]
+fn malformed_yaml_does_not_recover_an_indented_key() {
+    let temp = TempDir::new().unwrap();
+    let skill_dir = temp.path().join(".claude/skills/cas-nested");
+    fs::create_dir_all(&skill_dir).unwrap();
+    let malformed = "---\nname: cas-nested\nhooks:\n  description: nested value\nbroken: \"unterminated\n---\n\nBody.\n";
+    assert!(
+        serde_yaml::from_str::<serde_yaml::Value>(malformed.split("---").nth(1).unwrap()).is_err(),
+        "this fixture is only meaningful if a parser really rejects it"
+    );
+    fs::write(skill_dir.join("SKILL.md"), malformed).unwrap();
+
+    let read_back = read_skills_from_files(temp.path()).unwrap();
+    let skill = read_back
+        .iter()
+        .find(|s| s.name == "cas-nested")
+        .expect("the file must still be listed");
+    assert_eq!(
+        skill.summary, "",
+        "an indented key must not be recovered as top-level, got {:?}",
         skill.summary
     );
 }

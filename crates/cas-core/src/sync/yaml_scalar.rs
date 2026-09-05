@@ -63,11 +63,12 @@ pub fn yaml_scalar(value: &str) -> String {
 /// answers exactly the question this fallback needs answered. The corpus test
 /// verifies that claim against a YAML parser rather than asserting it.
 fn json_string_as_yaml_scalar(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| {
-        // serde_json only fails here on an allocation error; a plain empty
-        // scalar is the safest thing to write in that case.
-        "\"\"".to_string()
-    })
+    // Serializing a `&str` cannot fail: serde_json's error cases are I/O,
+    // non-string map keys and unrepresentable numbers, none of which a string
+    // can reach. Stating that invariant is honest; swallowing an error into an
+    // empty scalar would silently blank a description, which is worse than the
+    // bug this module fixes.
+    serde_json::to_string(value).expect("serializing a &str to a JSON string is infallible")
 }
 
 #[cfg(test)]

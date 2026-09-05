@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Mutex, OnceLock};
+use std::thread;
 
 use crate::cli::Cli;
 use crate::ui::components::OutputMode;
@@ -795,4 +796,127 @@ fn skipped_refresh_receipt_says_the_update_did_not_converge() {
         receipt["message"].as_str().unwrap().contains("cas update"),
         "{receipt}"
     );
+}
+
+fn update_test_args() -> UpdateArgs {
+    UpdateArgs {
+        check: false,
+        version: Some("9.9.9".to_owned()),
+        yes: false,
+        schema_only: false,
+        sync: false,
+        user: false,
+        dry_run: false,
+        keep_backup: false,
+        all_projects: false,
+        register: None,
+        post_swap: false,
+        from: None,
+    }
+}
+
+fn update_test_cli(json: bool) -> Cli {
+    Cli {
+        json,
+        full: false,
+        verbose: false,
+        command: None,
+    }
+}
+
+#[test]
+fn non_tty_update_without_json_or_yes_fails_closed() {
+    let args = update_test_args();
+    let cli = update_test_cli(false);
+
+    let error = configure_updater(&args, "3.17.1", &cli, false)
+        .expect_err("a non-TTY update without --yes must fail before network access");
+    assert!(
+        error.to_string().contains("--yes") && error.to_string().contains("TTY"),
+        "error should name the missing consent flag: {error:#}"
+    );
+}
+
+#[test]
+fn tty_update_without_yes_keeps_confirmation_and_human_output_enabled() {
+    let args = update_test_args();
+    let cli = update_test_cli(false);
+
+    assert_eq!(
+        update_interactivity(&args, &cli, true),
+        UpdateInteractivity {
+            no_confirm: false,
+            show_output: true,
+            show_download_progress: true,
+        }
+    );
+}
+
+#[test]
+fn json_update_from_fake_release_never_prompts_or_leaks_self_update_output() {
+    use self_update::update::ReleaseUpdate;
+
+    let (base_url, server) = fake_release_source();
+    let args = update_test_args();
+    let cli = update_test_cli(true);
+    let mut builder = configure_updater(&args, "3.17.1", &cli, false)
+        .expect("JSON mode must not require --yes on a non-TTY");
+    builder.with_url(&base_url);
+    let updater = builder.build().expect("fake release updater configuration");
+
+    #[cfg(unix)]
+    let _output_lock = update_output_lock();
+    let (result, output) = capture_phase(true, || updater.update());
+    server
+        .join()
+        .expect("fake release source should serve its release response");
+
+    result.expect_err("the fake download intentionally fails after release lookup");
+    assert!(
+        !output.contains("Do you want to continue?"),
+        "output was: {output:?}"
+    );
+    assert!(
+        !output.contains("Checking target-arch"),
+        "output was: {output:?}"
+    );
+    assert!(
+        !output.contains("Looking for tag"),
+        "output was: {output:?}"
+    );
+}
+
+fn fake_release_source() -> (String, thread::JoinHandle<()>) {
+    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind fake release source");
+    let base_url = format!("http://{}", server.server_addr());
+    let release = format!(
+        r#"{{
+            "tag_name": "v9.9.9",
+            "name": "9.9.9",
+            "created_at": "2026-09-05T00:00:00Z",
+            "assets": [{{
+                "name": "cas-linux-x86_64.tar.gz",
+                "url": "{base_url}/asset"
+            }}]
+        }}"#,
+        base_url = base_url
+    );
+    let handle = thread::spawn(move || {
+        let request = server
+            .incoming_requests()
+            .next()
+            .expect("updater should request the fake release");
+        request
+            .respond(tiny_http::Response::from_string(release))
+            .expect("respond with fake release");
+    });
+    (base_url, handle)
+}
+
+#[cfg(unix)]
+fn update_output_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

@@ -4,7 +4,7 @@
 //! and runs schema migrations for the local database.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -2517,26 +2517,9 @@ fn perform_update(
     cli: &Cli,
 ) -> anyhow::Result<BinaryUpdateOutcome> {
     use self_update::Status;
-    use self_update::backends::github::Update;
     use self_update::update::ReleaseUpdate;
 
-    let mut updater = Update::configure();
-    updater
-        .repo_owner(REPO_OWNER)
-        .repo_name(REPO_NAME)
-        .bin_name(BIN_NAME)
-        .current_version(current_version)
-        .show_download_progress(true)
-        .no_confirm(args.yes);
-    if let Some(token) = github_auth_token() {
-        updater.auth_token(&token);
-    }
-
-    // If a specific version is requested, set it
-    if let Some(ref version) = args.version {
-        updater.target_version_tag(&format!("v{}", version.trim_start_matches('v')));
-    }
-
+    let updater = configure_updater(args, current_version, cli, io::stdin().is_terminal())?;
     let updater = updater.build()?;
     // self_update resolves its install destination before the replacement.
     // Keep that stable path: after a Linux rename swap, current_exe() can
@@ -2664,6 +2647,59 @@ fn perform_update(
         updated: binary_was_updated,
         post_install_refresh,
     })
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct UpdateInteractivity {
+    no_confirm: bool,
+    show_output: bool,
+    show_download_progress: bool,
+}
+
+fn update_interactivity(
+    args: &UpdateArgs,
+    cli: &Cli,
+    stdin_is_terminal: bool,
+) -> UpdateInteractivity {
+    let silent = cli.json || !stdin_is_terminal;
+    UpdateInteractivity {
+        no_confirm: args.yes || silent,
+        show_output: !silent,
+        show_download_progress: !silent,
+    }
+}
+
+fn configure_updater(
+    args: &UpdateArgs,
+    current_version: &str,
+    cli: &Cli,
+    stdin_is_terminal: bool,
+) -> anyhow::Result<self_update::backends::github::UpdateBuilder> {
+    use self_update::backends::github::Update;
+
+    if !args.yes && !cli.json && !stdin_is_terminal {
+        anyhow::bail!("cas update requires --yes when stdin is not a TTY");
+    }
+
+    let interactivity = update_interactivity(args, cli, stdin_is_terminal);
+    let mut updater = Update::configure();
+    updater
+        .repo_owner(REPO_OWNER)
+        .repo_name(REPO_NAME)
+        .bin_name(BIN_NAME)
+        .current_version(current_version)
+        .show_download_progress(interactivity.show_download_progress)
+        .show_output(interactivity.show_output)
+        .no_confirm(interactivity.no_confirm);
+    if let Some(token) = github_auth_token() {
+        updater.auth_token(&token);
+    }
+
+    if let Some(ref version) = args.version {
+        updater.target_version_tag(&format!("v{}", version.trim_start_matches('v')));
+    }
+
+    Ok(updater)
 }
 
 /// What the binary phase produced, including the refresh the newly installed

@@ -85,6 +85,18 @@ mod test_env_guard;
 pub(crate) mod test_support {
     pub(crate) use crate::test_env_guard::TestEnvGuard;
     use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// Cargo's in-process test harness runs otherwise isolated Tantivy
+    /// fixtures concurrently. Keep the tests that intentionally exercise
+    /// short-lived disk writers out of each other's lock lifecycle; nextest
+    /// process isolation does not provide this protection for cargo runs.
+    pub(crate) fn disk_index_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn nested_test_env_guard_panics_instead_of_deadlocking() {

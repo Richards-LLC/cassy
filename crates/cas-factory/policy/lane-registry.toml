@@ -60,6 +60,7 @@ default_effort = "medium"
 # Explicit Astra requests retain the existing Cassy effort vocabulary.
 allowed_efforts = ["minimal", "low", "medium", "high", "xhigh"]
 status = "active"
+reason = "Not routed for supervisor or taste: observed 2026-09-05 to hold finished workers and stop driving epics; explicit-request only."
 required_capability = "codex-account"
 
 [recipes.codex_sol]
@@ -103,6 +104,13 @@ candidates = ["claude_fable"]
 # Keep the only taste fallback as an explicit, reviewable registry edge while
 # disabling it in the shipped policy. A host may remove this guard only when
 # its own routing policy permits taste to degrade to Luna.
+fallbacks = ["claude_opus"]
+no_fallback = true
+
+[lanes.supervisor]
+candidates = ["claude_fable"]
+# Claude Fable is the supervisor default; an unavailable Claude account must
+# fail closed rather than silently put the coordinator on another harness.
 fallbacks = ["claude_opus"]
 no_fallback = true
 

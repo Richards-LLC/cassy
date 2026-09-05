@@ -2089,3 +2089,56 @@ fn a_refresh_advances_a_checkout_that_is_still_clean() {
     assert!(sibling.join("delivered.txt").exists());
     let _ = std::fs::remove_dir_all(&sibling);
 }
+
+/// cas-0f04, review follow-up. The injected edit can also be STAGED — a user
+/// who ran `git add` in that checkout during the window has work that lives
+/// only in the index. A guard that only noticed unstaged modifications would
+/// destroy exactly that. Staged and unstaged are asserted separately because
+/// they are separate failure modes.
+#[test]
+fn a_refresh_preserves_a_staged_edit_made_after_the_cleanliness_check() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let old_tip = git.resolve_commit(&target).unwrap();
+    let new_tip = {
+        let out = Command::new("git")
+            .args(["rev-parse", "factory/worker"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git.compare_and_swap_ref(&target, &new_tip, &old_tip).unwrap();
+
+    // Staged, not merely written: the content exists only in that index.
+    let precious = sibling.join("README.md");
+    std::fs::write(&precious, "staged during the merge window\n").unwrap();
+    let add = Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    assert!(add.status.success());
+
+    let outcome = git.refresh_linked_checkout(&sibling, &old_tip, &new_tip);
+
+    assert!(
+        matches!(outcome, CheckoutRefresh::LeftStale { .. }),
+        "a staged edit made inside the window must not be overwritten, got {outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&precious).unwrap(),
+        "staged during the merge window\n",
+        "the staged content must survive byte-for-byte"
+    );
+    let staged = Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&staged.stdout).contains("README.md"),
+        "the staged entry itself must still be staged"
+    );
+    let _ = std::fs::remove_dir_all(&sibling);
+}

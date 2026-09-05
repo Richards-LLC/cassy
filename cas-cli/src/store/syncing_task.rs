@@ -56,19 +56,26 @@ impl SyncingTaskStore {
         task: &Task,
         operation: &str,
         previous_updated_at: Option<&str>,
-        old_project_id: Option<&str>,
+        previous: Option<&Task>,
     ) -> Result<TaskSyncIntent> {
         let team_id = self
             .team_id
             .as_deref()
             .filter(|_| eligible_for_team_task(task));
+        let previous_team_id = previous
+            .filter(|task| eligible_for_team_task(task))
+            .and(self.team_id.as_deref());
+        let previous_project_id = previous
+            .and_then(|task| task.origin_project.as_deref())
+            .filter(|project_id| !project_id.trim().is_empty());
         self.queue
             .stage_task_sync_intent(
                 &task.id,
                 operation,
                 previous_updated_at,
                 team_id,
-                old_project_id,
+                previous_team_id,
+                previous_project_id,
                 task.scope == Scope::Global,
             )
             .map_err(queue_error_before_local_commit)
@@ -81,8 +88,12 @@ impl SyncingTaskStore {
             .origin_project
             .as_deref()
             .filter(|project_id| !project_id.trim().is_empty());
+        let current_team_id = self
+            .team_id
+            .as_deref()
+            .filter(|_| eligible_for_team_task(task));
         self.queue
-            .fulfill_task_sync_intent(intent, &payload, current_project_id)
+            .fulfill_task_sync_intent(intent, &payload, current_project_id, current_team_id)
             .map_err(|error| degraded_sync_error(intent, error.to_string()))
     }
 
@@ -95,38 +106,55 @@ impl SyncingTaskStore {
     }
 
     pub(crate) fn reconcile_pending_task_sync(&self) -> Result<()> {
+        let _sync_guard = self
+            .queue
+            .lock_task_sync_mutations()
+            .map_err(queue_error_before_local_commit)?;
         let intents = self
             .queue
             .pending_task_sync_intents()
             .map_err(queue_error_before_local_commit)?;
+        let mut by_entity = std::collections::BTreeMap::<String, Vec<TaskSyncIntent>>::new();
         for intent in intents {
-            let mut task = match self.inner.get(&intent.entity_id) {
+            by_entity
+                .entry(intent.entity_id.clone())
+                .or_default()
+                .push(intent);
+        }
+        for (entity_id, mut intents) in by_entity {
+            let mut task = match self.inner.get(&entity_id) {
                 Ok(task) => task,
                 Err(StoreError::TaskNotFound(_)) | Err(StoreError::NotFound(_)) => {
                     self.queue
-                        .cancel_task_sync_intent(intent.id)
+                        .cancel_task_sync_intents_for_entity(&entity_id)
                         .map_err(queue_error_before_local_commit)?;
                     continue;
                 }
                 Err(error) => return Err(error),
             };
-            if intent.operation == "update"
-                && intent.previous_updated_at.as_deref()
-                    == Some(task.updated_at.to_rfc3339().as_str())
-            {
+            let persisted_updated_at = task.updated_at.to_rfc3339();
+            while intents.last().is_some_and(|intent| {
+                intent.operation == "update"
+                    && intent.previous_updated_at.as_deref() == Some(persisted_updated_at.as_str())
+            }) {
                 // The process exited after staging but before the local
                 // update changed the store-owned timestamp. There was no
                 // committed local mutation to repair.
+                let intent = intents.pop().expect("last intent was present");
                 self.queue
                     .cancel_task_sync_intent(intent.id)
                     .map_err(queue_error_before_local_commit)?;
-                continue;
             }
+            let Some(intent) = intents.last() else {
+                continue;
+            };
             if intent.global_scope {
                 task.scope = Scope::Global;
                 task.origin_project = None;
+            } else {
+                task.scope = Scope::Project;
             }
-            self.fulfill_upsert(&intent, &task)?;
+            self.fulfill_upsert(intent, &task)?;
         }
         Ok(())
     }
@@ -269,6 +297,10 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn add(&self, task: &Task) -> Result<()> {
+        let _sync_guard = self
+            .queue
+            .lock_task_sync_mutations()
+            .map_err(queue_error_before_local_commit)?;
         let intent = self.stage_upsert(task, "add", None, None)?;
         if let Err(error) = self.inner.add(task) {
             self.cancel_staged_after_local_failure(&intent);
@@ -288,6 +320,10 @@ impl TaskStore for SyncingTaskStore {
         epic_id: Option<&str>,
         created_by: Option<&str>,
     ) -> Result<()> {
+        let _sync_guard = self
+            .queue
+            .lock_task_sync_mutations()
+            .map_err(queue_error_before_local_commit)?;
         let intent = self.stage_upsert(task, "create_atomic", None, None)?;
         if let Err(error) = self
             .inner
@@ -320,14 +356,14 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
+        let _sync_guard = self
+            .queue
+            .lock_task_sync_mutations()
+            .map_err(queue_error_before_local_commit)?;
         let previous = self.inner.get(&task.id)?;
-        let old_project_id = previous
-            .origin_project
-            .as_deref()
-            .filter(|project_id| !project_id.trim().is_empty());
         let previous_updated_at = previous.updated_at.to_rfc3339();
         let intent =
-            self.stage_upsert(task, "update", Some(&previous_updated_at), old_project_id)?;
+            self.stage_upsert(task, "update", Some(&previous_updated_at), Some(&previous))?;
         let persisted_at = match self.inner.update(task) {
             Ok(persisted_at) => persisted_at,
             Err(error) => {
@@ -493,7 +529,11 @@ impl TaskStore for SyncingTaskStore {
 mod tests {
     use crate::store::syncing_task::*;
     use crate::store::{SqliteTaskStore, StoreError};
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
     use std::path::Path;
+    use std::sync::{Barrier, mpsc};
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn create_test_store() -> (TempDir, SyncingTaskStore) {
@@ -521,6 +561,14 @@ mod tests {
         } else {
             store
         }
+    }
+
+    fn reopen_test_store_for_team(cas_dir: &Path, team_id: &str) -> SyncingTaskStore {
+        let inner = SqliteTaskStore::open(cas_dir).unwrap();
+        let queue = SyncQueue::open(cas_dir).unwrap();
+        let mut cfg = CloudConfig::default();
+        cfg.set_team(team_id, "test-team");
+        SyncingTaskStore::new(Arc::new(inner), Arc::new(queue)).with_cloud_config(Arc::new(cfg))
     }
 
     fn install_task_enqueue_failure(cas_dir: &Path, team_id: &str) {
@@ -615,6 +663,34 @@ mod tests {
     }
 
     #[test]
+    fn intent_staging_failure_is_pre_commit_and_releases_the_mutation_lease() {
+        let (temp, store) = create_test_store();
+        let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+        conn.execute_batch("DROP TABLE task_sync_intents;").unwrap();
+        let task = Task::new(
+            "task-pre-commit-queue-failure".to_string(),
+            "must not commit".to_string(),
+        );
+
+        let error = store.add(&task).unwrap_err();
+
+        assert!(matches!(error, StoreError::Database(_)));
+        assert!(matches!(
+            store.get(&task.id),
+            Err(StoreError::TaskNotFound(_))
+        ));
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.path().join("task-sync-intents.lock"))
+            .unwrap();
+        contender
+            .try_lock_exclusive()
+            .expect("every pre-commit error path must release the mutation lease");
+        FileExt::unlock(&contender).unwrap();
+    }
+
+    #[test]
     fn update_reports_degraded_personal_sync_and_restart_queues_the_committed_row() {
         let (temp, store) = create_test_store();
         let queue = SyncQueue::open(temp.path()).unwrap();
@@ -660,6 +736,7 @@ mod tests {
                 Some(&previous_updated_at),
                 None,
                 None,
+                None,
                 false,
             )
             .unwrap();
@@ -671,6 +748,60 @@ mod tests {
             queue.pending(10, 5).unwrap().is_empty(),
             "an update that never committed must not be synthesized on restart"
         );
+    }
+
+    #[test]
+    fn independent_reconciler_cannot_consume_a_live_pre_write_intent() {
+        let (temp, _) = create_test_store();
+        let cas_dir = temp.path().to_path_buf();
+        let writer_lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(cas_dir.join("task-sync-intents.lock"))
+            .unwrap();
+        writer_lock.lock_exclusive().unwrap();
+
+        let writer_queue = SyncQueue::open(&cas_dir).unwrap();
+        writer_queue.init().unwrap();
+        let task = Task::new(
+            "task-live-pre-write-intent".to_string(),
+            "commit after barrier".to_string(),
+        );
+        writer_queue
+            .stage_task_sync_intent(&task.id, "add", None, None, None, None, false)
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let reconcile_barrier = Arc::clone(&barrier);
+        let reconcile_dir = cas_dir.clone();
+        let reconciler = std::thread::spawn(move || {
+            let store = reopen_test_store(&reconcile_dir, false);
+            reconcile_barrier.wait();
+            let result = store.init();
+            finished_tx.send(result).unwrap();
+        });
+
+        barrier.wait();
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "reconciliation must wait while another handle owns the mutation lease"
+        );
+        let local = SqliteTaskStore::open(&cas_dir).unwrap();
+        local.init().unwrap();
+        local.add(&task).unwrap();
+        FileExt::unlock(&writer_lock).unwrap();
+
+        finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reconciler should finish after the writer releases its lease")
+            .unwrap();
+        reconciler.join().unwrap();
+        assert!(writer_queue.pending_task_sync_intents().unwrap().is_empty());
+        assert_eq!(writer_queue.pending(10, 5).unwrap().len(), 1);
     }
 
     #[test]
@@ -765,11 +896,14 @@ mod tests {
         let dep = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
         store.add_dependency(&dep).unwrap();
 
-        let pending = queue.pending_for_entity_type(Some(EntityType::TaskDependency), 10, 5).unwrap();
+        let pending = queue
+            .pending_for_entity_type(Some(EntityType::TaskDependency), 10, 5)
+            .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].entity_id, "task-dep-from:task-dep-to:blocks");
         assert_eq!(pending[0].operation, SyncOperation::Upsert);
-        let payload: serde_json::Value = serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
         assert_eq!(payload["from_id"], "task-dep-from");
         assert_eq!(payload["to_id"], "task-dep-to");
         assert_eq!(payload["dep_type"], "blocks");
@@ -789,13 +923,20 @@ mod tests {
         store.add_dependency(&dep).unwrap();
         queue.clear().unwrap();
 
-        assert!(store
-            .remove_dependency_of_type(&from.id, &to.id, DependencyType::Related)
-            .unwrap());
+        assert!(
+            store
+                .remove_dependency_of_type(&from.id, &to.id, DependencyType::Related)
+                .unwrap()
+        );
 
-        let pending = queue.pending_for_entity_type(Some(EntityType::TaskDependency), 10, 5).unwrap();
+        let pending = queue
+            .pending_for_entity_type(Some(EntityType::TaskDependency), 10, 5)
+            .unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].entity_id, "task-remove-from:task-remove-to:related");
+        assert_eq!(
+            pending[0].entity_id,
+            "task-remove-from:task-remove-to:related"
+        );
         assert_eq!(pending[0].operation, SyncOperation::Delete);
         assert!(pending[0].payload.is_none());
     }
@@ -832,6 +973,7 @@ mod tests {
     use cas_types::Scope;
 
     use crate::store::share_policy::TEST_TEAM_UUID as TEST_TEAM;
+    const SECOND_TEAM: &str = "650e8400-e29b-41d4-a716-446655440001";
 
     fn create_team_store(team_auto_promote: Option<bool>) -> (TempDir, SyncingTaskStore) {
         let temp = TempDir::new().unwrap();
@@ -925,6 +1067,90 @@ mod tests {
                     .is_some_and(|payload| payload.contains("team update committed"))
             );
         }
+    }
+
+    #[test]
+    fn restart_does_not_replay_a_stale_team_intent_after_team_promotion_is_disabled() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut task = Task::new("task-stale-team-disabled".to_string(), "before".to_string());
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+        install_task_enqueue_failure(temp.path(), TEST_TEAM);
+        task.title = "committed while team A was active".to_string();
+        assert_degraded(store.update(&task).unwrap_err(), "update", &task.id);
+        remove_task_enqueue_failure(temp.path());
+
+        reopen_test_store(temp.path(), false).init().unwrap();
+
+        assert!(queue.pending_task_sync_intents().unwrap().is_empty());
+        assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+        let obsolete_team = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+        assert_eq!(obsolete_team.len(), 1);
+        assert_eq!(obsolete_team[0].operation, SyncOperation::Delete);
+        assert!(obsolete_team[0].payload.is_none());
+    }
+
+    #[test]
+    fn restart_routes_a_stale_team_intent_only_to_the_current_team() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut task = Task::new("task-stale-team-change".to_string(), "before".to_string());
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+        install_task_enqueue_failure(temp.path(), TEST_TEAM);
+        task.title = "current team only".to_string();
+        assert_degraded(store.update(&task).unwrap_err(), "update", &task.id);
+        remove_task_enqueue_failure(temp.path());
+
+        reopen_test_store_for_team(temp.path(), SECOND_TEAM)
+            .init()
+            .unwrap();
+
+        let obsolete_team = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+        assert_eq!(obsolete_team.len(), 1);
+        assert_eq!(obsolete_team[0].operation, SyncOperation::Delete);
+        assert!(obsolete_team[0].payload.is_none());
+        let current_team = queue.pending_for_team(SECOND_TEAM, 10, 5).unwrap();
+        assert_eq!(current_team.len(), 1);
+        assert!(
+            current_team[0]
+                .payload
+                .as_deref()
+                .is_some_and(|payload| payload.contains("current team only"))
+        );
+    }
+
+    #[test]
+    fn newer_global_mutation_supersedes_an_older_failed_team_intent() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut task = Task::new("task-stale-team-global".to_string(), "before".to_string());
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+        install_task_enqueue_failure(temp.path(), TEST_TEAM);
+        task.title = "failed public update".to_string();
+        assert_degraded(store.update(&task).unwrap_err(), "update", &task.id);
+        remove_task_enqueue_failure(temp.path());
+
+        task.scope = Scope::Global;
+        task.title = "newest private payload".to_string();
+        store.update(&task).unwrap();
+        reopen_test_store(temp.path(), true).init().unwrap();
+
+        assert!(queue.pending_task_sync_intents().unwrap().is_empty());
+        let obsolete_team = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+        assert_eq!(obsolete_team.len(), 1);
+        assert_eq!(obsolete_team[0].operation, SyncOperation::Delete);
+        assert!(obsolete_team[0].payload.is_none());
+        let personal = queue.pending(10, 5).unwrap();
+        assert_eq!(personal.len(), 1);
+        assert!(
+            personal[0]
+                .payload
+                .as_deref()
+                .is_some_and(|payload| payload.contains("\"scope\":\"global\""))
+        );
     }
 
     #[test]
@@ -1028,7 +1254,11 @@ mod tests {
         store.update(&task).unwrap();
 
         let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
-        assert_eq!(pending.len(), 2, "a move must replace stale generic upserts");
+        assert_eq!(
+            pending.len(),
+            2,
+            "a move must replace stale generic upserts"
+        );
         assert_eq!(pending[0].operation, SyncOperation::Delete);
         assert_eq!(pending[0].project_id.as_deref(), Some("project-a"));
         assert_eq!(pending[1].operation, SyncOperation::Upsert);

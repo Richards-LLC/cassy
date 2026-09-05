@@ -52,17 +52,7 @@ pub(super) fn enqueue_team_move_rows(
     // NULL project_id. Remove any before writing the move pair so an
     // edit-then-move sequence cannot leave a third row that would replay the
     // task under the pusher's project after the old key is deleted.
-    conn.execute(
-        r#"
-        DELETE FROM sync_queue
-        WHERE entity_type = ?1
-          AND entity_id = ?2
-          AND operation = 'upsert'
-          AND team_id = ?3
-          AND project_id IS NULL
-        "#,
-        params![entity_type.as_str(), entity_id, team_id],
-    )?;
+    remove_legacy_team_upsert_row(conn, entity_type, entity_id, team_id)?;
     upsert_queue_row(
         conn,
         entity_type,
@@ -81,6 +71,26 @@ pub(super) fn enqueue_team_move_rows(
         team_id,
         Some(new_project_id),
     )
+}
+
+pub(super) fn remove_legacy_team_upsert_row(
+    conn: &Connection,
+    entity_type: EntityType,
+    entity_id: &str,
+    team_id: &str,
+) -> Result<(), CasError> {
+    conn.execute(
+        r#"
+        DELETE FROM sync_queue
+        WHERE entity_type = ?1
+          AND entity_id = ?2
+          AND operation = 'upsert'
+          AND team_id = ?3
+          AND project_id IS NULL
+        "#,
+        params![entity_type.as_str(), entity_id, team_id],
+    )?;
+    Ok(())
 }
 
 impl SyncQueue {

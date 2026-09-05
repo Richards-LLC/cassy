@@ -409,19 +409,16 @@ pub fn open_task_store(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
     // Wrap with cloud sync if logged in
     if let Ok(cloud_config) = CloudConfig::load_from_cas_dir(cas_dir) {
         if cloud_config.is_logged_in() {
-            if let Ok(queue) = SyncQueue::open(cas_dir) {
-                if queue.init().is_ok() {
-                    let store = SyncingTaskStore::new(base_store, Arc::new(queue))
-                        .with_cloud_config(Arc::new(cloud_config));
-                    // A prior local task write may have committed immediately
-                    // before its outbox transaction failed or the process
-                    // exited. Repair that durable intent during store reopen;
-                    // if SQLite is still unhealthy, re-report degradation
-                    // instead of silently returning a store that lost sync.
-                    store.reconcile_pending_task_sync()?;
-                    return Ok(Arc::new(store));
-                }
-            }
+            let queue = SyncQueue::open(cas_dir)?;
+            queue.init()?;
+            let store = SyncingTaskStore::new(base_store, Arc::new(queue))
+                .with_cloud_config(Arc::new(cloud_config));
+            // A prior local task write may have committed immediately before
+            // its outbox transaction failed or the process exited. A logged-in
+            // store never falls back to an unsynced writer when this repair
+            // path itself is unavailable.
+            store.reconcile_pending_task_sync()?;
+            return Ok(Arc::new(store));
         }
     }
 
@@ -760,7 +757,7 @@ mod tests {
         let queue = SyncQueue::open(&cas_dir).unwrap();
         queue.init().unwrap();
         queue
-            .stage_task_sync_intent(&task.id, "add", None, None, None, false)
+            .stage_task_sync_intent(&task.id, "add", None, None, None, None, false)
             .unwrap();
 
         open_task_store(&cas_dir).unwrap();
@@ -785,7 +782,7 @@ mod tests {
         let queue = SyncQueue::open(&cas_dir).unwrap();
         queue.init().unwrap();
         queue
-            .stage_task_sync_intent(&task.id, "add", None, None, None, false)
+            .stage_task_sync_intent(&task.id, "add", None, None, None, None, false)
             .unwrap();
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
         conn.execute_batch(
@@ -818,6 +815,26 @@ mod tests {
         }
         assert_eq!(queue.pending_task_sync_intents().unwrap().len(), 1);
         assert!(queue.pending(10, 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn logged_in_task_store_refuses_to_fall_back_when_queue_init_fails() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        std::fs::write(cas_dir.join("cloud.json"), r#"{"token":"test-token"}"#).unwrap();
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute_batch("CREATE TABLE task_sync_intents (id INTEGER PRIMARY KEY);")
+            .unwrap();
+
+        let error = match open_task_store(&cas_dir) {
+            Ok(_) => panic!("logged-in queue init failure must not return an unsynced base store"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("entity_id"),
+            "the queue schema failure should be surfaced before any local mutation: {error}"
+        );
     }
 
     #[test]

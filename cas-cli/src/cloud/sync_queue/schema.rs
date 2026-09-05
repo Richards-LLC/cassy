@@ -33,13 +33,21 @@ CREATE TABLE IF NOT EXISTS task_sync_intents (
     operation TEXT NOT NULL,
     previous_updated_at TEXT,
     team_id TEXT,
-    old_project_id TEXT,
+    previous_team_id TEXT,
+    previous_project_id TEXT,
     global_scope INTEGER NOT NULL DEFAULT 0 CHECK (global_scope IN (0, 1)),
     created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_sync_intents_entity
     ON task_sync_intents(entity_id);
+
+CREATE TABLE IF NOT EXISTS task_sync_routes (
+    entity_id TEXT PRIMARY KEY,
+    team_id TEXT,
+    project_id TEXT,
+    updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,

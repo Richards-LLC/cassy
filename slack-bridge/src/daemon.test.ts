@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -101,6 +101,45 @@ describe("Slack thread message injection", () => {
       "7265c816-1515-b05e-2028-865a7a7730d3",
       "7265c816-1515-b05e-2028-865a7a7730d3",
     ]);
+  });
+
+  it("fails closed without spawning when durable session state is corrupt", async () => {
+    const path = statePath();
+    writeFileSync(path, "not json");
+    let calls = 0;
+    const inject = createMessageInjector({
+      runner: async () => {
+        calls += 1;
+        return { code: 0, stdout: "unexpected", stderr: "" };
+      },
+      sessionStatePath: path,
+    });
+
+    const result = await inject(config, baseMessage);
+    expect(result).toMatchObject({ ok: false });
+    expect(result.error).toContain("could not be read");
+    expect(result.error).toContain(path);
+    expect(calls).toBe(0);
+  });
+
+  it("remembers a successful child in memory when durable persistence fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cas-slack-daemon-test-"));
+    temporaryDirectories.push(directory);
+    const blockedParent = join(directory, "not-a-directory");
+    writeFileSync(blockedParent, "file");
+    const calls: string[][] = [];
+    const inject = createMessageInjector({
+      runner: async (args) => {
+        calls.push(args);
+        return { code: 0, stdout: "ok", stderr: "" };
+      },
+      sessionStatePath: join(blockedParent, "thread-sessions.json"),
+    });
+
+    expect((await inject(config, baseMessage)).ok).toBe(false);
+    expect((await inject(config, baseMessage)).ok).toBe(false);
+    expect(calls[0]).toContain("--session-id");
+    expect(calls[1]).toContain("--resume");
   });
 
   it("serializes messages for the same scoped thread", async () => {

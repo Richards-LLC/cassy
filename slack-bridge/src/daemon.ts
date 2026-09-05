@@ -126,19 +126,30 @@ function threadScopeToSessionId(scopeKey: string): string {
 
 class ThreadSessionStore {
   private readonly sessions = new Map<string, string>();
+  private loadError?: string;
 
   constructor(private readonly path: string) {
     if (!existsSync(path)) return;
 
     try {
       const stored = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-      if (!stored || typeof stored !== "object" || Array.isArray(stored)) return;
+      if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
+        throw new Error("expected an object mapping thread scopes to session IDs");
+      }
       for (const [scopeKey, sessionId] of Object.entries(stored)) {
-        if (typeof sessionId === "string") this.sessions.set(scopeKey, sessionId);
+        if (typeof sessionId !== "string") {
+          throw new Error(`session ID for ${scopeKey} is not a string`);
+        }
+        this.sessions.set(scopeKey, sessionId);
       }
     } catch (err) {
-      console.warn(`Ignoring unreadable Slack thread session state at ${path}: ${err}`);
+      this.sessions.clear();
+      this.loadError = err instanceof Error ? err.message : String(err);
     }
+  }
+
+  error(): string | undefined {
+    return this.loadError;
   }
 
   get(scopeKey: string): string | undefined {
@@ -146,8 +157,9 @@ class ThreadSessionStore {
   }
 
   record(scopeKey: string, sessionId: string): void {
+    // The child established this session even if durable recovery cannot be saved.
+    this.sessions.set(scopeKey, sessionId);
     const next = new Map(this.sessions);
-    next.set(scopeKey, sessionId);
 
     const directory = dirname(this.path);
     mkdirSync(directory, { recursive: true });
@@ -159,7 +171,6 @@ class ThreadSessionStore {
         { encoding: "utf-8", flag: "wx", mode: 0o600 },
       );
       renameSync(temporaryPath, this.path);
-      this.sessions.set(scopeKey, sessionId);
     } finally {
       if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
     }
@@ -214,6 +225,14 @@ export function createMessageInjector(
     msg: DaemonMessage,
     scopeKey: string,
   ): Promise<InjectionResult> => {
+    const stateError = sessions.error();
+    if (stateError) {
+      return {
+        ok: false,
+        error: `Slack thread session state at ${statePath} could not be read safely: ${stateError}. Repair or remove the state file before retrying; no child was started.`,
+      };
+    }
+
     const storedSessionId = sessions.get(scopeKey);
     const sessionId = storedSessionId ?? threadScopeToSessionId(scopeKey);
     const isResume = storedSessionId !== undefined;
@@ -260,7 +279,7 @@ export function createMessageInjector(
     } catch (err) {
       return {
         ok: false,
-        error: `claude session succeeded but its Slack thread state could not be saved: ${err instanceof Error ? err.message : String(err)}`,
+        error: `claude session succeeded and will resume in this daemon, but its Slack thread state could not be saved; restart recovery is uncertain: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
 

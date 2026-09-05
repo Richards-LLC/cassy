@@ -97,6 +97,42 @@ pub enum GitError {
         actual: String,
     },
 
+    /// cas-0f04: the target branch is checked out in another linked worktree
+    /// that holds uncommitted work.
+    ///
+    /// Advancing the ref would leave that checkout describing an ancestor of
+    /// its own HEAD — `git status` there reports the merged content as staged
+    /// deletions, and every later merge refuses. Git blocks `checkout` of one
+    /// branch in two worktrees, but `update-ref` bypasses that protection and
+    /// notifies nobody, so this refusal is the notification. It fires before
+    /// the merge, so the uncommitted work is untouched.
+    #[error(
+        "target branch {branch} is checked out at {checkout} with uncommitted changes \
+         ({change_count} path(s), first: {first_change}) — NO MERGE WAS ATTEMPTED. \
+         Advancing the ref would strand that checkout at its current commit and turn the \
+         merged content into phantom staged deletions there. That work exists nowhere \
+         else: commit or stash it in {checkout} — do NOT reset or check it out over — then \
+         retry. Target is still at {tip}."
+    )]
+    TargetCheckedOutDirty {
+        branch: String,
+        checkout: PathBuf,
+        change_count: usize,
+        first_change: String,
+        tip: String,
+    },
+
+    /// cas-0f04: git could not be asked which worktrees hold the target
+    /// branch. Without that inventory there is no basis for claiming the
+    /// advance is safe for them, so the merge refuses instead of proceeding on
+    /// an assumption.
+    #[error(
+        "cannot determine which checkouts hold {branch} ({reason}) — NO MERGE WAS ATTEMPTED. \
+         Advancing the ref without that inventory could strand a checkout holding \
+         uncommitted work. Resolve the git failure above, then retry."
+    )]
+    CheckoutInventoryUnavailable { branch: String, reason: String },
+
     #[error("Uncommitted changes in worktree")]
     UncommittedChanges,
 
@@ -281,6 +317,60 @@ impl EpicBaseChoice {
     }
 }
 
+/// What happened to a linked checkout of the target after the ref moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CheckoutRefresh {
+    /// Index and working tree were advanced to the new tip.
+    Updated,
+    /// Left exactly as it was, because advancing it would have overwritten
+    /// something. Carries git's own reason.
+    LeftStale { reason: String },
+}
+
+/// The branch a checkout currently has out, if it is on one at all.
+fn head_branch_of(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!branch.is_empty()).then_some(branch)
+}
+
+/// Twelve characters of a commit id — enough to identify it in a receipt.
+fn short_tip(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
+/// A worktree that currently has a given branch checked out (cas-0f04).
+#[derive(Debug, Clone)]
+struct LinkedCheckout {
+    path: PathBuf,
+}
+
+/// Uncommitted work in `dir`, as `(count, first path)`.
+///
+/// Untracked files count: this decides whether advancing a ref would strand
+/// somebody's work, and an untracked file exists nowhere else.
+fn dirty_summary(dir: &Path) -> Option<(usize, String)> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty()).peekable();
+    let first = (*lines.peek()?).trim().to_string();
+    Some((text.lines().filter(|l| !l.trim().is_empty()).count(), first))
+}
+
 /// Monotonic suffix so two ephemeral merge worktrees created inside the same
 /// nanosecond still get distinct paths.
 static TEMP_WORKTREE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -329,12 +419,24 @@ impl Drop for TempWorktree {
 pub struct GitOperations {
     /// Path to the main repository root
     repo_root: PathBuf,
+    /// cas-0f04: linked checkouts of a merge target that were deliberately
+    /// left untouched, recorded so the operator's receipt can say so.
+    ///
+    /// A `tracing::warn!` is not delivery: the MCP caller sees a receipt, not
+    /// this process's logs, and reporting an ordinary success while a
+    /// checkout is stranded is the original defect at the user boundary.
+    /// Drained by [`Self::take_stale_checkout_notes`] when the receipt is
+    /// assembled.
+    stale_checkout_notes: std::sync::Mutex<Vec<String>>,
 }
 
 impl GitOperations {
     /// Create a new GitOperations instance for a repository
     pub fn new(repo_root: PathBuf) -> Self {
-        Self { repo_root }
+        Self {
+            repo_root,
+            stale_checkout_notes: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     /// Detect the repository root from a path
@@ -1246,6 +1348,23 @@ impl GitOperations {
             .resolve_commit(target_branch)
             .ok_or_else(|| GitError::BranchNotFound(target_branch.to_string()))?;
 
+        // cas-0f04: a compare-and-swap on the ref is invisible to any OTHER
+        // worktree that has this branch checked out. Decide what to do about
+        // those checkouts BEFORE the merge — a dirty one refuses here, while
+        // the ref is still where that checkout expects it.
+        let checkouts = self.linked_checkouts_of(target_branch)?;
+        for checkout in &checkouts {
+            if let Some((change_count, first_change)) = dirty_summary(&checkout.path) {
+                return Err(GitError::TargetCheckedOutDirty {
+                    branch: target_branch.to_string(),
+                    checkout: checkout.path.clone(),
+                    change_count,
+                    first_change,
+                    tip: old_tip.clone(),
+                });
+            }
+        }
+
         let guard = self.add_temp_worktree(&old_tip)?;
         let merged = self.merge_branch_in_dir(guard.path(), None, source_branch, no_ff)?;
 
@@ -1271,7 +1390,190 @@ impl GitOperations {
                     .unwrap_or_else(|| "<unresolvable>".to_string()),
             });
         }
+
+        // The ref moved. Every checkout listed above was clean when we looked
+        // and holds this branch, so realigning it discards nothing and is the
+        // difference between a usable checkout and one stranded on an
+        // ancestor of its own HEAD.
+        for checkout in &checkouts {
+            if let CheckoutRefresh::LeftStale { reason } =
+                self.refresh_linked_checkout(&checkout.path, target_branch, &old_tip, &new_tip)
+            {
+                self.record_stale_checkout(
+                    target_branch,
+                    &checkout.path,
+                    &old_tip,
+                    &new_tip,
+                    &reason,
+                );
+            }
+        }
         Ok(Some(new_tip))
+    }
+
+    /// Worktrees other than the ephemeral merge worktree that currently have
+    /// `branch` checked out, as git itself reports them.
+    ///
+    /// The ephemeral worktree is detached, so it carries no `branch` line and
+    /// never appears here.
+    fn linked_checkouts_of(&self, branch: &str) -> Result<Vec<LinkedCheckout>> {
+        // An unknown inventory must never authorize the ref advance: if we
+        // cannot say which checkouts hold this branch, we cannot say the merge
+        // is safe for them. Fail closed, before anything is written.
+        #[cfg(test)]
+        if std::env::var_os("CAS_TEST_FAIL_WORKTREE_LIST").is_some() {
+            return Err(GitError::CheckoutInventoryUnavailable {
+                branch: branch.to_string(),
+                reason: "injected failure (CAS_TEST_FAIL_WORKTREE_LIST)".to_string(),
+            });
+        }
+
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&self.repo_root)
+            .output()
+            .map_err(|error| GitError::CheckoutInventoryUnavailable {
+                branch: branch.to_string(),
+                reason: error.to_string(),
+            })?;
+        if !output.status.success() {
+            return Err(GitError::CheckoutInventoryUnavailable {
+                branch: branch.to_string(),
+                reason: branch_ops::first_line(&String::from_utf8_lossy(&output.stderr)),
+            });
+        }
+
+        let wanted = format!("refs/heads/{branch}");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut found = Vec::new();
+        let mut current: Option<PathBuf> = None;
+        for line in text.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                current = Some(PathBuf::from(path));
+            } else if let Some(reference) = line.strip_prefix("branch ") {
+                if reference.trim() == wanted {
+                    if let Some(path) = current.clone() {
+                        found.push(LinkedCheckout { path });
+                    }
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Record a checkout the merge deliberately did not touch.
+    fn record_stale_checkout(
+        &self,
+        branch: &str,
+        path: &Path,
+        old_tip: &str,
+        new_tip: &str,
+        reason: &str,
+    ) {
+        // Deliberately does not claim what that checkout now contains: it may
+        // have been edited, staged into, or switched to another branch inside
+        // the window. The only facts we can state are that the ref moved, the
+        // refresh declined, and why.
+        let note = format!(
+            "\n⚠️  Stale checkout: {branch} advanced {} -> {}, and the checkout at {} was left \
+             untouched because the refresh declined ({reason}). Nothing there was overwritten. \
+             Inspect it, preserve whatever it holds (commit or stash), then reconcile it \
+             deliberately.",
+            short_tip(old_tip),
+            short_tip(new_tip),
+            path.display(),
+        );
+        tracing::warn!("{}", note.trim());
+        // A poisoned lock must not drop a safety warning: recover the
+        // contained notes rather than discarding them.
+        let mut notes = self
+            .stale_checkout_notes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        notes.push(note);
+    }
+
+    /// Test seam for the receipt contract: records a note exactly as a real
+    /// refusal does, without needing to drive a whole merge.
+    #[cfg(test)]
+    pub(crate) fn record_stale_checkout_for_test(
+        &self,
+        branch: &str,
+        path: &Path,
+        old_tip: &str,
+        new_tip: &str,
+        reason: &str,
+    ) {
+        self.record_stale_checkout(branch, path, old_tip, new_tip, reason);
+    }
+
+    /// Drain the stale-checkout notes recorded since the last call.
+    ///
+    /// The receipt assembler calls this after a merge so the operator reads
+    /// about a stranded checkout in the response, not only in a log file.
+    pub fn take_stale_checkout_notes(&self) -> Vec<String> {
+        let mut notes = self
+            .stale_checkout_notes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *notes)
+    }
+
+    /// Advance a linked checkout from `old_tip` to `new_tip`, refusing rather
+    /// than overwriting if anything there changed.
+    ///
+    /// The cleanliness check happens before the merge; the refresh happens
+    /// after the compare-and-swap. Someone can edit that checkout in between,
+    /// so a `--reset` justified by the earlier observation would silently
+    /// destroy work that appeared during the window. This uses git's two-tree
+    /// `read-tree -m -u`, which performs the same update but refuses when an
+    /// entry is not up to date — the safety is git's, evaluated at the moment
+    /// of the write, not ours from an earlier glance.
+    ///
+    /// Refusal is not an error: the merge has already published. The checkout
+    /// is simply left exactly as the operator has it, and the caller says so.
+    pub(crate) fn refresh_linked_checkout(
+        &self,
+        path: &Path,
+        branch: &str,
+        old_tip: &str,
+        new_tip: &str,
+    ) -> CheckoutRefresh {
+        if !path.is_dir() {
+            return CheckoutRefresh::LeftStale {
+                reason: "checkout directory no longer exists".to_string(),
+            };
+        }
+        // The checkout may have been switched to a different branch inside the
+        // window. Advancing it to this target's tip would then be a silent
+        // checkout of a branch nobody asked for, so re-verify identity here
+        // rather than trusting the pre-merge listing.
+        match head_branch_of(path) {
+            Some(current) if current == branch => {}
+            Some(current) => {
+                return CheckoutRefresh::LeftStale {
+                    reason: format!("checkout moved to branch {current} during the merge"),
+                };
+            }
+            None => {
+                return CheckoutRefresh::LeftStale {
+                    reason: "checkout is no longer on a branch (detached HEAD)".to_string(),
+                };
+            }
+        }
+        let output = Command::new("git")
+            .args(["read-tree", "-m", "-u", old_tip, new_tip])
+            .current_dir(path)
+            .output();
+        match output {
+            Ok(output) if output.status.success() => CheckoutRefresh::Updated,
+            Ok(output) => CheckoutRefresh::LeftStale {
+                reason: branch_ops::first_line(&String::from_utf8_lossy(&output.stderr)),
+            },
+            Err(error) => CheckoutRefresh::LeftStale {
+                reason: error.to_string(),
+            },
+        }
     }
 
     /// Absolute path of the repository's *common* git dir — shared by the

@@ -58,6 +58,15 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise: new Promise<T>((done) => { resolve = done; }), resolve };
 }
 
+async function exchangeFailure(attempt: Promise<unknown>): Promise<PairingExchangeError> {
+  try {
+    await attempt;
+  } catch (error) {
+    return error as PairingExchangeError;
+  }
+  throw new Error("expected pairing exchange to fail");
+}
+
 class MemoryMachineCatalogBackend implements MachineCatalogBackend {
   readonly records = new Map<string, MachineCatalogRecord>();
   rejectUpdate = false;
@@ -453,6 +462,37 @@ describe("wire-v1 reverse pairing", () => {
     })).rejects.toThrow("This device is not approved for this hub.");
   });
 
+  it("keeps a lost-response invitation for a bounded retry without claiming nonconsumption", async () => {
+    const invitation = { kind: "invitation" as const, token: "one-time-token", hubId: "machine-uuid", hubUrl: "https://workstation.tail.example", controllerOrigin: request.controllerOrigin, scopes: ["machine-read"] as const };
+    let consumed = false;
+    let attempts = 0;
+    const run = () => exchangePendingPairing({
+      invitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
+      fetcher: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          consumed = true;
+          throw new TypeError("response lost after the machine consumed the invitation");
+        }
+        return response(401, { error: "unauthorized" });
+      },
+      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
+      installationGeneration: attempts + 1,
+      stagePersisted: async () => undefined, activatePersisted: async () => true, rollbackPersisted: async () => true,
+    });
+
+    const uncertain = await exchangeFailure(run());
+    expect(consumed).toBe(true);
+    expect(uncertain.recoverable).toBe(true);
+    expect(uncertain.message).toMatch(/could not confirm pairing/i);
+    expect(uncertain.message).toMatch(/fresh invitation/i);
+    expect(uncertain.message).not.toMatch(/still open|unused|untouched/i);
+
+    const refused = await exchangeFailure(run());
+    expect(refused.recoverable).toBe(false);
+    expect(attempts).toBe(2);
+  });
+
   it("keeps a cleanup-rejected credential non-activatable after reload, then restores the exact prior row", async () => {
     const backend = new MemoryMachineCatalogBackend();
     const catalog = new MachineCatalog(backend);
@@ -695,6 +735,10 @@ describe("wire-v1 reverse pairing", () => {
     ["relay", [["device", "Tablet"], ["operator", "Daniel"]]],
   ] as const)("preserves %s confirmation fields across unrelated renders", (_kind, entries) => {
     const initial = createPairingDraft("https://controller.tail.example");
+    // The machine's address is never guessed from the page (cas-8051 F5); the
+    // page origin is kept only as the one-tap fill for the served-by-hub case.
+    expect(initial.hubUrl).toBe("");
+    expect(initial.pageOrigin).toBe("https://controller.tail.example");
     const captured = updatePairingDraft(initial, entries);
     const afterBackgroundRender = updatePairingDraft(captured, []);
 

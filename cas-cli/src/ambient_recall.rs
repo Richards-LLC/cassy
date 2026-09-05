@@ -423,6 +423,14 @@ struct RecallDecisionCandidate {
 }
 
 fn decision_trigger_terms(query: &RecallQuery) -> Vec<RecallTriggerTerm> {
+    // Report only terms that can actually influence ranking. Previously this
+    // omitted structural `project=` / `task=` terms even though query_terms()
+    // scored them, while listing title terms beyond the retriever's ten-term
+    // budget. That made a noisy selection look better grounded than it was.
+    let ranking_terms: HashSet<String> = query_terms(&query.canonical)
+        .into_iter()
+        .chain(query.tool_context_terms.iter().cloned())
+        .collect();
     let mut terms = Vec::new();
     for line in query.canonical.lines() {
         let (source, value) = if let Some(value) = line.strip_prefix("request=") {
@@ -454,7 +462,7 @@ fn decision_trigger_terms(query: &RecallQuery) -> Vec<RecallTriggerTerm> {
             .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
         {
             let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
-            if is_content_bearing_term(&term) || term.chars().any(|ch| ch.is_ascii_digit()) {
+            if ranking_terms.contains(&term) {
                 if !terms.iter().any(|existing: &RecallTriggerTerm| {
                     existing.term == term && existing.source == source
                 }) {
@@ -727,6 +735,40 @@ impl RecallRetriever for SqliteRecallRetriever {
         let mut rows = Vec::new();
         for spec in local_surface_specs() {
             rows.extend(read_surface(&conn, spec, &terms, scope, per_surface));
+        }
+        // cas-4028: `task=` is deliberately excluded from lexical terms so an
+        // identity value cannot manufacture relevance. That also made a row
+        // which NAMES the current task unreachable — it was neither a term nor
+        // structurally bound — and the packet went silent on a case whose own
+        // prior learnings were sitting in the store. Fetch those rows by
+        // identity as well; `local_candidate` still scores them against the
+        // unchanged lexical terms, so identity buys retrieval and binding, not
+        // a lexical score, and a merely similar id is rejected at the token
+        // boundary rather than here.
+        if let Some(task_id) = query
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            let identity_needle = vec![task_id.to_ascii_lowercase()];
+            for spec in local_surface_specs() {
+                // SQL matches this needle as a SUBSTRING, so the fetch alone
+                // would admit `cas-096e1` and friends. Keep only rows that
+                // bind on an exact token, so a supplemental read can never
+                // introduce a row the binding rule itself would reject.
+                let bound = read_surface(&conn, spec, &identity_needle, scope, per_surface)
+                    .into_iter()
+                    .filter(|row| {
+                        names_current_task(Some(task_id), &row.snippet.to_ascii_lowercase())
+                    });
+                rows.extend(bound);
+            }
+            // Identity is (surface, id): ids are only unique within their own
+            // table, so deduping on the bare id could silently drop a row from
+            // a different surface that happens to share it.
+            let mut seen = HashSet::new();
+            rows.retain(|row| seen.insert((row.surface, row.id.clone())));
         }
         let mut candidates: Vec<EvidenceCandidate> = rows
             .into_iter()
@@ -1139,6 +1181,8 @@ struct LocalSurfaceSpec {
     extra_scope_predicate: &'static str,
 }
 
+const MEMORY_STALE_SQL: &str = "case when valid_until is not null and datetime(valid_until) < datetime('now') then 1 else 0 end";
+
 fn local_surface_specs() -> [LocalSurfaceSpec; 8] {
     [
         LocalSurfaceSpec {
@@ -1150,7 +1194,7 @@ fn local_surface_specs() -> [LocalSurfaceSpec; 8] {
             team: "team_id",
             share: "share",
             revision: "coalesce(updated_at, created)",
-            stale: "case when valid_until is not null and valid_until < datetime('now') then 1 else 0 end",
+            stale: MEMORY_STALE_SQL,
             body_available: true,
             locator: "id",
             extra_scope_predicate: "archived = 0",
@@ -1358,7 +1402,21 @@ fn query_terms(canonical: &str) -> Vec<String> {
     // ten-term work budget, and putting request terms last made an active
     // supervisor task title silently consume that entire budget (cas-0337).
     // Preserve the remaining canonical context as a fallback after the turn.
-    let mut lines: Vec<&str> = canonical.lines().collect();
+    let mut lines: Vec<&str> = canonical
+        .lines()
+        // These fields enforce identity, scope, de-duplication, or structural
+        // binding elsewhere. Treating their values as text evidence let a
+        // project slug such as `cas-src` manufacture relevance inside a store
+        // that was already project-gated.
+        .filter(|line| {
+            !matches!(
+                line.split_once('=').map(|(key, _)| key),
+                Some("role" | "project" | "task" | "already_seen" | "focus_epic")
+            )
+        })
+        // SessionStart is an event label, not user intent.
+        .filter(|line| !line.eq_ignore_ascii_case("request=session start"))
+        .collect();
     if let Some(request_index) = lines.iter().position(|line| {
         line.strip_prefix("request=")
             .is_some_and(|request| !request.eq_ignore_ascii_case("session start"))
@@ -1481,6 +1539,7 @@ fn is_high_document_frequency_term(term: &str) -> bool {
         "put",
         "merge",
         "branch",
+        "every",
         "please",
         "implement",
     ];
@@ -1555,6 +1614,50 @@ fn exclude_corpus_ubiquitous_lexical_terms(candidates: &mut [EvidenceCandidate],
     }
 }
 
+/// Whether `haystack` names the task currently being worked, as a whole token.
+///
+/// cas-4028. Suppressing structural identity terms is right for the generic
+/// noise it was written for — a post-mortem matching on `cas-src` and `every`
+/// is not release guidance. But a task id is also a structural identity term,
+/// and when the id is the CURRENT task's, a row carrying it is the prior
+/// record of this exact work rather than noise. The regression this repairs:
+/// the packet returned nothing at all for the case whose task is cas-096e,
+/// dropping a memory tagged `cas-096e` whose body opens "CI wall-clock work on
+/// cas-src (cas-096e/GH #142 ...)" — the case's own prior learnings.
+///
+/// A mention is evidence, not authority: this only lets the row bind, and
+/// every other gate — staleness, expiry, privacy and eligibility — still
+/// applies. Matching is token-bounded, so `cas-096e1` and `cas-096e-extra` are
+/// different tasks and do not bind, and an absent or empty id never matches.
+fn names_current_task(task_id: Option<&str>, haystack: &str) -> bool {
+    let Some(task_id) = task_id else {
+        return false;
+    };
+    let needle = task_id.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+
+    // `match_indices` yields char-boundary-safe offsets, so a multi-byte
+    // haystack or task id cannot panic here the way manual slicing would.
+    let bytes = haystack.as_bytes();
+    haystack.match_indices(needle.as_str()).any(|(start, hit)| {
+        let end = start + hit.len();
+        // A task id is one token: a neighbouring id character means this is a
+        // different id that merely shares a prefix or suffix. A multi-byte
+        // neighbour is not an id character, so it reads as a boundary.
+        let before_ok = start == 0 || !is_task_id_char(bytes[start - 1]);
+        let after_ok = end == haystack.len() || !is_task_id_char(bytes[end]);
+        before_ok && after_ok
+    })
+}
+
+/// Characters that continue a task id token (`cas-096e`), so an adjacent one
+/// proves the match was part of a longer, different identifier.
+fn is_task_id_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+}
+
 fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> EvidenceCandidate {
     let haystack = row.snippet.to_ascii_lowercase();
     let matched: Vec<&str> = terms
@@ -1565,6 +1668,7 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
     let lexical_eligible = lexical_match_is_eligible(&matched);
     let lexical = matched.len() as f64 / terms.len().max(1) as f64;
     let binding = query.task_id.as_deref() == Some(row.id.as_str())
+        || names_current_task(query.task_id.as_deref(), &haystack)
         || query.files.iter().any(|file| haystack.contains(file))
         || query.symbols.iter().any(|symbol| haystack.contains(symbol));
     let role_score = match (query.role, row.surface) {
@@ -1572,7 +1676,11 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
         (RecallRole::Worker, EvidenceSurface::History) => 0.20,
         (RecallRole::Worker, EvidenceSurface::Rule) => 0.16,
         (RecallRole::Worker, EvidenceSurface::Memory) => 0.14,
-        (RecallRole::Supervisor, EvidenceSurface::Task) => 0.26,
+        // Preserve the established supervisor contract for current,
+        // multi-term task evidence without boosting weak or closed tasks. In
+        // its three-term fixture, 0.31 puts a two-term task at 0.75, narrowly
+        // above a three-term code match at 0.74; 0.30 only ties that row.
+        (RecallRole::Supervisor, EvidenceSurface::Task) if !row.stale && matched.len() >= 2 => 0.31,
         (RecallRole::Supervisor, EvidenceSurface::Spec) => 0.22,
         (RecallRole::Supervisor, EvidenceSurface::History) => 0.20,
         (RecallRole::Supervisor, EvidenceSurface::Rule) => 0.14,
@@ -3017,6 +3125,12 @@ pub(crate) fn retrieve_candidates(
     }
     let mut candidates: Vec<EvidenceCandidate> = fused.into_values().collect();
     exclude_corpus_ubiquitous_lexical_terms(&mut candidates, &query.canonical);
+    // Expired memories remain available through explicit memory/search tools,
+    // but SessionStart ambient recall must not present obsolete procedures as
+    // current authority. Other stale surfaces (for example a closed task) can
+    // still be useful historical evidence and retain their visible flag.
+    candidates
+        .retain(|candidate| !(candidate.surface == EvidenceSurface::Memory && candidate.stale));
     candidates.retain(|candidate| {
         !candidate.focus_mismatch
             || candidate
@@ -3979,7 +4093,81 @@ mod tests {
         let supervisor = identity(RecallRole::Supervisor);
         let supervisor_rows = retrieve_candidates(&supervisor, &request, &[&retriever]).unwrap();
         assert_eq!(supervisor_rows.candidates[0].evidence_id, "cas-parser");
+        assert_eq!(supervisor_rows.candidates[0].role_score, 0.31);
+        assert_eq!(supervisor_rows.candidates[1].evidence_id, "sym-parser");
+        assert_eq!(supervisor_rows.candidates[1].role_score, 0.08);
+        assert!(
+            supervisor_rows.candidates[0].relevance > supervisor_rows.candidates[1].relevance,
+            "a current two-term task must narrowly outrank a three-term code match"
+        );
         assert!(!dir.path().join("index/code-vectors").exists());
+    }
+
+    #[test]
+    fn supervisor_task_boost_requires_current_multi_term_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            create table entries (
+                id text primary key, title text, content text, scope text,
+                team_id text, share text, updated_at text, created text,
+                valid_until text, archived integer
+            );
+            create table tasks (
+                id text primary key, title text, description text, design text,
+                notes text, team_id text, share text, updated_at text, status text
+            );
+            create table code_symbols (
+                id text primary key, qualified_name text, name text,
+                file_path text, documentation text, signature text,
+                scope text, content_hash text
+            );
+            insert into entries values
+                ('current-memory', '', 'signing artifact guidance', 'project',
+                 null, null, 'r1', 'r1', null, 0);
+            insert into tasks values
+                ('weak-task', 'release checklist', '', '', '', null, null, 'r1', 'open'),
+                ('closed-task', 'release signing artifact recovery', '', '', '',
+                 null, null, 'r1', 'closed');
+            insert into code_symbols values
+                ('current-code', 'release::signing', 'signing', 'src/release.rs',
+                 'signing artifact implementation', 'fn sign()', 'project', 'r1');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        let candidates = retrieve_candidates(
+            &identity(RecallRole::Supervisor),
+            &RecallRequest {
+                prompt: "release signing artifact recovery".into(),
+                ..Default::default()
+            },
+            &[&retriever],
+        )
+        .unwrap()
+        .candidates;
+        let ids = candidates
+            .iter()
+            .map(|candidate| candidate.evidence_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(&ids[..2], &["current-code", "current-memory"]);
+        assert_eq!(ids[2], "weak-task");
+        assert_eq!(ids[3], "closed-task");
+        let weak_task = candidates
+            .iter()
+            .find(|candidate| candidate.evidence_id == "weak-task")
+            .unwrap();
+        let closed_task = candidates
+            .iter()
+            .find(|candidate| candidate.evidence_id == "closed-task")
+            .unwrap();
+        assert!(weak_task.lexical_weak);
+        assert_eq!(weak_task.role_score, 0.08);
+        assert_eq!(closed_task.role_score, 0.08);
     }
 
     #[test]
@@ -4129,6 +4317,277 @@ mod tests {
         assert!(!ids.contains(&"stopword-noise"));
         assert!(!ids.contains(&"merge-noise"));
         assert!(!ids.contains(&"trailer-noise"));
+    }
+
+    /// cas-fa938: replay the exact shape of query 4405439dd571. The project
+    /// identity and the adjective `every` must not turn an unrelated flock
+    /// post-mortem into release guidance, and an expired procedure must not be
+    /// presented beside the current task as ambient authority.
+    #[test]
+    fn release_recovery_replay_rejects_identity_noise_and_expired_procedure() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            create table entries (
+                id text primary key, title text, content text, scope text,
+                team_id text, share text, updated_at text, created text,
+                valid_until text, archived integer
+            );
+            create table tasks (
+                id text primary key, title text, description text, design text,
+                notes text, team_id text, share text, updated_at text, status text
+            );
+            insert into entries values
+                ('flock-history', '',
+                 'POSIX flock in cas-src releases only when every descriptor closes',
+                 'project', null, null, '2026-08-03', '2026-08-03', null, 0),
+                ('obsolete-release-procedure', '',
+                 'Every release train requires workers to avoid origin pushes and gh commands',
+                 'project', null, null, '2026-09-01', '2026-09-01',
+                 '2026-09-03T00:00:00Z', 0),
+                ('current-release-guidance', '',
+                 'Current release-gate recovery keeps ledger-last and scratch-base preflight receipts',
+                 'project', null, null, '2026-09-04', '2026-09-04', null, 0);
+            insert into tasks values
+                ('cas-d2cf',
+                 'cas-cut-release + release-gate: encode every hour-losing lesson from the v3.16.0 train (merge-only-on-green-CI, ledger-last, scratch-base preflight row, detached gate + reminders, --stop kills children, --only rerun, fixture rules, snapshot policy)',
+                 'Harden release recovery without reviving obsolete worker rules', '', '',
+                 null, null, '2026-09-04', 'in_progress');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut supervisor = identity(RecallRole::Supervisor);
+        supervisor.project_id = "cas-src".into();
+        let request = RecallRequest {
+            prompt: "session start".into(),
+            task_id: Some("cas-d2cf".into()),
+            task_title: Some("cas-cut-release + release-gate: encode every hour-losing lesson from the v3.16.0 train (merge-only-on-green-CI, ledger-last, scratch-base preflight row, detached gate + reminders, --stop kills children, --only rerun, fixture rules, snapshot policy)".into()),
+            task_labels: vec!["cas-cut-release".into()],
+            ..Default::default()
+        };
+        let query = RecallQuery::build(&supervisor, &request).unwrap();
+        let ranked_terms = query_terms(&query.canonical);
+        assert!(!ranked_terms.iter().any(|term| term == "cas-src"));
+        assert!(!ranked_terms.iter().any(|term| term == "every"));
+        let mut traced_terms = decision_trigger_terms(&query)
+            .into_iter()
+            .map(|term| term.term)
+            .collect::<Vec<_>>();
+        traced_terms.sort();
+        traced_terms.dedup();
+        let mut ranked_terms_for_trace = ranked_terms.clone();
+        ranked_terms_for_trace.sort();
+        assert_eq!(traced_terms, ranked_terms_for_trace);
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        let candidates = retrieve_candidates(&supervisor, &request, &[&retriever]).unwrap();
+        let (packet, injected) = render_packet(
+            &supervisor,
+            &query,
+            &candidates,
+            &mut RecallLedger::default(),
+        )
+        .unwrap();
+        let ids = injected
+            .iter()
+            .map(|candidate| candidate.evidence_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            ids.contains(&"cas-d2cf"),
+            "exact task binding was lost: {packet:?}"
+        );
+        assert!(
+            ids.contains(&"current-release-guidance"),
+            "useful current recovery guidance was lost: {packet:?}"
+        );
+        assert!(
+            !ids.contains(&"flock-history"),
+            "project identity + generic adjective selected unrelated history: {packet:?}"
+        );
+        assert!(
+            !ids.contains(&"obsolete-release-procedure"),
+            "expired procedural memory was presented as ambient authority: {packet:?}"
+        );
+    }
+
+    #[test]
+    fn same_day_rfc3339_expiry_is_compared_as_time_not_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            create table entries (
+                id text primary key, title text, content text, scope text,
+                team_id text, share text, updated_at text, created text,
+                valid_until text, archived integer
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, ?4, 0)",
+            params![
+                "expired-same-day",
+                "same day release preference expired",
+                "r1",
+                "2026-09-05T00:00:00Z"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, ?4, 0)",
+            params![
+                "current-same-day",
+                "same day release preference current",
+                "r1",
+                "2026-09-05T23:59:59Z"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, ?4, 0)",
+            params![
+                "expired-offset",
+                "same day release preference offset expired",
+                "r1",
+                "2026-09-05T07:00:00+05:00"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, null, 0)",
+            params!["no-expiry", "same day release preference stable", "r1"],
+        )
+        .unwrap();
+
+        // Pin the midnight, same-day future, timezone-offset, and NULL cases
+        // against a fixed reference instant while deriving the predicate from
+        // the exact expression used by the local retriever.
+        let fixed_stale_sql =
+            MEMORY_STALE_SQL.replace("datetime('now')", "datetime('2026-09-05 12:00:00')");
+        let mut stmt = conn
+            .prepare(&format!(
+                "select id from entries where ({fixed_stale_sql}) = 0 order by id"
+            ))
+            .unwrap();
+        let fixed_current = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fixed_current, vec!["current-same-day", "no-expiry"]);
+        drop(stmt);
+
+        // Retain an integration check through retrieve_candidates using live
+        // instants safely separated from the current clock.
+        let now = Utc::now();
+        let expired = (now - chrono::TimeDelta::minutes(5)).to_rfc3339();
+        let future = (now + chrono::TimeDelta::minutes(5)).to_rfc3339();
+        let expired_with_offset = (now - chrono::TimeDelta::minutes(5))
+            .with_timezone(&chrono::FixedOffset::east_opt(5 * 60 * 60).unwrap())
+            .to_rfc3339();
+        conn.execute(
+            "update entries set valid_until = ?1 where id = 'expired-same-day'",
+            [expired],
+        )
+        .unwrap();
+        conn.execute(
+            "update entries set valid_until = ?1 where id = 'current-same-day'",
+            [future],
+        )
+        .unwrap();
+        conn.execute(
+            "update entries set valid_until = ?1 where id = 'expired-offset'",
+            [expired_with_offset],
+        )
+        .unwrap();
+        drop(conn);
+
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        let candidates = retrieve_candidates(
+            &identity(RecallRole::Supervisor),
+            &RecallRequest {
+                prompt: "same day release preference".into(),
+                ..Default::default()
+            },
+            &[&retriever],
+        )
+        .unwrap();
+        let ids = candidates
+            .candidates
+            .iter()
+            .map(|candidate| candidate.evidence_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(ids.contains(&"current-same-day"));
+        assert!(ids.contains(&"no-expiry"));
+        assert!(!ids.contains(&"expired-same-day"));
+        assert!(!ids.contains(&"expired-offset"));
+    }
+
+    /// An operator decision and the deployed runtime state are complementary
+    /// evidence until the implementation lands; recall must keep their source
+    /// types and wording distinct rather than treating the decision as shipped.
+    #[test]
+    fn decided_not_shipped_policy_remains_distinct_from_deployed_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            create table entries (
+                id text primary key, title text, content text, scope text,
+                team_id text, share text, updated_at text, created text,
+                valid_until text, archived integer
+            );
+            create table tasks (
+                id text primary key, title text, description text, design text,
+                notes text, team_id text, share text, updated_at text, status text
+            );
+            insert into entries values
+                ('deployed-taste-route', '',
+                 'Deployed runtime taste lane remains Claude Opus until the migration lands',
+                 'project', null, null, '2026-09-04', '2026-09-04', null, 0);
+            insert into tasks values
+                ('cas-b8fc',
+                 'Replace the taste lane with Codex gpt-6-astra at medium effort',
+                 'Operator decision is current intent; implementation is not yet shipped', '', '',
+                 null, null, '2026-09-04', 'open');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let supervisor = identity(RecallRole::Supervisor);
+        let request = RecallRequest {
+            prompt: "session start".into(),
+            task_id: Some("cas-b8fc".into()),
+            task_title: Some(
+                "Replace the taste lane with Codex gpt-6-astra at medium effort".into(),
+            ),
+            ..Default::default()
+        };
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        let candidates = retrieve_candidates(&supervisor, &request, &[&retriever]).unwrap();
+        let intent = candidates
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evidence_id == "cas-b8fc")
+            .expect("current intent task must be recalled");
+        let deployed = candidates
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evidence_id == "deployed-taste-route")
+            .expect("deployed runtime state must remain useful");
+
+        assert!(intent.binding);
+        assert_eq!(intent.surface, EvidenceSurface::Task);
+        assert!(intent.snippet.contains("not yet shipped"));
+        assert_eq!(deployed.surface, EvidenceSurface::Memory);
+        assert!(deployed.snippet.contains("Deployed runtime"));
+        assert!(!deployed.snippet.contains("gpt-6-astra"));
     }
 
     #[test]
@@ -5356,4 +5815,159 @@ mod tests {
         assert!(p99 <= identity.role.policy().default_tokens * 4);
         assert!(sizes.last().unwrap() <= &(identity.role.policy().default_tokens * 4));
     }
+
+    /// cas-4028. Token-boundary contract for the current-task binding.
+    ///
+    /// The regression it repairs is real: with structural identity terms
+    /// suppressed, the ambient packet returned NOTHING for the eval case whose
+    /// task is cas-096e, dropping a memory tagged `cas-096e` that carried that
+    /// task's own prior CI learnings. Binding on the current id restores it.
+    ///
+    /// The negatives matter as much as the positive. A different task that
+    /// merely shares a prefix or suffix is a different task, an unrelated id
+    /// never binds, and an absent or empty id binds nothing at all — otherwise
+    /// this would become the blanket identity match that fa938 removed.
+    #[test]
+    fn only_the_current_task_id_binds_and_only_on_token_boundaries() {
+        let current = Some("cas-096e");
+
+        // The regression case: the id appears in tags and in prose.
+        assert!(names_current_task(
+            current,
+            "ci wall-clock work on cas-src (cas-096e/gh #142, extended 2026-08-18)"
+        ));
+        assert!(names_current_task(current, "tags: [\"ci\",\"cas-096e\",\"nextest\"]"));
+        assert!(names_current_task(current, "cas-096e"));
+        assert!(names_current_task(current, "see cas-096e."));
+
+        // Decoys: longer ids that contain the current one as a substring.
+        assert!(!names_current_task(current, "cas-096e1 is a different task"));
+        assert!(!names_current_task(current, "cas-096e-extra is a different task"));
+        assert!(!names_current_task(current, "cas-096e_2 is a different task"));
+        assert!(!names_current_task(current, "xcas-096e is a different task"));
+
+        // Another task entirely.
+        assert!(!names_current_task(current, "work on cas-1939 and cas-b7f5"));
+
+        // No current task, or an empty one, binds nothing — including against
+        // text that would otherwise look like a match.
+        assert!(!names_current_task(None, "cas-096e"));
+        assert!(!names_current_task(Some(""), "cas-096e"));
+        assert!(!names_current_task(Some("   "), "cas-096e"));
+    }
+
+
+    /// cas-4028. The helper test pins the token rule; this pins the SEAM —
+    /// what the production retriever actually fetches and hands to the packet
+    /// when the current task id is the only thing connecting a row to the
+    /// session. The SQL matches the id as a substring, so without the exact
+    /// binding filter this fetch would drag in every neighbouring id.
+    #[test]
+    fn identity_fetch_returns_only_the_exact_current_task_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("cas.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"
+            create table entries (
+                id text primary key, title text, content text, scope text,
+                team_id text, share text, updated_at text, created text,
+                valid_until text, archived integer
+            );
+            create table tasks (
+                id text primary key, title text, description text, design text,
+                notes text, team_id text, share text, updated_at text, status text
+            );
+            create table code_symbols (
+                id text primary key, qualified_name text, name text,
+                file_path text, documentation text, signature text,
+                scope text, content_hash text
+            );
+            create table knowledge_pages (
+                id text primary key, title text, snippet text, page_type text,
+                rel_path text, updated_at text, origin text, origin_project_id text
+            );
+            insert into entries values
+                ('mem-exact', '', 'ci wall-clock work on cas-src (cas-096e/gh #142)',
+                 'project', null, null, 'r2', 'r1', null, 0),
+                ('mem-suffix-decoy', '', 'notes for cas-096e1, a different task',
+                 'project', null, null, 'r2', 'r1', null, 0),
+                ('mem-prefix-decoy', '', 'notes for xcas-096e, a different task',
+                 'project', null, null, 'r2', 'r1', null, 0),
+                ('mem-hyphen-decoy', '', 'notes for cas-096e-extra, a different task',
+                 'project', null, null, 'r2', 'r1', null, 0),
+                ('mem-other-task', '', 'different effort tracked under cas-1939',
+                 'project', null, null, 'r2', 'r1', null, 0),
+                ('mem-expired', '', 'obsolete procedure for cas-096e',
+                 'project', null, null, 'r2', 'r1', '2000-01-01T00:00:00Z', 0),
+                ('mem-private-unowned', '', 'private note about cas-096e',
+                 'project', null, 'private', 'r2', 'r1', null, 0);
+            insert into tasks values
+                ('cas-parser', 'different effort', '', '', '', null, null, 'r2', 'in_progress');
+            insert into code_symbols values
+                ('sym-unrelated', 'other::thing', 'thing', 'src/other.rs', '', 'fn thing()', 'project', 'h');
+            insert into knowledge_pages values
+                ('kn-unrelated', 'other', 'other', 'guide', 'guide/o.md', 'r2', 'local', null);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        // The prompt shares no term with ANY row here — the first cut of this
+        // fixture said "unrelated" in both the prompt and two rows, so they
+        // matched lexically and looked like an identity-fetch leak. The only
+        // connection between the session and mem-exact is the task id.
+        let request = RecallRequest {
+            prompt: "sparrow lantern drift".into(),
+            task_id: Some("cas-096e".into()),
+            task_title: Some("sparrow lantern".into()),
+            ..Default::default()
+        };
+        let worker = identity(RecallRole::Worker);
+        let rows = retrieve_candidates(&worker, &request, &[&retriever]).unwrap();
+        let ids: Vec<&str> = rows
+            .candidates
+            .iter()
+            .map(|c| c.evidence_id.as_str())
+            .collect();
+
+        assert!(
+            ids.contains(&"mem-exact"),
+            "the row naming the current task must be reachable: {ids:?}"
+        );
+        for decoy in [
+            "mem-suffix-decoy",
+            "mem-prefix-decoy",
+            "mem-hyphen-decoy",
+            "mem-other-task",
+        ] {
+            assert!(
+                !ids.contains(&decoy),
+                "{decoy} is a different task and must not be fetched by identity: {ids:?}"
+            );
+        }
+        assert!(
+            !ids.contains(&"mem-expired"),
+            "an expired procedure naming the task must stay excluded: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"mem-private-unowned"),
+            "privacy exclusion must survive the identity fetch: {ids:?}"
+        );
+    }
+
+    /// cas-4028. A non-ASCII task id or haystack must not panic the scan.
+    /// The first cut advanced by one byte after a match, which can land
+    /// mid-character; `match_indices` is boundary-safe and this proves it.
+    #[test]
+    fn a_non_ascii_task_id_or_haystack_is_handled_without_panicking() {
+        assert!(!names_current_task(Some("café-01"), "notes about café-011"));
+        assert!(names_current_task(Some("café-01"), "notes about café-01 here"));
+        assert!(!names_current_task(Some("cas-096e"), "日本語 cas-096e1 日本語"));
+        assert!(names_current_task(Some("cas-096e"), "日本語 cas-096e 日本語"));
+        assert!(!names_current_task(Some("🎯"), "🎯x"));
+        assert!(names_current_task(Some("🎯"), "a 🎯 b"));
+    }
+
 }

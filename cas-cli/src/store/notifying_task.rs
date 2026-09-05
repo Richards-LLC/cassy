@@ -85,6 +85,12 @@ impl TaskStore for NotifyingTaskStore {
         Ok(())
     }
 
+    fn add_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<()> {
+        self.inner.add_with_mutation_receipt(task, receipt_id)?;
+        self.notify_created(task);
+        Ok(())
+    }
+
     fn create_atomic(
         &self,
         task: &Task,
@@ -94,6 +100,21 @@ impl TaskStore for NotifyingTaskStore {
     ) -> Result<()> {
         self.inner
             .create_atomic(task, blocked_by, epic_id, created_by)?;
+        self.notify_created(task);
+        Ok(())
+    }
+
+    fn create_atomic_with_mutation_receipt(
+        &self,
+        task: &Task,
+        blocked_by: &[String],
+        epic_id: Option<&str>,
+        created_by: Option<&str>,
+        receipt_id: &str,
+    ) -> Result<()> {
+        self.inner.create_atomic_with_mutation_receipt(
+            task, blocked_by, epic_id, created_by, receipt_id,
+        )?;
         self.notify_created(task);
         Ok(())
     }
@@ -115,6 +136,13 @@ impl TaskStore for NotifyingTaskStore {
         let old_status = self.inner.get(&task.id).ok().map(|t| t.status);
 
         let persisted_at = self.inner.update(task)?;
+        self.notify_updated(task, old_status);
+        Ok(persisted_at)
+    }
+
+    fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
+        let old_status = self.inner.get(&task.id).ok().map(|t| t.status);
+        let persisted_at = self.inner.update_with_mutation_receipt(task, receipt_id)?;
         self.notify_updated(task, old_status);
         Ok(persisted_at)
     }

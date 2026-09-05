@@ -900,6 +900,153 @@ async fn h2_pair_02_pairing_exchange_cors_covers_bound_browser_responses() {
 }
 
 #[tokio::test]
+async fn h2_pair_02_bound_sixth_exchange_is_throttled_without_disclosing_unbound_requests() {
+    use chrono::Utc;
+
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let now = Utc::now();
+    let origin = "https://controller.example";
+    let invitation = auth
+        .mint_pairing(origin, Scope::default_read_only(), now)
+        .unwrap();
+    let mut refused_exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        origin,
+        Scope::default_read_only(),
+    );
+    refused_exchange.requested_scopes.insert(Scope::HubAdmin);
+    let events = MachineEventBus::new(16);
+    let app = router(
+        HubState::new(
+            SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+            Arc::new(PreAuthAuthorizer),
+            MachineIdentity {
+                id: "machine-test".into(),
+            },
+            DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+            events,
+        )
+        .with_auth(auth.clone())
+        .with_response_transport(TransportSecurity::TrustedLoopbackTlsProxy),
+    );
+    let request = |exchange: &PairingExchange| {
+        Request::post("/v1/auth/pairing/exchange")
+            .header("origin", origin)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(exchange).unwrap()))
+            .unwrap()
+    };
+
+    for _ in 0..5 {
+        let refused = app
+            .clone()
+            .oneshot(request(&refused_exchange))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(refused.headers()["access-control-allow-origin"], origin);
+        assert!(!refused.headers().contains_key("retry-after"));
+    }
+
+    let throttled = app
+        .clone()
+        .oneshot(request(&refused_exchange))
+        .await
+        .unwrap();
+    assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(throttled.headers()["access-control-allow-origin"], origin);
+    assert_eq!(throttled.headers()["vary"], "Origin");
+    assert_eq!(
+        throttled.headers()["access-control-expose-headers"],
+        "Retry-After"
+    );
+    assert!(
+        !throttled
+            .headers()
+            .contains_key("access-control-allow-credentials")
+    );
+    let retry_after = throttled.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!((1..=60).contains(&retry_after));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(throttled.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({"error":"slow_down"})
+    );
+    assert!(auth.list_devices().unwrap().is_empty());
+
+    let unbound_exchange = PairingExchange {
+        token: "unknown-pairing-capability".into(),
+        ..refused_exchange
+    };
+    let unbound = app.oneshot(request(&unbound_exchange)).await.unwrap();
+    assert_eq!(unbound.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        !unbound
+            .headers()
+            .contains_key("access-control-allow-origin")
+    );
+    assert!(
+        !unbound
+            .headers()
+            .contains_key("access-control-expose-headers")
+    );
+    assert!(!unbound.headers().contains_key("retry-after"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(unbound.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({"error":"unauthorized"})
+    );
+}
+
+#[test]
+fn h2_pair_02_pairing_throttle_reports_the_remaining_window() {
+    use chrono::{Duration, Utc};
+
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let now = Utc::now();
+    let origin = "https://controller.example";
+    let invitation = auth
+        .mint_pairing(origin, Scope::default_read_only(), now)
+        .unwrap();
+    let mut exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        origin,
+        Scope::default_read_only(),
+    );
+    exchange.source = origin.into();
+    exchange.requested_scopes.insert(Scope::HubAdmin);
+
+    for offset in [0, 5, 10, 15, 20] {
+        assert!(matches!(
+            auth.exchange_pairing(exchange.clone(), now + Duration::seconds(offset)),
+            Err(PairingExchangeError::Opaque(_))
+        ));
+    }
+    assert!(matches!(
+        auth.exchange_pairing(exchange.clone(), now + Duration::seconds(30)),
+        Err(PairingExchangeError::Throttled {
+            retry_after_seconds: 30
+        })
+    ));
+    assert!(matches!(
+        auth.exchange_pairing(exchange, now + Duration::seconds(60)),
+        Err(PairingExchangeError::Opaque(_))
+    ));
+}
+
+#[tokio::test]
 async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestions() {
     let events = MachineEventBus::new(16);
     let state = HubState::new(

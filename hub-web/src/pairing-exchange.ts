@@ -24,13 +24,26 @@ interface ExchangeOptions {
 }
 
 export class PairingExchangeError extends Error {
-  /** The invitation is untouched, so the caller keeps it and lets the operator retry. */
+  /** The caller keeps the invitation for a safe retry; this does not imply the hub left it unused. */
   readonly recoverable: boolean;
 
   constructor(message = "This pairing invitation has expired or was already used.", options: { recoverable?: boolean } = {}) {
     super(message);
     this.name = "PairingExchangeError";
     this.recoverable = options.recoverable ?? false;
+  }
+}
+
+/**
+ * The hub accepted the exchange — the one-time invitation is consumed and the
+ * device is recorded there — but this browser could not persist the credential.
+ * Restoring storage does not un-consume the invitation, so this is its own
+ * outcome: not "expired or already used", not a raw storage exception (F3).
+ */
+export class PairingStorageError extends PairingExchangeError {
+  constructor(readonly cause: unknown) {
+    super("The machine approved this browser, but this browser could not save access. Restore browser storage, then get a fresh invitation.");
+    this.name = "PairingStorageError";
   }
 }
 
@@ -87,15 +100,21 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
       }),
     });
   } catch (error) {
-    // A cancelled exchange keeps its own cancellation path; anything else means
-    // the request never reached the hub, so the invitation is still unused.
+    // A cancelled exchange keeps its own cancellation path. Any other fetch
+    // rejection is uncertain: the POST may have reached the hub before its
+    // response was lost, so retain a retry without claiming nonconsumption.
     if (options.signal?.aborted || options.isCurrent?.() === false) throw error;
     throw new PairingExchangeError(unreachableHubMessage(endpoint.origin), { recoverable: true });
   }
   ensureCurrent(options);
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
-    const failure = pairingExchangeFailure({ status: response.status, body: detail, controllerOrigin: options.controllerOrigin });
+    const failure = pairingExchangeFailure({
+      status: response.status,
+      body: detail,
+      controllerOrigin: options.controllerOrigin,
+      retryAfter: response.headers.get("Retry-After"),
+    });
     throw new PairingExchangeError(failure.message, { recoverable: failure.keepInvitation });
   }
   const credential = await response.json().catch(() => null) as Record<string, unknown> | null;
@@ -125,9 +144,19 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
     generation: options.installationGeneration,
   };
   let staged = false;
+  // Past this point the hub has consumed the invitation. A storage rejection is
+  // reported as such; a cancellation or supersession keeps its own error.
+  const persist = async <T>(step: () => Promise<T>): Promise<T> => {
+    try {
+      return await step();
+    } catch (error) {
+      if (error instanceof PairingExchangeError || options.signal?.aborted || options.isCurrent?.() === false) throw error;
+      throw new PairingStorageError(error);
+    }
+  };
   try {
     ensureCurrent(options);
-    await options.stagePersisted(machine, identity);
+    await persist(() => options.stagePersisted(machine, identity));
     staged = true;
     ensureCurrent(options);
     if (invitation.relay && options.acknowledge) {
@@ -138,7 +167,7 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
       ensureCurrent(options);
     }
     ensureCurrent(options);
-    if (!await options.activatePersisted(identity, options.signal)) {
+    if (!await persist(() => options.activatePersisted(identity, options.signal))) {
       throw new PairingExchangeError("This pairing credential was superseded before installation completed.");
     }
     ensureCurrent(options);

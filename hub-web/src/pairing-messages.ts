@@ -27,24 +27,32 @@ function readErrorText(body: string): string {
   }
 }
 
-export function pairingExchangeFailure(input: { status: number; body: string; controllerOrigin: string }): PairingFailureCopy {
+function retryAfterCopy(value: string | null | undefined): string {
+  const text = value?.trim();
+  if (!text || !/^\d+$/.test(text)) return "a minute";
+  const seconds = Number(text);
+  if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 60) return "a minute";
+  return seconds === 1 ? "1 second" : `${seconds} seconds`;
+}
+
+export function pairingExchangeFailure(input: { status: number; body: string; controllerOrigin: string; retryAfter?: string | null }): PairingFailureCopy {
   const detail = hubSentence(input.body);
   const remint = `Run cas hub pair --origin ${input.controllerOrigin} on the machine and open the link it prints.`;
   if (input.status === 429) {
     return {
-      message: "The machine is refusing pairing attempts for a moment — it accepts five a minute. Wait a minute and tap Pair again; this invitation is still open.",
+      message: `The machine is limiting pairing attempts. Wait ${retryAfterCopy(input.retryAfter)} and tap Pair again. If this invitation was already used, you will need a fresh invitation.`,
       keepInvitation: true,
     };
   }
   if (input.status === 404) {
     return {
-      message: "No Cassy hub answered at that Hub URL. Check it names the machine's hub root, then tap Pair again; this invitation is still open.",
+      message: "No Cassy hub answered at that address. Check it is the machine's hub address, not this page's, then tap Pair again; this invitation is still open.",
       keepInvitation: true,
     };
   }
   if (input.status >= 500) {
     return {
-      message: `${detail ?? `The machine's hub answered with an error (${input.status}).`} It may still be starting up — wait a few seconds and tap Pair again; this invitation is still open.`,
+      message: `${detail ?? `The machine's hub answered with an error (${input.status}).`} Wait a few seconds and tap Pair again. If the machine already handled this invitation, you will need a fresh one.`,
       keepInvitation: true,
     };
   }
@@ -62,7 +70,7 @@ export function pairingExchangeFailure(input: { status: number; body: string; co
   };
 }
 
-/** The hub was never reached, so the invitation is untouched and still usable. */
+/** A fetch rejection cannot distinguish no delivery from a consumed POST whose response was lost. */
 export function unreachableHubMessage(hubUrl: string): string {
-  return `This device could not reach ${hubUrl}. Check that Tailscale (VPN) is connected here and that the machine is awake, then tap Pair again; this invitation is still open.`;
+  return `We could not confirm pairing with ${hubUrl}. Check that Tailscale (VPN) is connected here and that the machine is awake, then tap Pair again. If the machine already used this invitation, you will need a fresh invitation.`;
 }

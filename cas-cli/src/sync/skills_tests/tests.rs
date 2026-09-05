@@ -40,6 +40,25 @@ fn create_test_skill(name: &str, enabled: bool) -> Skill {
     }
 }
 
+/// cas-d731. `argument-hint: [title]` is not a string in YAML — the brackets
+/// make it a flow sequence, so a real parser returned a one-element list where
+/// every consumer expects text. The shared serializer quotes it, so this
+/// asserts the value a parser actually yields rather than the raw bytes the
+/// old escaper happened to write.
+fn assert_frontmatter_string(content: &str, key: &str, expected: &str) {
+    let frontmatter = content
+        .split("---")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no frontmatter in:\n{content}"));
+    let parsed: serde_yaml::Value = serde_yaml::from_str(frontmatter)
+        .unwrap_or_else(|e| panic!("frontmatter is not valid YAML: {e}\n{frontmatter}"));
+    assert_eq!(
+        parsed.get(key).and_then(|v| v.as_str()),
+        Some(expected),
+        "{key} must read back as the string {expected:?}:\n{frontmatter}"
+    );
+}
+
 #[test]
 fn test_is_enabled() {
     let syncer = SkillSyncer::new(PathBuf::from("/tmp/test"));
@@ -127,7 +146,7 @@ fn test_sync_invokable_skill() {
     syncer.sync_skill(&skill).unwrap();
 
     let content = fs::read_to_string(target.join("cas-my-task/SKILL.md")).unwrap();
-    assert!(content.contains("argument-hint: [title]"));
+    assert_frontmatter_string(&content, "argument-hint", "[title]");
 }
 
 #[test]
@@ -162,7 +181,7 @@ fn test_sync_invokable_skill_no_user_invocable_false() {
     let content = fs::read_to_string(target.join("cas-invokable-skill/SKILL.md")).unwrap();
     // Invokable skills should NOT have user-invocable: false
     assert!(!content.contains("user-invocable: false"));
-    assert!(content.contains("argument-hint: [query]"));
+    assert_frontmatter_string(&content, "argument-hint", "[query]");
 }
 
 #[test]
@@ -236,7 +255,7 @@ fn test_sync_skill_with_all_frontmatter_fields() {
     let content = fs::read_to_string(target.join("cas-full-skill/SKILL.md")).unwrap();
     // Should have all frontmatter fields
     assert!(content.contains("name: cas-full-skill"));
-    assert!(content.contains("argument-hint: [file]"));
+    assert_frontmatter_string(&content, "argument-hint", "[file]");
     assert!(content.contains("context: fork"));
     assert!(content.contains("agent: Explore"));
     assert!(content.contains("allowed-tools:"));
@@ -383,4 +402,209 @@ fn test_sync_skill_disallowed_tools_omitted_when_empty() {
 
     let content = fs::read_to_string(target.join("cas-open-skill/SKILL.md")).unwrap();
     assert!(!content.contains("disallowed-tools:"), "disallowed-tools must NOT be emitted when empty");
+}
+
+/// cas-d731. The end-to-end claim: a skill whose summary contains the
+/// characters that broke the old escaper is written to disk as frontmatter a
+/// real YAML parser accepts, with the value intact. The reported defect —
+/// `Use C:\project: inspect` — produced `description: "Use C:\project:
+/// inspect"`, which a parser rejects with `found unknown escape character
+/// 'p'`.
+#[test]
+fn a_synced_skill_writes_frontmatter_a_real_yaml_parser_accepts() {
+    for summary in [
+        "Use C:\\project: inspect",
+        "Windows path C:\\Users\\dev and a colon: here",
+        "quotes \" and ' together",
+        "true",
+        "- leading dash",
+        "trailing space ",
+        "multi\nline summary",
+        "unicode — café 日本語 🎯",
+    ] {
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join(".claude/skills");
+        let syncer = SkillSyncer::new(target.clone());
+
+        let mut skill = create_test_skill("hostile", true);
+        skill.summary = summary.to_string();
+        assert!(syncer.sync_skill(&skill).unwrap());
+
+        let content = fs::read_to_string(target.join("cas-hostile/SKILL.md")).unwrap();
+        let frontmatter = content
+            .split("---")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no frontmatter written for {summary:?}:\n{content}"));
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(frontmatter).unwrap_or_else(|e| {
+            panic!("generated frontmatter is not valid YAML for {summary:?}: {e}\n{frontmatter}")
+        });
+        assert_eq!(
+            parsed.get("description").and_then(|v| v.as_str()),
+            Some(summary),
+            "the description changed on the way to disk:\n{frontmatter}"
+        );
+
+        // The frontmatter stays line-oriented: one `description:` line, no
+        // block scalar continuation, so line-based readers still see the value.
+        let description_lines = frontmatter
+            .lines()
+            .filter(|l| l.starts_with("description:"))
+            .count();
+        assert_eq!(description_lines, 1, "{frontmatter}");
+    }
+}
+
+/// cas-d731. The other half of the round trip: what the writer puts on disk,
+/// CAS's own reader must read back. External parser agreement is not enough —
+/// the reader is line-oriented and decodes no escapes, so a writer fix that
+/// ignored it would trade an invalid file for a silently wrong value.
+#[test]
+fn cas_reads_back_the_hostile_values_it_wrote() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path();
+    let target = project.join(".claude/skills");
+    let syncer = SkillSyncer::new(target.clone());
+
+    let cases = [
+        ("windows", "Use C:\\project: inspect"),
+        ("quotes", "quotes \" and ' together"),
+        ("implicit", "true"),
+        ("dash", "- leading dash"),
+        ("newline", "multi\nline summary"),
+        ("unicode", "unicode — café 日本語 🎯"),
+    ];
+    for (name, summary) in cases {
+        let mut skill = create_test_skill(name, true);
+        skill.summary = summary.to_string();
+        assert!(syncer.sync_skill(&skill).unwrap());
+    }
+
+    let read_back = read_skills_from_files(project).unwrap();
+    for (name, summary) in cases {
+        let found = read_back
+            .iter()
+            .find(|s| s.name == format!("cas-{name}"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "CAS could not read back the skill it wrote for {summary:?}; got {:?}",
+                    read_back.iter().map(|s| &s.name).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            found.summary, summary,
+            "CAS's own reader changed the value it had just written for {name}"
+        );
+    }
+}
+
+/// The narrow legacy fallback, justified by a real fixture rather than by
+/// caution: this is exactly what the old escaper wrote for the reported
+/// defect, and it is not valid YAML. Files like it exist in every checkout
+/// that ran a sync before the fix, so the reader must still understand them.
+#[test]
+fn a_legacy_invalid_yaml_skill_file_is_still_readable() {
+    let temp = TempDir::new().unwrap();
+    let skill_dir = temp.path().join(".claude/skills/cas-legacy");
+    fs::create_dir_all(&skill_dir).unwrap();
+    // Verbatim pre-cas-d731 output: the raw backslash makes this invalid YAML.
+    let legacy = "---\nname: cas-legacy\ndescription: \"Use C:\\project: inspect\"\n---\n\nBody.\n";
+    assert!(
+        serde_yaml::from_str::<serde_yaml::Value>(
+            legacy.split("---").nth(1).unwrap()
+        )
+        .is_err(),
+        "this fixture is only meaningful if a parser really rejects it"
+    );
+    fs::write(skill_dir.join("SKILL.md"), legacy).unwrap();
+
+    let read_back = read_skills_from_files(temp.path()).unwrap();
+    let skill = read_back
+        .iter()
+        .find(|s| s.name == "cas-legacy")
+        .expect("a legacy file must not become unreadable");
+    // Byte-equality, not a substring: the recovered value is exactly what the
+    // old scan returned for these bytes, quotes trimmed and nothing decoded.
+    assert_eq!(skill.summary, "Use C:\\project: inspect");
+}
+
+/// The fallback must not become a second, looser reader. A document that no
+/// parser accepts still may not answer `description` from `description_extra`:
+/// legacy recovery is keyed exactly, on an unindented top-level line.
+#[test]
+fn malformed_yaml_does_not_prefix_match_a_different_key() {
+    let temp = TempDir::new().unwrap();
+    let skill_dir = temp.path().join(".claude/skills/cas-malformed");
+    fs::create_dir_all(&skill_dir).unwrap();
+    // Unparseable for a reason unrelated to the key in question, and the only
+    // description-ish key present is a longer one.
+    let malformed = "---\nname: cas-malformed\ndescription_extra: \"leaked C:\\path\"\nbroken: \"unterminated\n---\n\nBody.\n";
+    assert!(
+        serde_yaml::from_str::<serde_yaml::Value>(malformed.split("---").nth(1).unwrap()).is_err(),
+        "this fixture is only meaningful if a parser really rejects it"
+    );
+    fs::write(skill_dir.join("SKILL.md"), malformed).unwrap();
+
+    let read_back = read_skills_from_files(temp.path()).unwrap();
+    let skill = read_back
+        .iter()
+        .find(|s| s.name == "cas-malformed")
+        .expect("the file must still be listed");
+    assert_eq!(
+        skill.summary, "",
+        "description_extra must not answer for description, got {:?}",
+        skill.summary
+    );
+}
+
+/// Legacy recovery is top-level only: an indented key belongs to some nested
+/// structure and must not be lifted out of it.
+#[test]
+fn malformed_yaml_does_not_recover_an_indented_key() {
+    let temp = TempDir::new().unwrap();
+    let skill_dir = temp.path().join(".claude/skills/cas-nested");
+    fs::create_dir_all(&skill_dir).unwrap();
+    let malformed = "---\nname: cas-nested\nhooks:\n  description: nested value\nbroken: \"unterminated\n---\n\nBody.\n";
+    assert!(
+        serde_yaml::from_str::<serde_yaml::Value>(malformed.split("---").nth(1).unwrap()).is_err(),
+        "this fixture is only meaningful if a parser really rejects it"
+    );
+    fs::write(skill_dir.join("SKILL.md"), malformed).unwrap();
+
+    let read_back = read_skills_from_files(temp.path()).unwrap();
+    let skill = read_back
+        .iter()
+        .find(|s| s.name == "cas-nested")
+        .expect("the file must still be listed");
+    assert_eq!(
+        skill.summary, "",
+        "an indented key must not be recovered as top-level, got {:?}",
+        skill.summary
+    );
+}
+
+/// A document that parses but omits the key returns None: the parser's answer
+/// stands, and the legacy scan must not be used to invent a value.
+#[test]
+fn valid_yaml_without_the_key_does_not_fall_back_to_scanning() {
+    let temp = TempDir::new().unwrap();
+    let skill_dir = temp.path().join(".claude/skills/cas-nodesc");
+    fs::create_dir_all(&skill_dir).unwrap();
+    // `description_extra` would satisfy the legacy prefix scan for the key
+    // `description`; a parsed document must not be reinterpreted that way.
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: cas-nodesc\ndescription_extra: leaked\n---\n\nBody.\n",
+    )
+    .unwrap();
+
+    let read_back = read_skills_from_files(temp.path()).unwrap();
+    let skill = read_back
+        .iter()
+        .find(|s| s.name == "cas-nodesc")
+        .expect("the file itself is valid and must still be read");
+    assert_eq!(
+        skill.summary, "",
+        "a missing key must read as absent, not as a prefix match"
+    );
 }

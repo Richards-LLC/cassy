@@ -428,13 +428,14 @@ fn skill_dir_name(name: &str) -> String {
     }
 }
 
-/// Escape a string for YAML
+/// Escape a string for YAML.
+///
+/// Delegates to the single shared serializer (cas-d731). The hand-rolled copy
+/// that used to live here left backslashes raw inside a quoted scalar, so a
+/// description like `Use C:\project: inspect` produced frontmatter a YAML
+/// reader rejects.
 fn escape_yaml(s: &str) -> String {
-    if s.contains(':') || s.contains('#') || s.contains('\n') || s.starts_with(' ') {
-        format!("\"{}\"", s.replace('\"', "\\\"").replace('\n', "\\n"))
-    } else {
-        s.to_string()
-    }
+    cas_core::sync::yaml_scalar(s)
 }
 
 /// Read all skills from the .claude/skills/ directory
@@ -596,18 +597,79 @@ fn extract_body(content: &str) -> String {
 }
 
 /// Extract a single value from YAML frontmatter
+/// Reads one scalar out of generated frontmatter.
+///
+/// cas-d731. The writer now emits real YAML, which means a value can carry
+/// real YAML quoting and escapes. The scan below cannot decode those — it
+/// trims quote characters and returns the rest verbatim — so a parser is asked
+/// first and the scan survives only for files the parser rejects.
+///
+/// That fallback is evidenced, not defensive habit. The old escaper wrote
+/// `Use C:\project: inspect` as `description: "Use C:\project: inspect"`,
+/// which no YAML parser accepts; files in that exact shape were produced
+/// wherever a skill with such a value was synced before this change, and the
+/// fixture in the tests is that output verbatim. Dropping the scan would make
+/// those files unreadable.
+///
+/// The fallback is narrow by construction:
+/// - it runs only when the frontmatter fails to parse as YAML at all;
+/// - it matches an unindented, exact `key:` at the start of a line, so an
+///   unrelated malformed document cannot let `description_extra` answer for
+///   `description`;
+/// - a document that parses but lacks the key, or holds a non-scalar value,
+///   returns `None`. The parser's answer stands.
 fn extract_yaml_value(frontmatter: &str, key: &str) -> Option<String> {
+    match serde_yaml::from_str::<serde_yaml::Value>(frontmatter) {
+        Ok(parsed) => scalar_field(&parsed, key),
+        // Only a document YAML cannot read at all falls through to the legacy
+        // scan, because only the pre-fix writer produced those.
+        Err(_) => legacy_line_scan(frontmatter, key),
+    }
+}
+
+/// Exact-key scalar lookup that preserves the typed-field behaviour callers
+/// already depend on: `user-invocable: false` and `disable-model-invocation:
+/// true` are compared as the strings `"false"` and `"true"` upstream, so a
+/// YAML boolean has to read back as that text rather than as `None`.
+fn scalar_field(parsed: &serde_yaml::Value, key: &str) -> Option<String> {
+    let value = parsed.get(key)?;
+    let text = match value {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        // A sequence, mapping or null is not a scalar. Reporting it as absent
+        // is the honest answer and matches what the old scan did with a list.
+        _ => return None,
+    };
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Recovers one scalar from frontmatter no YAML parser will accept.
+///
+/// Deliberately narrower than the reader it replaces. The old scan accepted
+/// any line whose trimmed text merely *started with* the key, so `description`
+/// could be answered by `description_extra`. Here the line must be
+/// unindented — the shape the old writer emitted for a top-level key — and the
+/// key must be followed immediately by `:`. The value handling is unchanged
+/// from the old scan, because that is what the legacy bytes on disk need.
+fn legacy_line_scan(frontmatter: &str, key: &str) -> Option<String> {
     for line in frontmatter.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(key) {
-            if let Some(colon_pos) = trimmed.find(':') {
-                let value = trimmed[colon_pos + 1..].trim();
-                // Remove quotes if present
-                let value = value.trim_matches('"').trim_matches('\'');
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
+        // A top-level key, as the old writer wrote it: no leading whitespace.
+        if line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix(key) else {
+            continue;
+        };
+        // Exact key, not a prefix of a longer one.
+        let Some(value) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let value = value.trim();
+        // Remove quotes if present
+        let value = value.trim_matches('"').trim_matches('\'');
+        if !value.is_empty() {
+            return Some(value.to_string());
         }
     }
     None

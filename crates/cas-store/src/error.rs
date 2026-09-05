@@ -52,6 +52,16 @@ pub enum StoreError {
     #[error("parse error: {0}")]
     Parse(String),
 
+    #[error(
+        "local {entity_type} {operation} committed, but cloud sync is degraded; durable retry intent retained for {entity_id}: {reason}"
+    )]
+    SyncDegradedAfterCommit {
+        entity_type: String,
+        entity_id: String,
+        operation: String,
+        reason: String,
+    },
+
     #[error("{0}")]
     Other(String),
 }

@@ -13,10 +13,21 @@ usage() {
 base="$1"
 head="$2"
 
+# Capture the diff with an explicitly checked exit status before reading it.
+# A process-substitution producer (`done < <(git diff ...)`) does not fail the
+# loop under `set -e`, so an unknown ref or a broken git used to read as an
+# empty diff and exit 0 — a fast-pass for an unknown change set (audit finding
+# 7, cas-b505). Failing here is fail-closed: the composite action treats a
+# nonzero classifier as rust-touched.
+if ! diff_list="$(git diff --name-only "$base" "$head")"; then
+    echo "classify-ci-diff: git diff failed for $base..$head; refusing to classify" >&2
+    exit 1
+fi
 files=()
 while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
     files[${#files[@]}]="$file"
-done < <(git diff --name-only "$base" "$head")
+done <<<"$diff_list"
 if [[ ${#files[@]} == 0 ]]; then
     echo empty
     exit 0
@@ -97,6 +108,8 @@ for file in "${files[@]}"; do
         break
     fi
 
+    # An assignment from a failing command substitution exits under `set -e`;
+    # the version-bump and lock diffs below therefore already fail closed.
     manifest_diff="$(git diff --unified=0 "$base" "$head" -- "$file")"
     manifest_change_count=0
     manifest_old_change=""

@@ -43,9 +43,12 @@ export interface ShellSignatureParts {
   readonly commandPaletteOpen: boolean;
   readonly sessionPickerOpen: boolean;
   /**
-   * The pairing dialog is shell markup, so its whole visible state — code,
-   * expiry, status sentence, in-flight submit — belongs here. A pairing status
-   * that changed while the form has focus is deferred, not dropped.
+   * The pairing dialog's *step*: which flow is showing, which request it
+   * identifies, its expiry, and whether cancellation cleanup is outstanding.
+   * The status sentence and the in-flight flags are deliberately absent — they
+   * are written into the dialog's own nodes as live regions, so a failed
+   * exchange re-enables Pair without rebuilding the form under the operator's
+   * focus (F1).
    */
   readonly pairingView: string;
 }
@@ -93,7 +96,25 @@ export function isEditableElement(element: { tagName?: string; isContentEditable
   return tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT";
 }
 
-export function renderDecision(input: { signatureChanged: boolean; composing: boolean }): RenderDecision {
+export interface RenderDecisionInput {
+  readonly signatureChanged: boolean;
+  /** An editable control inside the app has focus. */
+  readonly composing: boolean;
+  /** The pairing dialog moved to a different step (see `pairingView`). */
+  readonly pairingStepChanged?: boolean;
+  /** The focused control is inside the pairing dialog itself. */
+  readonly focusInPairingDialog?: boolean;
+}
+
+/**
+ * A pairing step change while the focus is inside the pairing dialog is the
+ * operator's own doing — they submitted, cancelled, or their code was
+ * approved — and the new step is where focus belongs. Deferring it left the
+ * old form on screen until something blurred it. The composer and every other
+ * field keep their protection: a step change never overrides focus elsewhere.
+ */
+export function renderDecision(input: RenderDecisionInput): RenderDecision {
   if (!input.signatureChanged) return "regions";
-  return input.composing ? "defer" : "shell";
+  if (!input.composing) return "shell";
+  return input.pairingStepChanged && input.focusInPairingDialog ? "shell" : "defer";
 }

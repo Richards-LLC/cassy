@@ -621,6 +621,52 @@ pub(crate) fn describe_target_push_state(
 /// A fast-forward is reported rather than silent: the operator's local target
 /// moved, and a merge receipt that hides that is how a supervisor loses track
 /// of which commits their branch actually carries.
+/// The refusal for a target that genuinely diverged from origin.
+///
+/// Extracted from the merge flow (cas-26c7) so the safety claims in it are
+/// testable without driving a whole merge: it must refuse before any merge, it
+/// must keep the fetch/merge/retry recovery that actually works when origin
+/// holds commits the caller lacks, and it must keep forbidding a force-push.
+/// The ahead-only state deliberately does NOT reach this text, because the
+/// recovery it prescribes is a no-op when `behind` is zero.
+fn target_diverged_error(
+    ci_prefix: &str,
+    target: &str,
+    local: &str,
+    remote: &str,
+    ahead: u32,
+    behind: u32,
+) -> String {
+    format!(
+        "{ci_prefix}TARGET_DIVERGED_FROM_ORIGIN: local {target} is at {} with \
+         {ahead} commit(s) origin does not have, while origin/{target} is at {} \
+         with {behind} commit(s) you do not have. NO MERGE WAS ATTEMPTED.\n\n\
+         A merge now would produce a push that origin rejects, leaving an \
+         unpublished merge commit on your local {target}.\n\n\
+         Reconcile first, from a checkout on {target}:\n\
+         1. `git fetch origin {target}`\n\
+         2. `git merge origin/{target}`   (resolve any conflicts)\n\
+         3. re-run this worktree_merge\n\n\
+         Never force-push {target}: the {behind} remote commit(s) belong to \
+         someone else's landed work.",
+        short_sha(local),
+        short_sha(remote),
+    )
+}
+
+/// Fold any stale-checkout warnings from the last merge into the receipt.
+///
+/// cas-0f04. A merge that declined to refresh a linked checkout of the target
+/// returns success; without this the operator would read that success and
+/// never learn a checkout was left behind, which is the same silent-state
+/// defect the merge fix removes, one layer up. Drains one-shot, so a checkout
+/// already reported is not reported again by the next merge.
+fn append_stale_checkout_notes(receipt: &mut String, manager: &crate::worktree::WorktreeManager) {
+    for note in manager.git().take_stale_checkout_notes() {
+        receipt.push_str(&note);
+    }
+}
+
 fn describe_target_reconcile(
     target_branch: &str,
     reconcile: &crate::worktree::git::TargetReconcile,
@@ -647,6 +693,23 @@ fn describe_target_reconcile(
                  the push may be rejected as non-fast-forward."
             )
         }
+        // cas-26c7: origin has not moved, so there is nothing to reconcile and
+        // nothing to refuse. Say what is unpublished and where it goes, and do
+        // NOT hand over the divergence recipe — `git merge origin/<target>` is
+        // a no-op in this state, and force-pushing would be actively wrong.
+        TargetReconcile::AheadOfRemote {
+            local,
+            remote,
+            ahead,
+        } => format!(
+            "\nTarget sync: local {target_branch} is {ahead} commit(s) ahead of origin/\
+             {target_branch} ({} vs {}) and origin holds nothing it lacks, so this is not a \
+             divergence. Merged against local {target_branch}; the {ahead} earlier commit(s) plus \
+             this merge still have to reach origin the normal way for this branch (a push, or a \
+             pull request where the branch is protected).",
+            short_sha(local),
+            short_sha(remote)
+        ),
         // Refused before the merge, so it never reaches a receipt.
         TargetReconcile::Diverged { .. } => String::new(),
     }
@@ -2686,21 +2749,13 @@ impl CasCore {
                 behind,
             } = &reconcile
             {
-                let target = &worktree.parent_branch;
-                return Ok(Self::tool_error(format!(
-                    "{ci_prefix}TARGET_DIVERGED_FROM_ORIGIN: local {target} is at {} with \
-                     {ahead} commit(s) origin does not have, while origin/{target} is at {} \
-                     with {behind} commit(s) you do not have. NO MERGE WAS ATTEMPTED.\n\n\
-                     A merge now would produce a push that origin rejects, leaving an \
-                     unpublished merge commit on your local {target}.\n\n\
-                     Reconcile first, from a checkout on {target}:\n\
-                     1. `git fetch origin {target}`\n\
-                     2. `git merge origin/{target}`   (resolve any conflicts)\n\
-                     3. re-run this worktree_merge\n\n\
-                     Never force-push {target}: the {behind} remote commit(s) belong to \
-                     someone else's landed work.",
-                    short_sha(local),
-                    short_sha(remote),
+                return Ok(Self::tool_error(target_diverged_error(
+                    &ci_prefix,
+                    &worktree.parent_branch,
+                    local,
+                    remote,
+                    *ahead,
+                    *behind,
                 )));
             }
             reconcile_note = describe_target_reconcile(&worktree.parent_branch, &reconcile);
@@ -2712,6 +2767,11 @@ impl CasCore {
             } else {
                 manager.merge_and_cleanup(&mut worktree, force, do_cleanup)
             };
+            // cas-0f04: fold the stale-checkout notes into the same receipt
+            // text. This is a single call rather than an inline loop so the
+            // seam is testable: append_stale_checkout_notes is what the
+            // operator's receipt is built from.
+            append_stale_checkout_notes(&mut reconcile_note, &manager);
             match merge_result {
                 Ok(commit) => commit,
                 // cas-4702: the ephemeral-worktree merge lost its
@@ -3286,10 +3346,11 @@ mod tests {
         classify_delivery_merge_preflight, declared_system_b_merge_target,
         derive_delivery_supervisor_authority, describe_branch_ci_state, describe_target_push_state,
         is_cas_pattern_worktree, is_factory_style_worktree, is_git_worktree, lookup_branch_ci_with,
-        path_is_under, protected_default_branch_pr_error, resolve_worktree_merge_cleanup,
-        worktree_merge_mcp_error, CI_ADVISORY_POLICY_NOTICE,
+        describe_target_reconcile, path_is_under, protected_default_branch_pr_error,
+        resolve_worktree_merge_cleanup, target_diverged_error, worktree_merge_mcp_error,
+        CI_ADVISORY_POLICY_NOTICE,
     };
-    use crate::worktree::git::TargetPushOutcome;
+    use crate::worktree::git::{TargetPushOutcome, TargetReconcile};
     use crate::worktree::{GitError, WorktreeError};
     use std::path::Path;
     use tempfile::TempDir;
@@ -3503,6 +3564,82 @@ mod tests {
         // Short SHAs on both sides so the two tips are visibly different.
         assert!(note.contains("42d81bd9aaaa"), "{note}");
         assert!(note.contains("c2698df216cd"), "{note}");
+    }
+
+    /// cas-26c7. What the operator actually reads for an ahead-only target.
+    /// The measured failure was not the classification alone — it was that the
+    /// message handed over a recovery that cannot work when `behind` is zero,
+    /// so following it produced the identical refusal on retry.
+    #[test]
+    fn an_ahead_only_target_message_states_the_unpublished_work_without_a_no_op_remedy() {
+        let note = describe_target_reconcile(
+            "main",
+            &TargetReconcile::AheadOfRemote {
+                local: "42d81bd9aaaabbbbccccddddeeeeffff00001111".to_string(),
+                remote: "c2698df216cd9abe7db530ec1d035f6a378d1d06".to_string(),
+                ahead: 2,
+            },
+        );
+
+        // Says what is true: how much is unpublished, and which two tips.
+        assert!(note.contains("2 commit(s) ahead"), "{note}");
+        assert!(note.contains("42d81bd9aaaa"), "{note}");
+        assert!(note.contains("c2698df216cd"), "{note}");
+        assert!(note.contains("not a divergence"), "{note}");
+
+        // Must not hand over the divergence recovery: `git merge origin/main`
+        // is a no-op here, and following it is what created the loop.
+        assert!(!note.contains("git merge origin/"), "{note}");
+        assert!(!note.contains("TARGET_DIVERGED_FROM_ORIGIN"), "{note}");
+        assert!(
+            !note.to_lowercase().contains("force-push")
+                && !note.to_lowercase().contains("force push"),
+            "an unpublished target must never invite a force-push: {note}"
+        );
+        // And it must not imply the work already reached origin.
+        assert!(
+            !note.contains("pushed to origin"),
+            "the commits are still unpublished: {note}"
+        );
+    }
+
+    /// The other half of the same contract: a real divergence must still be
+    /// refused before any merge, and must keep the recovery that does work
+    /// there, so narrowing the classification did not weaken the guard.
+    #[test]
+    fn a_truly_diverged_target_still_refuses_before_merging() {
+        let error = target_diverged_error(
+            "",
+            "main",
+            "42d81bd9aaaabbbbccccddddeeeeffff00001111",
+            "c2698df216cd9abe7db530ec1d035f6a378d1d06",
+            2,
+            3,
+        );
+
+        assert!(error.starts_with("TARGET_DIVERGED_FROM_ORIGIN"), "{error}");
+        assert!(error.contains("NO MERGE WAS ATTEMPTED"), "{error}");
+        assert!(error.contains("2 commit(s) origin does not have"), "{error}");
+        assert!(error.contains("3 commit(s) you do not have"), "{error}");
+        // Here the fetch/merge/retry recipe is the recovery that works.
+        assert!(error.contains("git fetch origin main"), "{error}");
+        assert!(error.contains("git merge origin/main"), "{error}");
+        assert!(error.contains("Never force-push main"), "{error}");
+
+        // A refused divergence never reaches a merge receipt.
+        assert!(
+            describe_target_reconcile(
+                "main",
+                &TargetReconcile::Diverged {
+                    local: "42d81bd9aaaabbbbccccddddeeeeffff00001111".to_string(),
+                    remote: "c2698df216cd9abe7db530ec1d035f6a378d1d06".to_string(),
+                    ahead: 2,
+                    behind: 3,
+                },
+            )
+            .is_empty(),
+            "divergence is refused before the merge, so it must produce no receipt note"
+        );
     }
 
     #[test]
@@ -3985,5 +4122,54 @@ mod tests {
                 .branch,
             "release/operator-selected"
         );
+    }
+}
+
+#[cfg(test)]
+mod stale_checkout_receipt_tests {
+    use super::append_stale_checkout_notes;
+    use crate::worktree::WorktreeManager;
+    use tempfile::TempDir;
+
+    /// cas-0f04. Pins the seam the handler actually builds its receipt from:
+    /// a warning recorded by the merge must land in the operator-visible text.
+    /// Driving the real WorktreeManager means this fails if the drain stops
+    /// being wired to the receipt, not merely if the note format changes.
+    #[test]
+    fn a_recorded_stale_checkout_lands_in_the_receipt_text() {
+        let temp = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let manager =
+            WorktreeManager::new(temp.path(), crate::worktree::WorktreeConfig::default()).unwrap();
+        manager.git().record_stale_checkout_for_test(
+            "epic/target",
+            std::path::Path::new("/tmp/stranded-checkout"),
+            "1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222",
+            "not uptodate",
+        );
+
+        let mut receipt = String::from("Target sync: fast-forwarded.");
+        append_stale_checkout_notes(&mut receipt, &manager);
+
+        assert!(receipt.contains("Target sync: fast-forwarded."), "{receipt}");
+        assert!(receipt.contains("/tmp/stranded-checkout"), "{receipt}");
+        assert!(receipt.contains("111111111111"), "{receipt}");
+        assert!(receipt.contains("222222222222"), "{receipt}");
+        assert!(receipt.contains("Nothing there was overwritten"), "{receipt}");
+        assert!(
+            !receipt.to_lowercase().contains("read-tree") && !receipt.contains(" reset "),
+            "the receipt must not hand over a recovery that erases work: {receipt}"
+        );
+
+        // One-shot: a second merge must not re-report a checkout already dealt
+        // with.
+        let mut second = String::new();
+        append_stale_checkout_notes(&mut second, &manager);
+        assert_eq!(second, "");
     }
 }

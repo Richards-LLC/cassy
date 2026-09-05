@@ -6,13 +6,14 @@ import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./con
 import { connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
-import { consumePairingFragment, watchPairingFragment } from "./fragment";
+import { readPairingFragment, watchPairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
-import { pairingCleanupFailureUpdate, pairingStorageClearFailureMessage } from "./pairing-cleanup";
-import { exchangePendingPairing, PairingCleanupError, PairingExchangeError } from "./pairing-exchange";
+import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cancellationOutcome, cleanupStepCopy, pairingCleanupFailureUpdate, pairingStorageClearFailureMessage, type CleanupStepContext } from "./pairing-cleanup";
+import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
-import { PAIRING_SCOPES, pairCommand, preselectedScopes, scopeChoices, scopeLabel, ungrantedScopes } from "./pairing-scopes";
+import { LATE_ROLLBACK_FAILURE_MESSAGE, PairingCancellationTracker, cleanupRetryOutcome } from "./pairing-cancellation";
+import { PAIRING_SCOPES, pairCommand, preselectedScopes, scopeChoices, scopeLabel, scopeSummary, ungrantedScopes } from "./pairing-scopes";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
@@ -28,17 +29,32 @@ import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type Tra
 import { TranscriptView } from "./transcript-view";
 import { applyLiveRegions, type LiveRegionView } from "./live-regions";
 import { DeferredRenderScheduler } from "./deferred-render";
+import { FleetBoardRenderer } from "./fleet-board";
+import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connection";
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 const pendingPairingStore = pendingPairingStoreFor(window);
 const relayOrigin = pairingRelayOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-pairing-relay-origin"]')?.content ?? null);
-let pendingPairing: PendingPairing | null = consumePairingFragment(window.location, window.history, pendingPairingStore);
+const arrivedFragment = readPairingFragment(window.location, window.history, pendingPairingStore);
+let pendingPairing: PendingPairing | null = arrivedFragment.kind === "fragment" ? arrivedFragment.fragment : null;
 // Opening the link is the operator's "yes"; making them hunt for Pair a machine
-// afterwards is how a one-time invitation gets left unused on a phone.
-let pairDialogAutoOpen = pendingPairing !== null;
-pendingPairing ??= pendingPairingStore.load();
+// afterwards is how a one-time invitation gets left unused on a phone. A broken
+// or expired link is the same "yes" with nothing usable behind it, so it opens
+// the dialog too — on the sentence that says so, never on the token (F6).
+let pairDialogAutoOpen = pendingPairing !== null || arrivedFragment.kind === "invalid";
+let pairingArrivalNotice = arrivedFragment.kind === "invalid" ? INVALID_PAIRING_LINK_MESSAGE : "";
+if (!pendingPairing) {
+  const stored = pendingPairingStore.loadOutcome();
+  if (stored.kind === "pending") pendingPairing = stored.value;
+  if (stored.kind === "expired" && !pairingArrivalNotice) {
+    pairingArrivalNotice = EXPIRED_PAIRING_INVITATION_MESSAGE;
+    pairDialogAutoOpen = true;
+  }
+}
 const pairingOperations = new PairingOperationCoordinator();
+// Which cancellation, if any, owns the "could not finish cancelling" step.
+const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const rootStyles = getComputedStyle(document.documentElement);
 document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute(
@@ -60,6 +76,7 @@ const transcripts = new Map<string, TranscriptView>();
 // The shell is rebuilt only when its own inputs changed. A hub heartbeat
 // carries none of them, so it can no longer replace the composer mid-sentence.
 let lastShellSignature: string | undefined;
+let lastPairingView: string | undefined;
 // setTimeout, not queueMicrotask: the click event a pointerup is about to
 // produce is dispatched in the same task, so only a macrotask lands after it.
 const deferredRender = new DeferredRenderScheduler({
@@ -95,7 +112,19 @@ let selection: SelectionState = { history: [] };
 // confirms it still exists.
 let restoreTarget: SessionSelection | undefined;
 let sessionPickerOpen = false;
-let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a machine to claim the code…" : "";
+let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a machine to claim the code…" : pairingArrivalNotice;
+// Cancellation whose durable cleanup did not complete: the dialog stays on a
+// "could not finish cancelling" step with a retry until storage cooperates (F2).
+let pairingCleanupFailed = false;
+// Machines whose credential was just saved: "connected" is announced once per
+// saved credential, only when the connection actually reaches live (F8).
+const firstConnections = new FirstConnectionAnnouncer();
+// Why the cleanup step is showing: what was discarded and which cleanup is
+// still owed, so the step says only what is true of this cleanup.
+let pairingCleanupContext: CleanupStepContext = { cause: "cancel", storeOpen: false, rollbackPending: false };
+// The generation of the exchange Cancel would invalidate, so a late rollback
+// result can be matched to the cancellation that caused it.
+let exchangeOperationGeneration: number | undefined;
 let pairingPollTimer: number | undefined;
 let pairingCountdownTimer: number | undefined;
 let connectionViewTicker: number | undefined;
@@ -325,6 +354,16 @@ async function boot(): Promise<void> {
   resumePairingPoll();
 }
 
+/** Re-pairing is about a named machine; say so instead of a blank create prompt. */
+function openRepairDialog(machineId: string): void {
+  const label = machines.get(machineId)?.label ?? "this machine";
+  if (!pendingPairing && !pairingCleanupFailed) {
+    pairingStatus = `Re-pairing ${label}: create a new code and approve it on that machine. Its saved access here is replaced when the new credential is installed.`;
+    render(false);
+  }
+  openPairDialog();
+}
+
 function openPairDialog(): void {
   const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
   if (dialog && !dialog.open) dialog.showModal();
@@ -333,8 +372,17 @@ function openPairDialog(): void {
 // Android hands a pairing URL that differs only by #fragment to the tab that is
 // already open, so boot-time consumption alone drops the invitation in silence.
 watchPairingFragment(window, pendingPairingStore, (fragment) => {
+  // A new link is a new flow: whatever an earlier cancellation still owed the
+  // dialog no longer applies to it, and the fresh invitation takes the store.
+  pairingCancellations.supersede();
+  pairingCleanupFailed = false;
   pendingPairing = fragment;
   pairingStatus = "";
+  render();
+  openPairDialog();
+}, () => {
+  if (pendingPairing) return;
+  pairingStatus = INVALID_PAIRING_LINK_MESSAGE;
   render();
   openPairDialog();
 });
@@ -346,6 +394,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // Anchor staleness to the last live moment: retry transitions rewrite
       // snapshot.since, which would report a ten-minute outage as "just now".
       if (state.phase === "live") lastLiveAt.set(machine.id, Date.now());
+      const connectedNotice = firstConnections.observe(machine.id, machine.label, state);
+      if (connectedNotice) toast(connectedNotice);
       if (state.phase === "failed" || state.phase === "backoff") invalidateMachineLeases(machine.id);
       // One outage is one problem. A stable fingerprint per machine and kind
       // collapses every retry into a single card with a repeat count instead of
@@ -522,13 +572,15 @@ async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> 
   render();
 }
 
-async function pairMachine(form: HTMLFormElement): Promise<boolean> {
+/** Resolves with the installed machine, or false when nothing was installed. */
+async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false> {
   const invitation = pendingPairing?.kind === "invitation" ? pendingPairing : null;
   if (!invitation) throw new Error("Create a pairing request or open a one-time pairing link first.");
   const values = new FormData(form);
   pairingDraft = updatePairingDraft(pairingDraft, values.entries(), !invitation.hubUrl);
   const operation = pairingOperations.begin();
   pairingExchangeInFlight = true;
+  exchangeOperationGeneration = operation.generation;
   pairingStatus = "Creating this browser credential… Cancel stops local installation.";
   render();
   let machine: StoredMachine;
@@ -562,7 +614,23 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
         cleanupMessage: error.message,
         resetDraft: () => createPairingDraft(location.origin),
       });
-      if (!update) return false;
+      if (!update) {
+        // Cancel invalidated this operation and its rollback then rejected. The
+        // cancellation that did so still owns the dialog unless something newer
+        // started; then the staged row stays quarantined for boot-time recovery
+        // and the newer flow is left alone.
+        if (pairingCancellations.ownsOperation(operation.generation)) {
+          const cleared = pendingPairingStore.clear();
+          pairingCleanupContext = { cause: "cancel", storeOpen: !cleared.failClosed, rollbackPending: true };
+          pairingCleanupFailed = true;
+          pairingStatus = cleared.failClosed
+            ? LATE_ROLLBACK_FAILURE_MESSAGE
+            : `${LATE_ROLLBACK_FAILURE_MESSAGE} Browser storage also refused to record the cancellation.`;
+          render(false);
+          openPairDialog();
+        }
+        return false;
+      }
       const cleared = pendingPairingStore.clear();
       pendingPairing = update.pendingPairing;
       pairingDraft = update.pairingDraft;
@@ -570,21 +638,44 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
       pairingStatus = cleared.failClosed
         ? `${update.status}${cleared.persistentRemovalFailed ? " Browser storage removal was denied; the cancelled request is durably blocked." : ""}`
         : `${update.status} Browser storage could not durably block the cancelled request.`;
+      // The exchange itself failed and its rollback rejected: nobody pressed
+      // Cancel, so the recovery step needs an owner of its own before Retry
+      // cleanup can do anything (review 25564).
+      pairingCancellations.begin(operation.generation);
+      pairingCleanupContext = { cause: "failure", storeOpen: !cleared.failClosed, rollbackPending: true };
+      pairingCleanupFailed = true;
       render(false);
+      openPairDialog();
       throw error;
     }
     if (!pairingOperations.isCurrent(operation)) {
-      if (!pendingPairing) {
-        pairingStatus = "Pairing cancelled after durable local cleanup completed.";
-        render(false);
+      // Only the cancellation that ended this operation may close the dialog;
+      // a replacement flow that started since owns it now.
+      if (!pendingPairing && !pairingCleanupFailed && pairingCancellations.ownsOperation(operation.generation)) {
+        // The cancellation the operator asked for has now been verified: the
+        // dialog that said "verifying" can close, and the page says so.
+        pairingStatus = "Pairing cancelled.";
+        finishCancelledPairing();
       }
       return false;
     }
     pairingExchangeInFlight = false;
+    if (error instanceof PairingStorageError) {
+      // The hub consumed the invitation and recorded the device; only this
+      // browser's copy failed. Say exactly that and point at a fresh invitation
+      // instead of "expired or already used" (F3).
+      pairingOperations.invalidate();
+      const cleared = pendingPairingStore.clear();
+      pendingPairing = null;
+      pairingDraft = createPairingDraft(location.origin);
+      pairingStatus = pairingStorageClearFailureMessage(error.message, cleared);
+      render(false);
+      throw error;
+    }
     if (error instanceof PairingExchangeError && error.recoverable) {
-      // Nothing reached the machine, so the invitation is still good: say what
-      // happened and leave Pair usable instead of sending the operator back to
-      // a terminal for a fresh link.
+      // Keep the pending capability for a bounded retry. A fetch rejection may
+      // follow server-side consumption, while a typed throttle happened before
+      // this attempt consumed anything; the error copy preserves that uncertainty.
       pairingStatus = error.message;
       render(false);
       throw error;
@@ -602,9 +693,11 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
     throw error;
   } finally {
     pairingOperations.finish(operation);
+    if (exchangeOperationGeneration === operation.generation) exchangeOperationGeneration = undefined;
   }
   if (!pairingOperations.isCurrent(operation)) return false;
   pairingExchangeInFlight = false;
+  pairingCancellations.supersede();
   pairingOperations.invalidate();
   pendingPairingStore.clear();
   pendingPairing = null;
@@ -612,15 +705,25 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
   pairingDraft = createPairingDraft(location.origin);
   machines.set(machine.id, machine);
   commitSelection({ machineId: machine.id });
-  replaceMachineConnection(machine, connections, connectionStates, createConnection);
+  // The installation seam: "Access saved" and the armed first-connection
+  // announcement both precede the connection, so a hub that reports healthy
+  // live synchronously still yields saved → connected, named from the machine
+  // that was installed (reviews 25642, 25649).
+  installPairedMachine(machine, {
+    announcer: firstConnections,
+    notify: toast,
+    startConnection: (installed) => { replaceMachineConnection(installed, connections, connectionStates, createConnection); },
+  });
   render(false);
-  return true;
+  return machine;
 }
 
 async function startRelayPairing(email: string): Promise<boolean> {
   if (!relayOrigin) throw new PairingRelayError("relay_unavailable", "Page-initiated pairing is unavailable in this deployment.");
   if (pairingCreateInFlight) return false;
   const generation = pairingOperations.replace();
+  pairingCancellations.supersede();
+  pairingCleanupFailed = false;
   stopPairingTimers();
   pendingPairingStore.clear();
   pendingPairing = null;
@@ -716,21 +819,69 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
 
 function cancelPendingPairing(): void {
   const verifiesCleanup = pairingExchangeInFlight;
-  document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
+  pairingCancellations.begin(verifiesCleanup ? exchangeOperationGeneration : undefined);
   pairingOperations.invalidate();
   const cleared = pendingPairingStore.clear();
   pendingPairing = null;
   pairingCreateInFlight = false;
   pairingExchangeInFlight = false;
   pairingDraft = createPairingDraft(location.origin);
-  pairingStatus = !cleared.failClosed
-    ? "Pairing cancellation could not durably block the request; keep this page open and retry after storage access is restored."
-    : verifiesCleanup
-      ? "Cancelling pairing and verifying durable local cleanup…"
-      : cleared.persistentRemovalFailed
-        ? "Pairing cancelled. Browser storage removal was denied, so the request was durably blocked."
-        : "Pairing cancelled.";
   stopPairingTimers();
+  // Cancel discards the invitation either way. The dialog only closes once the
+  // page can say the cancellation is durable; a warning behind a closed dialog
+  // was a warning nobody saw (F2).
+  const outcome = cancellationOutcome(cleared, verifiesCleanup);
+  pairingStatus = outcome.status;
+  pairingCleanupFailed = outcome.cleanupFailed;
+  pairingCleanupContext = { cause: "cancel", storeOpen: !cleared.failClosed, rollbackPending: false };
+  if (outcome.cleanupFailed || outcome.verifying) {
+    render(false);
+    openPairDialog();
+    return;
+  }
+  finishCancelledPairing();
+}
+
+/** A cancellation the page can vouch for: close the dialog and say so. */
+function finishCancelledPairing(): void {
+  pairingCleanupFailed = false;
+  pairingCancellations.supersede();
+  document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
+  render(false);
+  toast(pairingStatus || "Pairing cancelled.");
+}
+
+/**
+ * Retry the durable part of a cancellation. It never resumes the discarded
+ * invitation: the persistent store is cleared again and the catalog's pending
+ * rollback is re-checked, and only a fail-closed result ends the step. One
+ * retry runs at a time, a rejection lands in the dialog, and a result is
+ * applied only while the cancellation that started it still owns the dialog.
+ */
+async function retryPairingCleanup(): Promise<void> {
+  const ticket = pairingCancellations.beginRetry();
+  if (!ticket) return;
+  pairingStatus = "Retrying cleanup…";
+  render(false);
+  const cleared = pendingPairingStore.clear();
+  let recovery: { pendingCleanup?: number; failed?: boolean };
+  try {
+    recovery = { pendingCleanup: (await catalog.recoverPending()).pendingCleanup };
+  } catch {
+    recovery = { failed: true };
+  }
+  if (!pairingCancellations.finishRetry(ticket)) return;
+  const outcome = cleanupRetryOutcome(cleared, recovery);
+  pairingStatus = outcome.status;
+  if (outcome.done) {
+    finishCancelledPairing();
+    return;
+  }
+  pairingCleanupContext = {
+    cause: pairingCleanupContext.cause,
+    storeOpen: !cleared.failClosed,
+    rollbackPending: recovery.failed === true || (recovery.pendingCleanup ?? 0) > 0,
+  };
   render(false);
 }
 
@@ -881,7 +1032,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       const repair = document.createElement("button");
       repair.type = "button";
       repair.textContent = "Re-pair";
-      repair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+      repair.onclick = () => openRepairDialog(machineId);
       actions.append(repair);
     }
     placeholder.append(actions);
@@ -1357,25 +1508,43 @@ function connectionLabel(state: ConnectionState | AttachSnapshot | undefined): s
 
 function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }
 
+function scopeSummaryMarkup(scopes: readonly Scope[]): string {
+  return `<div><dt>This browser will be able to</dt><dd class="pair-summary">${scopeSummary(scopes).map(escapeHtml).join(" · ")}</dd></div>`;
+}
+
 function pairingDetails(origin: string, scopes: readonly Scope[]): string {
-  return `<dl class="pair-details"><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Scopes</dt><dd>${scopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl>`;
+  return `<dl class="pair-details">${scopeSummaryMarkup(scopes)}<div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Exact scopes</dt><dd>${scopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl>`;
+}
+
+function pairStatusMarkup(): string {
+  return `<p class="pair-status" role="status"${pairingStatus ? "" : " hidden"}>${escapeHtml(pairingStatus)}</p>`;
 }
 
 function pairDialogMarkup(): string {
+  if (pairingCleanupFailed) {
+    // Cancel already discarded the invitation; this step exists because the
+    // page cannot yet prove a reload will not see it again. There is no way
+    // back to the invitation from here, only forward through the cleanup.
+    const copy = cleanupStepCopy(pairingCleanupContext);
+    return `<dialog id="pair-dialog"><section class="pair-flow pair-cleanup" tabindex="-1" autofocus aria-labelledby="pair-cleanup-title"><h2 id="pair-cleanup-title">${escapeHtml(copy.title)}</h2><p>${escapeHtml(copy.discarded)} ${escapeHtml(copy.outstanding)}</p><p>${escapeHtml(copy.next)}</p>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-close" type="button" data-role="cleanup">Close</button><button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button></div></section></dialog>`;
+  }
   if (pendingPairing?.kind === "relay-request") {
-    return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Run <code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code> on the machine you want to pair, then approve the request it prints.</p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">10:00</strong></p>${pairingDetails(pendingPairing.controllerOrigin, pendingPairing.requestedScopes)}<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p><div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
+    return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair a machine</h2><p>On the machine you want to pair, run this command, then approve the request it prints:</p><p><code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code></p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">10:00</strong></p>${pairingDetails(pendingPairing.controllerOrigin, pendingPairing.requestedScopes)}${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
   }
   if (pendingPairing?.kind === "invitation") {
     const relay = Boolean(pendingPairing.relay);
     const hubUrl = pendingPairing.hubUrl;
     const origin = pendingPairing.controllerOrigin;
     const invitationScopes = pendingPairing.scopes;
-    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Hub</dt><dd>${escapeHtml(hubUrl)}</dd></div><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Hub URL<input name="url" type="url" required autofocus value="${escapeAttr(pairingDraft.hubUrl)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(invitationScopes)}`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
+    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Machine's hub address</dt><dd>${escapeHtml(hubUrl)}</dd></div>${scopeSummaryMarkup(invitationScopes)}<div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Machine's hub address<input name="url" type="url" required autofocus placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"><small class="field-hint">The address of the machine you are pairing, as printed by <code>cas hub pair</code> (usually its Tailscale name). It is not this page's address unless this page is served by that machine.</small></label><div class="pair-code-actions pair-address-actions"><button id="pair-use-page-origin" type="button" data-page-origin="${escapeAttr(pairingDraft.pageOrigin)}">Use this page's address (${escapeHtml(pairingDraft.pageOrigin)})</button></div><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"><small class="field-hint">How this machine is listed in Cassy Commander.</small></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(invitationScopes)}`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"><small class="field-hint">How this browser is listed on the machine.</small></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"><small class="field-hint">Who is pairing this browser; the machine records it.</small></label>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
   }
   const relayAction = relayOrigin
     ? `<button id="pair-create" type="button" class="primary" ${pairingCreateInFlight ? "disabled" : ""}>${pairingCreateInFlight ? "Creating…" : "Create pairing code"}</button>`
     : '<p class="pairing-disabled-reason">Page-initiated pairing is unavailable because this Cassy Commander build has no reviewed relay origin.</p>';
-  return `<dialog id="pair-dialog"><section class="pair-flow" tabindex="-1" autofocus><h2>Pair this machine</h2><p>Create a ten-minute code, then verify the exact Cassy Commander origin and approve the requested read and control scopes on the target machine.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${pendingPairing ? "" : '<p class="pairing-disabled-reason">Pair is disabled until you open a pairing URL generated by <code>cas hub pair</code> on the machine.</p>'}<button type="button" ${pendingPairing ? "" : "disabled"}>Pair</button>${relayAction}</div></section></dialog>`;
+  // One state, one next action. Without an invitation there is nothing to
+  // Pair, so no Pair control exists here at all; a link printed by the machine
+  // opens the confirmation form directly and never passes through this step.
+  return `<dialog id="pair-dialog"><section class="pair-flow" tabindex="-1" autofocus><h2>Pair a machine</h2><p>Create a ten-minute code, approve it on the machine you want to pair, then confirm the exact Cassy Commander origin and scopes here.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairStatusMarkup()}<p class="pair-alternative">Already have a link? Open the pairing URL that <code>cas hub pair</code> printed on the machine; it continues straight to confirmation.</p><div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${relayAction}</div></section></dialog>`;
 }
 
 // A phone sentence takes longer to type than the heartbeat render interval, so
@@ -1677,6 +1846,10 @@ function render(captureDraft = true): void {
   // well otherwise split a phone into three unrelated empty states.
   const fleetEmpty = machineCatalogLoaded && machines.size === 0 && attention.length === 0;
   const showSessionControls = selected !== undefined && selectedSession !== undefined;
+  // With machines paired and nothing open, the canvas is the fleet: every
+  // machine and its sessions, one tap from opening. An empty card pointing at a
+  // drawer was a detour to the same list.
+  const showFleetBoard = machineCatalogLoaded && machines.size > 0 && selectedSession === undefined;
   const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER";
   const controlActionLabel = lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control";
   const machineLabel = selected?.label ?? "No machine";
@@ -1710,7 +1883,21 @@ function render(captureDraft = true): void {
     ...(sendReason ? { sendReason } : {}),
     ...(composerStatus ? { messageStatus: { text: composerStatus.text, error: composerStatus.tone === "error" } } : {}),
     ...(delivery ? { delivery: `Message sent to ${delivery.target}` } : {}),
+    pairing: {
+      ...(pairingStatus ? { status: pairingStatus } : {}),
+      exchangeInFlight: pairingExchangeInFlight,
+      createInFlight: pairingCreateInFlight,
+      cleanupRetryInFlight: pairingCancellations.retrying,
+    },
   };
+  // The pairing dialog's step: which flow, which request, its expiry, and an
+  // outstanding cleanup. The status sentence and busy flags are live regions.
+  const pairingView = [
+    pendingPairing?.kind ?? "",
+    pendingPairing?.kind === "relay-request" ? pendingPairing.userCode : pendingPairing?.token ?? "",
+    pendingPairing?.expiresAt ?? "",
+    pairingCleanupFailed ? `cleanup-failed:${pairingCleanupContext.cause}:${pairingCleanupContext.storeOpen ? "store" : ""}:${pairingCleanupContext.rollbackPending ? "rollback" : ""}` : "",
+  ].join("|");
   const signature = shellSignature({
     machineId: selectedMachineId,
     session: selectedSession,
@@ -1731,19 +1918,16 @@ function render(captureDraft = true): void {
     controlDisabled: controlActionDisabled,
     commandPaletteOpen,
     sessionPickerOpen,
-    pairingView: [
-      pendingPairing?.kind ?? "",
-      // The invitation form and the relay code render different dialogs, and
-      // both identify the request the operator is looking at.
-      pendingPairing?.kind === "relay-request" ? pendingPairing.userCode : pendingPairing?.token ?? "",
-      pendingPairing?.expiresAt ?? "",
-      pairingStatus,
-      pairingExchangeInFlight ? "in-flight" : "",
-    ].join("|"),
+    pairingView,
   });
   const active = document.activeElement;
   const composing = isEditableElement(active) && app.contains(active);
-  const decision = renderDecision({ signatureChanged: signature !== lastShellSignature, composing });
+  const decision = renderDecision({
+    signatureChanged: signature !== lastShellSignature,
+    composing,
+    pairingStepChanged: pairingView !== lastPairingView,
+    focusInPairingDialog: composing && document.querySelector("#pair-dialog")?.contains(active) === true,
+  });
   if (decision !== "shell") {
     // A deferred rebuild is owed to a structural change that arrived while the
     // operator was mid-sentence; it runs the moment the field is left.
@@ -1791,7 +1975,7 @@ function render(captureDraft = true): void {
           ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
           <div class="actions">${sessionCommands ? '<button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button>' : ""}${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button>` : ""}</div>
         </header>
-        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : emptyCanvasMarkup()}</div></section>
+        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}>${selectedSession ? '<div class="empty">Connecting to terminal…</div>' : showFleetBoard ? '<div id="fleet-board" class="fleet-board" aria-label="Fleet"></div>' : `<div class="empty empty-pane-slot">${emptyCanvasMarkup()}</div>`}</section>
         ${supervisor ? `<button id="talk-supervisor" class="talk-supervisor primary" type="button"><span>Talk to supervisor</span><small>${escapeHtml(supervisor)}</small></button>` : ""}
       </main>
       <aside class="context-panel${attentionPanelCollapsed ? " collapsed" : ""}" aria-label="Attention, workers, and tasks">
@@ -1804,6 +1988,7 @@ function render(captureDraft = true): void {
           <div class="context-tabs" role="tablist" aria-label="Operations panel">
             <button type="button" role="tab" data-context-tab="attention" aria-selected="${activeContextTab === "attention"}">Attention</button>
             <button type="button" role="tab" data-context-tab="status" aria-selected="${activeContextTab === "status"}">Workers &amp; Tasks</button>
+            <button id="context-panel-close" class="context-panel-close" type="button" aria-label="Close panel">×</button>
           </div>
           <section id="attention-panel" class="context-tab" data-context-content="attention" ${activeContextTab === "attention" ? "" : "hidden"}></section>
           <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><p class="status-stale" role="status" hidden></p><div id="status-view"></div><div class="message"><h2>Talk to ${escapeHtml(supervisor ?? "supervisor")}</h2><textarea id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-status" class="message-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div></section>
@@ -1836,6 +2021,7 @@ function render(captureDraft = true): void {
   if (focusWinner === "composer") queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus());
   lastRailSignature = undefined;
   lastShellSignature = signature;
+  lastPairingView = pairingView;
   bindEvents(selected, lease);
   if (commandPaletteOpen) {
     document.querySelector<HTMLDialogElement>("#command-palette")?.showModal();
@@ -1863,6 +2049,7 @@ interface RegionContext {
 function renderRegions(context: RegionContext): void {
   renderMachineNavigation();
   renderSessionPicker();
+  renderFleetBoard();
   const railCounts = document.querySelector("#attention-rail-counts");
   if (railCounts) {
     // Both forms ship; the compact block picks one. The button owns the
@@ -1933,6 +2120,43 @@ function renderMachineNavigation(): void {
   // a region update, so it carries its own handler.
   pair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")!.showModal();
   machineTree.append(pair);
+}
+
+/**
+ * The fleet in words a heartbeat cannot churn: phase only, no latency, so the
+ * board is rebuilt when a machine or session actually changes state and a
+ * button the operator is on is never pulled out from under a thumb.
+ */
+function fleetConnectionLabel(state: ConnectionState | undefined): string {
+  if (!state) return "Idle";
+  if (state.phase === "live") return state.degraded ? "Degraded" : "Live";
+  if (state.phase === "backoff") return "Reconnecting";
+  if (state.phase === "failed") return state.authFailure ? "Needs pairing" : "Unreachable";
+  return "Connecting";
+}
+
+const fleetBoard = new FleetBoardRenderer();
+
+function renderFleetBoard(): void {
+  const board = document.querySelector<HTMLElement>("#fleet-board");
+  const entries = sessionPickerEntries({
+    machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label })),
+    sessions,
+    selection: selectedMachineId ? { machineId: selectedMachineId } : undefined,
+    summaries: sessionSummaries,
+  });
+  fleetBoard.render(board, {
+    machines: [...machines.values()].map((machine) => ({
+      id: machine.id,
+      label: machine.label,
+      state: connectionClass(connectionStates.get(machine.id)),
+      phase: fleetConnectionLabel(connectionStates.get(machine.id)),
+      selected: machine.id === selectedMachineId,
+    })),
+    sessions: entries,
+  }, {
+    open: (machineId, session) => { machineDrawerOpen = false; void openSession(machineId, session); },
+  });
 }
 
 function compatibilityWarning(machineId: string): string | undefined {
@@ -2085,7 +2309,7 @@ function renderAttention(): void {
 
 async function performAttentionAction(item: AttentionItem, action: AttentionAction): Promise<void> {
   if (action === "repair") {
-    document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+    openRepairDialog(item.machineId);
     return;
   }
   if (action === "open_pr") {
@@ -2125,17 +2349,53 @@ function renderStatus(status?: Record<string, unknown>): void {
     span.textContent = String(value);
     return span;
   };
+  const chip = (value: unknown): HTMLSpanElement => {
+    const span = document.createElement("span");
+    const state = String(value ?? "").toLowerCase().replaceAll("_", "-");
+    span.className = `status-chip status-chip--${state.replaceAll(/[^a-z0-9-]/g, "") || "unknown"}`;
+    span.textContent = String(value ?? "").replaceAll("_", " ");
+    return span;
+  };
+  const sectionLabel = (text: string, count: number): HTMLParagraphElement => {
+    const label = document.createElement("p");
+    label.className = "status-section-label";
+    label.textContent = `${text} · ${count}`;
+    return label;
+  };
+  // Name, state, ticket, then the sentence: the identifiers stay mono and the
+  // activity reads as prose, instead of one grey mono line per agent where the
+  // eye had to find the dots to tell name from state from task.
+  if (agents.length > 0) container.append(sectionLabel("Agents", agents.length));
   for (const agent of agents) {
-    const row = document.createElement("article"); row.className = "status-row";
-    row.append(identifier(agent.name), " · ", identifier(agent.status));
-    if (agent.current_task) row.append(" · ", identifier(agent.current_task));
-    if (agent.latest_activity?.summary) row.append(` — ${agent.latest_activity.summary}`);
+    const row = document.createElement("article"); row.className = "status-row status-agent";
+    const line = document.createElement("div"); line.className = "status-line";
+    line.append(identifier(agent.name), chip(agent.status));
+    if (agent.current_task) line.append(identifier(agent.current_task));
+    row.append(line);
+    if (agent.latest_activity?.summary) {
+      const activity = document.createElement("p");
+      activity.className = "status-activity";
+      activity.textContent = agent.latest_activity.summary;
+      row.append(activity);
+    }
     container.append(row);
   }
+  if (tasks.length > 0) container.append(sectionLabel("Tasks", tasks.length));
   for (const task of tasks) {
-    const row = document.createElement("article"); row.className = "status-row";
-    row.append(identifier(task.id), " · ", identifier(task.status), ` · ${task.title}`);
+    const row = document.createElement("article"); row.className = "status-row status-task";
+    const line = document.createElement("div"); line.className = "status-line";
+    line.append(identifier(task.id), chip(task.status));
+    const title = document.createElement("p");
+    title.className = "status-task-title";
+    title.textContent = String(task.title ?? "");
+    row.append(line, title);
     container.append(row);
+  }
+  if (agents.length === 0 && tasks.length === 0 && !summary) {
+    const empty = document.createElement("p");
+    empty.className = "status-empty";
+    empty.textContent = "No agents or tasks reported for this session yet.";
+    container.append(empty);
   }
 }
 
@@ -2280,6 +2540,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     pair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")!.showModal();
   }
   document.querySelector<HTMLButtonElement>("#attention-panel-toggle")!.onclick = () => { attentionPanelCollapsed = !attentionPanelCollapsed; render(); };
+  document.querySelector<HTMLButtonElement>("#context-panel-close")!.onclick = () => { attentionPanelCollapsed = true; render(); };
   document.querySelector<HTMLButtonElement>("#mobile-message-toggle")!.onclick = openSupervisorComposer;
   const talkSupervisor = document.querySelector<HTMLButtonElement>("#talk-supervisor");
   if (talkSupervisor) talkSupervisor.onclick = openSupervisorComposer;
@@ -2317,7 +2578,22 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     if (opened && !opened.open) opened.showModal();
   }
   if (pairCancel) pairCancel.onclick = cancelPendingPairing;
-  if (pairClose) pairClose.onclick = pairingCreateInFlight ? cancelPendingPairing : () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).close();
+  // Read at click time: the label flips to Cancel through a live region while a
+  // code is being minted, without rebuilding the dialog.
+  if (pairClose) pairClose.onclick = () => {
+    if (pairingCreateInFlight) { cancelPendingPairing(); return; }
+    document.querySelector<HTMLDialogElement>("#pair-dialog")!.close();
+  };
+  const usePageOrigin = document.querySelector<HTMLButtonElement>("#pair-use-page-origin");
+  if (usePageOrigin) usePageOrigin.onclick = () => {
+    const url = document.querySelector<HTMLInputElement>('#pair-form input[name="url"]');
+    if (!url) return;
+    url.value = usePageOrigin.dataset.pageOrigin ?? "";
+    pairingDraft = { ...pairingDraft, hubUrl: url.value };
+    url.focus();
+  };
+  const pairCleanupRetry = document.querySelector<HTMLButtonElement>("#pair-cleanup-retry");
+  if (pairCleanupRetry) pairCleanupRetry.onclick = () => { void retryPairingCleanup(); };
   if (pairCreate) pairCreate.onclick = () => {
     pairCreate.disabled = true;
     const email = document.querySelector<HTMLInputElement>("#pair-email")?.value.trim() ?? "";
@@ -2334,16 +2610,22 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   };
   if (pairForm) pairForm.onsubmit = (event) => {
     event.preventDefault();
-    void pairMachine(pairForm).then((paired) => {
-      if (!paired) return;
+    void pairMachine(pairForm).then((installed) => {
+      if (!installed) return;
+      // Saved and connected are announced at the installation seam inside
+      // pairMachine; the handler only closes the dialog.
       document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
-      // Pairing ends by silently closing a dialog; say that it worked.
-      toast(`${machines.get(selectedMachineId ?? "")?.label ?? "Machine"} paired`);
-    }).catch((error) => toast(error instanceof Error ? error.message : "Pairing failed"));
+    }).catch((error) => {
+      // A pairing failure is stated inside the dialog beside Pair; a toast
+      // behind the backdrop only duplicated it. Anything else still surfaces.
+      if (error instanceof PairingExchangeError) return;
+      toast(error instanceof Error ? error.message : "Pairing failed");
+    });
   };
   const remove = document.querySelector<HTMLButtonElement>("#remove-machine");
   if (remove && selected) remove.onclick = async () => {
     connections.get(selected.id)?.stop();
+    firstConnections.forget(selected.id);
     connections.delete(selected.id); machines.delete(selected.id); sessions.delete(selected.id);
     await catalog.remove(selected.id);
     // Walking back into a credential that no longer exists is a dead end, and

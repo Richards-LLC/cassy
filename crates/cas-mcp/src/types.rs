@@ -444,9 +444,9 @@ pub struct TaskRequest {
     #[serde(default)]
     pub demo_statement: Option<String>,
 
-    /// Execution note (for create, update) - methodology used to execute this task
+    /// Execution note (for create, update, and no-code close) - methodology used to execute this task
     #[schemars(
-        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, value-only, no-code. value-only permits edits to existing values but rejects added, deleted, copied, or renamed files at close. no-code declares an operations/artifact task and requires external_ref proof at close. Pass empty string to clear on update."
+        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, value-only, no-code. value-only permits edits to existing values but rejects added, deleted, copied, or renamed files at close. no-code declares an operations/artifact task and requires external_ref proof at close. For action=close, only no-code is accepted, only when the stored methodology is empty or already no-code; its portable external_ref is validated and persisted with it before verification dispatch or atomically with an already-approved close. Pass empty string to clear on update."
     )]
     #[serde(default)]
     pub execution_note: Option<String>,

@@ -2,7 +2,11 @@ import type { Scope } from "./types";
 import { PAIRING_SCOPES } from "./pairing-scopes";
 
 export interface PairingDraft {
+  /** The machine's hub address. Never seeded from the page: a hosted Commander
+   *  origin is a plausible-looking wrong answer for a remote machine (F5). */
   hubUrl: string;
+  /** Where this page is served from, offered as one tap for the page-served-by-hub case. */
+  pageOrigin: string;
   machineLabel: string;
   deviceLabel: string;
   operatorLabel: string;
@@ -13,7 +17,8 @@ export interface PairingDraft {
 /** `scopes` is the invitation's ceiling when one is known, never a wider guess. */
 export function createPairingDraft(controllerOrigin: string, scopes?: readonly Scope[]): PairingDraft {
   return {
-    hubUrl: controllerOrigin,
+    hubUrl: "",
+    pageOrigin: controllerOrigin,
     machineLabel: "",
     deviceLabel: "Cassy Commander browser",
     operatorLabel: "",

@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AuthContext, AuthStore, DaemonConnector, HealthResponse, HubAction, HubAuthorizer, HubRequest,
-    HubSession, MachineEventBus, MachineIdentity, MachineMetadata, PairingExchange, ProxyFrame,
-    ProxyFrameKind, Scope, SessionCatalog, SessionReadModel, TransportSecurity, ViewerRecvError,
-    required_scope,
+    HubSession, MachineEventBus, MachineIdentity, MachineMetadata, PairingExchange,
+    PairingExchangeError, ProxyFrame, ProxyFrameKind, Scope, SessionCatalog, SessionReadModel,
+    TransportSecurity, ViewerRecvError, required_scope,
 };
 use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, PaneSizeAuthority};
 
@@ -836,9 +836,30 @@ async fn pairing_exchange<R: SessionReadModel>(
     exchange.source = exchange.controller_origin.clone();
     match auth.exchange_pairing(exchange, chrono::Utc::now()) {
         Ok(credential) => with_cors(Json(credential).into_response(), &headers),
+        Err(PairingExchangeError::Throttled {
+            retry_after_seconds,
+        }) if bound_origin => with_cors(pairing_throttled(retry_after_seconds), &headers),
         Err(_) if bound_origin => with_cors(unauthorized(), &headers),
         Err(_) => unauthorized(),
     }
+}
+
+fn pairing_throttled(retry_after_seconds: u64) -> Response {
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(serde_json::json!({"error":"slow_down"})),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        "retry-after",
+        HeaderValue::from_str(&retry_after_seconds.to_string())
+            .expect("a decimal retry delay is a valid header value"),
+    );
+    response.headers_mut().insert(
+        "access-control-expose-headers",
+        HeaderValue::from_static("Retry-After"),
+    );
+    response
 }
 
 async fn refresh_credential<R: SessionReadModel>(

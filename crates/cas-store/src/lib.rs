@@ -250,8 +250,8 @@ pub use reminder_store::{
 pub use retrieval_store::{
     DEFAULT_RETRIEVAL_POLICY, RETRIEVAL_ATTRIBUTION_AUTOMATIC, RETRIEVAL_ATTRIBUTION_EXPLICIT,
     RETRIEVAL_ATTRIBUTION_JUDGE, RETRIEVAL_SCHEMA, RETRIEVAL_SCHEMA_STATEMENTS,
-    RelevanceSamplingReport, RetrievalAggregate, RetrievalHitIdentity, RetrievalOutcome,
-    RetrievalOutcomeEvent, RetrievalQuery, RetrievalSample, RetrievalStore,
+    RelevanceSamplingReport, RetrievalAggregate, RetrievalEvidenceFunnel, RetrievalHitIdentity,
+    RetrievalOutcome, RetrievalOutcomeEvent, RetrievalQuery, RetrievalSample, RetrievalStore,
     RollingInjectedPrecision, SqliteRetrievalStore,
 };
 
@@ -539,6 +539,16 @@ pub trait TaskStore: Send + Sync {
     /// Add a new task
     fn add(&self, task: &Task) -> Result<()>;
 
+    /// Add a task and bind a generic durable mutation receipt in the same
+    /// store transaction. Stores that cannot provide that atomic boundary
+    /// must reject the operation instead of degrading to `add` followed by a
+    /// separate receipt write.
+    fn add_with_mutation_receipt(&self, _task: &Task, _receipt_id: &str) -> Result<()> {
+        Err(StoreError::Other(
+            "atomic task mutation receipts are unsupported by this store".to_string(),
+        ))
+    }
+
     /// Canonical project identity attached to this store, when available.
     /// Used by shared context builders that cannot depend on the CLI's cloud
     /// configuration module.
@@ -598,6 +608,21 @@ pub trait TaskStore: Send + Sync {
         Ok(())
     }
 
+    /// Atomically create a task, its initial dependencies, and a generic
+    /// durable mutation receipt.
+    fn create_atomic_with_mutation_receipt(
+        &self,
+        _task: &Task,
+        _blocked_by: &[String],
+        _epic_id: Option<&str>,
+        _created_by: Option<&str>,
+        _receipt_id: &str,
+    ) -> Result<()> {
+        Err(StoreError::Other(
+            "atomic task mutation receipts are unsupported by this store".to_string(),
+        ))
+    }
+
     /// Get a task by ID
     fn get(&self, id: &str) -> Result<Task>;
 
@@ -626,6 +651,18 @@ pub trait TaskStore: Send + Sync {
     /// timestamp is an explicit optimistic-concurrency key rather than a
     /// general write path.
     fn update(&self, task: &Task) -> Result<DateTime<Utc>>;
+
+    /// Update a task and bind a generic durable mutation receipt in the same
+    /// store transaction.
+    fn update_with_mutation_receipt(
+        &self,
+        _task: &Task,
+        _receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        Err(StoreError::Other(
+            "atomic task mutation receipts are unsupported by this store".to_string(),
+        ))
+    }
 
     /// Delete a task
     fn delete(&self, id: &str) -> Result<()>;

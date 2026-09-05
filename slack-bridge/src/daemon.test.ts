@@ -27,6 +27,9 @@ const baseMessage: DaemonMessage = {
   project: "project-a",
 };
 
+/** The deterministic session ID `baseMessage` resolves to. */
+const threadSessionId = "7265c816-1515-b05e-2028-865a7a7730d3";
+
 const temporaryDirectories: string[] = [];
 
 function statePath(): string {
@@ -177,11 +180,12 @@ describe("Slack thread message injection", () => {
   it("resumes instead of wedging when the deterministic session ID already exists", async () => {
     const path = statePath();
     const calls: string[][] = [];
-    // The exact refusal Claude Code emits for an existing ID (2.1.261).
+    // The exact refusal Claude Code emits for an existing ID (2.1.261), on the
+    // stderr channel its session-ID diagnostics were measured to use.
     const inUse: ClaudeRunResult = {
       code: 1,
       stdout: "",
-      stderr: "Error: Session ID 7265c816-1515-b05e-2028-865a7a7730d3 is already in use.",
+      stderr: `Error: Session ID ${threadSessionId} is already in use.`,
     };
     const results: ClaudeRunResult[] = [
       // First message: the child established the session, then failed late, so
@@ -214,6 +218,31 @@ describe("Slack thread message injection", () => {
       "--resume",
     ]);
     expect(new Set(calls.map((args) => args.at(-1))).size).toBe(1);
+    expect(calls.every((args) => args.at(-1) === threadSessionId)).toBe(true);
+  });
+
+  it("retries the refused session exactly once and reports a failing retry", async () => {
+    const calls: string[][] = [];
+    const inject = createMessageInjector({
+      runner: async (args) => {
+        calls.push(args);
+        // Both attempts refuse: the new-session attempt because the ID exists,
+        // the resume because the session is unusable. One retry, then stop.
+        return args.includes("--session-id")
+          ? {
+              code: 1,
+              stdout: "",
+              stderr: `Error: Session ID ${threadSessionId} is already in use.`,
+            }
+          : { code: 1, stdout: "", stderr: "Error: session is corrupt" };
+      },
+      sessionStatePath: statePath(),
+    });
+
+    const result = await inject(config, baseMessage);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("session is corrupt");
+    expect(calls.map((args) => args.at(-2))).toEqual(["--session-id", "--resume"]);
   });
 
   it("does not retry an unrelated new-session failure", async () => {
@@ -229,6 +258,66 @@ describe("Slack thread message injection", () => {
     const result = await inject(config, baseMessage);
     expect(result.ok).toBe(false);
     expect(result.error).toContain("reached max turns");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not treat model prose about session IDs as the CLI refusal", async () => {
+    const calls: string[][] = [];
+    const inject = createMessageInjector({
+      runner: async (args) => {
+        calls.push(args);
+        return {
+          code: 1,
+          // Answer text is not a diagnostic. Retrying here would replay the
+          // message into a session the child never established.
+          stdout: "The documentation says a session ID is already in use.",
+          stderr: "Error: reached max turns",
+        };
+      },
+      sessionStatePath: statePath(),
+    });
+
+    const result = await inject(config, baseMessage);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("reached max turns");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("--session-id");
+  });
+
+  it("does not retry a refusal that names a different session ID", async () => {
+    const calls: string[][] = [];
+    const inject = createMessageInjector({
+      runner: async (args) => {
+        calls.push(args);
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "Error: Session ID 00000000-0000-0000-0000-000000000000 is already in use.",
+        };
+      },
+      sessionStatePath: statePath(),
+    });
+
+    const result = await inject(config, baseMessage);
+    expect(result.ok).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not retry the refusal text arriving on stdout instead of the error channel", async () => {
+    const calls: string[][] = [];
+    const inject = createMessageInjector({
+      runner: async (args) => {
+        calls.push(args);
+        return {
+          code: 1,
+          stdout: `Error: Session ID ${threadSessionId} is already in use.`,
+          stderr: "Error: reached max turns",
+        };
+      },
+      sessionStatePath: statePath(),
+    });
+
+    expect((await inject(config, baseMessage)).ok).toBe(false);
     expect(calls).toHaveLength(1);
   });
 

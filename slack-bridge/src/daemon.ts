@@ -223,17 +223,27 @@ function claudeArgs(msg: DaemonMessage, sessionId: string, isResume: boolean): s
 }
 
 /**
- * Does this failure say the requested `--session-id` is already taken?
+ * Did the CLI refuse this exact `--session-id` because it already exists?
  *
- * Claude Code refuses to create a session over an existing ID. The contract is
- * a fixed message in the CLI itself — `Error: Session ID <id> is already in
- * use.`, alongside its internal `sessionIdExists` check (observed in the
- * installed bundle, Claude Code 2.1.261). Matching the stable half of that
- * sentence keeps the check readable without pinning the interpolated ID.
+ * Claude Code will not create a session over an existing ID: the CLI emits
+ * `Error: Session ID <id> is already in use.` and carries an internal
+ * `sessionIdExists` check (both observed in the installed 2.1.261 bundle). Its
+ * session-ID diagnostics go to stderr with an empty stdout and exit 1, measured
+ * directly with the sibling error from the same string table:
+ * `claude --session-id not-a-uuid -p x` printed only
+ * `Error: Invalid session ID. Must be a valid UUID.` on stderr.
+ *
+ * So this reads the error channel alone and demands the whole diagnostic for
+ * the ID we actually requested. Model output is not a diagnostic: a child that
+ * fails for its own reasons while writing prose about session IDs — or a
+ * refusal naming some other ID — must not be mistaken for this refusal, or the
+ * bridge would replay a message that never established a session.
  */
-function claimsSessionIdInUse(result: ClaudeRunResult): boolean {
-  const output = `${result.stderr} ${result.stdout}`.toLowerCase();
-  return output.includes("session id") && output.includes("is already in use");
+function refusedBecauseSessionIdExists(
+  result: ClaudeRunResult,
+  sessionId: string,
+): boolean {
+  return result.stderr.includes(`Error: Session ID ${sessionId} is already in use.`);
 }
 
 const runClaude: ClaudeRunner = (args, cwd) =>
@@ -320,7 +330,7 @@ export function createMessageInjector(
     // non-zero (max turns, timeout, a crash) leaves nothing recorded here, so
     // without this the thread would retry `--session-id` forever and stay
     // permanently wedged. Resume the ID we deterministically own instead.
-    if (!isResume && result.code !== 0 && claimsSessionIdInUse(result)) {
+    if (!isResume && result.code !== 0 && refusedBecauseSessionIdExists(result, sessionId)) {
       console.log(`Session ${sessionId} already exists; resuming it instead`);
       try {
         result = await runner(claudeArgs(msg, sessionId, true), msg.project_dir);

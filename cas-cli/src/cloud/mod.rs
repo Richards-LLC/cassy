@@ -94,13 +94,13 @@ pub use embeddings::{
 pub use me::{
     FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner, teams_cache_stale,
 };
-pub(crate) use sync_queue::TaskSyncIntent;
 pub use sync_queue::{
     EntityType, QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QueueHealth, QueuedSync,
     QuarantinedRow, SYNC_REVISION_STATEMENTS, SyncOperation, SyncQueue,
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,
     parse_wire_revision, wire_revision,
 };
+pub(crate) use sync_queue::{TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload};
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,
     KnowledgePageRecord, KnowledgePullReport, PushBacklog, PushPlan, PushScope, SyncConflict,

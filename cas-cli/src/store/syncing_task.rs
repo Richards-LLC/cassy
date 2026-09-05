@@ -6,7 +6,10 @@
 
 use std::sync::Arc;
 
-use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue, TaskSyncIntent};
+use crate::cloud::{
+    CloudConfig, EntityType, SyncOperation, SyncQueue, TaskSyncFulfillResult, TaskSyncIntent,
+    TaskSyncPayload,
+};
 use crate::error::CasError;
 use crate::store::share_policy::{eligible_for_team_task, resolve_team_id};
 use crate::store::{Result, StoreError, TaskStore};
@@ -81,19 +84,55 @@ impl SyncingTaskStore {
             .map_err(queue_error_before_local_commit)
     }
 
-    fn fulfill_upsert(&self, intent: &TaskSyncIntent, task: &Task) -> Result<()> {
-        let payload = serde_json::to_string(task)
-            .map_err(|error| degraded_sync_error(intent, error.to_string()))?;
+    fn load_canonical_sync_payload(&self, intent: &TaskSyncIntent) -> Result<TaskSyncPayload> {
+        // This is the only callback run while SyncQueue holds its queue mutex
+        // and BEGIN IMMEDIATE transaction. It is intentionally read-only: one
+        // inner.get plus in-memory policy/serialization. It cannot reopen a
+        // syncing store, acquire the mutation flock, or call back into queue.
+        let mut task = self.inner.get(&intent.entity_id)?;
+        task.scope = if intent.global_scope {
+            Scope::Global
+        } else {
+            Scope::Project
+        };
+        if task.scope == Scope::Global {
+            task.origin_project = None;
+        }
         let current_project_id = task
             .origin_project
             .as_deref()
-            .filter(|project_id| !project_id.trim().is_empty());
+            .filter(|project_id| !project_id.trim().is_empty())
+            .map(ToOwned::to_owned);
         let current_team_id = self
             .team_id
             .as_deref()
-            .filter(|_| eligible_for_team_task(task));
+            .filter(|_| eligible_for_team_task(&task))
+            .map(ToOwned::to_owned);
+        let payload = serde_json::to_string(&task)?;
+        Ok(TaskSyncPayload {
+            payload,
+            current_project_id,
+            current_team_id,
+        })
+    }
+
+    fn fulfill_upsert(&self, intent: &TaskSyncIntent) -> Result<TaskSyncFulfillResult> {
+        self.fulfill_upsert_after_validation(intent, || {})
+    }
+
+    fn fulfill_upsert_after_validation<H>(
+        &self,
+        intent: &TaskSyncIntent,
+        after_validation: H,
+    ) -> Result<TaskSyncFulfillResult>
+    where
+        H: FnOnce(),
+    {
         self.queue
-            .fulfill_task_sync_intent(intent, &payload, current_project_id, current_team_id)
+            .fulfill_task_sync_intent(intent, after_validation, || {
+                self.load_canonical_sync_payload(intent)
+                    .map_err(|error| CasError::Other(error.to_string()))
+            })
             .map_err(|error| degraded_sync_error(intent, error.to_string()))
     }
 
@@ -122,39 +161,20 @@ impl SyncingTaskStore {
                 .push(intent);
         }
         for (entity_id, mut intents) in by_entity {
-            let mut task = match self.inner.get(&entity_id) {
-                Ok(task) => task,
+            match self.inner.get(&entity_id) {
+                Ok(_) => {}
                 Err(StoreError::TaskNotFound(_)) | Err(StoreError::NotFound(_)) => {
-                    self.queue
-                        .cancel_task_sync_intents_for_entity(&entity_id)
-                        .map_err(queue_error_before_local_commit)?;
-                    continue;
+                    // Revision/receipt evidence, not row absence alone,
+                    // decides whether this is pre-commit or superseded.
                 }
                 Err(error) => return Err(error),
-            };
-            let persisted_updated_at = task.updated_at.to_rfc3339();
-            while intents.last().is_some_and(|intent| {
-                intent.operation == "update"
-                    && intent.previous_updated_at.as_deref() == Some(persisted_updated_at.as_str())
-            }) {
-                // The process exited after staging but before the local
-                // update changed the store-owned timestamp. There was no
-                // committed local mutation to repair.
-                let intent = intents.pop().expect("last intent was present");
-                self.queue
-                    .cancel_task_sync_intent(intent.id)
-                    .map_err(queue_error_before_local_commit)?;
             }
-            let Some(intent) = intents.last() else {
-                continue;
-            };
-            if intent.global_scope {
-                task.scope = Scope::Global;
-                task.origin_project = None;
-            } else {
-                task.scope = Scope::Project;
+            while let Some(intent) = intents.pop() {
+                match self.fulfill_upsert(&intent)? {
+                    TaskSyncFulfillResult::ProvenPreCommit => continue,
+                    TaskSyncFulfillResult::Fulfilled | TaskSyncFulfillResult::Superseded => break,
+                }
             }
-            self.fulfill_upsert(intent, &task)?;
         }
         Ok(())
     }
@@ -302,14 +322,14 @@ impl TaskStore for SyncingTaskStore {
             .lock_task_sync_mutations()
             .map_err(queue_error_before_local_commit)?;
         let intent = self.stage_upsert(task, "add", None, None)?;
-        if let Err(error) = self.inner.add(task) {
+        if let Err(error) = self
+            .inner
+            .add_with_mutation_receipt(task, &intent.mutation_id)
+        {
             self.cancel_staged_after_local_failure(&intent);
             return Err(error);
         }
-        let persisted = self
-            .persisted_for_queue(task)
-            .map_err(|error| degraded_sync_error(&intent, error.to_string()))?;
-        self.fulfill_upsert(&intent, &persisted)?;
+        self.fulfill_upsert(&intent)?;
         Ok(())
     }
 
@@ -325,17 +345,20 @@ impl TaskStore for SyncingTaskStore {
             .lock_task_sync_mutations()
             .map_err(queue_error_before_local_commit)?;
         let intent = self.stage_upsert(task, "create_atomic", None, None)?;
-        if let Err(error) = self
-            .inner
-            .create_atomic(task, blocked_by, epic_id, created_by)
-        {
+        if let Err(error) = self.inner.create_atomic_with_mutation_receipt(
+            task,
+            blocked_by,
+            epic_id,
+            created_by,
+            &intent.mutation_id,
+        ) {
             self.cancel_staged_after_local_failure(&intent);
             return Err(error);
         }
+        let task_sync_result = self.fulfill_upsert(&intent);
         let persisted = self
             .persisted_for_queue(task)
             .map_err(|error| degraded_sync_error(&intent, error.to_string()))?;
-        let task_sync_result = self.fulfill_upsert(&intent, &persisted);
         for dep in self.inner.get_dependencies(&task.id)? {
             self.queue_dependency_upsert(&dep, &persisted);
         }
@@ -364,26 +387,17 @@ impl TaskStore for SyncingTaskStore {
         let previous_updated_at = previous.updated_at.to_rfc3339();
         let intent =
             self.stage_upsert(task, "update", Some(&previous_updated_at), Some(&previous))?;
-        let persisted_at = match self.inner.update(task) {
+        let persisted_at = match self
+            .inner
+            .update_with_mutation_receipt(task, &intent.mutation_id)
+        {
             Ok(persisted_at) => persisted_at,
             Err(error) => {
                 self.cancel_staged_after_local_failure(&intent);
                 return Err(error);
             }
         };
-        // The inner store may enforce transition invariants while persisting
-        // (for example, clearing a prior close-cycle branch anchor when a
-        // Closed task returns to work). Queue the canonical stored row so a
-        // stale caller-owned value cannot be synced back over that invariant.
-        let mut persisted = self
-            .inner
-            .get(&task.id)
-            .map_err(|error| degraded_sync_error(&intent, error.to_string()))?;
-        persisted.scope = task.scope;
-        if task.scope == Scope::Global {
-            persisted.origin_project = None;
-        }
-        self.fulfill_upsert(&intent, &persisted)?;
+        self.fulfill_upsert(&intent)?;
         Ok(persisted_at)
     }
 
@@ -528,6 +542,7 @@ impl TaskStore for SyncingTaskStore {
 #[cfg(test)]
 mod tests {
     use crate::store::syncing_task::*;
+    use crate::store::mock::MockTaskStore;
     use crate::store::{SqliteTaskStore, StoreError};
     use fs2::FileExt;
     use std::fs::OpenOptions;
@@ -584,6 +599,16 @@ mod tests {
             "#,
         ))
         .unwrap();
+    }
+
+    fn task_mutation_revision(cas_dir: &Path, task_id: &str) -> (i64, bool) {
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.query_row(
+            "SELECT revision, present FROM task_mutation_revisions WHERE entity_id = ?1",
+            [task_id],
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? == 1)),
+        )
+        .unwrap()
     }
 
     fn remove_task_enqueue_failure(cas_dir: &Path) {
@@ -691,6 +716,99 @@ mod tests {
     }
 
     #[test]
+    fn atomic_receipt_failure_rolls_back_the_task_mutation() {
+        let (temp, store) = create_test_store();
+        let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER fail_task_mutation_receipt
+            BEFORE INSERT ON task_mutation_receipts
+            BEGIN
+                SELECT RAISE(ABORT, 'injected receipt failure');
+            END;
+            "#,
+        )
+        .unwrap();
+        let task = Task::new(
+            "task-atomic-receipt-failure".to_string(),
+            "must roll back".to_string(),
+        );
+
+        let error = store.add(&task).unwrap_err();
+
+        assert!(!matches!(error, StoreError::SyncDegradedAfterCommit { .. }));
+        assert!(matches!(
+            store.get(&task.id),
+            Err(StoreError::TaskNotFound(_))
+        ));
+        assert!(store.queue.pending_task_sync_intents().unwrap().is_empty());
+    }
+
+    #[test]
+    fn store_without_atomic_receipt_support_fails_before_mutation() {
+        let inner = MockTaskStore::new();
+        let task = Task::new("task-unsupported-receipt".to_string(), "unchanged".to_string());
+
+        let error = inner
+            .add_with_mutation_receipt(&task, "receipt-id")
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("atomic task mutation receipts are unsupported"),
+            "{error}"
+        );
+        assert!(inner.is_empty());
+    }
+
+    #[test]
+    fn task_mutation_revision_seeds_and_stays_monotonic_across_delete_replace_and_upsert() {
+        let (temp, store) = create_test_store();
+        let task = Task::new("task-revision-lifecycle".to_string(), "one".to_string());
+        store.inner.add(&task).unwrap();
+        let (insert_revision, present) = task_mutation_revision(temp.path(), &task.id);
+        assert!(present);
+
+        let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+        conn.execute(
+            "DELETE FROM task_mutation_revisions WHERE entity_id = ?1",
+            [&task.id],
+        )
+        .unwrap();
+        store.inner.init().unwrap();
+        assert_eq!(task_mutation_revision(temp.path(), &task.id), (1, true));
+
+        store.inner.delete(&task.id).unwrap();
+        let (deleted_revision, present) = task_mutation_revision(temp.path(), &task.id);
+        assert!(!present);
+        assert!(deleted_revision > insert_revision);
+        store.inner.add(&task).unwrap();
+        let (recreated_revision, present) = task_mutation_revision(temp.path(), &task.id);
+        assert!(present);
+        assert!(recreated_revision > deleted_revision);
+
+        conn.execute(
+            "INSERT OR REPLACE INTO tasks (id, title, created_at, updated_at) VALUES (?1, 'replace', ?2, ?2)",
+            rusqlite::params![task.id, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        let (replace_revision, present) = task_mutation_revision(temp.path(), &task.id);
+        assert!(present);
+        assert!(replace_revision > recreated_revision);
+
+        conn.execute(
+            "INSERT INTO tasks (id, title, created_at, updated_at) VALUES (?1, 'upsert', ?2, ?2)
+             ON CONFLICT(id) DO UPDATE SET title = excluded.title",
+            rusqlite::params![task.id, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        let (upsert_revision, present) = task_mutation_revision(temp.path(), &task.id);
+        assert!(present);
+        assert!(upsert_revision > replace_revision);
+    }
+
+    #[test]
     fn update_reports_degraded_personal_sync_and_restart_queues_the_committed_row() {
         let (temp, store) = create_test_store();
         let queue = SyncQueue::open(temp.path()).unwrap();
@@ -768,7 +886,7 @@ mod tests {
             "task-live-pre-write-intent".to_string(),
             "commit after barrier".to_string(),
         );
-        writer_queue
+        let intent = writer_queue
             .stage_task_sync_intent(&task.id, "add", None, None, None, None, false)
             .unwrap();
 
@@ -792,7 +910,9 @@ mod tests {
         );
         let local = SqliteTaskStore::open(&cas_dir).unwrap();
         local.init().unwrap();
-        local.add(&task).unwrap();
+        local
+            .add_with_mutation_receipt(&task, &intent.mutation_id)
+            .unwrap();
         FileExt::unlock(&writer_lock).unwrap();
 
         finished_rx
@@ -802,6 +922,105 @@ mod tests {
         reconciler.join().unwrap();
         assert!(writer_queue.pending_task_sync_intents().unwrap().is_empty());
         assert_eq!(writer_queue.pending(10, 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unbound_advanced_intent_is_retained_without_queue_output() {
+        let (_temp, store) = create_test_store();
+        let mut task = Task::new("task-ambiguous-intent".to_string(), "before".to_string());
+        store.inner.add(&task).unwrap();
+        let previous = store.inner.get(&task.id).unwrap();
+        let intent = store
+            .stage_upsert(
+                &task,
+                "update",
+                Some(&previous.updated_at.to_rfc3339()),
+                Some(&previous),
+            )
+            .unwrap();
+        task.title = "advanced outside the receipt protocol".to_string();
+        store.inner.update(&task).unwrap();
+
+        let error = store.reconcile_pending_task_sync().unwrap_err();
+
+        assert!(error.to_string().contains("unclassified"), "{error}");
+        assert!(error.to_string().contains("evidence retained"), "{error}");
+        assert!(store.queue.pending(10, 5).unwrap().is_empty());
+        assert_eq!(
+            store.queue.pending_task_sync_intents().unwrap(),
+            vec![intent]
+        );
+    }
+
+    #[test]
+    fn canonical_read_failure_rolls_back_without_retiring_bound_evidence() {
+        let (temp, store) = create_test_store();
+        install_task_enqueue_failure(temp.path(), "");
+        let task = Task::new("task-read-failure".to_string(), "committed".to_string());
+        assert_degraded(store.add(&task).unwrap_err(), "add", &task.id);
+        remove_task_enqueue_failure(temp.path());
+        let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+        conn.execute_batch("DROP TABLE tasks;").unwrap();
+
+        assert!(store.reconcile_pending_task_sync().is_err());
+
+        assert!(store.queue.pending(10, 5).unwrap().is_empty());
+        assert_eq!(store.queue.pending_task_sync_intents().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn direct_writer_cannot_interleave_between_revision_validation_and_production_payload_load() {
+        let (temp, store) = create_test_store();
+        let mut task = Task::new("task-fulfill-snapshot".to_string(), "before".to_string());
+        store.add(&task).unwrap();
+        store.queue.clear().unwrap();
+        install_task_enqueue_failure(temp.path(), "");
+        task.title = "validated canonical body".to_string();
+        assert_degraded(store.update(&task).unwrap_err(), "update", &task.id);
+        remove_task_enqueue_failure(temp.path());
+        let intent = store
+            .queue
+            .pending_task_sync_intents()
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let (start_tx, start_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let direct_dir = temp.path().to_path_buf();
+        let task_id = task.id.clone();
+        let writer = std::thread::spawn(move || {
+            start_rx.recv().unwrap();
+            let direct = SqliteTaskStore::open(&direct_dir).unwrap();
+            let mut newer = direct.get(&task_id).unwrap();
+            newer.title = "interleaving direct body".to_string();
+            let result = direct.update(&newer);
+            finished_tx.send(result).unwrap();
+        });
+
+        let outcome = store
+            .fulfill_upsert_after_validation(&intent, || {
+                start_tx.send(()).unwrap();
+                assert!(
+                    finished_rx
+                        .recv_timeout(Duration::from_millis(100))
+                        .is_err(),
+                    "BEGIN IMMEDIATE must exclude the direct writer through payload enqueue"
+                );
+            })
+            .unwrap();
+        assert_eq!(outcome, TaskSyncFulfillResult::Fulfilled);
+        finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("direct writer should complete after fulfillment commits")
+            .unwrap();
+        writer.join().unwrap();
+
+        let pending = store.queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        let payload = pending[0].payload.as_deref().unwrap();
+        assert!(payload.contains("validated canonical body"));
+        assert!(!payload.contains("interleaving direct body"));
     }
 
     #[test]
@@ -1119,6 +1338,35 @@ mod tests {
                 .as_deref()
                 .is_some_and(|payload| payload.contains("current team only"))
         );
+    }
+
+    #[test]
+    fn newer_direct_local_global_mutation_supersedes_a_retained_project_intent() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut task = Task::new(
+            "task-stale-project-direct-local".to_string(),
+            "before".to_string(),
+        );
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+        install_task_enqueue_failure(temp.path(), TEST_TEAM);
+        task.title = "older failed project mutation".to_string();
+        assert_degraded(store.update(&task).unwrap_err(), "update", &task.id);
+        remove_task_enqueue_failure(temp.path());
+
+        let direct = SqliteTaskStore::open(temp.path()).unwrap();
+        let mut newer = direct.get(&task.id).unwrap();
+        newer.scope = Scope::Global;
+        newer.origin_project = None;
+        newer.title = "newer direct-local private body".to_string();
+        direct.update(&newer).unwrap();
+
+        reopen_test_store(temp.path(), true).init().unwrap();
+
+        assert!(queue.pending(10, 5).unwrap().is_empty());
+        assert!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().is_empty());
+        assert!(queue.pending_task_sync_intents().unwrap().is_empty());
     }
 
     #[test]

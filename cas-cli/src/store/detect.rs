@@ -753,11 +753,13 @@ mod tests {
         let local = SqliteTaskStore::open(&cas_dir).unwrap();
         local.init().unwrap();
         let task = Task::new("task-restart-repair".to_string(), "repair me".to_string());
-        local.add(&task).unwrap();
         let queue = SyncQueue::open(&cas_dir).unwrap();
         queue.init().unwrap();
-        queue
+        let intent = queue
             .stage_task_sync_intent(&task.id, "add", None, None, None, None, false)
+            .unwrap();
+        local
+            .add_with_mutation_receipt(&task, &intent.mutation_id)
             .unwrap();
 
         open_task_store(&cas_dir).unwrap();
@@ -778,11 +780,13 @@ mod tests {
         let local = SqliteTaskStore::open(&cas_dir).unwrap();
         local.init().unwrap();
         let task = Task::new("task-restart-degraded".to_string(), "repair me".to_string());
-        local.add(&task).unwrap();
         let queue = SyncQueue::open(&cas_dir).unwrap();
         queue.init().unwrap();
-        queue
+        let intent = queue
             .stage_task_sync_intent(&task.id, "add", None, None, None, None, false)
+            .unwrap();
+        local
+            .add_with_mutation_receipt(&task, &intent.mutation_id)
             .unwrap();
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
         conn.execute_batch(

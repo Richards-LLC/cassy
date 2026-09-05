@@ -25,7 +25,7 @@ mod task_intents;
 mod tests;
 mod types;
 
-pub(crate) use task_intents::TaskSyncIntent;
+pub(crate) use task_intents::{TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload};
 
 pub use dependency_tombstones::{
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,
@@ -91,6 +91,8 @@ impl SyncQueue {
         for statement in QUARANTINED_ROW_STATEMENTS {
             conn.execute_batch(statement)?;
         }
+
+        self.migrate_task_sync_intent_bindings(&conn)?;
 
         // Migration: add team_id column if missing (for existing databases)
         self.migrate_team_id(&conn)?;

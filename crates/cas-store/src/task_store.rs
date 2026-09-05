@@ -83,6 +83,55 @@ CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_origin_project ON tasks(origin_project);
 
+-- Store-owned generations and receipts let callers couple external durable
+-- intent to a task mutation without teaching this layer about an outbox.
+-- The revision row deliberately survives task deletion so reusing an id can
+-- never reuse an earlier generation.
+CREATE TABLE IF NOT EXISTS task_mutation_revisions (
+    entity_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL,
+    present INTEGER NOT NULL CHECK (present IN (0, 1))
+);
+INSERT OR IGNORE INTO task_mutation_revisions (entity_id, revision, present)
+    SELECT id, 1, 1 FROM tasks;
+
+CREATE TABLE IF NOT EXISTS task_mutation_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    entity_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS task_mutation_revision_after_insert
+AFTER INSERT ON tasks
+BEGIN
+    INSERT INTO task_mutation_revisions (entity_id, revision, present)
+    VALUES (NEW.id, 1, 1)
+    ON CONFLICT(entity_id) DO UPDATE SET
+        revision = task_mutation_revisions.revision + 1,
+        present = 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS task_mutation_revision_after_update
+AFTER UPDATE ON tasks
+BEGIN
+    INSERT INTO task_mutation_revisions (entity_id, revision, present)
+    VALUES (NEW.id, 1, 1)
+    ON CONFLICT(entity_id) DO UPDATE SET
+        revision = task_mutation_revisions.revision + 1,
+        present = 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS task_mutation_revision_after_delete
+AFTER DELETE ON tasks
+BEGIN
+    INSERT INTO task_mutation_revisions (entity_id, revision, present)
+    VALUES (OLD.id, 1, 0)
+    ON CONFLICT(entity_id) DO UPDATE SET
+        revision = task_mutation_revisions.revision + 1,
+        present = 0;
+END;
+
 CREATE TABLE IF NOT EXISTS dependencies (
     from_id TEXT NOT NULL,
     to_id TEXT NOT NULL,
@@ -386,6 +435,28 @@ impl SqliteTaskStore {
         }
     }
 
+    fn record_mutation_receipt_with_conn(
+        conn: &Connection,
+        receipt_id: &str,
+        task_id: &str,
+    ) -> Result<()> {
+        let rows = conn.execute(
+            r#"
+            INSERT INTO task_mutation_receipts (receipt_id, entity_id, revision, created_at)
+            SELECT ?1, ?2, revision, ?3
+            FROM task_mutation_revisions
+            WHERE entity_id = ?2 AND present = 1
+            "#,
+            params![receipt_id, task_id, Utc::now().to_rfc3339()],
+        )?;
+        if rows != 1 {
+            return Err(StoreError::Other(format!(
+                "task mutation receipt {receipt_id} could not bind to {task_id}"
+            )));
+        }
+        Ok(())
+    }
+
     fn add_with_conn(conn: &Connection, task: &Task, event_session_id: Option<&str>) -> Result<()> {
         conn.execute(
             "INSERT INTO tasks (id, title, description, design, acceptance_criteria, notes,
@@ -584,6 +655,18 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    fn add_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<()> {
+        let task = self.task_with_default_origin(task);
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            Self::add_with_conn(&tx, &task, None)?;
+            Self::record_mutation_receipt_with_conn(&tx, receipt_id, &task.id)?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     fn create_atomic(
         &self,
         task: &Task,
@@ -650,6 +733,77 @@ impl TaskStore for SqliteTaskStore {
             tx.commit()?;
             Ok(())
         }) // with_write_retry
+    }
+
+    fn create_atomic_with_mutation_receipt(
+        &self,
+        task: &Task,
+        blocked_by: &[String],
+        epic_id: Option<&str>,
+        created_by: Option<&str>,
+        receipt_id: &str,
+    ) -> Result<()> {
+        let task = self.task_with_default_origin(task);
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let now = Utc::now();
+            let epic_id = epic_id.map(str::trim).filter(|id| !id.is_empty());
+
+            if let Some(epic_id) = epic_id {
+                let epic_type = tx
+                    .query_row(
+                        "SELECT task_type FROM tasks WHERE id = ?",
+                        params![epic_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                match epic_type {
+                    Some(task_type) if task_type == "epic" => {}
+                    Some(task_type) => {
+                        return Err(StoreError::Parse(format!(
+                            "Task {epic_id} is not an epic (type: {task_type})"
+                        )));
+                    }
+                    None => return Err(StoreError::TaskNotFound(epic_id.to_string())),
+                }
+            }
+
+            Self::add_with_conn(&tx, &task, created_by)?;
+            for blocker_id in blocked_by
+                .iter()
+                .map(|id| id.trim())
+                .filter(|id| !id.is_empty())
+            {
+                Self::add_dependency_with_conn(
+                    &tx,
+                    &Dependency {
+                        from_id: task.id.clone(),
+                        to_id: blocker_id.to_string(),
+                        dep_type: DependencyType::Blocks,
+                        created_at: now,
+                        created_by: created_by.map(ToString::to_string),
+                    },
+                    false,
+                )?;
+            }
+            if let Some(epic_id) = epic_id {
+                Self::add_dependency_with_conn(
+                    &tx,
+                    &Dependency {
+                        from_id: task.id.clone(),
+                        to_id: epic_id.to_string(),
+                        dep_type: DependencyType::ParentChild,
+                        created_at: now,
+                        created_by: created_by.map(ToString::to_string),
+                    },
+                    false,
+                )?;
+            }
+            Self::record_mutation_receipt_with_conn(&tx, receipt_id, &task.id)?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     fn get(&self, id: &str) -> Result<Task> {
@@ -724,8 +878,13 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
+        self.update_with_mutation_receipt(task, "")
+    }
+
+    fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
 
             // cas-ec74: read the clock ONCE and return that same instant. The
             // caller's `task.updated_at` is deliberately ignored (updated_at is
@@ -738,7 +897,7 @@ impl TaskStore for SqliteTaskStore {
             // when the new status differs from what's in the DB, avoiding the
             // pre-read on the common case where status hasn't changed.
             let new_status_str = task.status.to_string();
-            let prev_status: Option<String> = conn
+            let prev_status: Option<String> = tx
                 .query_row(
                     "SELECT status FROM tasks WHERE id = ? AND status != ?",
                     params![task.id, new_status_str],
@@ -777,7 +936,7 @@ impl TaskStore for SqliteTaskStore {
                 .as_ref()
                 .or(self.origin_project.as_ref());
 
-            let rows = conn.execute(
+            let rows = tx.execute(
             "UPDATE tasks SET title = ?1, description = ?2, design = ?3,
              acceptance_criteria = ?4, notes = ?5, status = ?6, priority = ?7,
              task_type = ?8, assignee = ?9, labels = ?10, updated_at = ?11,
@@ -862,13 +1021,17 @@ impl TaskStore for SqliteTaskStore {
                         ),
                     };
                     let event = Event::new(event_type, EventEntityType::Task, &task.id, summary);
-                    let _ = record_event_with_conn(&conn, &event);
+                    let _ = record_event_with_conn(&tx, &event);
 
                     // Capture event for recording playback
-                    let _ = capture_task_event(&conn, recording_event_type, &task.id, None);
+                    let _ = capture_task_event(&tx, recording_event_type, &task.id, None);
                 }
             }
 
+            if !receipt_id.is_empty() {
+                Self::record_mutation_receipt_with_conn(&tx, receipt_id, &task.id)?;
+            }
+            tx.commit()?;
             Ok(now)
         }) // with_write_retry
     }

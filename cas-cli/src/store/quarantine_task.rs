@@ -69,6 +69,10 @@ impl TaskStore for QuarantineFilteringTaskStore {
         self.inner.add(task)
     }
 
+    fn add_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<()> {
+        self.inner.add_with_mutation_receipt(task, receipt_id)
+    }
+
     fn create_atomic(
         &self,
         task: &Task,
@@ -78,6 +82,18 @@ impl TaskStore for QuarantineFilteringTaskStore {
     ) -> Result<()> {
         self.inner
             .create_atomic(task, blocked_by, epic_id, created_by)
+    }
+
+    fn create_atomic_with_mutation_receipt(
+        &self,
+        task: &Task,
+        blocked_by: &[String],
+        epic_id: Option<&str>,
+        created_by: Option<&str>,
+        receipt_id: &str,
+    ) -> Result<()> {
+        self.inner
+            .create_atomic_with_mutation_receipt(task, blocked_by, epic_id, created_by, receipt_id)
     }
 
     fn get(&self, id: &str) -> Result<Task> {
@@ -94,6 +110,10 @@ impl TaskStore for QuarantineFilteringTaskStore {
 
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
         self.inner.update(task)
+    }
+
+    fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
+        self.inner.update_with_mutation_receipt(task, receipt_id)
     }
 
     fn delete(&self, id: &str) -> Result<()> {

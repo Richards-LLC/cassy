@@ -161,6 +161,8 @@ impl SearchIndex {
             std::fs::remove_dir_all(index_dir)?;
         }
         let index = Self::open(index_dir)?;
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = index.writer()?;
         writer.delete_all_documents()?;
         writer.commit()?;
@@ -254,6 +256,8 @@ impl SearchIndex {
 
     /// Index a single entry
     pub fn index_entry(&self, entry: &Entry) -> Result<(), MemError> {
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = self.writer()?;
 
         // Delete existing document with same ID
@@ -313,6 +317,8 @@ impl SearchIndex {
             return Ok(0);
         }
 
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = self.writer()?;
         let mut count = 0;
 
@@ -365,6 +371,8 @@ impl SearchIndex {
 
     /// Index a single task
     pub fn index_task(&self, task: &Task) -> Result<(), MemError> {
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = self.writer()?;
 
         // Delete existing document with same ID
@@ -405,6 +413,8 @@ impl SearchIndex {
             return Ok(0);
         }
 
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = self.writer()?;
         for artifact in artifacts {
             let id = artifact_document_id(&artifact.task_id, &artifact.path);
@@ -437,6 +447,8 @@ impl SearchIndex {
 
     /// Index a single rule
     pub fn index_rule(&self, rule: &Rule) -> Result<(), MemError> {
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = self.writer()?;
 
         // Delete existing document with same ID
@@ -460,6 +472,8 @@ impl SearchIndex {
 
     /// Index a single skill
     pub fn index_skill(&self, skill: &Skill) -> Result<(), MemError> {
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = self.writer()?;
 
         // Delete existing document with same ID
@@ -498,6 +512,8 @@ impl SearchIndex {
 
     /// Delete an entry from the index
     pub fn delete(&self, id: &str) -> Result<(), MemError> {
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = self.writer()?;
         let id_term = tantivy::Term::from_field_text(self.id_field, id);
         writer.delete_term(id_term);
@@ -507,6 +523,8 @@ impl SearchIndex {
 
     /// Reindex all entries (legacy method - use reindex_all for unified search)
     pub fn reindex(&self, entries: &[Entry]) -> Result<(), MemError> {
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = self.writer()?;
 
         // Clear the index
@@ -555,6 +573,8 @@ impl SearchIndex {
         skills: &[Skill],
         specs: &[Spec],
     ) -> Result<usize, MemError> {
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = self.writer()?;
         let mut count = 0;
 
@@ -716,6 +736,8 @@ impl SearchIndex {
         skills: &[Skill],
         symbols: &[CodeSymbol],
     ) -> Result<usize, MemError> {
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = self.writer()?;
         let mut count = 0;
 

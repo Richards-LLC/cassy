@@ -675,11 +675,30 @@ mod tests {
 
     #[test]
     fn registry_skip_rejects_bare_folder_identity_and_nested_artifacts() {
-        let real_home = dirs::home_dir().expect("test runner has a home directory");
         TestEnvGuard::run_with_temp_home(|_| {
+            // Keep this fixture outside the temporary HOME and the system
+            // temporary root. A bare `.cas` folder under either root is
+            // intentionally classified as disposable, so using the
+            // repository parent gives this assertion a durable-root-shaped
+            // path without racing ambient HOME state or inheriting the
+            // checkout's origin remote.
+            let common_dir = std::process::Command::new("git")
+                .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+                .output()
+                .expect("git is available in the test checkout");
+            assert!(common_dir.status.success(), "git common dir lookup failed");
+            let fixture_parent = PathBuf::from(
+                String::from_utf8(common_dir.stdout)
+                    .expect("git common dir is UTF-8")
+                    .trim(),
+            )
+            .parent()
+            .and_then(Path::parent)
+            .expect("git common dir has a repository parent")
+            .to_path_buf();
             let bare = tempfile::Builder::new()
                 .prefix("cas-1d41-bare-")
-                .tempdir_in(&real_home)
+                .tempdir_in(fixture_parent)
                 .unwrap();
             std::fs::create_dir_all(bare.path().join(".cas")).unwrap();
             assert!(matches!(

@@ -87,6 +87,9 @@ mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude mode
 # heavy — recipe codex_sol
 mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high
 
+# supervisor — recipe claude_fable
+mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium
+
 ```
 <!-- END GENERATED SPAWN RECIPES -->
    `cli`, `model`, and `effort` are per-spawn controls for the workers spawned

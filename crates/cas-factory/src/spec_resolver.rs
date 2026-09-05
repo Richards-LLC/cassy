@@ -19,6 +19,8 @@ use thiserror::Error;
 
 use cas_mux::{Effort, SupervisorCli, WorkerSpec};
 
+use crate::routing::{CapabilitySnapshot, resolve_lane};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type
 // ─────────────────────────────────────────────────────────────────────────────
@@ -65,6 +67,11 @@ pub enum SpecResolverError {
          or drop --strict-cli to allow falling back to claude."
     )]
     CodexUnavailableStrict { worker: String, reason: String },
+
+    /// The embedded supervisor lane could not produce the built-in launch
+    /// spec. This should only be possible after a malformed shipped registry.
+    #[error("failed to resolve built-in supervisor lane: {0}")]
+    InvalidSupervisorLane(String),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -394,7 +401,9 @@ fn worker_slot_configured(
 /// Same error kinds as [`resolve_specs`].
 pub fn resolve_supervisor_spec(sources: ConfigSources) -> Result<WorkerSpec, SpecResolverError> {
     // ── Layer 1: built-in defaults ────────────────────────────────────────
-    let mut spec = WorkerSpec::builtin_default();
+    let mut spec = resolve_lane("supervisor", &CapabilitySnapshot::default())
+        .map_err(|error| SpecResolverError::InvalidSupervisorLane(error.to_string()))?
+        .spec;
 
     // ── Layer 2: user config (~/.cas/config.toml [factory.defaults]) ──────
     let user_path = sources

@@ -2992,7 +2992,7 @@ This is the body content."#;
             "Registry lanes",
             "Claude/Haiku 4.5/low",
             "Codex/GPT-5.6 Luna/xhigh",
-            "Codex/GPT-6 Astra/medium",
+            "Claude/Fable 5.1/medium",
             "Codex/GPT-5.6 Sol/high",
             "standing suspension",
             "generated route table and recipes",
@@ -5331,7 +5331,7 @@ This is the body content."#;
                         builtin.path
                     );
                     assert!(recipes.contains(&format!(
-                        "# taste — recipe codex_astra\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-astra effort=medium"
+                        "# taste — recipe claude_fable\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium"
                     )));
                 }
             }
@@ -5451,7 +5451,7 @@ This is the body content."#;
                 "registry recipe for {lane_name:?} missing from the supervisor guidance"
             );
         }
-        assert!(claude.content.contains("Codex GPT-6 Astra at medium"));
+        assert!(claude.content.contains("Claude Fable 5.1 at medium"));
         assert!(claude.content.contains("Claude Haiku 4.5"));
         assert!(!claude.content.contains("operator decision pending"));
         assert!(!claude.content.contains("exceptional-only"));
@@ -6318,7 +6318,7 @@ This is the body content."#;
             "Registry lanes",
             "Claude/Haiku 4.5/low",
             "Codex/GPT-5.6 Luna/xhigh",
-            "Codex/GPT-6 Astra/medium",
+            "Claude/Fable 5.1/medium",
             "Codex/GPT-5.6 Sol/high",
             "standing suspension",
             "generated route table and recipes",

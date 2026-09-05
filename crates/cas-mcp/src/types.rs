@@ -379,6 +379,19 @@ pub struct TaskRequest {
     #[serde(default)]
     pub completion_receipt: Option<String>,
 
+    /// Completed external-production verification receipt to use as delivery
+    /// evidence for an intentionally zero-CAS-commit close.
+    ///
+    /// This is distinct from `completion_receipt`, which remains the
+    /// worker-owned transactional delivery handoff. Only a live registered
+    /// supervisor may present this receipt, and close revalidates its exact
+    /// task, epic, factory session, gate, terminal verdict, and evidence.
+    #[schemars(
+        description = "Delegation receipt ID from verification action=external_verify. On close, a live registered supervisor may present a completed passing receipt for the exact task, epic, and current factory session as zero-commit delivery evidence. This does not replace or alter completion_receipt and does not bypass other close gates."
+    )]
+    #[serde(default)]
+    pub external_verification_receipt: Option<String>,
+
     /// Include dependencies (for show)
     #[schemars(description = "Include dependency information")]
     #[serde(default, deserialize_with = "deser::option_bool")]
@@ -1171,6 +1184,7 @@ mod worker_delivery_request_tests {
         assert_eq!(request.id.as_deref(), Some("cas-legacy"));
         assert_eq!(request.reason.as_deref(), Some("done"));
         assert!(request.completion_receipt.is_none());
+        assert!(request.external_verification_receipt.is_none());
         assert_eq!(request.negative_result, None);
         assert!(request.negative_result_artifact_path.is_none());
         assert!(request.negative_result_reference.is_none());
@@ -1186,6 +1200,19 @@ mod worker_delivery_request_tests {
             request.completion_receipt.as_deref(),
             Some(r#"{"task_id":"cas-new"}"#)
         );
+    }
+
+    #[test]
+    fn external_verification_receipt_is_separate_from_worker_completion_receipt() {
+        let request: TaskRequest = serde_json::from_str(
+            r#"{"action":"close","id":"cas-external","external_verification_receipt":"dr-0123456789abcdef01234567"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request.external_verification_receipt.as_deref(),
+            Some("dr-0123456789abcdef01234567")
+        );
+        assert!(request.completion_receipt.is_none());
     }
 
     #[test]

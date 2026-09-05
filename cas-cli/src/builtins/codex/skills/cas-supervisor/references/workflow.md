@@ -64,7 +64,7 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
    Omit `isolate` for shared mode.
 
    **Hard rule:** every `spawn_workers` call MUST include explicit `cli=`,
-   `model=`, and `effort=`. The active registry matrix is Claude Haiku 4.5/low for light, Codex GPT-5.6 Luna/xhigh for standard, Codex GPT-6 Astra/medium for taste, and Codex GPT-5.6 Sol/high for heavy. Use taste for judgment and public decisions and heavy for implementation risk; Terra is a standing suspension.
+   `model=`, and `effort=`. The active registry matrix is Claude Haiku 4.5/low for light, Codex GPT-5.6 Luna/xhigh for standard, Claude Fable 5.1/medium for taste, and Codex GPT-5.6 Sol/high for heavy. Use taste for judgment and public decisions and heavy for implementation risk; Terra is a standing suspension.
    Omitted fields fall back through the factory config cascade and stock floor;
    the spawn acknowledgement nags because supervisors should make worker tier
    selection intentional and visible.
@@ -81,8 +81,8 @@ mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model
 # standard — recipe codex_luna
 mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
 
-# taste — recipe codex_astra
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-astra effort=medium
+# taste — recipe claude_fable
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium
 
 # heavy — recipe codex_sol
 mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high

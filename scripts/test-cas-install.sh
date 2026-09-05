@@ -14,6 +14,8 @@ echo 'cas fixture version'
 EOF
 chmod +x "$tmpdir/archive/cas"
 tar -czf "$tmpdir/release.tar.gz" -C "$tmpdir/archive" cas
+release_sha256="$(sha256sum "$tmpdir/release.tar.gz" | awk '{print $1}')"
+real_tar="$(command -v tar)"
 
 cat >"$tmpdir/bin/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -38,22 +40,43 @@ done
 if [[ -n "$output" ]]; then
   cp "${FIXTURE_ARCHIVE:?}" "$output"
 else
-  printf '%s\n' '{"tag_name":"v9.9.9"}'
+  case "${FIXTURE_RECEIPT_MODE:-valid}" in
+    missing)
+      printf '%s\n' '{"tag_name":"v9.9.9","assets":[]}'
+      ;;
+    invalid)
+      printf '{"tag_name":"v9.9.9","assets":[{"name":"cas-aarch64-apple-darwin.tar.gz","digest":"sha256:not-a-digest"},{"name":"cas-x86_64-unknown-linux-gnu.tar.gz","digest":"sha256:%s"}]}\n' \
+        "${FIXTURE_RECEIPT_SHA256:?}"
+      ;;
+    valid)
+      printf '{"tag_name":"v9.9.9","assets":[{"name":"cas-aarch64-apple-darwin.tar.gz","uploader":{"login":"fixture"},"digest":"sha256:%s"},{"name":"cas-x86_64-unknown-linux-gnu.tar.gz","digest":"sha256:%s"}]}\n' \
+        "${FIXTURE_RECEIPT_SHA256:?}" "${FIXTURE_RECEIPT_SHA256:?}"
+      ;;
+  esac
 fi
+EOF
+
+cat >"$tmpdir/bin/tar" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FIXTURE_TAR_LOG:?}"
+exec "${FIXTURE_REAL_TAR:?}" "$@"
 EOF
 
 cat >"$tmpdir/bin/xattr" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FIXTURE_XATTR_LOG:?}"
 EOF
-chmod +x "$tmpdir/bin/uname" "$tmpdir/bin/curl" "$tmpdir/bin/xattr"
+chmod +x "$tmpdir/bin/uname" "$tmpdir/bin/curl" "$tmpdir/bin/tar" "$tmpdir/bin/xattr"
 
 darwin_output="$(
   PATH="$tmpdir/bin:/usr/bin:/bin" \
   FIXTURE_OS=Darwin \
   FIXTURE_ARCH=arm64 \
   FIXTURE_ARCHIVE="$tmpdir/release.tar.gz" \
+  FIXTURE_RECEIPT_SHA256="$release_sha256" \
   FIXTURE_CURL_LOG="$tmpdir/curl.log" \
+  FIXTURE_REAL_TAR="$real_tar" \
+  FIXTURE_TAR_LOG="$tmpdir/tar.log" \
   FIXTURE_XATTR_LOG="$tmpdir/xattr.log" \
   CAS_INSTALL_DIR="$tmpdir/install" \
   CAS_REPO=fixture/cassy \
@@ -62,10 +85,73 @@ darwin_output="$(
 grep -qF 'Platform: aarch64-apple-darwin' <<<"$darwin_output"
 grep -qF 'cas fixture version' <<<"$darwin_output"
 grep -qF 'cas hub service install' <<<"$darwin_output"
+grep -qF 'Verified SHA-256 against the published GitHub release receipt.' <<<"$darwin_output"
 test -x "$tmpdir/install/cas"
 grep -qF 'cas-aarch64-apple-darwin.tar.gz' "$tmpdir/curl.log"
 grep -qF -- "-d com.apple.quarantine $tmpdir/install/cas" "$tmpdir/xattr.log"
 echo 'ok   macOS Apple Silicon installs the published Darwin asset and clears quarantine'
+
+assert_rejected_before_extraction() {
+  local case_name="$1" archive="$2" receipt_mode="$3" expected_message="$4"
+  local case_install="$tmpdir/${case_name}-install" output status
+
+  mkdir -p "$case_install"
+  printf '%s\n' 'previous installed binary' >"$case_install/cas"
+  chmod +x "$case_install/cas"
+  : >"$tmpdir/tar.log"
+
+  set +e
+  output="$(
+    PATH="$tmpdir/bin:/usr/bin:/bin" \
+    FIXTURE_OS=Darwin \
+    FIXTURE_ARCH=arm64 \
+    FIXTURE_ARCHIVE="$archive" \
+    FIXTURE_RECEIPT_MODE="$receipt_mode" \
+    FIXTURE_RECEIPT_SHA256="$release_sha256" \
+    FIXTURE_CURL_LOG="$tmpdir/curl.log" \
+    FIXTURE_REAL_TAR="$real_tar" \
+    FIXTURE_TAR_LOG="$tmpdir/tar.log" \
+    FIXTURE_XATTR_LOG="$tmpdir/xattr.log" \
+    CAS_INSTALL_DIR="$case_install" \
+    CAS_REPO=fixture/cassy \
+    CAS_VERSION=v9.9.9 \
+    "$installer" 2>&1
+  )"
+  status=$?
+  set -e
+
+  test "$status" -ne 0
+  grep -qF "$expected_message" <<<"$output"
+  test ! -s "$tmpdir/tar.log"
+  grep -qFx 'previous installed binary' "$case_install/cas"
+}
+
+# A changed archive must be rejected before tar sees it and before an existing
+# installation is replaced.
+mkdir -p "$tmpdir/tampered-archive"
+cat >"$tmpdir/tampered-archive/cas" <<'EOF'
+#!/usr/bin/env bash
+echo 'tampered fixture version'
+EOF
+chmod +x "$tmpdir/tampered-archive/cas"
+tar -czf "$tmpdir/tampered-release.tar.gz" -C "$tmpdir/tampered-archive" cas
+assert_rejected_before_extraction \
+  tampered "$tmpdir/tampered-release.tar.gz" valid \
+  'Archive SHA-256 does not match the published GitHub release receipt'
+echo 'ok   a tampered archive is rejected before extraction and preserves the installed binary'
+
+# An absent digest is not an invitation to proceed without verification.
+assert_rejected_before_extraction \
+  missing-receipt "$tmpdir/release.tar.gz" missing \
+  'Published GitHub release receipt has no valid SHA-256'
+echo 'ok   a missing release digest fails closed before extraction or replacement'
+
+# A malformed digest also fails closed, and must not fall through to the valid
+# digest belonging to the next asset in the JSON response.
+assert_rejected_before_extraction \
+  invalid-receipt "$tmpdir/release.tar.gz" invalid \
+  'Published GitHub release receipt has no valid SHA-256'
+echo 'ok   an invalid release digest cannot borrow another asset digest'
 
 set +e
 intel_output="$(PATH="$tmpdir/bin:/usr/bin:/bin" FIXTURE_OS=Darwin FIXTURE_ARCH=x86_64 "$installer" 2>&1)"
@@ -131,7 +217,10 @@ wire_run() {
     FIXTURE_OS=Darwin \
     FIXTURE_ARCH=arm64 \
     FIXTURE_ARCHIVE="$tmpdir/release.tar.gz" \
+    FIXTURE_RECEIPT_SHA256="$release_sha256" \
     FIXTURE_CURL_LOG="$tmpdir/curl.log" \
+    FIXTURE_REAL_TAR="$real_tar" \
+    FIXTURE_TAR_LOG="$tmpdir/tar.log" \
     FIXTURE_XATTR_LOG="$tmpdir/xattr.log" \
     CAS_INSTALL_DIR="$home/.local/bin" \
     CAS_REPO=fixture/cassy \

@@ -142,6 +142,12 @@ pub struct HubAuthorizeArgs {
     /// Public hub URL when the hub record has no Tailscale Serve URL
     #[arg(long)]
     pub hub_url: Option<String>,
+    /// Skip only this host's public Hub readiness check.
+    ///
+    /// This does not bypass URL validation, consent, authentication, origin
+    /// checks, or one-time token handling.
+    #[arg(long)]
+    pub skip_hub_readiness: bool,
     /// Approve without an interactive confirmation prompt
     #[arg(long)]
     pub yes: bool,

@@ -601,6 +601,7 @@ if [[ -x "$classifier" ]]; then
     require_text "$("$classifier" c6c4122f^ c6c4122f)" 'docs-only' 'docs-only change fast-passes'
     require_text "$("$classifier" 49b434bf^ 49b434bf)" 'docs-only' 'PR 630 CODEMAP-only change fast-passes'
     require_text "$("$classifier" 7c233bef^ 7c233bef)" 'hub-web-only' 'hub-web-only change skips Rust work'
+    require_text "$("$classifier" c070753a^ c070753a)" 'slack-bridge-only' 'slack-bridge-only change skips Rust work'
     require_text "$("$classifier" 15edf2ef^ 15edf2ef)" 'version-bump' 'two-file package version bump fast-passes'
     require_text "$("$classifier" 15edf2ef^ eab3901c)" 'version-bump' 'workspace-wide seven-file version bump fast-passes'
     require_text "$("$classifier" 66b059b4^ 66b059b4)" 'rust-touched' 'version bump plus changelog runs Rust tier'
@@ -714,6 +715,47 @@ else
     fail=$((fail + 1))
 fi
 rm -f "$unknown_base_output"
+
+# The Slack bridge has its own tests and build. They must run whenever the diff
+# touches slack-bridge/ and stay out of the way when it does not, so a bridge
+# regression can never merge untested (cas-4bd9). `c070753a` is a permanent
+# bridge-only fixture, and an identical tree is the permanent negative case.
+require_text "$(<"$classify_action")" 'bridge-check-needed' 'shared classifier action publishes the Slack bridge signal'
+bridge_touched_output="$(mktemp)"
+if BASE_SHA="c070753a^" \
+    GITHUB_OUTPUT="$bridge_touched_output" \
+    bash < <(awk '
+        /^      run: \|$/ { in_run = 1; next }
+        in_run { sub(/^        /, ""); print }
+    ' "$classify_action"); then
+    require_text "$(<"$bridge_touched_output")" 'bridge-check-needed=true' 'a diff touching slack-bridge runs the bridge checks'
+else
+    printf 'FAIL slack-bridge diff runs the shared classifier action\n'
+    fail=$((fail + 1))
+fi
+rm -f "$bridge_touched_output"
+
+bridge_untouched_output="$(mktemp)"
+if BASE_SHA="HEAD" \
+    GITHUB_OUTPUT="$bridge_untouched_output" \
+    bash < <(awk '
+        /^      run: \|$/ { in_run = 1; next }
+        in_run { sub(/^        /, ""); print }
+    ' "$classify_action"); then
+    require_text "$(<"$bridge_untouched_output")" 'bridge-check-needed=false' 'a diff that leaves slack-bridge alone skips the bridge checks'
+else
+    printf 'FAIL unchanged slack-bridge runs the shared classifier action\n'
+    fail=$((fail + 1))
+fi
+rm -f "$bridge_untouched_output"
+
+for job in scoped-validation fast-validation-preflight; do
+    block="$(job_block "$job")"
+    require_text "$block" 'Build and test the Slack bridge' "$job runs the Slack bridge suite"
+    require_text "$block" "steps.classify-diff.outputs.bridge-check-needed == 'true'" \
+        "$job gates the Slack bridge suite on the classifier"
+    require_text "$block" 'working-directory: slack-bridge' "$job runs the bridge suite in its own package"
+done
 
 for job in fast-validation-preflight fast-validation-suite-build fast-validation-suite-shards fast-validation-suite fast-validation-docs fast-validation macos-check; do
     block="$(job_block "$job")"

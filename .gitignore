@@ -30,6 +30,10 @@
 # Node modules
 node_modules/
 
+# Slack bridge build output (`npm run build` in slack-bridge/, never committed;
+# the root /dist/ rule above is anchored and does not cover it)
+/slack-bridge/dist/
+
 # Build toolchains
 .zig-cache/
 .context/

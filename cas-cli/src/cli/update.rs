@@ -2605,7 +2605,11 @@ fn perform_update(
                 // must never read as converged to a script (cas-91ba).
                 let reason = format!("{error:#}");
                 if cli.json {
-                    println!("{}", skipped_refresh_receipt(&installed_version, &reason));
+                    let receipt = error
+                        .downcast_ref::<PostSwapRefreshFailure>()
+                        .and_then(|failure| failure.receipt.clone())
+                        .unwrap_or_else(|| skipped_refresh_receipt(&installed_version, &reason));
+                    println!("{receipt}");
                 }
                 return Err(error);
             }
@@ -2673,6 +2677,35 @@ struct BinaryUpdateOutcome {
     post_install_refresh: Option<serde_json::Value>,
 }
 
+/// A post-swap child started, but its refresh did not complete successfully.
+///
+/// Keep the receipt beside the error so the parent can still emit the
+/// per-project diagnosis in `--json` mode. A plain `anyhow!` error loses that
+/// distinction and makes the caller fall back to the misleading "skipped"
+/// receipt (cas-c650).
+#[derive(Debug)]
+struct PostSwapRefreshFailure {
+    receipt: Option<serde_json::Value>,
+    message: String,
+}
+
+impl PostSwapRefreshFailure {
+    fn new(receipt: serde_json::Value, message: String) -> Self {
+        Self {
+            receipt: Some(receipt),
+            message,
+        }
+    }
+}
+
+impl std::fmt::Display for PostSwapRefreshFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PostSwapRefreshFailure {}
+
 fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> anyhow::Result<()> {
     // Keep the old version available to the internal protocol and future
     // diagnostics without rendering it into the normal update receipt.
@@ -2730,11 +2763,29 @@ fn run_post_swap_refresh(
     let rerun_hint = post_swap_rerun_hint(installed_version, installed_binary);
 
     if !json {
-        let status = command
-            .status()
-            .with_context(|| format!("{rerun_hint} (could not start the installed binary)"))?;
+        let status = match command.status() {
+            Ok(status) => status,
+            Err(error) => {
+                let message =
+                    format!("{rerun_hint} (could not start the installed binary): {error}");
+                return Err(PostSwapRefreshFailure::new(
+                    refresh_spawn_failure_receipt(installed_version, &message),
+                    message,
+                )
+                .into());
+            }
+        };
         if !status.success() {
-            anyhow::bail!("{rerun_hint} (exit status {status})");
+            let message = post_swap_refresh_unreported_hint(installed_version, status, "");
+            return Err(PostSwapRefreshFailure::new(
+                refresh_failed_without_receipt(
+                    installed_version,
+                    "refresh_failed_no_receipt",
+                    &message,
+                ),
+                message,
+            )
+            .into());
         }
         // The child inherited stdio, so there is no receipt to read the
         // version out of; ask the same path what it is instead.
@@ -2746,29 +2797,176 @@ fn run_post_swap_refresh(
         return Ok(serde_json::Value::Null);
     }
 
-    let output = command
-        .output()
-        .with_context(|| format!("{rerun_hint} (could not start the installed binary)"))?;
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(error) => {
+            let message = format!("{rerun_hint} (could not start the installed binary): {error}");
+            return Err(PostSwapRefreshFailure::new(
+                refresh_spawn_failure_receipt(installed_version, &message),
+                message,
+            )
+            .into());
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("{rerun_hint} (exit status {}): {}", output.status, stderr.trim());
+        let Some(child_receipt) = parse_refresh_receipt(&stdout) else {
+            let message =
+                post_swap_refresh_unreported_hint(installed_version, output.status, stderr.trim());
+            return Err(PostSwapRefreshFailure::new(
+                refresh_failed_without_receipt(
+                    installed_version,
+                    "refresh_failed_no_receipt",
+                    &message,
+                ),
+                message,
+            )
+            .into());
+        };
+        verify_refresh_binary_version(
+            child_receipt
+                .get("refresh_binary_version")
+                .and_then(|v| v.as_str()),
+            installed_version,
+            installed_binary,
+        )?;
+        let message =
+            post_swap_refresh_failed_hint(installed_version, output.status, stderr.trim());
+        let receipt = refresh_failed_receipt(
+            installed_version,
+            child_receipt,
+            output.status,
+            stderr.trim(),
+            &message,
+        );
+        return Err(PostSwapRefreshFailure::new(receipt, message).into());
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
     // The child may print progress lines before its receipt; the receipt is
     // the last JSON document on stdout.
-    let receipt = stdout
-        .lines()
-        .rev()
-        .find_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
-        .ok_or_else(|| {
-            anyhow::anyhow!("{rerun_hint} (its output carried no JSON receipt: {})", stdout.trim())
-        })?;
+    let receipt = parse_refresh_receipt(&stdout).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{rerun_hint} (its output carried no JSON receipt: {})",
+            stdout.trim()
+        )
+    })?;
     verify_refresh_binary_version(
         receipt.get("refresh_binary_version").and_then(|v| v.as_str()),
         installed_version,
         installed_binary,
     )?;
     Ok(receipt)
+}
+
+/// The child may print progress lines before its machine-readable receipt.
+/// Only object receipts can prove that the refresh path ran.
+fn parse_refresh_receipt(stdout: &str) -> Option<serde_json::Value> {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .filter(|receipt| receipt.is_object() && receipt.get("refresh_binary_version").is_some())
+}
+
+fn post_swap_refresh_failed_hint(
+    installed_version: &str,
+    status: std::process::ExitStatus,
+    stderr: &str,
+) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        format!(
+            "binary updated to {installed_version}; post-swap refresh ran and failed (exit status {status}); inspect the per-project refresh results and resolve the reported failures before rerunning `cas update --all-projects`"
+        )
+    } else {
+        format!(
+            "binary updated to {installed_version}; post-swap refresh ran and failed (exit status {status}): {stderr}; inspect the per-project refresh results and resolve the reported failures before rerunning `cas update --all-projects`"
+        )
+    }
+}
+
+fn post_swap_refresh_unreported_hint(
+    installed_version: &str,
+    status: std::process::ExitStatus,
+    stderr: &str,
+) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        format!(
+            "binary updated to {installed_version}; post-swap child exited with status {status} without a refresh receipt; the refresh outcome is unknown — inspect the child diagnostics before rerunning `cas update --all-projects`"
+        )
+    } else {
+        format!(
+            "binary updated to {installed_version}; post-swap child exited with status {status} without a refresh receipt: {stderr}; the refresh outcome is unknown — inspect the child diagnostics before rerunning `cas update --all-projects`"
+        )
+    }
+}
+
+fn refresh_failed_receipt(
+    installed_version: &str,
+    child_receipt: serde_json::Value,
+    status: std::process::ExitStatus,
+    stderr: &str,
+    message: &str,
+) -> serde_json::Value {
+    let mut receipt = match child_receipt {
+        serde_json::Value::Object(receipt) => receipt,
+        _ => {
+            return refresh_failed_without_receipt(
+                installed_version,
+                "refresh_failed_no_receipt",
+                message,
+            );
+        }
+    };
+    receipt.insert("binary_updated".to_owned(), serde_json::Value::Bool(true));
+    receipt.insert(
+        "version".to_owned(),
+        serde_json::Value::String(installed_version.to_owned()),
+    );
+    receipt.insert(
+        "refresh_status".to_owned(),
+        serde_json::Value::String("refresh_failed".to_owned()),
+    );
+    receipt.insert(
+        "refresh_exit_status".to_owned(),
+        serde_json::Value::String(status.to_string()),
+    );
+    if !stderr.trim().is_empty() {
+        receipt.insert(
+            "refresh_stderr".to_owned(),
+            serde_json::Value::String(stderr.trim().to_owned()),
+        );
+    }
+    receipt.insert(
+        "message".to_owned(),
+        serde_json::Value::String(message.to_owned()),
+    );
+    serde_json::Value::Object(receipt)
+}
+
+fn refresh_spawn_failure_receipt(installed_version: &str, message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "binary_updated": true,
+        "version": installed_version,
+        "refresh_binary_version": serde_json::Value::Null,
+        "refresh_status": "spawn_failed",
+        "message": message,
+    })
+}
+
+fn refresh_failed_without_receipt(
+    installed_version: &str,
+    status: &str,
+    message: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "binary_updated": true,
+        "version": installed_version,
+        "refresh_binary_version": serde_json::Value::Null,
+        "refresh_status": status,
+        "message": message,
+    })
 }
 
 /// `<binary> --version` reduced to the bare semver, or None when it cannot be

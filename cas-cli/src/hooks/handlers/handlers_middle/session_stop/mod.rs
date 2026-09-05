@@ -569,7 +569,7 @@ pub(crate) fn emit_worker_final_git_state(
         &gs.pushed_ref
     };
     let summary = format!(
-        "checkpoint git-state: {} @ {} [{}] [{}] ahead:{} behind:{} PR:{}",
+        "checkpoint git-state: {} @ {} [{}] [{}] ahead:{} behind:{} PR: {}",
         gs.branch,
         crate::mcp::tools::service::factory_ops::head_sha_for_display(&gs.head_sha),
         dirty_tag,
@@ -592,7 +592,7 @@ pub(crate) fn emit_worker_final_git_state(
         "base_branch": gs.base_branch,
         "dirty": gs.dirty,
         "pushed_ref": gs.pushed_ref,
-        "pr_url": gs.pr_url,
+        "pr_url": gs.pr_url.to_string(),
     });
 
     let event = Event::new(
@@ -750,13 +750,17 @@ mod tests_b3 {
             summary.starts_with("checkpoint"),
             "summary must start with 'checkpoint'. Got: {summary}"
         );
+        assert!(
+            summary.contains("PR: unknown (branch not on origin locally)"),
+            "a missing local remote ref must remain distinguishable from no PR: {summary}"
+        );
     }
 
     /// AC2 (cas-5c0a): WorkerGitStatus is pub(crate) from factory_ops — reuse contract.
     /// This is a compile-time assertion; if it compiles, the contract holds.
     #[test]
     fn worker_git_status_struct_is_pub_crate_from_factory_ops() {
-        use crate::mcp::tools::service::factory_ops::WorkerGitStatus;
+        use crate::mcp::tools::service::factory_ops::{WorkerGitStatus, WorkerPrUrl};
         // Constructing it proves visibility — no runtime behavior needed.
         let _ = WorkerGitStatus {
             branch: "factory/x".to_string(),
@@ -766,7 +770,7 @@ mod tests_b3 {
             base_branch: "main".to_string(),
             dirty: false,
             pushed_ref: "none".to_string(),
-            pr_url: "none".to_string(),
+            pr_url: WorkerPrUrl::None,
             is_shared_checkout: false,
         };
     }

@@ -270,7 +270,7 @@ pub struct Lane {
 pub type LaneDefinition = Lane;
 
 /// Per-harness policy defaults. These retain the existing spawn defaults,
-/// independently of the lane recipes (including Astra/medium for taste).
+/// independently of the lane recipes (including Fable/medium for taste).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerDefaults {
@@ -1154,8 +1154,8 @@ candidates = ["codex_luna"]
             registry.lanes["standard"].candidates,
             ["codex_luna", "claude_opus"]
         );
-        assert_eq!(registry.lanes["taste"].candidates, ["codex_astra"]);
-        assert_eq!(registry.lanes["taste"].fallbacks, ["codex_luna"]);
+        assert_eq!(registry.lanes["taste"].candidates, ["claude_fable"]);
+        assert_eq!(registry.lanes["taste"].fallbacks, ["claude_opus"]);
         assert!(registry.lanes["taste"].no_fallback);
         assert_eq!(
             registry.lanes["heavy"].candidates,
@@ -1167,6 +1167,19 @@ candidates = ["codex_luna"]
         assert_eq!(haiku.allowed_efforts, [Effort::Low, Effort::Medium]);
         assert_eq!(haiku.default_effort, Effort::Low);
         assert_eq!(registry.recipes["claude_opus"].model, "claude-opus-5");
+        let fable = &registry.recipes["claude_fable"];
+        assert_eq!(fable.harness, SupervisorCli::Claude);
+        assert_eq!(fable.provider, "anthropic");
+        assert_eq!(fable.model, "claude-fable-5-1");
+        assert_eq!(fable.default_effort, Effort::Medium);
+        assert_eq!(fable.allowed_efforts, [Effort::Medium, Effort::High]);
+        assert_eq!(fable.required_capability.as_deref(), Some("claude-account"));
+        assert!(registry.recipes.contains_key("codex_astra"));
+        assert!(
+            !lane_references(&registry.lanes["taste"])
+                .iter()
+                .any(|candidate| candidate == "codex_astra")
+        );
         assert_eq!(
             registry.recipes["codex_terra"].status,
             RecipeStatus::Suspended
@@ -1196,12 +1209,18 @@ candidates = ["codex_luna"]
     }
 
     #[test]
-    fn taste_lane_resolves_astra_medium_and_fails_closed_when_unavailable() {
+    fn taste_lane_resolves_fable_medium_and_fails_closed_when_unavailable() {
         let registry = registry().unwrap();
-        let recipe = &registry.recipes["codex_astra"];
-        assert_eq!(recipe.provider, "openai");
-        assert_eq!(recipe.required_capability.as_deref(), Some("codex-account"));
-        assert!(recipe.allowed_efforts.contains(&Effort::Medium));
+        let recipe = &registry.recipes["claude_fable"];
+        assert_eq!(recipe.harness, SupervisorCli::Claude);
+        assert_eq!(recipe.provider, "anthropic");
+        assert_eq!(recipe.model, "claude-fable-5-1");
+        assert_eq!(recipe.default_effort, Effort::Medium);
+        assert_eq!(recipe.allowed_efforts, [Effort::Medium, Effort::High]);
+        assert_eq!(
+            recipe.required_capability.as_deref(),
+            Some("claude-account")
+        );
         let now = CapabilitySnapshot::now_ms();
         for availability in [
             CapabilityAvailability::Unknown,
@@ -1213,20 +1232,14 @@ candidates = ["codex_luna"]
                 CapabilityEvidence::new(availability, now),
             );
             for decision in resolve_lane_specs("taste", 2, &snapshot).unwrap() {
-                assert_eq!(decision.recipe_id, "codex_astra");
-                assert_eq!(decision.spec.cli, SupervisorCli::Codex);
-                assert_eq!(decision.spec.model.as_deref(), Some("gpt-6-astra"));
+                assert_eq!(decision.recipe_id, "claude_fable");
+                assert_eq!(decision.spec.cli, SupervisorCli::Claude);
+                assert_eq!(decision.spec.model.as_deref(), Some("claude-fable-5-1"));
                 assert_eq!(decision.spec.effort, Some(Effort::Medium));
                 assert!(decision.warnings.is_empty());
                 validate_explicit(&decision.spec, &snapshot).unwrap();
                 let mut explicit = decision.spec;
-                for effort in [
-                    Effort::Minimal,
-                    Effort::Low,
-                    Effort::Medium,
-                    Effort::High,
-                    Effort::XHigh,
-                ] {
+                for effort in [Effort::Medium, Effort::High] {
                     explicit.effort = Some(effort);
                     validate_explicit(&explicit, &snapshot).unwrap();
                 }
@@ -1237,7 +1250,7 @@ candidates = ["codex_luna"]
             recipe_route_identity(recipe, "default"),
             CapabilityEvidence::new(CapabilityAvailability::Unavailable, now),
         );
-        for alternative in ["claude_opus", "codex_luna"] {
+        for alternative in ["claude_opus"] {
             snapshot.record(
                 recipe_route_identity(&registry.recipes[alternative], "default"),
                 CapabilityEvidence::new(CapabilityAvailability::Available, now),

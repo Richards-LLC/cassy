@@ -38,6 +38,16 @@ someone is actually working on (`in_progress`, `blocked`, `awaiting_merge`)
 drops out, and the sweep concludes an in-flight issue was never tasked. List
 everything and ignore the closed ones yourself.
 
+## Issue routing
+
+The sweep must preserve component ownership. Resolve the four destinations
+with `cas config get issues.repo`, `cas config get issues.components.cassy`,
+`cas config get issues.components.mecha_cassy`, and
+`cas config get issues.components.cloud`. Use `issues.repo` for the current
+project, the Cassy component key for runtime/hooks/MCP/factory/skill defects,
+the MechaCassy key for Slack hub defects, and the Cloud key for sync,
+relay, or pairing defects. If you hit a bug during operation, file a ticket in the matching repo before moving on; do not infer a destination from git remotes.
+
 ## 1. List open issues
 
 Fetch the open issues with their bodies **and comment counts**. An issue whose

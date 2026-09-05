@@ -234,6 +234,7 @@ impl CheckGroup {
             "configuration" | "mcp config" | "mcp stdio upstreams" | "sync target" | "models" => {
                 Self::Config
             }
+            "issue repositories" => Self::Config,
             "integrations" | "mecha-cassy" => Self::Integrations,
             "user skills" => Self::Config,
             name if name.starts_with("integration") => Self::Integrations,
@@ -545,6 +546,24 @@ fn memory_decay_check(cas_root: &Path) -> Check {
             "Memory decay (last cycle): unavailable (no completed decay cycle recorded)".to_string()
         });
     Check::new("memory decay", CheckStatus::Ok, message)
+}
+
+/// Render the resolved issue destinations as one healthy Config row. The
+/// project destination can be unset, but component destinations are always
+/// available from compiled defaults; neither condition is a doctor warning.
+fn issue_repositories_check(config: &Config) -> Check {
+    let repos = config.issue_repo_registry();
+    Check::new(
+        "issue repositories",
+        CheckStatus::Ok,
+        format!(
+            "project={} | cassy={} | mecha_cassy={} | cloud={}",
+            repos.project.as_deref().unwrap_or("<unset>"),
+            repos.cassy,
+            repos.mecha_cassy,
+            repos.cloud,
+        ),
+    )
 }
 
 /// Report the routable supervisor population for every factory session that
@@ -1040,6 +1059,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                     }
                 ),
             });
+            checks.push(issue_repositories_check(&config));
         }
         Err(_) => {
             checks.push(Check {
@@ -1047,6 +1067,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 status: CheckStatus::Warning,
                 message: "Using defaults (no config.toml found)".to_string(),
             });
+            checks.push(issue_repositories_check(&Config::default()));
         }
     }
 
@@ -3793,6 +3814,19 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn issue_repository_doctor_row_resolves_defaults_without_warning() {
+        let check = issue_repositories_check(&Config::default());
+        assert_eq!(check.name, "issue repositories");
+        assert!(matches!(check.status, CheckStatus::Ok));
+        assert!(check.message.contains("project=<unset>"));
+        assert!(check.message.contains("cassy=Richards-LLC/cassy"));
+        assert!(check.message.contains("mecha_cassy=Richards-LLC/mecha-cassy"));
+        assert!(check
+            .message
+            .contains("cloud=Richards-LLC/petra-stella-cloud"));
+    }
 
     #[test]
     fn grouped_report_uses_sections_remediation_and_a_verbatim_summary() {

@@ -796,6 +796,48 @@ describe("wire-v1 reverse pairing", () => {
     expect(JSON.parse(String(hubInit?.body))).toMatchObject({ controller_origin: request.controllerOrigin, requested_scopes: ["machine-read"] });
   });
 
+  it("completes final pairing and leaves a usable active machine record", async () => {
+    const backend = new MemoryMachineCatalogBackend();
+    const catalog = new MachineCatalog(backend);
+    const privateKey = {} as CryptoKey;
+    const invitation = {
+      kind: "invitation" as const,
+      token: "one-time-token",
+      hubId: "machine-uuid",
+      hubUrl: "https://workstation.tail.example",
+      machineLabel: "Studio workstation",
+      controllerOrigin: request.controllerOrigin,
+      scopes: ["machine-read"] as const,
+    };
+
+    const machine = await exchangePendingPairing({
+      invitation,
+      controllerOrigin: request.controllerOrigin,
+      deviceLabel: "Browser",
+      operatorLabel: "Operator",
+      fetcher: async () => response(200, {
+        device_id: "device",
+        credential_id: "credential",
+        credential: "opaque",
+        expires_at: "2027-01-01T00:00:00Z",
+        scopes: ["machine-read"],
+      }),
+      createKey: async () => ({ privateKey, publicKey: { kty: "EC" } }),
+      installationGeneration: 1,
+      stagePersisted: (candidate, identity) => catalog.stage(candidate, identity),
+      activatePersisted: (identity, signal) => catalog.activate(identity, signal),
+      rollbackPersisted: (identity) => catalog.rollback(identity),
+    });
+
+    expect(machine).toMatchObject({
+      id: invitation.hubId,
+      baseUrl: invitation.hubUrl,
+      credentialId: "credential",
+      privateKey,
+    });
+    await expect(catalog.snapshot()).resolves.toEqual({ machines: [machine], pendingCleanup: 0 });
+  });
+
   it("serializes acknowledgement from the shared fixture to the explicit relay", async () => {
     const acknowledge = await fixture("acknowledge-request");
     const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => response(204));

@@ -1668,6 +1668,7 @@ mod tests {
         let mut set = crate::config::Config::default();
         set.issues = Some(crate::config::IssuesConfig {
             repo: Some("owner/cas".to_string()),
+            ..crate::config::IssuesConfig::default()
         });
         assert!(
             build_session_start_issues_target_banner_sized(&cas_root, &set).is_none(),
@@ -1677,6 +1678,7 @@ mod tests {
         let mut blank = crate::config::Config::default();
         blank.issues = Some(crate::config::IssuesConfig {
             repo: Some("   ".to_string()),
+            ..crate::config::IssuesConfig::default()
         });
         assert!(
             build_session_start_issues_target_banner_sized(&cas_root, &blank).is_some(),

@@ -29,18 +29,28 @@ Both jobs upload a transcript artifact, even when their assertions fail.
 
 - **macOS:** `macos-latest` must report `Darwin` and `arm64`. The real
   published installer runs with a clean HOME, wires `.zshenv` without a tty,
+  verifies the archive against its published GitHub Release SHA-256 before
+  extraction,
   proves `cas --version` through a fresh zsh login shell, checks that the
   installed binary has no `com.apple.quarantine` attribute, and runs bare
   `cas` plus `cas doctor` from another fresh login shell.
 - **Linux:** `ubuntu-latest` runs an `ubuntu:24.04` container with only bash,
   curl, certificates, coreutils, grep, and tar installed. The job asserts that
-  `rustc` is absent, then performs the same clean-HOME install and fresh bash
-  login-shell checks.
+  `rustc` is absent, then performs the same receipt-verified clean-HOME install
+  and fresh bash login-shell checks.
 
 The transcript greps the plain-language contracts as well as checking exit
-codes: `Cassy installed successfully!`, `A new terminal can run \`cas\`.`, the
+codes: `Verified SHA-256 against the published GitHub release receipt.`,
+`Cassy installed successfully!`, `A new terminal can run \`cas\`.`, the
 fresh-machine `Welcome to Cassy. Run \`cas init\`...` hint, and the doctor
 message that says to run `cas init`.
+
+The receipt establishes corruption detection only. GitHub serves both the
+archive and its per-asset digest under the repository's release-publishing
+authority, so this check does not resist an actor able to substitute both.
+There is currently no independent Cassy signing key or attestation identity;
+claiming substitution resistance would first require naming and operating that
+separate trust root.
 
 ## Release checklist and honest limits
 

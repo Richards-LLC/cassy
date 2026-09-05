@@ -1885,7 +1885,8 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
 /// first task to Blocked.
 #[tokio::test]
 async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipts_cas_6c50() {
-    let (temp, service, supervisor_id) = setup_cas_with_supervisor_session();
+    let (temp, service) = setup_cas_as(AgentRole::Supervisor);
+    let supervisor_id = format!("test-session-{}", std::process::id());
     let _env_lock = env_test_lock();
     let _supervisor_env = ScopedSupervisorEnv::new();
     let cas_dir = temp.path().join(".cas");
@@ -1956,6 +1957,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     commit_receipt: None,
                 }),
                 None,
+                None,
                 Some(NegativeResultCloseRequest {
                     artifact_path: None,
                     reference: None,
@@ -2009,6 +2011,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     commit_receipt: None,
                 }),
                 None,
+                None,
                 Some(NegativeResultCloseRequest {
                     artifact_path: None,
                     reference: None,
@@ -2048,6 +2051,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     search_manifest: None,
                     commit_receipt: None,
                 }),
+                None,
                 None,
                 Some(NegativeResultCloseRequest {
                     artifact_path: Some(proof.display().to_string()),
@@ -6923,6 +6927,400 @@ async fn inline_no_code_intent_survives_dispatch_and_approved_proof_cas_099d() {
     );
 }
 
+/// cas-3924 acceptance fixture: a registered supervisor has a completed,
+/// passing external-production receipt for an intentionally zero-CAS-commit
+/// deployment task. The explicit receipt ID satisfies only the zero-commit
+/// delivery-evidence branch. Keep the delegation receipt separate from
+/// `completion_receipt`, which is the worker-owned transactional handoff JSON
+/// and requires a live worker lease, repository tips, and a worker branch.
+fn reserve_external_receipt_fixture(
+    store: &cas_store::SqliteDelegationReceiptStore,
+    factory_session_id: &str,
+    epic_id: &str,
+    task_id: &str,
+    gate_kind: &str,
+    digest: &str,
+) -> cas_store::DelegationReceipt {
+    let reservation = cas_store::DelegationReserveRequest {
+        factory_session_id: factory_session_id.to_string(),
+        epic_id: epic_id.to_string(),
+        task_id: task_id.to_string(),
+        gate_kind: gate_kind.to_string(),
+        request_digest: digest.to_string(),
+        reserved_amount: 1,
+    };
+    let budget = cas_store::DelegationBudget {
+        max_per_run: 1,
+        max_active_per_factory_session: 100,
+        max_active_per_epic: 100,
+    };
+    match store
+        .reserve_or_resume(&reservation, &budget)
+        .expect("reserve external receipt")
+    {
+        cas_store::DelegationReserveOutcome::Created(receipt) => receipt,
+        other => panic!("expected new external receipt, got {other:?}"),
+    }
+}
+
+async fn close_with_external_receipt_fixture(
+    service: &cas::mcp::CasService,
+    task_id: &str,
+    receipt_id: Option<&str>,
+    supervisor_override: bool,
+) -> String {
+    let mut request = serde_json::json!({
+        "action": "close",
+        "id": task_id,
+        "reason": "External deployment close fixture",
+    });
+    if let Some(receipt_id) = receipt_id {
+        request["external_verification_receipt"] = serde_json::json!(receipt_id);
+    }
+    if supervisor_override {
+        request["supervisor_override"] = serde_json::json!(true);
+    }
+    extract_text(
+        service
+            .task(Parameters(task_req(request)))
+            .await
+            .expect("close result"),
+    )
+}
+
+#[tokio::test]
+async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924() {
+    let (temp, core) = setup_cas_as(AgentRole::Supervisor);
+    let supervisor_id = format!("test-session-{}", std::process::id());
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let factory_session = "cas-3924-fixture-session";
+    let _env = ScopedFactoryEnv::apply(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some(factory_session)),
+    ]);
+
+    // Close-time factory enforcement resolves the project repository from the
+    // parent of the CAS root. Seed that repository separately from the worker
+    // checkout; `.cas/` is intentionally ignored and contains only fixture
+    // state.
+    proof_boundary_git(temp.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(temp.path().join(".gitignore"), ".cas/\n").expect("ignore CAS state");
+    proof_boundary_git(temp.path(), &["add", ".gitignore"]);
+    proof_boundary_git(temp.path(), &["commit", "-q", "-m", "seed project"]);
+
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let mut supervisor = agent_store.get(&supervisor_id).expect("supervisor");
+    supervisor.factory_session = Some(factory_session.to_string());
+    supervisor.heartbeat();
+    agent_store.update(&supervisor).expect("update supervisor");
+
+    let worker_path = temp.path().join("cas-3924-external-worker");
+    std::fs::create_dir_all(&worker_path).expect("create worker checkout");
+    proof_boundary_git(&worker_path, &["init", "-q", "-b", "main"]);
+    std::fs::write(worker_path.join("seed.txt"), "seed\n").expect("seed checkout");
+    proof_boundary_git(&worker_path, &["add", "seed.txt"]);
+    proof_boundary_git(&worker_path, &["commit", "-q", "-m", "seed"]);
+    proof_boundary_git(
+        &worker_path,
+        &["checkout", "-q", "-b", "factory/cas-3924-external-worker"],
+    );
+
+    let worktree_store = open_worktree_store(&cas_dir).expect("worktree store");
+    worktree_store.init().expect("initialize worktree store");
+    let worktree_id = Worktree::generate_id();
+    worktree_store
+        .add(&Worktree::new(
+            worktree_id.clone(),
+            "factory/cas-3924-external-worker".to_string(),
+            "main".to_string(),
+            worker_path,
+        ))
+        .expect("record worker checkout");
+
+    let task_store = open_task_store(&cas_dir).expect("task store");
+    let mut epic = cas::types::Task::new(
+        "cas-3924-fixture-epic".to_string(),
+        "External receipt fixture epic".to_string(),
+    );
+    epic.task_type = cas::types::TaskType::Epic;
+    task_store.add(&epic).expect("add fixture epic");
+    let task = cas::types::Task::new(
+        "cas-3924-fixture-task".to_string(),
+        "External deployment with no CAS source commit".to_string(),
+    );
+    task_store
+        .create_atomic(&task, &[], Some(&epic.id), None)
+        .expect("add fixture task");
+    let mut task = task_store.get(&task.id).expect("fixture task");
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("cas-3924-external-worker".to_string());
+    task.worktree_id = Some(worktree_id);
+
+    let receipt_store =
+        cas_store::SqliteDelegationReceiptStore::open(&cas_dir).expect("delegation receipt store");
+    let receipt = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-fixture-request-digest",
+    );
+    let receipt = receipt_store
+        .record_terminal(
+            &receipt.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-fixture",
+        )
+        .expect("complete passing external receipt");
+    assert_eq!(receipt.task_id, task.id);
+    assert_eq!(receipt.epic_id, epic.id);
+    assert_eq!(receipt.factory_session_id, factory_session);
+    assert_eq!(receipt.state, cas_store::DelegationReceiptState::Completed);
+    assert_eq!(
+        receipt.terminal_verdict,
+        Some(cas_store::DelegationVerdict::Pass)
+    );
+    assert!(receipt.evidence_reference.is_some());
+
+    task_store.update(&task).expect("persist fixture task");
+    let service = cas::mcp::CasService::new(core, None);
+
+    let assert_rejected = |response: &str, expected: &str| {
+        assert!(
+            response.contains(expected),
+            "expected `{expected}` in: {response}"
+        );
+        assert_eq!(
+            task_store.get(&task.id).expect("refused task").status,
+            TaskStatus::InProgress
+        );
+    };
+
+    let ordinary = close_with_external_receipt_fixture(&service, &task.id, None, true).await;
+    assert_rejected(&ordinary, "ZERO-COMMIT CLOSE ON CODE TASK");
+    assert!(
+        ordinary.contains("external_verification_receipt=<dr-id>")
+            && ordinary.contains("supervisor_override` alone does not satisfy"),
+        "ordinary rejection must give the exact verified external-delivery recovery path: {ordinary}"
+    );
+
+    let malformed =
+        close_with_external_receipt_fixture(&service, &task.id, Some("not-a-receipt"), true).await;
+    assert_rejected(&malformed, "must be a complete delegation receipt ID");
+
+    let missing = close_with_external_receipt_fixture(
+        &service,
+        &task.id,
+        Some("dr-000000000000000000000000"),
+        true,
+    )
+    .await;
+    assert_rejected(&missing, "was not found in this Cassy project");
+
+    let incomplete = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-incomplete",
+    );
+    let incomplete_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&incomplete.id), true).await;
+    assert_rejected(&incomplete_response, "a completed receipt is required");
+
+    let nonpass = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-nonpass",
+    );
+    let nonpass = receipt_store
+        .record_terminal(
+            &nonpass.id,
+            cas_store::DelegationVerdict::Fail,
+            1,
+            "viktor://run/cas-3924-failed",
+        )
+        .expect("complete nonpassing receipt");
+    let nonpass_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&nonpass.id), true).await;
+    assert_rejected(
+        &nonpass_response,
+        "terminal verdict `fail`; pass is required",
+    );
+
+    let mut other_task = cas::types::Task::new(
+        "cas-3924-other-task".to_string(),
+        "Unrelated external deployment".to_string(),
+    );
+    other_task.status = TaskStatus::InProgress;
+    task_store
+        .create_atomic(&other_task, &[], Some(&epic.id), None)
+        .expect("add other task");
+    let wrong_task = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &other_task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-wrong-task",
+    );
+    let wrong_task = receipt_store
+        .record_terminal(
+            &wrong_task.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-wrong-task",
+        )
+        .expect("complete wrong-task receipt");
+    let wrong_task_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&wrong_task.id), true).await;
+    assert_rejected(
+        &wrong_task_response,
+        "belongs to task `cas-3924-other-task`",
+    );
+
+    let wrong_epic = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        "cas-3924-other-epic",
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-wrong-epic",
+    );
+    let wrong_epic = receipt_store
+        .record_terminal(
+            &wrong_epic.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-wrong-epic",
+        )
+        .expect("complete wrong-epic receipt");
+    let wrong_epic_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&wrong_epic.id), true).await;
+    assert_rejected(
+        &wrong_epic_response,
+        "belongs to epic `cas-3924-other-epic`",
+    );
+
+    let wrong_session = reserve_external_receipt_fixture(
+        &receipt_store,
+        "cas-3924-other-session",
+        &epic.id,
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-wrong-session",
+    );
+    let wrong_session = receipt_store
+        .record_terminal(
+            &wrong_session.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-wrong-session",
+        )
+        .expect("complete wrong-session receipt");
+    let wrong_session_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&wrong_session.id), true)
+            .await;
+    assert_rejected(
+        &wrong_session_response,
+        "not the registered supervisor's current factory session",
+    );
+
+    let wrong_gate = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &task.id,
+        "some_other_gate",
+        "cas-3924-wrong-gate",
+    );
+    let wrong_gate = receipt_store
+        .record_terminal(
+            &wrong_gate.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-wrong-gate",
+        )
+        .expect("complete wrong-gate receipt");
+    let wrong_gate_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&wrong_gate.id), true).await;
+    assert_rejected(&wrong_gate_response, "some_other_gate");
+
+    let missing_evidence = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-missing-evidence",
+    );
+    let missing_evidence = receipt_store
+        .record_terminal(
+            &missing_evidence.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-temporary-evidence",
+        )
+        .expect("complete receipt before fixture corruption");
+    // Corrupt only this test's TempDir database to prove that close revalidates
+    // persisted evidence instead of trusting the receipt's earlier shape.
+    let fixture_db = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("fixture db");
+    fixture_db
+        .execute(
+            "UPDATE delegation_receipts SET evidence_reference = '' WHERE id = ?1",
+            [&missing_evidence.id],
+        )
+        .expect("strip fixture evidence");
+    let missing_evidence_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&missing_evidence.id), true)
+            .await;
+    assert_rejected(
+        &missing_evidence_response,
+        "has no non-empty evidence reference",
+    );
+
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let mut caller = agent_store.get(&supervisor_id).expect("supervisor");
+    caller.role = AgentRole::Worker;
+    agent_store.update(&caller).expect("demote fixture caller");
+    let worker_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&receipt.id), false).await;
+    assert_rejected(&worker_response, "only a live registered supervisor");
+    caller.role = AgentRole::Supervisor;
+    caller.heartbeat();
+    agent_store
+        .update(&caller)
+        .expect("restore fixture supervisor");
+
+    let response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&receipt.id), true).await;
+    assert!(
+        response.contains("Closed task:"),
+        "passing exact external receipt must close the task: {response}"
+    );
+    let closed = task_store.get(&task.id).expect("closed task");
+    assert_eq!(closed.status, TaskStatus::Closed);
+    assert!(closed.notes.contains(&receipt.id), "{}", closed.notes);
+    assert!(
+        closed.notes.contains("viktor://run/cas-3924-fixture"),
+        "{}",
+        closed.notes
+    );
+    let persisted_receipt = receipt_store.get(&receipt.id).expect("receipt remains");
+    assert_eq!(
+        persisted_receipt.terminal_verdict,
+        Some(cas_store::DelegationVerdict::Pass)
+    );
+}
+
 /// Narrowed jail — positive case.
 ///
 /// A factory worker who holds an in-progress task with no approved
@@ -7555,56 +7953,6 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
 // exemptions, and give a concrete remediation path.
 // =============================================================================
 
-/// Minimal CasCore rooted in `temp` with a *Supervisor-role* agent
-/// pre-set as the current session. `support::setup_cas` always registers a
-/// Standard-role agent and pins it via OnceLock, so we can't reuse it for
-/// this test — we need the verification-tools authz path to see
-/// `agent.role == AgentRole::Supervisor`.
-///
-/// Mirrors `support::setup_cas`'s factory-env-clearing block (it briefly
-/// holds `env_test_lock()` for the mutation, matching the support.rs
-/// ordering contract). Callers should `let _env_lock = env_test_lock();`
-/// **after** this returns to hold the lock for the test body — std `Mutex`
-/// is not re-entrant, so taking it before would deadlock.
-///
-/// Returns the temp dir guard, the core (used by tests as `service` —
-/// MCP tool methods are defined directly on `CasCore`), and the supervisor
-/// session id.
-fn setup_cas_with_supervisor_session() -> (TempDir, cas::mcp::CasCore, String) {
-    // Clear factory env vars under the shared env lock so a parallel
-    // sibling test cannot observe a torn read. Match the four vars
-    // `support::setup_cas` clears so the two helpers do not drift.
-    {
-        let _env_guard = env_test_lock();
-        // SAFETY: we hold the process-wide env lock for the duration of
-        // this block; no other test thread can observe a torn env read.
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-            std::env::remove_var("CAS_FACTORY_MODE");
-            std::env::remove_var("CAS_FACTORY_SUPERVISOR_CLI");
-            std::env::remove_var("CAS_FACTORY_WORKER_CLI");
-        }
-    }
-
-    let temp = TempDir::new().expect("temp dir");
-    let cas_root = init_cas_dir(temp.path()).expect("init_cas_dir");
-
-    let agent_store = open_agent_store(&cas_root).expect("open agent store");
-    let supervisor_id = format!("supervisor-test-cas-a90f3-{}", std::process::id());
-    let mut supervisor =
-        cas::types::Agent::new(supervisor_id.clone(), "alpha-supervisor".to_string());
-    supervisor.role = cas::types::AgentRole::Supervisor;
-    supervisor.heartbeat();
-    agent_store
-        .register(&supervisor)
-        .expect("register supervisor");
-
-    let core = cas::mcp::CasCore::with_daemon(cas_root, None, None);
-    core.set_agent_id_for_testing(supervisor_id.clone());
-
-    (temp, core, supervisor_id)
-}
-
 /// A registered Supervisor role is server-authenticated external authority,
 /// even when a live worker owns the task. Caller-supplied names and environment
 /// claims are irrelevant; the persisted provenance must reflect the role gate.
@@ -7616,7 +7964,8 @@ async fn test_registered_supervisor_can_verify_live_worker_task() {
     // order would deadlock. Clearing the factory env vars ensures
     // `worker_harness_from_env()` falls back to Claude (subagents=true)
     // and the supervisor authz branch actually runs.
-    let (temp, service, supervisor_id) = setup_cas_with_supervisor_session();
+    let (temp, service) = setup_cas_as(AgentRole::Supervisor);
+    let supervisor_id = format!("test-session-{}", std::process::id());
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");

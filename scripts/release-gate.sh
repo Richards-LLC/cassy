@@ -511,7 +511,7 @@ assert_no_cas_ancestor() {
 
 make_archive_path() {
     local name command
-    for name in cargo rustc git sh bash jq python3; do
+    for name in cargo rustc cargo-nextest git sh bash jq python3; do
         command="$(command -v "$name" || true)"
         [[ -n "$command" ]] || {
             printf 'archive-mode: required archive command is missing: %s\n' "$name"

@@ -14351,6 +14351,24 @@ effort = "high"
         (tmp, sha)
     }
 
+    fn setup_git_repo_with_pushed_factory_branch(worker: &str) -> tempfile::TempDir {
+        let (tmp, _expected_sha) = setup_git_repo_with_factory_branch(worker);
+        let remote_ref = format!("refs/remotes/origin/factory/{worker}");
+        run_git_ok(tmp.path(), &["update-ref", remote_ref.as_str(), "HEAD"]);
+        tmp
+    }
+
+    #[cfg(unix)]
+    fn write_gh_stub(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("gh-stub");
+        std::fs::write(&path, script).expect("write gh stub");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("make gh stub executable");
+        path
+    }
+
     fn setup_factory_project_with_worker_worktrees(
         workers: &[&str],
     ) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -14819,6 +14837,73 @@ effort = "high"
         assert!(
             !rendered.contains("PR: none"),
             "failed gh lookup must not masquerade as no PR: {rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_git_status_reports_gh_failure_as_redacted_unknown() {
+        let tmp = setup_git_repo_with_pushed_factory_branch("gh-failure-worker");
+        let secret = "synthetic-gh-secret";
+        let gh = write_gh_stub(
+            tmp.path(),
+            &format!(
+                "#!/bin/sh\nprintf '%s' 'auth/network failure: {secret}' >&2\nexit 7\n"
+            ),
+        );
+
+        let status = collect_worker_git_status_with_gh(tmp.path(), &gh);
+        assert_eq!(status.pr_url, WorkerPrUrl::Unknown("gh lookup failed"));
+        let rendered = format_worker_git_status(&status);
+        assert!(
+            rendered.contains("PR: unknown (gh lookup failed)"),
+            "auth/network gh failure must render as unknown: {rendered}"
+        );
+        assert!(
+            !rendered.contains("PR: none"),
+            "auth/network gh failure must not masquerade as no PR: {rendered}"
+        );
+        assert!(
+            !rendered.contains(secret),
+            "gh stderr secrets must not leak into worker status: {rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_git_status_reports_successful_empty_gh_as_definite_none() {
+        let tmp = setup_git_repo_with_pushed_factory_branch("gh-empty-worker");
+        let gh = write_gh_stub(tmp.path(), "#!/bin/sh\nexit 0\n");
+
+        let status = collect_worker_git_status_with_gh(tmp.path(), &gh);
+        assert_eq!(status.pr_url, WorkerPrUrl::None);
+        let rendered = format_worker_git_status(&status);
+        assert!(
+            rendered.contains("PR: none"),
+            "successful empty gh output must render as no PR: {rendered}"
+        );
+        assert!(
+            !rendered.contains("PR: unknown"),
+            "successful empty gh output must not render as unknown: {rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_git_status_preserves_successful_gh_url() {
+        let tmp = setup_git_repo_with_pushed_factory_branch("gh-url-worker");
+        let expected_url = "https://github.com/org/repo/pull/99";
+        let gh = write_gh_stub(
+            tmp.path(),
+            &format!("#!/bin/sh\nprintf '%s\\n' '{expected_url}'\n"),
+        );
+
+        let status = collect_worker_git_status_with_gh(tmp.path(), &gh);
+        assert_eq!(status.pr_url, WorkerPrUrl::Url(expected_url.to_string()));
+        let rendered = format_worker_git_status(&status);
+        assert!(
+            rendered.contains(&format!("PR: {expected_url}")),
+            "successful gh URL must be preserved by the renderer: {rendered}"
         );
     }
 

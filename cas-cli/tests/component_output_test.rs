@@ -370,7 +370,7 @@ fn redact_dynamic_values(s: &str) -> String {
     // that this check could not inspect a non-repository temp fixture, so keep
     // the snapshot independent of the installed Git wording (cas-58be).
     let git_not_repo_re = regex::Regex::new(
-        r"fatal:\s+not\s+a\s+git\s+repository\s+\((?:or\s+any\s+of\s+the\s+parent\s+directories\):\s+\.git|or\s+any\s+parent\s+up\s+to\s+mount\s+point\s+/\)\s+Stopping\s+at\s+filesystem\s+boundary\s+\(GIT_DISCOVERY_ACROSS_FILESYSTEM\s+not\s+set\)\.)",
+        r"fatal:\s+not\s+a\s+git\s+repository\s+\((?:or\s+any\s+of\s+the\s+parent\s+directories\):\s+\.git|or\s+any\s+parent\s+up\s+to\s+mount\s+point\s+/[^)\s]*\)\s+Stopping\s+at\s+filesystem\s+boundary\s+\(GIT_DISCOVERY_ACROSS_FILESYSTEM\s+not\s+set\)\.)",
     )
     .unwrap();
     // The grouped doctor renderer wraps non-OK messages at terminal width
@@ -417,6 +417,8 @@ fn doctor_snapshot_redaction_normalizes_git_not_repository_diagnostics() {
     for diagnostic in [
         "fatal: not a git repository (or any of the parent directories): .git",
         "fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).",
+        "fatal: not a git repository (or any parent up to mount point /mnt)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).",
+        "fatal: not a git repository (or any parent up to mount point /mnt/shockwave)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).",
     ] {
         assert_eq!(
             redact_dynamic_values(&format!("{prefix}{diagnostic})")),
@@ -424,4 +426,11 @@ fn doctor_snapshot_redaction_normalizes_git_not_repository_diagnostics() {
             "diagnostic must not make the doctor snapshot depend on Git version"
         );
     }
+
+    let unrelated = "fatal: not a git repository (permission denied while reading mount metadata)";
+    assert_eq!(
+        redact_dynamic_values(&format!("{prefix}{unrelated})")),
+        format!("{prefix}{unrelated})"),
+        "unrelated git diagnostics must remain visible"
+    );
 }

@@ -1075,7 +1075,9 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         if let Err(e) = std::fs::create_dir_all(&host_dir) {
             eprintln!("Warning: could not create ~/.cas/: {e}");
         } else {
-            let mut global_cfg = Config::load(&host_dir).unwrap_or_default();
+            // Do not turn a malformed host config into defaults before this
+            // mutation: saving those defaults would destroy the original.
+            let mut global_cfg = Config::load(&host_dir)?;
             set_supervisor_harness(&mut global_cfg, &effective_args.supervisor_cli);
             if let Err(e) = global_cfg.save(&host_dir) {
                 eprintln!("Warning: could not persist supervisor default: {e}");

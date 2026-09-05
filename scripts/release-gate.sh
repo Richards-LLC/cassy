@@ -523,7 +523,7 @@ make_archive_path() {
 }
 
 check_archive_mode() {
-    local archive_base archive_dir archive remap archive_tmp archive_path manifest package_dir status
+    local archive_base archive_dir archive remap archive_tmp archive_cargo_home archive_path status
     archive_base="$scratch_base"
     mkdir -p "$(dirname "$archive_base")"
     assert_no_cas_ancestor "$archive_base" || return 1
@@ -531,8 +531,9 @@ check_archive_mode() {
     archive="$archive_dir/suite.tar.zst"
     remap="$archive_dir/workspace-remap"
     archive_tmp="$archive_dir/tmp"
+    archive_cargo_home="$archive_dir/cargo-home"
     archive_bin="$archive_dir/bin"
-    mkdir -p "$remap" "$archive_tmp" "$archive_bin"
+    mkdir -p "$remap" "$archive_tmp" "$archive_cargo_home" "$archive_bin"
     [[ -f Cargo.toml ]] || {
         printf 'archive-mode: root Cargo.toml is missing\n'
         return 1
@@ -579,6 +580,7 @@ check_archive_mode() {
     if (
         cd "$archive_dir"
         env -u COLUMNS HOME="${HOME:-$archive_dir}" TMPDIR="$archive_tmp" \
+            CARGO_HOME="$archive_cargo_home" RUSTC_WRAPPER=/nonexistent/sccache \
             PATH="$archive_bin${archive_path:+:$archive_path}" \
             "$cargo_bin" nextest run --archive-file "$archive" \
             --workspace-remap "$remap" \

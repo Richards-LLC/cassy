@@ -1956,6 +1956,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     commit_receipt: None,
                 }),
                 None,
+                None,
                 Some(NegativeResultCloseRequest {
                     artifact_path: None,
                     reference: None,
@@ -2009,6 +2010,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     commit_receipt: None,
                 }),
                 None,
+                None,
                 Some(NegativeResultCloseRequest {
                     artifact_path: None,
                     reference: None,
@@ -2048,6 +2050,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     search_manifest: None,
                     commit_receipt: None,
                 }),
+                None,
                 None,
                 Some(NegativeResultCloseRequest {
                     artifact_path: Some(proof.display().to_string()),
@@ -6923,15 +6926,70 @@ async fn inline_no_code_intent_survives_dispatch_and_approved_proof_cas_099d() {
     );
 }
 
-/// cas-3924 diagnosis fixture: a registered supervisor has a completed,
+/// cas-3924 acceptance fixture: a registered supervisor has a completed,
 /// passing external-production receipt for an intentionally zero-CAS-commit
-/// deployment task. The current close path still rejects it at the ordinary
-/// code-task zero-commit gate. Keep the delegation receipt separate from
+/// deployment task. The explicit receipt ID satisfies only the zero-commit
+/// delivery-evidence branch. Keep the delegation receipt separate from
 /// `completion_receipt`, which is the worker-owned transactional handoff JSON
 /// and requires a live worker lease, repository tips, and a worker branch.
+fn reserve_external_receipt_fixture(
+    store: &cas_store::SqliteDelegationReceiptStore,
+    factory_session_id: &str,
+    epic_id: &str,
+    task_id: &str,
+    gate_kind: &str,
+    digest: &str,
+) -> cas_store::DelegationReceipt {
+    let reservation = cas_store::DelegationReserveRequest {
+        factory_session_id: factory_session_id.to_string(),
+        epic_id: epic_id.to_string(),
+        task_id: task_id.to_string(),
+        gate_kind: gate_kind.to_string(),
+        request_digest: digest.to_string(),
+        reserved_amount: 1,
+    };
+    let budget = cas_store::DelegationBudget {
+        max_per_run: 1,
+        max_active_per_factory_session: 100,
+        max_active_per_epic: 100,
+    };
+    match store
+        .reserve_or_resume(&reservation, &budget)
+        .expect("reserve external receipt")
+    {
+        cas_store::DelegationReserveOutcome::Created(receipt) => receipt,
+        other => panic!("expected new external receipt, got {other:?}"),
+    }
+}
+
+async fn close_with_external_receipt_fixture(
+    service: &cas::mcp::CasService,
+    task_id: &str,
+    receipt_id: Option<&str>,
+    supervisor_override: bool,
+) -> String {
+    let mut request = serde_json::json!({
+        "action": "close",
+        "id": task_id,
+        "reason": "External deployment close fixture",
+    });
+    if let Some(receipt_id) = receipt_id {
+        request["external_verification_receipt"] = serde_json::json!(receipt_id);
+    }
+    if supervisor_override {
+        request["supervisor_override"] = serde_json::json!(true);
+    }
+    extract_text(
+        service
+            .task(Parameters(task_req(request)))
+            .await
+            .expect("close result"),
+    )
+}
+
 #[tokio::test]
-async fn supervisor_external_pass_receipt_currently_rejected_by_close_cas_3924() {
-    let (temp, service, supervisor_id) = setup_cas_with_supervisor_session();
+async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924() {
+    let (temp, core, supervisor_id) = setup_cas_with_supervisor_session();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     let factory_session = "cas-3924-fixture-session";
@@ -6998,28 +7056,16 @@ async fn supervisor_external_pass_receipt_currently_rejected_by_close_cas_3924()
     task.assignee = Some("cas-3924-external-worker".to_string());
     task.worktree_id = Some(worktree_id);
 
-    let receipt_store = cas_store::SqliteDelegationReceiptStore::open(&cas_dir)
-        .expect("delegation receipt store");
-    let reservation = cas_store::DelegationReserveRequest {
-        factory_session_id: factory_session.to_string(),
-        epic_id: epic.id.clone(),
-        task_id: task.id.clone(),
-        gate_kind: cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE.to_string(),
-        request_digest: "cas-3924-fixture-request-digest".to_string(),
-        reserved_amount: 1,
-    };
-    let budget = cas_store::DelegationBudget {
-        max_per_run: 1,
-        max_active_per_factory_session: 1,
-        max_active_per_epic: 1,
-    };
-    let receipt = match receipt_store
-        .reserve_or_resume(&reservation, &budget)
-        .expect("reserve external receipt")
-    {
-        cas_store::DelegationReserveOutcome::Created(receipt) => receipt,
-        other => panic!("expected new external receipt, got {other:?}"),
-    };
+    let receipt_store =
+        cas_store::SqliteDelegationReceiptStore::open(&cas_dir).expect("delegation receipt store");
+    let receipt = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-fixture-request-digest",
+    );
     let receipt = receipt_store
         .record_terminal(
             &receipt.id,
@@ -7038,35 +7084,233 @@ async fn supervisor_external_pass_receipt_currently_rejected_by_close_cas_3924()
     );
     assert!(receipt.evidence_reference.is_some());
 
-    // The current close schema has no external receipt-ID field. Preserve the
-    // receipt as task-scoped metadata and cite it in the supervisor audit
-    // reason; neither can currently satisfy check_zero_commit_close.
-    task.external_ref = Some(format!("delegation://receipt/{}", receipt.id));
-    task_store.update(&task).expect("persist receipt reference");
-    let response = extract_text(
-        service
-            .cas_task_close(Parameters(TaskCloseRequest {
-                stranded_branch_override: None,
-                id: task.id.clone(),
-                reason: Some(format!(
-                    "External deployment passed; receipt {} evidence viktor://run/cas-3924-fixture",
-                    receipt.id
-                )),
-                supervisor_override: Some(true),
-                legacy_bypass_code_review: None,
-                search_manifest: None,
-                commit_receipt: None,
-            }))
-            .await
-            .expect("close returns a refusal result"),
-    );
+    task_store.update(&task).expect("persist fixture task");
+    let service = cas::mcp::CasService::new(core, None);
+
+    let assert_rejected = |response: &str, expected: &str| {
+        assert!(
+            response.contains(expected),
+            "expected `{expected}` in: {response}"
+        );
+        assert_eq!(
+            task_store.get(&task.id).expect("refused task").status,
+            TaskStatus::InProgress
+        );
+    };
+
+    let ordinary = close_with_external_receipt_fixture(&service, &task.id, None, true).await;
+    assert_rejected(&ordinary, "ZERO-COMMIT CLOSE ON CODE TASK");
     assert!(
-        response.contains("ZERO-COMMIT CLOSE ON CODE TASK"),
-        "current close must expose the zero-commit rejection: {response}"
+        ordinary.contains("external_verification_receipt=<dr-id>")
+            && ordinary.contains("supervisor_override` alone does not satisfy"),
+        "ordinary rejection must give the exact verified external-delivery recovery path: {ordinary}"
     );
-    assert_eq!(
-        task_store.get(&task.id).expect("refused task").status,
-        TaskStatus::InProgress
+
+    let malformed =
+        close_with_external_receipt_fixture(&service, &task.id, Some("not-a-receipt"), true).await;
+    assert_rejected(&malformed, "must be a complete delegation receipt ID");
+
+    let missing = close_with_external_receipt_fixture(
+        &service,
+        &task.id,
+        Some("dr-000000000000000000000000"),
+        true,
+    )
+    .await;
+    assert_rejected(&missing, "was not found in this Cassy project");
+
+    let incomplete = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-incomplete",
+    );
+    let incomplete_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&incomplete.id), true).await;
+    assert_rejected(&incomplete_response, "a completed receipt is required");
+
+    let nonpass = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-nonpass",
+    );
+    let nonpass = receipt_store
+        .record_terminal(
+            &nonpass.id,
+            cas_store::DelegationVerdict::Fail,
+            1,
+            "viktor://run/cas-3924-failed",
+        )
+        .expect("complete nonpassing receipt");
+    let nonpass_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&nonpass.id), true).await;
+    assert_rejected(
+        &nonpass_response,
+        "terminal verdict `fail`; pass is required",
+    );
+
+    let mut other_task = cas::types::Task::new(
+        "cas-3924-other-task".to_string(),
+        "Unrelated external deployment".to_string(),
+    );
+    other_task.status = TaskStatus::InProgress;
+    task_store
+        .create_atomic(&other_task, &[], Some(&epic.id), None)
+        .expect("add other task");
+    let wrong_task = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &other_task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-wrong-task",
+    );
+    let wrong_task = receipt_store
+        .record_terminal(
+            &wrong_task.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-wrong-task",
+        )
+        .expect("complete wrong-task receipt");
+    let wrong_task_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&wrong_task.id), true).await;
+    assert_rejected(
+        &wrong_task_response,
+        "belongs to task `cas-3924-other-task`",
+    );
+
+    let wrong_epic = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        "cas-3924-other-epic",
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-wrong-epic",
+    );
+    let wrong_epic = receipt_store
+        .record_terminal(
+            &wrong_epic.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-wrong-epic",
+        )
+        .expect("complete wrong-epic receipt");
+    let wrong_epic_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&wrong_epic.id), true).await;
+    assert_rejected(
+        &wrong_epic_response,
+        "belongs to epic `cas-3924-other-epic`",
+    );
+
+    let wrong_session = reserve_external_receipt_fixture(
+        &receipt_store,
+        "cas-3924-other-session",
+        &epic.id,
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-wrong-session",
+    );
+    let wrong_session = receipt_store
+        .record_terminal(
+            &wrong_session.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-wrong-session",
+        )
+        .expect("complete wrong-session receipt");
+    let wrong_session_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&wrong_session.id), true)
+            .await;
+    assert_rejected(
+        &wrong_session_response,
+        "not the registered supervisor's current factory session",
+    );
+
+    let wrong_gate = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &task.id,
+        "some_other_gate",
+        "cas-3924-wrong-gate",
+    );
+    let wrong_gate = receipt_store
+        .record_terminal(
+            &wrong_gate.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-wrong-gate",
+        )
+        .expect("complete wrong-gate receipt");
+    let wrong_gate_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&wrong_gate.id), true).await;
+    assert_rejected(&wrong_gate_response, "some_other_gate");
+
+    let missing_evidence = reserve_external_receipt_fixture(
+        &receipt_store,
+        factory_session,
+        &epic.id,
+        &task.id,
+        cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE,
+        "cas-3924-missing-evidence",
+    );
+    let missing_evidence = receipt_store
+        .record_terminal(
+            &missing_evidence.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-temporary-evidence",
+        )
+        .expect("complete receipt before fixture corruption");
+    // Corrupt only this test's TempDir database to prove that close revalidates
+    // persisted evidence instead of trusting the receipt's earlier shape.
+    let fixture_db = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("fixture db");
+    fixture_db
+        .execute(
+            "UPDATE delegation_receipts SET evidence_reference = '' WHERE id = ?1",
+            [&missing_evidence.id],
+        )
+        .expect("strip fixture evidence");
+    let missing_evidence_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&missing_evidence.id), true)
+            .await;
+    assert_rejected(
+        &missing_evidence_response,
+        "has no non-empty evidence reference",
+    );
+
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let mut caller = agent_store.get(&supervisor_id).expect("supervisor");
+    caller.role = AgentRole::Worker;
+    agent_store.update(&caller).expect("demote fixture caller");
+    let worker_response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&receipt.id), false).await;
+    assert_rejected(&worker_response, "only a live registered supervisor");
+    caller.role = AgentRole::Supervisor;
+    caller.heartbeat();
+    agent_store
+        .update(&caller)
+        .expect("restore fixture supervisor");
+
+    let response =
+        close_with_external_receipt_fixture(&service, &task.id, Some(&receipt.id), true).await;
+    assert!(
+        response.contains("Closed task:"),
+        "passing exact external receipt must close the task: {response}"
+    );
+    let closed = task_store.get(&task.id).expect("closed task");
+    assert_eq!(closed.status, TaskStatus::Closed);
+    assert!(closed.notes.contains(&receipt.id), "{}", closed.notes);
+    assert!(
+        closed.notes.contains("viktor://run/cas-3924-fixture"),
+        "{}",
+        closed.notes
     );
     let persisted_receipt = receipt_store.get(&receipt.id).expect("receipt remains");
     assert_eq!(

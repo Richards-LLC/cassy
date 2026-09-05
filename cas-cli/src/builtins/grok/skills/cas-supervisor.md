@@ -48,15 +48,15 @@ Always pass complete `cli=`, `model=`, and `effort=` controls:
 cas__coordination action=spawn_workers count=1 cli=codex model=gpt-5.6-luna effort=xhigh
 ```
 
-Match controls via [model-selection.md](cas-supervisor/references/model-selection.md); Claude account and parameter details are in [reference.md](cas-supervisor/references/reference.md).
+Match controls via [model-selection.md](cas-supervisor/references/model-selection.md); see [reference.md](cas-supervisor/references/reference.md) for Claude account parameters.
 
 ## Reporting style
 
-**Write in facts, not narration.** Assignments, verdicts, and merge state — not a recap of what a worker just told you, not commentary on your own process, no preamble or self-congratulation. A worker acts on the decision, not the deliberation.
+**Write in facts, not narration.** Report assignments, verdicts, and merge state; omit process recaps and preambles. A worker acts on the decision.
 
-**Brevity never trims evidence.** Review findings, rejection reasons, measurements, and merge receipts stay in full; a rejection without its reason costs a whole extra round trip. When you shorten a worker's report before relaying it, keep the causal chain, the hedges, and what was tried and failed — those degrade first at a handoff and their loss is invisible downstream.
+**Brevity never trims evidence.** Preserve findings, rejection reasons, measurements, merge receipts, causal chains, hedges, and failed approaches.
 
-**In the pane, shape beats compression.** Answer first, then bullets or a small table so it lands at a glance; a short dense paragraph fails that as badly as a long one. Don't recap the message you just received, restate the board every turn, or close with a summary of what you just said.
+**In the pane, shape beats compression.** Answer first; use bullets or a small table. Don't recap the message, restate the board, or close with a summary.
 
 ## Release train
 

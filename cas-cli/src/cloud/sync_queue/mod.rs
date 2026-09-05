@@ -20,9 +20,12 @@ mod queue_ops;
 mod revisions;
 mod schema;
 mod stats;
+mod task_intents;
 #[cfg(test)]
 mod tests;
 mod types;
+
+pub(crate) use task_intents::TaskSyncIntent;
 
 pub use dependency_tombstones::{
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,

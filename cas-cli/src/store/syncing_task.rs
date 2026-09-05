@@ -6,9 +6,10 @@
 
 use std::sync::Arc;
 
-use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
+use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue, TaskSyncIntent};
+use crate::error::CasError;
 use crate::store::share_policy::{eligible_for_team_task, resolve_team_id};
-use crate::store::{Result, TaskStore};
+use crate::store::{Result, StoreError, TaskStore};
 use crate::types::{Dependency, DependencyType, Scope, Task, TaskStatus};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -50,63 +51,84 @@ impl SyncingTaskStore {
         self
     }
 
-    fn queue_upsert(&self, task: &Task) {
-        let payload = match serde_json::to_string(task) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        self.queue_personal_upsert(task, &payload);
-
-        if let Some(team_id) = self.team_id.as_deref()
-            && eligible_for_team_task(task)
-        {
-            let destination_project = task
-                .origin_project
-                .as_deref()
-                .filter(|project_id| !project_id.trim().is_empty());
-            let _ = self.queue.enqueue_for_team_project(
-                EntityType::Task,
+    fn stage_upsert(
+        &self,
+        task: &Task,
+        operation: &str,
+        previous_updated_at: Option<&str>,
+        old_project_id: Option<&str>,
+    ) -> Result<TaskSyncIntent> {
+        let team_id = self
+            .team_id
+            .as_deref()
+            .filter(|_| eligible_for_team_task(task));
+        self.queue
+            .stage_task_sync_intent(
                 &task.id,
-                SyncOperation::Upsert,
-                Some(&payload),
+                operation,
+                previous_updated_at,
                 team_id,
-                destination_project,
-            );
-        }
-    }
-
-    fn queue_personal_upsert(&self, task: &Task, payload: &str) {
-        let _ = self.queue.enqueue(
-            EntityType::Task,
-            &task.id,
-            SyncOperation::Upsert,
-            Some(payload),
-        );
-    }
-
-    fn queue_origin_project_move(&self, task: &Task, old_project_id: &str) {
-        let payload = match serde_json::to_string(task) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        self.queue_personal_upsert(task, &payload);
-
-        if let Some(team_id) = self.team_id.as_deref()
-            && eligible_for_team_task(task)
-        {
-            let Some(new_project_id) = task.origin_project.as_deref() else {
-                return;
-            };
-            let _ = self.queue.enqueue_team_move(
-                EntityType::Task,
-                &task.id,
                 old_project_id,
-                new_project_id,
-                &payload,
-                team_id,
-            );
+                task.scope == Scope::Global,
+            )
+            .map_err(queue_error_before_local_commit)
+    }
+
+    fn fulfill_upsert(&self, intent: &TaskSyncIntent, task: &Task) -> Result<()> {
+        let payload = serde_json::to_string(task)
+            .map_err(|error| degraded_sync_error(intent, error.to_string()))?;
+        let current_project_id = task
+            .origin_project
+            .as_deref()
+            .filter(|project_id| !project_id.trim().is_empty());
+        self.queue
+            .fulfill_task_sync_intent(intent, &payload, current_project_id)
+            .map_err(|error| degraded_sync_error(intent, error.to_string()))
+    }
+
+    fn cancel_staged_after_local_failure(&self, intent: &TaskSyncIntent) {
+        // The local error remains authoritative. If cancellation itself fails,
+        // restart reconciliation reloads the canonical row (or discards the
+        // marker when the add never created one), so retaining the marker is
+        // safe and preferable to masking the real local failure.
+        let _ = self.queue.cancel_task_sync_intent(intent.id);
+    }
+
+    pub(crate) fn reconcile_pending_task_sync(&self) -> Result<()> {
+        let intents = self
+            .queue
+            .pending_task_sync_intents()
+            .map_err(queue_error_before_local_commit)?;
+        for intent in intents {
+            let mut task = match self.inner.get(&intent.entity_id) {
+                Ok(task) => task,
+                Err(StoreError::TaskNotFound(_)) | Err(StoreError::NotFound(_)) => {
+                    self.queue
+                        .cancel_task_sync_intent(intent.id)
+                        .map_err(queue_error_before_local_commit)?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if intent.operation == "update"
+                && intent.previous_updated_at.as_deref()
+                    == Some(task.updated_at.to_rfc3339().as_str())
+            {
+                // The process exited after staging but before the local
+                // update changed the store-owned timestamp. There was no
+                // committed local mutation to repair.
+                self.queue
+                    .cancel_task_sync_intent(intent.id)
+                    .map_err(queue_error_before_local_commit)?;
+                continue;
+            }
+            if intent.global_scope {
+                task.scope = Scope::Global;
+                task.origin_project = None;
+            }
+            self.fulfill_upsert(&intent, &task)?;
         }
+        Ok(())
     }
 
     fn persisted_for_queue(&self, task: &Task) -> Result<Task> {
@@ -213,9 +235,29 @@ fn dependency_entity_id(dep: &Dependency) -> String {
     format!("{}:{}:{}", dep.from_id, dep.to_id, dep.dep_type)
 }
 
+fn queue_error_before_local_commit(error: CasError) -> StoreError {
+    match error {
+        CasError::Database(error) => StoreError::Database(error),
+        CasError::Io(error) => StoreError::Io(error),
+        CasError::Json(error) => StoreError::Json(error),
+        error => StoreError::Other(error.to_string()),
+    }
+}
+
+fn degraded_sync_error(intent: &TaskSyncIntent, reason: String) -> StoreError {
+    StoreError::SyncDegradedAfterCommit {
+        entity_type: "task".to_string(),
+        entity_id: intent.entity_id.clone(),
+        operation: intent.operation.clone(),
+        reason,
+    }
+}
+
 impl TaskStore for SyncingTaskStore {
     fn init(&self) -> Result<()> {
-        self.inner.init()
+        self.inner.init()?;
+        self.queue.init().map_err(queue_error_before_local_commit)?;
+        self.reconcile_pending_task_sync()
     }
 
     fn generate_id(&self) -> Result<String> {
@@ -227,9 +269,15 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn add(&self, task: &Task) -> Result<()> {
-        self.inner.add(task)?;
-        let persisted = self.persisted_for_queue(task)?;
-        self.queue_upsert(&persisted);
+        let intent = self.stage_upsert(task, "add", None, None)?;
+        if let Err(error) = self.inner.add(task) {
+            self.cancel_staged_after_local_failure(&intent);
+            return Err(error);
+        }
+        let persisted = self
+            .persisted_for_queue(task)
+            .map_err(|error| degraded_sync_error(&intent, error.to_string()))?;
+        self.fulfill_upsert(&intent, &persisted)?;
         Ok(())
     }
 
@@ -240,13 +288,22 @@ impl TaskStore for SyncingTaskStore {
         epic_id: Option<&str>,
         created_by: Option<&str>,
     ) -> Result<()> {
-        self.inner
-            .create_atomic(task, blocked_by, epic_id, created_by)?;
-        let persisted = self.persisted_for_queue(task)?;
-        self.queue_upsert(&persisted);
+        let intent = self.stage_upsert(task, "create_atomic", None, None)?;
+        if let Err(error) = self
+            .inner
+            .create_atomic(task, blocked_by, epic_id, created_by)
+        {
+            self.cancel_staged_after_local_failure(&intent);
+            return Err(error);
+        }
+        let persisted = self
+            .persisted_for_queue(task)
+            .map_err(|error| degraded_sync_error(&intent, error.to_string()))?;
+        let task_sync_result = self.fulfill_upsert(&intent, &persisted);
         for dep in self.inner.get_dependencies(&task.id)? {
             self.queue_dependency_upsert(&dep, &persisted);
         }
+        task_sync_result?;
         Ok(())
     }
 
@@ -264,26 +321,33 @@ impl TaskStore for SyncingTaskStore {
 
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
         let previous = self.inner.get(&task.id)?;
-        let persisted_at = self.inner.update(task)?;
+        let old_project_id = previous
+            .origin_project
+            .as_deref()
+            .filter(|project_id| !project_id.trim().is_empty());
+        let previous_updated_at = previous.updated_at.to_rfc3339();
+        let intent =
+            self.stage_upsert(task, "update", Some(&previous_updated_at), old_project_id)?;
+        let persisted_at = match self.inner.update(task) {
+            Ok(persisted_at) => persisted_at,
+            Err(error) => {
+                self.cancel_staged_after_local_failure(&intent);
+                return Err(error);
+            }
+        };
         // The inner store may enforce transition invariants while persisting
         // (for example, clearing a prior close-cycle branch anchor when a
         // Closed task returns to work). Queue the canonical stored row so a
         // stale caller-owned value cannot be synced back over that invariant.
-        let mut persisted = self.inner.get(&task.id)?;
+        let mut persisted = self
+            .inner
+            .get(&task.id)
+            .map_err(|error| degraded_sync_error(&intent, error.to_string()))?;
         persisted.scope = task.scope;
         if task.scope == Scope::Global {
             persisted.origin_project = None;
         }
-        if let Some(old_project_id) = previous.origin_project.as_deref()
-            && persisted
-                .origin_project
-                .as_deref()
-                .is_some_and(|new_project_id| new_project_id != old_project_id)
-        {
-            self.queue_origin_project_move(&persisted, old_project_id);
-        } else {
-            self.queue_upsert(&persisted);
-        }
+        self.fulfill_upsert(&intent, &persisted)?;
         Ok(persisted_at)
     }
 
@@ -427,8 +491,9 @@ impl TaskStore for SyncingTaskStore {
 
 #[cfg(test)]
 mod tests {
-    use crate::store::SqliteTaskStore;
     use crate::store::syncing_task::*;
+    use crate::store::{SqliteTaskStore, StoreError};
+    use std::path::Path;
     use tempfile::TempDir;
 
     fn create_test_store() -> (TempDir, SyncingTaskStore) {
@@ -445,6 +510,57 @@ mod tests {
         (temp, store)
     }
 
+    fn reopen_test_store(cas_dir: &Path, with_team: bool) -> SyncingTaskStore {
+        let inner = SqliteTaskStore::open(cas_dir).unwrap();
+        let queue = SyncQueue::open(cas_dir).unwrap();
+        let store = SyncingTaskStore::new(Arc::new(inner), Arc::new(queue));
+        if with_team {
+            let mut cfg = CloudConfig::default();
+            cfg.set_team(TEST_TEAM, "test-team");
+            store.with_cloud_config(Arc::new(cfg))
+        } else {
+            store
+        }
+    }
+
+    fn install_task_enqueue_failure(cas_dir: &Path, team_id: &str) {
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute_batch(&format!(
+            r#"
+            CREATE TRIGGER fail_task_enqueue
+            BEFORE INSERT ON sync_queue
+            WHEN NEW.entity_type = 'task' AND NEW.team_id = '{team_id}'
+            BEGIN
+                SELECT RAISE(FAIL, 'injected task enqueue failure');
+            END;
+            "#,
+        ))
+        .unwrap();
+    }
+
+    fn remove_task_enqueue_failure(cas_dir: &Path) {
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute_batch("DROP TRIGGER fail_task_enqueue;")
+            .unwrap();
+    }
+
+    fn assert_degraded(error: StoreError, operation: &str, entity_id: &str) {
+        match error {
+            StoreError::SyncDegradedAfterCommit {
+                entity_type,
+                entity_id: actual_entity_id,
+                operation: actual_operation,
+                reason,
+            } => {
+                assert_eq!(entity_type, "task");
+                assert_eq!(actual_entity_id, entity_id);
+                assert_eq!(actual_operation, operation);
+                assert!(reason.contains("injected task enqueue failure"), "{reason}");
+            }
+            other => panic!("expected structured degraded-sync error, got {other}"),
+        }
+    }
+
     #[test]
     fn test_add_queues_sync() {
         let (temp, store) = create_test_store();
@@ -458,6 +574,103 @@ mod tests {
         assert_eq!(pending[0].entity_type, EntityType::Task);
         assert_eq!(pending[0].entity_id, task.id);
         assert_eq!(pending[0].operation, SyncOperation::Upsert);
+    }
+
+    #[test]
+    fn add_reports_degraded_sync_when_the_personal_outbox_write_fails() {
+        let (temp, store) = create_test_store();
+        install_task_enqueue_failure(temp.path(), "");
+
+        let task = Task::new(
+            "task-degraded-add".to_string(),
+            "locally committed".to_string(),
+        );
+        let error = store.add(&task).unwrap_err();
+
+        assert_degraded(error, "add", &task.id);
+        assert_eq!(store.get(&task.id).unwrap().title, "locally committed");
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        assert!(queue.pending(10, 5).unwrap().is_empty());
+        let intents = queue.pending_task_sync_intents().unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].entity_id, task.id);
+
+        let still_broken = reopen_test_store(temp.path(), false);
+        assert_degraded(still_broken.init().unwrap_err(), "add", &task.id);
+        assert_eq!(queue.pending_task_sync_intents().unwrap().len(), 1);
+
+        remove_task_enqueue_failure(temp.path());
+        let restarted = reopen_test_store(temp.path(), false);
+        restarted.init().unwrap();
+        assert!(queue.pending_task_sync_intents().unwrap().is_empty());
+        let pending = queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].entity_id, task.id);
+        assert!(
+            pending[0]
+                .payload
+                .as_deref()
+                .is_some_and(|payload| payload.contains("locally committed"))
+        );
+    }
+
+    #[test]
+    fn update_reports_degraded_personal_sync_and_restart_queues_the_committed_row() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut task = Task::new("task-degraded-update".to_string(), "before".to_string());
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+        install_task_enqueue_failure(temp.path(), "");
+
+        task.title = "after local commit".to_string();
+        assert_degraded(store.update(&task).unwrap_err(), "update", &task.id);
+        assert_eq!(store.get(&task.id).unwrap().title, "after local commit");
+        assert!(queue.pending(10, 5).unwrap().is_empty());
+        assert_eq!(queue.pending_task_sync_intents().unwrap().len(), 1);
+
+        remove_task_enqueue_failure(temp.path());
+        reopen_test_store(temp.path(), false).init().unwrap();
+        assert!(queue.pending_task_sync_intents().unwrap().is_empty());
+        let pending = queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending[0]
+                .payload
+                .as_deref()
+                .is_some_and(|payload| payload.contains("after local commit"))
+        );
+    }
+
+    #[test]
+    fn restart_discards_an_update_intent_staged_before_an_uncommitted_write() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let task = Task::new(
+            "task-uncommitted-update".to_string(),
+            "unchanged".to_string(),
+        );
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+        let previous_updated_at = store.get(&task.id).unwrap().updated_at.to_rfc3339();
+        queue
+            .stage_task_sync_intent(
+                &task.id,
+                "update",
+                Some(&previous_updated_at),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+
+        reopen_test_store(temp.path(), false).init().unwrap();
+
+        assert!(queue.pending_task_sync_intents().unwrap().is_empty());
+        assert!(
+            queue.pending(10, 5).unwrap().is_empty(),
+            "an update that never committed must not be synthesized on restart"
+        );
     }
 
     #[test]
@@ -653,6 +866,65 @@ mod tests {
         let (personal, team) = queue_counts(&queue);
         assert_eq!(personal, 1);
         assert_eq!(team, 1, "team queue should have the task");
+    }
+
+    #[test]
+    fn add_reports_degraded_team_sync_and_restart_atomically_queues_both_paths() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        install_task_enqueue_failure(temp.path(), TEST_TEAM);
+
+        let task = Task::new("task-team-degraded-add".to_string(), "team add".to_string());
+        assert_degraded(store.add(&task).unwrap_err(), "add", &task.id);
+        assert_eq!(store.get(&task.id).unwrap().title, "team add");
+        assert_eq!(
+            queue_counts(&queue),
+            (0, 0),
+            "the failed team row must roll back the personal row"
+        );
+        assert_eq!(queue.pending_task_sync_intents().unwrap().len(), 1);
+
+        remove_task_enqueue_failure(temp.path());
+        reopen_test_store(temp.path(), true).init().unwrap();
+        assert!(queue.pending_task_sync_intents().unwrap().is_empty());
+        assert_eq!(queue_counts(&queue), (1, 1));
+    }
+
+    #[test]
+    fn update_reports_degraded_team_sync_and_restart_queues_committed_state_to_both_paths() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut task = Task::new(
+            "task-team-degraded-update".to_string(),
+            "before".to_string(),
+        );
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+        install_task_enqueue_failure(temp.path(), TEST_TEAM);
+
+        task.title = "team update committed".to_string();
+        assert_degraded(store.update(&task).unwrap_err(), "update", &task.id);
+        assert_eq!(store.get(&task.id).unwrap().title, "team update committed");
+        assert_eq!(queue_counts(&queue), (0, 0));
+        assert_eq!(queue.pending_task_sync_intents().unwrap().len(), 1);
+
+        remove_task_enqueue_failure(temp.path());
+        reopen_test_store(temp.path(), true).init().unwrap();
+        assert!(queue.pending_task_sync_intents().unwrap().is_empty());
+        assert_eq!(queue_counts(&queue), (1, 1));
+        for queued in queue
+            .pending(10, 5)
+            .unwrap()
+            .into_iter()
+            .chain(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap())
+        {
+            assert!(
+                queued
+                    .payload
+                    .as_deref()
+                    .is_some_and(|payload| payload.contains("team update committed"))
+            );
+        }
     }
 
     #[test]

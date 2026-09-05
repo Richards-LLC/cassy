@@ -23,6 +23,24 @@ CREATE TABLE IF NOT EXISTS sync_queue (
 CREATE INDEX IF NOT EXISTS idx_sync_queue_created ON sync_queue(created_at);
 CREATE INDEX IF NOT EXISTS idx_sync_queue_retry ON sync_queue(retry_count);
 
+-- A task mutation stages one row here before touching the canonical task.
+-- Successful outbox insertion deletes it in the same transaction as the
+-- sync_queue rows; a crash or enqueue failure leaves restart-visible repair
+-- evidence instead of silently losing the mutation's sync intent.
+CREATE TABLE IF NOT EXISTS task_sync_intents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    previous_updated_at TEXT,
+    team_id TEXT,
+    old_project_id TEXT,
+    global_scope INTEGER NOT NULL DEFAULT 0 CHECK (global_scope IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_sync_intents_entity
+    ON task_sync_intents(entity_id);
+
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

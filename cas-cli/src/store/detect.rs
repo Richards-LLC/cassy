@@ -410,11 +410,17 @@ pub fn open_task_store(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
     if let Ok(cloud_config) = CloudConfig::load_from_cas_dir(cas_dir) {
         if cloud_config.is_logged_in() {
             if let Ok(queue) = SyncQueue::open(cas_dir) {
-                let _ = queue.init();
-                return Ok(Arc::new(
-                    SyncingTaskStore::new(base_store, Arc::new(queue))
-                        .with_cloud_config(Arc::new(cloud_config)),
-                ));
+                if queue.init().is_ok() {
+                    let store = SyncingTaskStore::new(base_store, Arc::new(queue))
+                        .with_cloud_config(Arc::new(cloud_config));
+                    // A prior local task write may have committed immediately
+                    // before its outbox transaction failed or the process
+                    // exited. Repair that durable intent during store reopen;
+                    // if SQLite is still unhealthy, re-report degradation
+                    // instead of silently returning a store that lost sync.
+                    store.reconcile_pending_task_sync()?;
+                    return Ok(Arc::new(store));
+                }
             }
         }
     }
@@ -722,8 +728,11 @@ pub fn init_cas_dir(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use crate::cloud::{SyncOperation, SyncQueue};
     use crate::store::detect::*;
+    use crate::store::{SqliteTaskStore, StoreError, TaskStore};
     use crate::test_support::TestEnvGuard;
+    use crate::types::Task;
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -736,6 +745,79 @@ mod tests {
         assert!(cas_dir.join("cas.db").exists());
         // Config is now saved as TOML (preferred format)
         assert!(cas_dir.join("config.toml").exists());
+    }
+
+    #[test]
+    fn logged_in_task_store_open_reconciles_a_committed_task_sync_intent() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        std::fs::write(cas_dir.join("cloud.json"), r#"{"token":"test-token"}"#).unwrap();
+
+        let local = SqliteTaskStore::open(&cas_dir).unwrap();
+        local.init().unwrap();
+        let task = Task::new("task-restart-repair".to_string(), "repair me".to_string());
+        local.add(&task).unwrap();
+        let queue = SyncQueue::open(&cas_dir).unwrap();
+        queue.init().unwrap();
+        queue
+            .stage_task_sync_intent(&task.id, "add", None, None, None, false)
+            .unwrap();
+
+        open_task_store(&cas_dir).unwrap();
+
+        assert!(queue.pending_task_sync_intents().unwrap().is_empty());
+        let pending = queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].entity_id, task.id);
+        assert_eq!(pending[0].operation, SyncOperation::Upsert);
+    }
+
+    #[test]
+    fn logged_in_task_store_open_re_reports_a_still_broken_task_sync_intent() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        std::fs::write(cas_dir.join("cloud.json"), r#"{"token":"test-token"}"#).unwrap();
+
+        let local = SqliteTaskStore::open(&cas_dir).unwrap();
+        local.init().unwrap();
+        let task = Task::new("task-restart-degraded".to_string(), "repair me".to_string());
+        local.add(&task).unwrap();
+        let queue = SyncQueue::open(&cas_dir).unwrap();
+        queue.init().unwrap();
+        queue
+            .stage_task_sync_intent(&task.id, "add", None, None, None, false)
+            .unwrap();
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER fail_task_enqueue_on_reopen
+            BEFORE INSERT ON sync_queue
+            WHEN NEW.entity_type = 'task' AND NEW.team_id = ''
+            BEGIN
+                SELECT RAISE(FAIL, 'injected reopen enqueue failure');
+            END;
+            "#,
+        )
+        .unwrap();
+
+        let error = match open_task_store(&cas_dir) {
+            Ok(_) => panic!("reopen must report the retained intent while enqueue is broken"),
+            Err(error) => error,
+        };
+        match error {
+            CasError::StoreErr(StoreError::SyncDegradedAfterCommit {
+                entity_id, reason, ..
+            }) => {
+                assert_eq!(entity_id, task.id);
+                assert!(
+                    reason.contains("injected reopen enqueue failure"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected structured degraded-sync error, got {other}"),
+        }
+        assert_eq!(queue.pending_task_sync_intents().unwrap().len(), 1);
+        assert!(queue.pending(10, 5).unwrap().is_empty());
     }
 
     #[test]

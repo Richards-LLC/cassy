@@ -94,6 +94,7 @@ pub use embeddings::{
 pub use me::{
     FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner, teams_cache_stale,
 };
+pub(crate) use sync_queue::TaskSyncIntent;
 pub use sync_queue::{
     EntityType, QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QueueHealth, QueuedSync,
     QuarantinedRow, SYNC_REVISION_STATEMENTS, SyncOperation, SyncQueue,

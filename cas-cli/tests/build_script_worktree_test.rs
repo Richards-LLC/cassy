@@ -84,11 +84,16 @@ fn create_fixture() -> (TempDir, PathBuf, PathBuf) {
     fs::create_dir_all(&source).expect("fixture source directory");
     fs::create_dir_all(&dist).expect("fixture dist directory");
 
-    fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"),
-        package.join("build.rs"),
-    )
-    .expect("copy production build script");
+    let production_build_script = std::env::current_dir()
+        .expect("test current directory")
+        .join("build.rs");
+    assert!(
+        production_build_script.is_file(),
+        "resolve production build script from runtime current_dir(): {}",
+        production_build_script.display()
+    );
+    fs::copy(production_build_script, package.join("build.rs"))
+        .expect("copy production build script");
     fs::write(
         package.join("Cargo.toml"),
         r#"[package]

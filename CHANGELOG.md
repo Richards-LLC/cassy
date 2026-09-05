@@ -36,6 +36,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   requests resume the new conversation. Its dedicated tests and build now run
   in the CI lanes whenever the bridge changes, including mixed Rust/bridge
   changes, so session-recovery fixes cannot merge without bridge coverage.
+- `cas hub authorize` now checks that the advertised public Hub URL answers
+  `/v1/health` with `ready=true` before claiming a pairing code or minting a
+  one-time invitation. Dead Tailscale Serve routes fail fast with the recovery
+  hint `cas hub restart --tailscale-serve`, and redirects to another origin are
+  rejected. `--skip-hub-readiness` bypasses only this probe; URL validation,
+  consent, authentication, origin checks, and one-time token protections remain
+  enforced.
 - Worker pull-request status distinguishes a failed or unavailable lookup from
   a definite absence, reporting a redacted `unknown` reason instead of the
   false `none` result.

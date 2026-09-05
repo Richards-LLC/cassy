@@ -647,6 +647,23 @@ fn describe_target_reconcile(
                  the push may be rejected as non-fast-forward."
             )
         }
+        // cas-26c7: origin has not moved, so there is nothing to reconcile and
+        // nothing to refuse. Say what is unpublished and where it goes, and do
+        // NOT hand over the divergence recipe — `git merge origin/<target>` is
+        // a no-op in this state, and force-pushing would be actively wrong.
+        TargetReconcile::AheadOfRemote {
+            local,
+            remote,
+            ahead,
+        } => format!(
+            "\nTarget sync: local {target_branch} is {ahead} commit(s) ahead of origin/\
+             {target_branch} ({} vs {}) and origin holds nothing it lacks, so this is not a \
+             divergence. Merged against local {target_branch}; the {ahead} earlier commit(s) plus \
+             this merge still have to reach origin the normal way for this branch (a push, or a \
+             pull request where the branch is protected).",
+            short_sha(local),
+            short_sha(remote)
+        ),
         // Refused before the merge, so it never reaches a receipt.
         TargetReconcile::Diverged { .. } => String::new(),
     }

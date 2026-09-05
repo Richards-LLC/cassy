@@ -1693,6 +1693,54 @@ fn a_diverged_target_is_refused_and_left_untouched() {
     );
 }
 
+/// cas-26c7. A target that is ahead of origin and behind it by nothing is
+/// unpublished, not diverged. Reporting it as divergence sent the operator a
+/// `git merge origin/<target>` recipe that is a no-op in this state: running it
+/// changed nothing, the retry produced the identical refusal, and every exit
+/// left involved bypassing the tool. Origin has not moved here, so there is
+/// nothing to reconcile and nothing to refuse.
+#[test]
+fn a_target_only_ahead_of_origin_is_not_diverged() {
+    let (_temp, _origin_path, local_path) = create_repo_with_origin();
+    commit_file(&local_path, "unpublished.txt", "landed locally, not pushed\n");
+    let git = GitOperations::new(local_path.clone());
+    let local_tip = git.resolve_commit("main").unwrap();
+
+    match git.reconcile_target_with_origin("main") {
+        TargetReconcile::AheadOfRemote {
+            local,
+            remote,
+            ahead,
+        } => {
+            assert_eq!(local, local_tip);
+            assert_ne!(remote, local_tip, "origin must still be at the older tip");
+            assert_eq!(ahead, 1, "one unpublished commit");
+        }
+        other => panic!("an ahead-only target must not be reported as diverged, got {other:?}"),
+    }
+    assert_eq!(
+        git.resolve_commit("main").unwrap(),
+        local_tip,
+        "classifying an unpublished target must not move it"
+    );
+}
+
+/// The same state, several commits deep: the count must be the real number of
+/// unpublished commits, because the operator reads it to decide what to push.
+#[test]
+fn an_ahead_only_target_reports_every_unpublished_commit() {
+    let (_temp, _origin_path, local_path) = create_repo_with_origin();
+    for i in 0..3 {
+        commit_file(&local_path, &format!("unpublished-{i}.txt"), "local\n");
+    }
+
+    let git = GitOperations::new(local_path);
+    match git.reconcile_target_with_origin("main") {
+        TargetReconcile::AheadOfRemote { ahead, .. } => assert_eq!(ahead, 3),
+        other => panic!("expected an ahead-only classification, got {other:?}"),
+    }
+}
+
 #[test]
 fn an_unreachable_origin_degrades_explicitly_instead_of_blocking_the_merge() {
     let (_temp, origin_path, local_path) = create_repo_with_origin();

@@ -1191,6 +1191,7 @@ pub fn generate_prompt_at(
     let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
 
     match event {
+        DirectorEvent::SupervisorStalled { .. } => None,
         DirectorEvent::TaskAssigned {
             task_id,
             task_title,

@@ -21,12 +21,13 @@ pub(crate) mod tasks;
 
 pub use data::{AgentSummary, DirectorData, DirectorStores, TaskSummary};
 pub(crate) use events::pick_best_open_branch_epic;
-pub use events::{DirectorEvent, DirectorEventDetector};
+pub use events::{DirectorEvent, DirectorEventDetector, SupervisorStallTracker};
 // cas-893c: shared idle-confidence gate, reused by the daemon's delivery-time
 // idle-nudge decision (queue_and_events.rs) so the "is this worker really
 // idle, not just between turns" heuristic has one definition.
 pub(crate) use events::{
-    effective_stall_threshold_secs, FRESH_HEARTBEAT_SECS, RECENT_ACTIVITY_SECS,
+    effective_stall_threshold_secs, supervisor_actionable_state, FRESH_HEARTBEAT_SECS,
+    RECENT_ACTIVITY_SECS,
 };
 pub use panel::PanelRegistry;
 pub use prompts::{

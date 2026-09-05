@@ -87,6 +87,7 @@ fn awaiting_merge_names_task_branch_and_live_tip() {
     let state = supervisor_actionable_state(
         &snapshot,
         Some("cas-epic"),
+        "supervisor",
         &HashSet::new(),
         now,
         600,
@@ -119,6 +120,7 @@ fn ready_work_and_idle_worker_become_actionable_only_after_threshold() {
     let early = supervisor_actionable_state(
         &snapshot,
         Some("cas-epic"),
+        "supervisor",
         &HashSet::new(),
         now,
         600,
@@ -130,6 +132,7 @@ fn ready_work_and_idle_worker_become_actionable_only_after_threshold() {
     let ready = supervisor_actionable_state(
         &snapshot,
         Some("cas-epic"),
+        "supervisor",
         &HashSet::new(),
         now,
         600,
@@ -154,6 +157,7 @@ fn all_terminal_children_choose_assembly_exit_step() {
         supervisor_actionable_state(
             &snapshot,
             Some("cas-epic"),
+            "supervisor",
             &HashSet::new(),
             now,
             600,

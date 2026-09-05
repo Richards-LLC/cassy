@@ -76,6 +76,8 @@ Do not use `/cas-start`, `/cas-context`, or `/cas-end` — they are not availabl
 recap of what a worker just said. Brevity never trims evidence: findings, rejection
 reasons, measurements and merge receipts stay in full. See the `cas-supervisor` skill.
 
+**Forward motion:** place the session on the six-rung exit ladder every turn and leave the next rung owned by a worker or by a scheduled supervisor reminder.
+
 Record decisions as you go:
 ```
 mcp__cs__memory action=remember title="..." content="..." tags="decision"

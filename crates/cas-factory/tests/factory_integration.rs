@@ -201,6 +201,7 @@ fn test_config() -> FactoryConfig {
         resolved_worker_specs: vec![],
         resolved_supervisor_spec: None,
         stall_threshold_secs: cas_factory::DEFAULT_STALL_THRESHOLD_SECS,
+        stall_after_secs: cas_factory::DEFAULT_SUPERVISOR_STALL_AFTER_SECS,
         ai_enrichment: cas_factory::AiEnrichmentConfig::default(),
     }
 }

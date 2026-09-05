@@ -1424,6 +1424,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         lead_session_id: Some(lead_session_id),
         minions_theme: is_minions,
         stall_threshold_secs,
+        stall_after_secs: cas_config.factory().stall_after_secs,
         ai_enrichment: cas_config.factory().ai_enrichment,
     };
 

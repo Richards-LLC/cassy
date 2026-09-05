@@ -26,11 +26,11 @@ fi
 "$mountpoint_bin" -q "$volume_root" || fail "dedicated cache volume is not mounted: $volume_root"
 "$mountpoint_bin" -q "$cache_root" || fail "runner cache is not a mount point: $cache_root"
 
-volume_device="$("$findmnt_bin" -n -o MAJ:MIN -T "$volume_root")" ||
+volume_device="$("$findmnt_bin" -f -n -o MAJ:MIN -T "$volume_root")" ||
     fail "cannot resolve dedicated volume device: $volume_root"
-cache_device="$("$findmnt_bin" -n -o MAJ:MIN -T "$cache_root")" ||
+cache_device="$("$findmnt_bin" -f -n -o MAJ:MIN -T "$cache_root")" ||
     fail "cannot resolve runner cache device: $cache_root"
-cache_fsroot="$("$findmnt_bin" -n -o FSROOT -T "$cache_root")" ||
+cache_fsroot="$("$findmnt_bin" -f -n -o FSROOT -T "$cache_root")" ||
     fail "cannot resolve runner cache FSROOT: $cache_root"
 
 [[ -n "$volume_device" && "$cache_device" == "$volume_device" ]] ||

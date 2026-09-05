@@ -37,9 +37,11 @@ cat >"$fixture_root/findmnt" <<'EOF'
 field=""
 target=""
 recursive=0
+first_only=0
 while (($#)); do
     case "$1" in
         -R|--submounts) recursive=1; shift ;;
+        -f|--first-only) first_only=1; shift ;;
         -o) field="$2"; shift 2 ;;
         -T) target="$2"; shift 2 ;;
         *) shift ;;
@@ -58,7 +60,13 @@ case "$field:$target" in
             printf '%s\n' "$CASSY_ACTIONS_CACHE_ROOT"
         fi
         ;;
-    MAJ:MIN:*cache*) printf '%s\n' "${TEST_CACHE_DEVICE:-259:1}" ;;
+    MAJ:MIN:*cache*)
+        printf '%s\n' "${TEST_CACHE_DEVICE:-259:1}"
+        if [[ "${TEST_DUPLICATE_ROWS:-}" == 1 && "$first_only" == 0 &&
+              "$target" == "$CASSY_ACTIONS_CACHE_ROOT" ]]; then
+            printf '%s\n' "${TEST_CACHE_DEVICE:-259:1}"
+        fi
+        ;;
     MAJ:MIN:*) printf '%s\n' "${TEST_VOLUME_DEVICE:-259:1}" ;;
     FSROOT:*cache*) printf '%s\n' "${TEST_CACHE_FSROOT:-/home/.cassy-actions-cache}" ;;
     *) exit 2 ;;
@@ -94,13 +102,14 @@ for slot in '' '-2'; do
         "$cache_root/cargo-target$slot/debug/deps/libstale.rlib"
 done
 
-run_pruner --now >/dev/null
+TEST_DUPLICATE_ROWS=1 run_pruner --now >/dev/null
 for slot in '' '-2'; do
     test ! -e "$cache_root/cargo-target$slot/debug/incremental/stale-session"
     test ! -e "$cache_root/cargo-target$slot/debug/deps/libstale.rlib"
     test -e "$cache_root/cargo-target$slot/debug/deps/libfresh.rlib"
 done
 printf 'ok   idle pruning removes stale incremental/deps data from both slots\n'
+printf 'ok   pruning tolerates duplicate mount rows from a service namespace\n'
 
 mkdir -p "$proc_root/103"
 printf '103\n' >>"$cgroup_root/slot1/cgroup.procs"

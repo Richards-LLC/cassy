@@ -27,11 +27,12 @@ mod state;
 mod tailscale;
 
 pub(crate) use attention::spawn_attention_enricher;
-pub(crate) use auth::PairingInvitationTarget;
 pub use auth::{
     AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, LeaseSummary,
-    PairingExchange, PairingInvitation, PublicJwk, Scope, WsTicket, required_scope,
+    PairingExchange, PairingExchangeError, PairingInvitation, PublicJwk, Scope, WsTicket,
+    required_scope,
 };
+pub(crate) use auth::PairingInvitationTarget;
 pub use connector::DaemonConnector;
 pub use death::{DaemonExitEvidenceStore, DaemonExitReceipt, DaemonIdentity};
 #[cfg(unix)]

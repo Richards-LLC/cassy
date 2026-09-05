@@ -246,15 +246,35 @@ describe("pairing failure copy", () => {
     expect(failure.message).toContain("cas hub pair --origin");
   });
 
-  it("keeps the invitation for a rate limit, a hub restart, and a wrong hub URL", () => {
-    for (const status of [429, 500, 503, 404]) {
+  it("keeps the invitation for a hub restart and a wrong hub URL", () => {
+    for (const status of [500, 503, 404]) {
       const failure = pairingExchangeFailure({ status, body: "", controllerOrigin: ORIGIN });
       expect(failure.keepInvitation).toBe(true);
-      expect(failure.message).toMatch(/still open/);
       expect(failure.message.trim().endsWith(".")).toBe(true);
     }
-    expect(pairingExchangeFailure({ status: 429, body: "", controllerOrigin: ORIGIN }).message).toMatch(/minute/);
     expect(pairingExchangeFailure({ status: 404, body: "", controllerOrigin: ORIGIN }).message).toMatch(/machine's hub address/);
+  });
+
+  it("uses Retry-After for throttling without promising the invitation is unused", async () => {
+    const error = await failure(exchangePendingPairing({
+      invitation: invitationWith(READ_ONLY_PAIRING_SCOPES),
+      controllerOrigin: ORIGIN,
+      deviceLabel: "Browser",
+      operatorLabel: "Operator",
+      fetcher: async () => new Response(JSON.stringify({ error: "slow_down" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", "Retry-After": "37" },
+      }),
+      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
+      installationGeneration: 1,
+      stagePersisted: async () => undefined,
+      activatePersisted: async () => true,
+      rollbackPersisted: async () => true,
+    }));
+    expect(error.recoverable).toBe(true);
+    expect(error.message).toContain("37 seconds");
+    expect(error.message).toMatch(/fresh invitation/i);
+    expect(error.message).not.toMatch(/still open|unused|untouched/i);
   });
 
   it("names the network as the cause when the hub cannot be reached at all", async () => {

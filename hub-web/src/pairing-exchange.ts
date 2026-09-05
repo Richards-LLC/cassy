@@ -24,7 +24,7 @@ interface ExchangeOptions {
 }
 
 export class PairingExchangeError extends Error {
-  /** The invitation is untouched, so the caller keeps it and lets the operator retry. */
+  /** The caller keeps the invitation for a safe retry; this does not imply the hub left it unused. */
   readonly recoverable: boolean;
 
   constructor(message = "This pairing invitation has expired or was already used.", options: { recoverable?: boolean } = {}) {
@@ -100,15 +100,21 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
       }),
     });
   } catch (error) {
-    // A cancelled exchange keeps its own cancellation path; anything else means
-    // the request never reached the hub, so the invitation is still unused.
+    // A cancelled exchange keeps its own cancellation path. Any other fetch
+    // rejection is uncertain: the POST may have reached the hub before its
+    // response was lost, so retain a retry without claiming nonconsumption.
     if (options.signal?.aborted || options.isCurrent?.() === false) throw error;
     throw new PairingExchangeError(unreachableHubMessage(endpoint.origin), { recoverable: true });
   }
   ensureCurrent(options);
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
-    const failure = pairingExchangeFailure({ status: response.status, body: detail, controllerOrigin: options.controllerOrigin });
+    const failure = pairingExchangeFailure({
+      status: response.status,
+      body: detail,
+      controllerOrigin: options.controllerOrigin,
+      retryAfter: response.headers.get("Retry-After"),
+    });
     throw new PairingExchangeError(failure.message, { recoverable: failure.keepInvitation });
   }
   const credential = await response.json().catch(() => null) as Record<string, unknown> | null;

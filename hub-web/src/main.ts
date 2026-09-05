@@ -673,9 +673,9 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
       throw error;
     }
     if (error instanceof PairingExchangeError && error.recoverable) {
-      // Nothing reached the machine, so the invitation is still good: say what
-      // happened and leave Pair usable instead of sending the operator back to
-      // a terminal for a fresh link.
+      // Keep the pending capability for a bounded retry. A fetch rejection may
+      // follow server-side consumption, while a typed throttle happened before
+      // this attempt consumed anything; the error copy preserves that uncertainty.
       pairingStatus = error.message;
       render(false);
       throw error;

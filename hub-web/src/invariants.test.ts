@@ -184,6 +184,45 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).toContain("afterGesture: (run) => window.setTimeout(run, 0),");
   });
 
+  it("keeps pairing failures inside the open dialog and cancellation cleanup visible (cas-7d55 F1/F2/F3/F6)", async () => {
+    const [main, model] = await Promise.all(["main.ts", "render-model.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // F1: the status sentence and busy flags are live regions, not shell
+    // signature; a failed exchange must re-enable Pair under a focused field.
+    expect(main).toContain("pairingCleanupFailed ? `cleanup-failed:${pairingCleanupContext.cause}");
+    expect(main).not.toContain("      pairingStatus,\n      pairingExchangeInFlight ? \"in-flight\" : \"\",");
+    expect(main).toContain("exchangeInFlight: pairingExchangeInFlight,\n      createInFlight: pairingCreateInFlight,");
+    expect(main).toContain("pairingStepChanged: pairingView !== lastPairingView,");
+    expect(main).toContain('focusInPairingDialog: composing && document.querySelector("#pair-dialog")?.contains(active) === true,');
+    expect(model).toContain("return input.pairingStepChanged && input.focusInPairingDialog ? \"shell\" : \"defer\";");
+    // The status node is always in the markup so a region can fill it.
+    expect(main).toContain("function pairStatusMarkup(): string {");
+    expect(main).not.toContain("${pairingStatus ? `<p class=\"pair-status\"");
+    // F2: cancel closes only once cleanup is durable; otherwise a retry step.
+    expect(main).toContain("const outcome = cancellationOutcome(cleared, verifiesCleanup);");
+    expect(main).toContain('<h2 id="pair-cleanup-title">${escapeHtml(copy.title)}</h2>');
+    expect(main).toContain("const copy = cleanupStepCopy(pairingCleanupContext);");
+    // A failed exchange whose rollback rejected needs a retry owner too (review 25564).
+    expect(main).toContain("pairingCancellations.begin(operation.generation);\n      pairingCleanupContext = { cause: \"failure\", storeOpen: !cleared.failClosed, rollbackPending: true };");
+    expect(main).toContain('<button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button>');
+    expect(main).toContain("async function retryPairingCleanup(): Promise<void> {");
+    // A late rollback failure from the operation Cancel invalidated is shown
+    // only while that cancellation owns the dialog; retries are serialized,
+    // rejection-safe and applied only if still current (review 25536).
+    expect(main).toContain("if (pairingCancellations.ownsOperation(operation.generation)) {");
+    expect(main).toContain("const ticket = pairingCancellations.beginRetry();");
+    expect(main).toContain("if (!pairingCancellations.finishRetry(ticket)) return;");
+    expect(main).toContain("recovery = { failed: true };");
+    expect(main).toContain("pairingCancellations.begin(verifiesCleanup ? exchangeOperationGeneration : undefined);");
+    expect(main).not.toContain('const verifiesCleanup = pairingExchangeInFlight;\n  document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();');
+    // F3: a storage failure after the hub consumed the invitation is named.
+    expect(main).toContain("if (error instanceof PairingStorageError) {");
+    // F6: invalid and expired links open the dialog on a nonsecret sentence.
+    expect(main).toContain("const arrivedFragment = readPairingFragment(window.location, window.history, pendingPairingStore);");
+    expect(main).toContain('let pairDialogAutoOpen = pendingPairing !== null || arrivedFragment.kind === "invalid";');
+    expect(main).toContain('if (stored.kind === "expired" && !pairingArrivalNotice) {');
+    expect(main).toContain("pairingStatus = INVALID_PAIRING_LINK_MESSAGE;");
+  });
+
   it("keeps the live-region selectors and the shell markup on the same nodes", async () => {
     const [main, regions, fixture] = await Promise.all(
       ["main.ts", "live-regions.ts", "live-regions.test.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")),

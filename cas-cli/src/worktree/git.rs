@@ -110,14 +110,16 @@ pub enum GitError {
         "target branch {branch} is checked out at {checkout} with uncommitted changes \
          ({change_count} path(s), first: {first_change}) — NO MERGE WAS ATTEMPTED. \
          Advancing the ref would strand that checkout at its current commit and turn the \
-         merged content into phantom staged deletions there. Commit, stash or discard the \
-         work in {checkout}, then retry."
+         merged content into phantom staged deletions there. That work exists nowhere \
+         else: commit or stash it in {checkout} — do NOT reset or check it out over — then \
+         retry. Target is still at {tip}."
     )]
     TargetCheckedOutDirty {
         branch: String,
         checkout: PathBuf,
         change_count: usize,
         first_change: String,
+        tip: String,
     },
 
     #[error("Uncommitted changes in worktree")]
@@ -302,6 +304,16 @@ impl EpicBaseChoice {
             notice: None,
         }
     }
+}
+
+/// What happened to a linked checkout of the target after the ref moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CheckoutRefresh {
+    /// Index and working tree were advanced to the new tip.
+    Updated,
+    /// Left exactly as it was, because advancing it would have overwritten
+    /// something. Carries git's own reason.
+    LeftStale { reason: String },
 }
 
 /// A worktree that currently has a given branch checked out (cas-0f04).
@@ -1306,6 +1318,7 @@ impl GitOperations {
                     checkout: checkout.path.clone(),
                     change_count,
                     first_change,
+                    tip: old_tip.clone(),
                 });
             }
         }
@@ -1341,7 +1354,22 @@ impl GitOperations {
         // difference between a usable checkout and one stranded on an
         // ancestor of its own HEAD.
         for checkout in &checkouts {
-            self.realign_checkout_to_head(&checkout.path);
+            if let CheckoutRefresh::LeftStale { reason } =
+                self.refresh_linked_checkout(&checkout.path, &old_tip, &new_tip)
+            {
+                // Never silent: the ref moved under this checkout and we
+                // declined to write over whatever is there now.
+                tracing::warn!(
+                    "target branch {target_branch} advanced {} -> {} but the checkout at {} was \
+                     left untouched ({reason}). Its index and working tree still describe {}; \
+                     preserve the work there (commit or stash it), then reconcile that checkout \
+                     deliberately. Nothing was overwritten.",
+                    &old_tip[..old_tip.len().min(12)],
+                    &new_tip[..new_tip.len().min(12)],
+                    checkout.path.display(),
+                    &old_tip[..old_tip.len().min(12)],
+                );
+            }
         }
         Ok(Some(new_tip))
     }
@@ -1381,22 +1409,43 @@ impl GitOperations {
         found
     }
 
-    /// Bring a checkout's index and working tree back to its own HEAD.
+    /// Advance a linked checkout from `old_tip` to `new_tip`, refusing rather
+    /// than overwriting if anything there changed.
     ///
-    /// Only called for a checkout observed clean before the ref moved, so
-    /// there is nothing of the operator's to lose. Best effort by design: a
-    /// checkout that has since been deleted or is being written by someone
-    /// else must not fail a merge that already succeeded — the worst case is
-    /// the pre-existing stale state, which the refusal above covers for any
-    /// checkout that actually held work.
-    fn realign_checkout_to_head(&self, path: &Path) {
+    /// The cleanliness check happens before the merge; the refresh happens
+    /// after the compare-and-swap. Someone can edit that checkout in between,
+    /// so a `--reset` justified by the earlier observation would silently
+    /// destroy work that appeared during the window. This uses git's two-tree
+    /// `read-tree -m -u`, which performs the same update but refuses when an
+    /// entry is not up to date — the safety is git's, evaluated at the moment
+    /// of the write, not ours from an earlier glance.
+    ///
+    /// Refusal is not an error: the merge has already published. The checkout
+    /// is simply left exactly as the operator has it, and the caller says so.
+    pub(crate) fn refresh_linked_checkout(
+        &self,
+        path: &Path,
+        old_tip: &str,
+        new_tip: &str,
+    ) -> CheckoutRefresh {
         if !path.is_dir() {
-            return;
+            return CheckoutRefresh::LeftStale {
+                reason: "checkout directory no longer exists".to_string(),
+            };
         }
-        let _ = Command::new("git")
-            .args(["read-tree", "--reset", "-u", "HEAD"])
+        let output = Command::new("git")
+            .args(["read-tree", "-m", "-u", old_tip, new_tip])
             .current_dir(path)
             .output();
+        match output {
+            Ok(output) if output.status.success() => CheckoutRefresh::Updated,
+            Ok(output) => CheckoutRefresh::LeftStale {
+                reason: branch_ops::first_line(&String::from_utf8_lossy(&output.stderr)),
+            },
+            Err(error) => CheckoutRefresh::LeftStale {
+                reason: error.to_string(),
+            },
+        }
     }
 
     /// Absolute path of the repository's *common* git dir — shared by the

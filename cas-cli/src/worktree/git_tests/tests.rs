@@ -1857,9 +1857,13 @@ fn repo_with_target_checked_out_in_a_second_worktree() -> (TempDir, PathBuf, Pat
         &repo_path,
     );
 
-    // A worker branch with real content to merge in.
+    // A worker branch with real content to merge in. It also rewrites
+    // README.md, so the two trees genuinely differ on a pre-existing path —
+    // without that, an edit to README.md in a sibling checkout is not at risk
+    // and git has nothing to refuse.
     git(&["checkout", "-q", "-b", "factory/worker"], &repo_path);
     std::fs::write(repo_path.join("delivered.txt"), "worker delivery\n").unwrap();
+    std::fs::write(repo_path.join("README.md"), "# Test\nworker edit\n").unwrap();
     git(&["add", "."], &repo_path);
     git(&["commit", "-q", "-m", "worker delivery"], &repo_path);
     // Leave the primary checkout somewhere else entirely, as a supervisor's
@@ -1946,7 +1950,15 @@ fn merging_refuses_when_a_linked_checkout_of_the_target_is_dirty() {
     }
     let text = error.to_string();
     assert!(text.contains("NO MERGE WAS ATTEMPTED"), "{text}");
-    assert!(text.contains("Commit, stash or discard"), "{text}");
+    assert!(text.contains("commit or stash it"), "{text}");
+    assert!(
+        text.contains("do NOT reset or check it out over"),
+        "the refusal must never suggest resetting over the operator's work: {text}"
+    );
+    assert!(
+        !text.to_lowercase().contains("read-tree"),
+        "the refusal must not hand over a recovery that erases edits: {text}"
+    );
 
     assert_eq!(
         git.resolve_commit(&target).unwrap(),
@@ -2002,4 +2014,78 @@ fn merging_still_leaves_the_primary_checkout_untouched_when_no_sibling_holds_the
         "the merge must not check its result out into the primary checkout"
     );
     drop(temp);
+}
+
+/// cas-0f04, review follow-up. The gap between "this checkout was clean" and
+/// the refresh that runs after the compare-and-swap is real: someone can edit
+/// the checkout in that window. A `--reset` justified by the earlier
+/// observation would erase those edits silently, so the refresh must be
+/// evaluated by git at the moment it writes.
+///
+/// This drives the exact function the merge calls post-CAS, with an edit
+/// injected into that window.
+#[test]
+fn a_refresh_refuses_to_overwrite_an_edit_made_after_the_cleanliness_check() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let old_tip = git.resolve_commit(&target).unwrap();
+
+    // Publish a new tip the way the merge does, without touching the sibling.
+    let new_tip = {
+        let out = Command::new("git")
+            .args(["rev-parse", "factory/worker"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git.compare_and_swap_ref(&target, &new_tip, &old_tip).unwrap();
+
+    // The injected edit: it appears AFTER the pre-merge cleanliness check and
+    // BEFORE the refresh, exactly the window the review named.
+    let precious = sibling.join("README.md");
+    std::fs::write(&precious, "edited during the merge window\n").unwrap();
+
+    let outcome = git.refresh_linked_checkout(&sibling, &old_tip, &new_tip);
+
+    match outcome {
+        CheckoutRefresh::LeftStale { reason } => {
+            assert!(!reason.is_empty(), "the refusal must carry git's reason");
+        }
+        CheckoutRefresh::Updated => {
+            panic!("the refresh overwrote an edit made after the cleanliness check")
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(&precious).unwrap(),
+        "edited during the merge window\n",
+        "the edit made inside the window must survive untouched"
+    );
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// The same function on a checkout that really is untouched: it advances, so
+/// the guard above is not simply refusing everything.
+#[test]
+fn a_refresh_advances_a_checkout_that_is_still_clean() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let old_tip = git.resolve_commit(&target).unwrap();
+    let new_tip = {
+        let out = Command::new("git")
+            .args(["rev-parse", "factory/worker"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git.compare_and_swap_ref(&target, &new_tip, &old_tip).unwrap();
+
+    assert_eq!(
+        git.refresh_linked_checkout(&sibling, &old_tip, &new_tip),
+        CheckoutRefresh::Updated
+    );
+    assert_eq!(worktree_status(&sibling), "");
+    assert!(sibling.join("delivered.txt").exists());
+    let _ = std::fs::remove_dir_all(&sibling);
 }

@@ -93,10 +93,21 @@ run_pruner() {
     CASSY_ACTIONS_MOUNTPOINT_BIN="$fixture_root/mountpoint" \
     CASSY_ACTIONS_FINDMNT_BIN="$fixture_root/findmnt" \
     CASSY_ACTIONS_TARGET_BUDGET_BYTES=32768 \
-    CASSY_ACTIONS_SCCACHE_BUDGET_BYTES=8192 \
+    CASSY_ACTIONS_SCCACHE_BUDGET_BYTES="$fixture_sccache_budget_bytes" \
     CASSY_ACTIONS_SLOT_BUDGET_BYTES=60000 \
     CASSY_ACTIONS_CACHE_MAX_AGE_DAYS=7 \
         "$pruner" "$@"
+}
+
+measure_fixture_sccache_budget() {
+    local slot slot_sccache_bytes
+    fixture_sccache_budget_bytes=1
+    for slot in '' '-2'; do
+        slot_sccache_bytes="$(du -sx -B1 -- "$cache_root/sccache$slot" | awk '{print $1}')"
+        if (( slot_sccache_bytes > fixture_sccache_budget_bytes )); then
+            fixture_sccache_budget_bytes="$slot_sccache_bytes"
+        fi
+    done
 }
 
 for slot in '' '-2'; do
@@ -108,6 +119,13 @@ for slot in '' '-2'; do
     touch -d '8 days ago' "$cache_root/cargo-target$slot/debug/incremental/stale-session" \
         "$cache_root/cargo-target$slot/debug/deps/libstale.rlib"
 done
+
+# bytes_for() deliberately measures allocated bytes so the production budget
+# includes filesystem metadata. A tmpfs may charge zero blocks for this
+# directory while the GitHub-hosted ext4 image charges one 4096-byte block.
+# Pin the fixture ceiling to the larger observed slot instead of assuming file
+# payload is the complete du result. Recalculate after fixtures change shape.
+measure_fixture_sccache_budget
 
 TEST_DUPLICATE_ROWS=1 TEST_PADDED_ROWS=1 run_pruner --now >/dev/null
 for slot in '' '-2'; do
@@ -165,6 +183,7 @@ for slot in '' '-2'; do
     dd if=/dev/zero of="$cache_root/cargo-target$slot/debug/deps/current" bs=4096 count=16 status=none
     dd if=/dev/zero of="$cache_root/sccache$slot/current" bs=4096 count=2 status=none
 done
+measure_fixture_sccache_budget
 run_pruner --now >/dev/null
 for slot in '' '-2'; do
     test ! -e "$cache_root/cargo-target$slot/debug"

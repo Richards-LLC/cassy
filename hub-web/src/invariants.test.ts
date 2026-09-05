@@ -414,7 +414,7 @@ describe("binding Cassy Commander browser invariants", () => {
     // Pairing used to end by silently closing its dialog, then by claiming
     // "paired" before any connection existed. Saved access is announced at
     // once; "connected" only when that machine's connection reaches live.
-    expect(source).toContain("toast(`Access saved — connecting to ${paired?.label ?? \"the machine\"}…`);");
+    expect(source).toContain("return machine;\n}\n\nasync function startRelayPairing(");
     // The expectation is registered inside pairMachine, before the connection
     // for the new credential is created, so a first live phase can never
     // arrive ahead of it (review 25642).
@@ -424,6 +424,10 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(expectAt).toBeGreaterThan(0);
     expect(connectAt).toBeGreaterThan(expectAt);
     expect(source).not.toContain("if (paired) firstConnections.expect(paired.id);");
+    // The saved toast names the installed machine, never the selection.
+    expect(source).toContain("async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false> {");
+    expect(source).toContain("toast(`Access saved — connecting to ${installed.label}…`);");
+    expect(source).not.toContain("const paired = machines.get(selectedMachineId ?? \"\");");
     expect(source).toContain("const connectedNotice = firstConnections.observe(machine.id, machine.label, state);");
     expect(source).toContain("if (connectedNotice) toast(connectedNotice);");
     expect(source).toContain("firstConnections.forget(selected.id);");

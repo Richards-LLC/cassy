@@ -572,7 +572,8 @@ async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> 
   render();
 }
 
-async function pairMachine(form: HTMLFormElement): Promise<boolean> {
+/** Resolves with the installed machine, or false when nothing was installed. */
+async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false> {
   const invitation = pendingPairing?.kind === "invitation" ? pendingPairing : null;
   if (!invitation) throw new Error("Create a pairing request or open a one-time pairing link first.");
   const values = new FormData(form);
@@ -710,7 +711,7 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
   firstConnections.expect(machine.id);
   replaceMachineConnection(machine, connections, connectionStates, createConnection);
   render(false);
-  return true;
+  return machine;
 }
 
 async function startRelayPairing(email: string): Promise<boolean> {
@@ -2608,10 +2609,11 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     void pairMachine(pairForm).then((installed) => {
       if (!installed) return;
       document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
-      // What is true now is that access is saved; whether the machine is
-      // reachable is the connection's answer, announced when it arrives.
-      const paired = machines.get(selectedMachineId ?? "");
-      toast(`Access saved — connecting to ${paired?.label ?? "the machine"}…`);
+      // What is true now is that access is saved for the machine that was
+      // installed — named from that identity, not from whatever is selected;
+      // whether it is reachable is the connection's answer, announced when it
+      // arrives (firstConnections.expect ran before its connection started).
+      toast(`Access saved — connecting to ${installed.label}…`);
     }).catch((error) => {
       // A pairing failure is stated inside the dialog beside Pair; a toast
       // behind the backdrop only duplicated it. Anything else still surfaces.

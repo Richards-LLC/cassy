@@ -457,6 +457,24 @@ fn issue_repo_registry_resolves_defaults_and_overrides_without_serializing_defau
         config.get("issues.components.cloud"),
         Some("Richards-LLC/petra-stella-cloud".to_string())
     );
+    for (key, default) in [
+        ("issues.components.cassy", "Richards-LLC/cassy"),
+        (
+            "issues.components.mecha_cassy",
+            "Richards-LLC/mecha-cassy",
+        ),
+        (
+            "issues.components.cloud",
+            "Richards-LLC/petra-stella-cloud",
+        ),
+    ] {
+        assert!(config
+            .list()
+            .contains(&(key.to_string(), default.to_string())));
+        let meta = meta::registry().get(key).expect("component issue metadata");
+        assert_eq!(meta.section, "issues.components");
+        assert_eq!(meta.default, default);
+    }
 
     let defaults = toml::to_string(&config).unwrap();
     assert!(

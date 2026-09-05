@@ -13,6 +13,8 @@ First use each session — load MCP schemas: ToolSearch(query="select:mcp__cas__
 
 Cassy provides persistent context across sessions. Built-in tools are ephemeral.
 
+Issue routing: use `issues.repo` for project bugs, `issues.components.cassy` for Cassy runtime/hooks/MCP, `issues.components.mecha_cassy` for the Slack hub, and `issues.components.cloud` for Cassy Cloud. Inspect the resolved destinations with `cas config get issues.repo` and `cas config get issues.components.*`. If you hit a bug during operation, file a ticket in the matching repo before moving on.
+
 Release notes: when a merge reaches `staging` or `main`, use the `release-notes` skill and follow docs/release-notes/RUBRIC.md.
 <!-- CAS:END -->
 

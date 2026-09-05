@@ -151,6 +151,15 @@ pub struct Config {
 }
 
 impl Config {
+    /// Return the complete issue-routing registry for this project. The
+    /// project target remains optional, while Cassy's three component targets
+    /// always resolve to their compiled defaults unless explicitly overridden.
+    pub fn issue_repo_registry(&self) -> IssueRepoRegistry {
+        IssueRepoRegistry::from_config(self.issues.as_ref())
+    }
+}
+
+impl Config {
     /// Merge fields from `other` into `self` where `self` has `None`.
     /// Returns `true` if any field was updated.
     pub fn merge_missing(&mut self, other: &Self) -> bool {

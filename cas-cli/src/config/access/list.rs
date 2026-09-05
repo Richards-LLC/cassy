@@ -9,6 +9,7 @@ impl Config {
         let daemon = self.daemon.clone().unwrap_or_default();
         let staging = self.staging.clone().unwrap_or_default();
         let issues = self.issues.clone().unwrap_or_default();
+        let issue_repos = issues.resolved_registry();
         let notifications = self.notifications.clone().unwrap_or_default();
         let skill_validation = self.skill_validation.clone().unwrap_or_default();
         let skills = self.skills.clone().unwrap_or_default();
@@ -232,6 +233,18 @@ impl Config {
             ),
             // Issues section
             ("issues.repo".to_string(), issues.repo.unwrap_or_default()),
+            (
+                "issues.components.cassy".to_string(),
+                issue_repos.cassy,
+            ),
+            (
+                "issues.components.mecha_cassy".to_string(),
+                issue_repos.mecha_cassy,
+            ),
+            (
+                "issues.components.cloud".to_string(),
+                issue_repos.cloud,
+            ),
             // Notifications section
             (
                 "notifications.enabled".to_string(),

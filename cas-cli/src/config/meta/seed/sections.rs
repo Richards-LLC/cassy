@@ -23,6 +23,10 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
         "issues",
         "GitHub repository routing for Cassy-system bug reports",
     );
+    registry.section_descriptions.insert(
+        "issues.components",
+        "Issue repositories for each Cassy component",
+    );
     registry
         .section_descriptions
         .insert("dev", "Development and tracing options");

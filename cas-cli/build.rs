@@ -72,9 +72,11 @@ fn watch_optional_path(path: &Path) {
     // nearest existing parent gives creation/deletion transitions a bounded
     // inventory signal without making the missing file itself permanently
     // dirty.
-    if let Some(parent) = path.parent() {
-        watch_existing_ancestor(parent);
-    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    watch_existing_ancestor(parent);
 }
 
 fn watch_existing_ancestor(path: &Path) {

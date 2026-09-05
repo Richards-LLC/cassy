@@ -35,6 +35,7 @@ fn cargo_bin() -> PathBuf {
 fn run_cargo(package_root: &Path, target_dir: &Path, args: &[&str]) -> String {
     let manifest = package_root.join("Cargo.toml");
     let mut cargo_args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+    cargo_args.push("--offline".to_string());
     cargo_args.extend([
         "--manifest-path".to_string(),
         manifest.display().to_string(),
@@ -46,6 +47,13 @@ fn run_cargo(package_root: &Path, target_dir: &Path, args: &[&str]) -> String {
         .args(&cargo_args)
         .current_dir(package_root)
         .env("CARGO_TERM_COLOR", "never")
+        .env("CARGO_NET_OFFLINE", "true")
+        .env_remove("CAS_POSTHOG_API_KEY")
+        .env_remove("CAS_SENTRY_DSN")
+        .env_remove("POSTHOG_API_KEY")
+        .env_remove("SENTRY_DSN")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .output()
         .expect("cargo should start");
     assert_success("cargo", args, &output);
@@ -143,9 +151,8 @@ dotenvy = "0.15"
 #[test]
 fn cargo_build_script_stays_fresh_and_tracks_worktree_transitions() {
     let (repo, normal_package, linked_package) = create_fixture();
-    let targets = tempfile::tempdir().expect("target tempdir");
-    let normal_target = targets.path().join("normal-target");
-    let linked_target = targets.path().join("linked-target");
+    let normal_target = repo.path().join("target");
+    let linked_target = repo.path().join("linked/target");
     // Generate each worktree's lockfile before the first build. Cargo creates
     // it lazily otherwise, which is itself a parent-inventory transition.
     run_cargo(&normal_package, &normal_target, &["generate-lockfile"]);
@@ -176,9 +183,60 @@ fn cargo_build_script_stays_fresh_and_tracks_worktree_transitions() {
     run_cargo(&linked_package, &linked_target, &["check"]);
     let packed_hash = cargo_run_hash(&linked_package, &linked_target);
 
+    let linked_repo = repo.path().join("linked");
+    let old_linked_sha = run_git(&linked_repo, &["rev-parse", "refs/heads/linked"])
+        .trim()
+        .to_string();
+    let tree = run_git(&linked_repo, &["rev-parse", "HEAD^{tree}"])
+        .trim()
+        .to_string();
+    let head_path = PathBuf::from(
+        run_git(
+            &linked_repo,
+            &["rev-parse", "--path-format=absolute", "--git-path", "HEAD"],
+        )
+        .trim(),
+    );
+    let index_path = PathBuf::from(
+        run_git(
+            &linked_repo,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        )
+        .trim(),
+    );
+    let head_before = fs::read(&head_path).expect("read linked HEAD before update-ref");
+    let index_before = fs::read(&index_path).expect("read linked index before update-ref");
+    let new_linked_sha = run_git(
+        &linked_repo,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &old_linked_sha,
+            "-m",
+            "packed-to-loose",
+        ],
+    )
+    .trim()
+    .to_string();
     run_git(
-        &repo.path().join("linked"),
-        &["commit", "--allow-empty", "-q", "-m", "packed-to-loose"],
+        &linked_repo,
+        &[
+            "update-ref",
+            "refs/heads/linked",
+            &new_linked_sha,
+            &old_linked_sha,
+        ],
+    );
+    assert_eq!(
+        fs::read(&head_path).expect("read linked HEAD after update-ref"),
+        head_before,
+        "update-ref must not rewrite linked HEAD"
+    );
+    assert_eq!(
+        fs::read(&index_path).expect("read linked index after update-ref"),
+        index_before,
+        "update-ref must not rewrite linked index"
     );
     let loose_transition = run_cargo(&linked_package, &linked_target, &["check"]);
     assert_no_missing_input(&loose_transition);
@@ -189,15 +247,31 @@ fn cargo_build_script_stays_fresh_and_tracks_worktree_transitions() {
     );
 
     fs::write(
+        linked_package.join(".env"),
+        "CAS_POSTHOG_API_KEY=package-created\n",
+    )
+    .expect("create package-local optional .env");
+    let package_env_transition = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&package_env_transition);
+    let package_env_output = cargo_run_hash(&linked_package, &linked_target);
+    assert!(
+        package_env_output
+            .lines()
+            .any(|line| line == "package-created"),
+        "creating an absent package-local .env did not invalidate the build:\n{package_env_output}"
+    );
+    fs::remove_file(linked_package.join(".env")).expect("remove package-local optional .env");
+
+    fs::write(
         repo.path().join("linked/.env"),
-        "CAS_POSTHOG_API_KEY=created\n",
+        "CAS_POSTHOG_API_KEY=root-created\n",
     )
     .expect("create optional .env");
     let env_transition = run_cargo(&linked_package, &linked_target, &["check"]);
     assert_no_missing_input(&env_transition);
     let env_output = cargo_run_hash(&linked_package, &linked_target);
     assert!(
-        env_output.lines().any(|line| line == "created"),
+        env_output.lines().any(|line| line == "root-created"),
         "creating an absent .env did not invalidate the build:\n{env_output}"
     );
     let env_repeat = run_cargo(&linked_package, &linked_target, &["check"]);

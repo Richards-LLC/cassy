@@ -349,7 +349,12 @@ where
     // The browser receives this origin only after the relay completion below.
     // Prove the advertised route reaches a ready hub first, while the pairing
     // code is still unclaimed and no one-time invitation exists to strand.
-    probe(&hub_url)?;
+    // Operators with a split-horizon route can explicitly skip only this
+    // preflight; URL validation, consent, auth, origin checks, and one-time
+    // token handling remain unchanged below.
+    if !args.skip_hub_readiness {
+        probe(&hub_url)?;
+    }
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
     let auth = AuthStore::open(paths.root(), machine.id)?;
     let machine_label = hostname::get()
@@ -521,10 +526,15 @@ fn verify_public_hub_ready(hub_url: &str) -> Result<()> {
             "hub public URL {hub_url} is not reachable from this machine; the pairing code remains unclaimed and no invitation was created. Restore its HTTPS route (for Tailscale Serve, run `cas hub restart --tailscale-serve`) or pass a reachable `--hub-url`, then retry"
         )
     };
-    let response = ureq::get(health_url.as_str())
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
         .timeout(PUBLIC_HUB_READINESS_TIMEOUT)
+        .build();
+    let response = agent
+        .get(health_url.as_str())
         .call()
         .with_context(recovery)?;
+    anyhow::ensure!(response.status() == 200, "{}", recovery());
     let health: serde_json::Value = response.into_json().with_context(recovery)?;
     anyhow::ensure!(
         health
@@ -1165,30 +1175,104 @@ mod tests {
             code: code.to_owned(),
             scopes: None,
             hub_url: None,
+            skip_hub_readiness: false,
             yes: true,
         }
     }
 
-    fn serve_ready_health_checks(count: usize) -> (u16, std::thread::JoinHandle<()>) {
+    fn serve_http_checks(count: usize, response: String) -> (u16, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = std::thread::spawn(move || {
-            let body = r#"{"schema_version":1,"ready":true}"#;
             for _ in 0..count {
-                let (mut stream, _) = listener.accept().unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "timed out waiting for health fixture request"
+                            );
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("health fixture accept failed: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
                 let mut request = [0_u8; 1024];
                 let _ = stream.read(&mut request).unwrap();
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                )
-                .unwrap();
+                stream.write_all(response.as_bytes()).unwrap();
             }
+        });
+        (port, handle)
+    }
+
+    fn serve_ready_health_checks(count: usize) -> (u16, std::thread::JoinHandle<()>) {
+        let body = r#"{"schema_version":1,"ready":true}"#;
+        serve_http_checks(
+            count,
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        )
+    }
+
+    fn serve_redirect_health_check(target: &str) -> (u16, std::thread::JoinHandle<()>) {
+        let body = r#"{"schema_version":1,"ready":true}"#;
+        serve_http_checks(
+            1,
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        )
+    }
+
+    fn observe_ready_health_checks() -> (u16, std::thread::JoinHandle<usize>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            let mut count = 0;
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        let mut request = [0_u8; 1024];
+                        let _ = stream.read(&mut request).unwrap();
+                        let body = r#"{"schema_version":1,"ready":true}"#;
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .unwrap();
+                        count += 1;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("health observer accept failed: {error}"),
+                }
+            }
+            count
         });
         (port, handle)
     }
@@ -1253,12 +1337,12 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_remembered_hub_is_refused_before_claim_or_invitation() {
+    fn strict_readiness_refuses_unreachable_hub_but_explicit_bypass_continues() {
         let temp = tempfile::tempdir().unwrap();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         let relay = RecordingRelay::default();
         let args = authorize_args("K7MW-4H2Q");
-        let (hub_port, health) = serve_ready_health_checks(1);
+        let (hub_port, health) = serve_ready_health_checks(2);
         write_live_record(&paths, hub_port, None);
 
         let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1270,13 +1354,52 @@ mod tests {
             authorize_with_relay_with_config(&args, &test_cli(), &relay, &paths, None, None)
                 .unwrap_err()
                 .to_string();
-        health.join().unwrap();
 
         assert!(error.contains("not reachable from this machine"), "{error}");
         assert!(
             error.contains("cas hub restart --tailscale-serve"),
             "{error}"
         );
+        assert!(relay.claims.lock().unwrap().is_empty());
+        assert!(relay.completed_invitation_urls.lock().unwrap().is_empty());
+
+        let mut bypass = args;
+        bypass.skip_hub_readiness = true;
+        authorize_with_relay_with_config(&bypass, &test_cli(), &relay, &paths, None, None).unwrap();
+        health.join().unwrap();
+
+        assert_eq!(relay.claims.lock().unwrap().len(), 1);
+        assert_eq!(relay.completed_invitation_urls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn redirected_health_cannot_authorize_a_different_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let relay = RecordingRelay::default();
+        let (hub_port, health) = serve_ready_health_checks(1);
+        write_live_record(&paths, hub_port, None);
+        let (ready_port, ready) = observe_ready_health_checks();
+        let (redirect_port, redirect) =
+            serve_redirect_health_check(&format!("http://127.0.0.1:{ready_port}/v1/health"));
+        persist_last_hub_url(&paths, &format!("http://127.0.0.1:{redirect_port}")).unwrap();
+
+        let error = authorize_with_relay_with_config(
+            &authorize_args("K7MW-4H2Q"),
+            &test_cli(),
+            &relay,
+            &paths,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        health.join().unwrap();
+        redirect.join().unwrap();
+        let redirected_requests = ready.join().unwrap();
+
+        assert!(error.contains("not reachable from this machine"), "{error}");
+        assert_eq!(redirected_requests, 0, "health probe followed the redirect");
         assert!(relay.claims.lock().unwrap().is_empty());
         assert!(relay.completed_invitation_urls.lock().unwrap().is_empty());
     }

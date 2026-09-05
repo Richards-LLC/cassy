@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::{Config, IssueRepoRegistry};
 use crate::gh_graphql;
 
 const CACHE_VERSION: u8 = 1;
@@ -75,11 +75,17 @@ pub(crate) fn build_session_start_banner_sized(
     let cache = read_fresh_cache(&cache_path, repo, now)
         .or_else(|| fetch_issues(repo, now).inspect(|cache| write_cache(&cache_path, cache)))?;
 
-    let full = render_banner(&cache, now);
+    let registry = config.issue_repo_registry();
+    let full = format!(
+        "{}\n\n{}",
+        render_banner(&cache, now),
+        render_issue_repo_registry(&registry)
+    );
     let compact = format!(
         "## GitHub issue triage — {}\n{} open — run `gh issue list --repo {}` for the list.",
         cache.repo, cache.total_count, cache.repo
-    );
+    ) + "\n\n"
+        + &render_issue_repo_registry(&registry);
     Some(crate::hooks::handlers::session_hygiene::SessionStartBanner { full, compact })
 }
 
@@ -191,6 +197,21 @@ fn render_banner(cache: &IssueCache, now: u64) -> String {
     banner
 }
 
+fn render_issue_repo_registry(registry: &IssueRepoRegistry) -> String {
+    format!(
+        "## Where to file bugs\n\
+- project: {} — the current project's own issue tracker\n\
+- cassy: {} — Cassy runtime, hooks, MCP, factory, and skills\n\
+- mecha_cassy: {} — MechaCassy Slack hub and message delivery\n\
+- cloud: {} — Cassy Cloud sync, hub relay, and pairing\n\
+If you hit a bug during operation, file a ticket in the matching repo before moving on.",
+        registry.project.as_deref().unwrap_or("<unset>"),
+        registry.cassy,
+        registry.mecha_cassy,
+        registry.cloud,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +221,7 @@ mod tests {
         Config {
             issues: Some(IssuesConfig {
                 repo: Some(repo.to_string()),
+                ..IssuesConfig::default()
             }),
             ..Config::default()
         }
@@ -211,6 +233,23 @@ mod tests {
         assert_eq!(configured_repo(&Config::default()), None);
         assert_eq!(configured_repo(&config("owner/repo/extra")), None);
         assert_eq!(configured_repo(&config("owner/repo\nspoof")), None);
+    }
+
+    #[test]
+    fn triage_banner_includes_all_issue_destinations_and_operational_directive() {
+        let registry = config("owner/repo").issue_repo_registry();
+        let rendered = render_issue_repo_registry(&registry);
+        for repo in [
+            "owner/repo",
+            "Richards-LLC/cassy",
+            "Richards-LLC/mecha-cassy",
+            "Richards-LLC/petra-stella-cloud",
+        ] {
+            assert!(rendered.contains(repo), "missing {repo}: {rendered}");
+        }
+        assert!(rendered.contains(
+            "If you hit a bug during operation, file a ticket in the matching repo before moving on."
+        ));
     }
 
     #[test]

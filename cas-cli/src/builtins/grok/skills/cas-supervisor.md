@@ -65,7 +65,13 @@ Open the focused file in `cas-supervisor/references/`: preflight, intake, planni
 
 ## Cross-team routing
 
-File Cassy defects in `Richards-LLC/cassy`, even when a downstream project exposed them. File actionable Richards-LLC team requests directly on that team's issue board, never in its checkout, and save a Cassy memory receipt (URL, ask, date). `docs/requests/` is legacy-only for outbound actionable work; see `filing-cas-bugs` for the full policy.
+Route every bug through the resolved issue-repository registry: `issues.repo`
+for the current project, `issues.components.cassy` for Cassy runtime/hooks/MCP,
+`issues.components.mecha_cassy` for the Slack hub, and `issues.components.cloud`
+for Cassy Cloud sync/relay/pairing. Inspect destinations with `cas config get
+issues.repo` and the three `cas config get issues.components.*` keys. If you hit
+a bug during operation, file a ticket in the matching repo before moving on;
+see `filing-cas-bugs` for the filing and receipt policy.
 
 ## Context budgeting
 

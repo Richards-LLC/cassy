@@ -6,20 +6,35 @@ A standing directive: **file every Cassy-system bug you observe, by reflex.** Do
 
 ## Canonical routing
 
-- **Cassy-system defect, from any repository:** file a public-safe GitHub issue in
-  the configured Cassy issue repository. In cas-src, create the corresponding in-repo task; downstream
-  repositories consume Cassy and must not patch it locally.
-- **Actionable request for a Richards-LLC-controlled team:** file directly on
-  that team's repository issue board (for example,
-  `Richards-LLC/petra-stella-cloud`). Never write, commit, or push in that
-  team's checkout from this repository.
+Choose the destination by the component that owns the defect, then file a
+public-safe GitHub issue there. The project repository is configured locally;
+the three Cassy component repositories have compiled defaults and can be
+overridden for a fork or alternate deployment:
+
+- **Project bug or feature:** `issues.repo` — the current project's own issue
+  tracker. In cas-src, create the corresponding in-repo task.
+- **Cassy-system defect:** `issues.components.cassy` — Cassy runtime, hooks,
+  MCP, factory, and builtin skills. Downstream repositories consume Cassy and
+  must not patch it locally.
+- **MechaCassy defect:** `issues.components.mecha_cassy` — the Slack hub and
+  message-delivery component.
+- **Cassy Cloud defect:** `issues.components.cloud` — cloud sync, hub relay,
+  pairing, and related services.
+
+If you hit a bug during operation, file a ticket in the matching repo before moving on. Actionable requests for a Richards-LLC-controlled team belong on
+that component's issue board; never write, commit, or push in that team's
+checkout from this repository.
 - **Receipt:** after every cross-team filing, save a Cassy memory with the issue
   URL, one-line ask, and date. Recent examples are cloud-to-Cassy GH #215 and
   Cassy-to-cloud `Richards-LLC/petra-stella-cloud#44`.
 
-Configure the target with `[issues] repo = "owner/repo"`; inspect it with
-`cas config get issues.repo` and set it with `cas config set issues.repo <owner/repo>`.
-Do not derive the target from a downstream git `origin`.
+Inspect all four resolved destinations with:
+`cas config get issues.repo`, `cas config get issues.components.cassy`,
+`cas config get issues.components.mecha_cassy`, and
+`cas config get issues.components.cloud`. Configure the project target with
+`[issues] repo = "owner/repo"`, or use `cas config set issues.repo <owner/repo>`;
+component overrides use the corresponding `issues.components.*` key. Do not derive
+any target from a downstream git `origin`.
 
 Before filing, check `command -v gh` and `gh auth status`. Use
 `gh issue create --repo <owner/repo>` with a complete public-safe body. If `gh`

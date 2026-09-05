@@ -15,11 +15,100 @@ pub struct HubConfig {
 /// `repo` is deliberately optional: Cassy installations do not share one
 /// upstream repository, and inferring the current git origin would route Cassy
 /// bugs into a downstream consumer's issue tracker.
+pub const DEFAULT_CASSY_ISSUES_REPO: &str = "Richards-LLC/cassy";
+pub const DEFAULT_MECHA_CASSY_ISSUES_REPO: &str = "Richards-LLC/mecha-cassy";
+pub const DEFAULT_CLOUD_ISSUES_REPO: &str = "Richards-LLC/petra-stella-cloud";
+
+/// Optional overrides for the issue repositories of Cassy's component
+/// projects. The compiled defaults remain authoritative when a field is
+/// absent, so fresh projects can route reports without gaining generated
+/// configuration keys.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssueComponentsConfig {
+    /// Repository for Cassy runtime, hooks, MCP, factory, and skills bugs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cassy: Option<String>,
+    /// Repository for MechaCassy Slack hub bugs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mecha_cassy: Option<String>,
+    /// Repository for Cassy Cloud sync, hub relay, and pairing bugs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<String>,
+}
+
+/// Resolved issue destinations exposed to user-facing diagnostics and
+/// directives. `project` is intentionally optional because it has no safe
+/// compiled default; the three Cassy component repositories always resolve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueRepoRegistry {
+    pub project: Option<String>,
+    pub cassy: String,
+    pub mecha_cassy: String,
+    pub cloud: String,
+}
+
+impl IssueComponentsConfig {
+    fn resolved_value(value: Option<&String>, default: &'static str) -> String {
+        value
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(default)
+            .to_string()
+    }
+
+    fn resolved_registry(&self, project: Option<&String>) -> IssueRepoRegistry {
+        IssueRepoRegistry {
+            project: project
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+            cassy: Self::resolved_value(self.cassy.as_ref(), DEFAULT_CASSY_ISSUES_REPO),
+            mecha_cassy: Self::resolved_value(
+                self.mecha_cassy.as_ref(),
+                DEFAULT_MECHA_CASSY_ISSUES_REPO,
+            ),
+            cloud: Self::resolved_value(self.cloud.as_ref(), DEFAULT_CLOUD_ISSUES_REPO),
+        }
+    }
+}
+
+impl IssueRepoRegistry {
+    /// Resolve a registry from an optional issues config. Component defaults
+    /// intentionally live here rather than in serde defaults so serialization
+    /// does not materialize them in a project's config.toml.
+    pub fn from_config(config: Option<&IssuesConfig>) -> Self {
+        let Some(config) = config else {
+            return IssueComponentsConfig::default().resolved_registry(None);
+        };
+        config
+            .components
+            .as_ref()
+            .cloned()
+            .unwrap_or_default()
+            .resolved_registry(config.repo.as_ref())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssuesConfig {
     /// GitHub repository in `owner/repo` form used by Cassy-system bug filing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+
+    /// Optional per-component issue repository overrides. Omitted fields use
+    /// the compiled defaults in [`IssueRepoRegistry::from_config`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<IssueComponentsConfig>,
+}
+
+impl IssuesConfig {
+    /// Resolve this project's issue destinations, retaining the optional
+    /// project repository semantics of the legacy `issues.repo` setting.
+    pub fn resolved_registry(&self) -> IssueRepoRegistry {
+        IssueRepoRegistry::from_config(Some(self))
+    }
 }
 
 /// Release-routing configuration. Lives at `[release]` in `.cas/config.toml`.

@@ -72,3 +72,36 @@ fn every_shipped_harness_embeds_and_syncs_config_driven_issue_intake() {
         assert_config_driven_issue_intake(harness, &rendered);
     }
 }
+
+#[test]
+fn every_issue_filing_builtin_names_the_component_registry() {
+    for harness in SHIPPED_HARNESSES {
+        for relative in [
+            "skills/cas-worker/SKILL.md",
+            "skills/cas-supervisor/SKILL.md",
+            "skills/cas-github-issues/SKILL.md",
+            DIRECTIVE_PATH,
+        ] {
+            let content = skill_catalog_for_harness(harness)
+                .iter()
+                .find(|file| file.path == relative)
+                .unwrap_or_else(|| panic!("{harness:?} catalog is missing {relative}"))
+                .content;
+            for key in [
+                "issues.repo",
+                "issues.components.cassy",
+                "issues.components.mecha_cassy",
+                "issues.components.cloud",
+            ] {
+                assert!(
+                    content.contains(key),
+                    "{harness:?} {relative} is missing registry key {key}"
+                );
+            }
+            assert!(
+                content.contains("file a ticket in the matching repo before moving on"),
+                "{harness:?} {relative} is missing the standing issue-filing directive"
+            );
+        }
+    }
+}

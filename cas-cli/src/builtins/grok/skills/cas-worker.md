@@ -44,6 +44,17 @@ Tool loading is two steps, not one: if `cas__task` is unavailable, use
 `ToolSearch(query="select:cas__task")` once, then call the resolved tool;
   the lookup does **not** execute the tool; use the resolved tool, not another ToolSearch.
 
+## Issue routing
+
+When operation exposes a bug, use the resolved issue-repository registry:
+`issues.repo` is the current project's tracker; `issues.components.cassy` is
+for Cassy runtime/hooks/MCP; `issues.components.mecha_cassy` is for the Slack
+hub; and `issues.components.cloud` is for Cassy Cloud sync/relay/pairing.
+Inspect them with `cas config get issues.repo` and the three
+`cas config get issues.components.*` keys. If you hit a bug during operation,
+file a ticket in the matching repo before moving on; see the supervisor's
+`filing-cas-bugs` reference for the complete public-safe filing flow.
+
 ## Task types and depth
 
 - **Spike:** record the decision with `note_type=decision`; its criteria are

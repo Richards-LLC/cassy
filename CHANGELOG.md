@@ -10,12 +10,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [3.17.1] - 2026-09-05
 
 ### Changed
-- The shared `taste` route now selects Codex GPT-6 Astra at medium effort and
-  fails closed when that route is unavailable. The canonical registry,
-  generated supervisor guidance, CLI and MCP resolution, doctor, and preflight
-  now agree on that choice. Explicit Astra effort choices from minimal through
-  xhigh remain supported, as does explicit Claude Opus selection outside the
-  `taste` route.
+- The factory `taste` lane now routes to Claude Fable 5.1 at medium effort
+  instead of Codex GPT-6 Astra. Explicit Astra and Opus requests still work,
+  and `taste` fails closed when the Claude account is unavailable. The registry
+  recipe is `claude_fable` with model `claude-fable-5-1` and medium effort, and
+  the disabled Opus fallback edge remains fail-closed.
 - Bug filing now uses one component registry with four destinations: the
   project repository from `issues.repo`, Cassy, MechaCassy, and Cassy Cloud.
   Compiled defaults can be overridden under `[issues.components]`, and the

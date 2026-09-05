@@ -30,6 +30,7 @@ import { TranscriptView } from "./transcript-view";
 import { applyLiveRegions, type LiveRegionView } from "./live-regions";
 import { DeferredRenderScheduler } from "./deferred-render";
 import { FleetBoardRenderer } from "./fleet-board";
+import { FirstConnectionAnnouncer } from "./first-connection";
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
@@ -115,9 +116,9 @@ let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a ma
 // Cancellation whose durable cleanup did not complete: the dialog stays on a
 // "could not finish cancelling" step with a retry until storage cooperates (F2).
 let pairingCleanupFailed = false;
-// A machine whose credential was just saved: "connected" is announced only
-// once its connection actually reaches live (F8).
-let awaitingFirstConnection: string | undefined;
+// Machines whose credential was just saved: "connected" is announced once per
+// saved credential, only when the connection actually reaches live (F8).
+const firstConnections = new FirstConnectionAnnouncer();
 // Why the cleanup step is showing: what was discarded and which cleanup is
 // still owed, so the step says only what is true of this cleanup.
 let pairingCleanupContext: CleanupStepContext = { cause: "cancel", storeOpen: false, rollbackPending: false };
@@ -393,10 +394,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // Anchor staleness to the last live moment: retry transitions rewrite
       // snapshot.since, which would report a ten-minute outage as "just now".
       if (state.phase === "live") lastLiveAt.set(machine.id, Date.now());
-      if (state.phase === "live" && !state.degraded && awaitingFirstConnection === machine.id) {
-        awaitingFirstConnection = undefined;
-        toast(`${machine.label} connected`);
-      }
+      const connectedNotice = firstConnections.observe(machine.id, machine.label, state);
+      if (connectedNotice) toast(connectedNotice);
       if (state.phase === "failed" || state.phase === "backoff") invalidateMachineLeases(machine.id);
       // One outage is one problem. A stable fingerprint per machine and kind
       // collapses every retry into a single card with a repeat count instead of
@@ -2608,7 +2607,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       // What is true now is that access is saved; whether the machine is
       // reachable is the connection's answer, announced when it arrives.
       const paired = machines.get(selectedMachineId ?? "");
-      awaitingFirstConnection = paired?.id;
+      if (paired) firstConnections.expect(paired.id);
       toast(`Access saved — connecting to ${paired?.label ?? "the machine"}…`);
     }).catch((error) => {
       // A pairing failure is stated inside the dialog beside Pair; a toast
@@ -2620,6 +2619,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const remove = document.querySelector<HTMLButtonElement>("#remove-machine");
   if (remove && selected) remove.onclick = async () => {
     connections.get(selected.id)?.stop();
+    firstConnections.forget(selected.id);
     connections.delete(selected.id); machines.delete(selected.id); sessions.delete(selected.id);
     await catalog.remove(selected.id);
     // Walking back into a credential that no longer exists is a dead end, and

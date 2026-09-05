@@ -170,7 +170,7 @@ It also points `TMPDIR` at GitHub Runner's disk-backed temporary directory;
 nextest's default archive extraction used the unit's private tmpfs-backed
 `/tmp` and consumed about 2.5 GB during the shard evaluation.
 
-### Shockwave cache mount and hard budgets
+### Shockwave cache mount and enforced periodic budgets
 
 `/var/lib/cassy-actions/cache` must be the bind mount whose exact filesystem
 root is `/home/.cassy-actions-cache`. `/home` is itself backed by the
@@ -184,19 +184,31 @@ growing a new cache on the root filesystem. The durable host entry is:
 /home/.cassy-actions-cache /var/lib/cassy-actions/cache none bind,nofail,x-systemd.requires-mounts-for=/home 0 0
 ```
 
-Each slot has a decimal 60,000,000,000-byte ceiling. Cargo target data is
+Each slot has a decimal 60,000,000,000-byte enforced periodic budget. This is
+not a filesystem quota or an instantaneous hard ceiling: a running build can
+temporarily grow past it, and the idle-time pruner restores the bound before a
+later job. Cargo target data is
 configured at no more than 50,000,000,000 bytes. `SCCACHE_CACHE_SIZE=8G` uses
 sccache's binary suffix and therefore means 8,589,934,592 bytes; the configured
 sum is 58,589,934,592 bytes. `CARGO_INCREMENTAL=0` is set in the runner units
 and CI workflows so incremental sessions cannot regrow.
 
-`cassy-actions-cache-prune.timer` runs daily and the pruner checks both service
-cgroups for `Runner.Worker`, not merely `cargo` or `rustc`. An active worker
-skips the scheduled run. Missing cgroups, unreadable PID state, or a forced run
-while busy fail closed. When idle, the pruner removes stale incremental
-sessions and `deps` files first, then whole known-rebuildable Cargo profiles if
-needed. It accounts for the slot's actual sccache bytes when enforcing the
-total; unknown over-budget target data is retained and reported as a failure.
+`cassy-actions-cache-prune.timer` runs daily. GitHub Runner's job-started hook
+acquires a shared lock before checkout and a job-completed hook releases it;
+the holder clears `RUNNER_TRACKING_ID` so per-job orphan cleanup cannot reap it.
+It stays in the runner service cgroup, so stopping the unit still reaps it.
+The pruner takes the same lock exclusively and nonblocking, then rechecks the
+exact Shockwave mount and both service cgroups for `Runner.Worker`, not merely
+`cargo` or `rustc`. This barrier prevents a job from starting across destructive
+pruning and prevents pruning throughout a job that happens not to run a Rust
+compiler. An active worker skips the scheduled run. Missing cgroups, unreadable
+PID state, a bad mount, or a forced run while busy fail closed. When idle, the
+pruner removes stale incremental sessions and `deps` files first, then whole
+known-rebuildable Cargo profiles if
+needed. Every deletion target is canonicalized, must remain on the cache device,
+and is rejected if any path component is a symlink. The pruner accounts for the
+slot's actual sccache bytes when enforcing the total; unknown over-budget target
+data is retained and reported as a failure.
 
 The current migration keeps runner credentials, listeners, workspaces, and
 toolchains under `/var/lib/cassy-actions`; only the persistent cache is on

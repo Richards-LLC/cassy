@@ -19,6 +19,11 @@ pruner_source="$repo_root/scripts/prune-cassy-actions-cache.sh"
 pruner_dest=/usr/local/sbin/cassy-actions-cache-prune
 mount_guard_source="$repo_root/scripts/check-cassy-actions-cache-mount.sh"
 mount_guard_dest="$runner_root/check-cache-mount.sh"
+job_lock_source="$repo_root/scripts/cassy-actions-cache-job-lock.sh"
+job_lock_dest="$runner_root/cache-job-lock.sh"
+job_started_dest="$runner_root/cache-job-started.sh"
+job_completed_dest="$runner_root/cache-job-completed.sh"
+job_lock_state="$runner_root/job-locks"
 prune_service_source="$repo_root/ops/systemd/cassy-actions-cache-prune.service"
 prune_timer_source="$repo_root/ops/systemd/cassy-actions-cache-prune.timer"
 
@@ -57,7 +62,7 @@ if [[ -z "${RUNNER_TOKEN:-}" ]]; then
     exit 1
 fi
 if [[ ! -f "$unit_source" || ! -f "$wrapper_source" || ! -x "$pruner_source" ||
-      ! -x "$mount_guard_source" || ! -f "$prune_service_source" ||
+      ! -x "$mount_guard_source" || ! -x "$job_lock_source" || ! -f "$prune_service_source" ||
       ! -f "$prune_timer_source" ]]; then
     echo "runner service, cache guard, or pruning files are missing" >&2
     exit 1
@@ -69,7 +74,7 @@ fi
 install -d -o "$runner_user" -g "$runner_user" -m 0750 \
     "$runner_dir" "$runner_root/cache" "$cargo_target_dir" \
     "$sccache_dir" "$runner_root/.cargo" \
-    "$runner_root/.cargo/bin" "$runner_root/.rustup"
+    "$runner_root/.cargo/bin" "$runner_root/.rustup" "$job_lock_state"
 chown -R "$runner_user:$runner_user" \
     "$runner_root/cache" "$runner_root/.cargo" "$runner_root/.rustup"
 if ! mountpoint -q "$runner_root/cache"; then
@@ -126,6 +131,9 @@ fi
 install -o "$runner_user" -g "$runner_user" -m 0755 \
     "$wrapper_source" "$wrapper_dest"
 install -o root -g root -m 0755 "$mount_guard_source" "$mount_guard_dest"
+install -o root -g root -m 0755 "$job_lock_source" "$job_lock_dest"
+ln -sfn "$(basename -- "$job_lock_dest")" "$job_started_dest"
+ln -sfn "$(basename -- "$job_lock_dest")" "$job_completed_dest"
 install -o root -g root -m 0755 "$pruner_source" "$pruner_dest"
 install -o root -g root -m 0644 "$prune_service_source" \
     /etc/systemd/system/cassy-actions-cache-prune.service

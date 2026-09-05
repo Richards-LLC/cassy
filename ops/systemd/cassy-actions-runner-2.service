@@ -30,6 +30,9 @@ Environment=RUSTUP_HOME=/var/lib/cassy-actions/.rustup
 Environment=CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target-2
 Environment=SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache-2
 Environment=CARGO_INCREMENTAL=0
+Environment=CASSY_ACTIONS_RUNNER_SLOT=2
+Environment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/var/lib/cassy-actions/cache-job-started.sh
+Environment=ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/var/lib/cassy-actions/cache-job-completed.sh
 Environment=SCCACHE_SERVER_PORT=4228
 # 8G is 8,589,934,592 bytes; target+sccache is capped below 60,000,000,000.
 Environment=SCCACHE_CACHE_SIZE=8G

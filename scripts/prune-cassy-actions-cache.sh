@@ -13,10 +13,13 @@ log() {
 }
 
 production_root=/var/lib/cassy-actions/cache
-cache_root="$(realpath -m -- "${CASSY_ACTIONS_CACHE_ROOT:-$production_root}")"
+cache_root="$(realpath -e -- "${CASSY_ACTIONS_CACHE_ROOT:-$production_root}")" ||
+    fail 'cache root must exist'
 cgroup_root="${CASSY_ACTIONS_CGROUP_ROOT:-/sys/fs/cgroup}"
 proc_root="${CASSY_ACTIONS_PROC_ROOT:-/proc}"
 systemctl_bin="${CASSY_ACTIONS_SYSTEMCTL_BIN:-/usr/bin/systemctl}"
+mount_guard_bin="${CASSY_ACTIONS_MOUNT_GUARD_BIN:-/var/lib/cassy-actions/check-cache-mount.sh}"
+findmnt_bin="${CASSY_ACTIONS_FINDMNT_BIN:-/usr/bin/findmnt}"
 target_budget_bytes="${CASSY_ACTIONS_TARGET_BUDGET_BYTES:-50000000000}"
 # sccache parses G as 1024^3 bytes; 8G is exactly 8,589,934,592 bytes.
 sccache_budget_bytes="${CASSY_ACTIONS_SCCACHE_BUDGET_BYTES:-8589934592}"
@@ -33,19 +36,57 @@ usage() {
 validate_config() {
     local value
     if [[ "$cache_root" != "$production_root" || "$cgroup_root" != /sys/fs/cgroup ||
-          "$proc_root" != /proc || "$systemctl_bin" != /usr/bin/systemctl ]]; then
+          "$proc_root" != /proc || "$systemctl_bin" != /usr/bin/systemctl ||
+          "$mount_guard_bin" != /var/lib/cassy-actions/check-cache-mount.sh ||
+          "$findmnt_bin" != /usr/bin/findmnt ]]; then
         [[ "${CASSY_ACTIONS_ALLOW_TEST_ROOT:-}" == 1 ]] ||
             fail 'alternate cache/job-state roots are allowed only in a test fixture'
     fi
     [[ "$cache_root" != / && -d "$cache_root" && ! -L "$cache_root" ]] ||
         fail 'cache root must be an existing non-symlink directory'
     [[ -x "$systemctl_bin" ]] || fail "systemctl is not executable: $systemctl_bin"
+    [[ -x "$mount_guard_bin" ]] || fail "mount guard is not executable: $mount_guard_bin"
+    [[ -x "$findmnt_bin" ]] || fail "findmnt is not executable: $findmnt_bin"
     for value in "$target_budget_bytes" "$sccache_budget_bytes" "$slot_budget_bytes"; do
         [[ "$value" =~ ^[1-9][0-9]*$ ]] || fail 'cache budgets must be positive byte counts'
     done
     [[ "$max_age_days" =~ ^[0-9]+$ ]] || fail 'cache max age must be a non-negative day count'
     (( target_budget_bytes + sccache_budget_bytes <= slot_budget_bytes )) ||
         fail "configured target+sccache budget exceeds slot cap: $target_budget_bytes + $sccache_budget_bytes > $slot_budget_bytes"
+}
+
+require_safe_delete_path() {
+    local candidate="$1" cursor component canonical candidate_device candidate_mount
+    local relative="${candidate#"$cache_root"/}"
+    [[ "$candidate" == "$cache_root/"* && "$relative" != "$candidate" && -n "$relative" ]] ||
+        fail "refusing deletion outside the cache root: $candidate"
+    cursor="$cache_root"
+    IFS=/ read -r -a components <<<"$relative"
+    for component in "${components[@]}"; do
+        [[ -n "$component" && "$component" != . && "$component" != .. ]] ||
+            fail "refusing non-canonical cache deletion path: $candidate"
+        cursor="$cursor/$component"
+        [[ ! -L "$cursor" ]] || fail "refusing deletion below a symlink: $cursor"
+    done
+    canonical="$(realpath -e -- "$candidate")" || fail "cannot canonicalize deletion path: $candidate"
+    [[ "$canonical" == "$cache_root/"* ]] ||
+        fail "canonical deletion path escaped the cache root: $candidate -> $canonical"
+    candidate_device="$("$findmnt_bin" -n -o MAJ:MIN -T "$canonical")" ||
+        fail "cannot resolve deletion device: $canonical"
+    candidate_mount="$("$findmnt_bin" -n -o TARGET -T "$canonical")" ||
+        fail "cannot resolve deletion mount: $canonical"
+    [[ "$candidate_device" == "$cache_device" && "$candidate_mount" == "$cache_mount" ]] ||
+        fail "deletion path is not on the cache mount/device: $canonical"
+}
+
+safe_rm_rf() {
+    require_safe_delete_path "$1"
+    rm -rf -- "$1"
+}
+
+safe_rm_f() {
+    require_safe_delete_path "$1"
+    rm -f -- "$1"
 }
 
 bytes_for() {
@@ -87,13 +128,13 @@ remove_stale() {
     while IFS= read -r -d '' tree; do
         while IFS= read -r -d '' path; do
             require_idle
-            rm -rf -- "$path"
+            safe_rm_rf "$path"
         done < <(find "$tree" -xdev -mindepth 1 -maxdepth 1 \
             -mtime "+$max_age_days" -print0)
     done < <(find "$target" -xdev -type d -name incremental -print0)
     while IFS= read -r -d '' path; do
         require_idle
-        rm -f -- "$path"
+        safe_rm_f "$path"
     done < <(find "$target" -xdev -type d -name deps -print0 | while IFS= read -r -d '' path; do
         find "$path" -xdev -mindepth 1 -maxdepth 1 \( -type f -o -type l \) \
             -mtime "+$max_age_days" -print0
@@ -121,7 +162,7 @@ prune_slot() {
             "$target/release-fast" "$target/x86_64-unknown-linux-gnu/release-fast"; do
             [[ -e "$profile" && ! -L "$profile" ]] || continue
             require_idle
-            rm -rf -- "$profile"
+            safe_rm_rf "$profile"
             target_bytes="$(bytes_for "$target")"
             (( target_bytes <= allowed_target )) && break
         done
@@ -135,10 +176,31 @@ prune_slot() {
 }
 
 prune_all() {
-    local index
-    require_idle
-    exec 9>"$cache_root/.cassy-actions-cache-prune.lock"
-    flock -n 9 || fail 'another cache prune is already running'
+    local mode="$1" index state
+    exec 9>>"$cache_root/.cassy-actions-cache-job.lock"
+    if ! flock -n -x 9; then
+        if [[ "$mode" == --scheduled ]]; then
+            log 'scheduled prune skipped: a runner job or another prune holds the cache lock'
+            return 0
+        fi
+        fail 'refusing forced prune: a runner job or another prune holds the cache lock'
+    fi
+    "$mount_guard_bin" || fail 'exact Shockwave cache mount verification failed'
+    if runner_job_state; then
+        :
+    else
+        state=$?
+        if (( state == 1 )) && [[ "$mode" == --scheduled ]]; then
+            log 'scheduled prune skipped: Runner.Worker owns an active job'
+            return 0
+        fi
+        (( state == 1 )) && fail 'refusing to prune while Runner.Worker owns an active job'
+        fail 'refusing to prune because runner job state is missing or unreadable'
+    fi
+    cache_device="$("$findmnt_bin" -n -o MAJ:MIN -T "$cache_root")" ||
+        fail 'cannot resolve cache device'
+    cache_mount="$("$findmnt_bin" -n -o TARGET -T "$cache_root")" ||
+        fail 'cannot resolve cache mount'
     for index in 0 1; do prune_slot "$index"; done
 }
 
@@ -156,19 +218,8 @@ main() {
                 fail 'runner job state is missing or unreadable'
             fi
             ;;
-        --now) prune_all ;;
-        --scheduled)
-            if runner_job_state; then
-                prune_all
-            else
-                state=$?
-                if (( state == 1 )); then
-                    log 'scheduled prune skipped: Runner.Worker owns an active job'
-                    exit 0
-                fi
-                fail 'scheduled prune refused: runner job state is missing or unreadable'
-            fi
-            ;;
+        --now) prune_all --now ;;
+        --scheduled) prune_all --scheduled ;;
         *) usage >&2; exit 2 ;;
     esac
 }

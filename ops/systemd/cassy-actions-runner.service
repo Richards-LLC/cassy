@@ -33,6 +33,9 @@ Environment=RUSTUP_HOME=/var/lib/cassy-actions/.rustup
 Environment=CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target
 Environment=SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache
 Environment=CARGO_INCREMENTAL=0
+Environment=CASSY_ACTIONS_RUNNER_SLOT=1
+Environment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/var/lib/cassy-actions/cache-job-started.sh
+Environment=ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/var/lib/cassy-actions/cache-job-completed.sh
 # sccache otherwise discovers the operator's machine-global server on its
 # default port and crosses Unix-user/cache boundaries. A dedicated port keeps
 # runner traffic and statistics inside this service account.

@@ -8969,7 +8969,9 @@ fn read_context_usage_from_tail_for_cli(
 /// Git state snapshot for a factory worker.
 ///
 /// All fields are best-effort: a failed git sub-command yields a sentinel
-/// value ("?" or "none" or 0) rather than aborting the status render.
+/// value ("?" or "none" or 0) rather than aborting the status render.  The
+/// PR lookup is deliberately tri-state so an unavailable lookup cannot be
+/// mistaken for a successful query that found no PR.
 /// See [`collect_worker_git_status`] for field semantics.
 ///
 /// `pub(crate)` so the Stop hook (cas-5c0a) can reuse this struct without
@@ -8999,8 +9001,8 @@ pub(crate) struct WorkerGitStatus {
     pub dirty: bool,
     /// `"origin/<branch>"` when the branch has been pushed, otherwise `"none"`
     pub pushed_ref: String,
-    /// Open pull-request URL, or `"none"` when not found / gh unavailable
-    pub pr_url: String,
+    /// Result of the open pull-request lookup.
+    pub pr_url: WorkerPrUrl,
     /// `true` when this path is the SHARED primary checkout (the main
     /// working tree) rather than a linked `git worktree`.
     ///
@@ -9010,6 +9012,32 @@ pub(crate) struct WorkerGitStatus {
     /// `false` (treated as a linked worktree) whenever git can't answer —
     /// a false alarm on every non-git dir would train the reader to ignore it.
     pub is_shared_checkout: bool,
+}
+
+/// Outcome of the best-effort open pull-request lookup used by
+/// [`WorkerGitStatus`].
+///
+/// `None` is reserved for a successful `gh` query with empty output.  Every
+/// other inability to answer is `Unknown` with a fixed, redacted reason; the
+/// reason must never include command output, paths, or authentication data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkerPrUrl {
+    /// `gh` returned a non-empty URL.
+    Url(String),
+    /// `gh` succeeded and reported no open PR.
+    None,
+    /// The lookup could not establish whether an open PR exists.
+    Unknown(&'static str),
+}
+
+impl std::fmt::Display for WorkerPrUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Url(url) => f.write_str(url),
+            Self::None => f.write_str("none"),
+            Self::Unknown(reason) => write!(f, "unknown ({reason})"),
+        }
+    }
 }
 
 /// Collect git introspection data for a worker's worktree path.
@@ -9026,6 +9054,18 @@ pub(crate) struct WorkerGitStatus {
 /// blocking operations already).  Callers in a strict async context should
 /// wrap in `tokio::task::spawn_blocking` if needed.
 pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> WorkerGitStatus {
+    collect_worker_git_status_with_gh(worktree_path, std::path::Path::new("gh"))
+}
+
+/// Collect git status while using the supplied `gh` executable.
+///
+/// The executable parameter keeps the production collector's subprocess
+/// behavior intact while allowing tests to cover missing, failed, and empty
+/// `gh` responses without changing the process-wide `PATH`.
+fn collect_worker_git_status_with_gh(
+    worktree_path: &std::path::Path,
+    gh_program: &std::path::Path,
+) -> WorkerGitStatus {
     // --- current branch -------------------------------------------------------
     let branch = run_git(worktree_path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "?".to_string());
@@ -9109,24 +9149,9 @@ pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> Work
     };
 
     // --- open PR URL (gh, graceful degrade) -----------------------------------
-    // Only attempt the `gh` query when we know the branch has been pushed —
-    // otherwise it will always return nothing and adds ~200ms latency.
-    let pr_url = if pushed_ref == "none" || branch == "?" {
-        "none".to_string()
-    } else {
-        std::process::Command::new("gh")
-            .args([
-                "pr", "list", "--head", &branch, "--json", "url", "--jq", ".[0].url",
-            ])
-            .current_dir(worktree_path)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "none".to_string())
-    };
+    // Keep the pushed-ref short-circuit to avoid an unnecessary ~200ms query,
+    // but report why it could not answer instead of claiming "none".
+    let pr_url = collect_worker_pr_url(worktree_path, &branch, &pushed_ref, gh_program);
 
     // --- shared checkout or linked worktree? ----------------------------------
     // cas-5bef (GH #120). In a linked worktree `--git-dir` resolves to
@@ -9152,6 +9177,50 @@ pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> Work
         pushed_ref,
         pr_url,
         is_shared_checkout,
+    }
+}
+
+/// Resolve an open PR for a branch without exposing subprocess details.
+fn collect_worker_pr_url(
+    worktree_path: &std::path::Path,
+    branch: &str,
+    pushed_ref: &str,
+    gh_program: &std::path::Path,
+) -> WorkerPrUrl {
+    if branch == "?" {
+        return WorkerPrUrl::Unknown("branch unknown");
+    }
+    if pushed_ref == "none" {
+        return WorkerPrUrl::Unknown("branch not on origin locally");
+    }
+
+    let output = match std::process::Command::new(gh_program)
+        .args([
+            "pr", "list", "--head", branch, "--json", "url", "--jq", ".[0].url",
+        ])
+        .current_dir(worktree_path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return WorkerPrUrl::Unknown("gh unavailable");
+        }
+        Err(_) => return WorkerPrUrl::Unknown("gh could not start"),
+    };
+
+    if !output.status.success() {
+        return WorkerPrUrl::Unknown("gh lookup failed");
+    }
+
+    let stdout = match String::from_utf8(output.stdout) {
+        Ok(stdout) => stdout,
+        Err(_) => return WorkerPrUrl::Unknown("gh returned invalid output"),
+    };
+    let url = stdout.trim();
+    if url.is_empty() {
+        WorkerPrUrl::None
+    } else {
+        WorkerPrUrl::Url(url.to_string())
     }
 }
 
@@ -9222,7 +9291,7 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
     } else {
         format!("[pushed: {}]", gs.pushed_ref)
     };
-    let pr_label = gs.pr_url.clone(); // "none" or a URL
+    let pr_label = gs.pr_url.to_string(); // URL, "none", or "unknown (...)"
 
     // cas-ecf7 (GH #118): a worktree that is behind its base was the failure
     // mode that cost an epic three workers built on 25-commit-old history. The
@@ -14506,7 +14575,7 @@ effort = "high"
             base_branch: "origin/main".to_string(),
             dirty: false,
             pushed_ref: "origin/factory/myworker".to_string(),
-            pr_url: "https://github.com/org/repo/pull/42".to_string(),
+            pr_url: WorkerPrUrl::Url("https://github.com/org/repo/pull/42".to_string()),
             is_shared_checkout: false,
         };
         let out = format_worker_git_status(&gs);
@@ -14546,7 +14615,7 @@ effort = "high"
             base_branch: "origin/main".to_string(),
             dirty: false,
             pushed_ref: "none".to_string(),
-            pr_url: "none".to_string(),
+            pr_url: WorkerPrUrl::None,
             is_shared_checkout: false,
         };
         let out = format_worker_git_status(&stale);
@@ -14582,7 +14651,7 @@ effort = "high"
             base_branch: "origin/main".to_string(),
             dirty: false,
             pushed_ref: "none".to_string(),
-            pr_url: "none".to_string(),
+            pr_url: WorkerPrUrl::None,
             is_shared_checkout: true,
         };
         let out = format_worker_git_status(&parked);
@@ -14724,8 +14793,55 @@ effort = "high"
         outer
     }
 
-    /// AC2 (cas-844bf): when gh is unavailable / not pushed, pr_url and
-    /// pushed_ref degrade gracefully to "none" without panicking.
+    /// A missing `gh` lookup is not a successful no-PR result.  Keep the
+    /// pushed-ref short-circuit covered separately below, while this fixture
+    /// makes the branch look pushed and injects an absent executable.
+    #[test]
+    fn collect_git_status_reports_unknown_when_gh_is_unavailable() {
+        let (tmp, _expected_sha) = setup_git_repo_with_factory_branch("test-worker");
+        run_git_ok(
+            tmp.path(),
+            &[
+                "update-ref",
+                "refs/remotes/origin/factory/test-worker",
+                "HEAD",
+            ],
+        );
+
+        let missing_gh = tmp.path().join("gh-not-installed");
+        let status = collect_worker_git_status_with_gh(tmp.path(), &missing_gh);
+        assert_eq!(status.pr_url, WorkerPrUrl::Unknown("gh unavailable"));
+        let rendered = format_worker_git_status(&status);
+        assert!(
+            rendered.contains("PR: unknown (gh unavailable)"),
+            "failed gh lookup must be visible as unknown: {rendered}"
+        );
+        assert!(
+            !rendered.contains("PR: none"),
+            "failed gh lookup must not masquerade as no PR: {rendered}"
+        );
+    }
+
+    #[test]
+    fn collect_git_status_reports_unknown_when_branch_ref_is_unfetched() {
+        let (tmp, _expected_sha) = setup_git_repo_with_factory_branch("unfetched-worker");
+        let missing_gh = tmp.path().join("gh-not-installed");
+        let status = collect_worker_git_status_with_gh(tmp.path(), &missing_gh);
+        assert_eq!(
+            status.pr_url,
+            WorkerPrUrl::Unknown("branch not on origin locally")
+        );
+        let rendered = format_worker_git_status(&status);
+        assert!(
+            rendered.contains("PR: unknown (branch not on origin locally)"),
+            "unfetched branch must be visible as unknown: {rendered}"
+        );
+        assert!(
+            !rendered.contains("PR: none"),
+            "unfetched branch must not masquerade as no PR: {rendered}"
+        );
+    }
+
     #[test]
     fn collect_git_status_degrades_on_non_git_dir() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -14737,6 +14853,7 @@ effort = "high"
             "non-git dir must not propagate git error messages: '{}'",
             status.branch
         );
+        assert_eq!(status.pr_url, WorkerPrUrl::Unknown("branch unknown"));
         // No panics is the primary assertion — the above implicitly proves it.
     }
 
@@ -14751,7 +14868,7 @@ effort = "high"
             base_branch: "origin/main".to_string(),
             dirty: true,
             pushed_ref: "none".to_string(),
-            pr_url: "none".to_string(),
+            pr_url: WorkerPrUrl::None,
             is_shared_checkout: false,
         };
         let out = format_worker_git_status(&gs);

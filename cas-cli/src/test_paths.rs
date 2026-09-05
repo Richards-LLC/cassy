@@ -33,9 +33,24 @@ pub fn crate_root() -> PathBuf {
 ///
 /// `CARGO_MANIFEST_DIR` records the path on the machine that built an
 /// archived test. Nextest executes the archive from a checkout at a different
-/// path, so fixture directories must be created beneath the process cwd.
+/// path, so fixture directories must be created beneath the process cwd. A
+/// worker checkout's cwd may itself be under `.cas`; in that case, place the
+/// fixture outside the checkout so discovery cannot inherit its Git origin or
+/// walk through a `.cas` ancestor and mistake the fixture for Cassy state.
 pub fn runtime_fixture_parent() -> PathBuf {
-    std::env::current_dir().expect("test current directory")
+    let cwd = std::env::current_dir().expect("test current directory");
+    fixture_parent_for(&cwd)
+}
+
+fn fixture_parent_for(cwd: &Path) -> PathBuf {
+    let checkout_root = cwd
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == ".cas"))
+        .and_then(Path::parent)
+        .or_else(|| cwd.ancestors().find(|path| path.join(".git").exists()));
+    checkout_root
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| cwd.to_path_buf())
 }
 
 /// Finds the `cas` executable supplied alongside an archived test binary.
@@ -100,7 +115,8 @@ fn find_workspace_root(base: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_workspace_root, runtime_workspace_root};
+    use super::{find_workspace_root, fixture_parent_for, runtime_workspace_root};
+    use std::path::Path;
     use tempfile::tempdir;
 
     #[test]
@@ -135,6 +151,29 @@ mod tests {
     #[test]
     fn current_runtime_has_a_workspace_root() {
         assert!(runtime_workspace_root().is_some());
+    }
+
+    #[test]
+    fn fixture_parent_escapes_a_worker_cas_directory() {
+        let cwd = Path::new("/runner/cas-src/.cas/worktrees/worker");
+
+        assert_eq!(fixture_parent_for(cwd), Path::new("/runner"));
+    }
+
+    #[test]
+    fn fixture_parent_keeps_archive_cwd_outside_cas() {
+        let cwd = Path::new("/runner/archive-run");
+
+        assert_eq!(fixture_parent_for(cwd), cwd);
+    }
+
+    #[test]
+    fn fixture_parent_escapes_a_regular_git_checkout() {
+        let temp = tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".git")).unwrap();
+        let cwd = temp.path().join("target/nextest");
+
+        assert_eq!(fixture_parent_for(&cwd), temp.path().parent().unwrap());
     }
 
     #[test]

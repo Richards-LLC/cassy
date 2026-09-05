@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily bounded prune for Cassy Actions caches
+Documentation=https://github.com/Richards-LLC/cassy/issues/721
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=15min
+AccuracySec=5min
+Unit=cassy-actions-cache-prune.service
+
+[Install]
+WantedBy=timers.target

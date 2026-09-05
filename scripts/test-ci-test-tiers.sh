@@ -22,6 +22,14 @@ runner_unit_2="$repo_root/ops/systemd/cassy-actions-runner-2.service"
 runner_wrapper_2="$repo_root/ops/systemd/run-cassy-actions-runner-2.sh"
 runner_installer="$repo_root/scripts/install-cassy-actions-runner.sh"
 runner_isolation="$repo_root/scripts/check-cassy-actions-runner-isolation.sh"
+runner_pruner="$repo_root/scripts/prune-cassy-actions-cache.sh"
+runner_pruner_test="$repo_root/scripts/test-prune-cassy-actions-cache.sh"
+runner_job_lock="$repo_root/scripts/cassy-actions-cache-job-lock.sh"
+runner_job_lock_test="$repo_root/scripts/test-cassy-actions-cache-job-lock.sh"
+runner_mount_guard="$repo_root/scripts/check-cassy-actions-cache-mount.sh"
+runner_mount_guard_test="$repo_root/scripts/test-check-cassy-actions-cache-mount.sh"
+runner_prune_service="$repo_root/ops/systemd/cassy-actions-cache-prune.service"
+runner_prune_timer="$repo_root/ops/systemd/cassy-actions-cache-prune.timer"
 rust_setup="$repo_root/scripts/setup-cassy-actions-rust.sh"
 release_runner_trust="$repo_root/scripts/check-release-runner-trust.sh"
 stale_queue_watchdog="$repo_root/.github/workflows/stale-queued-run-watchdog.yml"
@@ -148,6 +156,7 @@ require_text "$self_hosted_text" 'labels: cas-ci-32core' 'self-hosted job uses i
 require_text "$self_hosted_text" 'permissions:' 'self-hosted workflow declares explicit token permissions'
 require_text "$self_hosted_text" 'contents: read' 'self-hosted workflow token is read-only'
 require_text "$self_hosted_text" 'CARGO_BUILD_JOBS: "12"' 'self-hosted compile leaves CPU capacity for the worker fleet'
+require_text "$self_hosted_text" 'CARGO_INCREMENTAL: "0"' 'self-hosted CI disables incremental compiler artifacts'
 require_text "$self_hosted_text" 'RUSTC_WRAPPER: ""' 'pilot archive timing is not coupled to sccache availability'
 require_text "$self_hosted_text" './scripts/check-cassy-actions-runner-isolation.sh' 'self-hosted job verifies an approved target/cache/port tuple'
 require_absent "$self_hosted_text" 'sccache --start-server' 'workflow steps cannot start a cache server that Runner.Worker will reap'
@@ -191,19 +200,72 @@ require_text "$pilot_doc" 'Ephemeral/JIT runners remain future' 'pilot records t
 runner_unit_text="$(<"$runner_unit")"
 runner_unit_2_text="$(<"$runner_unit_2")"
 require_text "$runner_unit_text" 'Environment=CARGO_CACHE_RUSTC_INFO=0' 'runner does not persist failed sccache rustc probes across jobs'
+require_text "$runner_unit_text" 'RequiresMountsFor=/home /var/lib/cassy-actions/cache' 'slot 1 requires the Shockwave-backed cache mount'
+require_text "$runner_unit_text" 'ExecStartPre=/var/lib/cassy-actions/check-cache-mount.sh' 'slot 1 validates the exact cache mount before starting'
+require_text "$runner_unit_text" 'Environment=CARGO_INCREMENTAL=0' 'slot 1 disables incremental compilation'
+require_text "$runner_unit_text" 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/var/lib/cassy-actions/cache-job-started.sh' 'slot 1 holds the prune barrier for the complete job lifecycle'
+require_text "$runner_unit_text" 'Environment=CASSY_ACTIONS_RUNNER_SLOT=1' 'slot 1 gives its hooks an unambiguous state identity'
+require_text "$runner_unit_text" 'Environment=SCCACHE_CACHE_SIZE=8G' 'slot 1 bounds binary sccache bytes'
 require_text "$runner_unit_text" 'Environment=SCCACHE_IDLE_TIMEOUT=0' 'runner keeps its private sccache server alive between merge-queue jobs'
 require_text "$runner_unit_text" 'TasksMax=2048' 'runner reserves enough cgroup task slots for parallel sccache compiler spawns'
 require_text "$runner_unit_2_text" 'WorkingDirectory=/var/lib/cassy-actions/runner-2' 'slot 2 has an independent runner checkout'
 require_text "$runner_unit_2_text" 'Environment=CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target-2' 'slot 2 has an independent Cargo target'
 require_text "$runner_unit_2_text" 'Environment=SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache-2' 'slot 2 has an independent sccache directory'
 require_text "$runner_unit_2_text" 'Environment=SCCACHE_SERVER_PORT=4228' 'slot 2 has an independent sccache server port'
+require_text "$runner_unit_2_text" 'RequiresMountsFor=/home /var/lib/cassy-actions/cache' 'slot 2 requires the Shockwave-backed cache mount'
+require_text "$runner_unit_2_text" 'ExecStartPre=/var/lib/cassy-actions/check-cache-mount.sh' 'slot 2 validates the exact cache mount before starting'
+require_text "$runner_unit_2_text" 'Environment=CARGO_INCREMENTAL=0' 'slot 2 disables incremental compilation'
+require_text "$runner_unit_2_text" 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/var/lib/cassy-actions/cache-job-completed.sh' 'slot 2 releases the prune barrier only after job completion'
+require_text "$runner_unit_2_text" 'Environment=CASSY_ACTIONS_RUNNER_SLOT=2' 'slot 2 gives its hooks an unambiguous state identity'
+require_text "$runner_unit_2_text" 'Environment=SCCACHE_CACHE_SIZE=8G' 'slot 2 bounds binary sccache bytes'
 require_text "$runner_unit_2_text" '/var/lib/cassy-actions/run-service-2.sh' 'slot 2 unit starts its dedicated wrapper'
 require_text "$(<"$runner_wrapper_2")" '/var/lib/cassy-actions/runner-2/bin/runsvc.sh' 'slot 2 wrapper starts its independent listener'
 require_text "$(<"$runner_installer")" 'RUNNER_SLOT must be 1 or 2' 'runner installer rejects unbounded slot identifiers'
 require_text "$(<"$runner_installer")" 'runner_name=soundwave-cas-ci-2' 'runner installer registers a distinct slot-2 name'
 require_text "$(<"$runner_installer")" 'service_name=cassy-actions-runner-2.service' 'runner installer enables the slot-2 unit'
+require_text "$(<"$runner_installer")" 'must be the dedicated mounted cache volume' 'runner installer refuses root-filesystem fallback'
+require_text "$(<"$runner_installer")" '"$mount_guard_source"' 'runner installer validates the exact cache source before provisioning'
+require_text "$(<"$runner_installer")" 'cassy-actions-cache-prune.timer' 'runner installer deploys and enables bounded pruning'
+require_text "$(<"$runner_installer")" 'cache-job-lock.sh' 'runner installer deploys the job-lifetime lock hook'
+require_text "$(<"$runner_installer")" 'ln -sfn' 'runner hook aliases share one verifiable holder identity'
+require_text "$(<"$runner_mount_guard")" 'production_fsroot=/home/.cassy-actions-cache' 'mount guard pins the authoritative live cache subtree'
+require_text "$(<"$runner_pruner")" 'Runner.Worker' 'pruner uses the full runner job lifecycle as its busy signal'
+require_text "$(<"$runner_pruner")" 'CASSY_ACTIONS_TARGET_BUDGET_BYTES:-50000000000' 'Cargo target cap is 50,000,000,000 bytes'
+require_text "$(<"$runner_pruner")" 'CASSY_ACTIONS_SCCACHE_BUDGET_BYTES:-8589934592' '8G sccache cap is accounted as binary bytes'
+require_text "$(<"$runner_pruner")" 'CASSY_ACTIONS_SLOT_BUDGET_BYTES:-60000000000' 'each slot has a 60,000,000,000-byte total cap'
+require_text "$(<"$runner_pruner")" 'CASSY_ACTIONS_MOUNT_GUARD_BIN' 'destructive pruning reuses the exact Shockwave mount guard'
+require_text "$(<"$runner_job_lock")" 'RUNNER_TRACKING_ID=' 'job lock holder survives GitHub Runner orphan cleanup'
+require_text "$(<"$runner_prune_service")" 'ConditionPathIsMountPoint=/var/lib/cassy-actions/cache' 'scheduled prune requires the cache mount'
+require_text "$(<"$runner_prune_timer")" 'OnCalendar=*-*-* 04:15:00' 'bounded pruning has a persistent daily schedule'
 require_text "$(<"$release_runner_trust")" 'check-cassy-actions-runner-isolation.sh' 'release trust guard accepts only approved slot tuples'
 require_text "$pilot_doc" '2,048 cgroup task slots' 'pilot documents the parallel sccache task-slot budget'
+require_text "$pilot_doc" '58,589,934,592 bytes' 'pilot documents the proven configured per-slot total'
+require_text "$pilot_doc" 'rollback rehearsal' 'pilot documents the authoritative-layout rollback sequence'
+require_text "$ci_text" 'CARGO_INCREMENTAL: "0"' 'main CI disables incremental compiler artifacts'
+
+if [[ -x "$runner_pruner" && -x "$runner_pruner_test" ]] && "$runner_pruner_test" >/dev/null; then
+    printf 'ok   runner cache pruning behavior test passes\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL runner cache pruning behavior test must be executable and pass\n'
+    fail=$((fail + 1))
+fi
+
+if [[ -x "$runner_mount_guard" && -x "$runner_mount_guard_test" ]] && "$runner_mount_guard_test" >/dev/null; then
+    printf 'ok   runner cache mount guard behavior test passes\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL runner cache mount guard behavior test must be executable and pass\n'
+    fail=$((fail + 1))
+fi
+
+if [[ -x "$runner_job_lock" && -x "$runner_job_lock_test" ]] && "$runner_job_lock_test" >/dev/null; then
+    printf 'ok   runner job-lifetime cache lock behavior test passes\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL runner job-lifetime cache lock behavior test must be executable and pass\n'
+    fail=$((fail + 1))
+fi
 
 if [[ -x "$runner_isolation" ]]; then
     if CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target \

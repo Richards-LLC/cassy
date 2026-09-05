@@ -1912,6 +1912,24 @@ mod tests {
     use super::*;
     use crate::ui::factory::FactoryConfig;
 
+    #[test]
+    fn taste_lane_cli_resolves_astra_medium() {
+        let (specs, notice) = resolve_lane_worker_specs(
+            "taste",
+            1,
+            &["taste-worker".to_string()],
+            cas_mux::SupervisorCli::Claude,
+            &[],
+            &CapabilitySnapshot::default(),
+        )
+        .unwrap();
+        assert_eq!(specs[0].name.as_deref(), Some("taste-worker"));
+        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Codex);
+        assert_eq!(specs[0].model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(specs[0].effort, Some(cas_mux::Effort::Medium));
+        assert!(notice.contains("codex_astra"), "{notice}");
+    }
+
     // EPIC cas-8888 (cas-964a, Phase 3): resolve_cli_choice's Grok arm.
     #[test]
     fn resolve_cli_choice_grok_installed_passes_through() {

@@ -186,8 +186,8 @@ growing a new cache on the root filesystem. The durable host entry is:
 
 Each slot has a decimal 60,000,000,000-byte enforced periodic budget. This is
 not a filesystem quota or an instantaneous hard ceiling: a running build can
-temporarily grow past it, and the idle-time pruner restores the bound before a
-later job. Cargo target data is
+grow past it, and the idle-time pruner restores the bound before a later job.
+Cargo target data is
 configured at no more than 50,000,000,000 bytes. `SCCACHE_CACHE_SIZE=8G` uses
 sccache's binary suffix and therefore means 8,589,934,592 bytes; the configured
 sum is 58,589,934,592 bytes. `CARGO_INCREMENTAL=0` is set in the runner units

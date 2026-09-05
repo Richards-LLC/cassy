@@ -33,7 +33,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   state fails closed, and an in-process session remains known if persistence
   fails after the child succeeds. The identity migration starts a fresh child
   conversation once for threads already live during the upgrade; later
-  requests resume the new conversation.
+  requests resume the new conversation. Its dedicated tests and build now run
+  in the CI lanes whenever the bridge changes, including mixed Rust/bridge
+  changes, so session-recovery fixes cannot merge without bridge coverage.
 - Worker pull-request status distinguishes a failed or unavailable lookup from
   a definite absence, reporting a redacted `unknown` reason instead of the
   false `none` result.

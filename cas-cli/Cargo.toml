@@ -1,6 +1,6 @@
 [package]
 name = "cas"
-version = "3.17.1"
+version = "3.17.2"
 edition = "2024"
 rust-version = "1.88"
 description = "Coding Agent System - unified tasks, memory, rules, and skills for AI agents"

@@ -83,6 +83,7 @@ jobs:
           printf '%s\n' "$installer_output"
 
           echo 'Checking the installer success contract.'
+          grep -qF 'Verified SHA-256 against the published GitHub release receipt.' <<<"$installer_output"
           grep -qF 'Cassy installed successfully!' <<<"$installer_output"
           grep -qF 'A new terminal can run `cas`.' <<<"$installer_output"
 
@@ -197,6 +198,7 @@ jobs:
           printf '%s\n' "$installer_output"
 
           echo 'Checking the installer success contract.'
+          grep -qF 'Verified SHA-256 against the published GitHub release receipt.' <<<"$installer_output"
           grep -qF 'Cassy installed successfully!' <<<"$installer_output"
           grep -qF 'A new terminal can run `cas`.' <<<"$installer_output"
 

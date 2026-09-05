@@ -11,6 +11,12 @@
 #   CAS_WIRE_PATH     1 = wire PATH into the login shell's rc file without asking,
 #                     0 = never edit an rc file (just print the line to add).
 #                     Unset = ask on the terminal when one is available.
+#
+# Artifact trust model: the installer requires the selected asset's SHA-256
+# from GitHub Release metadata and checks it before extraction. This detects
+# corrupt or mismatched downloads, but it is not substitution-resistant: the
+# archive and digest share the same GitHub/repository publishing authority.
+# Cassy does not currently name an independent signing key or attestation root.
 
 # --- POSIX-safe preamble: this installer requires bash -------------------------
 # A piped script has no shebang: `curl ... | sh` runs THIS FILE under /bin/sh
@@ -208,9 +214,71 @@ resolve_version() {
 # Download and install
 # ---------------------------------------------------------------------------
 
+release_asset_sha256() {
+  local asset_name="$1"
+  local asset_record digest_record
+
+  # The installer deliberately has no jq dependency. Flatten the response,
+  # split it at every asset `name` field, then inspect only the record beginning
+  # with the exact selected asset. This prevents a missing digest from falling
+  # through to a different asset's digest later in the response.
+  asset_record="$(
+    tr -d '\r\n' \
+      | sed 's/"name"[[:space:]]*:[[:space:]]*/\
+"name":/g' \
+      | grep -F -m1 "\"name\":\"${asset_name}\""
+  )" || return 1
+
+  digest_record="$(
+    printf '%s\n' "$asset_record" \
+      | grep -o -m1 '"digest"[[:space:]]*:[[:space:]]*"sha256:[0-9a-f]\{64\}"'
+  )" || return 1
+
+  printf '%s\n' "$digest_record" \
+    | sed 's/.*"sha256:\([0-9a-f]\{64\}\)"/\1/'
+}
+
+sha256_file() {
+  local path="$1"
+
+  if command -v sha256sum &>/dev/null; then
+    sha256sum -- "$path" | awk '{print $1}'
+  elif command -v shasum &>/dev/null; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    return 127
+  fi
+}
+
 download_and_install() {
   local asset_name="cas-${PLATFORM}.tar.gz"
   local download_url="https://github.com/${REPO}/releases/download/${VERSION}/${asset_name}"
+  local receipt_url="${GITHUB_API}/repos/${REPO}/releases/tags/${VERSION}"
+  local release_receipt expected_sha256 actual_sha256
+
+  info "Fetching the published GitHub release receipt..."
+  if command -v curl &>/dev/null; then
+    release_receipt="$(curl -fsSL "$receipt_url" 2>/dev/null)" || {
+      error "Failed to fetch the published release receipt: $receipt_url"
+      error "Refusing to install without a verifiable SHA-256 receipt."
+      exit 1
+    }
+  elif command -v wget &>/dev/null; then
+    release_receipt="$(wget -qO- "$receipt_url" 2>/dev/null)" || {
+      error "Failed to fetch the published release receipt: $receipt_url"
+      error "Refusing to install without a verifiable SHA-256 receipt."
+      exit 1
+    }
+  else
+    error "Neither curl nor wget found. Install one and try again."
+    exit 1
+  fi
+
+  expected_sha256="$(printf '%s\n' "$release_receipt" | release_asset_sha256 "$asset_name")" || {
+    error "Published GitHub release receipt has no valid SHA-256 for ${asset_name}."
+    error "Refusing to extract or replace ${INSTALL_DIR}/${BINARY_NAME}."
+    exit 1
+  }
 
   info "Downloading Cassy ${VERSION} for ${PLATFORM}..."
 
@@ -234,6 +302,20 @@ download_and_install() {
       exit 1
     }
   fi
+
+  actual_sha256="$(sha256_file "$archive_path")" || {
+    error "Cannot verify the archive: install sha256sum or shasum and try again."
+    error "Refusing to extract or replace ${INSTALL_DIR}/${BINARY_NAME}."
+    exit 1
+  }
+  if [ "$actual_sha256" != "$expected_sha256" ]; then
+    error "Archive SHA-256 does not match the published GitHub release receipt."
+    error "Expected: $expected_sha256"
+    error "Actual:   $actual_sha256"
+    error "Refusing to extract or replace ${INSTALL_DIR}/${BINARY_NAME}."
+    exit 1
+  fi
+  info "Verified SHA-256 against the published GitHub release receipt."
 
   info "Extracting..."
   tar -xzf "$archive_path" -C "$tmp_dir"

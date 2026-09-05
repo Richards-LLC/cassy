@@ -7,6 +7,78 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.17.0] - 2026-09-05
+
+### Added
+- Commander pairing tells you where you stand at each step: one primary action
+  per step, machine-address guidance, a capability summary naming exactly the
+  scopes granted, and a saved-versus-connected distinction so a saved machine
+  is no longer mistaken for a live one. The saved-access announcement is raised
+  at the installation seam, before the connection starts, and is named after
+  the installed machine rather than the selection.
+- Pairing recovery is visible and owned: a live dialog status, a cancellation
+  step that owns its own cleanup and surfaces a late rollback failure, a retry
+  owner with outcome-specific copy, a storage-failure outcome, and explicit
+  feedback for an invalid or expired link. Retry is serialized and
+  generation-guarded, so a stale attempt cannot report over a newer one.
+- The Commander fleet board renders workers and tasks as structured rows on its
+  own canvas, keyed on its container so a shell rebuild refills it, with phone
+  touch targets, header chips only when a session exists, and readable contrast
+  on the new surfaces.
+- `cas cloud purge-foreign` and the release train carry fuller receipts:
+  tag creation and publication are recorded as separate events, so a tag push
+  is no longer reported as a published release.
+
+### Fixed
+- Generated skill and spec frontmatter is emitted by one proven YAML
+  serializer. Three hand-rolled escapers had drifted apart, so a description
+  containing a Windows path and a colon — `Use C:\project: inspect` — produced
+  frontmatter a YAML reader rejects. `argument-hint: [title]` was also written
+  unquoted, which YAML read as a one-element list rather than the string every
+  consumer expects. Frontmatter is now read back through a parser too, with the
+  previous line scan retained only for files a parser cannot accept.
+- A canonical worker merge no longer strands another checkout of the target
+  branch. Advancing the branch ref is invisible to a second worktree holding
+  it, which was left describing an older commit and reporting the merged
+  content as staged deletions. A checkout holding uncommitted work now refuses
+  the merge before any ref moves, a clean one is advanced under git's own
+  refusal-on-conflict guard, and any checkout left untouched is named in the
+  merge receipt. This prevents new occurrences; it does not repair a checkout
+  already stranded.
+- A merge target that is merely unpublished is no longer reported as diverged.
+  A target ahead of origin with nothing behind it received a divergence refusal
+  whose recovery — merging origin into it — was a no-op, so following the
+  instruction produced the identical refusal.
+- Task writes no longer lose their cloud sync intent when the outbox enqueue
+  fails: the mutation and its sync intent are bound together, recovery is
+  serialized, and a failed enqueue is retained rather than discarded.
+- Closing a task with `execution_note` supplied inline is honored, so a no-code
+  task no longer has to be updated separately before it can close.
+- The published install-path proof asserts the greeting the shipped binary
+  actually prints, and a library test now fails if that workflow and the
+  front-door command drift apart again.
+- `classify-ci-diff.sh` fails closed when `git diff` fails, instead of
+  reporting an empty diff and a successful exit.
+- Self-hosted runner cache growth gains a guarded periodic budget: a prune
+  service and daily timer unit, an installer that registers them, pruning
+  serialized against running jobs, descendant mounts rejected, duplicate
+  systemd mount rows tolerated, and raw mount records read inside the runner
+  sandbox. This is the mechanism, not a hard ceiling enforced at write time,
+  and it does nothing on a host where the timer is not enabled.
+- Ambient recall rejects identity noise and stale procedural entries, expiry
+  instants are parsed rather than guessed, task boosting is narrowed, and
+  retrieval measurement explains itself and requires explicit use attribution.
+
+### Removed
+- The dormant Slack upload staging helper and its tests. The helper was
+  referenced only by its own tests and overwrote a symlink target before
+  rejecting the write; deleting it removes the defect rather than shipping a
+  repaired feature nothing calls.
+
+### Documentation
+- A correctness and architecture audit of this repository, and a review of the
+  Commander pairing journeys and their recovery paths.
+
 ## [3.16.0] - 2026-09-04
 
 ### Added

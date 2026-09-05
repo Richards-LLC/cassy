@@ -49,6 +49,11 @@ const BUILTIN_INSPECTION_SOURCES: &[(&str, &str)] = &[
     ),
 ];
 
+// Intentional compile-time checkout reads are prohibited today. If an
+// archive-safe exception is ever required, add its source path and a reason
+// here so the exception remains visible in review.
+const COMPILE_TIME_CHECKOUT_READ_ALLOWLIST: &[(&str, &str)] = &[];
+
 // Archive-mode has no producer checkout to enumerate at runtime. Keep every
 // integration-test source embedded here, along with source files that contain
 // unit-test fixtures, so this guard remains effective on another runner.
@@ -96,6 +101,10 @@ const FIXTURE_SOURCES: &[(&str, &str)] = &[
     source!(
         "cas-cli/tests/bridge_server_test.rs",
         "bridge_server_test.rs"
+    ),
+    source!(
+        "cas-cli/tests/build_script_worktree_test.rs",
+        "build_script_worktree_test.rs"
     ),
     source!(
         "cas-cli/tests/builtin_archive_portability_test.rs",
@@ -664,6 +673,28 @@ fn builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime() {
                 if line.contains(needle) && !guarded_checkout_probe {
                     violations.push(format!("{name}:{}: {needle}", line_number + 1));
                 }
+            }
+        }
+    }
+    // FIXTURE_SOURCES embeds every cas-cli/tests/**/*.rs file so archive-mode
+    // inspection catches checkout reads even when the test is not itself a
+    // builtin inspection. Keep intentional source-text mentions in this guard
+    // behind a named allowlist with a reason rather than weakening the scan.
+    for (name, source) in FIXTURE_SOURCES {
+        if !name.starts_with("cas-cli/tests/") {
+            continue;
+        }
+        for (line_number, line) in source.lines().enumerate() {
+            let needle = "env!(\"CARGO_MANIFEST_DIR\")";
+            if line.contains(needle)
+                && !COMPILE_TIME_CHECKOUT_READ_ALLOWLIST
+                    .iter()
+                    .any(|(allowed_name, _reason)| allowed_name == name)
+            {
+                violations.push(format!(
+                    "{name}:{}: {needle}",
+                    line_number + 1
+                ));
             }
         }
     }

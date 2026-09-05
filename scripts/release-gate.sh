@@ -579,7 +579,7 @@ check_archive_mode() {
     # source-tree .snap files and are excluded rather than "fixed".
     if (
         cd "$archive_dir"
-        env -u COLUMNS HOME="${HOME:-$archive_dir}" TMPDIR="$archive_tmp" \
+        env -u CAS_ROOT -u COLUMNS HOME="${HOME:-$archive_dir}" TMPDIR="$archive_tmp" \
             CARGO_HOME="$archive_cargo_home" RUSTC_WRAPPER=/nonexistent/sccache \
             PATH="$archive_bin${archive_path:+:$archive_path}" \
             "$cargo_bin" nextest run --archive-file "$archive" \

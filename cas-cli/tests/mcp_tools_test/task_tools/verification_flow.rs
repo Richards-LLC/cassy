@@ -6923,6 +6923,158 @@ async fn inline_no_code_intent_survives_dispatch_and_approved_proof_cas_099d() {
     );
 }
 
+/// cas-3924 diagnosis fixture: a registered supervisor has a completed,
+/// passing external-production receipt for an intentionally zero-CAS-commit
+/// deployment task. The current close path still rejects it at the ordinary
+/// code-task zero-commit gate. Keep the delegation receipt separate from
+/// `completion_receipt`, which is the worker-owned transactional handoff JSON
+/// and requires a live worker lease, repository tips, and a worker branch.
+#[tokio::test]
+async fn supervisor_external_pass_receipt_currently_rejected_by_close_cas_3924() {
+    let (temp, service, supervisor_id) = setup_cas_with_supervisor_session();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let factory_session = "cas-3924-fixture-session";
+    let _env = ScopedFactoryEnv::apply(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some(factory_session)),
+    ]);
+
+    // Close-time factory enforcement resolves the project repository from the
+    // parent of the CAS root. Seed that repository separately from the worker
+    // checkout; `.cas/` is intentionally ignored and contains only fixture
+    // state.
+    proof_boundary_git(temp.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(temp.path().join(".gitignore"), ".cas/\n").expect("ignore CAS state");
+    proof_boundary_git(temp.path(), &["add", ".gitignore"]);
+    proof_boundary_git(temp.path(), &["commit", "-q", "-m", "seed project"]);
+
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let mut supervisor = agent_store.get(&supervisor_id).expect("supervisor");
+    supervisor.factory_session = Some(factory_session.to_string());
+    supervisor.heartbeat();
+    agent_store.update(&supervisor).expect("update supervisor");
+
+    let worker_path = temp.path().join("cas-3924-external-worker");
+    std::fs::create_dir_all(&worker_path).expect("create worker checkout");
+    proof_boundary_git(&worker_path, &["init", "-q", "-b", "main"]);
+    std::fs::write(worker_path.join("seed.txt"), "seed\n").expect("seed checkout");
+    proof_boundary_git(&worker_path, &["add", "seed.txt"]);
+    proof_boundary_git(&worker_path, &["commit", "-q", "-m", "seed"]);
+    proof_boundary_git(
+        &worker_path,
+        &["checkout", "-q", "-b", "factory/cas-3924-external-worker"],
+    );
+
+    let worktree_store = open_worktree_store(&cas_dir).expect("worktree store");
+    worktree_store.init().expect("initialize worktree store");
+    let worktree_id = Worktree::generate_id();
+    worktree_store
+        .add(&Worktree::new(
+            worktree_id.clone(),
+            "factory/cas-3924-external-worker".to_string(),
+            "main".to_string(),
+            worker_path,
+        ))
+        .expect("record worker checkout");
+
+    let task_store = open_task_store(&cas_dir).expect("task store");
+    let mut epic = cas::types::Task::new(
+        "cas-3924-fixture-epic".to_string(),
+        "External receipt fixture epic".to_string(),
+    );
+    epic.task_type = cas::types::TaskType::Epic;
+    task_store.add(&epic).expect("add fixture epic");
+    let task = cas::types::Task::new(
+        "cas-3924-fixture-task".to_string(),
+        "External deployment with no CAS source commit".to_string(),
+    );
+    task_store
+        .create_atomic(&task, &[], Some(&epic.id), None)
+        .expect("add fixture task");
+    let mut task = task_store.get(&task.id).expect("fixture task");
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("cas-3924-external-worker".to_string());
+    task.worktree_id = Some(worktree_id);
+
+    let receipt_store = cas_store::SqliteDelegationReceiptStore::open(&cas_dir)
+        .expect("delegation receipt store");
+    let reservation = cas_store::DelegationReserveRequest {
+        factory_session_id: factory_session.to_string(),
+        epic_id: epic.id.clone(),
+        task_id: task.id.clone(),
+        gate_kind: cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE.to_string(),
+        request_digest: "cas-3924-fixture-request-digest".to_string(),
+        reserved_amount: 1,
+    };
+    let budget = cas_store::DelegationBudget {
+        max_per_run: 1,
+        max_active_per_factory_session: 1,
+        max_active_per_epic: 1,
+    };
+    let receipt = match receipt_store
+        .reserve_or_resume(&reservation, &budget)
+        .expect("reserve external receipt")
+    {
+        cas_store::DelegationReserveOutcome::Created(receipt) => receipt,
+        other => panic!("expected new external receipt, got {other:?}"),
+    };
+    let receipt = receipt_store
+        .record_terminal(
+            &receipt.id,
+            cas_store::DelegationVerdict::Pass,
+            1,
+            "viktor://run/cas-3924-fixture",
+        )
+        .expect("complete passing external receipt");
+    assert_eq!(receipt.task_id, task.id);
+    assert_eq!(receipt.epic_id, epic.id);
+    assert_eq!(receipt.factory_session_id, factory_session);
+    assert_eq!(receipt.state, cas_store::DelegationReceiptState::Completed);
+    assert_eq!(
+        receipt.terminal_verdict,
+        Some(cas_store::DelegationVerdict::Pass)
+    );
+    assert!(receipt.evidence_reference.is_some());
+
+    // The current close schema has no external receipt-ID field. Preserve the
+    // receipt as task-scoped metadata and cite it in the supervisor audit
+    // reason; neither can currently satisfy check_zero_commit_close.
+    task.external_ref = Some(format!("delegation://receipt/{}", receipt.id));
+    task_store.update(&task).expect("persist receipt reference");
+    let response = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                stranded_branch_override: None,
+                id: task.id.clone(),
+                reason: Some(format!(
+                    "External deployment passed; receipt {} evidence viktor://run/cas-3924-fixture",
+                    receipt.id
+                )),
+                supervisor_override: Some(true),
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+                commit_receipt: None,
+            }))
+            .await
+            .expect("close returns a refusal result"),
+    );
+    assert!(
+        response.contains("ZERO-COMMIT CLOSE ON CODE TASK"),
+        "current close must expose the zero-commit rejection: {response}"
+    );
+    assert_eq!(
+        task_store.get(&task.id).expect("refused task").status,
+        TaskStatus::InProgress
+    );
+    let persisted_receipt = receipt_store.get(&receipt.id).expect("receipt remains");
+    assert_eq!(
+        persisted_receipt.terminal_verdict,
+        Some(cas_store::DelegationVerdict::Pass)
+    );
+}
+
 /// Narrowed jail — positive case.
 ///
 /// A factory worker who holds an in-progress task with no approved

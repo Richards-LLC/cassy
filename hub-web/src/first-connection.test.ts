@@ -57,6 +57,15 @@ describe("saved-to-live notification lifecycle (cas-8051 F8)", () => {
     expect(announcer.observe("m1", "Studio Mac", live)).toBeUndefined();
   });
 
+  it("owes nothing for a live phase that arrives before the expectation is registered", () => {
+    // The wiring registers expect() before the connection is created; if it
+    // did not, a fast local hub's first live would be swallowed here.
+    const announcer = new FirstConnectionAnnouncer();
+    expect(announcer.observe("m1", "Studio Mac", live)).toBeUndefined();
+    announcer.expect("m1");
+    expect(announcer.observe("m1", "Studio Mac", live)).toBe("Studio Mac connected");
+  });
+
   it("forgets a machine removed before it connected and ignores machines it never expected", () => {
     const announcer = new FirstConnectionAnnouncer();
     announcer.expect("m1");

@@ -704,6 +704,10 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
   pairingDraft = createPairingDraft(location.origin);
   machines.set(machine.id, machine);
   commitSelection({ machineId: machine.id });
+  // Expect the first live phase before the connection exists: a hub on the
+  // same host can answer fast enough that the announcement would otherwise be
+  // owed to nobody by the time the submit handler runs (review 25642).
+  firstConnections.expect(machine.id);
   replaceMachineConnection(machine, connections, connectionStates, createConnection);
   render(false);
   return true;
@@ -2607,7 +2611,6 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       // What is true now is that access is saved; whether the machine is
       // reachable is the connection's answer, announced when it arrives.
       const paired = machines.get(selectedMachineId ?? "");
-      if (paired) firstConnections.expect(paired.id);
       toast(`Access saved — connecting to ${paired?.label ?? "the machine"}…`);
     }).catch((error) => {
       // A pairing failure is stated inside the dialog beside Pair; a toast

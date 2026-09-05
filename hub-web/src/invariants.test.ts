@@ -415,7 +415,15 @@ describe("binding Cassy Commander browser invariants", () => {
     // "paired" before any connection existed. Saved access is announced at
     // once; "connected" only when that machine's connection reaches live.
     expect(source).toContain("toast(`Access saved — connecting to ${paired?.label ?? \"the machine\"}…`);");
-    expect(source).toContain("if (paired) firstConnections.expect(paired.id);");
+    // The expectation is registered inside pairMachine, before the connection
+    // for the new credential is created, so a first live phase can never
+    // arrive ahead of it (review 25642).
+    const pairMachineBody = source.slice(source.indexOf("async function pairMachine("), source.indexOf("async function startRelayPairing("));
+    const expectAt = pairMachineBody.indexOf("firstConnections.expect(machine.id);");
+    const connectAt = pairMachineBody.indexOf("replaceMachineConnection(machine, connections, connectionStates, createConnection);");
+    expect(expectAt).toBeGreaterThan(0);
+    expect(connectAt).toBeGreaterThan(expectAt);
+    expect(source).not.toContain("if (paired) firstConnections.expect(paired.id);");
     expect(source).toContain("const connectedNotice = firstConnections.observe(machine.id, machine.label, state);");
     expect(source).toContain("if (connectedNotice) toast(connectedNotice);");
     expect(source).toContain("firstConnections.forget(selected.id);");

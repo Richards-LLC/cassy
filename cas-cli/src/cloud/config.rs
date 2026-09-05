@@ -425,7 +425,9 @@ fn atomic_replace_project_config(path: &Path, contents: &str) -> Result<(), CasE
     })
 }
 
-/// Write, sync, and atomically rename a same-directory temp into place. Until
+/// Write, sync, and atomically rename a same-directory temp into place. On
+/// Unix, the temp starts as `0600` before any config bytes are written; the
+/// destination's existing permissions are restored before rename. Until
 /// `commit` succeeds, the existing config is untouched; every error removes
 /// only the uniquely-created temp owned by this call.
 fn atomic_replace_project_config_via<F>(
@@ -437,20 +439,44 @@ fn atomic_replace_project_config_via<F>(
 where
     F: FnOnce(&Path, &Path) -> std::io::Result<()>,
 {
+    atomic_replace_project_config_via_with_created_hook(
+        path,
+        contents,
+        temp_path,
+        |_| Ok(()),
+        commit,
+    )
+}
+
+fn atomic_replace_project_config_via_with_created_hook<F, H>(
+    path: &Path,
+    contents: &str,
+    temp_path: &Path,
+    after_create: H,
+    commit: F,
+) -> Result<(), CasError>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    H: FnOnce(&fs::File) -> std::io::Result<()>,
+{
     let permissions = fs::metadata(path)
         .ok()
         .map(|metadata| metadata.permissions());
-    let mut temp = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(temp_path)
-        .map_err(|error| {
-            CasError::Other(format!(
-                "Failed to create temporary project config {temp_path:?}: {error}"
-            ))
-        })?;
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut temp = options.open(temp_path).map_err(|error| {
+        CasError::Other(format!(
+            "Failed to create temporary project config {temp_path:?}: {error}"
+        ))
+    })?;
 
     let result = (|| -> std::io::Result<()> {
+        after_create(&temp)?;
         temp.write_all(contents.as_bytes())?;
         temp.flush()?;
         if let Some(permissions) = permissions {
@@ -3668,6 +3694,50 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
         assert!(!temp_path.exists(), "owned temp file must be cleaned up");
         toml::from_str::<toml::Value>(original).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_config_temp_is_private_before_bytes_and_preserves_original_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let temp_path = temp.path().join(".config.toml.permission-boundary.tmp");
+        let replacement = "[project]\naliases = [\"legacy-name\"]\n";
+        std::fs::write(&config_path, "[hooks]\nai_context = false\n").unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut observed_before_write = None;
+        atomic_replace_project_config_via_with_created_hook(
+            &config_path,
+            replacement,
+            &temp_path,
+            |created| {
+                let metadata = created.metadata()?;
+                observed_before_write =
+                    Some((metadata.len(), metadata.permissions().mode() & 0o777));
+                Ok(())
+            },
+            |from, to| std::fs::rename(from, to),
+        )
+        .unwrap();
+
+        assert_eq!(
+            observed_before_write,
+            Some((0, 0o600)),
+            "temp must be private before config bytes are written"
+        );
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), replacement);
+        assert_eq!(
+            std::fs::metadata(&config_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "atomic replacement must preserve the original config mode"
+        );
     }
 
     // ── default_endpoint env-var tests ──────────────────────────────────────

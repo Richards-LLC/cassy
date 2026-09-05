@@ -380,6 +380,16 @@ fn redact_dynamic_values(s: &str) -> String {
         .replace_all(&result, "[GIT_NOT_REPOSITORY]")
         .to_string();
 
+    // Some Git callers expose only the short diagnostic. Match its closing
+    // wrapper parenthesis as a delimiter so a similarly-prefixed diagnostic
+    // with additional details is not over-redacted; put that delimiter back
+    // in the replacement.
+    let git_not_repo_plain_re =
+        regex::Regex::new(r"fatal:\s+not\s+a\s+git\s+repository\)").unwrap();
+    result = git_not_repo_plain_re
+        .replace_all(&result, "[GIT_NOT_REPOSITORY])")
+        .to_string();
+
     // Wrap positions of non-OK message continuation lines depend on the
     // redacted values' original lengths (temp paths differ per host), so join
     // hanging-indent continuations back onto their row before comparing.
@@ -415,8 +425,10 @@ fn doctor_snapshot_redaction_normalizes_git_not_repository_diagnostics() {
     let prefix = "[WARN] code history index: cannot check code history index: not a git repository: [TEMP_PATH] (";
     let expected = format!("{prefix}[GIT_NOT_REPOSITORY])");
     for diagnostic in [
+        "fatal: not a git repository",
         "fatal: not a git repository (or any of the parent directories): .git",
         "fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).",
+        "fatal: not a git repository (or any parent up to mount point /mnt) Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).",
         "fatal: not a git repository (or any parent up to mount point /mnt)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).",
         "fatal: not a git repository (or any parent up to mount point /mnt/shockwave)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).",
     ] {

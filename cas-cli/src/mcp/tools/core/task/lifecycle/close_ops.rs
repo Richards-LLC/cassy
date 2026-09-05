@@ -1453,9 +1453,39 @@ impl CasCore {
                     (None, Some(receipt.id.clone()))
                 }
                 _ => {
-                    return Ok(Self::tool_error(
-                        "DELIVERY RECEIPT REJECTED: no exact active task lease belongs to the authenticated caller. A new receipt requires the lease-owning worker session; only that same session may retry its already-persisted exact receipt.",
-                    ));
+                    let parked_anchor = task
+                        .deliverables
+                        .factory_branch_anchor
+                        .as_deref()
+                        .filter(|anchor| !anchor.trim().is_empty());
+                    let parked_branch = task
+                        .deliverables
+                        .parked_branch
+                        .as_deref()
+                        .filter(|branch| !branch.trim().is_empty());
+                    let stale_anchor_guidance = if task.status == TaskStatus::AwaitingMerge {
+                        parked_anchor
+                            .map(|anchor| {
+                                let branch = parked_branch
+                                    .map(|branch| format!(" (parked branch `{branch}`)"))
+                                    .unwrap_or_default();
+                                format!(
+                                    " Task {} is AwaitingMerge with parked delivery anchor `{anchor}`{branch} from an earlier continuation. That anchor is not caller authority. For a post-merge retry, use the legacy `commit_receipt=<current merged commit>` path; if the anchor is stale, ask the supervisor to re-anchor/reconcile the task before retrying.",
+                                    task.id
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                format!(
+                                    " Task {} is AwaitingMerge without a parked delivery anchor. For a post-merge retry, use the legacy `commit_receipt=<current merged commit>` path or ask the supervisor to reconcile the task.",
+                                    task.id
+                                )
+                            })
+                    } else {
+                        String::new()
+                    };
+                    return Ok(Self::tool_error(format!(
+                        "DELIVERY RECEIPT REJECTED: no exact active task lease belongs to the authenticated caller. A new receipt requires the lease-owning worker session; only that same session may retry its already-persisted exact receipt.{stale_anchor_guidance}"
+                    )));
                 }
             },
         };
@@ -2426,30 +2456,6 @@ impl CasCore {
             }
         }
 
-        // cas-e74c: resolve the work-cycle identity before the urgent-halt
-        // gate as well as the later delivery/review gates. cas-a699 needs the
-        // same current-cycle boundary used by the delivery and verification
-        // gates below.
-        let task_commit_identity = task_commit_identity(
-            &task,
-            cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
-                .ok()
-                .flatten()
-                .map(|(receipt, _)| receipt.commit_sha),
-        );
-        let commit_receipt_window = {
-            let lease_history = self
-                .open_agent_store()
-                .ok()
-                .and_then(|store| store.get_lease_history(&req.id, None).ok())
-                .unwrap_or_default();
-            Some(resolve_task_commit_receipt_window(
-                task.created_at,
-                &lease_history,
-                task_commit_identity.clone(),
-            ))
-        };
-
         // cas-b269/cas-85fd: urgent stop sets halt_task_work; block close
         // until the worker answers that exchange (or starts a new task).
         //
@@ -2597,6 +2603,46 @@ impl CasCore {
                 .parent()
                 .unwrap_or(&self.cas_root)
                 .to_path_buf(),
+        };
+
+        // cas-e74c: resolve the work-cycle identity before the later
+        // delivery/review gates. cas-a699 needs the same current-cycle
+        // boundary used by the delivery and verification gates below.
+        let mut task_commit_identity = task_commit_identity(
+            &task,
+            cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
+                .ok()
+                .flatten()
+                .map(|(receipt, _)| receipt.commit_sha),
+        );
+        // A supplied commit_receipt is not durable evidence until the close
+        // gates accept it. It may still be needed to recognize a delivery
+        // from an earlier continuation, though, because the latest lease
+        // boundary can postdate that commit. Add it to the identity only when
+        // it is the exact tip of the currently assigned factory branch. This
+        // preserves the old-cycle attribution rule without treating an
+        // arbitrary caller-selected target commit as task-owned.
+        if let Some(receipt) = req.commit_receipt.as_deref()
+            && let Some(current_tip) =
+                current_factory_branch_receipt_for_identity(&close_project_root, &task, receipt)
+            && !task_commit_identity
+                .known_commits
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&current_tip))
+        {
+            task_commit_identity.known_commits.push(current_tip);
+        }
+        let commit_receipt_window = {
+            let lease_history = self
+                .open_agent_store()
+                .ok()
+                .and_then(|store| store.get_lease_history(&req.id, None).ok())
+                .unwrap_or_default();
+            Some(resolve_task_commit_receipt_window(
+                task.created_at,
+                &lease_history,
+                task_commit_identity.clone(),
+            ))
         };
 
         // For Epics: Check that all worker branches are merged before verification
@@ -5589,7 +5635,8 @@ pub(crate) struct TaskCommitIdentity {
     /// The task id, matched as a whole token against commit messages.
     pub task_id: Option<String>,
     /// Commit ids Cassy durably recorded for this task (parked factory anchor,
-    /// worker delivery receipts). Exact evidence that needs no convention.
+    /// worker delivery receipts), plus any server-validated current delivery
+    /// tip supplied by the close path. Exact evidence that needs no convention.
     pub known_commits: Vec<String>,
 }
 
@@ -5598,7 +5645,7 @@ impl TaskCommitIdentity {
         self.task_id.is_none() && self.known_commits.is_empty()
     }
 
-    /// True when `commit` is one of the durably recorded task commits.
+    /// True when `commit` is one of the recorded task commits.
     ///
     /// Both sides are git object ids, so a prefix match in either direction is
     /// the same commit (Cassy records full ids; git may hand back an
@@ -5638,6 +5685,26 @@ pub(crate) fn task_commit_identity(
         task_id: Some(task.id.clone()),
         known_commits,
     }
+}
+
+/// Return a supplied close receipt as task identity only when it names the
+/// exact tip of the currently assigned factory branch.
+///
+/// A post-merge re-close may submit a commit from an earlier continuation,
+/// after a later claim has moved the work-cycle boundary forward. The current
+/// branch tip is the server-observable link that distinguishes that delivery
+/// from an arbitrary old target commit; the receipt still passes the complete
+/// merge, diff, and target-content validators afterward.
+fn current_factory_branch_receipt_for_identity(
+    repo_path: &std::path::Path,
+    task: &Task,
+    receipt: &str,
+) -> Option<String> {
+    let assignee = task.assignee.as_deref()?;
+    let branch = format!("factory/{assignee}");
+    let full_receipt = resolve_task_commit_receipt_sha(repo_path, receipt).ok()?;
+    let current_tip = resolve_branch_sha(repo_path, &branch)?;
+    (current_tip == full_receipt).then_some(full_receipt)
 }
 
 /// True when `message` references `task_id` as a whole token.

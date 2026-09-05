@@ -120,8 +120,12 @@ name the blocking step in the operator timeline, and require its receipt.
    At reminder wakeups use `kill -0` on that PID and inspect the done receipt;
    never `wait`, foreground-poll, or use `pkill -f`.
 12. Before announcing, require the annotated tag peels to the landed SHA and
-   `git ls-remote --exit-code --refs origin "refs/tags/$TAG"` succeeds. Save the
-   exact matching `gh run list --workflow release.yml --limit 20 --json
+   `git ls-remote --exit-code --refs origin "refs/tags/$TAG"` succeeds. The
+   release workflow explicitly dispatches `install-path-proof.yml` with
+   `version=$TAG` after publication because its release-created `GITHUB_TOKEN`
+   does not fan out `release.published`; save that matching `workflow_dispatch`
+   run id in the release receipt and require its success. Save the exact
+   matching `gh run list --workflow release.yml --limit 20 --json
    databaseId,headBranch,headSha,status,conclusion` row as `release-workflow.json` and
    require success. Save `release-published-receipt.sh "$TAG" --write-draft
    <draft-path>` output as `release-published.receipt` and

@@ -473,6 +473,13 @@ pub(super) fn execute_status(
         .add("Ready tasks", tasks_ready.len().to_string())
         .add("In-progress tasks", tasks_in_progress.len().to_string())
         .add("Agents", agents.len().to_string())
+        .add(
+            "Actionable-idle minutes",
+            session
+                .metadata
+                .actionable_idle_minutes_at(chrono::Utc::now())
+                .to_string(),
+        )
         .render(&mut fmt)?;
     Ok(())
 }
@@ -703,6 +710,7 @@ struct SessionJson {
     is_running: bool,
     socket_exists: bool,
     can_attach: bool,
+    actionable_idle_minutes: u64,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<serde_json::Value>,
@@ -725,6 +733,9 @@ impl SessionJson {
             is_running: session.is_running,
             socket_exists: session.socket_exists,
             can_attach: session.can_attach(),
+            actionable_idle_minutes: session
+                .metadata
+                .actionable_idle_minutes_at(chrono::Utc::now()),
             metadata: if include_metadata {
                 serde_json::to_value(&session.metadata).ok()
             } else {

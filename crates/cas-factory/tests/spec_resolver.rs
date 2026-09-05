@@ -668,7 +668,7 @@ fn all_effort_variants_roundtrip_through_toml() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn supervisor_spec_defaults_to_claude_high() {
+fn supervisor_spec_defaults_to_supervisor_lane() {
     let spec = resolve_supervisor_spec(ConfigSources {
         user_config: Some(nonexistent_path()),
         project_config: None,
@@ -677,8 +677,8 @@ fn supervisor_spec_defaults_to_claude_high() {
     .unwrap();
 
     assert_eq!(spec.cli, SupervisorCli::Claude);
-    assert_eq!(spec.model, None);
-    assert_eq!(spec.effort, Some(Effort::High));
+    assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
+    assert_eq!(spec.effort, Some(Effort::Medium));
 }
 
 #[test]
@@ -826,7 +826,7 @@ effort = "minimal"
     })
     .unwrap();
 
-    // Supervisor should see builtin defaults, NOT the worker TOML.
+    // Supervisor should see the supervisor lane default, NOT the worker TOML.
     assert_eq!(
         spec.cli,
         SupervisorCli::Claude,
@@ -834,7 +834,8 @@ effort = "minimal"
     );
     assert_eq!(
         spec.effort,
-        Some(Effort::High),
+        Some(Effort::Medium),
         "[[factory.workers]] must not affect supervisor"
     );
+    assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
 }

@@ -675,11 +675,19 @@ mod tests {
 
     #[test]
     fn registry_skip_rejects_bare_folder_identity_and_nested_artifacts() {
-        let real_home = dirs::home_dir().expect("test runner has a home directory");
-        TestEnvGuard::run_with_temp_home(|_| {
+        let mut env = TestEnvGuard::temp_home();
+        let fixture_parent = crate::test_paths::runtime_fixture_parent();
+        // The worker cwd is under `.cas/worktrees`; stop Git at the fixture's
+        // parent so `git -C <fixture>/.cas` cannot inherit the checkout's
+        // `.git` directory and origin remote.
+        env.set("GIT_CEILING_DIRECTORIES", fixture_parent.as_os_str());
+        {
+            // Keep this fixture outside the temporary HOME and system
+            // temporary roots. GIT_CEILING_DIRECTORIES above is the
+            // isolation boundary for the enclosing checkout.
             let bare = tempfile::Builder::new()
                 .prefix("cas-1d41-bare-")
-                .tempdir_in(&real_home)
+                .tempdir_in(&fixture_parent)
                 .unwrap();
             std::fs::create_dir_all(bare.path().join(".cas")).unwrap();
             assert!(matches!(
@@ -693,7 +701,7 @@ mod tests {
                 registry_skip_for_known_roots(&copy, &[project]),
                 Some(RegistrySkip::NestedArtifacts { .. })
             ));
-        });
+        }
     }
 
     #[test]

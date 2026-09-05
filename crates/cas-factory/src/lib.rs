@@ -36,7 +36,8 @@ pub mod session;
 pub mod spec_resolver;
 pub use changes::{FileChangeInfo, GitFileStatus, SourceChangesInfo};
 pub use config::{
-    AiEnrichmentConfig, AutoPromptConfig, DEFAULT_STALL_THRESHOLD_SECS, EpicState, FactoryConfig,
+    AiEnrichmentConfig, AutoPromptConfig, DEFAULT_STALL_THRESHOLD_SECS,
+    DEFAULT_SUPERVISOR_STALL_AFTER_SECS, EpicState, FactoryConfig,
     NotifyBackend, NotifyConfig,
 };
 pub use core::{FactoryCore, FactoryError, FactoryEvent, PaneId, PaneInfo, Result};

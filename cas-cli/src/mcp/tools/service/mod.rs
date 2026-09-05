@@ -251,6 +251,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("memory", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let is_mutating = matches!(
                 req.action.as_str(),
@@ -319,6 +320,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("task", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let event_task_id = req.id.clone().unwrap_or_default();
             let is_mutating = matches!(
@@ -417,6 +419,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("rule", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let is_mutating = matches!(
                 req.action.as_str(),
@@ -471,6 +474,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("skill", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let is_mutating = matches!(
                 req.action.as_str(),
@@ -525,6 +529,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("coordination", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let event_target = req.target.clone().unwrap_or_default();
             let event_task_id = req.task_id.clone().unwrap_or_default();
@@ -844,6 +849,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("search", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let result = match req.action.as_str() {
                 "search" => this.search_impl(req).await,
@@ -891,6 +897,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("system", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             // cas-3b51 regression seam: double-underscore action cannot
             // collide with real input; `#[cfg(test)]` strips in release.
             #[cfg(test)]
@@ -950,6 +957,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("verification", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let result = match req.action.as_str() {
                 "add" => this.verification_add(req).await,
@@ -993,6 +1001,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("knowledge", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let is_mutating = action == "write";
 
@@ -1034,6 +1043,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("team", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let result = match req.action.as_str() {
                 "list" => this.team_list(req).await,
@@ -1070,6 +1080,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("pattern", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let result = match req.action.as_str() {
                 "create" => this.pattern_create(req).await,
@@ -1119,6 +1130,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_catch("spec", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let is_mutating = matches!(
                 req.action.as_str(),
@@ -1179,6 +1191,7 @@ impl CasService {
         &self,
         #[allow(unused_variables)] Parameters(req): Parameters<ExecuteRequest>,
     ) -> Result<CallToolResult, McpError> {
+        crate::ui::factory::record_supervisor_mcp_call();
         #[cfg(feature = "mcp-proxy")]
         {
             let proxy = self.proxy.as_ref().ok_or_else(|| {
@@ -1222,6 +1235,7 @@ impl CasService {
         &self,
         Parameters(req): Parameters<ExecuteRequest>,
     ) -> Result<CallToolResult, McpError> {
+        crate::ui::factory::record_supervisor_mcp_call();
         #[cfg(feature = "mcp-proxy")]
         {
             let proxy = self.proxy.as_ref().ok_or_else(|| {

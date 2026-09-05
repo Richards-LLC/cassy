@@ -1157,6 +1157,9 @@ candidates = ["codex_luna"]
         assert_eq!(registry.lanes["taste"].candidates, ["claude_fable"]);
         assert_eq!(registry.lanes["taste"].fallbacks, ["claude_opus"]);
         assert!(registry.lanes["taste"].no_fallback);
+        assert_eq!(registry.lanes["supervisor"].candidates, ["claude_fable"]);
+        assert_eq!(registry.lanes["supervisor"].fallbacks, ["claude_opus"]);
+        assert!(registry.lanes["supervisor"].no_fallback);
         assert_eq!(
             registry.lanes["heavy"].candidates,
             ["codex_sol", "codex_luna"]
@@ -1175,6 +1178,12 @@ candidates = ["codex_luna"]
         assert_eq!(fable.allowed_efforts, [Effort::Medium, Effort::High]);
         assert_eq!(fable.required_capability.as_deref(), Some("claude-account"));
         assert!(registry.recipes.contains_key("codex_astra"));
+        assert_eq!(
+            registry.recipes["codex_astra"].reason.as_deref(),
+            Some(
+                "Not routed for supervisor or taste: observed 2026-09-05 to hold finished workers and stop driving epics; explicit-request only."
+            )
+        );
         assert!(
             !lane_references(&registry.lanes["taste"])
                 .iter()
@@ -1258,6 +1267,33 @@ candidates = ["codex_luna"]
         }
         assert!(matches!(
             resolve_lane("taste", &snapshot),
+            Err(RoutingError::NoActiveRecipe { .. })
+        ));
+    }
+
+    #[test]
+    fn supervisor_lane_resolves_fable_medium_and_fails_closed_when_unavailable() {
+        let registry = registry().unwrap();
+        let recipe = &registry.recipes["claude_fable"];
+        let now = CapabilitySnapshot::now_ms();
+        let mut available = CapabilitySnapshot::default();
+        available.record(
+            recipe_route_identity(recipe, "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Available, now),
+        );
+        let decision = resolve_lane("supervisor", &available).unwrap();
+        assert_eq!(decision.recipe_id, "claude_fable");
+        assert_eq!(decision.spec.cli, SupervisorCli::Claude);
+        assert_eq!(decision.spec.model.as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(decision.spec.effort, Some(Effort::Medium));
+
+        let mut unavailable = CapabilitySnapshot::default();
+        unavailable.record(
+            recipe_route_identity(recipe, "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Unavailable, now),
+        );
+        assert!(matches!(
+            resolve_lane("supervisor", &unavailable),
             Err(RoutingError::NoActiveRecipe { .. })
         ));
     }

@@ -7,6 +7,40 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.17.2] - 2026-09-05
+
+### Added
+- The director now wakes a silent supervisor when the fleet is idle, tasks are
+  awaiting merge, or all children are terminal, subject to configurable
+  `[factory] stall_after_secs`. The supervisor skill now requires a “Drive to
+  the exit” rule and six-rung exit ladder, while `worker_status` and session
+  summaries expose actionable-idle minutes.
+
+### Changed
+- Factory supervisors now launch through an explicit `supervisor` registry lane
+  routed to Claude Fable 5.1 at medium effort (previously the built-in Claude
+  Opus/high default); the lane fails closed when the Claude account is
+  unavailable, and the Codex Astra recipe records why it is explicit-request
+  only.
+- Release publication now explicitly dispatches the install-path proof after
+  publication, including token-created releases that never emit
+  `release.published`.
+
+### Fixed
+- Post-merge task re-close now names a stale parked delivery anchor and its
+  remediation, and accepts a receipt matching the current assignee's branch tip
+  as task identity.
+- Epic status now recognizes same-lineage evolution as retained delivery
+  content and ancestor branches as merged, avoiding false “content dropped” and
+  “1 unmerged” reports.
+- `cas update --json` never prompts and keeps its output machine-clean, while a
+  plain non-TTY update without explicit consent fails closed with actionable
+  guidance.
+
+### Tests
+- Parallel test fixtures now use isolated paths and disk-index writers, removing
+  cross-test collisions without changing production behavior.
+
 ## [3.17.1] - 2026-09-05
 
 ### Changed
@@ -71,6 +105,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   parent, active-session, gate, completed/pass verdict, and portable-evidence
   validation. All other close gates and the worker completion receipt remain
   unchanged, and accepted evidence is audited.
+- The build-script worktree test now resolves `build.rs` from runtime paths, and
+  archive portability checks flag tests that use compile-time
+  `CARGO_MANIFEST_DIR`.
+- The nested-Cargo fixture now scrubs wrapper environment and skips when nested
+  Cargo is unavailable, while the release-gate archive row reproduces the
+  merge-queue shard environment.
 
 ## [3.17.0] - 2026-09-05
 

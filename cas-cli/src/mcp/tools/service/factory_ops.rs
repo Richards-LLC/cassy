@@ -3283,6 +3283,17 @@ impl CasService {
                 &supervisor_epics,
             )
         };
+        let actionable_idle_label = |session: Option<&str>| {
+            session
+                .and_then(crate::ui::factory::supervisor_progress_from_session_metadata_named)
+                .map(|(_, tracker)| {
+                    format!(
+                        " [actionable-idle: {}m]",
+                        tracker.actionable_idle_minutes_at(now)
+                    )
+                })
+                .unwrap_or_default()
+        };
 
         if !supervisors.is_empty() || live_supervisor_sessions.len() > 1 {
             output.push_str("Supervisors:\n");
@@ -3298,10 +3309,13 @@ impl CasService {
                         .or(factory_session.as_deref()),
                 );
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}\n",
+                    "  • {} (heartbeat: {}){}{}\n",
                     &agent.name,
                     since,
-                    epic.render()
+                    epic.render(),
+                    actionable_idle_label(
+                        agent.factory_session.as_deref().or(factory_session.as_deref())
+                    )
                 ));
             }
             for session in &live_supervisor_sessions {
@@ -3311,9 +3325,10 @@ impl CasService {
                 let elapsed = (now - session.last_heartbeat).num_seconds();
                 let epic = supervisor_epic(&session.id, &session.name, session.session.as_deref());
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {elapsed}s ago) [other session — shares this clone]{}\n",
+                    "  • {} (heartbeat: {elapsed}s ago) [other session — shares this clone]{}{}\n",
                     session.label(),
-                    epic.render()
+                    epic.render(),
+                    actionable_idle_label(session.session.as_deref())
                 ));
             }
             output.push('\n');

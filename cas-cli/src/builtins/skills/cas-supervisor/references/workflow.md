@@ -87,6 +87,9 @@ mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude mode
 # heavy — recipe codex_sol
 mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high
 
+# supervisor — recipe claude_fable
+mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium
+
 ```
 <!-- END GENERATED SPAWN RECIPES -->
    `cli`, `model`, and `effort` are per-spawn controls for the workers spawned
@@ -103,7 +106,7 @@ mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model
      summary="Task <id> assignment" \
      message="Task <id>: <description>. Context: <findings>. Run mcp__cas__task action=mine to see your tasks."
    ```
-6. **End your turn immediately.** Stop here. Do not monitor, poll, or run any commands. Workers will push a message to you when done or blocked. Your next action is triggered by their message, not by checking.
+6. **Own the next exit rung.** If a worker owns it, wait for that worker's injected event. If you own a time-based follow-up, schedule one `coordination remind` that names the exact check and when it fires. Do not spin-poll.
 
 ### Resuming an Existing EPIC
 

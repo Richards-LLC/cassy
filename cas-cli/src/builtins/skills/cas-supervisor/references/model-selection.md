@@ -32,7 +32,8 @@ The route table below is generated from the embedded `cas-factory` registry. Kee
 | `standard` | `codex_luna` | `openai` | `codex` | `gpt-5.6-luna` | `xhigh` | `active` | `ordered candidates` |  |
 | `taste` | `claude_fable` | `anthropic` | `claude` | `claude-fable-5-1` | `medium` | `active` | `disabled` |  |
 | `heavy` | `codex_sol` | `openai` | `codex` | `gpt-5.6-sol` | `high` | `active` | `ordered candidates` |  |
-| `— (explicit only)` | `codex_astra` | `openai` | `codex` | `gpt-6-astra` | `medium` | `active` | `not lane-routed` |  |
+| `supervisor` | `claude_fable` | `anthropic` | `claude` | `claude-fable-5-1` | `medium` | `active` | `disabled` |  |
+| `— (explicit only)` | `codex_astra` | `openai` | `codex` | `gpt-6-astra` | `medium` | `active` | `not lane-routed` | Not routed for supervisor or taste: observed 2026-09-05 to hold finished workers and stop driving epics; explicit-request only. |
 | `— (explicit only)` | `codex_terra` | `openai` | `codex` | `gpt-5.6-terra` | `xhigh` | `suspended` | `not lane-routed` | Standing operator suspension (2026-08-27) |
 | `— (explicit only)` | `qwencloud_qwen` | `qwencloud` | `opencode` | `qwen3.8-max` | `medium` | `active` | `not lane-routed` | Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27; explicit recipe/model only |
 

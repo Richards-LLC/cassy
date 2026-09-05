@@ -190,9 +190,11 @@ fn attention_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::net::TcpListener;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{self, Receiver, Sender};
 
     use super::*;
     use crate::ai_enrichment::HttpAiEnrichmentProvider;
@@ -202,6 +204,68 @@ mod tests {
     struct RecordingProvider {
         calls: AtomicUsize,
         batch_sizes: Mutex<Vec<usize>>,
+    }
+
+    struct SignalingProvider {
+        inner: HttpAiEnrichmentProvider,
+        completed: Mutex<Option<Sender<()>>>,
+    }
+
+    impl AiEnrichmentProvider for SignalingProvider {
+        fn complete_json(&self, request: AiEnrichmentRequest<'_>) -> anyhow::Result<Value> {
+            let result = self.inner.complete_json(request);
+            if let Some(sender) = self.completed.lock().unwrap().take() {
+                let _ = sender.send(());
+            }
+            result
+        }
+    }
+
+    async fn advance_until_pending_cleared(events: &MachineEventBus) {
+        // With Tokio's paused clock, advancing before the spawned worker has
+        // received its first event can move past the deadline it will later
+        // register. Advance in bounded windows while yielding to the worker,
+        // so the test waits on the actual completion state rather than one
+        // scheduler-specific ordering.
+        for _ in 0..16 {
+            tokio::time::advance(BATCH_WINDOW).await;
+            for _ in 0..128 {
+                if !events.history().iter().any(|event| event.enrichment_pending) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    async fn advance_until_provider_finished(
+        events: &MachineEventBus,
+        completed: Receiver<()>,
+    ) {
+        // Let the spawned worker receive the queued event before the first
+        // clock jump, otherwise its deadline is registered at the already
+        // advanced instant and this test can spend every window behind it.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        for _ in 0..16 {
+            tokio::time::advance(BATCH_WINDOW).await;
+            for _ in 0..128 {
+                tokio::task::yield_now().await;
+            }
+        }
+        let provider_finished = tokio::task::spawn_blocking(move || {
+            completed.recv_timeout(Duration::from_secs(5)).is_ok()
+        })
+        .await
+        .expect("provider wait task");
+        assert!(provider_finished, "HTTP provider never completed");
+        for _ in 0..128 {
+            if !events.history().iter().any(|event| event.enrichment_pending) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     impl AiEnrichmentProvider for RecordingProvider {
@@ -240,18 +304,7 @@ mod tests {
             );
         }
 
-        tokio::task::yield_now().await;
-        tokio::time::advance(BATCH_WINDOW).await;
-        for _ in 0..10_000 {
-            if events
-                .history()
-                .iter()
-                .all(|event| event.enrichment.is_some())
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        advance_until_pending_cleared(&events).await;
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         assert_eq!(*provider.batch_sizes.lock().unwrap(), vec![20]);
         assert_eq!(
@@ -269,29 +322,39 @@ mod tests {
     async fn killed_http_api_clears_pending_and_preserves_the_raw_event() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
-        drop(listener);
+        // Accept the request and close the socket immediately. A dropped
+        // listener can leave the kernel's refused-connection path pending
+        // long enough for a paused-clock test to finish before ureq reports
+        // the provider failure.
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test API accepts one request");
+            stream
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .expect("test API response");
+        });
         let provider = HttpAiEnrichmentProvider::new(AiEnrichmentConfig {
             enabled: true,
             endpoint,
             ..Default::default()
         });
+        let (completed_sender, completed_receiver) = mpsc::channel();
         let events = MachineEventBus::new(4);
         let receiver = events.enable_enrichment();
-        let task = spawn_attention_enricher(events.clone(), receiver, Arc::new(provider));
+        let task = spawn_attention_enricher(
+            events.clone(),
+            receiver,
+            Arc::new(SignalingProvider {
+                inner: provider,
+                completed: Mutex::new(Some(completed_sender)),
+            }),
+        );
         events.observe_daemon(
             "factory-a",
             &DaemonMessage::Error {
                 message: "raw error still visible".into(),
             },
         );
-        tokio::task::yield_now().await;
-        tokio::time::advance(BATCH_WINDOW).await;
-        for _ in 0..10_000 {
-            if !events.history()[0].enrichment_pending {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        advance_until_provider_finished(&events, completed_receiver).await;
 
         let event = &events.history()[0];
         assert!(!event.enrichment_pending);
@@ -300,6 +363,7 @@ mod tests {
             event.payload.as_ref().unwrap()["message"],
             "raw error still visible"
         );
+        server.join().expect("test API thread");
         task.abort();
     }
 

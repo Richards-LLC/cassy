@@ -65,6 +65,23 @@ if "$hub_web_only"; then
     exit 0
 fi
 
+# The Slack bridge is a self-contained TypeScript package with its own tests
+# and build. A change entirely beneath slack-bridge/ cannot affect a Rust
+# build, doctest, or macOS check — but it must still run the bridge's own
+# checks, which `bridge-check-needed` in the composite action decides from the
+# changed paths rather than from this class.
+slack_bridge_only=true
+for file in "${files[@]}"; do
+    case "$file" in
+        slack-bridge/*) ;;
+        *) slack_bridge_only=false; break ;;
+    esac
+done
+if "$slack_bridge_only"; then
+    echo slack-bridge-only
+    exit 0
+fi
+
 # A release-only patch changes one or more workspace package manifests and the
 # matching package entries in Cargo.lock. Every manifest must change exactly
 # one version line; Cargo.lock may change only version lines for those same

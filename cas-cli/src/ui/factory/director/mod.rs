@@ -15,6 +15,8 @@ pub mod mission_workers;
 pub mod panel;
 mod prompts;
 mod reminders;
+#[cfg(test)]
+mod supervisor_stall_tests;
 pub(crate) mod tasks;
 
 pub use data::{AgentSummary, DirectorData, DirectorStores, TaskSummary};

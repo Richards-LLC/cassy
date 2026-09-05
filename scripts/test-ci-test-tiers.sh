@@ -623,6 +623,37 @@ if [[ -x "$classifier" ]]; then
         pass=$((pass + 1))
     fi
     rm -f "$classifier_without_source_guard"
+
+    # Fail-closed contract (cas-b505, audit finding 7): a Git failure must never
+    # read as an empty diff with exit 0. Two producers: an unresolvable ref, and
+    # a git executable whose `diff` fails after base resolution succeeded — the
+    # case the composite action would otherwise trust as a real `empty`.
+    classifier_failure_case() {
+        local label="$1" base="$2" head="$3" path_prefix="$4"
+        local output status
+        set +e
+        if [[ -n "$path_prefix" ]]; then
+            output="$(PATH="$path_prefix:$PATH" "$classifier" "$base" "$head" 2>/dev/null)"
+        else
+            output="$("$classifier" "$base" "$head" 2>/dev/null)"
+        fi
+        status=$?
+        set -e
+        if [[ "$status" != 0 && "$output" != empty ]]; then
+            printf 'ok   %s\n' "$label"
+            pass=$((pass + 1))
+        else
+            printf 'FAIL %s (exit %s, stdout %q)\n' "$label" "$status" "$output"
+            fail=$((fail + 1))
+        fi
+    }
+    classifier_failure_case 'unresolvable ref fails the classifier instead of reading empty' 'audit-nonexistent-base' 'HEAD' ''
+    failing_git_dir="$(mktemp -d)"
+    real_git="$(command -v git)"
+    printf '#!/usr/bin/env bash\nif [[ "$1" == diff ]]; then echo "fatal: injected diff failure" >&2; exit 128; fi\nexec %q "$@"\n' "$real_git" >"$failing_git_dir/git"
+    chmod +x "$failing_git_dir/git"
+    classifier_failure_case 'injected failing git diff fails the classifier instead of reading empty' 'HEAD~1' 'HEAD' "$failing_git_dir"
+    rm -rf "$failing_git_dir"
 else
     printf 'FAIL CI diff classifier is executable\n'
     fail=$((fail + 1))

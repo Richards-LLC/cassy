@@ -31,6 +31,16 @@ const CREDENTIAL_REFRESH_GRACE_DAYS: i64 = 7;
 const DPOP_SKEW_SECONDS: i64 = 60;
 const DPOP_REPLAY_MINUTES: i64 = 5;
 
+#[derive(Debug, thiserror::Error)]
+pub enum PairingExchangeError {
+    /// Five exchanges from the same bound controller origin are already inside the one-minute window.
+    #[error("pairing exchange throttled")]
+    Throttled { retry_after_seconds: u64 },
+    /// Every non-throttling failure retains its prior diagnostic for trusted in-process callers.
+    #[error(transparent)]
+    Opaque(#[from] anyhow::Error),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Scope {
@@ -535,7 +545,7 @@ impl AuthStore {
         &self,
         exchange: PairingExchange,
         now: DateTime<Utc>,
-    ) -> Result<DeviceCredential> {
+    ) -> std::result::Result<DeviceCredential, PairingExchangeError> {
         validate_origin(&exchange.controller_origin)?;
         let token_hash = hash_b64(exchange.token.as_bytes());
         let mut state = self.lock()?;
@@ -548,8 +558,19 @@ impl AuthStore {
             .filter(|attempt| {
                 attempt.source == exchange.source && attempt.at > now - Duration::minutes(1)
             })
-            .count();
-        anyhow::ensure!(recent_source < 5, "pairing exchange refused");
+            .collect::<Vec<_>>();
+        if recent_source.len() >= 5 {
+            let oldest = recent_source
+                .iter()
+                .map(|attempt| attempt.at)
+                .min()
+                .expect("five recent attempts have an oldest timestamp");
+            let remaining_millis = (oldest + Duration::minutes(1) - now).num_milliseconds();
+            let retry_after_seconds = ((remaining_millis.max(1) + 999) / 1_000).clamp(1, 60) as u64;
+            return Err(PairingExchangeError::Throttled {
+                retry_after_seconds,
+            });
+        }
         state.source_attempts.push(SourceAttempt {
             source: exchange.source.clone(),
             at: now,
@@ -561,7 +582,7 @@ impl AuthStore {
         });
         let Some(index) = matching else {
             self.persist(&state)?;
-            anyhow::bail!("pairing exchange refused")
+            return Err(anyhow::anyhow!("pairing exchange refused").into());
         };
         let record = &mut state.pairings[index];
         let valid = record.consumed_at.is_none()
@@ -571,7 +592,7 @@ impl AuthStore {
         if !valid {
             record.failed_attempts = record.failed_attempts.saturating_add(1);
             self.persist(&state)?;
-            anyhow::bail!("pairing exchange refused")
+            return Err(anyhow::anyhow!("pairing exchange refused").into());
         }
         let thumbprint = exchange.public_key_jwk.thumbprint()?;
         record.consumed_at = Some(now);

@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_taste_lane_requires_codex_even_with_claude_project_defaults() {
+    fn doctor_taste_lane_requires_claude_even_with_claude_project_defaults() {
         let _home = crate::test_support::TestEnvGuard::temp_home();
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join(".cas")).unwrap();
@@ -759,14 +759,14 @@ effort = "high"
         assert!(
             required_harnesses(&args, directory.path())
                 .unwrap()
-                .contains(&SupervisorCli::Codex)
+                .contains(&SupervisorCli::Claude)
         );
         args.worker_spec = vec![r#"{"model":"claude-opus-5"}"#.to_string()];
         assert!(required_harnesses(&args, directory.path()).is_err());
     }
 
     #[test]
-    fn doctor_accepts_astra_taste_spec_and_requires_codex() {
+    fn doctor_accepts_fable_taste_spec_and_requires_claude() {
         let _home = crate::test_support::TestEnvGuard::temp_home();
         let directory = tempfile::tempdir().unwrap();
         let mut decision =
@@ -779,7 +779,7 @@ effort = "high"
                 ..FactoryArgs::default()
             };
             let required = required_harnesses(&args, directory.path()).unwrap();
-            assert!(required.contains(&SupervisorCli::Codex));
+            assert!(required.contains(&SupervisorCli::Claude));
         }
     }
 

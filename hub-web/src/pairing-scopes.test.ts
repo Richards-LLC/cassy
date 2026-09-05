@@ -1,3 +1,4 @@
+import { CONTROL_CAPABILITY, READ_CAPABILITY, scopeSummary } from "./pairing-scopes";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { consumePairingFragment } from "./fragment";
@@ -253,7 +254,7 @@ describe("pairing failure copy", () => {
       expect(failure.message.trim().endsWith(".")).toBe(true);
     }
     expect(pairingExchangeFailure({ status: 429, body: "", controllerOrigin: ORIGIN }).message).toMatch(/minute/);
-    expect(pairingExchangeFailure({ status: 404, body: "", controllerOrigin: ORIGIN }).message).toMatch(/Hub URL/);
+    expect(pairingExchangeFailure({ status: 404, body: "", controllerOrigin: ORIGIN }).message).toMatch(/machine's hub address/);
   });
 
   it("names the network as the cause when the hub cannot be reached at all", async () => {
@@ -312,5 +313,43 @@ describe("pairing form scope invariants", () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("error instanceof PairingExchangeError && error.recoverable");
     expect(source).toContain("preselectedScopes(");
+  });
+});
+
+describe("plain capability summary beside the exact scopes (cas-8051 F7)", () => {
+  it("collapses a complete group to one phrase", () => {
+    expect(scopeSummary(["machine-read", "session-read", "pane-read"])).toEqual([READ_CAPABILITY]);
+    expect(scopeSummary(["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"])).toEqual([READ_CAPABILITY, CONTROL_CAPABILITY]);
+    expect(scopeSummary(["pane-input", "message-send", "pane-interrupt"])).toEqual([CONTROL_CAPABILITY]);
+  });
+
+  it("names exactly the granted capabilities for a singleton (review 01:10)", () => {
+    expect(scopeSummary(["pane-interrupt"])).toEqual(["Interrupt panes"]);
+    expect(scopeSummary(["message-send"])).toEqual(["Send messages to supervisors"]);
+    expect(scopeSummary(["pane-input"])).toEqual(["Type into terminals"]);
+    expect(scopeSummary(["machine-read"])).toEqual(["See this machine"]);
+    expect(scopeSummary(["pane-read"])).toEqual(["Read its terminals"]);
+    for (const single of ["pane-interrupt", "message-send", "pane-input", "machine-read", "session-read", "pane-read"] as const) {
+      const words = scopeSummary([single]);
+      expect(words).toHaveLength(1);
+      expect(words[0]).not.toBe(READ_CAPABILITY);
+      expect(words[0]).not.toBe(CONTROL_CAPABILITY);
+    }
+  });
+
+  it("names exactly the granted subset of a group, keeping the other group's phrase when complete", () => {
+    expect(scopeSummary(["machine-read", "session-read"])).toEqual(["See this machine", "See its sessions"]);
+    expect(scopeSummary(["machine-read", "session-read", "pane-read", "message-send"])).toEqual([READ_CAPABILITY, "Send messages to supervisors"]);
+    expect(scopeSummary(["session-read", "pane-input", "message-send", "pane-interrupt"])).toEqual(["See its sessions", CONTROL_CAPABILITY]);
+    expect(scopeSummary(["pane-read", "pane-input"])).toEqual(["Read its terminals", "Type into terminals"]);
+    // Never a capability the grant does not contain.
+    expect(scopeSummary(["message-send"]).join(" ")).not.toMatch(/interrupt|Type/);
+    expect(scopeSummary(["pane-read"]).join(" ")).not.toMatch(/sessions/);
+  });
+
+  it("names any scope outside those two sets as itself", () => {
+    expect(scopeSummary(["machine-read", "hub-admin"])).toEqual(["See this machine", "Administer the hub"]);
+    expect(scopeSummary(["factory-manage"])).toEqual(["Manage the factory"]);
+    expect(scopeSummary([])).toEqual([]);
   });
 });

@@ -13,7 +13,7 @@ import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cance
 import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { LATE_ROLLBACK_FAILURE_MESSAGE, PairingCancellationTracker, cleanupRetryOutcome } from "./pairing-cancellation";
-import { PAIRING_SCOPES, pairCommand, preselectedScopes, scopeChoices, scopeLabel, ungrantedScopes } from "./pairing-scopes";
+import { PAIRING_SCOPES, pairCommand, preselectedScopes, scopeChoices, scopeLabel, scopeSummary, ungrantedScopes } from "./pairing-scopes";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
@@ -30,6 +30,7 @@ import { TranscriptView } from "./transcript-view";
 import { applyLiveRegions, type LiveRegionView } from "./live-regions";
 import { DeferredRenderScheduler } from "./deferred-render";
 import { FleetBoardRenderer } from "./fleet-board";
+import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connection";
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
@@ -115,6 +116,9 @@ let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a ma
 // Cancellation whose durable cleanup did not complete: the dialog stays on a
 // "could not finish cancelling" step with a retry until storage cooperates (F2).
 let pairingCleanupFailed = false;
+// Machines whose credential was just saved: "connected" is announced once per
+// saved credential, only when the connection actually reaches live (F8).
+const firstConnections = new FirstConnectionAnnouncer();
 // Why the cleanup step is showing: what was discarded and which cleanup is
 // still owed, so the step says only what is true of this cleanup.
 let pairingCleanupContext: CleanupStepContext = { cause: "cancel", storeOpen: false, rollbackPending: false };
@@ -350,6 +354,16 @@ async function boot(): Promise<void> {
   resumePairingPoll();
 }
 
+/** Re-pairing is about a named machine; say so instead of a blank create prompt. */
+function openRepairDialog(machineId: string): void {
+  const label = machines.get(machineId)?.label ?? "this machine";
+  if (!pendingPairing && !pairingCleanupFailed) {
+    pairingStatus = `Re-pairing ${label}: create a new code and approve it on that machine. Its saved access here is replaced when the new credential is installed.`;
+    render(false);
+  }
+  openPairDialog();
+}
+
 function openPairDialog(): void {
   const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
   if (dialog && !dialog.open) dialog.showModal();
@@ -380,6 +394,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // Anchor staleness to the last live moment: retry transitions rewrite
       // snapshot.since, which would report a ten-minute outage as "just now".
       if (state.phase === "live") lastLiveAt.set(machine.id, Date.now());
+      const connectedNotice = firstConnections.observe(machine.id, machine.label, state);
+      if (connectedNotice) toast(connectedNotice);
       if (state.phase === "failed" || state.phase === "backoff") invalidateMachineLeases(machine.id);
       // One outage is one problem. A stable fingerprint per machine and kind
       // collapses every retry into a single card with a repeat count instead of
@@ -556,7 +572,8 @@ async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> 
   render();
 }
 
-async function pairMachine(form: HTMLFormElement): Promise<boolean> {
+/** Resolves with the installed machine, or false when nothing was installed. */
+async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false> {
   const invitation = pendingPairing?.kind === "invitation" ? pendingPairing : null;
   if (!invitation) throw new Error("Create a pairing request or open a one-time pairing link first.");
   const values = new FormData(form);
@@ -688,9 +705,17 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
   pairingDraft = createPairingDraft(location.origin);
   machines.set(machine.id, machine);
   commitSelection({ machineId: machine.id });
-  replaceMachineConnection(machine, connections, connectionStates, createConnection);
+  // The installation seam: "Access saved" and the armed first-connection
+  // announcement both precede the connection, so a hub that reports healthy
+  // live synchronously still yields saved → connected, named from the machine
+  // that was installed (reviews 25642, 25649).
+  installPairedMachine(machine, {
+    announcer: firstConnections,
+    notify: toast,
+    startConnection: (installed) => { replaceMachineConnection(installed, connections, connectionStates, createConnection); },
+  });
   render(false);
-  return true;
+  return machine;
 }
 
 async function startRelayPairing(email: string): Promise<boolean> {
@@ -1007,7 +1032,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       const repair = document.createElement("button");
       repair.type = "button";
       repair.textContent = "Re-pair";
-      repair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+      repair.onclick = () => openRepairDialog(machineId);
       actions.append(repair);
     }
     placeholder.append(actions);
@@ -1483,8 +1508,12 @@ function connectionLabel(state: ConnectionState | AttachSnapshot | undefined): s
 
 function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }
 
+function scopeSummaryMarkup(scopes: readonly Scope[]): string {
+  return `<div><dt>This browser will be able to</dt><dd class="pair-summary">${scopeSummary(scopes).map(escapeHtml).join(" · ")}</dd></div>`;
+}
+
 function pairingDetails(origin: string, scopes: readonly Scope[]): string {
-  return `<dl class="pair-details"><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Scopes</dt><dd>${scopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl>`;
+  return `<dl class="pair-details">${scopeSummaryMarkup(scopes)}<div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Exact scopes</dt><dd>${scopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl>`;
 }
 
 function pairStatusMarkup(): string {
@@ -1500,19 +1529,22 @@ function pairDialogMarkup(): string {
     return `<dialog id="pair-dialog"><section class="pair-flow pair-cleanup" tabindex="-1" autofocus aria-labelledby="pair-cleanup-title"><h2 id="pair-cleanup-title">${escapeHtml(copy.title)}</h2><p>${escapeHtml(copy.discarded)} ${escapeHtml(copy.outstanding)}</p><p>${escapeHtml(copy.next)}</p>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-close" type="button" data-role="cleanup">Close</button><button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button></div></section></dialog>`;
   }
   if (pendingPairing?.kind === "relay-request") {
-    return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Run <code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code> on the machine you want to pair, then approve the request it prints.</p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">10:00</strong></p>${pairingDetails(pendingPairing.controllerOrigin, pendingPairing.requestedScopes)}${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
+    return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair a machine</h2><p>On the machine you want to pair, run this command, then approve the request it prints:</p><p><code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code></p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">10:00</strong></p>${pairingDetails(pendingPairing.controllerOrigin, pendingPairing.requestedScopes)}${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
   }
   if (pendingPairing?.kind === "invitation") {
     const relay = Boolean(pendingPairing.relay);
     const hubUrl = pendingPairing.hubUrl;
     const origin = pendingPairing.controllerOrigin;
     const invitationScopes = pendingPairing.scopes;
-    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Hub</dt><dd>${escapeHtml(hubUrl)}</dd></div><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Hub URL<input name="url" type="url" required autofocus value="${escapeAttr(pairingDraft.hubUrl)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(invitationScopes)}`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"></label>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
+    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Machine's hub address</dt><dd>${escapeHtml(hubUrl)}</dd></div>${scopeSummaryMarkup(invitationScopes)}<div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Machine's hub address<input name="url" type="url" required autofocus placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"><small class="field-hint">The address of the machine you are pairing, as printed by <code>cas hub pair</code> (usually its Tailscale name). It is not this page's address unless this page is served by that machine.</small></label><div class="pair-code-actions pair-address-actions"><button id="pair-use-page-origin" type="button" data-page-origin="${escapeAttr(pairingDraft.pageOrigin)}">Use this page's address (${escapeHtml(pairingDraft.pageOrigin)})</button></div><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"><small class="field-hint">How this machine is listed in Cassy Commander.</small></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(invitationScopes)}`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"><small class="field-hint">How this browser is listed on the machine.</small></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"><small class="field-hint">Who is pairing this browser; the machine records it.</small></label>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
   }
   const relayAction = relayOrigin
     ? `<button id="pair-create" type="button" class="primary" ${pairingCreateInFlight ? "disabled" : ""}>${pairingCreateInFlight ? "Creating…" : "Create pairing code"}</button>`
     : '<p class="pairing-disabled-reason">Page-initiated pairing is unavailable because this Cassy Commander build has no reviewed relay origin.</p>';
-  return `<dialog id="pair-dialog"><section class="pair-flow" tabindex="-1" autofocus><h2>Pair this machine</h2><p>Create a ten-minute code, then verify the exact Cassy Commander origin and approve the requested read and control scopes on the target machine.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${pendingPairing ? "" : '<p class="pairing-disabled-reason">Pair is disabled until you open a pairing URL generated by <code>cas hub pair</code> on the machine.</p>'}<button type="button" ${pendingPairing ? "" : "disabled"}>Pair</button>${relayAction}</div></section></dialog>`;
+  // One state, one next action. Without an invitation there is nothing to
+  // Pair, so no Pair control exists here at all; a link printed by the machine
+  // opens the confirmation form directly and never passes through this step.
+  return `<dialog id="pair-dialog"><section class="pair-flow" tabindex="-1" autofocus><h2>Pair a machine</h2><p>Create a ten-minute code, approve it on the machine you want to pair, then confirm the exact Cassy Commander origin and scopes here.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairStatusMarkup()}<p class="pair-alternative">Already have a link? Open the pairing URL that <code>cas hub pair</code> printed on the machine; it continues straight to confirmation.</p><div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${relayAction}</div></section></dialog>`;
 }
 
 // A phone sentence takes longer to type than the heartbeat render interval, so
@@ -2277,7 +2309,7 @@ function renderAttention(): void {
 
 async function performAttentionAction(item: AttentionItem, action: AttentionAction): Promise<void> {
   if (action === "repair") {
-    document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+    openRepairDialog(item.machineId);
     return;
   }
   if (action === "open_pr") {
@@ -2552,6 +2584,14 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     if (pairingCreateInFlight) { cancelPendingPairing(); return; }
     document.querySelector<HTMLDialogElement>("#pair-dialog")!.close();
   };
+  const usePageOrigin = document.querySelector<HTMLButtonElement>("#pair-use-page-origin");
+  if (usePageOrigin) usePageOrigin.onclick = () => {
+    const url = document.querySelector<HTMLInputElement>('#pair-form input[name="url"]');
+    if (!url) return;
+    url.value = usePageOrigin.dataset.pageOrigin ?? "";
+    pairingDraft = { ...pairingDraft, hubUrl: url.value };
+    url.focus();
+  };
   const pairCleanupRetry = document.querySelector<HTMLButtonElement>("#pair-cleanup-retry");
   if (pairCleanupRetry) pairCleanupRetry.onclick = () => { void retryPairingCleanup(); };
   if (pairCreate) pairCreate.onclick = () => {
@@ -2570,11 +2610,11 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   };
   if (pairForm) pairForm.onsubmit = (event) => {
     event.preventDefault();
-    void pairMachine(pairForm).then((paired) => {
-      if (!paired) return;
+    void pairMachine(pairForm).then((installed) => {
+      if (!installed) return;
+      // Saved and connected are announced at the installation seam inside
+      // pairMachine; the handler only closes the dialog.
       document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
-      // Pairing ends by silently closing a dialog; say that it worked.
-      toast(`${machines.get(selectedMachineId ?? "")?.label ?? "Machine"} paired`);
     }).catch((error) => {
       // A pairing failure is stated inside the dialog beside Pair; a toast
       // behind the backdrop only duplicated it. Anything else still surfaces.
@@ -2585,6 +2625,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const remove = document.querySelector<HTMLButtonElement>("#remove-machine");
   if (remove && selected) remove.onclick = async () => {
     connections.get(selected.id)?.stop();
+    firstConnections.forget(selected.id);
     connections.delete(selected.id); machines.delete(selected.id); sessions.delete(selected.id);
     await catalog.remove(selected.id);
     // Walking back into a credential that no longer exists is a dead end, and

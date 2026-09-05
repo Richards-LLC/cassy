@@ -2081,6 +2081,44 @@ fieldset {
 }
 .pair-details dd { margin: 0; overflow-wrap: anywhere; }
 
+.field-hint {
+  color: var(--text-mid);
+  font-size: var(--fs-xs);
+  font-family: var(--font-ui);
+  text-wrap: pretty;
+}
+
+.field-hint code { font-size: var(--fs-xs); }
+
+.pair-address-actions { justify-content: flex-start; }
+
+/* The page origin can be long; the control wraps inside the dialog instead
+   of forcing the form wider than a phone. */
+.pair-address-actions button {
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--space-8);
+  padding: var(--space-1) var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+  text-align: left;
+  white-space: normal;
+}
+
+/* Every grid child in the dialog may shrink; a nowrap child otherwise sets
+   the form's minimum width and scrolls the whole dialog sideways. */
+dialog form > *,
+.pair-flow > * { min-width: 0; }
+
+.pair-summary { color: var(--text-hi); font-family: var(--font-ui); }
+
+.pair-alternative {
+  color: var(--text-mid);
+  font-size: var(--fs-sm);
+  text-wrap: pretty;
+}
+
 .pair-status {
   padding: var(--space-3);
   background: var(--bg-panel);

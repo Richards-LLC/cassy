@@ -695,6 +695,10 @@ describe("wire-v1 reverse pairing", () => {
     ["relay", [["device", "Tablet"], ["operator", "Daniel"]]],
   ] as const)("preserves %s confirmation fields across unrelated renders", (_kind, entries) => {
     const initial = createPairingDraft("https://controller.tail.example");
+    // The machine's address is never guessed from the page (cas-8051 F5); the
+    // page origin is kept only as the one-tap fill for the served-by-hub case.
+    expect(initial.hubUrl).toBe("");
+    expect(initial.pageOrigin).toBe("https://controller.tail.example");
     const captured = updatePairingDraft(initial, entries);
     const afterBackgroundRender = updatePairingDraft(captured, []);
 

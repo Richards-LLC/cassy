@@ -35,6 +35,47 @@ export function preselectedScopes(pending: PendingPairing | null | undefined): S
   return pending.scopes ? [...pending.scopes] : [...READ_ONLY_PAIRING_SCOPES];
 }
 
+/** What a scope set lets this browser do, in the operator's words (F7). */
+export const READ_CAPABILITY = "Read sessions and terminals";
+export const CONTROL_CAPABILITY = "Type, send messages and interrupt";
+const CONTROL_SCOPES: readonly Scope[] = ["pane-input", "message-send", "pane-interrupt"];
+
+/** One capability per scope, for a grant that is not a whole group. */
+const SCOPE_CAPABILITY: Readonly<Record<Scope, string>> = {
+  "machine-read": "See this machine",
+  "session-read": "See its sessions",
+  "pane-read": "Read its terminals",
+  "pane-input": "Type into terminals",
+  "message-send": "Send messages to supervisors",
+  "pane-interrupt": "Interrupt panes",
+  "factory-manage": "Manage the factory",
+  "hub-admin": "Administer the hub",
+};
+
+/**
+ * A plain summary beside the exact scope list, never instead of it: consent
+ * still names each scope and the exact origin, this just says what they add
+ * up to. A complete group collapses to one phrase; a partial grant names
+ * exactly the capabilities granted and nothing more — a summary that claims
+ * "interrupt" for a message-send-only credential is not made honest by the
+ * scope list under it.
+ */
+export function scopeSummary(scopes: readonly Scope[]): string[] {
+  const granted = new Set(scopes);
+  const summary: string[] = [];
+  const group = (members: readonly Scope[], whole: string): void => {
+    const present = members.filter((scope) => granted.has(scope));
+    if (present.length === members.length) summary.push(whole);
+    else for (const scope of present) summary.push(SCOPE_CAPABILITY[scope]);
+  };
+  group(READ_ONLY_PAIRING_SCOPES, READ_CAPABILITY);
+  group(CONTROL_SCOPES, CONTROL_CAPABILITY);
+  for (const scope of scopes) {
+    if (!READ_ONLY_PAIRING_SCOPES.includes(scope) && !CONTROL_SCOPES.includes(scope)) summary.push(SCOPE_CAPABILITY[scope] ?? `Also ${scopeLabel(scope)}`);
+  }
+  return summary;
+}
+
 export interface ScopeChoice {
   scope: Scope;
   label: string;

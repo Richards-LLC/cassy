@@ -129,21 +129,47 @@ class ThreadSessionStore {
   private loadError?: string;
 
   constructor(private readonly path: string) {
-    if (!existsSync(path)) return;
+    this.refresh();
+  }
+
+  /**
+   * Re-read durable state from disk.
+   *
+   * This runs before every injection, not once at construction, because the
+   * corruption error tells the operator to repair or remove the state file and
+   * retry. A one-shot constructor read would cache that failure for the life of
+   * the daemon and make the instruction impossible to follow without a restart.
+   *
+   * Corruption stays fail-closed: `loadError` is set and no session is served
+   * from a file we could not parse. Entries this process established but could
+   * not persist are retained across a refresh, so a durable-write failure never
+   * downgrades a live thread back to a new session.
+   */
+  refresh(): void {
+    if (!existsSync(this.path)) {
+      // An absent file is a clean slate, not corruption: anything this process
+      // established in memory remains authoritative for its own lifetime.
+      this.loadError = undefined;
+      return;
+    }
 
     try {
-      const stored = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+      const stored = JSON.parse(readFileSync(this.path, "utf-8")) as unknown;
       if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
         throw new Error("expected an object mapping thread scopes to session IDs");
       }
+      const loaded = new Map<string, string>();
       for (const [scopeKey, sessionId] of Object.entries(stored)) {
         if (typeof sessionId !== "string") {
           throw new Error(`session ID for ${scopeKey} is not a string`);
         }
+        loaded.set(scopeKey, sessionId);
+      }
+      for (const [scopeKey, sessionId] of loaded) {
         this.sessions.set(scopeKey, sessionId);
       }
+      this.loadError = undefined;
     } catch (err) {
-      this.sessions.clear();
       this.loadError = err instanceof Error ? err.message : String(err);
     }
   }
@@ -175,6 +201,49 @@ class ThreadSessionStore {
       if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
     }
   }
+}
+
+function claudeArgs(msg: DaemonMessage, sessionId: string, isResume: boolean): string[] {
+  const args = [
+    "--dangerously-skip-permissions",
+    "-p", msg.text,
+    "--effort", "high",
+    "--max-turns", "20",
+  ];
+
+  if (isResume) {
+    // Resume existing session — adds new message to the conversation
+    args.push("--resume", sessionId);
+  } else {
+    // New session — set session ID so we can resume later
+    args.push("--session-id", sessionId);
+  }
+
+  return args;
+}
+
+/**
+ * Did the CLI refuse this exact `--session-id` because it already exists?
+ *
+ * Claude Code will not create a session over an existing ID: the CLI emits
+ * `Error: Session ID <id> is already in use.` and carries an internal
+ * `sessionIdExists` check (both observed in the installed 2.1.261 bundle). Its
+ * session-ID diagnostics go to stderr with an empty stdout and exit 1, measured
+ * directly with the sibling error from the same string table:
+ * `claude --session-id not-a-uuid -p x` printed only
+ * `Error: Invalid session ID. Must be a valid UUID.` on stderr.
+ *
+ * So this reads the error channel alone and demands the whole diagnostic for
+ * the ID we actually requested. Model output is not a diagnostic: a child that
+ * fails for its own reasons while writing prose about session IDs — or a
+ * refusal naming some other ID — must not be mistaken for this refusal, or the
+ * bridge would replay a message that never established a session.
+ */
+function refusedBecauseSessionIdExists(
+  result: ClaudeRunResult,
+  sessionId: string,
+): boolean {
+  return result.stderr.includes(`Error: Session ID ${sessionId} is already in use.`);
 }
 
 const runClaude: ClaudeRunner = (args, cwd) =>
@@ -225,11 +294,14 @@ export function createMessageInjector(
     msg: DaemonMessage,
     scopeKey: string,
   ): Promise<InjectionResult> => {
+    // Re-read durable state per message so a repaired or removed file recovers
+    // this same injector, exactly as the corruption error instructs.
+    sessions.refresh();
     const stateError = sessions.error();
     if (stateError) {
       return {
         ok: false,
-        error: `Slack thread session state at ${statePath} could not be read safely: ${stateError}. Repair or remove the state file before retrying; no child was started.`,
+        error: `Slack thread session state at ${statePath} could not be read safely: ${stateError}. Repair or remove the state file and send the message again — this daemon re-reads it on the next message, no restart needed; no child was started.`,
       };
     }
 
@@ -237,26 +309,11 @@ export function createMessageInjector(
     const sessionId = storedSessionId ?? threadScopeToSessionId(scopeKey);
     const isResume = storedSessionId !== undefined;
 
-    const args = [
-      "--dangerously-skip-permissions",
-      "-p", msg.text,
-      "--effort", "high",
-      "--max-turns", "20",
-    ];
-
-    if (isResume) {
-      // Resume existing session — adds new message to the conversation
-      args.push("--resume", sessionId);
-    } else {
-      // New session — set session ID so we can resume later
-      args.push("--session-id", sessionId);
-    }
-
     console.log(`Spawning claude [${isResume ? "resume" : "new"}] in ${msg.project_dir}: ${msg.text.slice(0, 60)}`);
 
     let result: ClaudeRunResult;
     try {
-      result = await runner(args, msg.project_dir);
+      result = await runner(claudeArgs(msg, sessionId, isResume), msg.project_dir);
     } catch (err) {
       return {
         ok: false,
@@ -267,6 +324,30 @@ export function createMessageInjector(
     if (result.spawnError) {
       return { ok: false, error: `spawn failed: ${result.spawnError}` };
     }
+
+    // A new-session attempt whose ID the CLI already owns is recoverable, and
+    // recovering matters: a child that created the session and then exited
+    // non-zero (max turns, timeout, a crash) leaves nothing recorded here, so
+    // without this the thread would retry `--session-id` forever and stay
+    // permanently wedged. Resume the ID we deterministically own instead.
+    if (!isResume && result.code !== 0 && refusedBecauseSessionIdExists(result, sessionId)) {
+      console.log(`Session ${sessionId} already exists; resuming it instead`);
+      try {
+        result = await runner(claudeArgs(msg, sessionId, true), msg.project_dir);
+      } catch (err) {
+        return {
+          ok: false,
+          error: `spawn failed while resuming an already-established session: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      if (result.spawnError) {
+        return {
+          ok: false,
+          error: `spawn failed while resuming an already-established session: ${result.spawnError}`,
+        };
+      }
+    }
+
     if (result.code !== 0) {
       return {
         ok: false,

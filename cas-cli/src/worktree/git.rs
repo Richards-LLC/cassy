@@ -122,6 +122,17 @@ pub enum GitError {
         tip: String,
     },
 
+    /// cas-0f04: git could not be asked which worktrees hold the target
+    /// branch. Without that inventory there is no basis for claiming the
+    /// advance is safe for them, so the merge refuses instead of proceeding on
+    /// an assumption.
+    #[error(
+        "cannot determine which checkouts hold {branch} ({reason}) — NO MERGE WAS ATTEMPTED. \
+         Advancing the ref without that inventory could strand a checkout holding \
+         uncommitted work. Resolve the git failure above, then retry."
+    )]
+    CheckoutInventoryUnavailable { branch: String, reason: String },
+
     #[error("Uncommitted changes in worktree")]
     UncommittedChanges,
 
@@ -1341,7 +1352,7 @@ impl GitOperations {
         // worktree that has this branch checked out. Decide what to do about
         // those checkouts BEFORE the merge — a dirty one refuses here, while
         // the ref is still where that checkout expects it.
-        let checkouts = self.linked_checkouts_of(target_branch);
+        let checkouts = self.linked_checkouts_of(target_branch)?;
         for checkout in &checkouts {
             if let Some((change_count, first_change)) = dirty_summary(&checkout.path) {
                 return Err(GitError::TargetCheckedOutDirty {
@@ -1405,16 +1416,31 @@ impl GitOperations {
     ///
     /// The ephemeral worktree is detached, so it carries no `branch` line and
     /// never appears here.
-    fn linked_checkouts_of(&self, branch: &str) -> Vec<LinkedCheckout> {
-        let Ok(output) = Command::new("git")
+    fn linked_checkouts_of(&self, branch: &str) -> Result<Vec<LinkedCheckout>> {
+        // An unknown inventory must never authorize the ref advance: if we
+        // cannot say which checkouts hold this branch, we cannot say the merge
+        // is safe for them. Fail closed, before anything is written.
+        #[cfg(test)]
+        if std::env::var_os("CAS_TEST_FAIL_WORKTREE_LIST").is_some() {
+            return Err(GitError::CheckoutInventoryUnavailable {
+                branch: branch.to_string(),
+                reason: "injected failure (CAS_TEST_FAIL_WORKTREE_LIST)".to_string(),
+            });
+        }
+
+        let output = Command::new("git")
             .args(["worktree", "list", "--porcelain"])
             .current_dir(&self.repo_root)
             .output()
-        else {
-            return Vec::new();
-        };
+            .map_err(|error| GitError::CheckoutInventoryUnavailable {
+                branch: branch.to_string(),
+                reason: error.to_string(),
+            })?;
         if !output.status.success() {
-            return Vec::new();
+            return Err(GitError::CheckoutInventoryUnavailable {
+                branch: branch.to_string(),
+                reason: branch_ops::first_line(&String::from_utf8_lossy(&output.stderr)),
+            });
         }
 
         let wanted = format!("refs/heads/{branch}");
@@ -1432,7 +1458,7 @@ impl GitOperations {
                 }
             }
         }
-        found
+        Ok(found)
     }
 
     /// Record a checkout the merge deliberately did not touch.
@@ -1444,21 +1470,27 @@ impl GitOperations {
         new_tip: &str,
         reason: &str,
     ) {
+        // Deliberately does not claim what that checkout now contains: it may
+        // have been edited, staged into, or switched to another branch inside
+        // the window. The only facts we can state are that the ref moved, the
+        // refresh declined, and why.
         let note = format!(
-            "\n⚠️  Stale checkout: {branch} advanced {} -> {} but the checkout at {} was left \
-             untouched ({reason}). Its index and working tree still describe {}, so `git status` \
-             there will show the merged content as staged deletions. Nothing was overwritten — \
-             preserve what is there (commit or stash it), then reconcile that checkout \
+            "\n⚠️  Stale checkout: {branch} advanced {} -> {}, and the checkout at {} was left \
+             untouched because the refresh declined ({reason}). Nothing there was overwritten. \
+             Inspect it, preserve whatever it holds (commit or stash), then reconcile it \
              deliberately.",
             short_tip(old_tip),
             short_tip(new_tip),
             path.display(),
-            short_tip(old_tip),
         );
         tracing::warn!("{}", note.trim());
-        if let Ok(mut notes) = self.stale_checkout_notes.lock() {
-            notes.push(note);
-        }
+        // A poisoned lock must not drop a safety warning: recover the
+        // contained notes rather than discarding them.
+        let mut notes = self
+            .stale_checkout_notes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        notes.push(note);
     }
 
     /// Test seam for the receipt contract: records a note exactly as a real
@@ -1480,10 +1512,11 @@ impl GitOperations {
     /// The receipt assembler calls this after a merge so the operator reads
     /// about a stranded checkout in the response, not only in a log file.
     pub fn take_stale_checkout_notes(&self) -> Vec<String> {
-        self.stale_checkout_notes
+        let mut notes = self
+            .stale_checkout_notes
             .lock()
-            .map(|mut notes| std::mem::take(&mut *notes))
-            .unwrap_or_default()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *notes)
     }
 
     /// Advance a linked checkout from `old_tip` to `new_tip`, refusing rather

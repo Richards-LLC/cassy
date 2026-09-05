@@ -2176,7 +2176,12 @@ fn a_stale_checkout_is_reported_to_the_caller_not_only_logged() {
     assert!(note.contains(&sibling.display().to_string()), "{note}");
     assert!(note.contains(&old_tip[..12]), "{note}");
     assert!(note.contains(&new_tip[..12]), "{note}");
-    assert!(note.contains("Nothing was overwritten"), "{note}");
+    assert!(note.contains("Nothing there was overwritten"), "{note}");
+    assert!(
+        !note.contains("still describe"),
+        "the note must not claim what the checkout now contains — it may have been \
+         edited, staged into, or switched branches: {note}"
+    );
     assert!(note.contains("commit or stash"), "{note}");
     assert!(
         !note.to_lowercase().contains("read-tree") && !note.to_lowercase().contains("reset"),
@@ -2230,5 +2235,52 @@ fn a_checkout_switched_to_another_branch_is_not_refreshed_as_the_target() {
         !sibling.join("delivered.txt").exists(),
         "the target's content must not appear on the operator's branch"
     );
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// cas-0f04, review follow-up. If git cannot say which worktrees hold the
+/// target, there is no basis for claiming the advance is safe for them. An
+/// empty inventory used to mean "nobody holds it", so a failed enumeration
+/// silently authorised the ref move — the same fail-open shape as the bug
+/// itself. It must refuse, and refuse before anything is written.
+#[test]
+fn an_unreadable_checkout_inventory_refuses_before_touching_anything() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let tip_before = git.resolve_commit(&target).unwrap();
+    let sibling_head_before = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    let sibling_status_before = worktree_status(&sibling);
+
+    // SAFETY: nextest runs each test in its own process, so this env var
+    // cannot leak into another test.
+    unsafe { std::env::set_var("CAS_TEST_FAIL_WORKTREE_LIST", "1") };
+    let error = git
+        .merge_branch_via_temp_worktree(&target, "factory/worker", true)
+        .expect_err("an unknown inventory must refuse the merge");
+    unsafe { std::env::remove_var("CAS_TEST_FAIL_WORKTREE_LIST") };
+
+    match &error {
+        GitError::CheckoutInventoryUnavailable { branch, .. } => assert_eq!(branch, &target),
+        other => panic!("expected CheckoutInventoryUnavailable, got {other:?}"),
+    }
+    assert!(
+        error.to_string().contains("NO MERGE WAS ATTEMPTED"),
+        "{error}"
+    );
+
+    // Nothing moved: not the ref, not the sibling's HEAD, not its files.
+    assert_eq!(git.resolve_commit(&target).unwrap(), tip_before);
+    let sibling_head_after = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    assert_eq!(sibling_head_before.stdout, sibling_head_after.stdout);
+    assert_eq!(worktree_status(&sibling), sibling_status_before);
+    assert!(!sibling.join("delivered.txt").exists());
     let _ = std::fs::remove_dir_all(&sibling);
 }

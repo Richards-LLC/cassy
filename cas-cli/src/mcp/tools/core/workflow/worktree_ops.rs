@@ -654,6 +654,19 @@ fn target_diverged_error(
     )
 }
 
+/// Fold any stale-checkout warnings from the last merge into the receipt.
+///
+/// cas-0f04. A merge that declined to refresh a linked checkout of the target
+/// returns success; without this the operator would read that success and
+/// never learn a checkout was left behind, which is the same silent-state
+/// defect the merge fix removes, one layer up. Drains one-shot, so a checkout
+/// already reported is not reported again by the next merge.
+fn append_stale_checkout_notes(receipt: &mut String, manager: &crate::worktree::WorktreeManager) {
+    for note in manager.git().take_stale_checkout_notes() {
+        receipt.push_str(&note);
+    }
+}
+
 fn describe_target_reconcile(
     target_branch: &str,
     reconcile: &crate::worktree::git::TargetReconcile,
@@ -2754,14 +2767,11 @@ impl CasCore {
             } else {
                 manager.merge_and_cleanup(&mut worktree, force, do_cleanup)
             };
-            // cas-0f04: a linked checkout of the target that the merge
-            // declined to touch must reach the OPERATOR, not just this
-            // process's log. Reporting an ordinary success while a checkout is
-            // stranded is the defect this task exists to remove, so the note
-            // rides the same receipt as the reconcile line.
-            for note in manager.git().take_stale_checkout_notes() {
-                reconcile_note.push_str(&note);
-            }
+            // cas-0f04: fold the stale-checkout notes into the same receipt
+            // text. This is a single call rather than an inline loop so the
+            // seam is testable: append_stale_checkout_notes is what the
+            // operator's receipt is built from.
+            append_stale_checkout_notes(&mut reconcile_note, &manager);
             match merge_result {
                 Ok(commit) => commit,
                 // cas-4702: the ephemeral-worktree merge lost its
@@ -4112,5 +4122,54 @@ mod tests {
                 .branch,
             "release/operator-selected"
         );
+    }
+}
+
+#[cfg(test)]
+mod stale_checkout_receipt_tests {
+    use super::append_stale_checkout_notes;
+    use crate::worktree::WorktreeManager;
+    use tempfile::TempDir;
+
+    /// cas-0f04. Pins the seam the handler actually builds its receipt from:
+    /// a warning recorded by the merge must land in the operator-visible text.
+    /// Driving the real WorktreeManager means this fails if the drain stops
+    /// being wired to the receipt, not merely if the note format changes.
+    #[test]
+    fn a_recorded_stale_checkout_lands_in_the_receipt_text() {
+        let temp = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let manager =
+            WorktreeManager::new(temp.path(), crate::worktree::WorktreeConfig::default()).unwrap();
+        manager.git().record_stale_checkout_for_test(
+            "epic/target",
+            std::path::Path::new("/tmp/stranded-checkout"),
+            "1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222",
+            "not uptodate",
+        );
+
+        let mut receipt = String::from("Target sync: fast-forwarded.");
+        append_stale_checkout_notes(&mut receipt, &manager);
+
+        assert!(receipt.contains("Target sync: fast-forwarded."), "{receipt}");
+        assert!(receipt.contains("/tmp/stranded-checkout"), "{receipt}");
+        assert!(receipt.contains("111111111111"), "{receipt}");
+        assert!(receipt.contains("222222222222"), "{receipt}");
+        assert!(receipt.contains("Nothing there was overwritten"), "{receipt}");
+        assert!(
+            !receipt.to_lowercase().contains("read-tree") && !receipt.contains(" reset "),
+            "the receipt must not hand over a recovery that erases work: {receipt}"
+        );
+
+        // One-shot: a second merge must not re-report a checkout already dealt
+        // with.
+        let mut second = String::new();
+        append_stale_checkout_notes(&mut second, &manager);
+        assert_eq!(second, "");
     }
 }

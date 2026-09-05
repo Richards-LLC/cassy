@@ -457,6 +457,79 @@ impl SqliteTaskStore {
         Ok(())
     }
 
+    fn create_atomic_with_optional_receipt(
+        &self,
+        task: &Task,
+        blocked_by: &[String],
+        epic_id: Option<&str>,
+        created_by: Option<&str>,
+        receipt_id: Option<&str>,
+    ) -> Result<()> {
+        let task = self.task_with_default_origin(task);
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let now = Utc::now();
+            let epic_id = epic_id.map(str::trim).filter(|id| !id.is_empty());
+
+            if let Some(epic_id) = epic_id {
+                let epic_type = tx
+                    .query_row(
+                        "SELECT task_type FROM tasks WHERE id = ?",
+                        params![epic_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                match epic_type {
+                    Some(task_type) if task_type == "epic" => {}
+                    Some(task_type) => {
+                        return Err(StoreError::Parse(format!(
+                            "Task {epic_id} is not an epic (type: {task_type})"
+                        )));
+                    }
+                    None => return Err(StoreError::TaskNotFound(epic_id.to_string())),
+                }
+            }
+
+            Self::add_with_conn(&tx, &task, created_by)?;
+            for blocker_id in blocked_by
+                .iter()
+                .map(|id| id.trim())
+                .filter(|id| !id.is_empty())
+            {
+                Self::add_dependency_with_conn(
+                    &tx,
+                    &Dependency {
+                        from_id: task.id.clone(),
+                        to_id: blocker_id.to_string(),
+                        dep_type: DependencyType::Blocks,
+                        created_at: now,
+                        created_by: created_by.map(ToString::to_string),
+                    },
+                    false,
+                )?;
+            }
+            if let Some(epic_id) = epic_id {
+                Self::add_dependency_with_conn(
+                    &tx,
+                    &Dependency {
+                        from_id: task.id.clone(),
+                        to_id: epic_id.to_string(),
+                        dep_type: DependencyType::ParentChild,
+                        created_at: now,
+                        created_by: created_by.map(ToString::to_string),
+                    },
+                    false,
+                )?;
+            }
+            if let Some(receipt_id) = receipt_id {
+                Self::record_mutation_receipt_with_conn(&tx, receipt_id, &task.id)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     fn add_with_conn(conn: &Connection, task: &Task, event_session_id: Option<&str>) -> Result<()> {
         conn.execute(
             "INSERT INTO tasks (id, title, description, design, acceptance_criteria, notes,
@@ -674,65 +747,7 @@ impl TaskStore for SqliteTaskStore {
         epic_id: Option<&str>,
         created_by: Option<&str>,
     ) -> Result<()> {
-        let task = self.task_with_default_origin(task);
-        crate::shared_db::with_write_retry(|| {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-            let now = Utc::now();
-            let epic_id = epic_id.map(str::trim).filter(|id| !id.is_empty());
-
-            if let Some(epic_id) = epic_id {
-                let epic_type = tx
-                    .query_row(
-                        "SELECT task_type FROM tasks WHERE id = ?",
-                        params![epic_id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?;
-                match epic_type {
-                    Some(task_type) if task_type == "epic" => {}
-                    Some(task_type) => {
-                        return Err(StoreError::Parse(format!(
-                            "Task {epic_id} is not an epic (type: {task_type})"
-                        )));
-                    }
-                    None => {
-                        return Err(StoreError::TaskNotFound(epic_id.to_string()));
-                    }
-                }
-            }
-
-            Self::add_with_conn(&tx, &task, created_by)?;
-
-            for blocker_id in blocked_by
-                .iter()
-                .map(|id| id.trim())
-                .filter(|id| !id.is_empty())
-            {
-                let dep = Dependency {
-                    from_id: task.id.clone(),
-                    to_id: blocker_id.to_string(),
-                    dep_type: DependencyType::Blocks,
-                    created_at: now,
-                    created_by: created_by.map(ToString::to_string),
-                };
-                Self::add_dependency_with_conn(&tx, &dep, false)?;
-            }
-
-            if let Some(epic_id) = epic_id {
-                let dep = Dependency {
-                    from_id: task.id.clone(),
-                    to_id: epic_id.to_string(),
-                    dep_type: DependencyType::ParentChild,
-                    created_at: now,
-                    created_by: created_by.map(ToString::to_string),
-                };
-                Self::add_dependency_with_conn(&tx, &dep, false)?;
-            }
-
-            tx.commit()?;
-            Ok(())
-        }) // with_write_retry
+        self.create_atomic_with_optional_receipt(task, blocked_by, epic_id, created_by, None)
     }
 
     fn create_atomic_with_mutation_receipt(
@@ -743,67 +758,13 @@ impl TaskStore for SqliteTaskStore {
         created_by: Option<&str>,
         receipt_id: &str,
     ) -> Result<()> {
-        let task = self.task_with_default_origin(task);
-        crate::shared_db::with_write_retry(|| {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-            let now = Utc::now();
-            let epic_id = epic_id.map(str::trim).filter(|id| !id.is_empty());
-
-            if let Some(epic_id) = epic_id {
-                let epic_type = tx
-                    .query_row(
-                        "SELECT task_type FROM tasks WHERE id = ?",
-                        params![epic_id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?;
-                match epic_type {
-                    Some(task_type) if task_type == "epic" => {}
-                    Some(task_type) => {
-                        return Err(StoreError::Parse(format!(
-                            "Task {epic_id} is not an epic (type: {task_type})"
-                        )));
-                    }
-                    None => return Err(StoreError::TaskNotFound(epic_id.to_string())),
-                }
-            }
-
-            Self::add_with_conn(&tx, &task, created_by)?;
-            for blocker_id in blocked_by
-                .iter()
-                .map(|id| id.trim())
-                .filter(|id| !id.is_empty())
-            {
-                Self::add_dependency_with_conn(
-                    &tx,
-                    &Dependency {
-                        from_id: task.id.clone(),
-                        to_id: blocker_id.to_string(),
-                        dep_type: DependencyType::Blocks,
-                        created_at: now,
-                        created_by: created_by.map(ToString::to_string),
-                    },
-                    false,
-                )?;
-            }
-            if let Some(epic_id) = epic_id {
-                Self::add_dependency_with_conn(
-                    &tx,
-                    &Dependency {
-                        from_id: task.id.clone(),
-                        to_id: epic_id.to_string(),
-                        dep_type: DependencyType::ParentChild,
-                        created_at: now,
-                        created_by: created_by.map(ToString::to_string),
-                    },
-                    false,
-                )?;
-            }
-            Self::record_mutation_receipt_with_conn(&tx, receipt_id, &task.id)?;
-            tx.commit()?;
-            Ok(())
-        })
+        self.create_atomic_with_optional_receipt(
+            task,
+            blocked_by,
+            epic_id,
+            created_by,
+            Some(receipt_id),
+        )
     }
 
     fn get(&self, id: &str) -> Result<Task> {

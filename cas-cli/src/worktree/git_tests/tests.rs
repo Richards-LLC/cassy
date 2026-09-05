@@ -1820,3 +1820,186 @@ fn an_ordinary_push_failure_is_still_a_plain_not_pushed() {
         "an auth failure is not a non-fast-forward"
     );
 }
+
+/// cas-0f04 characterization. Builds the exact shape that stranded the epic
+/// integration checkout: the target branch is checked out in a SECOND linked
+/// worktree while a canonical merge advances the branch ref from elsewhere.
+///
+/// Returns (temp, repo_root, sibling_worktree_path, target_branch).
+fn repo_with_target_checked_out_in_a_second_worktree() -> (TempDir, PathBuf, PathBuf, String) {
+    let (temp, repo_path) = create_test_repo();
+    let git = |args: &[&str], dir: &PathBuf| {
+        let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // The integration branch, and a second linked worktree that has it out —
+    // the dedicated merge checkout in the real incident.
+    git(&["branch", "epic/target"], &repo_path);
+    // Outside the repository working tree, so the fixture's own scaffolding
+    // never shows up as repository status.
+    let sibling = temp.path().parent().unwrap().join(format!(
+        "cas-0f04-epic-checkout-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&sibling);
+    git(
+        &[
+            "worktree",
+            "add",
+            sibling.to_str().unwrap(),
+            "epic/target",
+        ],
+        &repo_path,
+    );
+
+    // A worker branch with real content to merge in.
+    git(&["checkout", "-q", "-b", "factory/worker"], &repo_path);
+    std::fs::write(repo_path.join("delivered.txt"), "worker delivery\n").unwrap();
+    git(&["add", "."], &repo_path);
+    git(&["commit", "-q", "-m", "worker delivery"], &repo_path);
+    // Leave the primary checkout somewhere else entirely, as a supervisor's
+    // shell would be.
+    git(&["checkout", "-q", "master"], &repo_path);
+
+    (temp, repo_path, sibling, "epic/target".to_string())
+}
+
+fn worktree_status(dir: &PathBuf) -> String {
+    let out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// cas-0f04. A canonical merge advanced the epic ref 35 commits while the
+/// dedicated integration checkout stayed at an ancestor, so `git status` there
+/// showed phantom staged reverse diffs and every merge attempt refused. Git
+/// forbids checking one branch out in two worktrees, but `update-ref` — which
+/// merge_branch_via_temp_worktree uses to advance the target — bypasses that
+/// protection and notifies no one.
+///
+/// A clean sibling checkout has nothing to preserve, so the merge must leave
+/// it consistent rather than stranded.
+#[test]
+fn merging_updates_a_clean_linked_checkout_of_the_target() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path);
+
+    let new_tip = git
+        .merge_branch_via_temp_worktree(&target, "factory/worker", true)
+        .expect("merge must succeed")
+        .expect("merge must produce a tip");
+
+    assert_eq!(
+        worktree_status(&sibling),
+        "",
+        "the sibling checkout must not be left with phantom reverse diffs"
+    );
+    assert!(
+        sibling.join("delivered.txt").exists(),
+        "the merged file must be present in the refreshed checkout"
+    );
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        new_tip,
+        "the sibling checkout must sit at the new tip"
+    );
+}
+
+/// cas-0f04. The refusal half of the contract: a sibling checkout that holds
+/// real uncommitted work must stop the merge BEFORE the ref moves, and must
+/// leave that work byte-for-byte intact. Advancing first and apologising later
+/// is what stranded the integration checkout.
+#[test]
+fn merging_refuses_when_a_linked_checkout_of_the_target_is_dirty() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path);
+    let tip_before = git.resolve_commit(&target).unwrap();
+
+    let precious = sibling.join("in-progress.txt");
+    std::fs::write(&precious, "supervisor's uncommitted work\n").unwrap();
+
+    let error = git
+        .merge_branch_via_temp_worktree(&target, "factory/worker", true)
+        .expect_err("a dirty checkout of the target must refuse");
+
+    match &error {
+        GitError::TargetCheckedOutDirty {
+            branch, checkout, ..
+        } => {
+            assert_eq!(branch, &target);
+            assert_eq!(checkout, &sibling);
+        }
+        other => panic!("expected TargetCheckedOutDirty, got {other:?}"),
+    }
+    let text = error.to_string();
+    assert!(text.contains("NO MERGE WAS ATTEMPTED"), "{text}");
+    assert!(text.contains("Commit, stash or discard"), "{text}");
+
+    assert_eq!(
+        git.resolve_commit(&target).unwrap(),
+        tip_before,
+        "a refusal must not move the target ref"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&precious).unwrap(),
+        "supervisor's uncommitted work\n",
+        "the uncommitted work must be untouched"
+    );
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// The pre-existing protection must survive: with no other checkout holding
+/// the target, the merge still runs in the ephemeral worktree and still leaves
+/// the primary checkout's HEAD exactly where the operator left it (cas-4702,
+/// GH #68/#73).
+#[test]
+fn merging_still_leaves_the_primary_checkout_untouched_when_no_sibling_holds_the_target() {
+    let (temp, repo_path) = create_test_repo();
+    let run = |args: &[&str]| {
+        let out = Command::new("git").args(args).current_dir(&repo_path).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    run(&["branch", "epic/target"]);
+    run(&["checkout", "-q", "-b", "factory/worker"]);
+    std::fs::write(repo_path.join("delivered.txt"), "worker delivery\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "worker delivery"]);
+    run(&["checkout", "-q", "master"]);
+    // Residue unrelated to the merge: GH #73 established this must not block.
+    std::fs::write(repo_path.join("unrelated.txt"), "supervisor scratch\n").unwrap();
+
+    let git = GitOperations::new(repo_path.clone());
+    let head_before = git.current_branch().unwrap();
+    git.merge_branch_via_temp_worktree("epic/target", "factory/worker", true)
+        .expect("an unrelated-residue merge must still succeed")
+        .expect("the merge must produce a tip");
+
+    assert_eq!(
+        git.current_branch().unwrap(),
+        head_before,
+        "the primary checkout's branch must not move"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo_path.join("unrelated.txt")).unwrap(),
+        "supervisor scratch\n",
+        "unrelated residue must survive the merge"
+    );
+    assert!(
+        !repo_path.join("delivered.txt").exists(),
+        "the merge must not check its result out into the primary checkout"
+    );
+    drop(temp);
+}

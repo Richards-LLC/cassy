@@ -97,6 +97,29 @@ pub enum GitError {
         actual: String,
     },
 
+    /// cas-0f04: the target branch is checked out in another linked worktree
+    /// that holds uncommitted work.
+    ///
+    /// Advancing the ref would leave that checkout describing an ancestor of
+    /// its own HEAD — `git status` there reports the merged content as staged
+    /// deletions, and every later merge refuses. Git blocks `checkout` of one
+    /// branch in two worktrees, but `update-ref` bypasses that protection and
+    /// notifies nobody, so this refusal is the notification. It fires before
+    /// the merge, so the uncommitted work is untouched.
+    #[error(
+        "target branch {branch} is checked out at {checkout} with uncommitted changes \
+         ({change_count} path(s), first: {first_change}) — NO MERGE WAS ATTEMPTED. \
+         Advancing the ref would strand that checkout at its current commit and turn the \
+         merged content into phantom staged deletions there. Commit, stash or discard the \
+         work in {checkout}, then retry."
+    )]
+    TargetCheckedOutDirty {
+        branch: String,
+        checkout: PathBuf,
+        change_count: usize,
+        first_change: String,
+    },
+
     #[error("Uncommitted changes in worktree")]
     UncommittedChanges,
 
@@ -279,6 +302,31 @@ impl EpicBaseChoice {
             notice: None,
         }
     }
+}
+
+/// A worktree that currently has a given branch checked out (cas-0f04).
+#[derive(Debug, Clone)]
+struct LinkedCheckout {
+    path: PathBuf,
+}
+
+/// Uncommitted work in `dir`, as `(count, first path)`.
+///
+/// Untracked files count: this decides whether advancing a ref would strand
+/// somebody's work, and an untracked file exists nowhere else.
+fn dirty_summary(dir: &Path) -> Option<(usize, String)> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty()).peekable();
+    let first = (*lines.peek()?).trim().to_string();
+    Some((text.lines().filter(|l| !l.trim().is_empty()).count(), first))
 }
 
 /// Monotonic suffix so two ephemeral merge worktrees created inside the same
@@ -1246,6 +1294,22 @@ impl GitOperations {
             .resolve_commit(target_branch)
             .ok_or_else(|| GitError::BranchNotFound(target_branch.to_string()))?;
 
+        // cas-0f04: a compare-and-swap on the ref is invisible to any OTHER
+        // worktree that has this branch checked out. Decide what to do about
+        // those checkouts BEFORE the merge — a dirty one refuses here, while
+        // the ref is still where that checkout expects it.
+        let checkouts = self.linked_checkouts_of(target_branch);
+        for checkout in &checkouts {
+            if let Some((change_count, first_change)) = dirty_summary(&checkout.path) {
+                return Err(GitError::TargetCheckedOutDirty {
+                    branch: target_branch.to_string(),
+                    checkout: checkout.path.clone(),
+                    change_count,
+                    first_change,
+                });
+            }
+        }
+
         let guard = self.add_temp_worktree(&old_tip)?;
         let merged = self.merge_branch_in_dir(guard.path(), None, source_branch, no_ff)?;
 
@@ -1271,7 +1335,68 @@ impl GitOperations {
                     .unwrap_or_else(|| "<unresolvable>".to_string()),
             });
         }
+
+        // The ref moved. Every checkout listed above was clean when we looked
+        // and holds this branch, so realigning it discards nothing and is the
+        // difference between a usable checkout and one stranded on an
+        // ancestor of its own HEAD.
+        for checkout in &checkouts {
+            self.realign_checkout_to_head(&checkout.path);
+        }
         Ok(Some(new_tip))
+    }
+
+    /// Worktrees other than the ephemeral merge worktree that currently have
+    /// `branch` checked out, as git itself reports them.
+    ///
+    /// The ephemeral worktree is detached, so it carries no `branch` line and
+    /// never appears here.
+    fn linked_checkouts_of(&self, branch: &str) -> Vec<LinkedCheckout> {
+        let Ok(output) = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&self.repo_root)
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+
+        let wanted = format!("refs/heads/{branch}");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut found = Vec::new();
+        let mut current: Option<PathBuf> = None;
+        for line in text.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                current = Some(PathBuf::from(path));
+            } else if let Some(reference) = line.strip_prefix("branch ") {
+                if reference.trim() == wanted {
+                    if let Some(path) = current.clone() {
+                        found.push(LinkedCheckout { path });
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// Bring a checkout's index and working tree back to its own HEAD.
+    ///
+    /// Only called for a checkout observed clean before the ref moved, so
+    /// there is nothing of the operator's to lose. Best effort by design: a
+    /// checkout that has since been deleted or is being written by someone
+    /// else must not fail a merge that already succeeded — the worst case is
+    /// the pre-existing stale state, which the refusal above covers for any
+    /// checkout that actually held work.
+    fn realign_checkout_to_head(&self, path: &Path) {
+        if !path.is_dir() {
+            return;
+        }
+        let _ = Command::new("git")
+            .args(["read-tree", "--reset", "-u", "HEAD"])
+            .current_dir(path)
+            .output();
     }
 
     /// Absolute path of the repository's *common* git dir — shared by the

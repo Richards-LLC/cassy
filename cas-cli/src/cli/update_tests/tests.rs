@@ -571,6 +571,37 @@ fn post_swap_refresh_failure_tells_the_operator_to_run_update_again() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn post_swap_refresh_failure_preserves_the_child_receipt_and_failed_project() {
+    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let installed_binary = temp_dir.path().join("cas-failed-refresh");
+    write_stub_binary(
+        &installed_binary,
+        "#!/bin/sh\nprintf '%s' '{\"refresh_binary_version\":\"9.9.9-stub\",\"projects\":[{\"project\":\"/tmp/failed-project\",\"cloud_sync\":\"FAILED: cloud sync: registration missing\"}],\"user_level_store\":{\"status\":\"ok\"},\"skipped_unregistered\":[]}'\nprintf '%s' 'cloud refresh failed' >&2\nexit 1\n",
+    );
+
+    let error = run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
+        .expect_err("a failed child refresh must remain an error");
+    let failure = error
+        .downcast_ref::<PostSwapRefreshFailure>()
+        .expect("a child refresh failure should preserve structured failure data");
+    let receipt = failure
+        .receipt
+        .as_ref()
+        .expect("the child receipt should be retained");
+
+    assert_eq!(receipt["refresh_binary_version"], "9.9.9-stub");
+    assert_eq!(receipt["refresh_status"], "refresh_failed");
+    assert_eq!(receipt["projects"][0]["project"], "/tmp/failed-project");
+    assert_eq!(receipt["projects"][0]["cloud_sync"], "FAILED: cloud sync: registration missing");
+    assert!(
+        failure.to_string().contains("refresh ran")
+            && failure.to_string().contains("cloud refresh failed"),
+        "failure guidance must describe an executed failed refresh: {failure}"
+    );
+}
+
 #[test]
 fn refresh_receipt_names_the_binary_that_ran_it() {
     let receipt = project_refresh_receipt_json(&[], &ProjectPhase::Ok(String::new()), &[]);

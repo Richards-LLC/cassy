@@ -100,6 +100,7 @@ pub use sync_queue::{
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,
     parse_wire_revision, wire_revision,
 };
+pub(crate) use sync_queue::{TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload};
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,
     KnowledgePageRecord, KnowledgePullReport, PushBacklog, PushPlan, PushScope, SyncConflict,

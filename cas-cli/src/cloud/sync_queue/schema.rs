@@ -23,6 +23,34 @@ CREATE TABLE IF NOT EXISTS sync_queue (
 CREATE INDEX IF NOT EXISTS idx_sync_queue_created ON sync_queue(created_at);
 CREATE INDEX IF NOT EXISTS idx_sync_queue_retry ON sync_queue(retry_count);
 
+-- A task mutation stages one row here before touching the canonical task.
+-- Successful outbox insertion deletes it in the same transaction as the
+-- sync_queue rows; a crash or enqueue failure leaves restart-visible repair
+-- evidence instead of silently losing the mutation's sync intent.
+CREATE TABLE IF NOT EXISTS task_sync_intents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mutation_id TEXT NOT NULL UNIQUE,
+    entity_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    previous_updated_at TEXT,
+    previous_revision INTEGER NOT NULL,
+    team_id TEXT,
+    previous_team_id TEXT,
+    previous_project_id TEXT,
+    global_scope INTEGER NOT NULL DEFAULT 0 CHECK (global_scope IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_sync_intents_entity
+    ON task_sync_intents(entity_id);
+
+CREATE TABLE IF NOT EXISTS task_sync_routes (
+    entity_id TEXT PRIMARY KEY,
+    team_id TEXT,
+    project_id TEXT,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -46,6 +74,48 @@ CREATE INDEX IF NOT EXISTS idx_sync_conflicts_resolved_at ON sync_conflicts(reso
 "#;
 
 impl SyncQueue {
+    /// Add crash-safe mutation binding columns to intent rows created by the
+    /// first durable-intent schema. A legacy row has no atomic receipt and no
+    /// trustworthy pre-mutation revision, so `-1` deliberately classifies it
+    /// as ambiguous during reconciliation instead of silently retiring it.
+    pub(super) fn migrate_task_sync_intent_bindings(
+        &self,
+        conn: &Connection,
+    ) -> Result<(), CasError> {
+        let has_mutation_id: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('task_sync_intents') WHERE name = 'mutation_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_mutation_id {
+            conn.execute_batch(
+                "ALTER TABLE task_sync_intents ADD COLUMN mutation_id TEXT;
+                 UPDATE task_sync_intents SET mutation_id = 'legacy-unbound-' || id
+                 WHERE mutation_id IS NULL;",
+            )?;
+        }
+
+        let has_previous_revision: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('task_sync_intents') WHERE name = 'previous_revision'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_previous_revision {
+            conn.execute_batch(
+                "ALTER TABLE task_sync_intents ADD COLUMN previous_revision INTEGER NOT NULL DEFAULT -1;",
+            )?;
+        }
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_sync_intents_mutation
+             ON task_sync_intents(mutation_id);",
+        )?;
+        Ok(())
+    }
+
     /// Add the conflict-journal revision columns to an existing database.
     ///
     /// `CREATE TABLE IF NOT EXISTS` cannot widen a table that already exists,

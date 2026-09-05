@@ -1,8 +1,97 @@
 use chrono::{DateTime, Utc};
-use rusqlite::params;
+use rusqlite::{Connection, params};
 
 use crate::cloud::sync_queue::{EntityType, QueuedSync, SyncOperation, SyncQueue};
 use crate::error::CasError;
+
+pub(super) fn upsert_queue_row(
+    conn: &Connection,
+    entity_type: EntityType,
+    entity_id: &str,
+    operation: SyncOperation,
+    payload: Option<&str>,
+    team_id: &str,
+    project_id: Option<&str>,
+) -> Result<(), CasError> {
+    conn.execute(
+        r#"
+        INSERT INTO sync_queue
+            (entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
+        ON CONFLICT DO UPDATE SET
+            operation = excluded.operation,
+            payload = excluded.payload,
+            created_at = excluded.created_at,
+            project_id = excluded.project_id,
+            retry_count = 0,
+            last_error = NULL
+        "#,
+        params![
+            entity_type.as_str(),
+            entity_id,
+            operation.as_str(),
+            payload,
+            team_id,
+            project_id,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub(super) fn enqueue_team_move_rows(
+    conn: &Connection,
+    entity_type: EntityType,
+    entity_id: &str,
+    old_project_id: &str,
+    new_project_id: &str,
+    payload: &str,
+    team_id: &str,
+) -> Result<(), CasError> {
+    // Legacy team upserts predate project-keyed queue identities and use a
+    // NULL project_id. Remove any before writing the move pair so an
+    // edit-then-move sequence cannot leave a third row that would replay the
+    // task under the pusher's project after the old key is deleted.
+    remove_legacy_team_upsert_row(conn, entity_type, entity_id, team_id)?;
+    upsert_queue_row(
+        conn,
+        entity_type,
+        entity_id,
+        SyncOperation::Delete,
+        None,
+        team_id,
+        Some(old_project_id),
+    )?;
+    upsert_queue_row(
+        conn,
+        entity_type,
+        entity_id,
+        SyncOperation::Upsert,
+        Some(payload),
+        team_id,
+        Some(new_project_id),
+    )
+}
+
+pub(super) fn remove_legacy_team_upsert_row(
+    conn: &Connection,
+    entity_type: EntityType,
+    entity_id: &str,
+    team_id: &str,
+) -> Result<(), CasError> {
+    conn.execute(
+        r#"
+        DELETE FROM sync_queue
+        WHERE entity_type = ?1
+          AND entity_id = ?2
+          AND operation = 'upsert'
+          AND team_id = ?3
+          AND project_id IS NULL
+        "#,
+        params![entity_type.as_str(), entity_id, team_id],
+    )?;
+    Ok(())
+}
 
 impl SyncQueue {
     /// Drop a queued task/entry tombstone when its target still exists locally.
@@ -112,32 +201,15 @@ impl SyncQueue {
         project_id: Option<&str>,
     ) -> Result<(), CasError> {
         let conn = self.conn.lock().unwrap();
-        let now = Utc::now().to_rfc3339();
-
-        conn.execute(
-            r#"
-            INSERT INTO sync_queue (entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
-            ON CONFLICT DO UPDATE SET
-                operation = excluded.operation,
-                payload = excluded.payload,
-                created_at = excluded.created_at,
-                project_id = excluded.project_id,
-                retry_count = 0,
-                last_error = NULL
-            "#,
-            params![
-                entity_type.as_str(),
-                entity_id,
-                operation.as_str(),
-                payload,
-                team_id,
-                project_id,
-                now,
-            ],
-        )?;
-
-        Ok(())
+        upsert_queue_row(
+            &conn,
+            entity_type,
+            entity_id,
+            operation,
+            payload,
+            team_id,
+            project_id,
+        )
     }
 
     /// Queue the two team operations needed to move a task between project
@@ -154,68 +226,15 @@ impl SyncQueue {
     ) -> Result<(), CasError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-
-        // Legacy team upserts predate project-keyed queue identities and use a
-        // NULL project_id. Remove any before writing the move pair so an
-        // edit-then-move sequence cannot leave a third row that would replay
-        // the task under the pusher's project after the old key is deleted.
-        tx.execute(
-            r#"
-            DELETE FROM sync_queue
-            WHERE entity_type = ?1
-              AND entity_id = ?2
-              AND operation = 'upsert'
-              AND team_id = ?3
-              AND project_id IS NULL
-            "#,
-            params![entity_type.as_str(), entity_id, team_id],
+        enqueue_team_move_rows(
+            &tx,
+            entity_type,
+            entity_id,
+            old_project_id,
+            new_project_id,
+            payload,
+            team_id,
         )?;
-
-        let delete_time = Utc::now().to_rfc3339();
-        tx.execute(
-            r#"
-            INSERT INTO sync_queue (entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count)
-            VALUES (?1, ?2, 'delete', NULL, ?3, ?4, ?5, 0)
-            ON CONFLICT DO UPDATE SET
-                operation = excluded.operation,
-                payload = NULL,
-                project_id = excluded.project_id,
-                created_at = excluded.created_at,
-                retry_count = 0,
-                last_error = NULL
-            "#,
-            params![
-                entity_type.as_str(),
-                entity_id,
-                team_id,
-                old_project_id,
-                delete_time,
-            ],
-        )?;
-
-        let upsert_time = Utc::now().to_rfc3339();
-        tx.execute(
-            r#"
-            INSERT INTO sync_queue (entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count)
-            VALUES (?1, ?2, 'upsert', ?3, ?4, ?5, ?6, 0)
-            ON CONFLICT DO UPDATE SET
-                operation = excluded.operation,
-                payload = excluded.payload,
-                project_id = excluded.project_id,
-                created_at = excluded.created_at,
-                retry_count = 0,
-                last_error = NULL
-            "#,
-            params![
-                entity_type.as_str(),
-                entity_id,
-                payload,
-                team_id,
-                new_project_id,
-                upsert_time,
-            ],
-        )?;
-
         tx.commit()?;
         Ok(())
     }

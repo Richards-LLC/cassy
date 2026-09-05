@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -25,6 +26,7 @@ use crate::hub::{
 const RELAY_PREFIX: &str = "/api/hub/pairing";
 const WIRE_VERSION: u8 = 1;
 const LAST_HUB_URL_FILE: &str = "last-public-url";
+const PUBLIC_HUB_READINESS_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 #[derive(Debug, Deserialize)]
 struct ClaimResponse {
@@ -306,7 +308,7 @@ fn authorize_with_relay(
     relay: &impl PairingRelay,
     paths: &HubRuntimePaths,
 ) -> Result<()> {
-    authorize_with_relay_with_config(args, cli, relay, paths, None, None)
+    authorize_with_relay_with_config_and_probe(args, cli, relay, paths, None, None, |_| Ok(()))
 }
 
 fn authorize_with_relay_with_config(
@@ -317,10 +319,37 @@ fn authorize_with_relay_with_config(
     configured_hub_url: Option<&str>,
     config_root: Option<&Path>,
 ) -> Result<()> {
+    authorize_with_relay_with_config_and_probe(
+        args,
+        cli,
+        relay,
+        paths,
+        configured_hub_url,
+        config_root,
+        verify_public_hub_ready,
+    )
+}
+
+fn authorize_with_relay_with_config_and_probe<F>(
+    args: &HubAuthorizeArgs,
+    cli: &Cli,
+    relay: &impl PairingRelay,
+    paths: &HubRuntimePaths,
+    configured_hub_url: Option<&str>,
+    config_root: Option<&Path>,
+    probe: F,
+) -> Result<()>
+where
+    F: FnOnce(&str) -> Result<()>,
+{
     let code = args.code.trim().to_ascii_uppercase();
     anyhow::ensure!(!code.is_empty(), "pairing code must not be empty");
     let override_scopes = parse_override_scopes(args.scopes.as_deref())?;
     let hub_url = resolve_hub_url(paths, args.hub_url.as_deref(), configured_hub_url)?;
+    // The browser receives this origin only after the relay completion below.
+    // Prove the advertised route reaches a ready hub first, while the pairing
+    // code is still unclaimed and no one-time invitation exists to strand.
+    probe(&hub_url)?;
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
     let auth = AuthStore::open(paths.root(), machine.id)?;
     let machine_label = hostname::get()
@@ -483,6 +512,30 @@ fn resolve_hub_url(
         )?;
     let parsed = validate_hub_url(url)?;
     Ok(parsed.origin().ascii_serialization())
+}
+
+fn verify_public_hub_ready(hub_url: &str) -> Result<()> {
+    let health_url = Url::parse(hub_url)?.join("/v1/health")?;
+    let recovery = || {
+        format!(
+            "hub public URL {hub_url} is not reachable from this machine; the pairing code remains unclaimed and no invitation was created. Restore its HTTPS route (for Tailscale Serve, run `cas hub restart --tailscale-serve`) or pass a reachable `--hub-url`, then retry"
+        )
+    };
+    let response = ureq::get(health_url.as_str())
+        .timeout(PUBLIC_HUB_READINESS_TIMEOUT)
+        .call()
+        .with_context(recovery)?;
+    let health: serde_json::Value = response.into_json().with_context(recovery)?;
+    anyhow::ensure!(
+        health
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1)
+            && health.get("ready").and_then(serde_json::Value::as_bool) == Some(true),
+        "{}",
+        recovery()
+    );
+    Ok(())
 }
 
 fn validate_hub_url(url: &str) -> Result<Url> {
@@ -1200,6 +1253,60 @@ mod tests {
     }
 
     #[test]
+    fn unreachable_remembered_hub_is_refused_before_claim_or_invitation() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let relay = RecordingRelay::default();
+        let args = authorize_args("K7MW-4H2Q");
+        let (hub_port, health) = serve_ready_health_checks(1);
+        write_live_record(&paths, hub_port, None);
+
+        let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let unavailable_port = unavailable.local_addr().unwrap().port();
+        drop(unavailable);
+        persist_last_hub_url(&paths, &format!("http://127.0.0.1:{unavailable_port}")).unwrap();
+
+        let error =
+            authorize_with_relay_with_config(&args, &test_cli(), &relay, &paths, None, None)
+                .unwrap_err()
+                .to_string();
+        health.join().unwrap();
+
+        assert!(error.contains("not reachable from this machine"), "{error}");
+        assert!(
+            error.contains("cas hub restart --tailscale-serve"),
+            "{error}"
+        );
+        assert!(relay.claims.lock().unwrap().is_empty());
+        assert!(relay.completed_invitation_urls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reachable_public_hub_completes_authorization_delivery() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let relay = RecordingRelay::default();
+        let args = authorize_args("K7MW-4H2Q");
+        let (port, health) = serve_ready_health_checks(2);
+        let public_url = format!("http://127.0.0.1:{port}");
+        write_live_record(&paths, port, Some(&public_url));
+
+        authorize_with_relay_with_config(&args, &test_cli(), &relay, &paths, None, None).unwrap();
+        health.join().unwrap();
+
+        assert_eq!(relay.claims.lock().unwrap().len(), 1);
+        assert_eq!(
+            *relay.completed_hub_urls.lock().unwrap(),
+            [public_url.clone()]
+        );
+        assert_eq!(
+            read_last_hub_url(&paths).unwrap().as_deref(),
+            Some(public_url.as_str())
+        );
+        assert_eq!(relay.completed_invitation_urls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
     fn successful_explicit_origin_is_saved_to_project_hub_config() {
         let temp = tempfile::tempdir().unwrap();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
@@ -1213,13 +1320,14 @@ mod tests {
         let mut args = authorize_args("K7MW-4H2Q");
         args.hub_url = Some("configured.example".to_owned());
 
-        authorize_with_relay_with_config(
+        authorize_with_relay_with_config_and_probe(
             &args,
             &test_cli(),
             &RecordingRelay::default(),
             &paths,
             None,
             Some(&config_root),
+            |_| Ok(()),
         )
         .unwrap();
         let config = crate::config::Config::load(&config_root).unwrap();

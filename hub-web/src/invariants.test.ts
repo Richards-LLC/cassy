@@ -188,7 +188,7 @@ describe("binding Cassy Commander browser invariants", () => {
     const [main, model] = await Promise.all(["main.ts", "render-model.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     // F1: the status sentence and busy flags are live regions, not shell
     // signature; a failed exchange must re-enable Pair under a focused field.
-    expect(main).toContain("pairingCleanupFailed ? \"cleanup-failed\" : \"\",");
+    expect(main).toContain("pairingCleanupFailed ? `cleanup-failed:${pairingCleanupContext.cause}");
     expect(main).not.toContain("      pairingStatus,\n      pairingExchangeInFlight ? \"in-flight\" : \"\",");
     expect(main).toContain("exchangeInFlight: pairingExchangeInFlight,\n      createInFlight: pairingCreateInFlight,");
     expect(main).toContain("pairingStepChanged: pairingView !== lastPairingView,");
@@ -199,7 +199,10 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).not.toContain("${pairingStatus ? `<p class=\"pair-status\"");
     // F2: cancel closes only once cleanup is durable; otherwise a retry step.
     expect(main).toContain("const outcome = cancellationOutcome(cleared, verifiesCleanup);");
-    expect(main).toContain('<h2 id="pair-cleanup-title">Could not finish cancelling</h2>');
+    expect(main).toContain('<h2 id="pair-cleanup-title">${escapeHtml(copy.title)}</h2>');
+    expect(main).toContain("const copy = cleanupStepCopy(pairingCleanupContext);");
+    // A failed exchange whose rollback rejected needs a retry owner too (review 25564).
+    expect(main).toContain("pairingCancellations.begin(operation.generation);\n      pairingCleanupContext = { cause: \"failure\", storeOpen: !cleared.failClosed, rollbackPending: true };");
     expect(main).toContain('<button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button>');
     expect(main).toContain("async function retryPairingCleanup(): Promise<void> {");
     // A late rollback failure from the operation Cancel invalidated is shown

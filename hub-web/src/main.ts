@@ -9,7 +9,7 @@ import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
-import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cancellationOutcome, pairingCleanupFailureUpdate, pairingStorageClearFailureMessage } from "./pairing-cleanup";
+import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cancellationOutcome, cleanupStepCopy, pairingCleanupFailureUpdate, pairingStorageClearFailureMessage, type CleanupStepContext } from "./pairing-cleanup";
 import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { LATE_ROLLBACK_FAILURE_MESSAGE, PairingCancellationTracker, cleanupRetryOutcome } from "./pairing-cancellation";
@@ -115,6 +115,9 @@ let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a ma
 // Cancellation whose durable cleanup did not complete: the dialog stays on a
 // "could not finish cancelling" step with a retry until storage cooperates (F2).
 let pairingCleanupFailed = false;
+// Why the cleanup step is showing: what was discarded and which cleanup is
+// still owed, so the step says only what is true of this cleanup.
+let pairingCleanupContext: CleanupStepContext = { cause: "cancel", storeOpen: false, rollbackPending: false };
 // The generation of the exchange Cancel would invalidate, so a late rollback
 // result can be matched to the cancellation that caused it.
 let exchangeOperationGeneration: number | undefined;
@@ -601,6 +604,7 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
         // and the newer flow is left alone.
         if (pairingCancellations.ownsOperation(operation.generation)) {
           const cleared = pendingPairingStore.clear();
+          pairingCleanupContext = { cause: "cancel", storeOpen: !cleared.failClosed, rollbackPending: true };
           pairingCleanupFailed = true;
           pairingStatus = cleared.failClosed
             ? LATE_ROLLBACK_FAILURE_MESSAGE
@@ -617,6 +621,11 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
       pairingStatus = cleared.failClosed
         ? `${update.status}${cleared.persistentRemovalFailed ? " Browser storage removal was denied; the cancelled request is durably blocked." : ""}`
         : `${update.status} Browser storage could not durably block the cancelled request.`;
+      // The exchange itself failed and its rollback rejected: nobody pressed
+      // Cancel, so the recovery step needs an owner of its own before Retry
+      // cleanup can do anything (review 25564).
+      pairingCancellations.begin(operation.generation);
+      pairingCleanupContext = { cause: "failure", storeOpen: !cleared.failClosed, rollbackPending: true };
       pairingCleanupFailed = true;
       render(false);
       openPairDialog();
@@ -799,6 +808,7 @@ function cancelPendingPairing(): void {
   const outcome = cancellationOutcome(cleared, verifiesCleanup);
   pairingStatus = outcome.status;
   pairingCleanupFailed = outcome.cleanupFailed;
+  pairingCleanupContext = { cause: "cancel", storeOpen: !cleared.failClosed, rollbackPending: false };
   if (outcome.cleanupFailed || outcome.verifying) {
     render(false);
     openPairDialog();
@@ -842,6 +852,11 @@ async function retryPairingCleanup(): Promise<void> {
     finishCancelledPairing();
     return;
   }
+  pairingCleanupContext = {
+    cause: pairingCleanupContext.cause,
+    storeOpen: !cleared.failClosed,
+    rollbackPending: recovery.failed === true || (recovery.pendingCleanup ?? 0) > 0,
+  };
   render(false);
 }
 
@@ -1481,7 +1496,8 @@ function pairDialogMarkup(): string {
     // Cancel already discarded the invitation; this step exists because the
     // page cannot yet prove a reload will not see it again. There is no way
     // back to the invitation from here, only forward through the cleanup.
-    return `<dialog id="pair-dialog"><section class="pair-flow pair-cleanup" tabindex="-1" autofocus aria-labelledby="pair-cleanup-title"><h2 id="pair-cleanup-title">Could not finish cancelling</h2><p>Pairing was cancelled on this page and the discarded invitation cannot be resumed here. Browser storage refused to record the cancellation, so a reload could still see it.</p><p>Keep this page open and retry once browser storage is available. Cancelling here blocks this browser only; copies of the link elsewhere remain subject to the machine's own expiry.</p>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-close" type="button" data-role="cleanup">Close</button><button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button></div></section></dialog>`;
+    const copy = cleanupStepCopy(pairingCleanupContext);
+    return `<dialog id="pair-dialog"><section class="pair-flow pair-cleanup" tabindex="-1" autofocus aria-labelledby="pair-cleanup-title"><h2 id="pair-cleanup-title">${escapeHtml(copy.title)}</h2><p>${escapeHtml(copy.discarded)} ${escapeHtml(copy.outstanding)}</p><p>${escapeHtml(copy.next)}</p>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-close" type="button" data-role="cleanup">Close</button><button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button></div></section></dialog>`;
   }
   if (pendingPairing?.kind === "relay-request") {
     return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Run <code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code> on the machine you want to pair, then approve the request it prints.</p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">10:00</strong></p>${pairingDetails(pendingPairing.controllerOrigin, pendingPairing.requestedScopes)}${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
@@ -1848,7 +1864,7 @@ function render(captureDraft = true): void {
     pendingPairing?.kind ?? "",
     pendingPairing?.kind === "relay-request" ? pendingPairing.userCode : pendingPairing?.token ?? "",
     pendingPairing?.expiresAt ?? "",
-    pairingCleanupFailed ? "cleanup-failed" : "",
+    pairingCleanupFailed ? `cleanup-failed:${pairingCleanupContext.cause}:${pairingCleanupContext.storeOpen ? "store" : ""}:${pairingCleanupContext.rollbackPending ? "rollback" : ""}` : "",
   ].join("|");
   const signature = shellSignature({
     machineId: selectedMachineId,

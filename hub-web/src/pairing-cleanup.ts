@@ -75,3 +75,39 @@ export function cancellationOutcome(cleared: PendingPairingClearResult, exchange
 /** Nonsecret feedback for a link or stored invitation that cannot be used (F6). */
 export const INVALID_PAIRING_LINK_MESSAGE = "This pairing link is invalid or incomplete, so nothing was paired. Create a pairing code here, or open a fresh link printed by cas hub pair on the machine.";
 export const EXPIRED_PAIRING_INVITATION_MESSAGE = "This pairing invitation expired before it was used. Create a pairing code here, or open a fresh link printed by cas hub pair on the machine.";
+
+/**
+ * What the "cleanup incomplete" step has to say, and only what is true of
+ * this cleanup. The step is reached by Cancel and by a failed exchange, and
+ * either the session store, the catalog rollback, or both can be outstanding;
+ * the earlier copy always blamed the session store.
+ */
+export interface CleanupStepContext {
+  readonly cause: "cancel" | "failure";
+  /** The pending-pairing store could not be fail-closed. */
+  readonly storeOpen: boolean;
+  /** A staged/cancelled credential is still waiting for its catalog rollback. */
+  readonly rollbackPending: boolean;
+}
+
+export interface CleanupStepCopy {
+  readonly title: string;
+  readonly discarded: string;
+  readonly outstanding: string;
+  readonly next: string;
+}
+
+export function cleanupStepCopy(context: CleanupStepContext): CleanupStepCopy {
+  const outstanding = [
+    ...(context.storeOpen ? ["Browser storage refused to record the cancellation, so a reload could still see the discarded invitation."] : []),
+    ...(context.rollbackPending ? ["The credential this browser started saving is blocked and invisible, but removing it from browser storage has not completed."] : []),
+  ];
+  return {
+    title: context.cause === "cancel" ? "Could not finish cancelling" : "Pairing failed and cleanup is incomplete",
+    discarded: context.cause === "cancel"
+      ? "Pairing was cancelled on this page and the discarded invitation cannot be resumed here."
+      : "Pairing did not complete and its invitation was discarded; it cannot be resumed here.",
+    outstanding: outstanding.length ? outstanding.join(" ") : "The cleanup this page owes has not completed.",
+    next: "Keep this page open and retry once browser storage is available. This blocks this browser only; copies of the link elsewhere remain subject to the machine's own expiry.",
+  };
+}

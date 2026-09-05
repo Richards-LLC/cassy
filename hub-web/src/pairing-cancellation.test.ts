@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { LATE_ROLLBACK_FAILURE_MESSAGE, PairingCancellationTracker, cleanupRetryOutcome } from "./pairing-cancellation";
+import { cleanupStepCopy } from "./pairing-cleanup";
 import { exchangePendingPairing, PairingCleanupError } from "./pairing-exchange";
 import { PairingOperationCoordinator } from "./pairing-operation";
 
@@ -112,5 +113,59 @@ describe("F2: Retry cleanup is serialized, guarded and reports rejection", () =>
     expect(storeStillOpen.done).toBe(false);
     expect(cleanupRetryOutcome({ persistentRemovalFailed: false, failClosed: true }, { pendingCleanup: 0 })).toEqual({ done: true, status: "Pairing cancelled." });
     expect(cleanupRetryOutcome({ persistentRemovalFailed: true, failClosed: true }, { pendingCleanup: 0 }).status).toContain("durably blocked");
+  });
+});
+
+describe("F2: a failed exchange whose rollback rejected owns a retry too (review 25564)", () => {
+  it("reaches the cleanup step with the operation still current, and begin() gives Retry an owner", async () => {
+    const coordinator = new PairingOperationCoordinator();
+    const tracker = new PairingCancellationTracker();
+    const operation = coordinator.begin();
+    const attempt = exchangePendingPairing({
+      invitation, controllerOrigin: invitation.controllerOrigin, deviceLabel: "Phone", operatorLabel: "Operator",
+      fetcher: async () => response(200, credential),
+      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
+      installationGeneration: operation.generation,
+      stagePersisted: async () => undefined,
+      activatePersisted: async () => { throw new DOMException("Fixture storage denied", "QuotaExceededError"); },
+      rollbackPersisted: async () => { throw new Error("durable cleanup rejected"); },
+      signal: operation.signal,
+      isCurrent: () => coordinator.isCurrent(operation),
+    });
+    await expect(attempt).rejects.toBeInstanceOf(PairingCleanupError);
+    // Nobody cancelled: the operation is current, so the old code rendered the
+    // step without an owner and beginRetry() returned undefined.
+    expect(coordinator.isCurrent(operation)).toBe(true);
+    expect(tracker.beginRetry()).toBeUndefined();
+    tracker.begin(operation.generation);
+    const ticket = tracker.beginRetry();
+    expect(ticket).toBeDefined();
+    // Storage restored: the retry completes and closes the step.
+    expect(tracker.finishRetry(ticket!)).toBe(true);
+    expect(cleanupRetryOutcome({ persistentRemovalFailed: false, failClosed: true }, { pendingCleanup: 0 }).done).toBe(true);
+  });
+
+  it("says only what is outstanding, for either way into the step", () => {
+    const cancelStore = cleanupStepCopy({ cause: "cancel", storeOpen: true, rollbackPending: false });
+    expect(cancelStore.title).toBe("Could not finish cancelling");
+    expect(cancelStore.outstanding).toContain("reload could still see");
+    expect(cancelStore.outstanding).not.toContain("credential this browser started saving");
+
+    const cancelRollback = cleanupStepCopy({ cause: "cancel", storeOpen: false, rollbackPending: true });
+    expect(cancelRollback.outstanding).not.toContain("reload could still see");
+    expect(cancelRollback.outstanding).toContain("blocked and invisible");
+
+    const failure = cleanupStepCopy({ cause: "failure", storeOpen: false, rollbackPending: true });
+    expect(failure.title).toBe("Pairing failed and cleanup is incomplete");
+    expect(failure.discarded).toContain("did not complete");
+    expect(failure.discarded).not.toContain("cancelled on this page");
+
+    const both = cleanupStepCopy({ cause: "cancel", storeOpen: true, rollbackPending: true });
+    expect(both.outstanding).toContain("reload could still see");
+    expect(both.outstanding).toContain("blocked and invisible");
+    for (const copy of [cancelStore, cancelRollback, failure, both]) {
+      expect(copy.next).toContain("blocks this browser only");
+      expect(`${copy.discarded} ${copy.outstanding}`).not.toContain("resume ");
+    }
   });
 });

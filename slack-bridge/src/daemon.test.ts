@@ -1,0 +1,133 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  createMessageInjector,
+  type ClaudeRunResult,
+  type ClaudeRunner,
+  type DaemonConfig,
+} from "./daemon.js";
+import type { DaemonMessage } from "./router.js";
+
+const config: DaemonConfig = {
+  socket_path: "/tmp/cas-bridge-test.sock",
+  username: "bridge-test",
+  cas_serve_url: "http://127.0.0.1:18999",
+  cas_serve_token: "",
+  slack_bot_token: "",
+};
+
+const baseMessage: DaemonMessage = {
+  channel: "C012345",
+  thread_ts: "1757020000.123451",
+  slack_user: "U012345",
+  text: "hello",
+  project_dir: "/work/project-a",
+  project: "project-a",
+};
+
+const temporaryDirectories: string[] = [];
+
+function statePath(): string {
+  const directory = mkdtempSync(join(tmpdir(), "cas-slack-daemon-test-"));
+  temporaryDirectories.push(directory);
+  return join(directory, "thread-sessions.json");
+}
+
+function sessionId(args: string[]): string {
+  const index = args.indexOf("--session-id");
+  expect(index).toBeGreaterThanOrEqual(0);
+  return args[index + 1];
+}
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+describe("Slack thread message injection", () => {
+  it("assigns distinct sessions to near-identical timestamps and different scopes", async () => {
+    const calls: string[][] = [];
+    const runner: ClaudeRunner = async (args) => {
+      calls.push(args);
+      return { code: 0, stdout: "ok", stderr: "" };
+    };
+    const inject = createMessageInjector({ runner, sessionStatePath: statePath() });
+
+    await inject(config, baseMessage);
+    await inject(config, { ...baseMessage, thread_ts: "1757020000.123459" });
+    await inject(config, { ...baseMessage, channel: "C987654" });
+    await inject(config, { ...baseMessage, project: "project-b" });
+
+    const ids = calls.map(sessionId);
+    expect(new Set(ids).size).toBe(4);
+    expect(ids).toEqual([
+      "7265c816-1515-b05e-2028-865a7a7730d3",
+      "ea3b785c-9b6a-35b1-33ef-0b918c17ffe4",
+      "a8434afe-40fc-5e44-b6ba-9a6e794a8ea3",
+      "d5509c6c-8edb-ccb0-5a57-bad19499b4ab",
+    ]);
+  });
+
+  it("records establishment only after success and resumes after restart", async () => {
+    const path = statePath();
+    const calls: string[][] = [];
+    const results: ClaudeRunResult[] = [
+      { code: 1, stdout: "", stderr: "startup failed" },
+      { code: 0, stdout: "started", stderr: "" },
+      { code: 0, stdout: "resumed", stderr: "" },
+      { code: 0, stdout: "resumed after restart", stderr: "" },
+    ];
+    const runner: ClaudeRunner = async (args) => {
+      calls.push(args);
+      return results.shift()!;
+    };
+
+    const firstDaemon = createMessageInjector({ runner, sessionStatePath: path });
+    expect((await firstDaemon(config, baseMessage)).ok).toBe(false);
+    expect((await firstDaemon(config, baseMessage)).ok).toBe(true);
+    expect((await firstDaemon(config, baseMessage)).ok).toBe(true);
+
+    const restartedDaemon = createMessageInjector({ runner, sessionStatePath: path });
+    expect((await restartedDaemon(config, baseMessage)).ok).toBe(true);
+
+    expect(calls.slice(0, 2).every((args) => args.includes("--session-id"))).toBe(true);
+    expect(calls.slice(2).every((args) => args.includes("--resume"))).toBe(true);
+    expect(calls.map((args) => args.at(-1))).toEqual([
+      "7265c816-1515-b05e-2028-865a7a7730d3",
+      "7265c816-1515-b05e-2028-865a7a7730d3",
+      "7265c816-1515-b05e-2028-865a7a7730d3",
+      "7265c816-1515-b05e-2028-865a7a7730d3",
+    ]);
+  });
+
+  it("serializes messages for the same scoped thread", async () => {
+    const releases: Array<(result: ClaudeRunResult) => void> = [];
+    let active = 0;
+    let maximumActive = 0;
+    const runner: ClaudeRunner = async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      const result = await new Promise<ClaudeRunResult>((resolve) => releases.push(resolve));
+      active -= 1;
+      return result;
+    };
+    const inject = createMessageInjector({ runner, sessionStatePath: statePath() });
+
+    const first = inject(config, baseMessage);
+    const second = inject(config, { ...baseMessage, text: "follow-up" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(releases).toHaveLength(1);
+
+    releases.shift()!({ code: 0, stdout: "first", stderr: "" });
+    await first;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(releases).toHaveLength(1);
+
+    releases.shift()!({ code: 0, stdout: "second", stderr: "" });
+    await second;
+    expect(maximumActive).toBe(1);
+  });
+});

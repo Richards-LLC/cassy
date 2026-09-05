@@ -54,6 +54,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and per-project `refresh_status=refresh_failed` results, while
   `spawn_failed` and `refresh_failed_no_receipt` remain distinct outcomes with
   truthful recovery guidance.
+- The release gate's doctor snapshot now normalizes bare `fatal: not a git
+  repository` wording alongside its parent-directory and mount-boundary forms,
+  and records the normalized failure in the release ledger.
 - Worker pull-request status distinguishes a failed or unavailable lookup from
   a definite absence, reporting a redacted `unknown` reason instead of the
   false `none` result.

@@ -64,10 +64,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   serialized against running jobs, descendant mounts rejected, duplicate
   systemd mount rows tolerated, and raw mount records read inside the runner
   sandbox. This is the mechanism, not a hard ceiling enforced at write time,
-  and it does nothing on a host where the timer is not enabled. Separately, the
-  cutover script now restores the previous route and service state when one of
-  its own pre-cutover steps fails; recovery from a cutover that has already
-  completed remains an operator action.
+  and it does nothing on a host where the timer is not enabled.
 - Ambient recall rejects identity noise and stale procedural entries, expiry
   instants are parsed rather than guessed, task boosting is narrowed, and
   retrieval measurement explains itself and requires explicit use attribution.

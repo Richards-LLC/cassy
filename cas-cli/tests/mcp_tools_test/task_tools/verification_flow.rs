@@ -6702,6 +6702,15 @@ async fn inline_no_code_intent_survives_dispatch_and_approved_proof_cas_099d() {
         Some("no-code"),
         "close metadata must be stored before verification locks its scope"
     );
+    assert_eq!(
+        task_store
+            .get(&after_dispatch)
+            .expect("dispatched task")
+            .external_ref
+            .as_deref(),
+        Some("artifact:cas-099d/after-dispatch"),
+        "the validated portable proof must be stored in the same dispatch projection"
+    );
     add_exact_supervisor_fixture_verdict(
         &cas_dir,
         Verification::approved(
@@ -6758,6 +6767,131 @@ async fn inline_no_code_intent_survives_dispatch_and_approved_proof_cas_099d() {
         Some("no-code")
     );
 
+    // Failure atomicity: inline no-code is a paired declaration. Missing or
+    // non-portable proof must fail before either task metadata or an exact
+    // verification dispatch is written.
+    for (label, external_ref) in [
+        ("missing", None),
+        ("absolute", Some("/tmp/local-only-proof")),
+    ] {
+        let task_id =
+            create_zero_commit_bug!(format!("No-code with {label} portable proof"), "deep");
+        let refused = extract_text(
+            service
+                .task(Parameters(task_req(serde_json::json!({
+                    "action": "close",
+                    "id": task_id,
+                    "reason": "Attempted no-code disposition",
+                    "execution_note": "no-code",
+                    "external_ref": external_ref
+                }))))
+                .await
+                .expect("invalid inline no-code proof refusal"),
+        );
+        assert!(refused.contains("NO-CODE PROOF REQUIRED"), "{refused}");
+        let persisted = task_store.get(&task_id).expect("refused task");
+        assert_eq!(persisted.status, TaskStatus::InProgress);
+        assert!(!persisted.pending_verification);
+        assert_eq!(persisted.execution_note, None);
+        assert_eq!(persisted.external_ref, None);
+        assert!(
+            cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+                .expect("dispatch lookup")
+                .is_none(),
+            "invalid paired metadata must not mint a proof boundary"
+        );
+    }
+
+    // A close-time declaration is a bounded empty -> no-code correction, not
+    // authority to rewrite an already-reviewed execution methodology. This
+    // remains true after an exact supervisor approval, when ordinary updates
+    // are proof-locked.
+    for posture in ["value-only", "test-first"] {
+        let task_id = create_zero_commit_bug!(
+            format!("Approved {posture} task keeps its methodology"),
+            "deep"
+        );
+        let updated = extract_text(
+            service
+                .task(Parameters(task_req(serde_json::json!({
+                    "action": "update",
+                    "id": task_id,
+                    "execution_note": posture
+                }))))
+                .await
+                .expect("store execution methodology before review"),
+        );
+        assert!(updated.contains("Updated task "), "{updated}");
+        let approved_dispatch = add_exact_supervisor_fixture_verdict(
+            &cas_dir,
+            Verification::approved(
+                format!("ver-cas-099d-preserve-{posture}"),
+                task_id.clone(),
+                format!("approved {posture} delivery"),
+            ),
+            None,
+        );
+        let refused = extract_text(
+            service
+                .task(Parameters(task_req(serde_json::json!({
+                    "action": "close",
+                    "id": task_id,
+                    "reason": "Attempted methodology replacement",
+                    "execution_note": "no-code",
+                    "external_ref": format!("artifact:cas-099d/preserve-{posture}")
+                }))))
+                .await
+                .expect("approved methodology replacement refusal"),
+        );
+        assert!(
+            refused.contains("INLINE NO-CODE INTENT REJECTED"),
+            "{refused}"
+        );
+        assert!(refused.contains(posture), "{refused}");
+        let persisted = task_store.get(&task_id).expect("refused task");
+        assert_eq!(persisted.status, TaskStatus::InProgress);
+        assert_eq!(persisted.execution_note.as_deref(), Some(posture));
+        assert_eq!(persisted.external_ref, None);
+        let latest = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+            .expect("dispatch lookup")
+            .expect("approved dispatch remains");
+        assert_eq!(latest.id, approved_dispatch.id);
+        assert_eq!(
+            latest.state,
+            cas::types::VerificationDispatchState::Resolved
+        );
+    }
+
+    // Other methodologies are never accepted inline, and rejection itself is
+    // also failure-atomic.
+    let non_no_code = create_zero_commit_bug!("Non-no-code inline methodology", "deep");
+    let refused = extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": non_no_code,
+                "reason": "Attempted inline methodology",
+                "execution_note": "test-first",
+                "external_ref": "artifact:cas-099d/non-no-code"
+            }))))
+            .await
+            .expect("non-no-code inline refusal"),
+    );
+    assert!(
+        refused.contains("INLINE EXECUTION NOTE REJECTED"),
+        "{refused}"
+    );
+    let persisted = task_store.get(&non_no_code).expect("refused task");
+    assert_eq!(persisted.status, TaskStatus::InProgress);
+    assert!(!persisted.pending_verification);
+    assert_eq!(persisted.execution_note, None);
+    assert_eq!(persisted.external_ref, None);
+    assert!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, &non_no_code)
+            .expect("dispatch lookup")
+            .is_none()
+    );
+
     // Negative control: a real code task cannot use absence of commits as
     // evidence of completion, and its recovery command must work even when an
     // approved proof would lock ordinary task.update.
@@ -6772,7 +6906,10 @@ async fn inline_no_code_intent_survives_dispatch_and_approved_proof_cas_099d() {
             .await
             .expect("zero-commit code refusal"),
     );
-    assert!(refused.contains("ZERO-COMMIT CLOSE ON CODE TASK"), "{refused}");
+    assert!(
+        refused.contains("ZERO-COMMIT CLOSE ON CODE TASK"),
+        "{refused}"
+    );
     assert!(!refused.contains("no no execution_note"), "{refused}");
     assert!(
         refused.contains(&format!(

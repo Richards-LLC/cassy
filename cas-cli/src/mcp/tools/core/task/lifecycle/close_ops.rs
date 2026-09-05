@@ -114,12 +114,12 @@ fn no_code_close_proof<'a>(
     }
     let proof_reference = external_ref.map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| {
         format!(
-            "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but no external_ref was supplied inline or persisted on the task. Retry close with `external_ref=<portable-reference>` (or record it first with task update)."
+            "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but no external_ref was supplied inline or persisted on the task. Retry close with `task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>` so the paired metadata is validated before verification dispatch."
         )
     })?;
     if let Some(reason) = delivery_audit_text_rejection(proof_reference) {
         return Err(format!(
-            "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but the supplied external_ref {reason}. Supply a non-empty portable artifact/proof reference and retry close."
+            "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but the supplied external_ref {reason}. Retry with `task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>` so the paired metadata is validated before verification dispatch."
         ));
     }
     if has_reviewable_code {
@@ -146,6 +146,61 @@ fn apply_no_code_close_proof(
     )?;
     if inline.is_some() {
         task.external_ref = proof.map(str::to_string);
+    }
+    Ok(())
+}
+
+/// Validate the close-only no-code correction before any verification or task
+/// projection can persist it. The correction is intentionally narrow: an
+/// absent methodology may become `no-code`, and an existing `no-code` posture
+/// may be repeated, but close cannot rewrite a methodology the verifier may
+/// already have approved. The portable proof is part of the same declaration,
+/// so both fields reach the pending verification projection together.
+fn prepare_no_code_close_metadata(
+    task: &mut cas_types::Task,
+    inline_execution_note: Option<&str>,
+    inline_external_ref: Option<&str>,
+) -> Result<(), String> {
+    let validated_inline = match inline_execution_note {
+        Some(raw) => {
+            let validated = crate::mcp::tools::types::validate_execution_note(Some(raw))?;
+            if validated.as_deref() != Some("no-code") {
+                return Err(
+                    "INLINE EXECUTION NOTE REJECTED: task close accepts only execution_note=no-code, paired with a portable external_ref. Record other execution methodologies with task action=update before requesting verification."
+                        .to_string(),
+                );
+            }
+            if let Some(stored) = task.execution_note.as_deref()
+                && stored != "no-code"
+            {
+                return Err(format!(
+                    "INLINE NO-CODE INTENT REJECTED: Task {} already records execution_note={stored}. task close may set no-code only when execution_note is empty or already no-code; it cannot replace a reviewed methodology. Preserve the stored methodology and satisfy its close gates. If it is wrong after verification, ask a registered supervisor to run `task action=reopen id={}`, then update it before a fresh proof cycle.",
+                    task.id, task.id
+                ));
+            }
+            validated
+        }
+        None => None,
+    };
+
+    let effective_execution_note = validated_inline
+        .as_deref()
+        .or(task.execution_note.as_deref());
+    if effective_execution_note != Some("no-code") {
+        return Ok(());
+    }
+
+    let inline = inline_external_ref.map(str::to_string);
+    let persisted = task.external_ref.clone();
+    let effective_external_ref = inline.as_deref().or(persisted.as_deref());
+    let proof = no_code_close_proof(&task.id, Some("no-code"), effective_external_ref, false)?
+        .map(str::to_string);
+
+    if validated_inline.is_some() {
+        task.execution_note = Some("no-code".to_string());
+    }
+    if inline.is_some() {
+        task.external_ref = proof;
     }
     Ok(())
 }
@@ -2065,23 +2120,18 @@ impl CasCore {
 
         // cas-099d, recurring after GH #272/#294/#304/#333: close-time
         // no-code intent is delivery metadata, not a separate task-scope edit.
-        // Apply it to the same in-memory task that every later gate reads. If
-        // this attempt creates a verification dispatch, the existing pending
-        // projection persists the declaration before that exact proof locks
-        // ordinary task.update; if the dispatch is already approved, the
-        // final close write persists it atomically with the closed state.
-        if let Some(raw) = inline_execution_note.as_deref() {
-            let validated = match crate::mcp::tools::types::validate_execution_note(Some(raw)) {
-                Ok(value) => value,
-                Err(message) => return Ok(Self::tool_error(message)),
-            };
-            if validated.as_deref() != Some("no-code") {
-                return Ok(Self::tool_error(
-                    "INLINE EXECUTION NOTE REJECTED: task close accepts only execution_note=no-code, paired with a portable external_ref. Record other execution methodologies with task action=update before requesting verification."
-                        .to_string(),
-                ));
-            }
-            task.execution_note = validated;
+        // Validate the bounded correction and its paired proof before any
+        // verification dispatch or task projection can lock partial metadata.
+        // An already-approved task with no stored methodology can still apply
+        // the pair atomically in its final close write.
+        if close_disposition.requires_delivery_gates()
+            && let Err(message) = prepare_no_code_close_metadata(
+                &mut task,
+                inline_execution_note.as_deref(),
+                inline_external_ref.as_deref(),
+            )
+        {
+            return Ok(Self::tool_error(message));
         }
 
         if !(supervisor_override && is_supervisor_from_env())

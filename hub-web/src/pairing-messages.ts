@@ -38,7 +38,7 @@ export function pairingExchangeFailure(input: { status: number; body: string; co
   }
   if (input.status === 404) {
     return {
-      message: "No Cassy hub answered at that Hub URL. Check it names the machine's hub root, then tap Pair again; this invitation is still open.",
+      message: "No Cassy hub answered at that address. Check it is the machine's hub address, not this page's, then tap Pair again; this invitation is still open.",
       keepInvitation: true,
     };
   }

@@ -35,6 +35,26 @@ export function preselectedScopes(pending: PendingPairing | null | undefined): S
   return pending.scopes ? [...pending.scopes] : [...READ_ONLY_PAIRING_SCOPES];
 }
 
+/** What a scope set lets this browser do, in the operator's words (F7). */
+export const READ_CAPABILITY = "Read sessions and terminals";
+export const CONTROL_CAPABILITY = "Type, send messages and interrupt";
+const CONTROL_SCOPES: readonly Scope[] = ["pane-input", "message-send", "pane-interrupt"];
+
+/**
+ * A plain summary beside the exact scope list, never instead of it: consent
+ * still names each scope and the exact origin, this just says what they add
+ * up to. Admin/factory scopes are named as themselves.
+ */
+export function scopeSummary(scopes: readonly Scope[]): string[] {
+  const summary: string[] = [];
+  if (scopes.some((scope) => READ_ONLY_PAIRING_SCOPES.includes(scope))) summary.push(READ_CAPABILITY);
+  if (scopes.some((scope) => CONTROL_SCOPES.includes(scope))) summary.push(CONTROL_CAPABILITY);
+  for (const scope of scopes) {
+    if (!READ_ONLY_PAIRING_SCOPES.includes(scope) && !CONTROL_SCOPES.includes(scope)) summary.push(`Also ${scopeLabel(scope)}`);
+  }
+  return summary;
+}
+
 export interface ScopeChoice {
   scope: Scope;
   label: string;

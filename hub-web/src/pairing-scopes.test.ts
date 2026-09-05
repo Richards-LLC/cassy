@@ -1,3 +1,4 @@
+import { CONTROL_CAPABILITY, READ_CAPABILITY, scopeSummary } from "./pairing-scopes";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { consumePairingFragment } from "./fragment";
@@ -253,7 +254,7 @@ describe("pairing failure copy", () => {
       expect(failure.message.trim().endsWith(".")).toBe(true);
     }
     expect(pairingExchangeFailure({ status: 429, body: "", controllerOrigin: ORIGIN }).message).toMatch(/minute/);
-    expect(pairingExchangeFailure({ status: 404, body: "", controllerOrigin: ORIGIN }).message).toMatch(/Hub URL/);
+    expect(pairingExchangeFailure({ status: 404, body: "", controllerOrigin: ORIGIN }).message).toMatch(/machine's hub address/);
   });
 
   it("names the network as the cause when the hub cannot be reached at all", async () => {
@@ -312,5 +313,18 @@ describe("pairing form scope invariants", () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("error instanceof PairingExchangeError && error.recoverable");
     expect(source).toContain("preselectedScopes(");
+  });
+});
+
+describe("plain capability summary beside the exact scopes (cas-8051 F7)", () => {
+  it("names reading and control in the operator's words", () => {
+    expect(scopeSummary(["machine-read", "session-read", "pane-read"])).toEqual([READ_CAPABILITY]);
+    expect(scopeSummary(["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"])).toEqual([READ_CAPABILITY, CONTROL_CAPABILITY]);
+    expect(scopeSummary(["pane-interrupt"])).toEqual([CONTROL_CAPABILITY]);
+  });
+
+  it("names any scope outside those two sets as itself", () => {
+    expect(scopeSummary(["machine-read", "hub-admin"])).toEqual([READ_CAPABILITY, "Also hub:admin"]);
+    expect(scopeSummary([])).toEqual([]);
   });
 });

@@ -36,6 +36,11 @@ export type PendingPairing = PendingRelayRequest | PendingInvitation;
 
 type PairingStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
+export type PendingPairingLoadOutcome =
+  | { readonly kind: "none" }
+  | { readonly kind: "expired" }
+  | { readonly kind: "pending"; readonly value: PendingPairing };
+
 export interface PendingPairingClearResult {
   /** `removeItem` was denied, so a tombstone rather than deletion was persisted. */
   persistentRemovalFailed: boolean;
@@ -82,25 +87,35 @@ export class PendingPairingStore {
   constructor(private readonly storage?: PairingStorage, private readonly now: () => number = Date.now) {}
 
   load(): PendingPairing | null {
+    const outcome = this.loadOutcome();
+    return outcome.kind === "pending" ? outcome.value : null;
+  }
+
+  /**
+   * Like `load()`, but says why nothing came back. An expired invitation is
+   * cleared exactly as before; the outcome carries no token, only the fact
+   * that the operator's link ran out before it was used (F6).
+   */
+  loadOutcome(): PendingPairingLoadOutcome {
     let raw: string | null;
     try {
       raw = this.storage?.getItem(STORAGE_KEY) ?? this.fallback.getItem(STORAGE_KEY);
     } catch {
       raw = this.fallback.getItem(STORAGE_KEY);
     }
-    if (!raw) return null;
-    if (raw === CLEARED_TOMBSTONE) return null;
+    if (!raw) return { kind: "none" };
+    if (raw === CLEARED_TOMBSTONE) return { kind: "none" };
     try {
       const value: unknown = JSON.parse(raw);
       if (!isPendingPairing(value)) throw new Error("invalid pending pairing");
       if (value.expiresAt && (Number.isNaN(Date.parse(value.expiresAt)) || Date.parse(value.expiresAt) <= this.now())) {
         this.clear();
-        return null;
+        return { kind: "expired" };
       }
-      return value;
+      return { kind: "pending", value };
     } catch {
       this.clear();
-      return null;
+      return { kind: "none" };
     }
   }
 

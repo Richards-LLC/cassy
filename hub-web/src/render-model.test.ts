@@ -46,7 +46,7 @@ describe("shell signature", () => {
     ["the command palette opening", { commandPaletteOpen: true }],
     ["the session picker opening", { sessionPickerOpen: true }],
     ["a pairing invitation arriving", { pairingView: "relay-request|ABCD-1234||Waiting for a machine to claim the code…|" }],
-    ["a pairing status sentence changing", { pairingView: "|||This pairing request has expired.|" }],
+    ["cancellation cleanup becoming outstanding", { pairingView: "|||cleanup-failed" }],
   ] as [string, Partial<ShellSignatureParts>][]) {
     it(`changes with ${name}`, () => {
       expect(shellSignature({ ...base, ...change })).not.toBe(shellSignature(base));
@@ -100,5 +100,26 @@ describe("editable element detection", () => {
     expect(isEditableElement({ tagName: "BODY" })).toBe(false);
     expect(isEditableElement(null)).toBe(false);
     expect(isEditableElement(undefined)).toBe(false);
+  });
+});
+
+describe("render decision and the pairing dialog", () => {
+  it("defers a structural change while any field in the app has focus", () => {
+    expect(renderDecision({ signatureChanged: true, composing: true })).toBe("defer");
+    expect(renderDecision({ signatureChanged: true, composing: true, pairingStepChanged: false, focusInPairingDialog: true })).toBe("defer");
+  });
+
+  it("rebuilds for a pairing step change when the focus is inside the pairing dialog", () => {
+    // Submit with Device label focused, then the exchange succeeds or is
+    // cancelled: the new step is what the operator asked for.
+    expect(renderDecision({ signatureChanged: true, composing: true, pairingStepChanged: true, focusInPairingDialog: true })).toBe("shell");
+  });
+
+  it("never lets a pairing step change take the composer's keyboard", () => {
+    expect(renderDecision({ signatureChanged: true, composing: true, pairingStepChanged: true, focusInPairingDialog: false })).toBe("defer");
+  });
+
+  it("stays on the region path when nothing structural changed, whatever has focus", () => {
+    expect(renderDecision({ signatureChanged: false, composing: true, pairingStepChanged: false, focusInPairingDialog: true })).toBe("regions");
   });
 });

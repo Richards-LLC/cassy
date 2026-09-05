@@ -34,7 +34,30 @@ const SHELL = `
         <p id="message-delivery" class="message-delivery" role="status" hidden></p>
       </div>
     </section>
-  </div>`;
+  </div>
+  <dialog id="pair-dialog" open>
+    <form id="pair-form">
+      <label>Device label<input name="device" value="Phone"></label>
+      <p class="pair-status" role="status" hidden></p>
+      <div class="dialog-actions">
+        <button id="pair-cancel" type="button">Cancel</button>
+        <button type="submit" class="primary">Pair</button>
+      </div>
+    </form>
+  </dialog>`;
+
+/** The create-code step, where the dialog holds a section and not a form. */
+const CREATE_STEP = `
+  <dialog id="pair-dialog" open>
+    <section class="pair-flow">
+      <label>Email code (optional)<input id="pair-email" type="email"></label>
+      <p class="pair-status" role="status" hidden></p>
+      <div class="dialog-actions">
+        <button id="pair-close" type="button">Close</button>
+        <button id="pair-create" type="button" class="primary">Create pairing code</button>
+      </div>
+    </section>
+  </dialog>`;
 
 const live = {
   connection: { state: "live", title: "live", latencyText: "41ms" },
@@ -224,5 +247,45 @@ describe("live region values", () => {
     document.body.innerHTML = '<div class="shell"></div>';
 
     expect(() => applyLiveRegions(document.body, { ...live, staleNotice: "Not live" })).not.toThrow();
+  });
+});
+
+describe("pairing dialog live regions (F1)", () => {
+  it("re-enables Pair and states the failure without touching the focused field", () => {
+    const device = root.querySelector<HTMLInputElement>('#pair-form input[name="device"]')!;
+    device.focus();
+    device.setSelectionRange(2, 2);
+    const form = root.querySelector("#pair-form");
+    applyLiveRegions(root, { ...live, pairing: { status: "Creating this browser credential…", exchangeInFlight: true, createInFlight: false } });
+    const submit = root.querySelector<HTMLButtonElement>('#pair-form button[type="submit"]')!;
+    expect(submit.disabled).toBe(true);
+    expect(submit.textContent).toBe("Pairing…");
+    expect(root.querySelector("#pair-form")?.getAttribute("aria-busy")).toBe("true");
+
+    // The exchange fails while Device label still has focus: the same nodes
+    // carry the sentence and the usable button. No rebuild, no blur.
+    applyLiveRegions(root, { ...live, pairing: { status: "This device could not reach the hub. Tap Pair again.", exchangeInFlight: false, createInFlight: false } });
+    expect(root.querySelector("#pair-form")).toBe(form);
+    expect(document.activeElement).toBe(device);
+    expect(device.selectionStart).toBe(2);
+    expect(submit.disabled).toBe(false);
+    expect(submit.textContent).toBe("Pair");
+    const status = root.querySelector<HTMLElement>("#pair-dialog .pair-status")!;
+    expect(status.hidden).toBe(false);
+    expect(status.textContent).toBe("This device could not reach the hub. Tap Pair again.");
+    expect(root.querySelector("#pair-form")?.getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("hides an empty status and flips Close to Cancel while a code is minted", () => {
+    document.body.innerHTML = CREATE_STEP;
+    root = document.body;
+    applyLiveRegions(root, { ...live, pairing: { exchangeInFlight: false, createInFlight: true } });
+    expect(root.querySelector<HTMLElement>("#pair-dialog .pair-status")!.hidden).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>("#pair-create")!.disabled).toBe(true);
+    expect(root.querySelector("#pair-create")!.textContent).toBe("Creating…");
+    expect(root.querySelector("#pair-close")!.textContent).toBe("Cancel");
+    applyLiveRegions(root, { ...live, pairing: { status: "Waiting for a machine to claim the code…", exchangeInFlight: false, createInFlight: false } });
+    expect(root.querySelector("#pair-create")!.textContent).toBe("Create pairing code");
+    expect(root.querySelector("#pair-close")!.textContent).toBe("Close");
   });
 });

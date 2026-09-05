@@ -6,11 +6,11 @@ import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./con
 import { connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
-import { consumePairingFragment, watchPairingFragment } from "./fragment";
+import { readPairingFragment, watchPairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
-import { pairingCleanupFailureUpdate, pairingStorageClearFailureMessage } from "./pairing-cleanup";
-import { exchangePendingPairing, PairingCleanupError, PairingExchangeError } from "./pairing-exchange";
+import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cancellationOutcome, pairingCleanupFailureUpdate, pairingStorageClearFailureMessage } from "./pairing-cleanup";
+import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { PAIRING_SCOPES, pairCommand, preselectedScopes, scopeChoices, scopeLabel, ungrantedScopes } from "./pairing-scopes";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
@@ -34,11 +34,22 @@ import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCar
 
 const pendingPairingStore = pendingPairingStoreFor(window);
 const relayOrigin = pairingRelayOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-pairing-relay-origin"]')?.content ?? null);
-let pendingPairing: PendingPairing | null = consumePairingFragment(window.location, window.history, pendingPairingStore);
+const arrivedFragment = readPairingFragment(window.location, window.history, pendingPairingStore);
+let pendingPairing: PendingPairing | null = arrivedFragment.kind === "fragment" ? arrivedFragment.fragment : null;
 // Opening the link is the operator's "yes"; making them hunt for Pair a machine
-// afterwards is how a one-time invitation gets left unused on a phone.
-let pairDialogAutoOpen = pendingPairing !== null;
-pendingPairing ??= pendingPairingStore.load();
+// afterwards is how a one-time invitation gets left unused on a phone. A broken
+// or expired link is the same "yes" with nothing usable behind it, so it opens
+// the dialog too — on the sentence that says so, never on the token (F6).
+let pairDialogAutoOpen = pendingPairing !== null || arrivedFragment.kind === "invalid";
+let pairingArrivalNotice = arrivedFragment.kind === "invalid" ? INVALID_PAIRING_LINK_MESSAGE : "";
+if (!pendingPairing) {
+  const stored = pendingPairingStore.loadOutcome();
+  if (stored.kind === "pending") pendingPairing = stored.value;
+  if (stored.kind === "expired" && !pairingArrivalNotice) {
+    pairingArrivalNotice = EXPIRED_PAIRING_INVITATION_MESSAGE;
+    pairDialogAutoOpen = true;
+  }
+}
 const pairingOperations = new PairingOperationCoordinator();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const rootStyles = getComputedStyle(document.documentElement);
@@ -61,6 +72,7 @@ const transcripts = new Map<string, TranscriptView>();
 // The shell is rebuilt only when its own inputs changed. A hub heartbeat
 // carries none of them, so it can no longer replace the composer mid-sentence.
 let lastShellSignature: string | undefined;
+let lastPairingView: string | undefined;
 // setTimeout, not queueMicrotask: the click event a pointerup is about to
 // produce is dispatched in the same task, so only a macrotask lands after it.
 const deferredRender = new DeferredRenderScheduler({
@@ -96,7 +108,10 @@ let selection: SelectionState = { history: [] };
 // confirms it still exists.
 let restoreTarget: SessionSelection | undefined;
 let sessionPickerOpen = false;
-let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a machine to claim the code…" : "";
+let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a machine to claim the code…" : pairingArrivalNotice;
+// Cancellation whose durable cleanup did not complete: the dialog stays on a
+// "could not finish cancelling" step with a retry until storage cooperates (F2).
+let pairingCleanupFailed = false;
 let pairingPollTimer: number | undefined;
 let pairingCountdownTimer: number | undefined;
 let connectionViewTicker: number | undefined;
@@ -338,6 +353,11 @@ watchPairingFragment(window, pendingPairingStore, (fragment) => {
   pairingStatus = "";
   render();
   openPairDialog();
+}, () => {
+  if (pendingPairing) return;
+  pairingStatus = INVALID_PAIRING_LINK_MESSAGE;
+  render();
+  openPairDialog();
 });
 
 function createConnection(machine: StoredMachine): HubConnectionSupervisor {
@@ -571,17 +591,33 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
       pairingStatus = cleared.failClosed
         ? `${update.status}${cleared.persistentRemovalFailed ? " Browser storage removal was denied; the cancelled request is durably blocked." : ""}`
         : `${update.status} Browser storage could not durably block the cancelled request.`;
+      pairingCleanupFailed = true;
       render(false);
+      openPairDialog();
       throw error;
     }
     if (!pairingOperations.isCurrent(operation)) {
-      if (!pendingPairing) {
-        pairingStatus = "Pairing cancelled after durable local cleanup completed.";
-        render(false);
+      if (!pendingPairing && !pairingCleanupFailed) {
+        // The cancellation the operator asked for has now been verified: the
+        // dialog that said "verifying" can close, and the page says so.
+        pairingStatus = "Pairing cancelled.";
+        finishCancelledPairing();
       }
       return false;
     }
     pairingExchangeInFlight = false;
+    if (error instanceof PairingStorageError) {
+      // The hub consumed the invitation and recorded the device; only this
+      // browser's copy failed. Say exactly that and point at a fresh invitation
+      // instead of "expired or already used" (F3).
+      pairingOperations.invalidate();
+      const cleared = pendingPairingStore.clear();
+      pendingPairing = null;
+      pairingDraft = createPairingDraft(location.origin);
+      pairingStatus = pairingStorageClearFailureMessage(error.message, cleared);
+      render(false);
+      throw error;
+    }
     if (error instanceof PairingExchangeError && error.recoverable) {
       // Nothing reached the machine, so the invitation is still good: say what
       // happened and leave Pair usable instead of sending the operator back to
@@ -717,21 +753,53 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
 
 function cancelPendingPairing(): void {
   const verifiesCleanup = pairingExchangeInFlight;
-  document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
   pairingOperations.invalidate();
   const cleared = pendingPairingStore.clear();
   pendingPairing = null;
   pairingCreateInFlight = false;
   pairingExchangeInFlight = false;
   pairingDraft = createPairingDraft(location.origin);
-  pairingStatus = !cleared.failClosed
-    ? "Pairing cancellation could not durably block the request; keep this page open and retry after storage access is restored."
-    : verifiesCleanup
-      ? "Cancelling pairing and verifying durable local cleanup…"
-      : cleared.persistentRemovalFailed
-        ? "Pairing cancelled. Browser storage removal was denied, so the request was durably blocked."
-        : "Pairing cancelled.";
   stopPairingTimers();
+  // Cancel discards the invitation either way. The dialog only closes once the
+  // page can say the cancellation is durable; a warning behind a closed dialog
+  // was a warning nobody saw (F2).
+  const outcome = cancellationOutcome(cleared, verifiesCleanup);
+  pairingStatus = outcome.status;
+  pairingCleanupFailed = outcome.cleanupFailed;
+  if (outcome.cleanupFailed || outcome.verifying) {
+    render(false);
+    openPairDialog();
+    return;
+  }
+  finishCancelledPairing();
+}
+
+/** A cancellation the page can vouch for: close the dialog and say so. */
+function finishCancelledPairing(): void {
+  pairingCleanupFailed = false;
+  document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
+  render(false);
+  toast(pairingStatus || "Pairing cancelled.");
+}
+
+/**
+ * Retry the durable part of a cancellation. It never resumes the discarded
+ * invitation: the persistent store is cleared again and the catalog's pending
+ * rollback is re-checked, and only a fail-closed result ends the step.
+ */
+async function retryPairingCleanup(): Promise<void> {
+  const cleared = pendingPairingStore.clear();
+  const recovered = await catalog.recoverPending();
+  if (cleared.failClosed && recovered.pendingCleanup === 0) {
+    pairingStatus = cleared.persistentRemovalFailed
+      ? "Pairing cancelled. Browser storage removal was denied, so the request was durably blocked instead."
+      : "Pairing cancelled.";
+    finishCancelledPairing();
+    return;
+  }
+  pairingStatus = cleared.failClosed
+    ? "The cancelled invitation is blocked, but a cancelled credential is still waiting for cleanup. Keep this page open and retry."
+    : "Browser storage still refuses to record the cancellation. Keep this page open and retry once storage access is restored.";
   render(false);
 }
 
@@ -1362,21 +1430,31 @@ function pairingDetails(origin: string, scopes: readonly Scope[]): string {
   return `<dl class="pair-details"><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Scopes</dt><dd>${scopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl>`;
 }
 
+function pairStatusMarkup(): string {
+  return `<p class="pair-status" role="status"${pairingStatus ? "" : " hidden"}>${escapeHtml(pairingStatus)}</p>`;
+}
+
 function pairDialogMarkup(): string {
+  if (pairingCleanupFailed) {
+    // Cancel already discarded the invitation; this step exists because the
+    // page cannot yet prove a reload will not see it again. There is no way
+    // back to the invitation from here, only forward through the cleanup.
+    return `<dialog id="pair-dialog"><section class="pair-flow pair-cleanup" tabindex="-1" autofocus aria-labelledby="pair-cleanup-title"><h2 id="pair-cleanup-title">Could not finish cancelling</h2><p>Pairing was cancelled on this page and the discarded invitation cannot be resumed here. Browser storage refused to record the cancellation, so a reload could still see it.</p><p>Keep this page open and retry once browser storage is available. Cancelling here blocks this browser only; copies of the link elsewhere remain subject to the machine's own expiry.</p>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-close" type="button" data-role="cleanup">Close</button><button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button></div></section></dialog>`;
+  }
   if (pendingPairing?.kind === "relay-request") {
-    return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Run <code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code> on the machine you want to pair, then approve the request it prints.</p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">10:00</strong></p>${pairingDetails(pendingPairing.controllerOrigin, pendingPairing.requestedScopes)}<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p><div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
+    return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Run <code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code> on the machine you want to pair, then approve the request it prints.</p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">10:00</strong></p>${pairingDetails(pendingPairing.controllerOrigin, pendingPairing.requestedScopes)}${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
   }
   if (pendingPairing?.kind === "invitation") {
     const relay = Boolean(pendingPairing.relay);
     const hubUrl = pendingPairing.hubUrl;
     const origin = pendingPairing.controllerOrigin;
     const invitationScopes = pendingPairing.scopes;
-    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Hub</dt><dd>${escapeHtml(hubUrl)}</dd></div><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Hub URL<input name="url" type="url" required autofocus value="${escapeAttr(pairingDraft.hubUrl)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(invitationScopes)}`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
+    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Hub</dt><dd>${escapeHtml(hubUrl)}</dd></div><div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Hub URL<input name="url" type="url" required autofocus value="${escapeAttr(pairingDraft.hubUrl)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(invitationScopes)}`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"></label>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
   }
   const relayAction = relayOrigin
     ? `<button id="pair-create" type="button" class="primary" ${pairingCreateInFlight ? "disabled" : ""}>${pairingCreateInFlight ? "Creating…" : "Create pairing code"}</button>`
     : '<p class="pairing-disabled-reason">Page-initiated pairing is unavailable because this Cassy Commander build has no reviewed relay origin.</p>';
-  return `<dialog id="pair-dialog"><section class="pair-flow" tabindex="-1" autofocus><h2>Pair this machine</h2><p>Create a ten-minute code, then verify the exact Cassy Commander origin and approve the requested read and control scopes on the target machine.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${pendingPairing ? "" : '<p class="pairing-disabled-reason">Pair is disabled until you open a pairing URL generated by <code>cas hub pair</code> on the machine.</p>'}<button type="button" ${pendingPairing ? "" : "disabled"}>Pair</button>${relayAction}</div></section></dialog>`;
+  return `<dialog id="pair-dialog"><section class="pair-flow" tabindex="-1" autofocus><h2>Pair this machine</h2><p>Create a ten-minute code, then verify the exact Cassy Commander origin and approve the requested read and control scopes on the target machine.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${pendingPairing ? "" : '<p class="pairing-disabled-reason">Pair is disabled until you open a pairing URL generated by <code>cas hub pair</code> on the machine.</p>'}<button type="button" ${pendingPairing ? "" : "disabled"}>Pair</button>${relayAction}</div></section></dialog>`;
 }
 
 // A phone sentence takes longer to type than the heartbeat render interval, so
@@ -1715,7 +1793,20 @@ function render(captureDraft = true): void {
     ...(sendReason ? { sendReason } : {}),
     ...(composerStatus ? { messageStatus: { text: composerStatus.text, error: composerStatus.tone === "error" } } : {}),
     ...(delivery ? { delivery: `Message sent to ${delivery.target}` } : {}),
+    pairing: {
+      ...(pairingStatus ? { status: pairingStatus } : {}),
+      exchangeInFlight: pairingExchangeInFlight,
+      createInFlight: pairingCreateInFlight,
+    },
   };
+  // The pairing dialog's step: which flow, which request, its expiry, and an
+  // outstanding cleanup. The status sentence and busy flags are live regions.
+  const pairingView = [
+    pendingPairing?.kind ?? "",
+    pendingPairing?.kind === "relay-request" ? pendingPairing.userCode : pendingPairing?.token ?? "",
+    pendingPairing?.expiresAt ?? "",
+    pairingCleanupFailed ? "cleanup-failed" : "",
+  ].join("|");
   const signature = shellSignature({
     machineId: selectedMachineId,
     session: selectedSession,
@@ -1736,19 +1827,16 @@ function render(captureDraft = true): void {
     controlDisabled: controlActionDisabled,
     commandPaletteOpen,
     sessionPickerOpen,
-    pairingView: [
-      pendingPairing?.kind ?? "",
-      // The invitation form and the relay code render different dialogs, and
-      // both identify the request the operator is looking at.
-      pendingPairing?.kind === "relay-request" ? pendingPairing.userCode : pendingPairing?.token ?? "",
-      pendingPairing?.expiresAt ?? "",
-      pairingStatus,
-      pairingExchangeInFlight ? "in-flight" : "",
-    ].join("|"),
+    pairingView,
   });
   const active = document.activeElement;
   const composing = isEditableElement(active) && app.contains(active);
-  const decision = renderDecision({ signatureChanged: signature !== lastShellSignature, composing });
+  const decision = renderDecision({
+    signatureChanged: signature !== lastShellSignature,
+    composing,
+    pairingStepChanged: pairingView !== lastPairingView,
+    focusInPairingDialog: composing && document.querySelector("#pair-dialog")?.contains(active) === true,
+  });
   if (decision !== "shell") {
     // A deferred rebuild is owed to a structural change that arrived while the
     // operator was mid-sentence; it runs the moment the field is left.
@@ -1842,6 +1930,7 @@ function render(captureDraft = true): void {
   if (focusWinner === "composer") queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus());
   lastRailSignature = undefined;
   lastShellSignature = signature;
+  lastPairingView = pairingView;
   bindEvents(selected, lease);
   if (commandPaletteOpen) {
     document.querySelector<HTMLDialogElement>("#command-palette")?.showModal();
@@ -2398,7 +2487,14 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     if (opened && !opened.open) opened.showModal();
   }
   if (pairCancel) pairCancel.onclick = cancelPendingPairing;
-  if (pairClose) pairClose.onclick = pairingCreateInFlight ? cancelPendingPairing : () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).close();
+  // Read at click time: the label flips to Cancel through a live region while a
+  // code is being minted, without rebuilding the dialog.
+  if (pairClose) pairClose.onclick = () => {
+    if (pairingCreateInFlight) { cancelPendingPairing(); return; }
+    document.querySelector<HTMLDialogElement>("#pair-dialog")!.close();
+  };
+  const pairCleanupRetry = document.querySelector<HTMLButtonElement>("#pair-cleanup-retry");
+  if (pairCleanupRetry) pairCleanupRetry.onclick = () => { void retryPairingCleanup(); };
   if (pairCreate) pairCreate.onclick = () => {
     pairCreate.disabled = true;
     const email = document.querySelector<HTMLInputElement>("#pair-email")?.value.trim() ?? "";
@@ -2420,7 +2516,12 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
       // Pairing ends by silently closing a dialog; say that it worked.
       toast(`${machines.get(selectedMachineId ?? "")?.label ?? "Machine"} paired`);
-    }).catch((error) => toast(error instanceof Error ? error.message : "Pairing failed"));
+    }).catch((error) => {
+      // A pairing failure is stated inside the dialog beside Pair; a toast
+      // behind the backdrop only duplicated it. Anything else still surfaces.
+      if (error instanceof PairingExchangeError) return;
+      toast(error instanceof Error ? error.message : "Pairing failed");
+    });
   };
   const remove = document.querySelector<HTMLButtonElement>("#remove-machine");
   if (remove && selected) remove.onclick = async () => {

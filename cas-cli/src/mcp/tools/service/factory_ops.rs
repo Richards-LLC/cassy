@@ -10652,50 +10652,63 @@ mod tests {
     }
 
     #[test]
-    fn taste_lane_spawn_specs_and_explicit_astra_route_agree() {
+    fn taste_lane_spawn_specs_and_explicit_fable_route_agree() {
         let _home = TestEnvGuard::temp_home();
         let (specs, recipe, warnings) = build_lane_spawn_specs(
             2,
             "taste",
-            Some("~/.codex-alt"),
+            Some("~/.claude-alt"),
             Some(r#"[{"name":"taste-a"},{"name":"taste-b"}]"#),
             &cas_factory::CapabilitySnapshot::default(),
         )
         .unwrap();
-        assert_eq!(recipe, "codex_astra");
+        assert_eq!(recipe, "claude_fable");
         assert!(warnings.is_empty());
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].name.as_deref(), Some("taste-a"));
         assert_eq!(specs[1].name.as_deref(), Some("taste-b"));
         for spec in specs {
-            assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-            assert_eq!(spec.model.as_deref(), Some("gpt-6-astra"));
+            assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
+            assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
             assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
-            assert_eq!(spec.config_dir.as_deref(), Some("~/.codex-alt"));
+            assert_eq!(spec.config_dir.as_deref(), Some("~/.claude-alt"));
         }
         assert_eq!(
-            cli_for_model_slug("gpt-6-astra"),
-            Some(cas_mux::SupervisorCli::Codex)
+            cli_for_model_slug("claude-fable-5-1"),
+            Some(cas_mux::SupervisorCli::Claude)
         );
-        for cli in [None, Some("codex")] {
-            for effort in ["minimal", "low", "medium", "high", "xhigh"] {
-                let json = build_spawn_spec_json(cli, Some("gpt-6-astra"), Some(effort)).unwrap();
+        for cli in [None, Some("claude")] {
+            for effort in ["medium", "high"] {
+                let json = build_spawn_spec_json(
+                    cli,
+                    Some("claude-fable-5-1"),
+                    Some(effort),
+                )
+                .unwrap();
                 let spec = decoded_spawn_spec(&json);
-                assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-                assert_eq!(spec.model.as_deref(), Some("gpt-6-astra"));
+                assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
+                assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
                 assert_eq!(
                     spec.effort,
                     Some(effort.parse::<cas_mux::Effort>().unwrap())
                 );
             }
         }
-        for cli in ["claude", "grok", "opencode"] {
-            let error =
-                build_spawn_spec_json(Some(cli), Some("gpt-6-astra"), Some("medium")).unwrap_err();
-            assert!(error.contains("cli=codex"), "{error}");
+        for cli in ["codex", "grok", "opencode"] {
+            let error = build_spawn_spec_json(
+                Some(cli),
+                Some("claude-fable-5-1"),
+                Some("medium"),
+            )
+            .unwrap_err();
+            assert!(error.contains("cli=claude"), "{error}");
         }
-        let error =
-            build_spawn_spec_json(Some("codex"), Some("gpt-6-astra"), Some("ultra")).unwrap_err();
+        let error = build_spawn_spec_json(
+            Some("claude"),
+            Some("claude-fable-5-1"),
+            Some("ultra"),
+        )
+        .unwrap_err();
         assert!(error.contains("effort"), "{error}");
     }
 

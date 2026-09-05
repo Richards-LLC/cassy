@@ -6,81 +6,91 @@ managed_by: cas
 
 # Cassy release train
 
-This is the only supervisor release procedure. Every numbered step is a gate:
-stop at its first failure, record the blocking step in the operator timeline,
-and do not claim success without its receipt.
+This is the only supervisor release procedure. Stop at the first failed step,
+name the blocking step in the operator timeline, and require its receipt.
 
-1. Read references/failure-log.md in full. If a new failure is not logged,
-   learn it with `scripts/release-gate.sh --learn "<symptom>" "<cause>"
-   "<check-id>"`, add its executable check and `scripts/test-release-gate.sh`
-   fixture in the same commit, then record the same text with
-   `mcp__cs__memory action=remember entry_type=learning tags=release`.
-2. Assemble the exact epic tip: `git worktree add .cas/epic-<id>-merge
-   <epic-tip>`. Reconcile sibling lanes there before the prep commit: run the
-   full suite, inspect guardrail/marker and counted-field tests (grep
-   `conflicts_resolved` and assert directional fields), and commit any trim
-   or move.
-3. After builtin changes, copy each changed embedded agent file from
-   `cas-cli/src/builtins/**/agents` to its root projection (`.claude/agents`,
-   `.codex/agents`). Do not run `cas update --sync`; run the root-managed-
-   projections drift test, regenerate `reference-history.json`, and require
-   `git diff --quiet -- cas-cli/src/builtins/reference-history.json`.
-4. Before preparing the source commit, confirm no other open or queued PR
-   bumps a release version (`gh pr list --state open --search release`, the
-   merge-queue GraphQL query, `git ls-remote --tags origin`); a competing release
-   from a second supervisor session must land first and this train takes the
-   next patch number. Then prepare one source commit: run `scripts/bump-release-version.sh <version>`,
-   `cargo update --workspace --offline`, update CHANGELOG, the runtime-release
-   draft, and the previous POSTED receipt; then run
-   `scripts/release-train.sh <version> <epic-worktree> --gate` and require every
-   row PASS. Never hand-write a wrapper with a version-keyed artifacts path:
-   `release-train.sh` owns a per-run directory keyed by version AND worktree
-   (`v<version>-<worktree-basename>`), so two supervisors cutting the same
-   version from different epics cannot overwrite each other's `gate.log` or
-   `gate.done`. It records the gate's PID and refuses to start a second gate
-   for that run; inspect with `--status` and stop with `--stop`, which signals
-   only the recorded PID. Locate a run by its recorded PID, never by a process
-   name pattern: `pgrep -f 'release-gate.sh <version>'` matches every
-   concurrent supervisor's gate, and acting on `head -1` picks by pid order
-   rather than by ownership (cas-5212).
-5. For archive mode, the gate already puts the archive and TMPDIR under
-   `/var/tmp/cas-release-gate` — a large real-disk scratch base with no `.cas`
-   ancestor, never `/tmp` tmpfs. Set `CAS_RELEASE_GATE_HOME_DIR` only to move
-   that base; the receipt names the base and where it came from, and the gate
-   still refuses any base with a `.cas` ancestor. Build a remap
-   with root `Cargo.toml` and every package path from `git ls-files
-   '*/Cargo.toml'`; run outside the checkout with symlinks for
-   cargo/rustc/git/sh/bash/jq/python3, no `rg`, and `--workspace-remap`.
-   Exclude `component_output_test` only when its source snapshots need checkout.
-6. Push the source branch and drive it to a landed merge with
-   `scripts/release-train.sh <version> <epic-worktree> --pipeline`, which
-   reads the supervisor-authored `pr-body.md` from the run directory (author
-   that file before invoking `--pipeline`),
-   reuses the gate's run directory and writes `pr-number.txt`,
-   `landed-main.sha` and a terminal `pipeline.done`
-   (MERGED / CHECKS_FAILED / QUEUE_RUN_FAILED / DROPPED_TOO_OFTEN / TIMEOUT).
-   It enqueues only after the pull_request run shows a `bucket == pass` row for
-   BOTH Fast Validation and macOS Check: a push-triggered run contributes rows
-   with the same names and `bucket == skipped`, and enqueuing on those gets the
-   merge-queue entry dropped silently (`mergeQueueEntry` null), which is what
-   cost v3.15.2 its first queue attempt. It also watches for that dropped
-   signature — no entry and no new `merge_group` run — and re-enqueues up to
-   three times before giving up (cas-da81).
-7. After the merge lands, publish with
-   `scripts/release-train.sh <version> <epic-worktree> --publish`, which takes
-   the landed sha from the run directory's `landed-main.sha` (pass it
-   explicitly to override). It refuses before creating anything if `origin/main`
-   is not that sha or if the LANDED COMMIT's `cas-cli/Cargo.toml` does not
-   declare the version being published — read from the commit, not the working
-   tree, so a dirty epic worktree cannot vouch for what is tagged. It then
-   creates the detached tag worktree at `.cas/release-v<version>`, hardlinks
-   `.context/zig`, sources `CAS_RELEASE_ENV_FILE` printing variable NAMES and
-   set/unset state only, and runs `release.sh --publish-tag` with
-   `release.log`, a recorded `release.pid` and a numeric `release.done` inside
-   the run directory. Do not run local preflight here:
-   `release.sh --publish-tag` owns annotated-tag creation and runs
-   `check-release-preflight.sh --local` before pushing the tag (cas-c1cd).
-8. From that tag worktree, run this exact publisher wrapper:
+1. Read references/failure-log.md in full. Learn an absent failure with
+   `scripts/release-gate.sh --learn "<symptom>" "<cause>" "<check-id>"`, add
+   its executable row and self-test fixture in the same commit, and store the
+   same text with `mcp__cs__memory action=remember entry_type=learning
+   tags=release`. `--learn` regenerates the builtin reference ledger.
+2. Before `worktree_merge` on any release-bound lane, run
+   `scripts/release-train.sh <version> <epic-worktree> --check-lane <branch>`
+   and require the `Scoped Validation (factory/PR)` job inside that branch tip's
+   exact-SHA, push-triggered `CI` workflow run to be GREEN. Missing or malformed evidence,
+   API errors, pending, skipped, cancelled, or red is a refusal. The only
+   substitute is the supervisor running the affected caller modules in the gate
+   worktree. The supervisor monitors CI; workers never poll CI.
+3. A stalled worker with green proofs gets one urgent interrupt; if it remains
+   stalled, the supervisor pushes from its worktree. When a rebase makes the
+   anchor stale, close the handoff with `commit_receipt` instead of spending
+   another worker turn rebasing it.
+4. Assemble the exact epic tip in a dedicated worktree. Reconcile sibling lanes
+   there, run the full suite on the assembled tree, inspect guardrail/marker and
+   counted-field tests, and commit every trim or move. Real-project fixtures use
+   `cas::test_paths::runtime_fixture_parent()`, never `/tmp`, `/var/tmp`, or
+   `env!("CARGO_MANIFEST_DIR")`. `cas init` and serve registration remain
+   unconditional; only discovery/cloud behavior skips disposable roots.
+5. Treat an intentional doctor row change as a reviewed snapshot update in the
+   prep commit and name the row in that commit message; an unexplained snapshot
+   change is a bug. Fixture versions use the unmistakable `9.99.x` range,
+   never a plausible current or next release such as an `-rc.1` value.
+6. After the final merge and after every `--learn`, regenerate
+   `cas-cli/src/builtins/reference-history.json` and commit it before the gate.
+   The ledger is the last prep step. For builtin agent changes, update root
+   projections and run the flavor/projection drift tests; do not use
+   `cas update --sync` in the source worktree.
+7. Configure `CAS_RELEASE_GATE_HOME_DIR` on the release host to a large base on
+   the checkout mount with a writable parent and no `.cas` ancestor. On
+   soundwave use `/home/cas-release-gate/base`, not `/`, which was 97% full.
+   The scratch-base row runs first and requires free space at least twice
+   the last recorded archive size and records the new archive size per run. A
+   failure aborts before Cargo or archive rows. Archive mode builds outside the
+   checkout with a remap rooted at `Cargo.toml` plus every package path from
+   `git ls-files '*/Cargo.toml'`, symlinks only cargo/rustc/git/sh/bash/jq/python3,
+   removes `rg`, and uses `--workspace-remap`; exclude `component_output_test`
+   only when its source snapshots require the checkout.
+8. Before changing a version, prove there is no competing release with
+   `gh pr list --state open --search release`, the merge-queue GraphQL query,
+   and `git ls-remote --tags origin`. A competing release from another supervisor lands
+   first and this train takes the next patch number. Then prepare the source
+   commit with `scripts/bump-release-version.sh <version>`,
+   `cargo update --workspace --offline`, CHANGELOG, release draft, and prior
+   POSTED receipt. Start the gate with `scripts/release-train.sh <version>
+   <epic-worktree> --gate`; it regenerates and refuses an uncommitted ledger,
+   then launches a nohup detached process group. Schedule a `coordination
+   remind`, end the turn, and inspect once with `--status`; never run a shell
+   watcher. `--stop` terminates the recorded process group, including nextest
+   and git children. After a targeted fix rerun only failed rows with `--gate
+   --only <row,row>`; row order and the selected-row summary are preserved.
+   These are diagnostic receipts in append-only per-attempt directories: they
+   never overwrite or authorize the exact-SHA full gate required by pipeline.
+   The main per-run directory is keyed by version and worktree, never only by
+   version, and every gate is located by its recorded PID, never `pgrep`.
+9. Create `pr-body.md` in the printed run directory, then use `--pipeline`.
+   It refuses unless `gate.done`, `gate.full.sha`, and the current tree prove a
+   successful full gate on the exact commit about to be pushed. Require
+   pull-request Fast Validation and macOS Check pass rows before queue admission;
+   skipped push rows prove nothing. The train records the PR, merge-queue
+   terminal state, and landed main SHA. It detects a missing `mergeQueueEntry`
+   with no new `merge_group` run and re-enqueues at most three times before
+   failing; stale queue runs from before this attempt prove nothing.
+10. Add one epic note per gate run containing tip, failed rows, cause class
+    (`product`, `fixture`, `environment`, or `procedure`), and blocking step.
+    The final pane summary names green-to-published latency only from saved,
+    verified publication receipts; `--status` is bounded and read-only, prints
+    the note template, and otherwise reports publication pending or unavailable.
+11. Publish the recorded landed SHA with `--publish`. Require origin/main and
+   the landed commit's `cas-cli/Cargo.toml` to match before the detached tag
+   worktree is created. Hardlink `.context/zig`, source
+   `CAS_RELEASE_ENV_FILE` (default `$HOME/.cas/release.env`) without printing
+   values, and print only the set/unset state of `CAS_POSTHOG_API_KEY` and
+   `CAS_SENTRY_DSN`. Let `release.sh --publish-tag` create the annotated tag and
+   run local preflight. Keep `release.log`, the recorded PID, and numeric done
+   receipt in the train's external run directory. A zero publisher status writes
+   `release.tag-complete.epoch`, never a publication timestamp: tag push
+   completion is separate from GitHub release and asset publication. The detached wrapper must
+   capture status without changing the caller's errexit state:
 
    ```bash
    cd "$TAG_WORKTREE"
@@ -88,15 +98,10 @@ and do not claim success without its receipt.
    export ZIG="$PWD/.context/zig/zig"
    RELEASE_ENV_FILE="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}"
    test -r "$RELEASE_ENV_FILE"
-   set -a
-   source "$RELEASE_ENV_FILE"
-   set +a
+   set -a; source "$RELEASE_ENV_FILE"; set +a
    for name in CAS_POSTHOG_API_KEY CAS_SENTRY_DSN; do
      if [[ -v "$name" ]]; then printf '%s: set\n' "$name"; else printf '%s: unset\n' "$name"; fi
    done
-   # Set CAS_RELEASE_ARTIFACTS_ROOT to the configured [factory] artifacts_root.
-   ARTIFACTS_ROOT="${CAS_RELEASE_ARTIFACTS_ROOT:-$HOME/.cas/artifacts}"
-   # Per-run, not per-version: take the same directory the gate used.
    EVIDENCE_DIR="$(scripts/release-train.sh "$VERSION" "$EPIC_WORKTREE" --print-run-dir)"
    mkdir -p "$EVIDENCE_DIR"
    LOG="$EVIDENCE_DIR/release.log"
@@ -112,29 +117,24 @@ and do not claim success without its receipt.
    PUBLISH_PID=$!; printf '%s\n' "$PUBLISH_PID" >"$PID_FILE"
    ```
 
-   `CAS_RELEASE_ENV_FILE` is configurable and defaults to the user-level
-   `$HOME/.cas/release.env`. The credential proof prints names and set/unset state only. The inner
-   `set +e` leaves an outer shell's errexit unchanged while capturing `$?` and
-   writing the numeric done receipt. The log, PID, and done receipt must stay
-   under `ARTIFACTS_ROOT`, outside the tag worktree. At reminder wakeups inspect
-   `kill -0 "$(cat "$PID_FILE")"` and `test -s "$DONE"`; do not `wait`,
-   foreground-poll, or use `pkill -f`.
-9. Before announcing, require every receipt: verify the annotated tag peels to
-   `LANDED_MAIN` and `git ls-remote --exit-code --refs origin "refs/tags/$TAG"`
-   succeeds; save the matching `gh run list --workflow release.yml --limit 20
-   --json databaseId,headSha,status,conclusion` row and successful conclusion;
-   run `release-published-receipt.sh --write-draft` and
-   `release-latency-receipt.sh`; use MechaCassy's default `cas-internal` channel
-   name for preflight and posts, retaining `C0B44GUKDK2` only for receipt
-   verification, and save four Slack POSTED entries with timestamp and
-   permalink. If a live Cassy proxy lacks the new registration, use the direct
-   configured mecha-cassy MCP or approved bounded one-shot route; do not retry
-   `cas`/`mcp_execute` after its authenticated-session rejection. Save `cas
-   update`, `cas --version`, and `cas hub` proof under `EVIDENCE_DIR`, and
-   require the host `cas update -y --json` receipt to carry
-   `refresh_binary_version` equal to the released version: a different value
-   means the refresh ran with the pre-update binary and the host has not
-   converged (cas-91ba).
-10. Carry the POSTED receipt into the next prep commit. Close only after the
-    merge receipt and stranded-branch inspection; if sibling lanes rewrote
-    delivered files, use `stranded_branch_override` with proof on main.
+   At reminder wakeups use `kill -0` on that PID and inspect the done receipt;
+   never `wait`, foreground-poll, or use `pkill -f`.
+12. Before announcing, require the annotated tag peels to the landed SHA and
+   `git ls-remote --exit-code --refs origin "refs/tags/$TAG"` succeeds. Save the
+   exact matching `gh run list --workflow release.yml --limit 20 --json
+   databaseId,headBranch,headSha,status,conclusion` row as `release-workflow.json` and
+   require success. Save `release-published-receipt.sh "$TAG" --write-draft
+   <draft-path>` output as `release-published.receipt` and
+   `release-latency-receipt.sh "$TAG"` output as `release-latency.receipt` in
+   the run directory. Only the published receipt's matching tag, SHA, actual
+   `PUBLISHED_AT`, and both required asset digests authorize `--status` to name
+   green-to-published latency. Use
+   MechaCassy's default `cas-internal` channel, retain `C0B44GUKDK2` only for
+   verification, and save four Slack POSTED entries with timestamps and
+   permalinks. If the live proxy lacks registration, use the configured direct
+   mecha-cassy MCP or an approved bounded one-shot route; do not retry an
+   authenticated-session rejection. Save `cas update`, `cas --version`, and
+   `cas hub` proof and require `refresh_binary_version` in the host update JSON
+   to equal the released version. Carry the POSTED receipt into the next prep
+   commit. Close only after merge and stranded-branch inspection; use
+   `stranded_branch_override` only with proof on main.

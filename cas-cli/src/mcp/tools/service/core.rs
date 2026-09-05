@@ -454,6 +454,7 @@ impl CasService {
             .cas_task_close_with_completion(
                 Parameters(inner_req),
                 req.completion_receipt,
+                req.external_verification_receipt,
                 negative_result,
                 inline_external_ref,
                 inline_execution_note,

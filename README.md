@@ -198,6 +198,14 @@ Installs the latest release binary to `~/.local/bin/cas`. Override with `CAS_INS
 Pipe it to `bash`, not `sh` — a piped script has no shebang, and the installer
 is written for bash.
 
+Before extracting anything, the installer requires the selected archive's
+SHA-256 from the published GitHub Release metadata and verifies the downloaded
+bytes. A missing digest or mismatch aborts without replacing an existing
+binary. This is a corruption-detection boundary, not independent publisher
+authentication: the archive and digest come from the same GitHub repository
+authority, and Cassy does not currently name a separate signing or attestation
+trust root.
+
 If the install directory is not already on your PATH, the installer offers to
 add a marker-guarded guard to your **login** shell's startup file (`.zshenv` for
 zsh, `.bashrc` or `.profile` for bash), and re-running it never adds the block

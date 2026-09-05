@@ -21,6 +21,9 @@ outputs:
   web-check-needed:
     description: Whether the Commander web build and tests must run.
     value: ${{ steps.classify.outputs.web-check-needed }}
+  bridge-check-needed:
+    description: Whether the Slack bridge build and tests must run.
+    value: ${{ steps.classify.outputs.bridge-check-needed }}
 runs:
   using: composite
   steps:
@@ -55,7 +58,7 @@ runs:
         fi
 
         case "$class" in
-          empty|docs-only|hub-web-only|version-bump|rust-touched) ;;
+          empty|docs-only|hub-web-only|slack-bridge-only|version-bump|rust-touched) ;;
           *)
             echo "::warning title=CI diff class::Unknown class '$class'; running Rust tier"
             class=rust-touched
@@ -72,11 +75,30 @@ runs:
           hub-web-only)
             rust_unaffected=true
             ;;
+          slack-bridge-only)
+            rust_unaffected=true
+            web_check_needed=false
+            ;;
         esac
+
+        # The Slack bridge is decided by changed paths, not by class: a mixed
+        # Rust + bridge diff must still run the bridge's own tests. Uncertainty
+        # runs them, matching the Rust tier's fail-closed default.
+        bridge_check_needed=true
+        if [[ -n "${merge_base:-}" ]]; then
+          if bridge_diff="$(git diff --name-only "$merge_base" HEAD -- slack-bridge)"; then
+            [[ -n "$bridge_diff" ]] || bridge_check_needed=false
+          else
+            echo "::warning title=CI bridge check::Could not diff slack-bridge; running its checks"
+          fi
+        else
+          echo "::notice title=CI bridge check::No comparable base; running Slack bridge checks"
+        fi
 
         printf 'class=%s\n' "$class" >> "$GITHUB_OUTPUT"
         printf 'rust-unaffected=%s\n' "$rust_unaffected" >> "$GITHUB_OUTPUT"
         printf 'web-check-needed=%s\n' "$web_check_needed" >> "$GITHUB_OUTPUT"
+        printf 'bridge-check-needed=%s\n' "$bridge_check_needed" >> "$GITHUB_OUTPUT"
         printf 'fast-pass=%s\n' "$rust_unaffected" >> "$GITHUB_OUTPUT"
         if [[ "$rust_unaffected" == true ]]; then
           echo "::notice title=CI Rust short-circuit::Diff class '$class' is Rust-unaffected"

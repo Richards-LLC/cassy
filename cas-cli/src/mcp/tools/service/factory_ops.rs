@@ -8969,7 +8969,9 @@ fn read_context_usage_from_tail_for_cli(
 /// Git state snapshot for a factory worker.
 ///
 /// All fields are best-effort: a failed git sub-command yields a sentinel
-/// value ("?" or "none" or 0) rather than aborting the status render.
+/// value ("?" or "none" or 0) rather than aborting the status render.  The
+/// PR lookup is deliberately tri-state so an unavailable lookup cannot be
+/// mistaken for a successful query that found no PR.
 /// See [`collect_worker_git_status`] for field semantics.
 ///
 /// `pub(crate)` so the Stop hook (cas-5c0a) can reuse this struct without
@@ -8999,8 +9001,8 @@ pub(crate) struct WorkerGitStatus {
     pub dirty: bool,
     /// `"origin/<branch>"` when the branch has been pushed, otherwise `"none"`
     pub pushed_ref: String,
-    /// Open pull-request URL, or `"none"` when not found / gh unavailable
-    pub pr_url: String,
+    /// Result of the open pull-request lookup.
+    pub pr_url: WorkerPrUrl,
     /// `true` when this path is the SHARED primary checkout (the main
     /// working tree) rather than a linked `git worktree`.
     ///
@@ -9010,6 +9012,32 @@ pub(crate) struct WorkerGitStatus {
     /// `false` (treated as a linked worktree) whenever git can't answer —
     /// a false alarm on every non-git dir would train the reader to ignore it.
     pub is_shared_checkout: bool,
+}
+
+/// Outcome of the best-effort open pull-request lookup used by
+/// [`WorkerGitStatus`].
+///
+/// `None` is reserved for a successful `gh` query with empty output.  Every
+/// other inability to answer is `Unknown` with a fixed, redacted reason; the
+/// reason must never include command output, paths, or authentication data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkerPrUrl {
+    /// `gh` returned a non-empty URL.
+    Url(String),
+    /// `gh` succeeded and reported no open PR.
+    None,
+    /// The lookup could not establish whether an open PR exists.
+    Unknown(&'static str),
+}
+
+impl std::fmt::Display for WorkerPrUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Url(url) => f.write_str(url),
+            Self::None => f.write_str("none"),
+            Self::Unknown(reason) => write!(f, "unknown ({reason})"),
+        }
+    }
 }
 
 /// Collect git introspection data for a worker's worktree path.
@@ -9026,6 +9054,18 @@ pub(crate) struct WorkerGitStatus {
 /// blocking operations already).  Callers in a strict async context should
 /// wrap in `tokio::task::spawn_blocking` if needed.
 pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> WorkerGitStatus {
+    collect_worker_git_status_with_gh(worktree_path, std::path::Path::new("gh"))
+}
+
+/// Collect git status while using the supplied `gh` executable.
+///
+/// The executable parameter keeps the production collector's subprocess
+/// behavior intact while allowing tests to cover missing, failed, and empty
+/// `gh` responses without changing the process-wide `PATH`.
+fn collect_worker_git_status_with_gh(
+    worktree_path: &std::path::Path,
+    gh_program: &std::path::Path,
+) -> WorkerGitStatus {
     // --- current branch -------------------------------------------------------
     let branch = run_git(worktree_path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "?".to_string());
@@ -9109,24 +9149,9 @@ pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> Work
     };
 
     // --- open PR URL (gh, graceful degrade) -----------------------------------
-    // Only attempt the `gh` query when we know the branch has been pushed —
-    // otherwise it will always return nothing and adds ~200ms latency.
-    let pr_url = if pushed_ref == "none" || branch == "?" {
-        "none".to_string()
-    } else {
-        std::process::Command::new("gh")
-            .args([
-                "pr", "list", "--head", &branch, "--json", "url", "--jq", ".[0].url",
-            ])
-            .current_dir(worktree_path)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "none".to_string())
-    };
+    // Keep the pushed-ref short-circuit to avoid an unnecessary ~200ms query,
+    // but report why it could not answer instead of claiming "none".
+    let pr_url = collect_worker_pr_url(worktree_path, &branch, &pushed_ref, gh_program);
 
     // --- shared checkout or linked worktree? ----------------------------------
     // cas-5bef (GH #120). In a linked worktree `--git-dir` resolves to
@@ -9152,6 +9177,50 @@ pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> Work
         pushed_ref,
         pr_url,
         is_shared_checkout,
+    }
+}
+
+/// Resolve an open PR for a branch without exposing subprocess details.
+fn collect_worker_pr_url(
+    worktree_path: &std::path::Path,
+    branch: &str,
+    pushed_ref: &str,
+    gh_program: &std::path::Path,
+) -> WorkerPrUrl {
+    if branch == "?" {
+        return WorkerPrUrl::Unknown("branch unknown");
+    }
+    if pushed_ref == "none" {
+        return WorkerPrUrl::Unknown("branch not on origin locally");
+    }
+
+    let output = match std::process::Command::new(gh_program)
+        .args([
+            "pr", "list", "--head", branch, "--json", "url", "--jq", ".[0].url",
+        ])
+        .current_dir(worktree_path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return WorkerPrUrl::Unknown("gh unavailable");
+        }
+        Err(_) => return WorkerPrUrl::Unknown("gh could not start"),
+    };
+
+    if !output.status.success() {
+        return WorkerPrUrl::Unknown("gh lookup failed");
+    }
+
+    let stdout = match String::from_utf8(output.stdout) {
+        Ok(stdout) => stdout,
+        Err(_) => return WorkerPrUrl::Unknown("gh returned invalid output"),
+    };
+    let url = stdout.trim();
+    if url.is_empty() {
+        WorkerPrUrl::None
+    } else {
+        WorkerPrUrl::Url(url.to_string())
     }
 }
 
@@ -9222,7 +9291,7 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
     } else {
         format!("[pushed: {}]", gs.pushed_ref)
     };
-    let pr_label = gs.pr_url.clone(); // "none" or a URL
+    let pr_label = gs.pr_url.to_string(); // URL, "none", or "unknown (...)"
 
     // cas-ecf7 (GH #118): a worktree that is behind its base was the failure
     // mode that cost an epic three workers built on 25-commit-old history. The
@@ -10583,50 +10652,53 @@ mod tests {
     }
 
     #[test]
-    fn taste_lane_spawn_specs_and_explicit_astra_route_agree() {
+    fn taste_lane_spawn_specs_and_explicit_fable_route_agree() {
         let _home = TestEnvGuard::temp_home();
         let (specs, recipe, warnings) = build_lane_spawn_specs(
             2,
             "taste",
-            Some("~/.codex-alt"),
+            Some("~/.claude-alt"),
             Some(r#"[{"name":"taste-a"},{"name":"taste-b"}]"#),
             &cas_factory::CapabilitySnapshot::default(),
         )
         .unwrap();
-        assert_eq!(recipe, "codex_astra");
+        assert_eq!(recipe, "claude_fable");
         assert!(warnings.is_empty());
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].name.as_deref(), Some("taste-a"));
         assert_eq!(specs[1].name.as_deref(), Some("taste-b"));
         for spec in specs {
-            assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-            assert_eq!(spec.model.as_deref(), Some("gpt-6-astra"));
+            assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
+            assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
             assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
-            assert_eq!(spec.config_dir.as_deref(), Some("~/.codex-alt"));
+            assert_eq!(spec.config_dir.as_deref(), Some("~/.claude-alt"));
         }
         assert_eq!(
-            cli_for_model_slug("gpt-6-astra"),
-            Some(cas_mux::SupervisorCli::Codex)
+            cli_for_model_slug("claude-fable-5-1"),
+            Some(cas_mux::SupervisorCli::Claude)
         );
-        for cli in [None, Some("codex")] {
-            for effort in ["minimal", "low", "medium", "high", "xhigh"] {
-                let json = build_spawn_spec_json(cli, Some("gpt-6-astra"), Some(effort)).unwrap();
+        for cli in [None, Some("claude")] {
+            for effort in ["medium", "high"] {
+                let json =
+                    build_spawn_spec_json(cli, Some("claude-fable-5-1"), Some(effort)).unwrap();
                 let spec = decoded_spawn_spec(&json);
-                assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-                assert_eq!(spec.model.as_deref(), Some("gpt-6-astra"));
+                assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
+                assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
                 assert_eq!(
                     spec.effort,
                     Some(effort.parse::<cas_mux::Effort>().unwrap())
                 );
             }
         }
-        for cli in ["claude", "grok", "opencode"] {
+        for cli in ["codex", "grok", "opencode"] {
             let error =
-                build_spawn_spec_json(Some(cli), Some("gpt-6-astra"), Some("medium")).unwrap_err();
-            assert!(error.contains("cli=codex"), "{error}");
+                build_spawn_spec_json(Some(cli), Some("claude-fable-5-1"), Some("medium"))
+                    .unwrap_err();
+            assert!(error.contains("cli=claude"), "{error}");
         }
         let error =
-            build_spawn_spec_json(Some("codex"), Some("gpt-6-astra"), Some("ultra")).unwrap_err();
+            build_spawn_spec_json(Some("claude"), Some("claude-fable-5-1"), Some("ultra"))
+                .unwrap_err();
         assert!(error.contains("effort"), "{error}");
     }
 
@@ -14330,6 +14402,24 @@ effort = "high"
         (tmp, sha)
     }
 
+    fn setup_git_repo_with_pushed_factory_branch(worker: &str) -> tempfile::TempDir {
+        let (tmp, _expected_sha) = setup_git_repo_with_factory_branch(worker);
+        let remote_ref = format!("refs/remotes/origin/factory/{worker}");
+        run_git_ok(tmp.path(), &["update-ref", remote_ref.as_str(), "HEAD"]);
+        tmp
+    }
+
+    #[cfg(unix)]
+    fn write_gh_stub(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("gh-stub");
+        std::fs::write(&path, script).expect("write gh stub");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("make gh stub executable");
+        path
+    }
+
     fn setup_factory_project_with_worker_worktrees(
         workers: &[&str],
     ) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -14554,7 +14644,7 @@ effort = "high"
             base_branch: "origin/main".to_string(),
             dirty: false,
             pushed_ref: "origin/factory/myworker".to_string(),
-            pr_url: "https://github.com/org/repo/pull/42".to_string(),
+            pr_url: WorkerPrUrl::Url("https://github.com/org/repo/pull/42".to_string()),
             is_shared_checkout: false,
         };
         let out = format_worker_git_status(&gs);
@@ -14594,7 +14684,7 @@ effort = "high"
             base_branch: "origin/main".to_string(),
             dirty: false,
             pushed_ref: "none".to_string(),
-            pr_url: "none".to_string(),
+            pr_url: WorkerPrUrl::None,
             is_shared_checkout: false,
         };
         let out = format_worker_git_status(&stale);
@@ -14630,7 +14720,7 @@ effort = "high"
             base_branch: "origin/main".to_string(),
             dirty: false,
             pushed_ref: "none".to_string(),
-            pr_url: "none".to_string(),
+            pr_url: WorkerPrUrl::None,
             is_shared_checkout: true,
         };
         let out = format_worker_git_status(&parked);
@@ -14772,8 +14862,122 @@ effort = "high"
         outer
     }
 
-    /// AC2 (cas-844bf): when gh is unavailable / not pushed, pr_url and
-    /// pushed_ref degrade gracefully to "none" without panicking.
+    /// A missing `gh` lookup is not a successful no-PR result.  Keep the
+    /// pushed-ref short-circuit covered separately below, while this fixture
+    /// makes the branch look pushed and injects an absent executable.
+    #[test]
+    fn collect_git_status_reports_unknown_when_gh_is_unavailable() {
+        let (tmp, _expected_sha) = setup_git_repo_with_factory_branch("test-worker");
+        run_git_ok(
+            tmp.path(),
+            &[
+                "update-ref",
+                "refs/remotes/origin/factory/test-worker",
+                "HEAD",
+            ],
+        );
+
+        let missing_gh = tmp.path().join("gh-not-installed");
+        let status = collect_worker_git_status_with_gh(tmp.path(), &missing_gh);
+        assert_eq!(status.pr_url, WorkerPrUrl::Unknown("gh unavailable"));
+        let rendered = format_worker_git_status(&status);
+        assert!(
+            rendered.contains("PR: unknown (gh unavailable)"),
+            "failed gh lookup must be visible as unknown: {rendered}"
+        );
+        assert!(
+            !rendered.contains("PR: none"),
+            "failed gh lookup must not masquerade as no PR: {rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_git_status_reports_gh_failure_as_redacted_unknown() {
+        let tmp = setup_git_repo_with_pushed_factory_branch("gh-failure-worker");
+        let secret = "synthetic-gh-secret";
+        let gh = write_gh_stub(
+            tmp.path(),
+            &format!(
+                "#!/bin/sh\nprintf '%s' 'auth/network failure: {secret}' >&2\nexit 7\n"
+            ),
+        );
+
+        let status = collect_worker_git_status_with_gh(tmp.path(), &gh);
+        assert_eq!(status.pr_url, WorkerPrUrl::Unknown("gh lookup failed"));
+        let rendered = format_worker_git_status(&status);
+        assert!(
+            rendered.contains("PR: unknown (gh lookup failed)"),
+            "auth/network gh failure must render as unknown: {rendered}"
+        );
+        assert!(
+            !rendered.contains("PR: none"),
+            "auth/network gh failure must not masquerade as no PR: {rendered}"
+        );
+        assert!(
+            !rendered.contains(secret),
+            "gh stderr secrets must not leak into worker status: {rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_git_status_reports_successful_empty_gh_as_definite_none() {
+        let tmp = setup_git_repo_with_pushed_factory_branch("gh-empty-worker");
+        let gh = write_gh_stub(tmp.path(), "#!/bin/sh\nexit 0\n");
+
+        let status = collect_worker_git_status_with_gh(tmp.path(), &gh);
+        assert_eq!(status.pr_url, WorkerPrUrl::None);
+        let rendered = format_worker_git_status(&status);
+        assert!(
+            rendered.contains("PR: none"),
+            "successful empty gh output must render as no PR: {rendered}"
+        );
+        assert!(
+            !rendered.contains("PR: unknown"),
+            "successful empty gh output must not render as unknown: {rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_git_status_preserves_successful_gh_url() {
+        let tmp = setup_git_repo_with_pushed_factory_branch("gh-url-worker");
+        let expected_url = "https://github.com/org/repo/pull/99";
+        let gh = write_gh_stub(
+            tmp.path(),
+            &format!("#!/bin/sh\nprintf '%s\\n' '{expected_url}'\n"),
+        );
+
+        let status = collect_worker_git_status_with_gh(tmp.path(), &gh);
+        assert_eq!(status.pr_url, WorkerPrUrl::Url(expected_url.to_string()));
+        let rendered = format_worker_git_status(&status);
+        assert!(
+            rendered.contains(&format!("PR: {expected_url}")),
+            "successful gh URL must be preserved by the renderer: {rendered}"
+        );
+    }
+
+    #[test]
+    fn collect_git_status_reports_unknown_when_branch_ref_is_unfetched() {
+        let (tmp, _expected_sha) = setup_git_repo_with_factory_branch("unfetched-worker");
+        let missing_gh = tmp.path().join("gh-not-installed");
+        let status = collect_worker_git_status_with_gh(tmp.path(), &missing_gh);
+        assert_eq!(
+            status.pr_url,
+            WorkerPrUrl::Unknown("branch not on origin locally")
+        );
+        let rendered = format_worker_git_status(&status);
+        assert!(
+            rendered.contains("PR: unknown (branch not on origin locally)"),
+            "unfetched branch must be visible as unknown: {rendered}"
+        );
+        assert!(
+            !rendered.contains("PR: none"),
+            "unfetched branch must not masquerade as no PR: {rendered}"
+        );
+    }
+
     #[test]
     fn collect_git_status_degrades_on_non_git_dir() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -14785,6 +14989,7 @@ effort = "high"
             "non-git dir must not propagate git error messages: '{}'",
             status.branch
         );
+        assert_eq!(status.pr_url, WorkerPrUrl::Unknown("branch unknown"));
         // No panics is the primary assertion — the above implicitly proves it.
     }
 
@@ -14799,7 +15004,7 @@ effort = "high"
             base_branch: "origin/main".to_string(),
             dirty: true,
             pushed_ref: "none".to_string(),
-            pr_url: "none".to_string(),
+            pr_url: WorkerPrUrl::None,
             is_shared_checkout: false,
         };
         let out = format_worker_git_status(&gs);

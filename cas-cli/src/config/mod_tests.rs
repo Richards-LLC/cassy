@@ -441,6 +441,66 @@ fn issues_repo_is_project_local_config_with_no_inferred_default() {
 }
 
 #[test]
+fn issue_repo_registry_resolves_defaults_and_overrides_without_serializing_defaults() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+
+    assert_eq!(
+        config.get("issues.components.cassy"),
+        Some("Richards-LLC/cassy".to_string())
+    );
+    assert_eq!(
+        config.get("issues.components.mecha_cassy"),
+        Some("Richards-LLC/mecha-cassy".to_string())
+    );
+    assert_eq!(
+        config.get("issues.components.cloud"),
+        Some("Richards-LLC/petra-stella-cloud".to_string())
+    );
+    for (key, default) in [
+        ("issues.components.cassy", "Richards-LLC/cassy"),
+        (
+            "issues.components.mecha_cassy",
+            "Richards-LLC/mecha-cassy",
+        ),
+        (
+            "issues.components.cloud",
+            "Richards-LLC/petra-stella-cloud",
+        ),
+    ] {
+        assert!(config
+            .list()
+            .contains(&(key.to_string(), default.to_string())));
+        let meta = meta::registry().get(key).expect("component issue metadata");
+        assert_eq!(meta.section, "issues.components");
+        assert_eq!(meta.default, default);
+    }
+
+    let defaults = toml::to_string(&config).unwrap();
+    assert!(
+        !defaults.contains("[issues.components]"),
+        "compiled defaults must not be written to config.toml"
+    );
+
+    config
+        .set("issues.components.cassy", "example/runtime")
+        .unwrap();
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(
+        loaded.get("issues.components.cassy"),
+        Some("example/runtime".to_string())
+    );
+    assert_eq!(
+        loaded.get("issues.components.cloud"),
+        Some("Richards-LLC/petra-stella-cloud".to_string())
+    );
+    let raw = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(raw.contains("[issues.components]"));
+    assert!(raw.contains("cassy = \"example/runtime\""));
+}
+
+#[test]
 fn test_worktrees_abandon_ttl_hours_default() {
     let config = Config::default();
     assert_eq!(

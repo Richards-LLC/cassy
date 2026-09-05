@@ -8,11 +8,14 @@
 // #![allow(dead_code)] // Check unused
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use url::Url;
 
 use crate::error::CasError;
@@ -363,6 +366,174 @@ pub fn project_aliases_from_config_toml(cas_root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Salt same-process temp paths; the PID separates independent MCP servers.
+static PROJECT_CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+struct ProjectConfigWriteLock {
+    file: fs::File,
+}
+
+impl Drop for ProjectConfigWriteLock {
+    fn drop(&mut self) {
+        if let Err(error) = FileExt::unlock(&self.file) {
+            tracing::error!(%error, "failed to release project config write lock");
+        }
+    }
+}
+
+fn lock_project_config(cas_root: &Path) -> Result<ProjectConfigWriteLock, CasError> {
+    fs::create_dir_all(cas_root).map_err(|error| {
+        CasError::Other(format!(
+            "Failed to create project config directory {cas_root:?}: {error}"
+        ))
+    })?;
+    // The lock needs a stable inode of its own. Locking config.toml itself is
+    // ineffective after an atomic rename replaces that file's inode.
+    let lock_path = cas_root.join(".config.toml.cas-write.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            CasError::Other(format!(
+                "Failed to open project config lock {lock_path:?}: {error}"
+            ))
+        })?;
+    file.lock_exclusive().map_err(|error| {
+        CasError::Other(format!(
+            "Failed to lock project config {lock_path:?}: {error}"
+        ))
+    })?;
+    Ok(ProjectConfigWriteLock { file })
+}
+
+fn atomic_replace_project_config(path: &Path, contents: &str) -> Result<(), CasError> {
+    let parent = path.parent().ok_or_else(|| {
+        CasError::Other(format!(
+            "Cannot atomically write project config without a parent: {path:?}"
+        ))
+    })?;
+    let sequence = PROJECT_CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temp_path = parent.join(format!(
+        ".config.toml.cas-write.{}.{sequence}.tmp",
+        std::process::id()
+    ));
+    atomic_replace_project_config_via(path, contents, &temp_path, |from, to| {
+        fs::rename(from, to)
+    })
+}
+
+/// Write, sync, and atomically rename a same-directory temp into place. On
+/// Unix, the temp starts as `0600` before any config bytes are written; the
+/// destination's existing permissions are restored before rename. Until
+/// `commit` succeeds, the existing config is untouched; every error removes
+/// only the uniquely-created temp owned by this call.
+fn atomic_replace_project_config_via<F>(
+    path: &Path,
+    contents: &str,
+    temp_path: &Path,
+    commit: F,
+) -> Result<(), CasError>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    atomic_replace_project_config_via_with_created_hook(
+        path,
+        contents,
+        temp_path,
+        |_| Ok(()),
+        commit,
+    )
+}
+
+fn atomic_replace_project_config_via_with_created_hook<F, H>(
+    path: &Path,
+    contents: &str,
+    temp_path: &Path,
+    after_create: H,
+    commit: F,
+) -> Result<(), CasError>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    H: FnOnce(&fs::File) -> std::io::Result<()>,
+{
+    let permissions = fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut temp = options.open(temp_path).map_err(|error| {
+        CasError::Other(format!(
+            "Failed to create temporary project config {temp_path:?}: {error}"
+        ))
+    })?;
+
+    let result = (|| -> std::io::Result<()> {
+        after_create(&temp)?;
+        temp.write_all(contents.as_bytes())?;
+        temp.flush()?;
+        if let Some(permissions) = permissions {
+            temp.set_permissions(permissions)?;
+        }
+        temp.sync_all()?;
+        drop(temp);
+        commit(temp_path, path)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(temp_path);
+        return Err(CasError::Other(format!(
+            "Failed to atomically write project config {path:?}: {error}"
+        )));
+    }
+    Ok(())
+}
+
+fn update_project_config_toml_with<F, H>(
+    cas_root: &Path,
+    update: F,
+    before_commit: H,
+) -> Result<(), CasError>
+where
+    F: FnOnce(&mut toml::value::Table) -> Result<bool, CasError>,
+    H: FnOnce(),
+{
+    let _lock = lock_project_config(cas_root)?;
+    let toml_path = cas_root.join("config.toml");
+    let mut doc: toml::Value = match std::fs::read_to_string(&toml_path) {
+        Ok(content) => toml::from_str(&content)
+            .map_err(|e| CasError::Other(format!("Failed to parse config.toml: {e}")))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            toml::Value::Table(toml::value::Table::new())
+        }
+        Err(e) => return Err(CasError::Other(format!("Failed to read config.toml: {e}"))),
+    };
+    let table = doc
+        .as_table_mut()
+        .ok_or_else(|| CasError::Other("config.toml root is not a table".to_string()))?;
+    if !update(table)? {
+        return Ok(());
+    }
+
+    let serialized = toml::to_string_pretty(&doc)
+        .map_err(|e| CasError::Other(format!("Failed to serialize config.toml: {e}")))?;
+    before_commit();
+    atomic_replace_project_config(&toml_path, &serialized)
+}
+
+fn update_project_config_toml<F>(cas_root: &Path, update: F) -> Result<(), CasError>
+where
+    F: FnOnce(&mut toml::value::Table) -> Result<bool, CasError>,
+{
+    update_project_config_toml_with(cas_root, update, || {})
+}
+
 /// Persist the server's per-project `aliases` record into
 /// `<cas_root>/config.toml` as `[project] aliases`.
 ///
@@ -388,41 +559,24 @@ pub fn set_project_aliases_in_config_toml(
     }
     normalized.sort();
 
-    let toml_path = cas_root.join("config.toml");
-    let mut doc: toml::Value = match std::fs::read_to_string(&toml_path) {
-        Ok(content) => toml::from_str(&content)
-            .map_err(|e| CasError::Other(format!("Failed to parse config.toml: {e}")))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            toml::Value::Table(toml::value::Table::new())
-        }
-        Err(e) => return Err(CasError::Other(format!("Failed to read config.toml: {e}"))),
-    };
-    let table = doc
-        .as_table_mut()
-        .ok_or_else(|| CasError::Other("config.toml root is not a table".to_string()))?;
-    let project = table
-        .entry("project".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
-        .as_table_mut()
-        .ok_or_else(|| CasError::Other("config.toml [project] is not a table".to_string()))?;
-    project.insert(
-        "aliases".to_string(),
-        toml::Value::Array(
+    update_project_config_toml(cas_root, |table| {
+        let project = table
+            .entry("project".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| CasError::Other("config.toml [project] is not a table".to_string()))?;
+        let aliases = toml::Value::Array(
             normalized
                 .iter()
                 .map(|alias| toml::Value::String(alias.clone()))
                 .collect(),
-        ),
-    );
-
-    let serialized = toml::to_string_pretty(&doc)
-        .map_err(|e| CasError::Other(format!("Failed to serialize config.toml: {e}")))?;
-    if let Some(parent) = toml_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| CasError::Other(format!("Failed to create {parent:?}: {e}")))?;
-    }
-    std::fs::write(&toml_path, serialized)
-        .map_err(|e| CasError::Other(format!("Failed to write config.toml: {e}")))?;
+        );
+        if project.get("aliases") == Some(&aliases) {
+            return Ok(false);
+        }
+        project.insert("aliases".to_string(), aliases);
+        Ok(true)
+    })?;
     invalidate_cached_project_alias_class();
     Ok(normalized)
 }
@@ -477,44 +631,19 @@ pub fn set_canonical_id_in_config_toml(
 ) -> Result<(), CasError> {
     let canonical_id = canonical_project_id(canonical_id)
         .ok_or_else(|| CasError::Other("canonical project id must not be empty".to_string()))?;
-    let toml_path = cas_root.join("config.toml");
-
-    // Read-modify-write: parse existing content (or start with empty table
-    // if absent), update [project].canonical_id, serialize back.
-    let mut doc: toml::Value = match std::fs::read_to_string(&toml_path) {
-        Ok(content) => toml::from_str(&content)
-            .map_err(|e| CasError::Other(format!("Failed to parse config.toml: {e}")))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            toml::Value::Table(toml::value::Table::new())
+    update_project_config_toml(cas_root, |table| {
+        let project = table
+            .entry("project".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| CasError::Other("config.toml [project] is not a table".to_string()))?;
+        let canonical_id = toml::Value::String(canonical_id);
+        if project.get("canonical_id") == Some(&canonical_id) {
+            return Ok(false);
         }
-        Err(e) => return Err(CasError::Other(format!("Failed to read config.toml: {e}"))),
-    };
-
-    let table = doc
-        .as_table_mut()
-        .ok_or_else(|| CasError::Other("config.toml root is not a table".to_string()))?;
-
-    let project = table
-        .entry("project".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
-        .as_table_mut()
-        .ok_or_else(|| CasError::Other("config.toml [project] is not a table".to_string()))?;
-    project.insert(
-        "canonical_id".to_string(),
-        toml::Value::String(canonical_id),
-    );
-
-    let serialized = toml::to_string_pretty(&doc)
-        .map_err(|e| CasError::Other(format!("Failed to serialize config.toml: {e}")))?;
-
-    // Ensure cas_root exists before writing.
-    if let Some(parent) = toml_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| CasError::Other(format!("Failed to create {parent:?}: {e}")))?;
-    }
-    std::fs::write(&toml_path, serialized)
-        .map_err(|e| CasError::Other(format!("Failed to write config.toml: {e}")))?;
-    Ok(())
+        project.insert("canonical_id".to_string(), canonical_id);
+        Ok(true)
+    })
 }
 
 /// Derive the canonical project ID from `git -C <cas_root> remote get-url origin`,
@@ -3420,6 +3549,194 @@ mod tests {
         assert!(
             content.contains("github.com/foo/bar"),
             "new canonical_id must be written — got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn alias_refresh_preserves_unrelated_sections_and_canonical_pin() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path();
+        std::fs::write(
+            cas_root.join("config.toml"),
+            "[hooks]\nai_context = false\n\n[project]\ncanonical_id = \"canonical-name\"\n",
+        )
+        .unwrap();
+
+        let written = set_project_aliases_in_config_toml(
+            cas_root,
+            &["legacy-name".to_string(), "canonical-name".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(written, vec!["legacy-name"]);
+        let content = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&content).unwrap();
+        assert_eq!(parsed["hooks"]["ai_context"].as_bool(), Some(false));
+        assert_eq!(
+            parsed["project"]["canonical_id"].as_str(),
+            Some("canonical-name")
+        );
+        assert_eq!(
+            parsed["project"]["aliases"].as_array().unwrap(),
+            &[toml::Value::String("legacy-name".to_string())]
+        );
+    }
+
+    #[test]
+    fn concurrent_project_config_updates_are_serialized_and_preserve_sections() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().to_path_buf();
+        std::fs::write(
+            cas_root.join("config.toml"),
+            "[hooks]\nai_context = false\n",
+        )
+        .unwrap();
+
+        let (first_read_tx, first_read_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let first_root = cas_root.clone();
+        let first = std::thread::spawn(move || {
+            update_project_config_toml_with(
+                &first_root,
+                |table| {
+                    let project = table
+                        .entry("project".to_string())
+                        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+                        .as_table_mut()
+                        .unwrap();
+                    project.insert(
+                        "aliases".to_string(),
+                        toml::Value::Array(vec![toml::Value::String("legacy-name".to_string())]),
+                    );
+                    Ok(true)
+                },
+                || {
+                    first_read_tx.send(()).unwrap();
+                    release_first_rx.recv().unwrap();
+                },
+            )
+            .unwrap();
+        });
+        first_read_rx.recv().unwrap();
+
+        let (second_read_tx, second_read_rx) = mpsc::channel();
+        let second_root = cas_root.clone();
+        let second = std::thread::spawn(move || {
+            update_project_config_toml_with(
+                &second_root,
+                |table| {
+                    let project = table
+                        .entry("project".to_string())
+                        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+                        .as_table_mut()
+                        .unwrap();
+                    project.insert(
+                        "canonical_id".to_string(),
+                        toml::Value::String("canonical-name".to_string()),
+                    );
+                    Ok(true)
+                },
+                || second_read_tx.send(()).unwrap(),
+            )
+            .unwrap();
+        });
+
+        let second_read_while_first_was_paused = second_read_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_ok();
+        release_first_tx.send(()).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+
+        assert!(
+            !second_read_while_first_was_paused,
+            "a second updater reached the commit boundary while the first still held stale state"
+        );
+        let content = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&content).unwrap();
+        assert_eq!(parsed["hooks"]["ai_context"].as_bool(), Some(false));
+        assert_eq!(
+            parsed["project"]["canonical_id"].as_str(),
+            Some("canonical-name")
+        );
+        assert_eq!(
+            parsed["project"]["aliases"].as_array().unwrap(),
+            &[toml::Value::String("legacy-name".to_string())]
+        );
+    }
+
+    #[test]
+    fn failed_project_config_commit_leaves_original_valid_and_removes_owned_temp() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let temp_path = temp.path().join(".config.toml.injected.tmp");
+        let original = "[hooks]\nai_context = false\n";
+        std::fs::write(&config_path, original).unwrap();
+
+        let error = atomic_replace_project_config_via(
+            &config_path,
+            "[project]\naliases = []\n",
+            &temp_path,
+            |_temp, _target| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected rename failure",
+                ))
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("injected rename failure"), "{error}");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+        assert!(!temp_path.exists(), "owned temp file must be cleaned up");
+        toml::from_str::<toml::Value>(original).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_config_temp_is_private_before_bytes_and_preserves_original_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let temp_path = temp.path().join(".config.toml.permission-boundary.tmp");
+        let replacement = "[project]\naliases = [\"legacy-name\"]\n";
+        std::fs::write(&config_path, "[hooks]\nai_context = false\n").unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut observed_before_write = None;
+        atomic_replace_project_config_via_with_created_hook(
+            &config_path,
+            replacement,
+            &temp_path,
+            |created| {
+                let metadata = created.metadata()?;
+                observed_before_write =
+                    Some((metadata.len(), metadata.permissions().mode() & 0o777));
+                Ok(())
+            },
+            |from, to| std::fs::rename(from, to),
+        )
+        .unwrap();
+
+        assert_eq!(
+            observed_before_write,
+            Some((0, 0o600)),
+            "temp must be private before config bytes are written"
+        );
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), replacement);
+        assert_eq!(
+            std::fs::metadata(&config_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "atomic replacement must preserve the original config mode"
         );
     }
 

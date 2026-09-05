@@ -7,6 +7,71 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.17.1] - 2026-09-05
+
+### Changed
+- The factory `taste` lane now routes to Claude Fable 5.1 at medium effort
+  instead of Codex GPT-6 Astra. Explicit Astra and Opus requests still work,
+  and `taste` fails closed when the Claude account is unavailable. The registry
+  recipe is `claude_fable` with model `claude-fable-5-1` and medium effort, and
+  the disabled Opus fallback edge remains fail-closed.
+- Bug filing now uses one component registry with four destinations: the
+  project repository from `issues.repo`, Cassy, MechaCassy, and Cassy Cloud.
+  Compiled defaults can be overridden under `[issues.components]`, and the
+  same routing appears in session-start guidance, the `cas doctor` issue
+  repositories row, `cas config get/set issues.components.*`, managed
+  CLAUDE.md/AGENTS.md guidance, and worker, supervisor, and GitHub-issues skill
+  mirrors. Operational bugs are directed to their matching repository first.
+
+### Fixed
+- The installer now requires the selected GitHub release asset's published
+  SHA-256 before extraction or executable replacement. A missing, malformed,
+  or mismatched receipt leaves the existing installation untouched. This is
+  corruption detection against the same publishing authority, not independent
+  signature or attestation authentication.
+- Concurrent project-config updates are serialized across processes and
+  committed through a private same-directory temporary file, sync, and atomic
+  rename. Existing permissions and unrelated TOML sections are preserved, and
+  a failed commit leaves the prior valid config in place.
+- Slack bridge sessions are keyed by the full channel, thread, and project
+  tuple instead of a truncated timestamp prefix. Successful establishment is
+  retained across restart, same-thread requests are serialized, corrupt saved
+  state fails closed, and an in-process session remains known if persistence
+  fails after the child succeeds. The identity migration starts a fresh child
+  conversation once for threads already live during the upgrade; later
+  requests resume the new conversation. Its dedicated tests and build now run
+  in the CI lanes whenever the bridge changes, including mixed Rust/bridge
+  changes, so session-recovery fixes cannot merge without bridge coverage.
+- `cas hub authorize` now checks that the advertised public Hub URL answers
+  `/v1/health` with `ready=true` before claiming a pairing code or minting a
+  one-time invitation. Dead Tailscale Serve routes fail fast with the recovery
+  hint `cas hub restart --tailscale-serve`, and redirects to another origin are
+  rejected. `--skip-hub-readiness` bypasses only this probe; URL validation,
+  consent, authentication, origin checks, and one-time token protections remain
+  enforced.
+- `cas update --json` now distinguishes a post-swap refresh that ran and
+  failed from a skipped refresh. The receipt keeps `refresh_binary_version`
+  and per-project `refresh_status=refresh_failed` results, while
+  `spawn_failed` and `refresh_failed_no_receipt` remain distinct outcomes with
+  truthful recovery guidance.
+- The release gate's doctor snapshot now normalizes bare `fatal: not a git
+  repository` wording alongside its parent-directory and mount-boundary forms,
+  and records the normalized failure in the release ledger.
+- Worker pull-request status distinguishes a failed or unavailable lookup from
+  a definite absence, reporting a redacted `unknown` reason instead of the
+  false `none` result.
+- Linked-worktree builds watch the real per-worktree and shared Git metadata
+  instead of nonexistent `.git` descendants or broad checkout directories.
+  Unchanged builds remain fresh while ref, detached-HEAD, and existing optional
+  environment-file transitions still invalidate precisely; creating a
+  previously absent optional environment file requires another ordinary build
+  trigger or clean rebuild.
+- A separately supplied external-production verification receipt can satisfy
+  only the zero-commit delivery-evidence check after exact authority, task,
+  parent, active-session, gate, completed/pass verdict, and portable-evidence
+  validation. All other close gates and the worker completion receipt remain
+  unchanged, and accepted evidence is audited.
+
 ## [3.17.0] - 2026-09-05
 
 ### Added

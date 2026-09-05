@@ -209,6 +209,18 @@ jobs:
         if: steps.pr-dedupe.outputs.covered != 'true'
         run: ./scripts/test-cas-install.sh
 
+      # The bridge is Node-only and its whole suite runs in about a second, so
+      # it rides the existing lane instead of adding one.
+      - name: Build and test the Slack bridge
+        if: >-
+          steps.pr-dedupe.outputs.covered != 'true'
+          && steps.classify-diff.outputs.bridge-check-needed == 'true'
+        working-directory: slack-bridge
+        run: |
+          npm ci
+          npm test
+          npm run build
+
       - uses: ./.github/actions/setup-rust-linux
         if: >-
           steps.pr-dedupe.outputs.covered != 'true'
@@ -359,6 +371,14 @@ jobs:
           set -euo pipefail
           sccache rustc -vV
           sccache --show-stats
+
+      - name: Build and test the Slack bridge
+        if: steps.classify-diff.outputs.bridge-check-needed == 'true'
+        working-directory: slack-bridge
+        run: |
+          npm ci
+          npm test
+          npm run build
 
       - name: Build and test Commander web assets
         if: steps.classify-diff.outputs.web-check-needed == 'true'

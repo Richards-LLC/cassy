@@ -397,6 +397,39 @@ impl Config {
                     Some(value.trim().to_string())
                 };
             }
+            "issues.components.cassy" => {
+                let issues = self.issues.get_or_insert_with(IssuesConfig::default);
+                let components = issues
+                    .components
+                    .get_or_insert_with(IssueComponentsConfig::default);
+                components.cassy = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
+            "issues.components.mecha_cassy" => {
+                let issues = self.issues.get_or_insert_with(IssuesConfig::default);
+                let components = issues
+                    .components
+                    .get_or_insert_with(IssueComponentsConfig::default);
+                components.mecha_cassy = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
+            "issues.components.cloud" => {
+                let issues = self.issues.get_or_insert_with(IssuesConfig::default);
+                let components = issues
+                    .components
+                    .get_or_insert_with(IssueComponentsConfig::default);
+                components.cloud = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
             // Release section
             "release.claude_account_allowlist" => {
                 let release = self.release.get_or_insert_with(ReleaseConfig::default);

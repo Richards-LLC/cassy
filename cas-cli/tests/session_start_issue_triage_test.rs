@@ -89,6 +89,18 @@ fn configured_supervisor_sees_issue_count_recent_titles_and_reuses_fresh_cache()
     assert!(first.contains("#105 Newest report"), "{first}");
     assert!(first.contains("#104 Second report"), "{first}");
     assert!(first.contains("#103 Third report"), "{first}");
+    assert!(first.contains("## Where to file bugs"), "{first}");
+    for repo in [
+        "owner/cas",
+        "Richards-LLC/cassy",
+        "Richards-LLC/mecha-cassy",
+        "Richards-LLC/petra-stella-cloud",
+    ] {
+        assert!(first.contains(repo), "missing {repo}: {first}");
+    }
+    assert!(first.contains(
+        "If you hit a bug during operation, file a ticket in the matching repo before moving on."
+    ));
 
     let (second, _) = session_start(&project, "supervisor", &fake_bin, &call_log);
     assert!(second.contains("7 open"), "{second}");

@@ -431,6 +431,15 @@ struct NegativeResultCloseReceipt {
     supervisor_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalVerificationCloseReceipt {
+    receipt_id: String,
+    evidence_reference: String,
+    factory_session_id: String,
+    supervisor_id: String,
+    supervisor_name: String,
+}
+
 #[derive(Debug)]
 pub(crate) enum SupervisorAuthorityError {
     Identity(String),
@@ -1227,6 +1236,144 @@ impl CasCore {
         }))
     }
 
+    fn validate_external_verification_close(
+        &self,
+        task: &cas_types::Task,
+        task_store: &dyn cas_store::TaskStore,
+        receipt_id: Option<&str>,
+    ) -> Result<Option<ExternalVerificationCloseReceipt>, String> {
+        let Some(receipt_id) = receipt_id else {
+            return Ok(None);
+        };
+        let receipt_id = receipt_id.trim();
+        let well_formed = receipt_id.strip_prefix("dr-").is_some_and(|digest| {
+            digest.len() == 24 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+        });
+        if !well_formed {
+            return Err(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: external_verification_receipt must be a complete delegation receipt ID in the form dr-<24 hexadecimal characters>."
+                    .to_string(),
+            );
+        }
+
+        let caller = self.resolve_live_supervisor_authority().map_err(|error| match error {
+            SupervisorAuthorityError::Identity(error) => format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: an authenticated live registered supervisor is required; caller identity could not be resolved ({error})."
+            ),
+            SupervisorAuthorityError::Store(error) => format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: supervisor authority could not be checked ({error})."
+            ),
+            SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: caller `{caller_id}` is not a registered supervisor ({error})."
+            ),
+            SupervisorAuthorityError::NotLive(caller) => format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: only a live registered supervisor may present external delivery evidence. Caller `{}` has role {}.",
+                caller.name, caller.role
+            ),
+        })?;
+        let factory_session_id = caller
+            .factory_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|session| !session.is_empty())
+            .ok_or_else(|| {
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: the registered supervisor is not bound to a current factory session."
+                    .to_string()
+            })?;
+
+        let expected_epic_id = if task.task_type == TaskType::Epic {
+            task.id.clone()
+        } else {
+            task_store
+                .get_parent_epic(&task.id)
+                .map_err(|error| {
+                    format!(
+                        "EXTERNAL VERIFICATION RECEIPT REJECTED: failed to resolve the task's epic ({error})."
+                    )
+                })?
+                .map(|epic| epic.id)
+                .ok_or_else(|| {
+                    "EXTERNAL VERIFICATION RECEIPT REJECTED: external production verification requires the closing task to belong to an epic."
+                        .to_string()
+                })?
+        };
+
+        let receipt_store = cas_store::SqliteDelegationReceiptStore::open(&self.cas_root)
+            .map_err(|error| {
+                format!(
+                    "EXTERNAL VERIFICATION RECEIPT REJECTED: delegation receipt store could not be opened ({error})."
+                )
+            })?;
+        let receipt = receipt_store.get(receipt_id).map_err(|_| {
+            format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: delegation receipt `{receipt_id}` was not found in this Cassy project."
+            )
+        })?;
+        if receipt.task_id != task.id {
+            return Err(format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: receipt `{receipt_id}` belongs to task `{}`, not closing task `{}`.",
+                receipt.task_id, task.id
+            ));
+        }
+        if receipt.epic_id != expected_epic_id {
+            return Err(format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: receipt `{receipt_id}` belongs to epic `{}`, not current epic `{expected_epic_id}`.",
+                receipt.epic_id
+            ));
+        }
+        if receipt.factory_session_id != factory_session_id {
+            return Err(format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: receipt `{receipt_id}` belongs to factory session `{}`, not the registered supervisor's current factory session `{factory_session_id}`.",
+                receipt.factory_session_id
+            ));
+        }
+        if receipt.gate_kind != cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE {
+            return Err(format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: receipt `{receipt_id}` has gate `{}`; expected `{}`.",
+                receipt.gate_kind,
+                cas_store::EXTERNAL_PRODUCTION_VERIFICATION_GATE
+            ));
+        }
+        if receipt.state != cas_store::DelegationReceiptState::Completed {
+            return Err(format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: receipt `{receipt_id}` is `{}`; a completed receipt is required.",
+                receipt.state
+            ));
+        }
+        if receipt.terminal_verdict != Some(cas_store::DelegationVerdict::Pass) {
+            let verdict = receipt
+                .terminal_verdict
+                .map(|verdict| verdict.to_string())
+                .unwrap_or_else(|| "missing".to_string());
+            return Err(format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: receipt `{receipt_id}` has terminal verdict `{verdict}`; pass is required."
+            ));
+        }
+        let evidence_reference = receipt
+            .evidence_reference
+            .as_deref()
+            .map(str::trim)
+            .filter(|reference| !reference.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "EXTERNAL VERIFICATION RECEIPT REJECTED: completed passing receipt `{receipt_id}` has no non-empty evidence reference."
+                )
+            })?;
+        if let Some(reason) = delivery_audit_text_rejection(evidence_reference) {
+            return Err(format!(
+                "EXTERNAL VERIFICATION RECEIPT REJECTED: receipt `{receipt_id}` evidence reference {reason}."
+            ));
+        }
+
+        Ok(Some(ExternalVerificationCloseReceipt {
+            receipt_id: receipt.id,
+            evidence_reference: evidence_reference.to_string(),
+            factory_session_id: factory_session_id.to_string(),
+            supervisor_id: caller.id,
+            supervisor_name: caller.name,
+        }))
+    }
+
     fn cancellation_supervisor(&self) -> Result<cas_types::Agent, String> {
         self.resolve_live_supervisor_authority()
             .map_err(|error| match error {
@@ -2012,7 +2159,7 @@ impl CasCore {
         &self,
         params: Parameters<TaskCloseRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.cas_task_close_with_completion(params, None, None, None, None)
+        self.cas_task_close_with_completion(params, None, None, None, None, None)
             .await
     }
 
@@ -2020,6 +2167,7 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskCloseRequest>,
         completion_receipt: Option<String>,
+        external_verification_receipt: Option<String>,
         negative_result: Option<NegativeResultCloseRequest>,
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
@@ -2059,6 +2207,24 @@ impl CasCore {
                 task.id
             )));
         }
+        if completion_receipt.is_some() && external_verification_receipt.is_some() {
+            return Ok(Self::tool_error(
+                "TASK CLOSE REJECTED: completion_receipt and external_verification_receipt are distinct delivery contracts and cannot be supplied together."
+                    .to_string(),
+            ));
+        }
+        if negative_result.is_some() && external_verification_receipt.is_some() {
+            return Ok(Self::tool_error(
+                "TASK CLOSE REJECTED: negative_result and external_verification_receipt are distinct close dispositions and cannot be supplied together."
+                    .to_string(),
+            ));
+        }
+        if task.task_type == TaskType::Gate && external_verification_receipt.is_some() {
+            return Ok(Self::tool_error(format!(
+                "GATE CLOSE REJECTED: task {} has the Decision disposition; external_verification_receipt is not applicable.",
+                task.id
+            )));
+        }
         if task.task_type == TaskType::Gate && negative_result.is_some() {
             return Ok(Self::tool_error(format!(
                 "GATE CLOSE REJECTED: task {} has the Decision disposition; negative_result is not applicable.",
@@ -2080,6 +2246,15 @@ impl CasCore {
             TaskCloseDisposition::NegativeResult
         } else {
             TaskCloseDisposition::Delivered
+        };
+
+        let external_verification_receipt = match self.validate_external_verification_close(
+            &task,
+            task_store.as_ref(),
+            external_verification_receipt.as_deref(),
+        ) {
+            Ok(receipt) => receipt,
+            Err(message) => return Ok(Self::tool_error(message)),
         };
 
         if let Some(raw_receipt) = completion_receipt.as_deref() {
@@ -3969,6 +4144,7 @@ impl CasCore {
         if close_disposition.requires_delivery_gates()
             && !effective_has_reviewable
             && !bypass_close_gates
+            && external_verification_receipt.is_none()
             && let Some(worker_wt) = worker_worktree_path.as_ref()
         {
             match check_zero_commit_close(
@@ -4110,6 +4286,23 @@ impl CasCore {
             let reference = task.external_ref.as_deref().unwrap_or("<missing>");
             let decision_note = format!(
                 "[{timestamp}] DECISION: no-code operations delivery accepted with recorded artifact/proof reference: {reference}"
+            );
+            if task.notes.is_empty() {
+                task.notes = decision_note;
+            } else {
+                task.notes = format!("{}\n\n{}", task.notes, decision_note);
+            }
+        }
+
+        if let Some(receipt) = external_verification_receipt.as_ref() {
+            let timestamp = now.format("%Y-%m-%d %H:%M");
+            let decision_note = format!(
+                "[{timestamp}] DECISION: supervisor {} ({}) accepted external production verification receipt {} as zero-commit delivery evidence for factory session {}. Evidence: {}",
+                receipt.supervisor_name,
+                receipt.supervisor_id,
+                receipt.receipt_id,
+                receipt.factory_session_id,
+                receipt.evidence_reference,
             );
             if task.notes.is_empty() {
                 task.notes = decision_note;
@@ -9704,9 +9897,12 @@ pub(crate) fn check_zero_commit_close(
                docs-only, characterization-only), retry close with explicit \
                no-code intent and its portable proof in the same command:\n\
                `mcp__cas__task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>`\n\
-            4. Ask the supervisor to audit the merge. Only a supervisor may \
-               close with `supervisor_override=true` and a reason recording \
-               that audit if the work was intentionally resolved without code."
+            4. If this is external production work and a supervisor already \
+               ran `verification action=external_verify`, that same live \
+               registered supervisor may retry with \
+               `supervisor_override=true external_verification_receipt=<dr-id> reason=<audit>`. \
+               `supervisor_override` alone does not satisfy zero-commit \
+               delivery evidence."
         ));
     }
     if let Some(outcome) = resolve_merge_evidence(
@@ -9743,9 +9939,12 @@ pub(crate) fn check_zero_commit_close(
            historical commit), verify it is an ancestor of \
            {parent_branch}, then retry close with \
            `commit_receipt=<sha>` (full or an unambiguous abbreviation).\n\
-        4. If no task commit receipt is available, ask the supervisor to audit \
-           the merge. Only a supervisor may close with \
-           `supervisor_override=true` and a reason recording that audit."
+        4. If this is external production work and a supervisor already ran \
+           `verification action=external_verify`, that same live registered \
+           supervisor may retry with \
+           `supervisor_override=true external_verification_receipt=<dr-id> reason=<audit>`. \
+           `supervisor_override` alone does not satisfy zero-commit delivery \
+           evidence."
     ))
 }
 
@@ -21503,11 +21702,11 @@ mod zero_change_close_tests {
                 );
                 assert!(
                     msg.contains("commit_receipt=<sha>")
-                        && msg.contains("ask the supervisor")
                         && msg.contains("supervisor_override=true")
-                        && msg.contains("Only a supervisor"),
+                        && msg.contains("external_verification_receipt=<dr-id>")
+                        && msg.contains("supervisor_override` alone does not satisfy"),
                     "rejection must name both the worker receipt path and the \
-                     audited supervisor fallback: {msg}"
+                     independently verified external-delivery path: {msg}"
                 );
                 assert!(
                     msg.contains("out-of-band merge after conflict rework")

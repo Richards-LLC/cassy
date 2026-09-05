@@ -33,8 +33,8 @@ use cas_mux::{
     ContractRole, OpenCodeProjectionSpec, OpenCodeRole, PtyConfig, SupervisorCli,
     render_opencode_config,
 };
-use serde_json::Value;
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::builtins::{
     GENERAL_PARITY_CAPABILITIES, REQUIRED_FACTORY_AGENTS, REQUIRED_FACTORY_CAPABILITIES,
@@ -562,9 +562,9 @@ mod tests {
     /// its skill and ambient-recall policy are explicitly declared.
     #[test]
     fn supervisor_launch_context_parity_is_exhaustive_and_declared() {
-        use crate::store::{init_cas_dir, open_store};
+        use crate::store::{init_cas_dir, open_agent_store, open_store, open_task_store_local};
         use crate::test_support::TestEnvGuard;
-        use crate::types::Entry;
+        use crate::types::{Agent, AgentRole, Entry, Task, TaskStatus};
 
         let mut env = TestEnvGuard::temp_home();
         env.set("CAS_AGENT_ROLE", "supervisor");
@@ -577,12 +577,34 @@ mod tests {
 
         let project = tempfile::tempdir().unwrap();
         let cas_dir = init_cas_dir(project.path()).unwrap();
+        let mut task = Task::new(
+            "cas-launch-recovery".to_string(),
+            "Coordinate release recovery audit receipts".to_string(),
+        );
+        task.status = TaskStatus::InProgress;
+        open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
+        let agent_store = open_agent_store(&cas_dir).unwrap();
+        agent_store
+            .register(&Agent::new_with_role(
+                "parity-session".to_string(),
+                "parity-supervisor".to_string(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        agent_store
+            .try_claim(
+                "cas-launch-recovery",
+                "parity-session",
+                600,
+                Some("supervisor launch parity fixture"),
+            )
+            .unwrap();
         let mut sentinel = Entry::new(
             "grok-supervisor-ambient".to_string(),
-            "supervisor session start ambient recall sentinel".to_string(),
+            "Current release recovery audit receipts preserve operator intent".to_string(),
         );
-        sentinel.title = Some("Grok supervisor launch recall".to_string());
-        sentinel.tags = vec!["grok".to_string(), "supervisor".to_string()];
+        sentinel.title = Some("Current supervisor release recovery guidance".to_string());
+        sentinel.tags = vec!["release".to_string(), "recovery".to_string()];
         sentinel.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&sentinel).unwrap();
 

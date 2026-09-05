@@ -1147,6 +1147,8 @@ struct LocalSurfaceSpec {
     extra_scope_predicate: &'static str,
 }
 
+const MEMORY_STALE_SQL: &str = "case when valid_until is not null and datetime(valid_until) < datetime('now') then 1 else 0 end";
+
 fn local_surface_specs() -> [LocalSurfaceSpec; 8] {
     [
         LocalSurfaceSpec {
@@ -1158,7 +1160,7 @@ fn local_surface_specs() -> [LocalSurfaceSpec; 8] {
             team: "team_id",
             share: "share",
             revision: "coalesce(updated_at, created)",
-            stale: "case when valid_until is not null and datetime(valid_until) < datetime('now') then 1 else 0 end",
+            stale: MEMORY_STALE_SQL,
             body_available: true,
             locator: "id",
             extra_scope_predicate: "archived = 0",
@@ -4346,14 +4348,13 @@ mod tests {
             "#,
         )
         .unwrap();
-        let today = Utc::now().format("%Y-%m-%d");
         conn.execute(
             "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, ?4, 0)",
             params![
                 "expired-same-day",
                 "same day release preference expired",
-                today.to_string(),
-                format!("{today}T00:00:00Z")
+                "r1",
+                "2026-09-05T00:00:00Z"
             ],
         )
         .unwrap();
@@ -4362,31 +4363,66 @@ mod tests {
             params![
                 "current-same-day",
                 "same day release preference current",
-                today.to_string(),
-                format!("{today}T23:59:59Z")
+                "r1",
+                "2026-09-05T23:59:59Z"
             ],
         )
         .unwrap();
-        let expired_with_offset = (Utc::now() - chrono::TimeDelta::minutes(1))
-            .with_timezone(&chrono::FixedOffset::east_opt(5 * 60 * 60).unwrap())
-            .to_rfc3339();
         conn.execute(
             "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, ?4, 0)",
             params![
                 "expired-offset",
                 "same day release preference offset expired",
-                today.to_string(),
-                expired_with_offset
+                "r1",
+                "2026-09-05T07:00:00+05:00"
             ],
         )
         .unwrap();
         conn.execute(
             "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, null, 0)",
-            params![
-                "no-expiry",
-                "same day release preference stable",
-                today.to_string()
-            ],
+            params!["no-expiry", "same day release preference stable", "r1"],
+        )
+        .unwrap();
+
+        // Pin the midnight, same-day future, timezone-offset, and NULL cases
+        // against a fixed reference instant while deriving the predicate from
+        // the exact expression used by the local retriever.
+        let fixed_stale_sql =
+            MEMORY_STALE_SQL.replace("datetime('now')", "datetime('2026-09-05 12:00:00')");
+        let mut stmt = conn
+            .prepare(&format!(
+                "select id from entries where ({fixed_stale_sql}) = 0 order by id"
+            ))
+            .unwrap();
+        let fixed_current = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fixed_current, vec!["current-same-day", "no-expiry"]);
+        drop(stmt);
+
+        // Retain an integration check through retrieve_candidates using live
+        // instants safely separated from the current clock.
+        let now = Utc::now();
+        let expired = (now - chrono::TimeDelta::minutes(5)).to_rfc3339();
+        let future = (now + chrono::TimeDelta::minutes(5)).to_rfc3339();
+        let expired_with_offset = (now - chrono::TimeDelta::minutes(5))
+            .with_timezone(&chrono::FixedOffset::east_opt(5 * 60 * 60).unwrap())
+            .to_rfc3339();
+        conn.execute(
+            "update entries set valid_until = ?1 where id = 'expired-same-day'",
+            [expired],
+        )
+        .unwrap();
+        conn.execute(
+            "update entries set valid_until = ?1 where id = 'current-same-day'",
+            [future],
+        )
+        .unwrap();
+        conn.execute(
+            "update entries set valid_until = ?1 where id = 'expired-offset'",
+            [expired_with_offset],
         )
         .unwrap();
         drop(conn);

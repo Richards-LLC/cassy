@@ -36,3 +36,29 @@ export class FirstConnectionAnnouncer {
     return `${label} connected`;
   }
 }
+
+export interface InstalledMachineIdentity {
+  readonly id: string;
+  readonly label: string;
+}
+
+export interface InstallAnnouncementDeps<M extends InstalledMachineIdentity> {
+  readonly announcer: FirstConnectionAnnouncer;
+  /** Where sentences go (the toast). */
+  readonly notify: (text: string) => void;
+  /** Creates and starts the connection; its onState may fire synchronously. */
+  readonly startConnection: (machine: M) => void;
+}
+
+/**
+ * The installation seam: a credential for `machine` is saved. Say so, arm the
+ * first-connection announcement, and only then start the connection — so even
+ * a connection that reports healthy live synchronously produces exactly
+ * ["Access saved — connecting to X…", "X connected"], named from the installed
+ * machine and never from whatever happens to be selected (review 25649).
+ */
+export function installPairedMachine<M extends InstalledMachineIdentity>(machine: M, deps: InstallAnnouncementDeps<M>): void {
+  deps.announcer.expect(machine.id);
+  deps.notify(`Access saved — connecting to ${machine.label}…`);
+  deps.startConnection(machine);
+}

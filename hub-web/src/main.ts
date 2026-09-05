@@ -30,7 +30,7 @@ import { TranscriptView } from "./transcript-view";
 import { applyLiveRegions, type LiveRegionView } from "./live-regions";
 import { DeferredRenderScheduler } from "./deferred-render";
 import { FleetBoardRenderer } from "./fleet-board";
-import { FirstConnectionAnnouncer } from "./first-connection";
+import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connection";
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
@@ -705,11 +705,15 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   pairingDraft = createPairingDraft(location.origin);
   machines.set(machine.id, machine);
   commitSelection({ machineId: machine.id });
-  // Expect the first live phase before the connection exists: a hub on the
-  // same host can answer fast enough that the announcement would otherwise be
-  // owed to nobody by the time the submit handler runs (review 25642).
-  firstConnections.expect(machine.id);
-  replaceMachineConnection(machine, connections, connectionStates, createConnection);
+  // The installation seam: "Access saved" and the armed first-connection
+  // announcement both precede the connection, so a hub that reports healthy
+  // live synchronously still yields saved → connected, named from the machine
+  // that was installed (reviews 25642, 25649).
+  installPairedMachine(machine, {
+    announcer: firstConnections,
+    notify: toast,
+    startConnection: (installed) => { replaceMachineConnection(installed, connections, connectionStates, createConnection); },
+  });
   render(false);
   return machine;
 }
@@ -2608,12 +2612,9 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     event.preventDefault();
     void pairMachine(pairForm).then((installed) => {
       if (!installed) return;
+      // Saved and connected are announced at the installation seam inside
+      // pairMachine; the handler only closes the dialog.
       document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
-      // What is true now is that access is saved for the machine that was
-      // installed — named from that identity, not from whatever is selected;
-      // whether it is reachable is the connection's answer, announced when it
-      // arrives (firstConnections.expect ran before its connection started).
-      toast(`Access saved — connecting to ${installed.label}…`);
     }).catch((error) => {
       // A pairing failure is stated inside the dialog beside Pair; a toast
       // behind the backdrop only duplicated it. Anything else still surfaces.

@@ -415,18 +415,19 @@ describe("binding Cassy Commander browser invariants", () => {
     // "paired" before any connection existed. Saved access is announced at
     // once; "connected" only when that machine's connection reaches live.
     expect(source).toContain("return machine;\n}\n\nasync function startRelayPairing(");
+    expect(source).toContain("// Saved and connected are announced at the installation seam inside");
     // The expectation is registered inside pairMachine, before the connection
     // for the new credential is created, so a first live phase can never
     // arrive ahead of it (review 25642).
     const pairMachineBody = source.slice(source.indexOf("async function pairMachine("), source.indexOf("async function startRelayPairing("));
-    const expectAt = pairMachineBody.indexOf("firstConnections.expect(machine.id);");
-    const connectAt = pairMachineBody.indexOf("replaceMachineConnection(machine, connections, connectionStates, createConnection);");
-    expect(expectAt).toBeGreaterThan(0);
-    expect(connectAt).toBeGreaterThan(expectAt);
+    // Both the saved sentence and the armed expectation live in
+    // installPairedMachine, which starts the connection last; the only
+    // replaceMachineConnection call in pairMachine is inside its starter.
+    expect(pairMachineBody).toContain("installPairedMachine(machine, {\n    announcer: firstConnections,\n    notify: toast,\n    startConnection: (installed) => { replaceMachineConnection(installed, connections, connectionStates, createConnection); },\n  });");
+    expect(pairMachineBody.split("replaceMachineConnection(").length - 1).toBe(1);
     expect(source).not.toContain("if (paired) firstConnections.expect(paired.id);");
-    // The saved toast names the installed machine, never the selection.
+    expect(source).not.toContain("toast(`Access saved");
     expect(source).toContain("async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false> {");
-    expect(source).toContain("toast(`Access saved — connecting to ${installed.label}…`);");
     expect(source).not.toContain("const paired = machines.get(selectedMachineId ?? \"\");");
     expect(source).toContain("const connectedNotice = firstConnections.observe(machine.id, machine.label, state);");
     expect(source).toContain("if (connectedNotice) toast(connectedNotice);");

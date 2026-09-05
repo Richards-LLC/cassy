@@ -36,6 +36,7 @@
 pub mod agents_md;
 pub mod skills;
 pub mod specs;
+pub mod yaml_scalar;
 
 pub use agents_md::{
     AgentsMdFileReport, AgentsMdSyncMode, AgentsMdSyncReport, GENERATED_HEADER, sync_agents_md,
@@ -43,6 +44,7 @@ pub use agents_md::{
 };
 pub use skills::{SkillSyncReport, SkillSyncer, create_planning_skill, generate_planning_skill};
 pub use specs::{SpecSyncReport, SpecSyncer};
+pub use yaml_scalar::yaml_scalar;
 
 use std::collections::HashSet;
 use std::fs;

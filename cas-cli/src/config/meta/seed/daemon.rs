@@ -39,7 +39,7 @@ pub(super) fn register_daemon(registry: &mut ConfigRegistry) {
         key: "daemon.relevance_sampling_enabled",
         section: "daemon",
         name: "Injected Relevance Sampling",
-        description: "Enable the weekly bounded judge pass over recent injected retrieval results. Disable when no receiving-agent or scheduled judge is available.",
+        description: "Schedule the weekly bounded relevance pass over recent injected retrieval results. This setting does not configure a receiving-agent or model judge; without one, precision remains honestly unavailable.",
         value_type: ConfigType::Bool,
         default: "true",
         constraint: Constraint::None,

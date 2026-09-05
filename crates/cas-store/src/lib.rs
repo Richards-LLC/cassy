@@ -250,8 +250,8 @@ pub use reminder_store::{
 pub use retrieval_store::{
     DEFAULT_RETRIEVAL_POLICY, RETRIEVAL_ATTRIBUTION_AUTOMATIC, RETRIEVAL_ATTRIBUTION_EXPLICIT,
     RETRIEVAL_ATTRIBUTION_JUDGE, RETRIEVAL_SCHEMA, RETRIEVAL_SCHEMA_STATEMENTS,
-    RelevanceSamplingReport, RetrievalAggregate, RetrievalHitIdentity, RetrievalOutcome,
-    RetrievalOutcomeEvent, RetrievalQuery, RetrievalSample, RetrievalStore,
+    RelevanceSamplingReport, RetrievalAggregate, RetrievalEvidenceFunnel, RetrievalHitIdentity,
+    RetrievalOutcome, RetrievalOutcomeEvent, RetrievalQuery, RetrievalSample, RetrievalStore,
     RollingInjectedPrecision, SqliteRetrievalStore,
 };
 

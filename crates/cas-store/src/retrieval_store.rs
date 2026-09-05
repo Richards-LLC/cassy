@@ -252,6 +252,25 @@ pub struct RollingInjectedPrecision {
     pub window_days: u64,
 }
 
+/// Evidence stages for one retrieval scope.
+///
+/// These counts deliberately do not collapse body access, explicit use, or a
+/// judge's helpfulness label into one another. A body pull is observable
+/// opening evidence; it is not proof that the caller used the content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RetrievalEvidenceFunnel {
+    /// Distinct query/result rows returned by retrieval.
+    pub retrieved: u64,
+    /// Retrieved rows placed in SessionStart/ambient context packets.
+    pub injected: u64,
+    /// Distinct rows whose body was pulled by an automatic hook signal.
+    pub opened: u64,
+    /// Distinct rows explicitly marked `used` by a caller.
+    pub used: u64,
+    /// Distinct rows labelled helpful by the relevance judge.
+    pub judged_helpful: u64,
+}
+
 /// Offline quality aggregate. Usefulness and negative rates use only resolved
 /// outcomes as their denominator; unresolved events report instrumentation
 /// coverage without influencing quality or promotion decisions.
@@ -591,6 +610,57 @@ impl SqliteRetrievalStore {
         let rows = stmt.query_map([session_hash], Self::parse_aggregate)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StoreError::Database)
+    }
+
+    /// Return stage-separated evidence across all retrieval sessions.
+    pub fn evidence_funnel(&self) -> Result<RetrievalEvidenceFunnel> {
+        self.evidence_funnel_for_session_hash(None)
+    }
+
+    /// Return stage-separated evidence for exactly one raw session ID.
+    pub fn evidence_funnel_for_session(&self, session_id: &str) -> Result<RetrievalEvidenceFunnel> {
+        let session_hash = Self::identity_hash("session", session_id)?;
+        self.evidence_funnel_for_session_hash(Some(session_hash))
+    }
+
+    fn evidence_funnel_for_session_hash(
+        &self,
+        session_hash: Option<String>,
+    ) -> Result<RetrievalEvidenceFunnel> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let row = conn.query_row(
+            "SELECT
+                 COUNT(DISTINCT r.query_id || char(0) || r.result_id),
+                 COUNT(DISTINCT CASE
+                     WHEN q.query_family = 'context_session_start'
+                          OR q.query_family LIKE 'ambient_%'
+                     THEN r.query_id || char(0) || r.result_id END),
+                 COUNT(DISTINCT CASE
+                     WHEN o.outcome = 'used' AND o.attribution = 'automatic'
+                     THEN r.query_id || char(0) || r.result_id END),
+                 COUNT(DISTINCT CASE
+                     WHEN o.outcome = 'used' AND o.attribution = 'explicit'
+                     THEN r.query_id || char(0) || r.result_id END),
+                 COUNT(DISTINCT CASE
+                     WHEN o.outcome = 'helpful' AND o.attribution = 'judge'
+                     THEN r.query_id || char(0) || r.result_id END)
+             FROM retrieval_query_results r
+             JOIN retrieval_queries q ON q.id = r.query_id
+             LEFT JOIN retrieval_outcomes o
+               ON o.query_id = r.query_id AND o.result_id = r.result_id
+             WHERE (?1 IS NULL OR q.session_hash = ?1)",
+            [session_hash],
+            |row| {
+                Ok(RetrievalEvidenceFunnel {
+                    retrieved: row.get::<_, i64>(0)?.max(0) as u64,
+                    injected: row.get::<_, i64>(1)?.max(0) as u64,
+                    opened: row.get::<_, i64>(2)?.max(0) as u64,
+                    used: row.get::<_, i64>(3)?.max(0) as u64,
+                    judged_helpful: row.get::<_, i64>(4)?.max(0) as u64,
+                })
+            },
+        )?;
+        Ok(row)
     }
 }
 
@@ -952,6 +1022,24 @@ impl SqliteRetrievalStore {
     /// Compute precision over judge-labelled injected results in a rolling
     /// window. A missing denominator is `None`, not a fabricated zero.
     pub fn rolling_injected_precision(&self, window_days: u64) -> Result<RollingInjectedPrecision> {
+        self.rolling_injected_precision_for_session_hash(window_days, None)
+    }
+
+    /// Compute rolling judge precision for exactly one retrieval session.
+    pub fn rolling_injected_precision_for_session(
+        &self,
+        window_days: u64,
+        session_id: &str,
+    ) -> Result<RollingInjectedPrecision> {
+        let session_hash = Self::identity_hash("session", session_id)?;
+        self.rolling_injected_precision_for_session_hash(window_days, Some(session_hash))
+    }
+
+    fn rolling_injected_precision_for_session_hash(
+        &self,
+        window_days: u64,
+        session_hash: Option<String>,
+    ) -> Result<RollingInjectedPrecision> {
         let cutoff = Utc::now() - chrono::Duration::days(window_days as i64);
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let (helpful, judged): (i64, i64) = conn.query_row(
@@ -963,8 +1051,9 @@ impl SqliteRetrievalStore {
              WHERE o.attribution = 'judge'
                AND o.created_at >= ?1
                AND (q.query_family = 'context_session_start'
-                    OR q.query_family LIKE 'ambient_%')",
-            [cutoff.to_rfc3339()],
+                    OR q.query_family LIKE 'ambient_%')
+               AND (?2 IS NULL OR q.session_hash = ?2)",
+            params![cutoff.to_rfc3339(), session_hash],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let helpful = helpful.max(0) as u64;
@@ -1415,6 +1504,110 @@ mod tests {
             .sample_injected_relevance(10, 604_800, |_| Ok(Some(true)))
             .unwrap();
         assert_eq!(second.sampled, 0, "judge rows are idempotently excluded");
+    }
+
+    #[test]
+    fn session_metrics_keep_open_use_and_judge_evidence_separate() {
+        let temp = TempDir::new().unwrap();
+        let store = SqliteRetrievalStore::open(temp.path()).unwrap();
+        for (query_id, session_id) in [("query-a", "session-a"), ("query-b", "session-b")] {
+            store
+                .record_query(
+                    query_id,
+                    "injected context",
+                    "ambient_transition",
+                    DEFAULT_RETRIEVAL_POLICY,
+                    Some(session_id),
+                    &[hit("entry", "entry", 0)],
+                )
+                .unwrap();
+        }
+        store
+            .record_outcome_with_attribution(
+                "opened-a",
+                "query-a",
+                "entry",
+                RetrievalOutcome::Used,
+                "hook",
+                "session-a",
+                None,
+                RETRIEVAL_ATTRIBUTION_AUTOMATIC,
+            )
+            .unwrap();
+        store
+            .record_outcome(
+                "used-a",
+                "query-a",
+                "entry",
+                RetrievalOutcome::Used,
+                "agent",
+                "session-a",
+                None,
+            )
+            .unwrap();
+        for (event_id, query_id, session_id, outcome) in [
+            ("judge-a", "query-a", "session-a", RetrievalOutcome::Ignored),
+            ("judge-b", "query-b", "session-b", RetrievalOutcome::Helpful),
+        ] {
+            store
+                .record_outcome_with_attribution(
+                    event_id,
+                    query_id,
+                    "entry",
+                    outcome,
+                    "judge",
+                    session_id,
+                    None,
+                    RETRIEVAL_ATTRIBUTION_JUDGE,
+                )
+                .unwrap();
+        }
+        for (event_id, attribution) in [
+            ("judge-used-b", RETRIEVAL_ATTRIBUTION_JUDGE),
+            ("custom-used-b", "future-signal"),
+        ] {
+            store
+                .record_outcome_with_attribution(
+                    event_id,
+                    "query-b",
+                    "entry",
+                    RetrievalOutcome::Used,
+                    "non-caller",
+                    "session-b",
+                    None,
+                    attribution,
+                )
+                .unwrap();
+        }
+
+        let session_a = store.evidence_funnel_for_session("session-a").unwrap();
+        assert_eq!(session_a.retrieved, 1);
+        assert_eq!(session_a.injected, 1);
+        assert_eq!(session_a.opened, 1);
+        assert_eq!(session_a.used, 1);
+        assert_eq!(session_a.judged_helpful, 0);
+
+        let session_b = store.evidence_funnel_for_session("session-b").unwrap();
+        assert_eq!(session_b.retrieved, 1);
+        assert_eq!(session_b.injected, 1);
+        assert_eq!(session_b.opened, 0);
+        assert_eq!(session_b.used, 0);
+        assert_eq!(session_b.judged_helpful, 1);
+
+        let precision_a = store
+            .rolling_injected_precision_for_session(30, "session-a")
+            .unwrap();
+        let precision_b = store
+            .rolling_injected_precision_for_session(30, "session-b")
+            .unwrap();
+        assert_eq!(precision_a.precision, Some(0.0));
+        assert_eq!(precision_a.judged, 1);
+        assert_eq!(precision_b.precision, Some(1.0));
+        assert_eq!(precision_b.judged, 1);
+        assert_eq!(
+            store.rolling_injected_precision(30).unwrap().precision,
+            Some(0.5)
+        );
     }
 
     #[test]

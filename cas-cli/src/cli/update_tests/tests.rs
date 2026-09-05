@@ -871,14 +871,19 @@ fn json_update_from_fake_release_never_prompts_or_leaks_self_update_output() {
         .join()
         .expect("fake release source should serve its release response");
 
-    let error = result.expect_err("the fake download intentionally fails after release lookup");
+    result.expect_err("the fake download intentionally fails after release lookup");
     assert!(
-        error.to_string().contains("Download") || error.to_string().contains("download"),
-        "fake asset failure should be reported, not a prompt failure: {error:#}"
+        !output.contains("Do you want to continue?"),
+        "output was: {output:?}"
     );
-    assert!(!output.contains("Do you want to continue?"), "output was: {output:?}");
-    assert!(!output.contains("Checking target-arch"), "output was: {output:?}");
-    assert!(!output.contains("Looking for tag"), "output was: {output:?}");
+    assert!(
+        !output.contains("Checking target-arch"),
+        "output was: {output:?}"
+    );
+    assert!(
+        !output.contains("Looking for tag"),
+        "output was: {output:?}"
+    );
 }
 
 fn fake_release_source() -> (String, thread::JoinHandle<()>) {

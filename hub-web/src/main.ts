@@ -28,6 +28,7 @@ import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type Tra
 import { TranscriptView } from "./transcript-view";
 import { applyLiveRegions, type LiveRegionView } from "./live-regions";
 import { DeferredRenderScheduler } from "./deferred-render";
+import { FleetBoardRenderer } from "./fleet-board";
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
@@ -1677,6 +1678,10 @@ function render(captureDraft = true): void {
   // well otherwise split a phone into three unrelated empty states.
   const fleetEmpty = machineCatalogLoaded && machines.size === 0 && attention.length === 0;
   const showSessionControls = selected !== undefined && selectedSession !== undefined;
+  // With machines paired and nothing open, the canvas is the fleet: every
+  // machine and its sessions, one tap from opening. An empty card pointing at a
+  // drawer was a detour to the same list.
+  const showFleetBoard = machineCatalogLoaded && machines.size > 0 && selectedSession === undefined;
   const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER";
   const controlActionLabel = lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control";
   const machineLabel = selected?.label ?? "No machine";
@@ -1791,7 +1796,7 @@ function render(captureDraft = true): void {
           ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
           <div class="actions">${sessionCommands ? '<button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button>' : ""}${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button>` : ""}</div>
         </header>
-        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : emptyCanvasMarkup()}</div></section>
+        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}>${selectedSession ? '<div class="empty">Connecting to terminal…</div>' : showFleetBoard ? '<div id="fleet-board" class="fleet-board" aria-label="Fleet"></div>' : `<div class="empty empty-pane-slot">${emptyCanvasMarkup()}</div>`}</section>
         ${supervisor ? `<button id="talk-supervisor" class="talk-supervisor primary" type="button"><span>Talk to supervisor</span><small>${escapeHtml(supervisor)}</small></button>` : ""}
       </main>
       <aside class="context-panel${attentionPanelCollapsed ? " collapsed" : ""}" aria-label="Attention, workers, and tasks">
@@ -1804,6 +1809,7 @@ function render(captureDraft = true): void {
           <div class="context-tabs" role="tablist" aria-label="Operations panel">
             <button type="button" role="tab" data-context-tab="attention" aria-selected="${activeContextTab === "attention"}">Attention</button>
             <button type="button" role="tab" data-context-tab="status" aria-selected="${activeContextTab === "status"}">Workers &amp; Tasks</button>
+            <button id="context-panel-close" class="context-panel-close" type="button" aria-label="Close panel">×</button>
           </div>
           <section id="attention-panel" class="context-tab" data-context-content="attention" ${activeContextTab === "attention" ? "" : "hidden"}></section>
           <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><p class="status-stale" role="status" hidden></p><div id="status-view"></div><div class="message"><h2>Talk to ${escapeHtml(supervisor ?? "supervisor")}</h2><textarea id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-status" class="message-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div></section>
@@ -1863,6 +1869,7 @@ interface RegionContext {
 function renderRegions(context: RegionContext): void {
   renderMachineNavigation();
   renderSessionPicker();
+  renderFleetBoard();
   const railCounts = document.querySelector("#attention-rail-counts");
   if (railCounts) {
     // Both forms ship; the compact block picks one. The button owns the
@@ -1933,6 +1940,43 @@ function renderMachineNavigation(): void {
   // a region update, so it carries its own handler.
   pair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")!.showModal();
   machineTree.append(pair);
+}
+
+/**
+ * The fleet in words a heartbeat cannot churn: phase only, no latency, so the
+ * board is rebuilt when a machine or session actually changes state and a
+ * button the operator is on is never pulled out from under a thumb.
+ */
+function fleetConnectionLabel(state: ConnectionState | undefined): string {
+  if (!state) return "Idle";
+  if (state.phase === "live") return state.degraded ? "Degraded" : "Live";
+  if (state.phase === "backoff") return "Reconnecting";
+  if (state.phase === "failed") return state.authFailure ? "Needs pairing" : "Unreachable";
+  return "Connecting";
+}
+
+const fleetBoard = new FleetBoardRenderer();
+
+function renderFleetBoard(): void {
+  const board = document.querySelector<HTMLElement>("#fleet-board");
+  const entries = sessionPickerEntries({
+    machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label })),
+    sessions,
+    selection: selectedMachineId ? { machineId: selectedMachineId } : undefined,
+    summaries: sessionSummaries,
+  });
+  fleetBoard.render(board, {
+    machines: [...machines.values()].map((machine) => ({
+      id: machine.id,
+      label: machine.label,
+      state: connectionClass(connectionStates.get(machine.id)),
+      phase: fleetConnectionLabel(connectionStates.get(machine.id)),
+      selected: machine.id === selectedMachineId,
+    })),
+    sessions: entries,
+  }, {
+    open: (machineId, session) => { machineDrawerOpen = false; void openSession(machineId, session); },
+  });
 }
 
 function compatibilityWarning(machineId: string): string | undefined {
@@ -2125,17 +2169,53 @@ function renderStatus(status?: Record<string, unknown>): void {
     span.textContent = String(value);
     return span;
   };
+  const chip = (value: unknown): HTMLSpanElement => {
+    const span = document.createElement("span");
+    const state = String(value ?? "").toLowerCase().replaceAll("_", "-");
+    span.className = `status-chip status-chip--${state.replaceAll(/[^a-z0-9-]/g, "") || "unknown"}`;
+    span.textContent = String(value ?? "").replaceAll("_", " ");
+    return span;
+  };
+  const sectionLabel = (text: string, count: number): HTMLParagraphElement => {
+    const label = document.createElement("p");
+    label.className = "status-section-label";
+    label.textContent = `${text} · ${count}`;
+    return label;
+  };
+  // Name, state, ticket, then the sentence: the identifiers stay mono and the
+  // activity reads as prose, instead of one grey mono line per agent where the
+  // eye had to find the dots to tell name from state from task.
+  if (agents.length > 0) container.append(sectionLabel("Agents", agents.length));
   for (const agent of agents) {
-    const row = document.createElement("article"); row.className = "status-row";
-    row.append(identifier(agent.name), " · ", identifier(agent.status));
-    if (agent.current_task) row.append(" · ", identifier(agent.current_task));
-    if (agent.latest_activity?.summary) row.append(` — ${agent.latest_activity.summary}`);
+    const row = document.createElement("article"); row.className = "status-row status-agent";
+    const line = document.createElement("div"); line.className = "status-line";
+    line.append(identifier(agent.name), chip(agent.status));
+    if (agent.current_task) line.append(identifier(agent.current_task));
+    row.append(line);
+    if (agent.latest_activity?.summary) {
+      const activity = document.createElement("p");
+      activity.className = "status-activity";
+      activity.textContent = agent.latest_activity.summary;
+      row.append(activity);
+    }
     container.append(row);
   }
+  if (tasks.length > 0) container.append(sectionLabel("Tasks", tasks.length));
   for (const task of tasks) {
-    const row = document.createElement("article"); row.className = "status-row";
-    row.append(identifier(task.id), " · ", identifier(task.status), ` · ${task.title}`);
+    const row = document.createElement("article"); row.className = "status-row status-task";
+    const line = document.createElement("div"); line.className = "status-line";
+    line.append(identifier(task.id), chip(task.status));
+    const title = document.createElement("p");
+    title.className = "status-task-title";
+    title.textContent = String(task.title ?? "");
+    row.append(line, title);
     container.append(row);
+  }
+  if (agents.length === 0 && tasks.length === 0 && !summary) {
+    const empty = document.createElement("p");
+    empty.className = "status-empty";
+    empty.textContent = "No agents or tasks reported for this session yet.";
+    container.append(empty);
   }
 }
 
@@ -2280,6 +2360,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     pair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")!.showModal();
   }
   document.querySelector<HTMLButtonElement>("#attention-panel-toggle")!.onclick = () => { attentionPanelCollapsed = !attentionPanelCollapsed; render(); };
+  document.querySelector<HTMLButtonElement>("#context-panel-close")!.onclick = () => { attentionPanelCollapsed = true; render(); };
   document.querySelector<HTMLButtonElement>("#mobile-message-toggle")!.onclick = openSupervisorComposer;
   const talkSupervisor = document.querySelector<HTMLButtonElement>("#talk-supervisor");
   if (talkSupervisor) talkSupervisor.onclick = openSupervisorComposer;

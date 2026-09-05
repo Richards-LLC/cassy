@@ -84,7 +84,10 @@
   --pair-detail-label-width: 140px;
   --mobile-drawer-max-height: 520px;
   --mobile-pane-min-width: 260px;
-  --mobile-attention-label-width: 156px;
+  --mobile-attention-label-width: 200px;
+  /* Fleet board session cards: one column on a phone, three across a desktop canvas. */
+  --fleet-card-min-width: 260px;
+  --fleet-board-max-width: 1120px;
   --mobile-header-chip-width: 72px;
   /* Collapsed phone context pill: the attention summary plus one message cell. */
   --mobile-context-pill-width: 152px;
@@ -138,6 +141,7 @@ button {
   border: 0;
   border-radius: var(--radius-card);
   cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease;
   /* Touch taps use the same surface feedback as hover, not a platform flash. */
   -webkit-tap-highlight-color: transparent;
 }
@@ -281,17 +285,26 @@ pre { font-family: var(--font-mono); }
   overflow-y: auto;
 }
 
+/* Machines are tiles and the two controls are glyphs, so the rail reads as
+   "these are the things, and this is what you can do" instead of one column
+   of identical squares. */
 .machine-icon {
   position: relative;
   color: var(--text-mid);
+  background: var(--bg-raised);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
+  font-weight: var(--weight-medium);
 }
+
+.machine-icon:hover:not(:disabled) { color: var(--text-hi); }
 
 .machine-icon.active {
   color: var(--text-hi);
   background: var(--bg-active);
 }
+
+.rail-control:hover:not(:disabled) { background: var(--bg-raised); }
 
 .machine-state,
 .connection-dot,
@@ -340,9 +353,11 @@ pre { font-family: var(--font-mono); }
 
 .pair-machine {
   margin-top: auto;
-  color: var(--text-hi);
+  color: var(--text-mid);
   font-size: var(--fs-lg);
 }
+
+.pair-machine:hover:not(:disabled) { color: var(--text-hi); }
 
 .pair-machine-label { display: none; }
 
@@ -504,6 +519,122 @@ pre { font-family: var(--font-mono); }
 
 .session-summary-description.stale { color: var(--text-lo); }
 
+/* Fleet board — the canvas with machines paired and no session open. */
+.fleet-board {
+  align-self: start;
+  justify-self: center;
+  display: grid;
+  width: min(100%, var(--fleet-board-max-width));
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-2) var(--space-4);
+}
+
+.fleet-board-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-3);
+  min-height: var(--space-8);
+}
+
+.fleet-board-header h2 {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--weight-semibold);
+}
+
+.fleet-board-summary {
+  margin: 0;
+  color: var(--text-mid);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.fleet-machine { display: grid; gap: var(--space-2); }
+
+.fleet-machine-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--space-6);
+  padding: 0 var(--space-1);
+  color: var(--text-hi);
+  font-size: var(--fs-sm);
+  font-weight: var(--weight-medium);
+}
+
+.fleet-machine-phase {
+  color: var(--text-mid);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.fleet-machine-phase.live { color: var(--state-ok); }
+.fleet-machine-phase.degraded,
+.fleet-machine-phase.backoff { color: var(--state-warn); }
+.fleet-machine-phase.failed { color: var(--state-crit); }
+.fleet-machine-phase.resolving,
+.fleet-machine-phase.dialing,
+.fleet-machine-phase.auth,
+.fleet-machine-phase.attaching { color: var(--state-info); }
+
+.fleet-sessions {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--fleet-card-min-width), 1fr));
+  gap: var(--space-2);
+}
+
+.fleet-session {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-height: var(--space-10);
+  padding: var(--space-3);
+  background: var(--bg-raised);
+  border-radius: var(--radius-pane);
+  text-align: left;
+}
+
+.fleet-session .session-name {
+  grid-column: 1;
+  overflow: hidden;
+  color: var(--text-hi);
+  font-size: var(--fs-base);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-session .phase-chip { grid-column: 2; grid-row: 1; }
+
+.fleet-session .session-summary-title {
+  display: -webkit-box;
+  grid-column: 1 / -1;
+  color: var(--text-mid);
+  font-size: var(--fs-sm);
+  font-weight: var(--weight-regular);
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.fleet-session .session-meta {
+  grid-column: 1 / -1;
+  color: var(--text-mid);
+  font-size: var(--fs-xs);
+}
+
+.fleet-empty-sessions {
+  margin: 0;
+  padding: var(--space-3);
+  color: var(--text-mid);
+  background: var(--bg-panel);
+  border-radius: var(--radius-card);
+  font-size: var(--fs-sm);
+}
+
 .phase-chip {
   align-self: center;
   padding: var(--space-1) var(--space-2);
@@ -575,6 +706,12 @@ main {
 }
 
 .session-header h1.toolbar-session-title { font-family: var(--font-mono); }
+
+/* Lease mode and terminal latency describe an open session. On the fleet
+   board they described nothing and were clipped to "Status una" on a phone. */
+.session-header:not(:has(.toolbar-session-title)) .machine-chip,
+.session-header:not(:has(.toolbar-session-title)) .mode-badge,
+.session-header:not(:has(.toolbar-session-title)) .connection-summary { display: none; }
 
 /* Where you are, and the way back out of it, sit together at the start of the
    header: the same two controls on a desktop and under a thumb. */
@@ -979,23 +1116,30 @@ main {
 .empty-hint { max-width: var(--terminal-state-width); color: var(--text-mid); }
 .empty-pane-slot .primary { width: auto; padding: 0 var(--space-4); }
 
+/* Connecting, failed and retry share the empty slot's card: one centred shape
+   for every "no terminal yet" state, instead of a spinner and a rising counter
+   pinned to the top-left corner of an otherwise blank canvas. */
 .terminal-state {
-  place-self: center start;
+  place-self: center;
   display: grid;
-  grid-template-columns: auto minmax(0, auto) auto;
   width: min(var(--terminal-state-width), calc(100% - var(--space-8)));
-  align-items: center;
-  gap: var(--space-2) var(--space-3);
-  margin-left: var(--space-4);
-  padding: var(--space-4) 0;
+  justify-items: center;
+  gap: var(--space-2);
+  padding: var(--space-5);
   color: var(--text-hi);
+  background: var(--bg-raised);
+  border-radius: var(--radius-pane);
   font-size: var(--fs-base);
+  text-align: center;
 }
 
 .terminal-state p { margin: 0; }
-.terminal-state .retry-terminal { width: auto; justify-self: start; }
+.terminal-state .retry-terminal { width: auto; justify-self: center; padding: 0 var(--space-4); }
 
-.terminal-connecting-title { font-family: var(--font-mono); }
+.terminal-connecting-title {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
 
 .terminal-connecting-elapsed {
   color: var(--text-lo);
@@ -1003,17 +1147,18 @@ main {
   font-size: var(--fs-xs);
 }
 
-.terminal-connecting-step,
-.terminal-connecting-actions { grid-column: 2 / -1; }
-
 .terminal-connecting-step {
   color: var(--state-warn);
   font-size: var(--fs-sm);
+  text-wrap: pretty;
 }
 
 .terminal-connecting-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 
 .terminal-connecting-actions button {
@@ -1022,8 +1167,9 @@ main {
 }
 
 .connection-spinner {
-  width: var(--space-4);
-  height: var(--space-4);
+  width: var(--space-6);
+  height: var(--space-6);
+  margin-bottom: var(--space-1);
   border: var(--state-rule-width) solid var(--line-strong);
   border-top-color: var(--state-info);
   border-radius: var(--radius-pill);
@@ -1123,6 +1269,10 @@ main {
   border-bottom-color: var(--line-strong);
 }
 
+/* The desktop rail carries its own collapse control; the phone panel closes
+   from its tab row instead of spending a 48px row on one chevron. */
+.context-panel-close { display: none; }
+
 .context-tab {
   min-height: 0;
   flex: 1;
@@ -1207,12 +1357,17 @@ main {
 .attention-list { display: grid; gap: var(--space-2); }
 .attention-group { min-width: 0; }
 
+/* A group is a section: its session name is the heading the cards sit under,
+   so the cards themselves stop repeating it and the header stops competing
+   with them for surface. */
 .attention-group-header {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin: 0 0 var(--space-1);
+  margin: var(--space-2) 0 var(--space-1);
 }
+
+.attention-group:first-child .attention-group-header { margin-top: 0; }
 
 .attention-group-toggle {
   display: flex;
@@ -1233,10 +1388,23 @@ main {
 .attention-group-label {
   min-width: 0;
   overflow: hidden;
-  color: var(--text-mid);
+  color: var(--text-hi);
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attention-dismiss-group {
+  color: var(--text-mid);
+  background: var(--color-transparent);
+}
+
+.attention-dismiss-group:hover:not(:disabled),
+.attention-dismiss-group:focus-visible { color: var(--text-hi); background: var(--bg-raised); }
+
+.attention-ticket {
+  color: var(--text-mid);
   white-space: nowrap;
 }
 
@@ -1315,7 +1483,9 @@ main {
   overflow: hidden;
   color: var(--text-hi);
   font-family: var(--font-ui);
+  font-size: var(--fs-base);
   font-weight: var(--weight-semibold);
+  text-wrap: pretty;
 }
 
 .attention-item--enriching .attention-title {
@@ -1471,6 +1641,7 @@ main {
   .attention-item--reclassified { animation: none; }
   .connection-spinner { animation: none; }
   .machine-drawer { transition-property: opacity; }
+  button { transition: none; }
   #toast { transform: translate(-50%, 0); transition-property: opacity; }
 }
 
@@ -1479,7 +1650,9 @@ main {
 }
 
 .status-row {
-  margin: var(--space-2) 0;
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-1) 0 0;
   padding: var(--space-3);
   color: var(--text-mid);
   background: var(--bg-raised);
@@ -1489,6 +1662,73 @@ main {
 }
 
 .status-identifier { color: var(--text-hi); }
+
+/* Workers & Tasks: identifiers and state stay mono on one line, the sentence
+   about what the agent is doing reads as prose beneath it. */
+.status-section-label {
+  margin: var(--space-3) 0 0;
+  color: var(--text-mid);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.status-section-label:first-child { margin-top: 0; }
+
+.status-line {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.status-line .status-identifier {
+  overflow: hidden;
+  font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-line .status-identifier:last-child { color: var(--text-mid); }
+
+.status-chip {
+  display: inline-flex;
+  min-height: var(--space-5);
+  align-items: center;
+  padding: 0 var(--space-2);
+  color: var(--text-mid);
+  background: var(--bg-panel);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.status-chip--active,
+.status-chip--in-progress { color: var(--state-info); }
+.status-chip--blocked { color: var(--state-warn); background: var(--tint-warn); }
+.status-chip--idle,
+.status-chip--open { color: var(--text-mid); }
+
+.status-activity,
+.status-task-title {
+  margin: 0;
+  color: var(--text-mid);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  text-wrap: pretty;
+}
+
+.status-empty {
+  margin: var(--space-2) 0;
+  color: var(--text-mid);
+  font-size: var(--fs-sm);
+}
 
 /* Stale operations data is still useful, but it must never read as live. */
 .status-stale {
@@ -1521,6 +1761,10 @@ main {
   margin: 0 var(--space-2) var(--space-2);
 }
 
+/* The composer is on screen, so the one-tap way to it is a second copy of the
+   same control. It returns the moment the panel or the tab changes. */
+.shell:has(.context-panel:not(.collapsed) [data-context-content="status"]:not([hidden])) .talk-supervisor { display: none; }
+
 .talk-supervisor small {
   color: var(--text-mid);
   font-family: var(--font-mono);
@@ -1537,7 +1781,7 @@ main {
 
 .message textarea {
   width: 100%;
-  min-height: var(--toolbar-height);
+  min-height: calc(var(--toolbar-height) + var(--space-6));
   padding: var(--space-3);
   color: inherit;
   background: var(--bg-raised);
@@ -1829,7 +2073,12 @@ fieldset {
   gap: var(--space-2);
 }
 
-.pair-details dt { color: var(--text-mid); }
+.pair-details dt {
+  color: var(--text-mid);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
 .pair-details dd { margin: 0; overflow-wrap: anywhere; }
 
 .pair-status {
@@ -1967,6 +2216,14 @@ fieldset {
   /* Inline, so the chip's corner radius cannot slice the status dot (fig a1). */
   .machine-rail .machine-icon .machine-state { position: static; }
 
+  /* Portrait keeps the bar to four labelled controls. Machines live in the
+     drawer this bar opens: chips for them here truncated "Attic Linux" to
+     "Atti" beside a scrollbar the moment a second machine was paired, and
+     the header already names the one that is open. */
+  .machine-rail nav { display: none; }
+  .machine-rail .commander-mark,
+  .machine-rail .pair-machine { flex: 1 1 0; }
+
   .machine-drawer {
     position: fixed;
     inset: auto var(--space-2) calc(var(--machine-rail-width) + var(--space-2) + env(safe-area-inset-bottom)) var(--space-2);
@@ -2009,16 +2266,28 @@ fieldset {
 
   .session-header .actions { gap: var(--line-width); }
 
+  /* A 44px header leaves 36px for its controls; 32px was the smallest target
+     on the phone and the two the thumb uses most. */
+  .session-header .actions button,
+  .session-back,
+  .session-picker-toggle {
+    min-height: calc(var(--space-8) + var(--space-1));
+  }
+
   .session-header .actions button {
-    min-height: var(--space-8);
     padding: 0 var(--space-2);
     font-size: var(--fs-xs);
   }
 
-  .terminal-state {
-    width: calc(100% - var(--space-6));
-    margin-left: var(--space-1);
+  .drawer-header button {
+    width: var(--space-10);
+    min-height: var(--space-10);
   }
+
+  .remove-machine { min-height: var(--space-10); }
+
+  .terminal-state { width: calc(100% - var(--space-4)); }
+  .fleet-board { padding: var(--space-1) var(--space-1) var(--space-3); gap: var(--space-3); }
 
   .talk-supervisor {
     min-height: 48px;
@@ -2093,33 +2362,40 @@ fieldset {
     grid-column: 1;
     grid-row: 2;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: var(--space-10) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     width: auto;
     height: 100%;
     background: var(--bg-panel);
   }
 
-  .context-panel:not(.collapsed) .attention-rail {
-    flex-direction: row;
-    width: 100%;
-    height: var(--space-10);
-    padding: 0 var(--space-1);
+  /* Open, the panel's rail is gone: the tabs row closes it, and the envelope
+     is the Workers & Tasks tab it would have opened. A 48px row holding one
+     chevron and one glyph above a 40px tab row was two rows of chrome for
+     one decision. */
+  .context-panel:not(.collapsed) .attention-rail { display: none; }
+
+  .context-tabs {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) var(--rail-item-min);
+    flex-basis: var(--machine-rail-width);
+    align-items: center;
+    padding-right: var(--space-1);
   }
 
-  .context-panel:not(.collapsed) .attention-rail .rail-control,
-  .context-panel:not(.collapsed) .attention-rail-counts,
-  .context-panel:not(.collapsed) .mobile-message-toggle {
-    width: auto;
-    min-width: var(--space-8);
-    min-height: var(--space-8);
+  .context-panel-close {
+    display: grid;
+    place-items: center;
+    min-width: var(--rail-item-min);
+    min-height: var(--rail-item-min);
+    padding: 0;
+    color: var(--text-mid);
+    border-bottom: 0;
+    border-radius: var(--radius-card);
+    font-size: var(--fs-lg);
   }
-
-  .context-panel:not(.collapsed) .attention-counts--compact { flex-direction: row; }
 
   /* Toasts clear the bottom rail and the gesture bar instead of landing under them. */
   #toast { bottom: calc(var(--machine-rail-width) + var(--space-3) + env(safe-area-inset-bottom)); }
   .context-body { min-height: 0; }
-  .context-tabs { flex-basis: var(--space-10); }
   .attention-group-label { max-width: var(--mobile-attention-label-width); }
 
   .message { padding-bottom: env(safe-area-inset-bottom); }
@@ -2178,6 +2454,12 @@ fieldset {
      than the mount and pans instead of being redrawn at half its width. */
   .terminal-mount { overflow-x: auto; }
   .terminal-mount.transcript-active { overflow-x: hidden; }
+
+  /* A phone reorders by tapping a worker row to open it as primary; the three
+     reorder glyphs only ate the header the pane name needs. */
+  .pane-grid.pane-layout .pane-layout-controls .make-primary,
+  .pane-grid.pane-layout .pane-layout-controls .move-earlier,
+  .pane-grid.pane-layout .pane-layout-controls .move-later { display: none; }
 
   .pane-grid.pane-layout .pane-view-toggle[data-view="transcript"]::after { content: "▦"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .pane-view-toggle[data-view="terminal"]::after { content: "≡"; font-size: var(--fs-md); }
@@ -2240,7 +2522,9 @@ fieldset {
     padding-bottom: var(--space-1);
   }
 
+  /* Landscape has the height for machine tiles again, as initials. */
   .machine-rail nav {
+    display: flex;
     flex-direction: column;
     gap: var(--space-1);
     width: 100%;
@@ -2327,7 +2611,7 @@ fieldset {
     left: auto;
     grid-column: auto;
     grid-row: auto;
-    grid-template-rows: var(--space-10) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     width: min(var(--context-panel-width), 60vw);
     height: 100dvh;
     padding-right: env(safe-area-inset-right);

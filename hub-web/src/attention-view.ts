@@ -126,7 +126,7 @@ function renderPayload(card: AttentionCard, callbacks: AttentionPanelCallbacks):
   return details;
 }
 
-function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, options: AttentionPanelOptions): HTMLElement {
+function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, options: AttentionPanelOptions, groupLabel?: string): HTMLElement {
   const severity = card.content.severity;
   const article = document.createElement("article");
   article.className = `attention-item attention-item--${severity}`;
@@ -141,10 +141,16 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   const identity = document.createElement("span");
   identity.className = "attention-identity";
   identity.append(severityDot(severity));
-  const session = document.createElement("span");
-  session.className = "attention-session";
-  session.textContent = card.latest.session ?? card.latest.machineLabel;
-  identity.append(session);
+  // The group header already names the session; repeating it on every card
+  // in that group spent the eyebrow's width on the one thing it did not need
+  // to say. A card grouped under another label still states its own.
+  const owner = card.latest.session ?? card.latest.machineLabel;
+  if (owner !== groupLabel) {
+    const session = document.createElement("span");
+    session.className = "attention-session";
+    session.textContent = owner;
+    identity.append(session);
+  }
   if (card.count > 1) {
     const repeated = document.createElement("span");
     repeated.className = "attention-repeat";
@@ -227,7 +233,8 @@ function renderGroup(group: AttentionGroup, callbacks: AttentionPanelCallbacks, 
   header.append(toggle, button("Dismiss group", "attention-dismiss-group", () => void callbacks.dismiss(allItems)));
   const body = document.createElement("div");
   body.className = "attention-group-body";
-  for (const card of group.cards) body.append(renderCard(card, callbacks, options));
+  const groupLabel = group.overflow ? group.machineLabel : group.session ?? group.machineLabel;
+  for (const card of group.cards) body.append(renderCard(card, callbacks, options, groupLabel));
   section.append(header, body);
   return section;
 }

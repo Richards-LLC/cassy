@@ -675,13 +675,16 @@ mod tests {
 
     #[test]
     fn registry_skip_rejects_bare_folder_identity_and_nested_artifacts() {
-        TestEnvGuard::run_with_temp_home(|_| {
-            // Keep this fixture outside the temporary HOME and the system
-            // temporary root. A bare `.cas` folder under either root is
-            // intentionally classified as disposable. The runtime fixture
-            // parent also works when an archived test runs outside any Git
-            // checkout, while keeping the path on the runner's durable root.
-            let fixture_parent = crate::test_paths::runtime_fixture_parent();
+        let mut env = TestEnvGuard::temp_home();
+        let fixture_parent = crate::test_paths::runtime_fixture_parent();
+        // The worker cwd is under `.cas/worktrees`; stop Git at the fixture's
+        // parent so `git -C <fixture>/.cas` cannot inherit the checkout's
+        // `.git` directory and origin remote.
+        env.set("GIT_CEILING_DIRECTORIES", fixture_parent.as_os_str());
+        {
+            // Keep this fixture outside the temporary HOME and system
+            // temporary roots. GIT_CEILING_DIRECTORIES above is the
+            // isolation boundary for the enclosing checkout.
             let bare = tempfile::Builder::new()
                 .prefix("cas-1d41-bare-")
                 .tempdir_in(&fixture_parent)
@@ -698,7 +701,7 @@ mod tests {
                 registry_skip_for_known_roots(&copy, &[project]),
                 Some(RegistrySkip::NestedArtifacts { .. })
             ));
-        });
+        }
     }
 
     #[test]

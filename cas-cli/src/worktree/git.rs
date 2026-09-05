@@ -316,6 +316,25 @@ pub(crate) enum CheckoutRefresh {
     LeftStale { reason: String },
 }
 
+/// The branch a checkout currently has out, if it is on one at all.
+fn head_branch_of(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!branch.is_empty()).then_some(branch)
+}
+
+/// Twelve characters of a commit id — enough to identify it in a receipt.
+fn short_tip(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
 /// A worktree that currently has a given branch checked out (cas-0f04).
 #[derive(Debug, Clone)]
 struct LinkedCheckout {
@@ -389,12 +408,24 @@ impl Drop for TempWorktree {
 pub struct GitOperations {
     /// Path to the main repository root
     repo_root: PathBuf,
+    /// cas-0f04: linked checkouts of a merge target that were deliberately
+    /// left untouched, recorded so the operator's receipt can say so.
+    ///
+    /// A `tracing::warn!` is not delivery: the MCP caller sees a receipt, not
+    /// this process's logs, and reporting an ordinary success while a
+    /// checkout is stranded is the original defect at the user boundary.
+    /// Drained by [`Self::take_stale_checkout_notes`] when the receipt is
+    /// assembled.
+    stale_checkout_notes: std::sync::Mutex<Vec<String>>,
 }
 
 impl GitOperations {
     /// Create a new GitOperations instance for a repository
     pub fn new(repo_root: PathBuf) -> Self {
-        Self { repo_root }
+        Self {
+            repo_root,
+            stale_checkout_notes: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     /// Detect the repository root from a path
@@ -1355,19 +1386,14 @@ impl GitOperations {
         // ancestor of its own HEAD.
         for checkout in &checkouts {
             if let CheckoutRefresh::LeftStale { reason } =
-                self.refresh_linked_checkout(&checkout.path, &old_tip, &new_tip)
+                self.refresh_linked_checkout(&checkout.path, target_branch, &old_tip, &new_tip)
             {
-                // Never silent: the ref moved under this checkout and we
-                // declined to write over whatever is there now.
-                tracing::warn!(
-                    "target branch {target_branch} advanced {} -> {} but the checkout at {} was \
-                     left untouched ({reason}). Its index and working tree still describe {}; \
-                     preserve the work there (commit or stash it), then reconcile that checkout \
-                     deliberately. Nothing was overwritten.",
-                    &old_tip[..old_tip.len().min(12)],
-                    &new_tip[..new_tip.len().min(12)],
-                    checkout.path.display(),
-                    &old_tip[..old_tip.len().min(12)],
+                self.record_stale_checkout(
+                    target_branch,
+                    &checkout.path,
+                    &old_tip,
+                    &new_tip,
+                    &reason,
                 );
             }
         }
@@ -1409,6 +1435,57 @@ impl GitOperations {
         found
     }
 
+    /// Record a checkout the merge deliberately did not touch.
+    fn record_stale_checkout(
+        &self,
+        branch: &str,
+        path: &Path,
+        old_tip: &str,
+        new_tip: &str,
+        reason: &str,
+    ) {
+        let note = format!(
+            "\n⚠️  Stale checkout: {branch} advanced {} -> {} but the checkout at {} was left \
+             untouched ({reason}). Its index and working tree still describe {}, so `git status` \
+             there will show the merged content as staged deletions. Nothing was overwritten — \
+             preserve what is there (commit or stash it), then reconcile that checkout \
+             deliberately.",
+            short_tip(old_tip),
+            short_tip(new_tip),
+            path.display(),
+            short_tip(old_tip),
+        );
+        tracing::warn!("{}", note.trim());
+        if let Ok(mut notes) = self.stale_checkout_notes.lock() {
+            notes.push(note);
+        }
+    }
+
+    /// Test seam for the receipt contract: records a note exactly as a real
+    /// refusal does, without needing to drive a whole merge.
+    #[cfg(test)]
+    pub(crate) fn record_stale_checkout_for_test(
+        &self,
+        branch: &str,
+        path: &Path,
+        old_tip: &str,
+        new_tip: &str,
+        reason: &str,
+    ) {
+        self.record_stale_checkout(branch, path, old_tip, new_tip, reason);
+    }
+
+    /// Drain the stale-checkout notes recorded since the last call.
+    ///
+    /// The receipt assembler calls this after a merge so the operator reads
+    /// about a stranded checkout in the response, not only in a log file.
+    pub fn take_stale_checkout_notes(&self) -> Vec<String> {
+        self.stale_checkout_notes
+            .lock()
+            .map(|mut notes| std::mem::take(&mut *notes))
+            .unwrap_or_default()
+    }
+
     /// Advance a linked checkout from `old_tip` to `new_tip`, refusing rather
     /// than overwriting if anything there changed.
     ///
@@ -1425,6 +1502,7 @@ impl GitOperations {
     pub(crate) fn refresh_linked_checkout(
         &self,
         path: &Path,
+        branch: &str,
         old_tip: &str,
         new_tip: &str,
     ) -> CheckoutRefresh {
@@ -1432,6 +1510,23 @@ impl GitOperations {
             return CheckoutRefresh::LeftStale {
                 reason: "checkout directory no longer exists".to_string(),
             };
+        }
+        // The checkout may have been switched to a different branch inside the
+        // window. Advancing it to this target's tip would then be a silent
+        // checkout of a branch nobody asked for, so re-verify identity here
+        // rather than trusting the pre-merge listing.
+        match head_branch_of(path) {
+            Some(current) if current == branch => {}
+            Some(current) => {
+                return CheckoutRefresh::LeftStale {
+                    reason: format!("checkout moved to branch {current} during the merge"),
+                };
+            }
+            None => {
+                return CheckoutRefresh::LeftStale {
+                    reason: "checkout is no longer on a branch (detached HEAD)".to_string(),
+                };
+            }
         }
         let output = Command::new("git")
             .args(["read-tree", "-m", "-u", old_tip, new_tip])

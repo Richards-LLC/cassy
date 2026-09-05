@@ -2754,6 +2754,14 @@ impl CasCore {
             } else {
                 manager.merge_and_cleanup(&mut worktree, force, do_cleanup)
             };
+            // cas-0f04: a linked checkout of the target that the merge
+            // declined to touch must reach the OPERATOR, not just this
+            // process's log. Reporting an ordinary success while a checkout is
+            // stranded is the defect this task exists to remove, so the note
+            // rides the same receipt as the reconcile line.
+            for note in manager.git().take_stale_checkout_notes() {
+                reconcile_note.push_str(&note);
+            }
             match merge_result {
                 Ok(commit) => commit,
                 // cas-4702: the ephemeral-worktree merge lost its

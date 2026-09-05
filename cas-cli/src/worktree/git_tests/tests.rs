@@ -2046,7 +2046,7 @@ fn a_refresh_refuses_to_overwrite_an_edit_made_after_the_cleanliness_check() {
     let precious = sibling.join("README.md");
     std::fs::write(&precious, "edited during the merge window\n").unwrap();
 
-    let outcome = git.refresh_linked_checkout(&sibling, &old_tip, &new_tip);
+    let outcome = git.refresh_linked_checkout(&sibling, &target, &old_tip, &new_tip);
 
     match outcome {
         CheckoutRefresh::LeftStale { reason } => {
@@ -2082,7 +2082,7 @@ fn a_refresh_advances_a_checkout_that_is_still_clean() {
     git.compare_and_swap_ref(&target, &new_tip, &old_tip).unwrap();
 
     assert_eq!(
-        git.refresh_linked_checkout(&sibling, &old_tip, &new_tip),
+        git.refresh_linked_checkout(&sibling, &target, &old_tip, &new_tip),
         CheckoutRefresh::Updated
     );
     assert_eq!(worktree_status(&sibling), "");
@@ -2120,7 +2120,7 @@ fn a_refresh_preserves_a_staged_edit_made_after_the_cleanliness_check() {
         .unwrap();
     assert!(add.status.success());
 
-    let outcome = git.refresh_linked_checkout(&sibling, &old_tip, &new_tip);
+    let outcome = git.refresh_linked_checkout(&sibling, &target, &old_tip, &new_tip);
 
     assert!(
         matches!(outcome, CheckoutRefresh::LeftStale { .. }),
@@ -2139,6 +2139,96 @@ fn a_refresh_preserves_a_staged_edit_made_after_the_cleanliness_check() {
     assert!(
         String::from_utf8_lossy(&staged.stdout).contains("README.md"),
         "the staged entry itself must still be staged"
+    );
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// cas-0f04, review follow-up. A tracing warning is not delivery: the MCP
+/// caller reads a receipt, not this process's log. A merge that leaves a
+/// checkout stranded must say so in the operator-visible text, or it is the
+/// same silent-state defect one layer up.
+#[test]
+fn a_stale_checkout_is_reported_to_the_caller_not_only_logged() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let old_tip = git.resolve_commit(&target).unwrap();
+    let new_tip = {
+        let out = Command::new("git")
+            .args(["rev-parse", "factory/worker"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git.compare_and_swap_ref(&target, &new_tip, &old_tip).unwrap();
+
+    // Work appears in the window, so the refresh must decline.
+    std::fs::write(sibling.join("README.md"), "edited in the window\n").unwrap();
+    assert!(matches!(
+        git.refresh_linked_checkout(&sibling, &target, &old_tip, &new_tip),
+        CheckoutRefresh::LeftStale { .. }
+    ));
+    git.record_stale_checkout_for_test(&target, &sibling, &old_tip, &new_tip, "not uptodate");
+
+    let notes = git.take_stale_checkout_notes();
+    assert_eq!(notes.len(), 1, "the caller must receive exactly one note");
+    let note = &notes[0];
+    assert!(note.contains(&sibling.display().to_string()), "{note}");
+    assert!(note.contains(&old_tip[..12]), "{note}");
+    assert!(note.contains(&new_tip[..12]), "{note}");
+    assert!(note.contains("Nothing was overwritten"), "{note}");
+    assert!(note.contains("commit or stash"), "{note}");
+    assert!(
+        !note.to_lowercase().contains("read-tree") && !note.to_lowercase().contains("reset"),
+        "the note must not hand over a recovery that erases the work: {note}"
+    );
+
+    // Draining is one-shot: a later merge must not re-report a stale checkout
+    // that has since been dealt with.
+    assert!(git.take_stale_checkout_notes().is_empty());
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// A checkout that switched to a different branch inside the window must not
+/// be advanced to the old target's tip — that would be a silent checkout of a
+/// branch nobody asked for.
+#[test]
+fn a_checkout_switched_to_another_branch_is_not_refreshed_as_the_target() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let old_tip = git.resolve_commit(&target).unwrap();
+    let new_tip = {
+        let out = Command::new("git")
+            .args(["rev-parse", "factory/worker"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git.compare_and_swap_ref(&target, &new_tip, &old_tip).unwrap();
+
+    // The operator moved that checkout onto their own branch in the window.
+    let switched = Command::new("git")
+        .args(["checkout", "-q", "-b", "operator/elsewhere"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    assert!(switched.status.success());
+
+    match git.refresh_linked_checkout(&sibling, &target, &old_tip, &new_tip) {
+        CheckoutRefresh::LeftStale { reason } => {
+            assert!(
+                reason.contains("operator/elsewhere"),
+                "the refusal must name the branch it found: {reason}"
+            );
+        }
+        CheckoutRefresh::Updated => {
+            panic!("a checkout on another branch must never be advanced to the target's tip")
+        }
+    }
+    assert!(
+        !sibling.join("delivered.txt").exists(),
+        "the target's content must not appear on the operator's branch"
     );
     let _ = std::fs::remove_dir_all(&sibling);
 }

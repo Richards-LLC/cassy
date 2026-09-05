@@ -1158,7 +1158,7 @@ fn local_surface_specs() -> [LocalSurfaceSpec; 8] {
             team: "team_id",
             share: "share",
             revision: "coalesce(updated_at, created)",
-            stale: "case when valid_until is not null and valid_until < datetime('now') then 1 else 0 end",
+            stale: "case when valid_until is not null and datetime(valid_until) < datetime('now') then 1 else 0 end",
             body_available: true,
             locator: "id",
             extra_scope_predicate: "archived = 0",
@@ -1595,10 +1595,11 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
         (RecallRole::Worker, EvidenceSurface::History) => 0.20,
         (RecallRole::Worker, EvidenceSurface::Rule) => 0.16,
         (RecallRole::Worker, EvidenceSurface::Memory) => 0.14,
-        // Preserve the supervisor contract that an active task outranks a
-        // denser code-text match. Structural identity terms no longer dilute
-        // lexical scores, so this needs the full task-vs-code separation.
-        (RecallRole::Supervisor, EvidenceSurface::Task) => 0.31,
+        // Preserve the established supervisor contract for current,
+        // multi-term task evidence without boosting weak or closed tasks. In
+        // its three-term fixture, 0.31 puts a two-term task at 0.75, narrowly
+        // above a three-term code match at 0.74; 0.30 only ties that row.
+        (RecallRole::Supervisor, EvidenceSurface::Task) if !row.stale && matched.len() >= 2 => 0.31,
         (RecallRole::Supervisor, EvidenceSurface::Spec) => 0.22,
         (RecallRole::Supervisor, EvidenceSurface::History) => 0.20,
         (RecallRole::Supervisor, EvidenceSurface::Rule) => 0.14,
@@ -4011,7 +4012,81 @@ mod tests {
         let supervisor = identity(RecallRole::Supervisor);
         let supervisor_rows = retrieve_candidates(&supervisor, &request, &[&retriever]).unwrap();
         assert_eq!(supervisor_rows.candidates[0].evidence_id, "cas-parser");
+        assert_eq!(supervisor_rows.candidates[0].role_score, 0.31);
+        assert_eq!(supervisor_rows.candidates[1].evidence_id, "sym-parser");
+        assert_eq!(supervisor_rows.candidates[1].role_score, 0.08);
+        assert!(
+            supervisor_rows.candidates[0].relevance > supervisor_rows.candidates[1].relevance,
+            "a current two-term task must narrowly outrank a three-term code match"
+        );
         assert!(!dir.path().join("index/code-vectors").exists());
+    }
+
+    #[test]
+    fn supervisor_task_boost_requires_current_multi_term_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            create table entries (
+                id text primary key, title text, content text, scope text,
+                team_id text, share text, updated_at text, created text,
+                valid_until text, archived integer
+            );
+            create table tasks (
+                id text primary key, title text, description text, design text,
+                notes text, team_id text, share text, updated_at text, status text
+            );
+            create table code_symbols (
+                id text primary key, qualified_name text, name text,
+                file_path text, documentation text, signature text,
+                scope text, content_hash text
+            );
+            insert into entries values
+                ('current-memory', '', 'signing artifact guidance', 'project',
+                 null, null, 'r1', 'r1', null, 0);
+            insert into tasks values
+                ('weak-task', 'release checklist', '', '', '', null, null, 'r1', 'open'),
+                ('closed-task', 'release signing artifact recovery', '', '', '',
+                 null, null, 'r1', 'closed');
+            insert into code_symbols values
+                ('current-code', 'release::signing', 'signing', 'src/release.rs',
+                 'signing artifact implementation', 'fn sign()', 'project', 'r1');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        let candidates = retrieve_candidates(
+            &identity(RecallRole::Supervisor),
+            &RecallRequest {
+                prompt: "release signing artifact recovery".into(),
+                ..Default::default()
+            },
+            &[&retriever],
+        )
+        .unwrap()
+        .candidates;
+        let ids = candidates
+            .iter()
+            .map(|candidate| candidate.evidence_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(&ids[..2], &["current-code", "current-memory"]);
+        assert_eq!(ids[2], "weak-task");
+        assert_eq!(ids[3], "closed-task");
+        let weak_task = candidates
+            .iter()
+            .find(|candidate| candidate.evidence_id == "weak-task")
+            .unwrap();
+        let closed_task = candidates
+            .iter()
+            .find(|candidate| candidate.evidence_id == "closed-task")
+            .unwrap();
+        assert!(weak_task.lexical_weak);
+        assert_eq!(weak_task.role_score, 0.08);
+        assert_eq!(closed_task.role_score, 0.08);
     }
 
     #[test]
@@ -4255,6 +4330,87 @@ mod tests {
             !ids.contains(&"obsolete-release-procedure"),
             "expired procedural memory was presented as ambient authority: {packet:?}"
         );
+    }
+
+    #[test]
+    fn same_day_rfc3339_expiry_is_compared_as_time_not_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            create table entries (
+                id text primary key, title text, content text, scope text,
+                team_id text, share text, updated_at text, created text,
+                valid_until text, archived integer
+            );
+            "#,
+        )
+        .unwrap();
+        let today = Utc::now().format("%Y-%m-%d");
+        conn.execute(
+            "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, ?4, 0)",
+            params![
+                "expired-same-day",
+                "same day release preference expired",
+                today.to_string(),
+                format!("{today}T00:00:00Z")
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, ?4, 0)",
+            params![
+                "current-same-day",
+                "same day release preference current",
+                today.to_string(),
+                format!("{today}T23:59:59Z")
+            ],
+        )
+        .unwrap();
+        let expired_with_offset = (Utc::now() - chrono::TimeDelta::minutes(1))
+            .with_timezone(&chrono::FixedOffset::east_opt(5 * 60 * 60).unwrap())
+            .to_rfc3339();
+        conn.execute(
+            "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, ?4, 0)",
+            params![
+                "expired-offset",
+                "same day release preference offset expired",
+                today.to_string(),
+                expired_with_offset
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, null, 0)",
+            params![
+                "no-expiry",
+                "same day release preference stable",
+                today.to_string()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        let candidates = retrieve_candidates(
+            &identity(RecallRole::Supervisor),
+            &RecallRequest {
+                prompt: "same day release preference".into(),
+                ..Default::default()
+            },
+            &[&retriever],
+        )
+        .unwrap();
+        let ids = candidates
+            .candidates
+            .iter()
+            .map(|candidate| candidate.evidence_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(ids.contains(&"current-same-day"));
+        assert!(ids.contains(&"no-expiry"));
+        assert!(!ids.contains(&"expired-same-day"));
+        assert!(!ids.contains(&"expired-offset"));
     }
 
     /// An operator decision and the deployed runtime state are complementary

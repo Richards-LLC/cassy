@@ -425,6 +425,11 @@ impl CasService {
     pub(super) async fn task_close(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskCloseRequest;
         let inline_external_ref = req.external_ref.clone();
+        // cas-099d, recurring after GH #272/#294/#304/#333: the unified
+        // request schema accepts execution_note on close, so dropping it here
+        // made the documented no-code escape discoverable only after exact
+        // verification had locked the ordinary update path.
+        let inline_execution_note = req.execution_note.clone();
         let effective_supervisor_override = req.effective_supervisor_override();
         let negative_result = req.negative_result.unwrap_or(false).then(|| {
             crate::mcp::tools::NegativeResultCloseRequest {
@@ -451,6 +456,7 @@ impl CasService {
                 req.completion_receipt,
                 negative_result,
                 inline_external_ref,
+                inline_execution_note,
             )
             .await
     }

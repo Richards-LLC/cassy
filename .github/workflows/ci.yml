@@ -50,6 +50,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
   RUSTC_WRAPPER: sccache
   # The action supplies GitHub cache-v2 credentials. Keep one explicit CAS
   # namespace so every CI job can reuse identical compiler objects.

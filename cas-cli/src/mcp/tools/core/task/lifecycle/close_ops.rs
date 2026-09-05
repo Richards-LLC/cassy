@@ -1957,7 +1957,7 @@ impl CasCore {
         &self,
         params: Parameters<TaskCloseRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.cas_task_close_with_completion(params, None, None, None)
+        self.cas_task_close_with_completion(params, None, None, None, None)
             .await
     }
 
@@ -1967,6 +1967,7 @@ impl CasCore {
         completion_receipt: Option<String>,
         negative_result: Option<NegativeResultCloseRequest>,
         inline_external_ref: Option<String>,
+        inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
@@ -2060,6 +2061,27 @@ impl CasCore {
                 "TASK CLOSE REJECTED: {} is cancelled without delivery, not closed/delivered. Reopen it first if work should resume; otherwise leave its cancellation history intact.",
                 task.id
             )));
+        }
+
+        // cas-099d, recurring after GH #272/#294/#304/#333: close-time
+        // no-code intent is delivery metadata, not a separate task-scope edit.
+        // Apply it to the same in-memory task that every later gate reads. If
+        // this attempt creates a verification dispatch, the existing pending
+        // projection persists the declaration before that exact proof locks
+        // ordinary task.update; if the dispatch is already approved, the
+        // final close write persists it atomically with the closed state.
+        if let Some(raw) = inline_execution_note.as_deref() {
+            let validated = match crate::mcp::tools::types::validate_execution_note(Some(raw)) {
+                Ok(value) => value,
+                Err(message) => return Ok(Self::tool_error(message)),
+            };
+            if validated.as_deref() != Some("no-code") {
+                return Ok(Self::tool_error(
+                    "INLINE EXECUTION NOTE REJECTED: task close accepts only execution_note=no-code, paired with a portable external_ref. Record other execution methodologies with task action=update before requesting verification."
+                        .to_string(),
+                ));
+            }
+            task.execution_note = validated;
         }
 
         if !(supervisor_override && is_supervisor_from_env())
@@ -9608,7 +9630,7 @@ pub(crate) fn check_zero_commit_close(
         return ZeroCommitCloseOutcome::AmbiguousCodeTask(format!(
             "⚠️ NO-DIFF CLOSE ON CODE TASK\n\n\
             task close rejected: this is a {task_type_str} task with no \
-            no execution_note, no merge evidence, and \
+            execution_note, no merge evidence, and \
             {commit_count} commit(s) on the worker branch that produce an \
             EMPTY diff vs {parent_branch} (a sync/merge-only commit, e.g. \
             `git merge --no-ff` with no unique work, not task work). That \
@@ -9629,9 +9651,9 @@ pub(crate) fn check_zero_commit_close(
                retry close with `commit_receipt=<sha>` (full or an \
                unambiguous abbreviation).\n\
             3. If this task was resolved without code (fixed by a sibling task, \
-               docs-only, characterization-only): update the task with an \
-               execution_note to signal intentional no-code work:\n\
-               `mcp__cas__task action=update id={task_id} execution_note=additive-only`\n\
+               docs-only, characterization-only), retry close with explicit \
+               no-code intent and its portable proof in the same command:\n\
+               `mcp__cas__task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>`\n\
             4. Ask the supervisor to audit the merge. Only a supervisor may \
                close with `supervisor_override=true` and a reason recording \
                that audit if the work was intentionally resolved without code."
@@ -9652,7 +9674,7 @@ pub(crate) fn check_zero_commit_close(
     ZeroCommitCloseOutcome::AmbiguousCodeTask(format!(
         "⚠️ ZERO-COMMIT CLOSE ON CODE TASK\n\n\
         task close rejected: this is a {task_type_str} task with no \
-        no execution_note and 0 commits on the \
+        execution_note and 0 commits on the \
         worker branch. That combination is ambiguous — either the work \
         wasn't committed yet, or this task was resolved without code.\n\n\
         📂 Worker worktree: {wt_display}\n\
@@ -9661,9 +9683,9 @@ pub(crate) fn check_zero_commit_close(
         1. If you wrote code but forgot to commit: stage and commit your \
            changes, then retry close.\n\
         2. If this task was resolved without code (fixed by a sibling task, \
-           docs-only, characterization-only): update the task with an \
-           execution_note to signal intentional no-code work:\n\
-           `mcp__cas__task action=update id={task_id} execution_note=additive-only`\n\
+           docs-only, characterization-only), retry close with explicit \
+           no-code intent and its portable proof in the same command:\n\
+           `mcp__cas__task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>`\n\
         3. If the supervisor already merged this task's work — including an \
            out-of-band merge after conflict rework cleared the old anchor — \
            find the SHA of the worker task commit OR the merge commit \

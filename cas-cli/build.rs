@@ -3,7 +3,10 @@
 //! Captures git commit hash and build timestamp for version info.
 //! Also loads telemetry keys from .env file for compile-time embedding.
 
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn main() {
     println!("cargo:rerun-if-changed=../hub-web/dist/index.html");
@@ -45,13 +48,100 @@ fn main() {
     println!("cargo:rustc-env=CAS_GIT_HASH={git_info}");
     println!("cargo:rustc-env=CAS_BUILD_DATE={build_date}");
 
-    // Rebuild if git HEAD changes
-    println!("cargo:rerun-if-changed=../.git/HEAD");
-    println!("cargo:rerun-if-changed=../.git/index");
+    // Rebuild if git metadata changes. A linked worktree has a `.git` file,
+    // not a directory, so resolve the per-worktree and common git directories
+    // before registering inputs. Watching only files that exist also avoids
+    // Cargo treating optional or packed refs as permanently dirty inputs.
+    watch_git_paths();
 
     // Rebuild if .env changes
-    println!("cargo:rerun-if-changed=../.env");
-    println!("cargo:rerun-if-changed=.env");
+    watch_optional_path(Path::new("../.env"));
+    watch_optional_path(Path::new(".env"));
+}
+
+fn watch_if_exists(path: &Path) {
+    if path.exists() {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+}
+
+fn watch_optional_path(path: &Path) {
+    watch_if_exists(path);
+
+    // Cargo cannot observe a file that does not exist yet. Watching the
+    // nearest existing parent gives creation/deletion transitions a bounded
+    // inventory signal without making the missing file itself permanently
+    // dirty.
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    watch_existing_ancestor(parent);
+}
+
+fn watch_existing_ancestor(path: &Path) {
+    let mut candidate = path;
+    loop {
+        if candidate.exists() {
+            watch_if_exists(candidate);
+            return;
+        }
+        let Some(parent) = candidate.parent() else {
+            return;
+        };
+        if parent == candidate {
+            return;
+        }
+        candidate = parent;
+    }
+}
+
+fn watch_git_paths() {
+    let Some(git_dir) = git_path("--git-dir") else {
+        return;
+    };
+    let Some(git_common_dir) = git_path("--git-common-dir") else {
+        return;
+    };
+
+    watch_if_exists(&git_dir.join("HEAD"));
+    watch_if_exists(&git_dir.join("index"));
+
+    if let Some(symbolic_head) = git_output(&["symbolic-ref", "--quiet", "HEAD"])
+        && symbolic_head.starts_with("refs/")
+    {
+        let branch_ref = git_common_dir.join(symbolic_head);
+        watch_if_exists(&branch_ref);
+        watch_existing_ancestor(branch_ref.parent().unwrap_or(&git_common_dir));
+    }
+
+    // A branch ref can be packed instead of having a loose file. Registering
+    // this existing file keeps ref changes observable without adding a missing
+    // path that would make every build dirty.
+    watch_if_exists(&git_common_dir.join("packed-refs"));
+}
+
+fn git_path(kind: &str) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", kind])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Load telemetry keys from .env file and pass to compiler

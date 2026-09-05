@@ -19383,6 +19383,140 @@ mod epic_status_gate_tests {
         );
     }
 
+    /// cas-9eae1: once an anchor is reachable from the target, a conflict
+    /// resolution may replace its exact hunk at integration and a later
+    /// first-parent edit may replace that evolved text again. The later path
+    /// touch is the only durable evidence that this is intentional lineage
+    /// evolution, not a dropped delivery.
+    #[test]
+    fn ancestor_anchor_with_later_same_lineage_evolution_is_not_stranded_cas_9eae1() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+
+        std::fs::write(p.join("shared.rs"), "fn value() { base(); }\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(p, &["commit", "-q", "-m", "seed shared file"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(p.join("shared.rs"), "fn value() { worker_v1(); }\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(p, &["commit", "-q", "-m", "worker delivery"]);
+        let anchor = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+
+        // A merge commit carries the anchor in its second parent but resolves
+        // the exact delivery hunk to an evolved implementation.
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-s",
+                "ours",
+                "factory/worker",
+                "-m",
+                "integrate evolved worker delivery",
+            ],
+        );
+        std::fs::write(p.join("shared.rs"), "fn value() { worker_v2(); }\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(p, &["commit", "-q", "-m", "evolve integrated worker delivery"]);
+
+        assert!(
+            git_commit_is_ancestor(p, &anchor, "main"),
+            "precondition: the delivery anchor must be reachable from main"
+        );
+        assert_eq!(
+            count_unmerged_against_targets(p, "factory/worker", "main"),
+            Some(0),
+            "precondition: the worker branch tip is an ancestor of main"
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(p, &anchor, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["shared.rs".to_string()]
+            },
+            "precondition: the old checker reports the false dropped-content verdict"
+        );
+
+        let mut task = child("cas-evolved", TaskStatus::Closed, Some("worker"));
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&task), "main", p);
+        let row = &statuses[0];
+        assert_eq!(
+            row.unmerged_count, 0,
+            "an ancestor branch tip must not receive the dropped-content sentinel: {row:?}"
+        );
+        assert!(
+            row.content_evolution_note.is_some(),
+            "later same-lineage path evolution must be recorded: {row:?}"
+        );
+        assert!(row.dropped_paths.is_empty(), "evolved content is not dropped: {row:?}");
+
+        let report = render_epic_status_report("cas-epic", "main", &statuses);
+        assert!(report.contains("merged (content evolved)"), "{report}");
+        assert!(
+            !report.contains("hard-blocked"),
+            "ancestor branch with evolved delivery must not hard-block: {report}"
+        );
+    }
+
+    /// cas-9eae1 fence: a reachable delivery with no later first-parent path
+    /// touch and absent target content remains a real dropped-content verdict.
+    #[test]
+    fn ancestor_anchor_without_later_path_evolution_stays_dropped_cas_9eae1() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+
+        std::fs::write(p.join("shared.rs"), "fn value() { base(); }\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(p, &["commit", "-q", "-m", "seed shared file"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(p.join("shared.rs"), "fn value() { worker_v1(); }\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(p, &["commit", "-q", "-m", "worker delivery"]);
+        let anchor = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+
+        // `ours` intentionally carries the anchor in history while removing
+        // its file effect. Nothing after the integration touches shared.rs.
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-s",
+                "ours",
+                "factory/worker",
+                "-m",
+                "drop worker delivery",
+            ],
+        );
+
+        assert!(git_commit_is_ancestor(p, &anchor, "main"));
+        assert_eq!(
+            delivery_content_presence_on_target(p, &anchor, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["shared.rs".to_string()]
+            },
+            "a genuine dropped hunk with no later path touch must remain dropped"
+        );
+
+        let mut task = child("cas-dropped", TaskStatus::Closed, Some("worker"));
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&task), "main", p);
+        let row = &statuses[0];
+        assert_eq!(row.dropped_paths, vec!["shared.rs".to_string()]);
+        assert!(
+            row.unmerged_count > 0,
+            "real dropped content must retain the fail-closed sentinel: {row:?}"
+        );
+        let report = render_epic_status_report("cas-epic", "main", &statuses);
+        assert!(report.contains("content dropped"), "{report}");
+        assert!(report.contains("hard-blocked"), "{report}");
+    }
+
     #[test]
     fn measured_negative_result_has_no_delivery_for_epic_merge_accounting_cas_6c50() {
         let dir = init_epic_repo(&[("experimenter", 1)]);

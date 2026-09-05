@@ -66,17 +66,13 @@ fn watch_if_exists(path: &Path) {
 }
 
 fn watch_optional_path(path: &Path) {
+    // Cargo treats a missing rerun input as dirty on every invocation. It also
+    // recursively fingerprints directories, so watching the parent of an
+    // absent root-level `.env` would include an in-tree `target/` directory
+    // and make the build script perpetually stale. Existing optional files
+    // remain precise inputs; absent files are picked up on the next build
+    // triggered by another input (or a clean rebuild).
     watch_if_exists(path);
-
-    // Cargo cannot observe a file that does not exist yet. Watching the
-    // nearest existing parent gives creation/deletion transitions a bounded
-    // inventory signal without making the missing file itself permanently
-    // dirty.
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    watch_existing_ancestor(parent);
 }
 
 fn watch_existing_ancestor(path: &Path) {
@@ -111,8 +107,14 @@ fn watch_git_paths() {
         && symbolic_head.starts_with("refs/")
     {
         let branch_ref = git_common_dir.join(symbolic_head);
-        watch_if_exists(&branch_ref);
-        watch_existing_ancestor(branch_ref.parent().unwrap_or(&git_common_dir));
+        if branch_ref.exists() {
+            watch_if_exists(&branch_ref);
+        } else {
+            // The current ref may be packed. Watch its existing namespace so
+            // creation of the loose ref is observed; after that transition,
+            // the next build switches to the exact file above.
+            watch_existing_ancestor(branch_ref.parent().unwrap_or(&git_common_dir));
+        }
     }
 
     // A branch ref can be packed instead of having a loose file. Registering

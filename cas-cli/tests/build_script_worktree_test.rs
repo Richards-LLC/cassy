@@ -158,6 +158,12 @@ fn cargo_build_script_stays_fresh_and_tracks_worktree_transitions() {
     run_cargo(&normal_package, &normal_target, &["generate-lockfile"]);
     run_cargo(&linked_package, &linked_target, &["generate-lockfile"]);
 
+    fs::write(
+        linked_package.join(".env"),
+        "CAS_POSTHOG_API_KEY=package-initial\n",
+    )
+    .expect("create package-local optional .env before the first build");
+
     let normal_first = run_cargo(&normal_package, &normal_target, &["check"]);
     assert_no_missing_input(&normal_first);
     let normal_second = run_cargo(&normal_package, &normal_target, &["check"]);
@@ -174,6 +180,13 @@ fn cargo_build_script_stays_fresh_and_tracks_worktree_transitions() {
     assert!(
         !linked_second.contains("Compiling build-watch-fixture"),
         "unchanged linked checkout reran its build script:\n{linked_second}"
+    );
+    let initial_env_output = cargo_run_hash(&linked_package, &linked_target);
+    assert!(
+        initial_env_output
+            .lines()
+            .any(|line| line == "package-initial"),
+        "the initial package-local .env was not embedded:\n{initial_env_output}"
     );
 
     run_git(
@@ -246,38 +259,95 @@ fn cargo_build_script_stays_fresh_and_tracks_worktree_transitions() {
         "packed-to-loose branch update did not refresh embedded metadata"
     );
 
+    let newer_linked_sha = run_git(
+        &linked_repo,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &new_linked_sha,
+            "-m",
+            "loose-to-loose",
+        ],
+    )
+    .trim()
+    .to_string();
+    run_git(
+        &linked_repo,
+        &[
+            "update-ref",
+            "refs/heads/linked",
+            &newer_linked_sha,
+            &new_linked_sha,
+        ],
+    );
+    assert_eq!(
+        fs::read(&head_path).expect("read linked HEAD after loose update-ref"),
+        head_before,
+        "updating a loose branch ref must not rewrite linked HEAD"
+    );
+    assert_eq!(
+        fs::read(&index_path).expect("read linked index after loose update-ref"),
+        index_before,
+        "updating a loose branch ref must not rewrite linked index"
+    );
+    let loose_update = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&loose_update);
+    let loose_update_hash = cargo_run_hash(&linked_package, &linked_target);
+    assert_ne!(
+        loose_update_hash, loose_hash,
+        "updating an existing loose branch ref did not refresh embedded metadata"
+    );
+
+    let detached_sha = run_git(
+        &linked_repo,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &newer_linked_sha,
+            "-m",
+            "detached-head",
+        ],
+    )
+    .trim()
+    .to_string();
+    run_git(&linked_repo, &["checkout", "-q", "--detach", &detached_sha]);
+    let detached_update = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&detached_update);
+    let detached_hash = cargo_run_hash(&linked_package, &linked_target);
+    assert_ne!(
+        detached_hash, loose_update_hash,
+        "checking out a detached HEAD did not refresh embedded metadata"
+    );
+    let detached_repeat = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&detached_repeat);
+    assert!(
+        !detached_repeat.contains("Compiling build-watch-fixture"),
+        "unchanged detached HEAD reran its build script:\n{detached_repeat}"
+    );
+
     fs::write(
         linked_package.join(".env"),
-        "CAS_POSTHOG_API_KEY=package-created\n",
+        "CAS_POSTHOG_API_KEY=package-updated\n",
     )
-    .expect("create package-local optional .env");
-    let package_env_transition = run_cargo(&linked_package, &linked_target, &["check"]);
-    assert_no_missing_input(&package_env_transition);
+    .expect("update package-local optional .env");
+    let package_env_update = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&package_env_update);
     let package_env_output = cargo_run_hash(&linked_package, &linked_target);
     assert!(
         package_env_output
             .lines()
-            .any(|line| line == "package-created"),
-        "creating an absent package-local .env did not invalidate the build:\n{package_env_output}"
+            .any(|line| line == "package-updated"),
+        "updating an existing package-local .env did not invalidate the build:\n{package_env_output}"
     );
     fs::remove_file(linked_package.join(".env")).expect("remove package-local optional .env");
-
-    fs::write(
-        repo.path().join("linked/.env"),
-        "CAS_POSTHOG_API_KEY=root-created\n",
-    )
-    .expect("create optional .env");
-    let env_transition = run_cargo(&linked_package, &linked_target, &["check"]);
-    assert_no_missing_input(&env_transition);
-    let env_output = cargo_run_hash(&linked_package, &linked_target);
+    let package_env_delete = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&package_env_delete);
+    let package_env_repeat = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&package_env_repeat);
     assert!(
-        env_output.lines().any(|line| line == "root-created"),
-        "creating an absent .env did not invalidate the build:\n{env_output}"
-    );
-    let env_repeat = run_cargo(&linked_package, &linked_target, &["check"]);
-    assert_no_missing_input(&env_repeat);
-    assert!(
-        !env_repeat.contains("Compiling build-watch-fixture"),
-        "unchanged linked checkout after .env creation reran its build script:\n{env_repeat}"
+        !package_env_repeat.contains("Compiling build-watch-fixture"),
+        "unchanged linked checkout after .env deletion reran its build script:\n{package_env_repeat}"
     );
 }

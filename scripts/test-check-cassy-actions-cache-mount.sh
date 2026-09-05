@@ -19,9 +19,11 @@ cat >"$fixture_root/bin/findmnt" <<'EOF'
 field=""
 target=""
 first_only=0
+raw=0
 while (($#)); do
     case "$1" in
         -f|--first-only) first_only=1; shift ;;
+        -r|--raw) raw=1; shift ;;
         -o) field="$2"; shift 2 ;;
         -T) target="$2"; shift 2 ;;
         *) shift ;;
@@ -33,7 +35,11 @@ case "$field:$target" in
     FSROOT:*cache) value="${TEST_CACHE_FSROOT:-/home/.cassy-actions-cache}" ;;
     *) exit 2 ;;
 esac
-printf '%s\n' "$value"
+if [[ "${TEST_PADDED_ROWS:-}" == 1 && "$raw" == 0 ]]; then
+    printf '%s  \n' "$value"
+else
+    printf '%s\n' "$value"
+fi
 if [[ "${TEST_DUPLICATE_ROWS:-}" == 1 && "$first_only" == 0 ]]; then
     printf '%s\n' "$value"
 fi
@@ -55,7 +61,7 @@ run_guard >/dev/null
 # systemd's service mount namespace can expose the same underlying mount more
 # than once. The guard must select one record instead of treating duplicate
 # identical rows as a different device or FSROOT.
-TEST_DUPLICATE_ROWS=1 run_guard >/dev/null
+TEST_DUPLICATE_ROWS=1 TEST_PADDED_ROWS=1 run_guard >/dev/null
 
 if TEST_CACHE_FSROOT=/home/wrong-but-same-device run_guard >/dev/null 2>&1; then
     printf 'FAIL same-device wrong cache subtree was accepted\n' >&2

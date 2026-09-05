@@ -736,6 +736,40 @@ impl RecallRetriever for SqliteRecallRetriever {
         for spec in local_surface_specs() {
             rows.extend(read_surface(&conn, spec, &terms, scope, per_surface));
         }
+        // cas-4028: `task=` is deliberately excluded from lexical terms so an
+        // identity value cannot manufacture relevance. That also made a row
+        // which NAMES the current task unreachable — it was neither a term nor
+        // structurally bound — and the packet went silent on a case whose own
+        // prior learnings were sitting in the store. Fetch those rows by
+        // identity as well; `local_candidate` still scores them against the
+        // unchanged lexical terms, so identity buys retrieval and binding, not
+        // a lexical score, and a merely similar id is rejected at the token
+        // boundary rather than here.
+        if let Some(task_id) = query
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            let identity_needle = vec![task_id.to_ascii_lowercase()];
+            for spec in local_surface_specs() {
+                // SQL matches this needle as a SUBSTRING, so the fetch alone
+                // would admit `cas-096e1` and friends. Keep only rows that
+                // bind on an exact token, so a supplemental read can never
+                // introduce a row the binding rule itself would reject.
+                let bound = read_surface(&conn, spec, &identity_needle, scope, per_surface)
+                    .into_iter()
+                    .filter(|row| {
+                        names_current_task(Some(task_id), &row.snippet.to_ascii_lowercase())
+                    });
+                rows.extend(bound);
+            }
+            // Identity is (surface, id): ids are only unique within their own
+            // table, so deduping on the bare id could silently drop a row from
+            // a different surface that happens to share it.
+            let mut seen = HashSet::new();
+            rows.retain(|row| seen.insert((row.surface, row.id.clone())));
+        }
         let mut candidates: Vec<EvidenceCandidate> = rows
             .into_iter()
             .map(|row| local_candidate(row, query, &terms))
@@ -1580,6 +1614,50 @@ fn exclude_corpus_ubiquitous_lexical_terms(candidates: &mut [EvidenceCandidate],
     }
 }
 
+/// Whether `haystack` names the task currently being worked, as a whole token.
+///
+/// cas-4028. Suppressing structural identity terms is right for the generic
+/// noise it was written for — a post-mortem matching on `cas-src` and `every`
+/// is not release guidance. But a task id is also a structural identity term,
+/// and when the id is the CURRENT task's, a row carrying it is the prior
+/// record of this exact work rather than noise. The regression this repairs:
+/// the packet returned nothing at all for the case whose task is cas-096e,
+/// dropping a memory tagged `cas-096e` whose body opens "CI wall-clock work on
+/// cas-src (cas-096e/GH #142 ...)" — the case's own prior learnings.
+///
+/// A mention is evidence, not authority: this only lets the row bind, and
+/// every other gate — staleness, expiry, privacy and eligibility — still
+/// applies. Matching is token-bounded, so `cas-096e1` and `cas-096e-extra` are
+/// different tasks and do not bind, and an absent or empty id never matches.
+fn names_current_task(task_id: Option<&str>, haystack: &str) -> bool {
+    let Some(task_id) = task_id else {
+        return false;
+    };
+    let needle = task_id.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+
+    // `match_indices` yields char-boundary-safe offsets, so a multi-byte
+    // haystack or task id cannot panic here the way manual slicing would.
+    let bytes = haystack.as_bytes();
+    haystack.match_indices(needle.as_str()).any(|(start, hit)| {
+        let end = start + hit.len();
+        // A task id is one token: a neighbouring id character means this is a
+        // different id that merely shares a prefix or suffix. A multi-byte
+        // neighbour is not an id character, so it reads as a boundary.
+        let before_ok = start == 0 || !is_task_id_char(bytes[start - 1]);
+        let after_ok = end == haystack.len() || !is_task_id_char(bytes[end]);
+        before_ok && after_ok
+    })
+}
+
+/// Characters that continue a task id token (`cas-096e`), so an adjacent one
+/// proves the match was part of a longer, different identifier.
+fn is_task_id_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+}
+
 fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> EvidenceCandidate {
     let haystack = row.snippet.to_ascii_lowercase();
     let matched: Vec<&str> = terms
@@ -1590,6 +1668,7 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
     let lexical_eligible = lexical_match_is_eligible(&matched);
     let lexical = matched.len() as f64 / terms.len().max(1) as f64;
     let binding = query.task_id.as_deref() == Some(row.id.as_str())
+        || names_current_task(query.task_id.as_deref(), &haystack)
         || query.files.iter().any(|file| haystack.contains(file))
         || query.symbols.iter().any(|symbol| haystack.contains(symbol));
     let role_score = match (query.role, row.surface) {
@@ -5736,4 +5815,159 @@ mod tests {
         assert!(p99 <= identity.role.policy().default_tokens * 4);
         assert!(sizes.last().unwrap() <= &(identity.role.policy().default_tokens * 4));
     }
+
+    /// cas-4028. Token-boundary contract for the current-task binding.
+    ///
+    /// The regression it repairs is real: with structural identity terms
+    /// suppressed, the ambient packet returned NOTHING for the eval case whose
+    /// task is cas-096e, dropping a memory tagged `cas-096e` that carried that
+    /// task's own prior CI learnings. Binding on the current id restores it.
+    ///
+    /// The negatives matter as much as the positive. A different task that
+    /// merely shares a prefix or suffix is a different task, an unrelated id
+    /// never binds, and an absent or empty id binds nothing at all — otherwise
+    /// this would become the blanket identity match that fa938 removed.
+    #[test]
+    fn only_the_current_task_id_binds_and_only_on_token_boundaries() {
+        let current = Some("cas-096e");
+
+        // The regression case: the id appears in tags and in prose.
+        assert!(names_current_task(
+            current,
+            "ci wall-clock work on cas-src (cas-096e/gh #142, extended 2026-08-18)"
+        ));
+        assert!(names_current_task(current, "tags: [\"ci\",\"cas-096e\",\"nextest\"]"));
+        assert!(names_current_task(current, "cas-096e"));
+        assert!(names_current_task(current, "see cas-096e."));
+
+        // Decoys: longer ids that contain the current one as a substring.
+        assert!(!names_current_task(current, "cas-096e1 is a different task"));
+        assert!(!names_current_task(current, "cas-096e-extra is a different task"));
+        assert!(!names_current_task(current, "cas-096e_2 is a different task"));
+        assert!(!names_current_task(current, "xcas-096e is a different task"));
+
+        // Another task entirely.
+        assert!(!names_current_task(current, "work on cas-1939 and cas-b7f5"));
+
+        // No current task, or an empty one, binds nothing — including against
+        // text that would otherwise look like a match.
+        assert!(!names_current_task(None, "cas-096e"));
+        assert!(!names_current_task(Some(""), "cas-096e"));
+        assert!(!names_current_task(Some("   "), "cas-096e"));
+    }
+
+
+    /// cas-4028. The helper test pins the token rule; this pins the SEAM —
+    /// what the production retriever actually fetches and hands to the packet
+    /// when the current task id is the only thing connecting a row to the
+    /// session. The SQL matches the id as a substring, so without the exact
+    /// binding filter this fetch would drag in every neighbouring id.
+    #[test]
+    fn identity_fetch_returns_only_the_exact_current_task_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("cas.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"
+            create table entries (
+                id text primary key, title text, content text, scope text,
+                team_id text, share text, updated_at text, created text,
+                valid_until text, archived integer
+            );
+            create table tasks (
+                id text primary key, title text, description text, design text,
+                notes text, team_id text, share text, updated_at text, status text
+            );
+            create table code_symbols (
+                id text primary key, qualified_name text, name text,
+                file_path text, documentation text, signature text,
+                scope text, content_hash text
+            );
+            create table knowledge_pages (
+                id text primary key, title text, snippet text, page_type text,
+                rel_path text, updated_at text, origin text, origin_project_id text
+            );
+            insert into entries values
+                ('mem-exact', '', 'ci wall-clock work on cas-src (cas-096e/gh #142)',
+                 'project', null, null, 'r2', 'r1', null, 0),
+                ('mem-suffix-decoy', '', 'notes for cas-096e1, a different task',
+                 'project', null, null, 'r2', 'r1', null, 0),
+                ('mem-prefix-decoy', '', 'notes for xcas-096e, a different task',
+                 'project', null, null, 'r2', 'r1', null, 0),
+                ('mem-hyphen-decoy', '', 'notes for cas-096e-extra, a different task',
+                 'project', null, null, 'r2', 'r1', null, 0),
+                ('mem-other-task', '', 'different effort tracked under cas-1939',
+                 'project', null, null, 'r2', 'r1', null, 0),
+                ('mem-expired', '', 'obsolete procedure for cas-096e',
+                 'project', null, null, 'r2', 'r1', '2000-01-01T00:00:00Z', 0),
+                ('mem-private-unowned', '', 'private note about cas-096e',
+                 'project', null, 'private', 'r2', 'r1', null, 0);
+            insert into tasks values
+                ('cas-parser', 'different effort', '', '', '', null, null, 'r2', 'in_progress');
+            insert into code_symbols values
+                ('sym-unrelated', 'other::thing', 'thing', 'src/other.rs', '', 'fn thing()', 'project', 'h');
+            insert into knowledge_pages values
+                ('kn-unrelated', 'other', 'other', 'guide', 'guide/o.md', 'r2', 'local', null);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        // The prompt shares no term with ANY row here — the first cut of this
+        // fixture said "unrelated" in both the prompt and two rows, so they
+        // matched lexically and looked like an identity-fetch leak. The only
+        // connection between the session and mem-exact is the task id.
+        let request = RecallRequest {
+            prompt: "sparrow lantern drift".into(),
+            task_id: Some("cas-096e".into()),
+            task_title: Some("sparrow lantern".into()),
+            ..Default::default()
+        };
+        let worker = identity(RecallRole::Worker);
+        let rows = retrieve_candidates(&worker, &request, &[&retriever]).unwrap();
+        let ids: Vec<&str> = rows
+            .candidates
+            .iter()
+            .map(|c| c.evidence_id.as_str())
+            .collect();
+
+        assert!(
+            ids.contains(&"mem-exact"),
+            "the row naming the current task must be reachable: {ids:?}"
+        );
+        for decoy in [
+            "mem-suffix-decoy",
+            "mem-prefix-decoy",
+            "mem-hyphen-decoy",
+            "mem-other-task",
+        ] {
+            assert!(
+                !ids.contains(&decoy),
+                "{decoy} is a different task and must not be fetched by identity: {ids:?}"
+            );
+        }
+        assert!(
+            !ids.contains(&"mem-expired"),
+            "an expired procedure naming the task must stay excluded: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"mem-private-unowned"),
+            "privacy exclusion must survive the identity fetch: {ids:?}"
+        );
+    }
+
+    /// cas-4028. A non-ASCII task id or haystack must not panic the scan.
+    /// The first cut advanced by one byte after a match, which can land
+    /// mid-character; `match_indices` is boundary-safe and this proves it.
+    #[test]
+    fn a_non_ascii_task_id_or_haystack_is_handled_without_panicking() {
+        assert!(!names_current_task(Some("café-01"), "notes about café-011"));
+        assert!(names_current_task(Some("café-01"), "notes about café-01 here"));
+        assert!(!names_current_task(Some("cas-096e"), "日本語 cas-096e1 日本語"));
+        assert!(names_current_task(Some("cas-096e"), "日本語 cas-096e 日本語"));
+        assert!(!names_current_task(Some("🎯"), "🎯x"));
+        assert!(names_current_task(Some("🎯"), "a 🎯 b"));
+    }
+
 }

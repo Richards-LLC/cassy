@@ -130,6 +130,8 @@ printf 'CAS_INIT_TIMEOUT_SECS=%s :: %s\n' "${CAS_INIT_TIMEOUT_SECS:-unset}" "$*"
   >>"${GATE_FIXTURE_ENV_LOG:-/dev/null}"
 printf 'ZIG=%s :: %s\n' "${ZIG:-unset}" "$*" \
   >>"${GATE_FIXTURE_ZIG_LOG:-/dev/null}"
+printf 'RUSTC_WRAPPER=%s CARGO_HOME=%s :: %s\n' "${RUSTC_WRAPPER:-unset}" "${CARGO_HOME:-unset}" "$*" \
+  >>"${GATE_FIXTURE_ARCHIVE_ENV_LOG:-/dev/null}"
 if [[ "$*" == 'check --workspace --tests' && "${GATE_FIXTURE_CHECK_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'nextest run -p cas'* && "${GATE_FIXTURE_NEXTEST_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == *'builtin_archive_portability_test'* && "${GATE_FIXTURE_FIXTURE_PATHS_FAIL:-}" == 1 ]]; then exit 1; fi
@@ -146,7 +148,12 @@ if [[ "$*" == 'nextest archive -p cas'* ]]; then
   [[ -n "$archive_file" ]] && printf archive >"$archive_file"
   exit 0
 fi
-if [[ "$*" == 'nextest run --archive-file '* && "${GATE_FIXTURE_ARCHIVE_FAIL:-}" == 1 ]]; then exit 1; fi
+if [[ "$*" == 'nextest run --archive-file '* ]]; then
+  [[ "${RUSTC_WRAPPER:-}" == /nonexistent/sccache ]] || { printf 'archive fixture: wrapper=%s\n' "${RUSTC_WRAPPER:-unset}" >&2; exit 1; }
+  [[ -d "${CARGO_HOME:-}" ]] || { printf 'archive fixture: CARGO_HOME is not a directory: %s\n' "${CARGO_HOME:-unset}" >&2; exit 1; }
+  [[ -z "$(find "$CARGO_HOME" -mindepth 1 -print -quit)" ]] || { printf 'archive fixture: CARGO_HOME is not empty: %s\n' "$CARGO_HOME" >&2; exit 1; }
+  if [[ "${GATE_FIXTURE_ARCHIVE_FAIL:-}" == 1 ]]; then exit 1; fi
+fi
 EOF
     chmod +x "$repo/scripts/cargo-stub"
     git -C "$repo" init -q
@@ -468,9 +475,12 @@ for invalid in '' not-a-row; do
 done
 
 archive_receipt="$tmp/archive-size-bytes"
-output="$(cd "$repo" && GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+archive_env_log="$tmp/archive-environment.log"
+: >"$archive_env_log"
+output="$(cd "$repo" && GATE_FIXTURE_ARCHIVE_ENV_LOG="$archive_env_log" \
+    GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
     CARGO="$repo/scripts/cargo-stub" CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$archive_receipt" \
-    "$repo/scripts/release-gate.sh" 9.99.7 --only archive-mode 2>&1)"
+    "$repo/scripts/release-gate.sh" 9.99.7 --only archive-mode 2>&1 || true)"
 if [[ "$(cat "$archive_receipt" 2>/dev/null)" == 7 ]] \
     && grep -qF "per-run=$archive_receipt" <<<"$output"; then
     ok 'archive-mode records the measured archive size in the per-run receipt source'
@@ -483,6 +493,13 @@ if grep -qF 'need at least 14 (2x last archive 7)' <<<"$output"; then
     ok 'scratch-base reads the last archive-size source written by archive-mode'
 else
     bad "scratch-base did not read the recorded archive size: $output"
+fi
+
+if grep -qE '^RUSTC_WRAPPER=/nonexistent/sccache CARGO_HOME=.*/cargo-home :: nextest run --archive-file ' \
+    "$archive_env_log"; then
+    ok 'archive-mode runs the extracted suite with a missing wrapper and empty CARGO_HOME'
+else
+    bad "archive-mode did not reproduce the shard environment: $(cat "$archive_env_log") (output: $output)"
 fi
 
 # cas-c0411. The `cas init` watchdog budget the gate hands its children is the

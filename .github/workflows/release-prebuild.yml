@@ -33,6 +33,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
   SCCACHE_GHA_VERSION: "cas-v2"
   # Keep aligned with release.yml: the prebuilt bytes must be the same bytes
   # the tag-time fallback path would have produced.

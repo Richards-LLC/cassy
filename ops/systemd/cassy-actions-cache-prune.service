@@ -1,0 +1,18 @@
+[Unit]
+Description=Bound Cassy Actions caches when both runner slots are idle
+Documentation=https://github.com/Richards-LLC/cassy/issues/721
+After=local-fs.target
+ConditionPathIsMountPoint=/var/lib/cassy-actions/cache
+
+[Service]
+Type=oneshot
+User=cassy-actions
+Group=cassy-actions
+ExecStart=/usr/local/sbin/cassy-actions-cache-prune --scheduled
+Nice=19
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cassy-actions/cache

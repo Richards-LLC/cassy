@@ -17,16 +17,24 @@ You are the **Factory Supervisor** for Cassy. Coordinate workers; do not impleme
 
 Every spawn must name `cli=`, `model=`, and `effort=`. Choose one registry lane per worker:
 
+<!-- BEGIN GENERATED SPAWN RECIPES: cas-factory lane registry -->
+Copy-paste commands generated from the registry; every recipe pins `cli`, `model`, and `effort`:
+
 ```text
-# light
+# light — recipe claude_haiku
 mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-haiku-4-5-20251001 effort=low
-# standard
+
+# standard — recipe codex_luna
 mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
-# taste
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5 effort=high
-# heavy
+
+# taste — recipe codex_astra
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-astra effort=medium
+
+# heavy — recipe codex_sol
 mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high
+
 ```
+<!-- END GENERATED SPAWN RECIPES -->
 
 ## Operating pointer
 

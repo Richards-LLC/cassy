@@ -16,6 +16,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   now agree on that choice. Explicit Astra effort choices from minimal through
   xhigh remain supported, as does explicit Claude Opus selection outside the
   `taste` route.
+- Bug filing now uses one component registry with four destinations: the
+  project repository from `issues.repo`, Cassy, MechaCassy, and Cassy Cloud.
+  Compiled defaults can be overridden under `[issues.components]`, and the
+  same routing appears in session-start guidance, the `cas doctor` issue
+  repositories row, `cas config get/set issues.components.*`, managed
+  CLAUDE.md/AGENTS.md guidance, and worker, supervisor, and GitHub-issues skill
+  mirrors. Operational bugs are directed to their matching repository first.
 
 ### Fixed
 - The installer now requires the selected GitHub release asset's published
@@ -43,6 +50,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   rejected. `--skip-hub-readiness` bypasses only this probe; URL validation,
   consent, authentication, origin checks, and one-time token protections remain
   enforced.
+- `cas update --json` now distinguishes a post-swap refresh that ran and
+  failed from a skipped refresh. The receipt keeps `refresh_binary_version`
+  and per-project `refresh_status=refresh_failed` results, while
+  `spawn_failed` and `refresh_failed_no_receipt` remain distinct outcomes with
+  truthful recovery guidance.
 - Worker pull-request status distinguishes a failed or unavailable lookup from
   a definite absence, reporting a redacted `unknown` reason instead of the
   false `none` result.

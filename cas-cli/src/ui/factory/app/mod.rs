@@ -14,7 +14,7 @@ use super::director::{
     DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
     MergeAlertFreshness, PanelAreas, Prompt, SidecarFocus, ViewMode, check_merge_alert_freshness,
     generate_prompt_at, prompt_is_still_deliverable, revalidate_event_for_delivery_with_context,
-    revalidate_event_for_delivery_with_focus,
+    revalidate_event_for_delivery_with_focus, supervisor_actionable_state,
 };
 use crate::store::open_prompt_queue_store;
 use crate::types::Worktree;
@@ -626,6 +626,8 @@ pub struct FactoryApp {
     factory_session: Option<String>,
     /// Factory session creation timestamp for elapsed-time display.
     session_created_at: Option<DateTime<Utc>>,
+    /// Silence threshold before supervisor-owned forward motion becomes a stall.
+    supervisor_stall_after_secs: u64,
     /// Supervisor CLI mode (claude/codex)
     supervisor_cli: cas_mux::SupervisorCli,
     /// Worker CLI mode (claude/codex)
@@ -1006,6 +1008,9 @@ impl FactoryApp {
                         focused_epic_id,
                         self.event_detector.worker_idle_since(worker),
                     )
+                } else if matches!(event, DirectorEvent::SupervisorStalled { .. }) {
+                    self.supervisor_stall_event_is_current(event, &unfiltered_data)
+                        .then(|| event.clone())
                 } else {
                     revalidate_event_for_delivery_with_focus(
                         event,
@@ -1054,6 +1059,7 @@ impl FactoryApp {
                     active_task: None,
                     ..
                 } | DirectorEvent::WorkerStalled { escalate: true, .. }
+                    | DirectorEvent::SupervisorStalled { .. }
             ) {
                 continue;
             }
@@ -1213,7 +1219,7 @@ impl FactoryApp {
             // refresh path; otherwise a just-written hold leaks one more
             // WorkerIdle event before unrelated database activity occurs.
             self.apply_session_metadata_worker_holds();
-            return Ok(Vec::new());
+            return Ok(self.detect_supervisor_stall().into_iter().collect());
         }
 
         self.refresh_branch_visibility_cache();
@@ -1242,9 +1248,10 @@ impl FactoryApp {
         // Pass the currently-tracked epic id so `EpicStarted` is gated on
         // strict improvement: a stray zero-subtask Open-with-branch epic
         // cannot hijack `epic_state` mid-session (see task cas-4181).
-        let events = self
+        let mut events = self
             .event_detector
             .detect_changes(&self.unfiltered_director_data, self.epic_state.epic_id());
+        events.extend(self.detect_supervisor_stall());
 
         // Now filter to current session (agents + tasks scoped to active epic)
         if db_changed {
@@ -1252,6 +1259,115 @@ impl FactoryApp {
         }
 
         Ok(events)
+    }
+
+    fn detect_supervisor_stall(&mut self) -> Option<DirectorEvent> {
+        use cas_store::ReminderStatus;
+
+        let session = self.factory_session.as_deref()?;
+        let (last_call, mut tracker) = supervisor_progress_from_session_metadata_named(session)?;
+        let before = tracker.clone();
+        let now = Utc::now();
+        let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
+        let repo_root = self.delivery_repo_root();
+        let actionable = supervisor_actionable_state(
+            &self.unfiltered_director_data,
+            self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
+            &self.supervisor_name,
+            &held_workers,
+            now,
+            self.supervisor_stall_after_secs,
+            |branch| {
+                crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+                    &repo_root,
+                    branch,
+                )
+            },
+        );
+        let supervisor_ids = self
+            .unfiltered_director_data
+            .agents
+            .iter()
+            .filter(|agent| agent.name == self.supervisor_name)
+            .map(|agent| agent.id.as_str())
+            .collect::<HashSet<_>>();
+        let window_end = now + chrono::Duration::seconds(self.supervisor_stall_after_secs as i64);
+        let covering_reminder = self.unfiltered_director_data.reminders.iter().any(|reminder| {
+            reminder.status == ReminderStatus::Pending
+                && reminder
+                    .session_id
+                    .as_deref()
+                    .map(|id| id == session)
+                    .unwrap_or(true)
+                && (supervisor_ids.contains(reminder.target_id.as_str())
+                    || reminder.target_id == self.supervisor_name)
+                && reminder
+                    .trigger_at
+                    .is_some_and(|at| at >= now && at <= window_end)
+        });
+        let observation = tracker.observe(
+            actionable,
+            last_call.or(self.session_created_at),
+            covering_reminder,
+            now,
+            self.supervisor_stall_after_secs,
+        );
+        if tracker != before {
+            let path = crate::ui::factory::session::metadata_path(session);
+            if let Err(error) = persist_session_metadata_supervisor_stall_at(&path, &tracker) {
+                tracing::warn!(%error, "failed to persist supervisor stall metric");
+            }
+        }
+        observation.wake.map(|next_step| DirectorEvent::SupervisorStalled {
+            next_step,
+            occurrence: now.to_rfc3339(),
+            actionable_idle_secs: observation.actionable_idle_secs,
+        })
+    }
+
+    fn supervisor_stall_event_is_current(
+        &self,
+        event: &DirectorEvent,
+        data: &DirectorData,
+    ) -> bool {
+        let DirectorEvent::SupervisorStalled {
+            next_step,
+            occurrence,
+            ..
+        } = event
+        else {
+            return false;
+        };
+        let Some(session) = self.factory_session.as_deref() else {
+            return false;
+        };
+        let Some((last_call, _)) = supervisor_progress_from_session_metadata_named(session) else {
+            return false;
+        };
+        let Ok(detected_at) = occurrence.parse::<DateTime<Utc>>() else {
+            return false;
+        };
+        if last_call.is_some_and(|last| last > detected_at) {
+            return false;
+        }
+        let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
+        let repo_root = self.delivery_repo_root();
+        supervisor_actionable_state(
+            data,
+            self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
+            &self.supervisor_name,
+            &held_workers,
+            Utc::now(),
+            self.supervisor_stall_after_secs,
+            |branch| {
+                crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+                    &repo_root,
+                    branch,
+                )
+            },
+        )
+        .as_ref()
+            == Some(next_step)
     }
 
     /// Route worker panes whose registry rows are all non-live through the normal shutdown path.
@@ -2514,6 +2630,56 @@ pub(crate) fn persist_session_metadata_worker_hold_at(
     })
 }
 
+/// Record a supervisor MCP call in the named factory session. Factory worker
+/// MCP servers share the same environment shape, so identity is corroborated
+/// against the metadata supervisor name before the timestamp is changed.
+pub(crate) fn record_supervisor_mcp_call() {
+    if std::env::var("CAS_AGENT_ROLE").ok().as_deref() != Some("supervisor") {
+        return;
+    }
+    let Some(session) = std::env::var("CAS_FACTORY_SESSION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return;
+    };
+    let Some(agent_name) = std::env::var("CAS_AGENT_NAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return;
+    };
+    let path = crate::ui::factory::session::metadata_path(&session);
+    let _ = update_session_metadata_at(&path, |metadata| {
+        if metadata.supervisor.name == agent_name {
+            metadata.last_supervisor_mcp_call_at = Some(chrono::Utc::now());
+        }
+    });
+}
+
+pub(crate) fn supervisor_progress_from_session_metadata_named(
+    session: &str,
+) -> Option<(
+    Option<chrono::DateTime<chrono::Utc>>,
+    crate::ui::factory::director::SupervisorStallTracker,
+)> {
+    let data = fs::read_to_string(crate::ui::factory::session::metadata_path(session)).ok()?;
+    let metadata = serde_json::from_str::<SessionMetadata>(&data).ok()?;
+    Some((
+        metadata.last_supervisor_mcp_call_at,
+        metadata.supervisor_stall,
+    ))
+}
+
+pub(crate) fn persist_session_metadata_supervisor_stall_at(
+    path: &std::path::Path,
+    tracker: &crate::ui::factory::director::SupervisorStallTracker,
+) -> std::io::Result<()> {
+    update_session_metadata_at(path, |metadata| {
+        metadata.supervisor_stall = tracker.clone();
+    })
+}
+
 pub(crate) fn update_session_metadata_at(
     path: &std::path::Path,
     mutator: impl FnOnce(&mut SessionMetadata),
@@ -3611,6 +3777,8 @@ mod tests {
                 pinned_epic_id: None,
                 delivery_mode: cas_types::DeliveryMode::PushBranch,
                 held_workers: Vec::new(),
+                last_supervisor_mcp_call_at: None,
+                supervisor_stall: Default::default(),
                 project_dir: None,
                 team_name: None,
             }

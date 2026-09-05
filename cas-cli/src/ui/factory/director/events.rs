@@ -8,7 +8,262 @@ use std::time::{Duration, Instant};
 
 use crate::ui::factory::director::data::{ActiveLeaseSummary, DirectorData, TaskSummary};
 use cas_types::TaskStatus;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
+
+/// Minimum cadence between repeated supervisor forward-motion wakes.
+///
+/// The configurable silence threshold controls when an episode first becomes
+/// actionable; once it does, repeated wakes stay capped at one per ten minutes
+/// so a silent supervisor is nudged without producing a notification storm.
+pub(crate) const SUPERVISOR_STALL_REFIRE_SECS: i64 = 10 * 60;
+
+/// Concrete next action the supervisor owns while a focused epic is stalled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorActionableState {
+    MergeBranches {
+        /// `(task id, delivery branch, live tip)` in deterministic task order.
+        branches: Vec<(String, String, String)>,
+    },
+    AssignReadyWork {
+        task_ids: Vec<String>,
+        idle_workers: Vec<String>,
+    },
+    AssembleGatePipeline {
+        epic_id: String,
+    },
+}
+
+impl SupervisorActionableState {
+    /// Render an impact-first instruction suitable for the supervisor wake.
+    pub(crate) fn next_step_text(&self) -> String {
+        match self {
+            Self::MergeBranches { branches } => {
+                let rows = branches
+                    .iter()
+                    .map(|(task, branch, tip)| format!("- {task}: {branch} @ {tip}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "Drive to the exit: merge the ready delivery branch(es) into the focused epic now:\n{rows}"
+                )
+            }
+            Self::AssignReadyWork {
+                task_ids,
+                idle_workers,
+            } => format!(
+                "Drive to the exit: assign ready/open task(s) {} to idle worker(s) {} now.",
+                task_ids.join(", "),
+                idle_workers.join(", ")
+            ),
+            Self::AssembleGatePipeline { epic_id } => format!(
+                "Drive to the exit: all children of {epic_id} are terminal -> assemble the epic branch, run the integration gate, and queue the release/PR pipeline."
+            ),
+        }
+    }
+}
+
+/// Persistable per-factory-session accounting for supervisor stalls.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SupervisorStallTracker {
+    /// Completed time spent under the full detector predicate.
+    #[serde(default)]
+    pub actionable_idle_secs: u64,
+    /// Start of the currently-active detector predicate, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actionable_idle_started_at: Option<DateTime<Utc>>,
+    /// Last wake accepted for delivery in this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_wake_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SupervisorStallObservation {
+    pub wake: Option<SupervisorActionableState>,
+    pub actionable_idle_secs: u64,
+}
+
+impl SupervisorStallTracker {
+    /// Advance one detector sample. The metric counts only while the complete
+    /// predicate is true: actionable epic state, supervisor silence beyond the
+    /// configured threshold, and no covering reminder.
+    pub(crate) fn observe(
+        &mut self,
+        actionable: Option<SupervisorActionableState>,
+        last_supervisor_mcp_call_at: Option<DateTime<Utc>>,
+        covering_reminder: bool,
+        now: DateTime<Utc>,
+        stall_after_secs: u64,
+    ) -> SupervisorStallObservation {
+        let silent = last_supervisor_mcp_call_at
+            .map(|last| (now - last).num_seconds() >= stall_after_secs as i64)
+            .unwrap_or(false);
+        let condition_true = actionable.is_some() && silent && !covering_reminder;
+
+        if condition_true {
+            self.actionable_idle_started_at.get_or_insert(now);
+        } else if let Some(started_at) = self.actionable_idle_started_at.take() {
+            self.actionable_idle_secs = self.actionable_idle_secs.saturating_add(
+                (now - started_at).num_seconds().max(0) as u64,
+            );
+        }
+
+        let current_secs = self.actionable_idle_secs.saturating_add(
+            self.actionable_idle_started_at
+                .map(|started_at| (now - started_at).num_seconds().max(0) as u64)
+                .unwrap_or(0),
+        );
+        let refire_due = self
+            .last_wake_at
+            .map(|last| (now - last).num_seconds() >= SUPERVISOR_STALL_REFIRE_SECS)
+            .unwrap_or(true);
+        let wake = if condition_true && refire_due {
+            self.last_wake_at = Some(now);
+            actionable
+        } else {
+            None
+        };
+
+        SupervisorStallObservation {
+            wake,
+            actionable_idle_secs: current_secs,
+        }
+    }
+
+    pub fn actionable_idle_minutes_at(&self, now: DateTime<Utc>) -> u64 {
+        self.actionable_idle_secs
+            .saturating_add(
+                self.actionable_idle_started_at
+                    .map(|started_at| (now - started_at).num_seconds().max(0) as u64)
+                    .unwrap_or(0),
+            )
+            / 60
+    }
+}
+
+/// Compute the highest-priority concrete next step for the focused epic.
+///
+/// Branch tips are resolved by the caller so tests stay pure and production
+/// can consult the live repository immediately before constructing the wake.
+pub(crate) fn supervisor_actionable_state(
+    data: &DirectorData,
+    focused_epic_id: Option<&str>,
+    supervisor_name: &str,
+    held_workers: &HashSet<String>,
+    now: DateTime<Utc>,
+    idle_after_secs: u64,
+    mut resolve_branch_tip: impl FnMut(&str) -> Option<String>,
+) -> Option<SupervisorActionableState> {
+    let epic_id = focused_epic_id?;
+    let epic_is_open = data.epic_tasks.iter().any(|epic| {
+        epic.id == epic_id
+            && matches!(
+                epic.status,
+                TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked
+            )
+    });
+    if !epic_is_open {
+        return None;
+    }
+
+    let mut mergeable = data
+        .in_progress_tasks
+        .iter()
+        .filter(|task| {
+            task.epic.as_deref() == Some(epic_id) && task.status == TaskStatus::AwaitingMerge
+        })
+        .filter_map(|task| {
+            let assignee = task.assignee.as_deref()?;
+            let worker = data
+                .agent_id_to_name
+                .get(assignee)
+                .map(String::as_str)
+                .unwrap_or(assignee);
+            let branch = format!("factory/{worker}");
+            let tip = resolve_branch_tip(&branch).unwrap_or_else(|| "tip-unresolved".to_string());
+            Some((task.id.clone(), branch, tip))
+        })
+        .collect::<Vec<_>>();
+    mergeable.sort_by(|left, right| left.0.cmp(&right.0));
+    if !mergeable.is_empty() {
+        return Some(SupervisorActionableState::MergeBranches {
+            branches: mergeable,
+        });
+    }
+
+    let active_children = data
+        .ready_tasks
+        .iter()
+        .chain(data.in_progress_tasks.iter())
+        .filter(|task| task.epic.as_deref() == Some(epic_id))
+        .count();
+    if active_children == 0
+        && data.epic_closed_counts.get(epic_id).copied().unwrap_or(0) > 0
+    {
+        return Some(SupervisorActionableState::AssembleGatePipeline {
+            epic_id: epic_id.to_string(),
+        });
+    }
+
+    let mut task_ids = data
+        .ready_tasks
+        .iter()
+        .filter(|task| {
+            task.epic.as_deref() == Some(epic_id)
+                && task.status == TaskStatus::Open
+                && task.assignee.is_none()
+        })
+        .map(|task| task.id.clone())
+        .collect::<Vec<_>>();
+    task_ids.sort();
+    if task_ids.is_empty() {
+        return None;
+    }
+
+    let assigned_workers = data
+        .ready_tasks
+        .iter()
+        .chain(data.in_progress_tasks.iter())
+        .filter_map(|task| task.assignee.as_deref())
+        .flat_map(|assignee| {
+            std::iter::once(assignee.to_string()).chain(
+                data.agent_id_to_name
+                    .get(assignee)
+                    .cloned()
+                    .into_iter(),
+            )
+        })
+        .collect::<HashSet<_>>();
+    let mut idle_workers = data
+        .agents
+        .iter()
+        .filter(|agent| {
+            agent.name != supervisor_name
+                && agent.current_task.is_none()
+                && !held_workers.contains(&agent.name)
+                && !assigned_workers.contains(&agent.name)
+                && !assigned_workers.contains(&agent.id)
+        })
+        .filter(|agent| {
+            let baseline = agent
+                .latest_activity
+                .as_ref()
+                .map(|(_, at)| *at)
+                .unwrap_or(agent.registered_at)
+                .max(agent.registered_at);
+            (now - baseline).num_seconds() >= idle_after_secs as i64
+        })
+        .map(|agent| agent.name.clone())
+        .collect::<Vec<_>>();
+    idle_workers.sort();
+    if idle_workers.is_empty() {
+        return None;
+    }
+
+    Some(SupervisorActionableState::AssignReadyWork {
+        task_ids,
+        idle_workers,
+    })
+}
 
 /// Debounce duration for events (don't emit same event within this window)
 const DEBOUNCE_DURATION: Duration = Duration::from_secs(30);
@@ -79,6 +334,13 @@ const SPAWN_ASSIGN_GRACE_SECS: i64 = 10;
 /// Events detected from Cassy state changes
 #[derive(Debug, Clone)]
 pub enum DirectorEvent {
+    /// The focused epic has concrete supervisor-owned work while the
+    /// supervisor has made no Cassy MCP call for the configured interval.
+    SupervisorStalled {
+        next_step: SupervisorActionableState,
+        occurrence: String,
+        actionable_idle_secs: u64,
+    },
     /// A task was assigned to a worker
     TaskAssigned {
         task_id: String,
@@ -138,6 +400,7 @@ impl DirectorEvent {
     /// Get the worker/agent this event targets (for prompt injection)
     pub fn target(&self) -> Option<&str> {
         match self {
+            Self::SupervisorStalled { .. } => None,
             Self::TaskAssigned { worker, .. } => Some(worker),
             Self::TaskCompleted { worker, .. } => Some(worker),
             Self::TaskBlocked { worker, .. } => Some(worker),
@@ -153,6 +416,15 @@ impl DirectorEvent {
     /// Get a description of the event for logging
     pub fn description(&self) -> String {
         match self {
+            Self::SupervisorStalled {
+                next_step,
+                actionable_idle_secs,
+                ..
+            } => format!(
+                "Supervisor actionable-idle for {}m. {}",
+                actionable_idle_secs / 60,
+                next_step.next_step_text()
+            ),
             Self::TaskAssigned {
                 task_id,
                 worker,
@@ -235,6 +507,9 @@ impl DirectorEvent {
     /// Events with the same key are considered duplicates within the debounce window.
     pub fn debounce_key(&self) -> String {
         match self {
+            Self::SupervisorStalled { occurrence, .. } => {
+                format!("supervisor_stalled:{occurrence}")
+            }
             Self::TaskAssigned {
                 task_id, worker, ..
             } => {
@@ -276,6 +551,7 @@ impl DirectorEvent {
     /// Get the event type as a string (for recording export)
     pub fn event_type(&self) -> &'static str {
         match self {
+            Self::SupervisorStalled { .. } => "supervisor_stalled",
             Self::TaskAssigned { .. } => "task_assigned",
             Self::TaskCompleted { .. } => "task_completed",
             Self::TaskBlocked { .. } => "task_blocked",
@@ -291,6 +567,15 @@ impl DirectorEvent {
     /// Convert event data to JSON (for recording export)
     pub fn to_json(&self) -> serde_json::Value {
         match self {
+            Self::SupervisorStalled {
+                next_step,
+                occurrence,
+                actionable_idle_secs,
+            } => serde_json::json!({
+                "next_step": next_step.next_step_text(),
+                "occurrence": occurrence,
+                "actionable_idle_secs": actionable_idle_secs,
+            }),
             Self::TaskAssigned {
                 task_id,
                 task_title,

@@ -573,6 +573,31 @@ fn post_swap_refresh_failure_tells_the_operator_to_run_update_again() {
 
 #[cfg(unix)]
 #[test]
+fn post_swap_refresh_spawn_failure_has_a_distinct_receipt_status() {
+    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let missing = temp_dir.path().join("cas-not-installed");
+
+    let error = run_post_swap_refresh(&missing, "3.15.1", "3.15.2", true)
+        .expect_err("an unusable installed binary must remain an error");
+    let failure = error
+        .downcast_ref::<PostSwapRefreshFailure>()
+        .expect("spawn failure should carry a typed failure receipt");
+    let receipt = failure
+        .receipt
+        .as_ref()
+        .expect("spawn failure should carry a receipt");
+
+    assert_eq!(receipt["refresh_status"], "spawn_failed");
+    assert!(receipt["refresh_binary_version"].is_null(), "{receipt}");
+    assert!(
+        failure.to_string().contains("could not start")
+            && failure.to_string().contains("cas update"),
+        "spawn guidance must describe the unavailable child: {failure}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn post_swap_refresh_failure_preserves_the_child_receipt_and_failed_project() {
     let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
     let installed_binary = temp_dir.path().join("cas-failed-refresh");
@@ -591,15 +616,50 @@ fn post_swap_refresh_failure_preserves_the_child_receipt_and_failed_project() {
         .as_ref()
         .expect("the child receipt should be retained");
 
+    assert_eq!(receipt["binary_updated"], true);
+    assert_eq!(receipt["version"], "9.9.9-stub");
     assert_eq!(receipt["refresh_binary_version"], "9.9.9-stub");
     assert_eq!(receipt["refresh_status"], "refresh_failed");
     assert_eq!(receipt["projects"][0]["project"], "/tmp/failed-project");
-    assert_eq!(receipt["projects"][0]["cloud_sync"], "FAILED: cloud sync: registration missing");
+    assert_eq!(
+        receipt["projects"][0]["cloud_sync"],
+        "FAILED: cloud sync: registration missing"
+    );
+    assert_eq!(receipt["refresh_stderr"], "cloud refresh failed");
     assert!(
         failure.to_string().contains("refresh ran")
             && failure.to_string().contains("cloud refresh failed"),
         "failure guidance must describe an executed failed refresh: {failure}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn post_swap_refresh_failure_without_a_receipt_is_not_reported_as_skipped() {
+    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let installed_binary = temp_dir.path().join("cas-no-receipt");
+    write_stub_binary(
+        &installed_binary,
+        "#!/bin/sh\nprintf '%s' 'refresh child failed before producing a receipt' >&2\nexit 1\n",
+    );
+
+    let error = run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
+        .expect_err("a child failure without a receipt must remain an error");
+    let failure = error
+        .downcast_ref::<PostSwapRefreshFailure>()
+        .expect("an executed child failure should carry a typed failure receipt");
+    let receipt = failure
+        .receipt
+        .as_ref()
+        .expect("an executed child failure should carry a receipt");
+
+    assert_eq!(receipt["refresh_status"], "refresh_failed_no_receipt");
+    assert!(
+        failure.to_string().contains("post-swap child exited")
+            && failure.to_string().contains("refresh child failed"),
+        "guidance must distinguish an unreported child from a skipped refresh: {failure}"
+    );
+    assert_eq!(receipt["message"], failure.to_string());
 }
 
 #[test]

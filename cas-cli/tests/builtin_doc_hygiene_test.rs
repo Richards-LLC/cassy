@@ -49,6 +49,31 @@ fn line_index(body: &str, needle: &str) -> usize {
         .unwrap_or_else(|| panic!("expected to find {needle:?} in the document"))
 }
 
+#[test]
+fn supervisor_guidance_drives_each_turn_to_a_named_exit_rung() {
+    for flavor_rel in all_flavors("skills/cas-supervisor.md") {
+        let body = load(&flavor_rel);
+        for marker in [
+            "Drive to the exit",
+            "Children merged",
+            "Epic assembled",
+            "Integration gated",
+            "PR queued",
+            "On main",
+            "Released and deployed",
+        ] {
+            assert!(
+                body.contains(marker),
+                "{flavor_rel} must carry supervisor forward-motion marker {marker:?}"
+            );
+        }
+        assert!(
+            !body.contains("produce no more output") && !body.contains("wait for events"),
+            "{flavor_rel} must not tell the supervisor to stop before owning the next rung"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 1. Doc family: shared hygiene reference, real signals only
 // ---------------------------------------------------------------------------

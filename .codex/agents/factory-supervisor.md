@@ -27,11 +27,14 @@ mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model
 # standard — recipe codex_luna
 mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
 
-# taste — recipe codex_astra
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-astra effort=medium
+# taste — recipe claude_fable
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium
 
 # heavy — recipe codex_sol
 mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high
+
+# supervisor — recipe claude_fable
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium
 
 ```
 <!-- END GENERATED SPAWN RECIPES -->

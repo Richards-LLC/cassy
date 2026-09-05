@@ -2952,7 +2952,8 @@ This is the body content."#;
         );
     }
 
-    /// All 6 Hard Rules must appear verbatim in the supervisor briefing.
+    /// The durable supervisor rules and exit ladder must appear verbatim in
+    /// the model-visible briefing.
     /// These keywords are the ones confirmed present in the model-visible
     /// hook_additional_context bytes after the harness cap trim (cas-5e4b).
     #[test]
@@ -2964,8 +2965,9 @@ This is the body content."#;
             "coordination",
             "Never close",
             "Never implement",
-            "Never monitor",
-            "End your turn",
+            "Drive to the exit",
+            "Children merged",
+            "Released and deployed",
         ] {
             assert!(
                 guide.contains(keyword),
@@ -2992,7 +2994,7 @@ This is the body content."#;
             "Registry lanes",
             "Claude/Haiku 4.5/low",
             "Codex/GPT-5.6 Luna/xhigh",
-            "Codex/GPT-6 Astra/medium",
+            "Claude/Fable 5.1/medium",
             "Codex/GPT-5.6 Sol/high",
             "standing suspension",
             "generated route table and recipes",
@@ -3002,11 +3004,6 @@ This is the body content."#;
                 "codex cas-supervisor.md missing tiering-rule keyword: {keyword:?}"
             );
         }
-        // Quick Start step 6 must show a tiered mix, not a single default line.
-        assert!(
-            codex_guide.contains("tiered mix"),
-            "codex cas-supervisor.md Quick Start must not read as a single default spawn recipe"
-        );
     }
 
     /// cas-b342: the three supervisor bodies must be semantically identical
@@ -3044,12 +3041,12 @@ This is the body content."#;
              tool prefix and the intentional Heterogeneous-Teams section title"
         );
 
-        // The shared body must carry the full explicit spawn recipes (not a
-        // condensed `effort=high`-only heavy example) on every twin.
+        // The shared body must retain explicit complete-call controls and the
+        // registry's heavy route on every twin without duplicating workflow.
         for (label, body) in [("claude", claude), ("codex", codex), ("grok", grok)] {
             assert!(
-                body.contains("model=gpt-5.6-sol effort=high` for a heavy one"),
-                "{label} cas-supervisor.md must give the heavy spawn as a complete recipe"
+                body.contains("Codex/GPT-5.6 Sol/high"),
+                "{label} cas-supervisor.md must retain the heavy registry route"
             );
             assert!(
                 body.contains("pass complete `cli=`, `model=`, and `effort=` controls"),
@@ -5331,7 +5328,7 @@ This is the body content."#;
                         builtin.path
                     );
                     assert!(recipes.contains(&format!(
-                        "# taste — recipe codex_astra\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-astra effort=medium"
+                        "# taste — recipe claude_fable\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium"
                     )));
                 }
             }
@@ -5451,7 +5448,7 @@ This is the body content."#;
                 "registry recipe for {lane_name:?} missing from the supervisor guidance"
             );
         }
-        assert!(claude.content.contains("Codex GPT-6 Astra at medium"));
+        assert!(claude.content.contains("Claude Fable 5.1 at medium"));
         assert!(claude.content.contains("Claude Haiku 4.5"));
         assert!(!claude.content.contains("operator decision pending"));
         assert!(!claude.content.contains("exceptional-only"));
@@ -6318,7 +6315,7 @@ This is the body content."#;
             "Registry lanes",
             "Claude/Haiku 4.5/low",
             "Codex/GPT-5.6 Luna/xhigh",
-            "Codex/GPT-6 Astra/medium",
+            "Claude/Fable 5.1/medium",
             "Codex/GPT-5.6 Sol/high",
             "standing suspension",
             "generated route table and recipes",

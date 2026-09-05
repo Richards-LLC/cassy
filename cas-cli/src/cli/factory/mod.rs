@@ -1424,6 +1424,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         lead_session_id: Some(lead_session_id),
         minions_theme: is_minions,
         stall_threshold_secs,
+        stall_after_secs: cas_config.factory().stall_after_secs,
         ai_enrichment: cas_config.factory().ai_enrichment,
     };
 
@@ -1913,7 +1914,7 @@ mod tests {
     use crate::ui::factory::FactoryConfig;
 
     #[test]
-    fn taste_lane_cli_resolves_astra_medium() {
+    fn taste_lane_cli_resolves_fable_medium() {
         let (specs, notice) = resolve_lane_worker_specs(
             "taste",
             1,
@@ -1924,10 +1925,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(specs[0].name.as_deref(), Some("taste-worker"));
-        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Codex);
-        assert_eq!(specs[0].model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Claude);
+        assert_eq!(specs[0].model.as_deref(), Some("claude-fable-5-1"));
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::Medium));
-        assert!(notice.contains("codex_astra"), "{notice}");
+        assert!(notice.contains("claude_fable"), "{notice}");
     }
 
     // EPIC cas-8888 (cas-964a, Phase 3): resolve_cli_choice's Grok arm.

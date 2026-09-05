@@ -428,7 +428,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: read
+      actions: write
 
     steps:
       - uses: actions/checkout@v4
@@ -518,3 +518,42 @@ jobs:
             --title "CAS $VERSION" \
             --notes "${{ steps.notes.outputs.notes }}" \
             release/*
+
+      # GITHUB_TOKEN-created releases do not fan out a release.published event
+      # to other workflows. Dispatch the proof explicitly after all assets are
+      # published, and record the run id so the release receipt can verify it.
+      - name: Dispatch install path proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          export DISPATCH_STARTED_AT="$(date -u +%s)"
+          gh workflow run install-path-proof.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$VERSION" \
+            -f version="$VERSION"
+
+          proof_run_id=''
+          for _attempt in {1..12}; do
+            proof_run_id="$(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow install-path-proof.yml \
+                --event workflow_dispatch \
+                --limit 20 \
+                --json databaseId,event,headSha,createdAt \
+                --jq 'map(select(.event == "workflow_dispatch" and .headSha == env.GITHUB_SHA and ((.createdAt | fromdateiso8601) >= (env.DISPATCH_STARTED_AT | tonumber)))) | sort_by(.createdAt) | last | .databaseId // empty'
+            )"
+            if [[ -n "$proof_run_id" ]]; then
+              break
+            fi
+            sleep 5
+          done
+          test -n "$proof_run_id"
+          {
+            echo 'Install-path proof dispatch receipt:'
+            echo "- workflow: install-path-proof.yml"
+            echo "- tag: $VERSION"
+            echo "- run id: $proof_run_id"
+          } >> "$GITHUB_STEP_SUMMARY"

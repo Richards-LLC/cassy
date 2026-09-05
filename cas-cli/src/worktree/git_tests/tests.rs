@@ -1825,8 +1825,8 @@ fn an_ordinary_push_failure_is_still_a_plain_not_pushed() {
 /// integration checkout: the target branch is checked out in a SECOND linked
 /// worktree while a canonical merge advances the branch ref from elsewhere.
 ///
-/// Returns (temp, repo_root, sibling_worktree_path, target_branch).
-fn repo_with_target_checked_out_in_a_second_worktree() -> (TempDir, PathBuf, PathBuf, String) {
+/// Returns (temp, sibling_guard, repo_root, sibling_worktree_path, target_branch).
+fn repo_with_target_checked_out_in_a_second_worktree() -> (TempDir, TempDir, PathBuf, PathBuf, String) {
     let (temp, repo_path) = create_test_repo();
     let git = |args: &[&str], dir: &PathBuf| {
         let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
@@ -1840,13 +1840,16 @@ fn repo_with_target_checked_out_in_a_second_worktree() -> (TempDir, PathBuf, Pat
     // The integration branch, and a second linked worktree that has it out —
     // the dedicated merge checkout in the real incident.
     git(&["branch", "epic/target"], &repo_path);
-    // Outside the repository working tree, so the fixture's own scaffolding
-    // never shows up as repository status.
-    let sibling = temp.path().parent().unwrap().join(format!(
-        "cas-0f04-epic-checkout-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&sibling);
+    // Keep this linked checkout outside the repository tree so fixture
+    // scaffolding never appears in `git status`, but let tempfile allocate a
+    // fresh path for every test invocation. A PID-only name is shared by all
+    // Rust test threads in this process; concurrent callers used to remove or
+    // dirty one another's checkout.
+    let sibling_guard = tempfile::Builder::new()
+        .prefix("cas-0f04-epic-checkout-")
+        .tempdir_in(temp.path().parent().unwrap())
+        .expect("sibling worktree tempdir");
+    let sibling = sibling_guard.path().to_path_buf();
     git(
         &[
             "worktree",
@@ -1870,7 +1873,13 @@ fn repo_with_target_checked_out_in_a_second_worktree() -> (TempDir, PathBuf, Pat
     // shell would be.
     git(&["checkout", "-q", "master"], &repo_path);
 
-    (temp, repo_path, sibling, "epic/target".to_string())
+    (
+        temp,
+        sibling_guard,
+        repo_path,
+        sibling,
+        "epic/target".to_string(),
+    )
 }
 
 fn worktree_status(dir: &PathBuf) -> String {
@@ -1893,7 +1902,8 @@ fn worktree_status(dir: &PathBuf) -> String {
 /// it consistent rather than stranded.
 #[test]
 fn merging_updates_a_clean_linked_checkout_of_the_target() {
-    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let (_temp, _sibling_guard, repo_path, sibling, target) =
+        repo_with_target_checked_out_in_a_second_worktree();
     let git = GitOperations::new(repo_path);
 
     let new_tip = git
@@ -1928,7 +1938,8 @@ fn merging_updates_a_clean_linked_checkout_of_the_target() {
 /// is what stranded the integration checkout.
 #[test]
 fn merging_refuses_when_a_linked_checkout_of_the_target_is_dirty() {
-    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let (_temp, _sibling_guard, repo_path, sibling, target) =
+        repo_with_target_checked_out_in_a_second_worktree();
     let git = GitOperations::new(repo_path);
     let tip_before = git.resolve_commit(&target).unwrap();
 
@@ -2026,7 +2037,8 @@ fn merging_still_leaves_the_primary_checkout_untouched_when_no_sibling_holds_the
 /// injected into that window.
 #[test]
 fn a_refresh_refuses_to_overwrite_an_edit_made_after_the_cleanliness_check() {
-    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let (_temp, _sibling_guard, repo_path, sibling, target) =
+        repo_with_target_checked_out_in_a_second_worktree();
     let git = GitOperations::new(repo_path.clone());
     let old_tip = git.resolve_commit(&target).unwrap();
 
@@ -2068,7 +2080,8 @@ fn a_refresh_refuses_to_overwrite_an_edit_made_after_the_cleanliness_check() {
 /// the guard above is not simply refusing everything.
 #[test]
 fn a_refresh_advances_a_checkout_that_is_still_clean() {
-    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let (_temp, _sibling_guard, repo_path, sibling, target) =
+        repo_with_target_checked_out_in_a_second_worktree();
     let git = GitOperations::new(repo_path.clone());
     let old_tip = git.resolve_commit(&target).unwrap();
     let new_tip = {
@@ -2097,7 +2110,8 @@ fn a_refresh_advances_a_checkout_that_is_still_clean() {
 /// they are separate failure modes.
 #[test]
 fn a_refresh_preserves_a_staged_edit_made_after_the_cleanliness_check() {
-    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let (_temp, _sibling_guard, repo_path, sibling, target) =
+        repo_with_target_checked_out_in_a_second_worktree();
     let git = GitOperations::new(repo_path.clone());
     let old_tip = git.resolve_commit(&target).unwrap();
     let new_tip = {
@@ -2149,7 +2163,8 @@ fn a_refresh_preserves_a_staged_edit_made_after_the_cleanliness_check() {
 /// same silent-state defect one layer up.
 #[test]
 fn a_stale_checkout_is_reported_to_the_caller_not_only_logged() {
-    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let (_temp, _sibling_guard, repo_path, sibling, target) =
+        repo_with_target_checked_out_in_a_second_worktree();
     let git = GitOperations::new(repo_path.clone());
     let old_tip = git.resolve_commit(&target).unwrap();
     let new_tip = {
@@ -2199,7 +2214,8 @@ fn a_stale_checkout_is_reported_to_the_caller_not_only_logged() {
 /// branch nobody asked for.
 #[test]
 fn a_checkout_switched_to_another_branch_is_not_refreshed_as_the_target() {
-    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let (_temp, _sibling_guard, repo_path, sibling, target) =
+        repo_with_target_checked_out_in_a_second_worktree();
     let git = GitOperations::new(repo_path.clone());
     let old_tip = git.resolve_commit(&target).unwrap();
     let new_tip = {
@@ -2245,7 +2261,8 @@ fn a_checkout_switched_to_another_branch_is_not_refreshed_as_the_target() {
 /// itself. It must refuse, and refuse before anything is written.
 #[test]
 fn an_unreadable_checkout_inventory_refuses_before_touching_anything() {
-    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let (_temp, _sibling_guard, repo_path, sibling, target) =
+        repo_with_target_checked_out_in_a_second_worktree();
     let git = GitOperations::new(repo_path.clone());
     let tip_before = git.resolve_commit(&target).unwrap();
     let sibling_head_before = Command::new("git")

@@ -7,7 +7,7 @@ use cas::mcp::CasCore;
 use cas::store::{
     open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
 };
-use cas::types::Agent;
+use cas::types::{Agent, AgentRole};
 
 /// Shared process-wide lock for tests that mutate environment variables
 /// (`CAS_AGENT_ROLE`, factory harness vars, etc.). Cargo runs integration
@@ -75,6 +75,12 @@ fn pin_home_to_a_sandbox() {
 }
 
 pub(crate) fn setup_cas() -> (TempDir, CasCore) {
+    setup_cas_as(AgentRole::Standard)
+}
+
+/// Helper to create an initialized CAS environment and register the test
+/// session agent with the requested role.
+pub(crate) fn setup_cas_as(role: AgentRole) -> (TempDir, CasCore) {
     pin_home_to_a_sandbox();
 
     // Clear factory env vars that leak from parent process (e.g., running
@@ -122,7 +128,7 @@ pub(crate) fn setup_cas() -> (TempDir, CasCore) {
     // Secondary/rebuilt cores must use `core_with_test_agent` instead of bare
     // `CasCore::with_daemon` (cas-48e6).
     let session_id = format!("test-session-{}", std::process::id());
-    let agent = Agent::new(session_id.clone(), "test-agent".to_string());
+    let agent = Agent::new_with_role(session_id.clone(), "test-agent".to_string(), role);
     agent_store
         .register(&agent)
         .expect("test agent should register");

@@ -1885,7 +1885,8 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
 /// first task to Blocked.
 #[tokio::test]
 async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipts_cas_6c50() {
-    let (temp, service, supervisor_id) = setup_cas_with_supervisor_session();
+    let (temp, service) = setup_cas_as(AgentRole::Supervisor);
+    let supervisor_id = format!("test-session-{}", std::process::id());
     let _env_lock = env_test_lock();
     let _supervisor_env = ScopedSupervisorEnv::new();
     let cas_dir = temp.path().join(".cas");
@@ -6989,7 +6990,8 @@ async fn close_with_external_receipt_fixture(
 
 #[tokio::test]
 async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924() {
-    let (temp, core, supervisor_id) = setup_cas_with_supervisor_session();
+    let (temp, core) = setup_cas_as(AgentRole::Supervisor);
+    let supervisor_id = format!("test-session-{}", std::process::id());
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     let factory_session = "cas-3924-fixture-session";
@@ -7951,56 +7953,6 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
 // exemptions, and give a concrete remediation path.
 // =============================================================================
 
-/// Minimal CasCore rooted in `temp` with a *Supervisor-role* agent
-/// pre-set as the current session. `support::setup_cas` always registers a
-/// Standard-role agent and pins it via OnceLock, so we can't reuse it for
-/// this test — we need the verification-tools authz path to see
-/// `agent.role == AgentRole::Supervisor`.
-///
-/// Mirrors `support::setup_cas`'s factory-env-clearing block (it briefly
-/// holds `env_test_lock()` for the mutation, matching the support.rs
-/// ordering contract). Callers should `let _env_lock = env_test_lock();`
-/// **after** this returns to hold the lock for the test body — std `Mutex`
-/// is not re-entrant, so taking it before would deadlock.
-///
-/// Returns the temp dir guard, the core (used by tests as `service` —
-/// MCP tool methods are defined directly on `CasCore`), and the supervisor
-/// session id.
-fn setup_cas_with_supervisor_session() -> (TempDir, cas::mcp::CasCore, String) {
-    // Clear factory env vars under the shared env lock so a parallel
-    // sibling test cannot observe a torn read. Match the four vars
-    // `support::setup_cas` clears so the two helpers do not drift.
-    {
-        let _env_guard = env_test_lock();
-        // SAFETY: we hold the process-wide env lock for the duration of
-        // this block; no other test thread can observe a torn env read.
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-            std::env::remove_var("CAS_FACTORY_MODE");
-            std::env::remove_var("CAS_FACTORY_SUPERVISOR_CLI");
-            std::env::remove_var("CAS_FACTORY_WORKER_CLI");
-        }
-    }
-
-    let temp = TempDir::new().expect("temp dir");
-    let cas_root = init_cas_dir(temp.path()).expect("init_cas_dir");
-
-    let agent_store = open_agent_store(&cas_root).expect("open agent store");
-    let supervisor_id = format!("supervisor-test-cas-a90f3-{}", std::process::id());
-    let mut supervisor =
-        cas::types::Agent::new(supervisor_id.clone(), "alpha-supervisor".to_string());
-    supervisor.role = cas::types::AgentRole::Supervisor;
-    supervisor.heartbeat();
-    agent_store
-        .register(&supervisor)
-        .expect("register supervisor");
-
-    let core = cas::mcp::CasCore::with_daemon(cas_root, None, None);
-    core.set_agent_id_for_testing(supervisor_id.clone());
-
-    (temp, core, supervisor_id)
-}
-
 /// A registered Supervisor role is server-authenticated external authority,
 /// even when a live worker owns the task. Caller-supplied names and environment
 /// claims are irrelevant; the persisted provenance must reflect the role gate.
@@ -8012,7 +7964,8 @@ async fn test_registered_supervisor_can_verify_live_worker_task() {
     // order would deadlock. Clearing the factory env vars ensures
     // `worker_harness_from_env()` falls back to Claude (subagents=true)
     // and the supervisor authz branch actually runs.
-    let (temp, service, supervisor_id) = setup_cas_with_supervisor_session();
+    let (temp, service) = setup_cas_as(AgentRole::Supervisor);
+    let supervisor_id = format!("test-session-{}", std::process::id());
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");

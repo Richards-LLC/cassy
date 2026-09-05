@@ -332,6 +332,11 @@ pub struct FactoryConfig {
     #[serde(default = "default_stall_threshold_secs")]
     pub stall_threshold_secs: u64,
 
+    /// Supervisor MCP silence required before actionable focused-epic state
+    /// produces a forward-motion wake. Default: 600 seconds.
+    #[serde(default = "default_supervisor_stall_after_secs")]
+    pub stall_after_secs: u64,
+
     /// Seconds before an unread critical/high-priority coordination message
     /// bounces a delivery-stalled notice back to its sender.
     #[serde(default = "default_delivery_stalled_priority_secs")]
@@ -443,6 +448,10 @@ fn default_stall_threshold_secs() -> u64 {
     cas_factory::DEFAULT_STALL_THRESHOLD_SECS
 }
 
+fn default_supervisor_stall_after_secs() -> u64 {
+    cas_factory::DEFAULT_SUPERVISOR_STALL_AFTER_SECS
+}
+
 fn default_delivery_stalled_priority_secs() -> u64 {
     10 * 60
 }
@@ -477,6 +486,7 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             stall_threshold_secs: default_stall_threshold_secs(),
+            stall_after_secs: default_supervisor_stall_after_secs(),
             delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),
             delivery_stalled_normal_secs: default_delivery_stalled_normal_secs(),
             epic_base_branch: None,
@@ -1314,6 +1324,7 @@ mod tests {
             fc.stall_threshold_secs,
             FactoryConfig::default().stall_threshold_secs
         );
+        assert_eq!(fc.stall_after_secs, 600);
         assert_eq!(
             fc.epic_base_branch,
             FactoryConfig::default().epic_base_branch
@@ -1344,11 +1355,12 @@ mod tests {
     /// tune stall detection for their workload.
     #[test]
     fn factory_config_stall_threshold_secs_configurable() {
-        let toml_str = "[factory]\nstall_threshold_secs = 120\n";
+        let toml_str = "[factory]\nstall_threshold_secs = 120\nstall_after_secs = 42\n";
         let parsed: std::collections::HashMap<String, FactoryConfig> =
             toml::from_str(toml_str).expect("valid toml");
         let fc = parsed.get("factory").expect("section present");
         assert_eq!(fc.stall_threshold_secs, 120);
+        assert_eq!(fc.stall_after_secs, 42);
         assert_eq!(
             FactoryConfig::default().stall_threshold_secs,
             cas_factory::DEFAULT_STALL_THRESHOLD_SECS

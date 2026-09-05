@@ -64,7 +64,7 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
    Omit `isolate` for shared mode.
 
    **Hard rule:** every `spawn_workers` call MUST include explicit `cli=`,
-   `model=`, and `effort=`. The active registry matrix is Claude Haiku 4.5/low for light, Codex GPT-5.6 Luna/xhigh for standard, Codex GPT-6 Astra/medium for taste, and Codex GPT-5.6 Sol/high for heavy. Use taste for judgment and public decisions and heavy for implementation risk; Terra is a standing suspension.
+   `model=`, and `effort=`. The active registry matrix is Claude Haiku 4.5/low for light, Codex GPT-5.6 Luna/xhigh for standard, Claude Fable 5.1/medium for taste, and Codex GPT-5.6 Sol/high for heavy. Use taste for judgment and public decisions and heavy for implementation risk; Terra is a standing suspension.
    Omitted fields fall back through the factory config cascade and stock floor;
    the spawn acknowledgement nags because supervisors should make worker tier
    selection intentional and visible.
@@ -81,11 +81,14 @@ cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=cla
 # standard — recipe codex_luna
 cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
 
-# taste — recipe codex_astra
-cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-astra effort=medium
+# taste — recipe claude_fable
+cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium
 
 # heavy — recipe codex_sol
 cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high
+
+# supervisor — recipe claude_fable
+cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium
 
 ```
 <!-- END GENERATED SPAWN RECIPES -->
@@ -103,7 +106,7 @@ cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-
      summary="Task <id> assignment" \
      message="Task <id>: <description>. Context: <findings>. Run cas__task action=mine to see your tasks."
    ```
-6. **End your turn immediately.** Stop here. Do not monitor, poll, or run any commands. Workers will push a message to you when done or blocked. Your next action is triggered by their message, not by checking.
+6. **Own the next exit rung.** If a worker owns it, wait for that worker's injected event. If you own a time-based follow-up, schedule one `coordination remind` that names the exact check and when it fires. Do not spin-poll.
 
 ### Resuming an Existing EPIC
 

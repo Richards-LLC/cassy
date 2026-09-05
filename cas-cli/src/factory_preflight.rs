@@ -1528,8 +1528,9 @@ mod tests {
     }
 
     #[test]
-    fn doctor_preflight_snapshot_includes_astra_taste_route() {
-        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[("CODEX_HOME", None)]);
+    fn doctor_preflight_snapshot_includes_fable_taste_route() {
+        let _env =
+            crate::test_support::TestEnvGuard::with_optional_vars(&[("CLAUDE_CONFIG_DIR", None)]);
         // Missing binaries produce deterministic unavailable evidence without auth/network probes.
         let snapshot = collect_capability_snapshot(
             &HashMap::new(),
@@ -1539,10 +1540,10 @@ mod tests {
         let (identity, evidence) = snapshot
             .availability
             .iter()
-            .find(|(identity, _)| identity.model == "gpt-6-astra")
+            .find(|(identity, _)| identity.model == "claude-fable-5-1")
             .expect("doctor/preflight must collect the registry's taste recipe");
-        assert_eq!(identity.harness, "codex");
-        assert_eq!(identity.provider, "openai");
+        assert_eq!(identity.harness, "claude");
+        assert_eq!(identity.provider, "anthropic");
         assert_eq!(
             evidence.availability,
             cas_factory::CapabilityAvailability::Unavailable

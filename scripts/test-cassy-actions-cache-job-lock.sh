@@ -89,6 +89,7 @@ if run_started >/dev/null 2>&1; then
     printf 'FAIL duplicate job start replaced a live per-slot holder\n' >&2
     exit 1
 fi
+printf 'ok   installed-shape started hook leaves a detached untracked holder alive\n'
 if run_pruner --now >/dev/null 2>&1; then
     printf 'FAIL forced prune crossed a live job shared lock\n' >&2
     exit 1
@@ -99,6 +100,31 @@ run_completed
 holder_started=0
 run_pruner --now >/dev/null
 printf 'ok   job-lifetime shared lock excludes scheduled and forced pruning\n'
+
+run_started >/dev/null
+holder_started=1
+read -r failed_holder_pid _ <"$state_root/slot-1.pid"
+kill -KILL "$failed_holder_pid"
+for _ in $(seq 1 100); do
+    kill -0 "$failed_holder_pid" 2>/dev/null || break
+    sleep 0.02
+done
+mkdir -p "$proc_root/103"
+printf '103\n' >>"$cgroup_root/slot1/cgroup.procs"
+printf 'Runner.Worker\n' >"$proc_root/103/comm"
+failed_holder_marker="$cache_root/cargo-target/holder-failed-marker"
+mkdir -p "$failed_holder_marker"
+if run_pruner --now >/dev/null 2>&1; then
+    printf 'FAIL forced prune crossed Runner.Worker after holder failure\n' >&2
+    exit 1
+fi
+worker_fallback_output="$(run_pruner --scheduled)"
+[[ "$worker_fallback_output" == *'Runner.Worker owns an active job'* ]]
+test -d "$failed_holder_marker"
+rm -f "$state_root/slot-1.pid"
+sed -i '/103/d' "$cgroup_root/slot1/cgroup.procs"
+holder_started=0
+printf 'ok   Runner.Worker keeps pruning fail-closed after abrupt holder loss\n'
 
 guard_entered="$fixture_root/guard-entered"
 guard_release="$fixture_root/guard-release"

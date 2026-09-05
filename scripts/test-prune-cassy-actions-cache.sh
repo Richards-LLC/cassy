@@ -36,8 +36,10 @@ cat >"$fixture_root/findmnt" <<'EOF'
 #!/usr/bin/env bash
 field=""
 target=""
+recursive=0
 while (($#)); do
     case "$1" in
+        -R|--submounts) recursive=1; shift ;;
         -o) field="$2"; shift 2 ;;
         -T) target="$2"; shift 2 ;;
         *) shift ;;
@@ -45,7 +47,12 @@ while (($#)); do
 done
 case "$field:$target" in
     TARGET:*cache*)
-        if [[ "${TEST_DELETE_NESTED_MOUNT:-}" == 1 && "$target" == */debug ]]; then
+        if (( recursive )) && [[ "${TEST_MOUNT_ENUM_FAIL:-}" == 1 ]]; then
+            exit 3
+        fi
+        if (( recursive )) && [[ "${TEST_DESCENDANT_NESTED_MOUNT:-}" == 1 && "$target" == */debug ]]; then
+            printf '%s\n%s/subdir\n' "$CASSY_ACTIONS_CACHE_ROOT" "$target"
+        elif [[ "${TEST_DELETE_NESTED_MOUNT:-}" == 1 && "$target" == */debug ]]; then
             printf '%s/cargo-target/debug\n' "$CASSY_ACTIONS_CACHE_ROOT"
         else
             printf '%s\n' "$CASSY_ACTIONS_CACHE_ROOT"
@@ -189,6 +196,32 @@ if TEST_DELETE_NESTED_MOUNT=1 run_pruner --now >/dev/null 2>&1; then
 fi
 test -f "$cache_root/cargo-target/debug/nested-mount-sentinel"
 printf 'ok   profile deletion cannot cross onto a nested mount\n'
+
+descendant_cache="$fixture_root/descendant-cache"
+cache_root="$descendant_cache"
+mkdir -p "$cache_root/cargo-target/debug/subdir" "$cache_root/sccache" \
+    "$cache_root/cargo-target-2" "$cache_root/sccache-2"
+printf 'nested descendant must survive\n' >"$cache_root/cargo-target/debug/subdir/sentinel"
+dd if=/dev/zero of="$cache_root/cargo-target/debug/over-budget.bin" bs=4096 count=16 status=none
+if TEST_DESCENDANT_NESTED_MOUNT=1 run_pruner --now >/dev/null 2>&1; then
+    printf 'FAIL recursive deletion accepted a nested mount below its root\n' >&2
+    exit 1
+fi
+test -f "$cache_root/cargo-target/debug/subdir/sentinel"
+printf 'ok   recursive profile deletion refuses descendant mounts before mutation\n'
+
+enumeration_cache="$fixture_root/enumeration-cache"
+cache_root="$enumeration_cache"
+mkdir -p "$cache_root/cargo-target/debug" "$cache_root/sccache" \
+    "$cache_root/cargo-target-2" "$cache_root/sccache-2"
+printf 'enumeration failure must preserve this\n' >"$cache_root/cargo-target/debug/sentinel"
+dd if=/dev/zero of="$cache_root/cargo-target/debug/over-budget.bin" bs=4096 count=16 status=none
+if TEST_MOUNT_ENUM_FAIL=1 run_pruner --now >/dev/null 2>&1; then
+    printf 'FAIL recursive deletion continued after mount enumeration failed\n' >&2
+    exit 1
+fi
+test -f "$cache_root/cargo-target/debug/sentinel"
+printf 'ok   mount enumeration failure refuses recursive deletion\n'
 
 if CASSY_ACTIONS_ALLOW_TEST_ROOT=1 CASSY_ACTIONS_CACHE_ROOT="$cache_root" \
     CASSY_ACTIONS_CGROUP_ROOT="$cgroup_root" CASSY_ACTIONS_PROC_ROOT="$proc_root" \

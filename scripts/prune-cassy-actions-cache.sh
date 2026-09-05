@@ -57,6 +57,7 @@ validate_config() {
 
 require_safe_delete_path() {
     local candidate="$1" cursor component canonical candidate_device candidate_mount
+    local mount_tree nested_mount canonical_mount
     local relative="${candidate#"$cache_root"/}"
     [[ "$candidate" == "$cache_root/"* && "$relative" != "$candidate" && -n "$relative" ]] ||
         fail "refusing deletion outside the cache root: $candidate"
@@ -77,6 +78,15 @@ require_safe_delete_path() {
         fail "cannot resolve deletion mount: $canonical"
     [[ "$candidate_device" == "$cache_device" && "$candidate_mount" == "$cache_mount" ]] ||
         fail "deletion path is not on the cache mount/device: $canonical"
+    mount_tree="$("$findmnt_bin" -R -r -n -o TARGET -T "$canonical")" ||
+        fail "cannot enumerate descendant mounts below deletion path: $canonical"
+    while IFS= read -r nested_mount; do
+        [[ -n "$nested_mount" ]] || continue
+        canonical_mount="$(realpath -e -- "$nested_mount")" ||
+            fail "cannot canonicalize enumerated mount target: $nested_mount"
+        [[ "$canonical_mount" != "$canonical/"* ]] ||
+            fail "refusing recursive deletion across descendant mount: $canonical_mount"
+    done <<<"$mount_tree"
 }
 
 safe_rm_rf() {

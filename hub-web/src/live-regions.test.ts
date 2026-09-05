@@ -46,6 +46,18 @@ const SHELL = `
     </form>
   </dialog>`;
 
+/** The cleanup step: Cancel discarded the invitation but storage has not proved it. */
+const CLEANUP_STEP = `
+  <dialog id="pair-dialog" open>
+    <section class="pair-flow pair-cleanup">
+      <p class="pair-status" role="status" hidden></p>
+      <div class="dialog-actions">
+        <button id="pair-close" type="button" data-role="cleanup">Close</button>
+        <button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button>
+      </div>
+    </section>
+  </dialog>`;
+
 /** The create-code step, where the dialog holds a section and not a form. */
 const CREATE_STEP = `
   <dialog id="pair-dialog" open>
@@ -287,5 +299,21 @@ describe("pairing dialog live regions (F1)", () => {
     applyLiveRegions(root, { ...live, pairing: { status: "Waiting for a machine to claim the code…", exchangeInFlight: false, createInFlight: false } });
     expect(root.querySelector("#pair-create")!.textContent).toBe("Create pairing code");
     expect(root.querySelector("#pair-close")!.textContent).toBe("Close");
+  });
+});
+
+describe("cleanup step live regions (F2)", () => {
+  it("holds Retry cleanup busy while a retry runs and keeps Close as Close", () => {
+    document.body.innerHTML = CLEANUP_STEP;
+    root = document.body;
+    applyLiveRegions(root, { ...live, pairing: { status: "Retrying cleanup…", exchangeInFlight: false, createInFlight: false, cleanupRetryInFlight: true } });
+    const retry = root.querySelector<HTMLButtonElement>("#pair-cleanup-retry")!;
+    expect(retry.disabled).toBe(true);
+    expect(retry.textContent).toBe("Retrying…");
+    expect(root.querySelector("#pair-close")!.textContent).toBe("Close");
+    applyLiveRegions(root, { ...live, pairing: { status: "Browser storage could not be checked. Keep this page open and retry once storage access is restored.", exchangeInFlight: false, createInFlight: false, cleanupRetryInFlight: false } });
+    expect(retry.disabled).toBe(false);
+    expect(retry.textContent).toBe("Retry cleanup");
+    expect(root.querySelector<HTMLElement>("#pair-dialog .pair-status")!.hidden).toBe(false);
   });
 });

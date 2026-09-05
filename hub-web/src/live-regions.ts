@@ -32,6 +32,8 @@ export interface LiveRegionView {
     readonly status?: string;
     readonly exchangeInFlight: boolean;
     readonly createInFlight: boolean;
+    /** A Retry cleanup is running; the button waits for it. */
+    readonly cleanupRetryInFlight?: boolean;
   };
 }
 
@@ -118,5 +120,10 @@ export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
     // flag at click time, so only the label has to move.
     const close = root.querySelector<HTMLButtonElement>("#pair-close");
     if (close && close.dataset.role !== "cleanup") close.textContent = pairing.createInFlight ? "Cancel" : "Close";
+    const retry = root.querySelector<HTMLButtonElement>("#pair-cleanup-retry");
+    if (retry) {
+      retry.disabled = pairing.cleanupRetryInFlight === true;
+      retry.textContent = pairing.cleanupRetryInFlight ? "Retrying…" : "Retry cleanup";
+    }
   }
 }

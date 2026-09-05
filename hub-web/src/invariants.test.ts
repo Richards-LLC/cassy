@@ -202,6 +202,14 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).toContain('<h2 id="pair-cleanup-title">Could not finish cancelling</h2>');
     expect(main).toContain('<button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button>');
     expect(main).toContain("async function retryPairingCleanup(): Promise<void> {");
+    // A late rollback failure from the operation Cancel invalidated is shown
+    // only while that cancellation owns the dialog; retries are serialized,
+    // rejection-safe and applied only if still current (review 25536).
+    expect(main).toContain("if (pairingCancellations.ownsOperation(operation.generation)) {");
+    expect(main).toContain("const ticket = pairingCancellations.beginRetry();");
+    expect(main).toContain("if (!pairingCancellations.finishRetry(ticket)) return;");
+    expect(main).toContain("recovery = { failed: true };");
+    expect(main).toContain("pairingCancellations.begin(verifiesCleanup ? exchangeOperationGeneration : undefined);");
     expect(main).not.toContain('const verifiesCleanup = pairingExchangeInFlight;\n  document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();');
     // F3: a storage failure after the hub consumed the invitation is named.
     expect(main).toContain("if (error instanceof PairingStorageError) {");

@@ -12,6 +12,7 @@ import { bindPairingDialogCancel } from "./pairing-dialog";
 import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cancellationOutcome, pairingCleanupFailureUpdate, pairingStorageClearFailureMessage } from "./pairing-cleanup";
 import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
+import { LATE_ROLLBACK_FAILURE_MESSAGE, PairingCancellationTracker, cleanupRetryOutcome } from "./pairing-cancellation";
 import { PAIRING_SCOPES, pairCommand, preselectedScopes, scopeChoices, scopeLabel, ungrantedScopes } from "./pairing-scopes";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
@@ -51,6 +52,8 @@ if (!pendingPairing) {
   }
 }
 const pairingOperations = new PairingOperationCoordinator();
+// Which cancellation, if any, owns the "could not finish cancelling" step.
+const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const rootStyles = getComputedStyle(document.documentElement);
 document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute(
@@ -112,6 +115,9 @@ let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a ma
 // Cancellation whose durable cleanup did not complete: the dialog stays on a
 // "could not finish cancelling" step with a retry until storage cooperates (F2).
 let pairingCleanupFailed = false;
+// The generation of the exchange Cancel would invalidate, so a late rollback
+// result can be matched to the cancellation that caused it.
+let exchangeOperationGeneration: number | undefined;
 let pairingPollTimer: number | undefined;
 let pairingCountdownTimer: number | undefined;
 let connectionViewTicker: number | undefined;
@@ -349,6 +355,10 @@ function openPairDialog(): void {
 // Android hands a pairing URL that differs only by #fragment to the tab that is
 // already open, so boot-time consumption alone drops the invitation in silence.
 watchPairingFragment(window, pendingPairingStore, (fragment) => {
+  // A new link is a new flow: whatever an earlier cancellation still owed the
+  // dialog no longer applies to it, and the fresh invitation takes the store.
+  pairingCancellations.supersede();
+  pairingCleanupFailed = false;
   pendingPairing = fragment;
   pairingStatus = "";
   render();
@@ -550,6 +560,7 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
   pairingDraft = updatePairingDraft(pairingDraft, values.entries(), !invitation.hubUrl);
   const operation = pairingOperations.begin();
   pairingExchangeInFlight = true;
+  exchangeOperationGeneration = operation.generation;
   pairingStatus = "Creating this browser credential… Cancel stops local installation.";
   render();
   let machine: StoredMachine;
@@ -583,7 +594,22 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
         cleanupMessage: error.message,
         resetDraft: () => createPairingDraft(location.origin),
       });
-      if (!update) return false;
+      if (!update) {
+        // Cancel invalidated this operation and its rollback then rejected. The
+        // cancellation that did so still owns the dialog unless something newer
+        // started; then the staged row stays quarantined for boot-time recovery
+        // and the newer flow is left alone.
+        if (pairingCancellations.ownsOperation(operation.generation)) {
+          const cleared = pendingPairingStore.clear();
+          pairingCleanupFailed = true;
+          pairingStatus = cleared.failClosed
+            ? LATE_ROLLBACK_FAILURE_MESSAGE
+            : `${LATE_ROLLBACK_FAILURE_MESSAGE} Browser storage also refused to record the cancellation.`;
+          render(false);
+          openPairDialog();
+        }
+        return false;
+      }
       const cleared = pendingPairingStore.clear();
       pendingPairing = update.pendingPairing;
       pairingDraft = update.pairingDraft;
@@ -597,7 +623,9 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
       throw error;
     }
     if (!pairingOperations.isCurrent(operation)) {
-      if (!pendingPairing && !pairingCleanupFailed) {
+      // Only the cancellation that ended this operation may close the dialog;
+      // a replacement flow that started since owns it now.
+      if (!pendingPairing && !pairingCleanupFailed && pairingCancellations.ownsOperation(operation.generation)) {
         // The cancellation the operator asked for has now been verified: the
         // dialog that said "verifying" can close, and the page says so.
         pairingStatus = "Pairing cancelled.";
@@ -639,9 +667,11 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
     throw error;
   } finally {
     pairingOperations.finish(operation);
+    if (exchangeOperationGeneration === operation.generation) exchangeOperationGeneration = undefined;
   }
   if (!pairingOperations.isCurrent(operation)) return false;
   pairingExchangeInFlight = false;
+  pairingCancellations.supersede();
   pairingOperations.invalidate();
   pendingPairingStore.clear();
   pendingPairing = null;
@@ -658,6 +688,8 @@ async function startRelayPairing(email: string): Promise<boolean> {
   if (!relayOrigin) throw new PairingRelayError("relay_unavailable", "Page-initiated pairing is unavailable in this deployment.");
   if (pairingCreateInFlight) return false;
   const generation = pairingOperations.replace();
+  pairingCancellations.supersede();
+  pairingCleanupFailed = false;
   stopPairingTimers();
   pendingPairingStore.clear();
   pendingPairing = null;
@@ -753,6 +785,7 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
 
 function cancelPendingPairing(): void {
   const verifiesCleanup = pairingExchangeInFlight;
+  pairingCancellations.begin(verifiesCleanup ? exchangeOperationGeneration : undefined);
   pairingOperations.invalidate();
   const cleared = pendingPairingStore.clear();
   pendingPairing = null;
@@ -777,6 +810,7 @@ function cancelPendingPairing(): void {
 /** A cancellation the page can vouch for: close the dialog and say so. */
 function finishCancelledPairing(): void {
   pairingCleanupFailed = false;
+  pairingCancellations.supersede();
   document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
   render(false);
   toast(pairingStatus || "Pairing cancelled.");
@@ -785,21 +819,29 @@ function finishCancelledPairing(): void {
 /**
  * Retry the durable part of a cancellation. It never resumes the discarded
  * invitation: the persistent store is cleared again and the catalog's pending
- * rollback is re-checked, and only a fail-closed result ends the step.
+ * rollback is re-checked, and only a fail-closed result ends the step. One
+ * retry runs at a time, a rejection lands in the dialog, and a result is
+ * applied only while the cancellation that started it still owns the dialog.
  */
 async function retryPairingCleanup(): Promise<void> {
+  const ticket = pairingCancellations.beginRetry();
+  if (!ticket) return;
+  pairingStatus = "Retrying cleanup…";
+  render(false);
   const cleared = pendingPairingStore.clear();
-  const recovered = await catalog.recoverPending();
-  if (cleared.failClosed && recovered.pendingCleanup === 0) {
-    pairingStatus = cleared.persistentRemovalFailed
-      ? "Pairing cancelled. Browser storage removal was denied, so the request was durably blocked instead."
-      : "Pairing cancelled.";
+  let recovery: { pendingCleanup?: number; failed?: boolean };
+  try {
+    recovery = { pendingCleanup: (await catalog.recoverPending()).pendingCleanup };
+  } catch {
+    recovery = { failed: true };
+  }
+  if (!pairingCancellations.finishRetry(ticket)) return;
+  const outcome = cleanupRetryOutcome(cleared, recovery);
+  pairingStatus = outcome.status;
+  if (outcome.done) {
     finishCancelledPairing();
     return;
   }
-  pairingStatus = cleared.failClosed
-    ? "The cancelled invitation is blocked, but a cancelled credential is still waiting for cleanup. Keep this page open and retry."
-    : "Browser storage still refuses to record the cancellation. Keep this page open and retry once storage access is restored.";
   render(false);
 }
 
@@ -1797,6 +1839,7 @@ function render(captureDraft = true): void {
       ...(pairingStatus ? { status: pairingStatus } : {}),
       exchangeInFlight: pairingExchangeInFlight,
       createInFlight: pairingCreateInFlight,
+      cleanupRetryInFlight: pairingCancellations.retrying,
     },
   };
   // The pairing dialog's step: which flow, which request, its expiry, and an

@@ -10679,12 +10679,8 @@ mod tests {
         );
         for cli in [None, Some("claude")] {
             for effort in ["medium", "high"] {
-                let json = build_spawn_spec_json(
-                    cli,
-                    Some("claude-fable-5-1"),
-                    Some(effort),
-                )
-                .unwrap();
+                let json =
+                    build_spawn_spec_json(cli, Some("claude-fable-5-1"), Some(effort)).unwrap();
                 let spec = decoded_spawn_spec(&json);
                 assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
                 assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
@@ -10695,20 +10691,14 @@ mod tests {
             }
         }
         for cli in ["codex", "grok", "opencode"] {
-            let error = build_spawn_spec_json(
-                Some(cli),
-                Some("claude-fable-5-1"),
-                Some("medium"),
-            )
-            .unwrap_err();
+            let error =
+                build_spawn_spec_json(Some(cli), Some("claude-fable-5-1"), Some("medium"))
+                    .unwrap_err();
             assert!(error.contains("cli=claude"), "{error}");
         }
-        let error = build_spawn_spec_json(
-            Some("claude"),
-            Some("claude-fable-5-1"),
-            Some("ultra"),
-        )
-        .unwrap_err();
+        let error =
+            build_spawn_spec_json(Some("claude"), Some("claude-fable-5-1"), Some("ultra"))
+                .unwrap_err();
         assert!(error.contains("effort"), "{error}");
     }
 

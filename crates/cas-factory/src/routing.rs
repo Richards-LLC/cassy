@@ -270,7 +270,7 @@ pub struct Lane {
 pub type LaneDefinition = Lane;
 
 /// Per-harness policy defaults. These retain the existing spawn defaults,
-/// independently of the lane recipes (including Astra/medium for taste).
+/// independently of the lane recipes (including Fable/medium for taste).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerDefaults {
@@ -1175,9 +1175,11 @@ candidates = ["codex_luna"]
         assert_eq!(fable.allowed_efforts, [Effort::Medium, Effort::High]);
         assert_eq!(fable.required_capability.as_deref(), Some("claude-account"));
         assert!(registry.recipes.contains_key("codex_astra"));
-        assert!(!lane_references(&registry.lanes["taste"])
-            .iter()
-            .any(|candidate| candidate == "codex_astra"));
+        assert!(
+            !lane_references(&registry.lanes["taste"])
+                .iter()
+                .any(|candidate| candidate == "codex_astra")
+        );
         assert_eq!(
             registry.recipes["codex_terra"].status,
             RecipeStatus::Suspended
@@ -1215,7 +1217,10 @@ candidates = ["codex_luna"]
         assert_eq!(recipe.model, "claude-fable-5-1");
         assert_eq!(recipe.default_effort, Effort::Medium);
         assert_eq!(recipe.allowed_efforts, [Effort::Medium, Effort::High]);
-        assert_eq!(recipe.required_capability.as_deref(), Some("claude-account"));
+        assert_eq!(
+            recipe.required_capability.as_deref(),
+            Some("claude-account")
+        );
         let now = CapabilitySnapshot::now_ms();
         for availability in [
             CapabilityAvailability::Unknown,

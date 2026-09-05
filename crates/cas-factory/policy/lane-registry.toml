@@ -43,12 +43,21 @@ allowed_efforts = ["high"]
 status = "active"
 required_capability = "claude-account"
 
+[recipes.claude_fable]
+harness = "claude"
+provider = "anthropic"
+model = "claude-fable-5-1"
+default_effort = "medium"
+allowed_efforts = ["medium", "high"]
+status = "active"
+required_capability = "claude-account"
+
 [recipes.codex_astra]
 harness = "codex"
 provider = "openai"
 model = "gpt-6-astra"
 default_effort = "medium"
-# Taste pins medium; explicit Astra requests retain the existing Cassy effort vocabulary.
+# Explicit Astra requests retain the existing Cassy effort vocabulary.
 allowed_efforts = ["minimal", "low", "medium", "high", "xhigh"]
 status = "active"
 required_capability = "codex-account"
@@ -89,12 +98,12 @@ candidates = ["claude_haiku", "codex_luna"]
 candidates = ["codex_luna", "claude_opus"]
 
 [lanes.taste]
-candidates = ["codex_astra"]
-# Astra/medium is the taste route; unavailable Astra fails closed.
+candidates = ["claude_fable"]
+# Fable/medium is the taste route; unavailable Fable fails closed.
 # Keep the only taste fallback as an explicit, reviewable registry edge while
 # disabling it in the shipped policy. A host may remove this guard only when
 # its own routing policy permits taste to degrade to Luna.
-fallbacks = ["codex_luna"]
+fallbacks = ["claude_opus"]
 no_fallback = true
 
 [lanes.heavy]

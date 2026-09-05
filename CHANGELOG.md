@@ -17,9 +17,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   summaries expose actionable-idle minutes.
 
 ### Changed
-- The supervisor lane now routes to Claude Fable 5.1 at medium effort instead
-  of Codex GPT-6 Astra. Explicit Astra requests remain available, and the Astra
-  recipe carries the stall reason when it is selected.
+- Factory supervisors now launch through an explicit `supervisor` registry lane
+  routed to Claude Fable 5.1 at medium effort (previously the built-in Claude
+  Opus/high default); the lane fails closed when the Claude account is
+  unavailable, and the Codex Astra recipe records why it is explicit-request
+  only.
 - Release publication now explicitly dispatches the install-path proof after
   publication, including token-created releases that never emit
   `release.published`.

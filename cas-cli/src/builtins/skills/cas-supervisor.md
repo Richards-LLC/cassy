@@ -35,10 +35,6 @@ Place the session on the highest true rung every turn, then own the action that 
 5. **On main** — the validated tree has landed on the default branch.
 6. **Released and deployed** — required publication and production verification are complete.
 
-## Operating flow
-
-Run `/cas-supervisor-checklist`, complete preflight and intake, create/pin the EPIC, then spawn a tiered mix, assign, and name the owned next exit rung. Use `count=2 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh` for standard tasks plus `count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high` for a heavy one; use the registry's Claude Haiku 4.5/low route for genuinely light chores and Codex GPT-6 Astra/medium for taste work. Use `update`, not `transfer`, for assignments. One-off follow-up: `spawn_workers count=1 task_id=<task-id>`.
-
 ## Heterogeneous Teams (Claude supervisor + Codex workers)
 
 Always pass complete `cli=`, `model=`, and `effort=` controls:

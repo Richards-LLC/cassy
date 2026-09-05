@@ -122,6 +122,116 @@ describe("Slack thread message injection", () => {
     expect(calls).toBe(0);
   });
 
+  it("recovers in the same injector once a corrupt state file is repaired", async () => {
+    const path = statePath();
+    writeFileSync(path, "not json");
+    const calls: string[][] = [];
+    const inject = createMessageInjector({
+      runner: async (args) => {
+        calls.push(args);
+        return { code: 0, stdout: "ok", stderr: "" };
+      },
+      sessionStatePath: path,
+    });
+
+    const rejected = await inject(config, baseMessage);
+    expect(rejected.ok).toBe(false);
+    expect(rejected.error).toContain("no restart needed");
+    expect(calls).toHaveLength(0);
+
+    // Exactly what the error tells the operator to do — repair the file, then
+    // send the message again. The same injector must accept it.
+    writeFileSync(path, JSON.stringify({}));
+    const repaired = await inject(config, baseMessage);
+    expect(repaired.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("--session-id");
+
+    // A recorded session survives a later corruption + repair cycle.
+    writeFileSync(path, "not json again");
+    expect((await inject(config, baseMessage)).ok).toBe(false);
+    writeFileSync(path, JSON.stringify({}));
+    expect((await inject(config, baseMessage)).ok).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain("--resume");
+  });
+
+  it("recovers in the same injector once a corrupt state file is removed", async () => {
+    const path = statePath();
+    writeFileSync(path, "[]");
+    const calls: string[][] = [];
+    const inject = createMessageInjector({
+      runner: async (args) => {
+        calls.push(args);
+        return { code: 0, stdout: "ok", stderr: "" };
+      },
+      sessionStatePath: path,
+    });
+
+    expect((await inject(config, baseMessage)).ok).toBe(false);
+    rmSync(path);
+    expect((await inject(config, baseMessage)).ok).toBe(true);
+    expect(calls.map((args) => args.at(-2))).toEqual(["--session-id"]);
+  });
+
+  it("resumes instead of wedging when the deterministic session ID already exists", async () => {
+    const path = statePath();
+    const calls: string[][] = [];
+    // The exact refusal Claude Code emits for an existing ID (2.1.261).
+    const inUse: ClaudeRunResult = {
+      code: 1,
+      stdout: "",
+      stderr: "Error: Session ID 7265c816-1515-b05e-2028-865a7a7730d3 is already in use.",
+    };
+    const results: ClaudeRunResult[] = [
+      // First message: the child established the session, then failed late, so
+      // nothing was recorded here.
+      { code: 1, stdout: "", stderr: "Error: reached max turns" },
+      inUse,
+      { code: 0, stdout: "recovered", stderr: "" },
+      { code: 0, stdout: "resumed", stderr: "" },
+    ];
+    const inject = createMessageInjector({
+      runner: async (args) => {
+        calls.push(args);
+        return results.shift()!;
+      },
+      sessionStatePath: path,
+    });
+
+    expect((await inject(config, baseMessage)).ok).toBe(false);
+
+    const recovered = await inject(config, baseMessage);
+    expect(recovered).toMatchObject({ ok: true, response: "recovered" });
+
+    // The recovery is durable: the next message resumes without a failed probe.
+    expect((await inject(config, baseMessage)).ok).toBe(true);
+
+    expect(calls.map((args) => args.at(-2))).toEqual([
+      "--session-id",
+      "--session-id",
+      "--resume",
+      "--resume",
+    ]);
+    expect(new Set(calls.map((args) => args.at(-1))).size).toBe(1);
+  });
+
+  it("does not retry an unrelated new-session failure", async () => {
+    const calls: string[][] = [];
+    const inject = createMessageInjector({
+      runner: async (args) => {
+        calls.push(args);
+        return { code: 1, stdout: "", stderr: "Error: reached max turns" };
+      },
+      sessionStatePath: statePath(),
+    });
+
+    const result = await inject(config, baseMessage);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("reached max turns");
+    expect(calls).toHaveLength(1);
+  });
+
   it("remembers a successful child in memory when durable persistence fails", async () => {
     const directory = mkdtempSync(join(tmpdir(), "cas-slack-daemon-test-"));
     temporaryDirectories.push(directory);

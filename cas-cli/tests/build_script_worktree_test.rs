@@ -43,8 +43,19 @@ fn run_cargo(package_root: &Path, target_dir: &Path, args: &[&str]) -> String {
     if args.first() != Some(&"generate-lockfile") {
         cargo_args.extend(["--target-dir".to_string(), target_dir.display().to_string()]);
     }
-    let output = Command::new(cargo_bin())
-        .args(&cargo_args)
+    let output = run_cargo_command(package_root, &cargo_args).expect("cargo should start");
+    assert_success("cargo", args, &output);
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn run_cargo_command(package_root: &Path, cargo_args: &[String]) -> std::io::Result<Output> {
+    let mut command = Command::new(cargo_bin());
+    command
+        .args(cargo_args)
         .current_dir(package_root)
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_NET_OFFLINE", "true")
@@ -54,14 +65,17 @@ fn run_cargo(package_root: &Path, target_dir: &Path, args: &[&str]) -> String {
         .env_remove("SENTRY_DSN")
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .output()
-        .expect("cargo should start");
-    assert_success("cargo", args, &output);
-    format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR");
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("SCCACHE_") {
+            command.env_remove(key);
+        }
+    }
+    command.output()
 }
 
 fn cargo_run_hash(package_root: &Path, target_dir: &Path) -> String {
@@ -73,6 +87,63 @@ fn assert_no_missing_input(output: &str) {
     assert!(
         !output.contains("Dirty") || !output.contains("missing"),
         "Cargo reported a missing rerun input:\n{output}"
+    );
+}
+
+fn nested_cargo_skip_message(stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let first_line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no stderr output");
+    format!("SKIP: nested cargo unavailable: {first_line}")
+}
+
+fn generate_lockfile_or_skip(package_root: &Path) -> bool {
+    let manifest = package_root.join("Cargo.toml");
+    let cargo_args = vec![
+        "generate-lockfile".to_string(),
+        "--offline".to_string(),
+        "--manifest-path".to_string(),
+        manifest.display().to_string(),
+    ];
+    match run_cargo_command(package_root, &cargo_args) {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            println!("{}", nested_cargo_skip_message(&output.stderr));
+            false
+        }
+        Err(error) => {
+            println!(
+                "SKIP: nested cargo unavailable: {}",
+                error
+                    .to_string()
+                    .lines()
+                    .next()
+                    .unwrap_or("cargo could not start")
+            );
+            false
+        }
+    }
+}
+
+#[test]
+fn offline_fixture_registry_classifier_preserves_skip_message_shape() {
+    assert_eq!(
+        nested_cargo_skip_message(
+            b"error: no matching package named `chrono` found\n\
+              location searched: crates.io index"
+        ),
+        "SKIP: nested cargo unavailable: error: no matching package named `chrono` found"
+    );
+    assert_eq!(
+        nested_cargo_skip_message(b"\n  error: could not execute process `sccache rustc -vV`\n"),
+        "SKIP: nested cargo unavailable: error: could not execute process `sccache rustc -vV`"
+    );
+    assert_eq!(
+        nested_cargo_skip_message(b""),
+        "SKIP: nested cargo unavailable: no stderr output"
     );
 }
 
@@ -160,8 +231,12 @@ fn cargo_build_script_stays_fresh_and_tracks_worktree_transitions() {
     let linked_target = repo.path().join("linked/target");
     // Generate each worktree's lockfile before the first build. Cargo creates
     // it lazily otherwise, which is itself a parent-inventory transition.
-    run_cargo(&normal_package, &normal_target, &["generate-lockfile"]);
-    run_cargo(&linked_package, &linked_target, &["generate-lockfile"]);
+    if !generate_lockfile_or_skip(&normal_package) {
+        return;
+    }
+    if !generate_lockfile_or_skip(&linked_package) {
+        return;
+    }
 
     fs::write(
         linked_package.join(".env"),

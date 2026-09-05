@@ -2624,7 +2624,7 @@ mod tests {
 
     use crate::test_support::TestEnvGuard;
     use cas_factory::{EpicState, FileChangeInfo, GitFileStatus, SourceChangesInfo, TaskSummary};
-    use cas_types::{Entry, Priority, TaskStatus, TaskType};
+    use cas_types::{Entry, Priority, Task, TaskStatus, TaskType};
 
     use super::{
         DirectorData, DirectorEvent, merge_director_data_preserving_git, non_closed_task_ids,
@@ -2765,18 +2765,26 @@ mod tests {
     /// ambient-recall packet.
     #[test]
     fn codex_supervisor_intro_carries_ambient_recall_and_supervisor_skills() {
-        use crate::store::{detect::open_prompt_queue_store, init_cas_dir, open_store};
+        use crate::store::{
+            detect::open_prompt_queue_store, init_cas_dir, open_store, open_task_store_local,
+        };
 
         let project = tempfile::tempdir().unwrap();
         let cas_dir = init_cas_dir(project.path()).unwrap();
         let _env =
             TestEnvGuard::with_optional_vars(&[(crate::internal_llm::INTERNAL_LLM_ENV, None)]);
+        let mut task = Task::new(
+            "cas-codex-launch".to_string(),
+            "Coordinate Codex release recovery audit".to_string(),
+        );
+        task.status = TaskStatus::InProgress;
+        open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
         let mut entry = Entry::new(
             "codex-supervisor-ambient".to_string(),
-            "Codex supervisor session start ambient recall sentinel".to_string(),
+            "Current Codex release recovery audit preserves operator intent".to_string(),
         );
-        entry.title = Some("Codex supervisor launch recall".to_string());
-        entry.tags = vec!["codex".to_string(), "supervisor".to_string()];
+        entry.title = Some("Current Codex release recovery guidance".to_string());
+        entry.tags = vec!["release".to_string(), "recovery".to_string()];
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 
@@ -2821,18 +2829,26 @@ mod tests {
     /// supervisor skills and a real ambient-recall packet.
     #[test]
     fn grok_supervisor_intro_carries_ambient_recall_and_supervisor_skills() {
-        use crate::store::{detect::open_prompt_queue_store, init_cas_dir, open_store};
+        use crate::store::{
+            detect::open_prompt_queue_store, init_cas_dir, open_store, open_task_store_local,
+        };
 
         let project = tempfile::tempdir().unwrap();
         let cas_dir = init_cas_dir(project.path()).unwrap();
         let _env =
             TestEnvGuard::with_optional_vars(&[(crate::internal_llm::INTERNAL_LLM_ENV, None)]);
+        let mut task = Task::new(
+            "cas-grok-launch".to_string(),
+            "Coordinate Grok release recovery audit".to_string(),
+        );
+        task.status = TaskStatus::InProgress;
+        open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
         let mut entry = Entry::new(
             "grok-supervisor-ambient".to_string(),
-            "supervisor session start ambient recall sentinel".to_string(),
+            "Current Grok release recovery audit preserves operator intent".to_string(),
         );
-        entry.title = Some("Grok supervisor launch recall".to_string());
-        entry.tags = vec!["grok".to_string(), "supervisor".to_string()];
+        entry.title = Some("Current Grok release recovery guidance".to_string());
+        entry.tags = vec!["release".to_string(), "recovery".to_string()];
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 

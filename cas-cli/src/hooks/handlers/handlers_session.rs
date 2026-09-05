@@ -1040,6 +1040,23 @@ pub fn handle_session_end(
         .collect();
 
     let session_count = session_observations.len();
+    let supervisor_actionable_idle_minutes = if std::env::var("CAS_AGENT_ROLE")
+        .ok()
+        .as_deref()
+        == Some("supervisor")
+    {
+        std::env::var("CAS_FACTORY_SESSION")
+            .ok()
+            .and_then(|session| {
+                crate::ui::factory::supervisor_progress_from_session_metadata_named(&session)
+            })
+            .map(|(_, tracker)| tracker.actionable_idle_minutes_at(chrono::Utc::now()))
+    } else {
+        None
+    };
+    if let Some(minutes) = supervisor_actionable_idle_minutes {
+        eprintln!("cas: Supervisor actionable-idle minutes: {minutes}");
+    }
 
     // Clean up agent leases and reset task status - ALWAYS do this regardless of observation count
     cleanup_agent_leases(cas_root, &input.session_id);
@@ -1181,6 +1198,12 @@ pub fn handle_session_end(
                 if !summary.summary.is_empty() {
                     let id = entry_store.generate_id()?;
                     let mut content = format!("## Session Summary\n\n{}\n", summary.summary);
+
+                    if let Some(minutes) = supervisor_actionable_idle_minutes {
+                        content.push_str(&format!(
+                            "\n### Factory Forward Motion\n- Actionable-idle minutes: {minutes}\n"
+                        ));
+                    }
 
                     if !summary.decisions.is_empty() {
                         content.push_str("\n### Decisions\n");

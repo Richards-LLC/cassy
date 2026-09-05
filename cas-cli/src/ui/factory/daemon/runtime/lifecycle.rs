@@ -7,6 +7,27 @@ fn enqueue_worker_attention_relay(
     cas_dir: &std::path::Path,
     event: &crate::ui::factory::director::DirectorEvent,
 ) -> WorkerAttentionRelayOutcome {
+    if let crate::ui::factory::director::DirectorEvent::SupervisorStalled {
+        next_step,
+        occurrence,
+        actionable_idle_secs,
+    } = event
+    {
+        let detail = format!(
+            "Supervisor actionable-idle for {}m. {}",
+            actionable_idle_secs / 60,
+            next_step.next_step_text()
+        );
+        return enqueue_worker_attention_relay_detail(
+            cas_dir,
+            "supervisor_stalled",
+            "supervisor",
+            None,
+            Some(*actionable_idle_secs),
+            &detail,
+            occurrence,
+        );
+    }
     let (kind, worker, task_id, elapsed_secs) = match event {
         crate::ui::factory::director::DirectorEvent::WorkerIdle {
             worker,

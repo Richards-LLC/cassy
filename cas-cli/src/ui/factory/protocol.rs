@@ -509,12 +509,25 @@ pub struct SessionMetadata {
     /// restart of the same session but never cross into a different session.
     #[serde(default)]
     pub held_workers: Vec<String>,
+    /// Most recent CAS MCP call made by this factory session's supervisor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_supervisor_mcp_call_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Persisted detector cadence and actionable-idle metric for this session.
+    #[serde(default)]
+    pub supervisor_stall: crate::ui::factory::director::SupervisorStallTracker,
     /// Project directory this session belongs to (for multi-project isolation)
     #[serde(default)]
     pub project_dir: Option<String>,
     /// Native Agent Teams team name (when Teams messaging is enabled)
     #[serde(default)]
     pub team_name: Option<String>,
+}
+
+impl SessionMetadata {
+    /// Current per-session actionable-idle metric, including an active span.
+    pub fn actionable_idle_minutes_at(&self, now: chrono::DateTime<chrono::Utc>) -> u64 {
+        self.supervisor_stall.actionable_idle_minutes_at(now)
+    }
 }
 
 /// Basic agent info for session metadata

@@ -76,6 +76,32 @@ fn assert_no_missing_input(output: &str) {
     );
 }
 
+#[test]
+fn offline_fixture_registry_classifier_accepts_only_missing_fixture_dependencies() {
+    assert!(offline_fixture_registry_missing(
+        "error: no matching package named `chrono` found\n\
+         location searched: crates.io index\n\
+         As a reminder, you're using offline mode (--offline)"
+    ));
+    assert!(offline_fixture_registry_missing(
+        "error: failed to select a version for the requirement `dotenvy = \"^0.15\"`\n\
+         location searched: crates.io index\n\
+         As a reminder, you're using offline mode (--offline)"
+    ));
+    assert!(!offline_fixture_registry_missing(
+        "error: could not execute process `sccache rustc -vV` (never executed)\n\
+         Caused by: No such file or directory"
+    ));
+    assert!(!offline_fixture_registry_missing(
+        "error: no matching package named `serde` found\n\
+         As a reminder, you're using offline mode (--offline)"
+    ));
+    assert!(!offline_fixture_registry_missing(
+        "error: no matching package named `chrono` found\n\
+         location searched: crates.io index"
+    ));
+}
+
 fn create_fixture() -> (TempDir, PathBuf, PathBuf) {
     let repo = tempfile::tempdir().expect("fixture tempdir");
     let package = repo.path().join("cas-cli");

@@ -59,10 +59,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   front-door command drift apart again.
 - `classify-ci-diff.sh` fails closed when `git diff` fails, instead of
   reporting an empty diff and a successful exit.
-- Self-hosted runner caches are bounded: cache pruning is serialized against
-  running jobs, descendant mounts are rejected, duplicate systemd mount rows
-  are tolerated, raw mount records are read inside the runner sandbox, and a
-  failed cutover restores the runners.
+- Self-hosted runner cache growth gains a guarded periodic budget: a prune
+  service and daily timer unit, an installer that registers them, pruning
+  serialized against running jobs, descendant mounts rejected, duplicate
+  systemd mount rows tolerated, and raw mount records read inside the runner
+  sandbox. This is the mechanism, not a hard ceiling enforced at write time,
+  and it does nothing on a host where the timer is not enabled. Separately, the
+  cutover script now restores the previous route and service state when one of
+  its own pre-cutover steps fails; recovery from a cutover that has already
+  completed remains an operator action.
 - Ambient recall rejects identity noise and stale procedural entries, expiry
   instants are parsed rather than guessed, task boosting is narrowed, and
   retrieval measurement explains itself and requires explicit use attribution.

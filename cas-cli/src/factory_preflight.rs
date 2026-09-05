@@ -1527,6 +1527,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn doctor_preflight_snapshot_includes_astra_taste_route() {
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[("CODEX_HOME", None)]);
+        // Missing binaries produce deterministic unavailable evidence without auth/network probes.
+        let snapshot = collect_capability_snapshot(
+            &HashMap::new(),
+            &[],
+            Deadline::after(Duration::from_secs(1)),
+        );
+        let (identity, evidence) = snapshot
+            .availability
+            .iter()
+            .find(|(identity, _)| identity.model == "gpt-6-astra")
+            .expect("doctor/preflight must collect the registry's taste recipe");
+        assert_eq!(identity.harness, "codex");
+        assert_eq!(identity.provider, "openai");
+        assert_eq!(
+            evidence.availability,
+            cas_factory::CapabilityAvailability::Unavailable
+        );
+        assert!(cas_factory::resolve_lane("taste", &snapshot).is_err());
+    }
+
     fn healthy_facts() -> PreflightFacts {
         let receipts = vec![
             receipt(Harness::ClaudeCode, "2.1.0"),

@@ -1820,3 +1820,467 @@ fn an_ordinary_push_failure_is_still_a_plain_not_pushed() {
         "an auth failure is not a non-fast-forward"
     );
 }
+
+/// cas-0f04 characterization. Builds the exact shape that stranded the epic
+/// integration checkout: the target branch is checked out in a SECOND linked
+/// worktree while a canonical merge advances the branch ref from elsewhere.
+///
+/// Returns (temp, repo_root, sibling_worktree_path, target_branch).
+fn repo_with_target_checked_out_in_a_second_worktree() -> (TempDir, PathBuf, PathBuf, String) {
+    let (temp, repo_path) = create_test_repo();
+    let git = |args: &[&str], dir: &PathBuf| {
+        let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // The integration branch, and a second linked worktree that has it out —
+    // the dedicated merge checkout in the real incident.
+    git(&["branch", "epic/target"], &repo_path);
+    // Outside the repository working tree, so the fixture's own scaffolding
+    // never shows up as repository status.
+    let sibling = temp.path().parent().unwrap().join(format!(
+        "cas-0f04-epic-checkout-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&sibling);
+    git(
+        &[
+            "worktree",
+            "add",
+            sibling.to_str().unwrap(),
+            "epic/target",
+        ],
+        &repo_path,
+    );
+
+    // A worker branch with real content to merge in. It also rewrites
+    // README.md, so the two trees genuinely differ on a pre-existing path —
+    // without that, an edit to README.md in a sibling checkout is not at risk
+    // and git has nothing to refuse.
+    git(&["checkout", "-q", "-b", "factory/worker"], &repo_path);
+    std::fs::write(repo_path.join("delivered.txt"), "worker delivery\n").unwrap();
+    std::fs::write(repo_path.join("README.md"), "# Test\nworker edit\n").unwrap();
+    git(&["add", "."], &repo_path);
+    git(&["commit", "-q", "-m", "worker delivery"], &repo_path);
+    // Leave the primary checkout somewhere else entirely, as a supervisor's
+    // shell would be.
+    git(&["checkout", "-q", "master"], &repo_path);
+
+    (temp, repo_path, sibling, "epic/target".to_string())
+}
+
+fn worktree_status(dir: &PathBuf) -> String {
+    let out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// cas-0f04. A canonical merge advanced the epic ref 35 commits while the
+/// dedicated integration checkout stayed at an ancestor, so `git status` there
+/// showed phantom staged reverse diffs and every merge attempt refused. Git
+/// forbids checking one branch out in two worktrees, but `update-ref` — which
+/// merge_branch_via_temp_worktree uses to advance the target — bypasses that
+/// protection and notifies no one.
+///
+/// A clean sibling checkout has nothing to preserve, so the merge must leave
+/// it consistent rather than stranded.
+#[test]
+fn merging_updates_a_clean_linked_checkout_of_the_target() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path);
+
+    let new_tip = git
+        .merge_branch_via_temp_worktree(&target, "factory/worker", true)
+        .expect("merge must succeed")
+        .expect("merge must produce a tip");
+
+    assert_eq!(
+        worktree_status(&sibling),
+        "",
+        "the sibling checkout must not be left with phantom reverse diffs"
+    );
+    assert!(
+        sibling.join("delivered.txt").exists(),
+        "the merged file must be present in the refreshed checkout"
+    );
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        new_tip,
+        "the sibling checkout must sit at the new tip"
+    );
+}
+
+/// cas-0f04. The refusal half of the contract: a sibling checkout that holds
+/// real uncommitted work must stop the merge BEFORE the ref moves, and must
+/// leave that work byte-for-byte intact. Advancing first and apologising later
+/// is what stranded the integration checkout.
+#[test]
+fn merging_refuses_when_a_linked_checkout_of_the_target_is_dirty() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path);
+    let tip_before = git.resolve_commit(&target).unwrap();
+
+    let precious = sibling.join("in-progress.txt");
+    std::fs::write(&precious, "supervisor's uncommitted work\n").unwrap();
+
+    let error = git
+        .merge_branch_via_temp_worktree(&target, "factory/worker", true)
+        .expect_err("a dirty checkout of the target must refuse");
+
+    match &error {
+        GitError::TargetCheckedOutDirty {
+            branch, checkout, ..
+        } => {
+            assert_eq!(branch, &target);
+            assert_eq!(checkout, &sibling);
+        }
+        other => panic!("expected TargetCheckedOutDirty, got {other:?}"),
+    }
+    let text = error.to_string();
+    assert!(text.contains("NO MERGE WAS ATTEMPTED"), "{text}");
+    assert!(text.contains("commit or stash it"), "{text}");
+    assert!(
+        text.contains("do NOT reset or check it out over"),
+        "the refusal must never suggest resetting over the operator's work: {text}"
+    );
+    assert!(
+        !text.to_lowercase().contains("read-tree"),
+        "the refusal must not hand over a recovery that erases edits: {text}"
+    );
+
+    assert_eq!(
+        git.resolve_commit(&target).unwrap(),
+        tip_before,
+        "a refusal must not move the target ref"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&precious).unwrap(),
+        "supervisor's uncommitted work\n",
+        "the uncommitted work must be untouched"
+    );
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// The pre-existing protection must survive: with no other checkout holding
+/// the target, the merge still runs in the ephemeral worktree and still leaves
+/// the primary checkout's HEAD exactly where the operator left it (cas-4702,
+/// GH #68/#73).
+#[test]
+fn merging_still_leaves_the_primary_checkout_untouched_when_no_sibling_holds_the_target() {
+    let (temp, repo_path) = create_test_repo();
+    let run = |args: &[&str]| {
+        let out = Command::new("git").args(args).current_dir(&repo_path).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    run(&["branch", "epic/target"]);
+    run(&["checkout", "-q", "-b", "factory/worker"]);
+    std::fs::write(repo_path.join("delivered.txt"), "worker delivery\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "worker delivery"]);
+    run(&["checkout", "-q", "master"]);
+    // Residue unrelated to the merge: GH #73 established this must not block.
+    std::fs::write(repo_path.join("unrelated.txt"), "supervisor scratch\n").unwrap();
+
+    let git = GitOperations::new(repo_path.clone());
+    let head_before = git.current_branch().unwrap();
+    git.merge_branch_via_temp_worktree("epic/target", "factory/worker", true)
+        .expect("an unrelated-residue merge must still succeed")
+        .expect("the merge must produce a tip");
+
+    assert_eq!(
+        git.current_branch().unwrap(),
+        head_before,
+        "the primary checkout's branch must not move"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo_path.join("unrelated.txt")).unwrap(),
+        "supervisor scratch\n",
+        "unrelated residue must survive the merge"
+    );
+    assert!(
+        !repo_path.join("delivered.txt").exists(),
+        "the merge must not check its result out into the primary checkout"
+    );
+    drop(temp);
+}
+
+/// cas-0f04, review follow-up. The gap between "this checkout was clean" and
+/// the refresh that runs after the compare-and-swap is real: someone can edit
+/// the checkout in that window. A `--reset` justified by the earlier
+/// observation would erase those edits silently, so the refresh must be
+/// evaluated by git at the moment it writes.
+///
+/// This drives the exact function the merge calls post-CAS, with an edit
+/// injected into that window.
+#[test]
+fn a_refresh_refuses_to_overwrite_an_edit_made_after_the_cleanliness_check() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let old_tip = git.resolve_commit(&target).unwrap();
+
+    // Publish a new tip the way the merge does, without touching the sibling.
+    let new_tip = {
+        let out = Command::new("git")
+            .args(["rev-parse", "factory/worker"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git.compare_and_swap_ref(&target, &new_tip, &old_tip).unwrap();
+
+    // The injected edit: it appears AFTER the pre-merge cleanliness check and
+    // BEFORE the refresh, exactly the window the review named.
+    let precious = sibling.join("README.md");
+    std::fs::write(&precious, "edited during the merge window\n").unwrap();
+
+    let outcome = git.refresh_linked_checkout(&sibling, &target, &old_tip, &new_tip);
+
+    match outcome {
+        CheckoutRefresh::LeftStale { reason } => {
+            assert!(!reason.is_empty(), "the refusal must carry git's reason");
+        }
+        CheckoutRefresh::Updated => {
+            panic!("the refresh overwrote an edit made after the cleanliness check")
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(&precious).unwrap(),
+        "edited during the merge window\n",
+        "the edit made inside the window must survive untouched"
+    );
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// The same function on a checkout that really is untouched: it advances, so
+/// the guard above is not simply refusing everything.
+#[test]
+fn a_refresh_advances_a_checkout_that_is_still_clean() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let old_tip = git.resolve_commit(&target).unwrap();
+    let new_tip = {
+        let out = Command::new("git")
+            .args(["rev-parse", "factory/worker"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git.compare_and_swap_ref(&target, &new_tip, &old_tip).unwrap();
+
+    assert_eq!(
+        git.refresh_linked_checkout(&sibling, &target, &old_tip, &new_tip),
+        CheckoutRefresh::Updated
+    );
+    assert_eq!(worktree_status(&sibling), "");
+    assert!(sibling.join("delivered.txt").exists());
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// cas-0f04, review follow-up. The injected edit can also be STAGED — a user
+/// who ran `git add` in that checkout during the window has work that lives
+/// only in the index. A guard that only noticed unstaged modifications would
+/// destroy exactly that. Staged and unstaged are asserted separately because
+/// they are separate failure modes.
+#[test]
+fn a_refresh_preserves_a_staged_edit_made_after_the_cleanliness_check() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let old_tip = git.resolve_commit(&target).unwrap();
+    let new_tip = {
+        let out = Command::new("git")
+            .args(["rev-parse", "factory/worker"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git.compare_and_swap_ref(&target, &new_tip, &old_tip).unwrap();
+
+    // Staged, not merely written: the content exists only in that index.
+    let precious = sibling.join("README.md");
+    std::fs::write(&precious, "staged during the merge window\n").unwrap();
+    let add = Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    assert!(add.status.success());
+
+    let outcome = git.refresh_linked_checkout(&sibling, &target, &old_tip, &new_tip);
+
+    assert!(
+        matches!(outcome, CheckoutRefresh::LeftStale { .. }),
+        "a staged edit made inside the window must not be overwritten, got {outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&precious).unwrap(),
+        "staged during the merge window\n",
+        "the staged content must survive byte-for-byte"
+    );
+    let staged = Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&staged.stdout).contains("README.md"),
+        "the staged entry itself must still be staged"
+    );
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// cas-0f04, review follow-up. A tracing warning is not delivery: the MCP
+/// caller reads a receipt, not this process's log. A merge that leaves a
+/// checkout stranded must say so in the operator-visible text, or it is the
+/// same silent-state defect one layer up.
+#[test]
+fn a_stale_checkout_is_reported_to_the_caller_not_only_logged() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let old_tip = git.resolve_commit(&target).unwrap();
+    let new_tip = {
+        let out = Command::new("git")
+            .args(["rev-parse", "factory/worker"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git.compare_and_swap_ref(&target, &new_tip, &old_tip).unwrap();
+
+    // Work appears in the window, so the refresh must decline.
+    std::fs::write(sibling.join("README.md"), "edited in the window\n").unwrap();
+    assert!(matches!(
+        git.refresh_linked_checkout(&sibling, &target, &old_tip, &new_tip),
+        CheckoutRefresh::LeftStale { .. }
+    ));
+    git.record_stale_checkout_for_test(&target, &sibling, &old_tip, &new_tip, "not uptodate");
+
+    let notes = git.take_stale_checkout_notes();
+    assert_eq!(notes.len(), 1, "the caller must receive exactly one note");
+    let note = &notes[0];
+    assert!(note.contains(&sibling.display().to_string()), "{note}");
+    assert!(note.contains(&old_tip[..12]), "{note}");
+    assert!(note.contains(&new_tip[..12]), "{note}");
+    assert!(note.contains("Nothing there was overwritten"), "{note}");
+    assert!(
+        !note.contains("still describe"),
+        "the note must not claim what the checkout now contains — it may have been \
+         edited, staged into, or switched branches: {note}"
+    );
+    assert!(note.contains("commit or stash"), "{note}");
+    assert!(
+        !note.to_lowercase().contains("read-tree") && !note.to_lowercase().contains("reset"),
+        "the note must not hand over a recovery that erases the work: {note}"
+    );
+
+    // Draining is one-shot: a later merge must not re-report a stale checkout
+    // that has since been dealt with.
+    assert!(git.take_stale_checkout_notes().is_empty());
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// A checkout that switched to a different branch inside the window must not
+/// be advanced to the old target's tip — that would be a silent checkout of a
+/// branch nobody asked for.
+#[test]
+fn a_checkout_switched_to_another_branch_is_not_refreshed_as_the_target() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let old_tip = git.resolve_commit(&target).unwrap();
+    let new_tip = {
+        let out = Command::new("git")
+            .args(["rev-parse", "factory/worker"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git.compare_and_swap_ref(&target, &new_tip, &old_tip).unwrap();
+
+    // The operator moved that checkout onto their own branch in the window.
+    let switched = Command::new("git")
+        .args(["checkout", "-q", "-b", "operator/elsewhere"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    assert!(switched.status.success());
+
+    match git.refresh_linked_checkout(&sibling, &target, &old_tip, &new_tip) {
+        CheckoutRefresh::LeftStale { reason } => {
+            assert!(
+                reason.contains("operator/elsewhere"),
+                "the refusal must name the branch it found: {reason}"
+            );
+        }
+        CheckoutRefresh::Updated => {
+            panic!("a checkout on another branch must never be advanced to the target's tip")
+        }
+    }
+    assert!(
+        !sibling.join("delivered.txt").exists(),
+        "the target's content must not appear on the operator's branch"
+    );
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// cas-0f04, review follow-up. If git cannot say which worktrees hold the
+/// target, there is no basis for claiming the advance is safe for them. An
+/// empty inventory used to mean "nobody holds it", so a failed enumeration
+/// silently authorised the ref move — the same fail-open shape as the bug
+/// itself. It must refuse, and refuse before anything is written.
+#[test]
+fn an_unreadable_checkout_inventory_refuses_before_touching_anything() {
+    let (_temp, repo_path, sibling, target) = repo_with_target_checked_out_in_a_second_worktree();
+    let git = GitOperations::new(repo_path.clone());
+    let tip_before = git.resolve_commit(&target).unwrap();
+    let sibling_head_before = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    let sibling_status_before = worktree_status(&sibling);
+
+    // SAFETY: nextest runs each test in its own process, so this env var
+    // cannot leak into another test.
+    unsafe { std::env::set_var("CAS_TEST_FAIL_WORKTREE_LIST", "1") };
+    let error = git
+        .merge_branch_via_temp_worktree(&target, "factory/worker", true)
+        .expect_err("an unknown inventory must refuse the merge");
+    unsafe { std::env::remove_var("CAS_TEST_FAIL_WORKTREE_LIST") };
+
+    match &error {
+        GitError::CheckoutInventoryUnavailable { branch, .. } => assert_eq!(branch, &target),
+        other => panic!("expected CheckoutInventoryUnavailable, got {other:?}"),
+    }
+    assert!(
+        error.to_string().contains("NO MERGE WAS ATTEMPTED"),
+        "{error}"
+    );
+
+    // Nothing moved: not the ref, not the sibling's HEAD, not its files.
+    assert_eq!(git.resolve_commit(&target).unwrap(), tip_before);
+    let sibling_head_after = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&sibling)
+        .output()
+        .unwrap();
+    assert_eq!(sibling_head_before.stdout, sibling_head_after.stdout);
+    assert_eq!(worktree_status(&sibling), sibling_status_before);
+    assert!(!sibling.join("delivered.txt").exists());
+    let _ = std::fs::remove_dir_all(&sibling);
+}

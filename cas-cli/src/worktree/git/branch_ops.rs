@@ -99,7 +99,7 @@ impl TargetPushOutcome {
     }
 }
 
-fn first_line(text: &str) -> String {
+pub(crate) fn first_line(text: &str) -> String {
     text.lines()
         .map(str::trim)
         .find(|line| !line.is_empty())

@@ -7223,12 +7223,9 @@ pub(crate) fn count_unmerged_factory_commits(
         return 0;
     }
 
+    let count_range = format!("{parent_branch}..{factory_branch}");
     let count_out = Command::new("git")
-        .args([
-            "rev-list",
-            "--count",
-            &format!("{merge_base}..{factory_branch}"),
-        ])
+        .args(["rev-list", "--count", &count_range])
         .current_dir(repo_path)
         .output();
     match count_out {
@@ -7379,8 +7376,10 @@ pub(crate) fn count_unmerged_against_targets(
     }
 
     let origin_parent = format!("origin/{parent_branch}");
-    let mut args = vec!["rev-list", "--count", commit_ish, "--not", parent_branch];
+    let count_range = format!("{parent_branch}..{commit_ish}");
+    let mut args = vec!["rev-list", "--count", count_range.as_str()];
     if git_ref_exists(repo_path, &origin_parent) {
+        args.push("--not");
         args.push(origin_parent.as_str());
     }
 
@@ -7417,14 +7416,10 @@ fn unmerged_commit_shas_against_targets(
 
     let origin_parent = format!("origin/{parent_branch}");
     let limit = format!("--max-count={limit}");
-    let mut args = vec![
-        "rev-list",
-        limit.as_str(),
-        commit_ish,
-        "--not",
-        parent_branch,
-    ];
+    let count_range = format!("{parent_branch}..{commit_ish}");
+    let mut args = vec!["rev-list", limit.as_str(), count_range.as_str()];
     if git_ref_exists(repo_path, &origin_parent) {
+        args.push("--not");
         args.push(origin_parent.as_str());
     }
     let Ok(out) = Command::new("git")
@@ -10059,6 +10054,16 @@ fn read_ref_preferring_local(repo_path: &std::path::Path, requested: &str) -> Ch
 }
 
 impl EpicChildBranchStatus {
+    /// The branch count is a live Git measurement. Content failures are kept
+    /// separate so an ancestor branch is never rendered as carrying a
+    /// fabricated unmerged commit merely because its historical anchor was
+    /// dropped from the target tree.
+    fn blocks_epic_close(&self) -> bool {
+        self.unmerged_count > 0
+            || !self.dropped_paths.is_empty()
+            || self.content_check_error.is_some()
+    }
+
     fn factory_branches_label(&self) -> String {
         let branches = self
             .factory_branch
@@ -10249,8 +10254,9 @@ fn reanchored_delivery_content_in_parent(
 ///
 /// Children without any recorded branch or assignee are still represented in
 /// the output so the report is complete; the gate filters only on
-/// `unmerged_count > 0` so a valid anchor still blocks even if its branch-name
-/// receipt is missing.
+/// `blocks_epic_close()` so a valid anchor still blocks when its content proof
+/// reports a real drop or an unknown result even if the live branch count is
+/// zero.
 pub(crate) fn collect_epic_branch_statuses(
     subtasks: &[Task],
     parent_branch: &str,
@@ -10358,14 +10364,16 @@ pub(crate) fn collect_epic_branch_statuses(
                         ));
                     }
                     DeliveryContentPresence::Dropped { paths } => {
-                        // The exact count is no longer meaningful: history is
-                        // integrated, but content is not. A positive sentinel
-                        // keeps both epic_status and epic close fail-closed.
-                        unmerged_count = 1;
+                        // Keep the live branch count honest: history can be
+                        // fully integrated while content proof independently
+                        // rejects the delivery. `blocks_epic_close()` carries
+                        // the fail-closed dropped-content verdict.
                         dropped_paths = paths;
                     }
                     DeliveryContentPresence::Unknown { reason } => {
-                        unmerged_count = u32::MAX;
+                        // Unknown content evidence is fail-closed through
+                        // `blocks_epic_close()`, not by manufacturing a Git
+                        // commit count that the branch does not have.
                         content_check_error = Some(reason);
                     }
                 }
@@ -10726,7 +10734,7 @@ pub(crate) fn render_epic_status_report_with_stack(
             ));
         }
     }
-    let stranded = statuses.iter().filter(|s| s.unmerged_count > 0).count();
+    let stranded = statuses.iter().filter(|s| s.blocks_epic_close()).count();
     if stranded > 0 {
         out.push_str(&format!(
             "\n⚠️  {stranded} child task(s) carry stranded factory commits. \
@@ -11140,7 +11148,7 @@ pub(crate) fn run_epic_close_merge_gate(
     }
     let statuses = collect_epic_branch_statuses(subtasks, parent_branch, repo_path);
     let stranded: Vec<&EpicChildBranchStatus> =
-        statuses.iter().filter(|s| s.unmerged_count > 0).collect();
+        statuses.iter().filter(|s| s.blocks_epic_close()).collect();
     if stranded.is_empty() {
         let notes = statuses
             .iter()
@@ -13295,17 +13303,23 @@ pub(crate) fn delivery_content_presence_on_target(
             Ok(present) => present,
             Err(reason) => return DeliveryContentPresence::Unknown { reason },
         };
-        if !integration_present {
-            truly_dropped.push(path);
-            continue;
-        }
-
+        // A merge resolution may replace the original hunk at the accepted
+        // integration commit. In that shape, an ordinary first-parent edit
+        // to the same path is still durable evidence that the delivery was
+        // evolved along the target lineage. Do not stop at the first absent
+        // integration hunk; inspect the post-integration path history before
+        // declaring a real drop.
+        let mut first_path_touch = None;
         let mut first_loss = None;
         for commit in &post_integration {
             match commit_changes_path(repo_path, commit, &path) {
                 Ok(false) => continue,
                 Ok(true) => {}
                 Err(reason) => return DeliveryContentPresence::Unknown { reason },
+            }
+            first_path_touch.get_or_insert_with(|| commit.clone());
+            if !integration_present {
+                break;
             }
             match delivery_path_effect_survives_on_tree(
                 repo_path,
@@ -13322,6 +13336,41 @@ pub(crate) fn delivery_content_presence_on_target(
                 Err(reason) => return DeliveryContentPresence::Unknown { reason },
             }
         }
+
+        if !integration_present {
+            let Some(first_touch) = first_path_touch else {
+                truly_dropped.push(path);
+                continue;
+            };
+            let supersession = match git_commit_parent_count(repo_path, &first_touch) {
+                0 => {
+                    return DeliveryContentPresence::Unknown {
+                        reason: format!("Git could not inspect parents of `{first_touch}`"),
+                    };
+                }
+                1 => true,
+                _ => match merge_carries_explicit_delivery_evolution(
+                    repo_path,
+                    &first_touch,
+                    delivery_commit,
+                    &delivery_parent,
+                    &path,
+                ) {
+                    Ok(evolved) => evolved,
+                    Err(reason) => return DeliveryContentPresence::Unknown { reason },
+                },
+            };
+            if supersession {
+                superseded.push(path);
+                if !superseding_commits.contains(&first_touch) {
+                    superseding_commits.push(first_touch);
+                }
+            } else {
+                truly_dropped.push(path);
+            }
+            continue;
+        }
+
         let Some(first_loss) = first_loss else {
             return DeliveryContentPresence::Unknown {
                 reason: format!(
@@ -17238,7 +17287,10 @@ mod merge_state_gate_tests {
         let rows = collect_epic_branch_statuses(&[task], "main", p);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].dropped_paths, vec!["credits.rs".to_string()]);
-        assert!(rows[0].unmerged_count > 0);
+        assert_eq!(
+            rows[0].unmerged_count, 0,
+            "content failure must not fabricate an unmerged commit count"
+        );
         let report = render_epic_status_report("cas-epic", "main", &rows);
         assert!(report.contains("content dropped"), "{report}");
         assert!(report.contains("credits.rs"), "{report}");
@@ -19420,7 +19472,10 @@ mod epic_status_gate_tests {
         );
         std::fs::write(p.join("shared.rs"), "fn value() { worker_v2(); }\n").unwrap();
         git(p, &["add", "shared.rs"]);
-        git(p, &["commit", "-q", "-m", "evolve integrated worker delivery"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "evolve integrated worker delivery"],
+        );
 
         assert!(
             git_commit_is_ancestor(p, &anchor, "main"),
@@ -19431,14 +19486,6 @@ mod epic_status_gate_tests {
             Some(0),
             "precondition: the worker branch tip is an ancestor of main"
         );
-        assert_eq!(
-            delivery_content_presence_on_target(p, &anchor, "main"),
-            DeliveryContentPresence::Dropped {
-                paths: vec!["shared.rs".to_string()]
-            },
-            "precondition: the old checker reports the false dropped-content verdict"
-        );
-
         let mut task = child("cas-evolved", TaskStatus::Closed, Some("worker"));
         task.deliverables.factory_branch_anchor = Some(anchor);
         let statuses = collect_epic_branch_statuses(std::slice::from_ref(&task), "main", p);
@@ -19451,7 +19498,10 @@ mod epic_status_gate_tests {
             row.content_evolution_note.is_some(),
             "later same-lineage path evolution must be recorded: {row:?}"
         );
-        assert!(row.dropped_paths.is_empty(), "evolved content is not dropped: {row:?}");
+        assert!(
+            row.dropped_paths.is_empty(),
+            "evolved content is not dropped: {row:?}"
+        );
 
         let report = render_epic_status_report("cas-epic", "main", &statuses);
         assert!(report.contains("merged (content evolved)"), "{report}");
@@ -19509,8 +19559,8 @@ mod epic_status_gate_tests {
         let row = &statuses[0];
         assert_eq!(row.dropped_paths, vec!["shared.rs".to_string()]);
         assert!(
-            row.unmerged_count > 0,
-            "real dropped content must retain the fail-closed sentinel: {row:?}"
+            row.blocks_epic_close(),
+            "real dropped content must remain an epic close blocker: {row:?}"
         );
         let report = render_epic_status_report("cas-epic", "main", &statuses);
         assert!(report.contains("content dropped"), "{report}");

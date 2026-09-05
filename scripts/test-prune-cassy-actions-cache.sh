@@ -37,9 +37,13 @@ cat >"$fixture_root/findmnt" <<'EOF'
 field=""
 target=""
 recursive=0
+first_only=0
+raw=0
 while (($#)); do
     case "$1" in
         -R|--submounts) recursive=1; shift ;;
+        -f|--first-only) first_only=1; shift ;;
+        -r|--raw) raw=1; shift ;;
         -o) field="$2"; shift 2 ;;
         -T) target="$2"; shift 2 ;;
         *) shift ;;
@@ -58,7 +62,18 @@ case "$field:$target" in
             printf '%s\n' "$CASSY_ACTIONS_CACHE_ROOT"
         fi
         ;;
-    MAJ:MIN:*cache*) printf '%s\n' "${TEST_CACHE_DEVICE:-259:1}" ;;
+    MAJ:MIN:*cache*)
+        if [[ "${TEST_PADDED_ROWS:-}" == 1 && "$raw" == 0 &&
+              "$target" == "$CASSY_ACTIONS_CACHE_ROOT" ]]; then
+            printf '%s  \n' "${TEST_CACHE_DEVICE:-259:1}"
+        else
+            printf '%s\n' "${TEST_CACHE_DEVICE:-259:1}"
+        fi
+        if [[ "${TEST_DUPLICATE_ROWS:-}" == 1 && "$first_only" == 0 &&
+              "$target" == "$CASSY_ACTIONS_CACHE_ROOT" ]]; then
+            printf '%s\n' "${TEST_CACHE_DEVICE:-259:1}"
+        fi
+        ;;
     MAJ:MIN:*) printf '%s\n' "${TEST_VOLUME_DEVICE:-259:1}" ;;
     FSROOT:*cache*) printf '%s\n' "${TEST_CACHE_FSROOT:-/home/.cassy-actions-cache}" ;;
     *) exit 2 ;;
@@ -78,10 +93,21 @@ run_pruner() {
     CASSY_ACTIONS_MOUNTPOINT_BIN="$fixture_root/mountpoint" \
     CASSY_ACTIONS_FINDMNT_BIN="$fixture_root/findmnt" \
     CASSY_ACTIONS_TARGET_BUDGET_BYTES=32768 \
-    CASSY_ACTIONS_SCCACHE_BUDGET_BYTES=8192 \
+    CASSY_ACTIONS_SCCACHE_BUDGET_BYTES="$fixture_sccache_budget_bytes" \
     CASSY_ACTIONS_SLOT_BUDGET_BYTES=60000 \
     CASSY_ACTIONS_CACHE_MAX_AGE_DAYS=7 \
         "$pruner" "$@"
+}
+
+measure_fixture_sccache_budget() {
+    local slot slot_sccache_bytes
+    fixture_sccache_budget_bytes=1
+    for slot in '' '-2'; do
+        slot_sccache_bytes="$(du -sx -B1 -- "$cache_root/sccache$slot" | awk '{print $1}')"
+        if (( slot_sccache_bytes > fixture_sccache_budget_bytes )); then
+            fixture_sccache_budget_bytes="$slot_sccache_bytes"
+        fi
+    done
 }
 
 for slot in '' '-2'; do
@@ -94,13 +120,21 @@ for slot in '' '-2'; do
         "$cache_root/cargo-target$slot/debug/deps/libstale.rlib"
 done
 
-run_pruner --now >/dev/null
+# bytes_for() deliberately measures allocated bytes so the production budget
+# includes filesystem metadata. A tmpfs may charge zero blocks for this
+# directory while the GitHub-hosted ext4 image charges one 4096-byte block.
+# Pin the fixture ceiling to the larger observed slot instead of assuming file
+# payload is the complete du result. Recalculate after fixtures change shape.
+measure_fixture_sccache_budget
+
+TEST_DUPLICATE_ROWS=1 TEST_PADDED_ROWS=1 run_pruner --now >/dev/null
 for slot in '' '-2'; do
     test ! -e "$cache_root/cargo-target$slot/debug/incremental/stale-session"
     test ! -e "$cache_root/cargo-target$slot/debug/deps/libstale.rlib"
     test -e "$cache_root/cargo-target$slot/debug/deps/libfresh.rlib"
 done
 printf 'ok   idle pruning removes stale incremental/deps data from both slots\n'
+printf 'ok   pruning tolerates duplicate mount rows from a service namespace\n'
 
 mkdir -p "$proc_root/103"
 printf '103\n' >>"$cgroup_root/slot1/cgroup.procs"
@@ -149,6 +183,7 @@ for slot in '' '-2'; do
     dd if=/dev/zero of="$cache_root/cargo-target$slot/debug/deps/current" bs=4096 count=16 status=none
     dd if=/dev/zero of="$cache_root/sccache$slot/current" bs=4096 count=2 status=none
 done
+measure_fixture_sccache_budget
 run_pruner --now >/dev/null
 for slot in '' '-2'; do
     test ! -e "$cache_root/cargo-target$slot/debug"

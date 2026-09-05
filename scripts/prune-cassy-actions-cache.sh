@@ -72,9 +72,9 @@ require_safe_delete_path() {
     canonical="$(realpath -e -- "$candidate")" || fail "cannot canonicalize deletion path: $candidate"
     [[ "$canonical" == "$cache_root/"* ]] ||
         fail "canonical deletion path escaped the cache root: $candidate -> $canonical"
-    candidate_device="$("$findmnt_bin" -n -o MAJ:MIN -T "$canonical")" ||
+    candidate_device="$("$findmnt_bin" -f -r -n -o MAJ:MIN -T "$canonical")" ||
         fail "cannot resolve deletion device: $canonical"
-    candidate_mount="$("$findmnt_bin" -n -o TARGET -T "$canonical")" ||
+    candidate_mount="$("$findmnt_bin" -f -r -n -o TARGET -T "$canonical")" ||
         fail "cannot resolve deletion mount: $canonical"
     [[ "$candidate_device" == "$cache_device" && "$candidate_mount" == "$cache_mount" ]] ||
         fail "deletion path is not on the cache mount/device: $canonical"
@@ -207,9 +207,9 @@ prune_all() {
         (( state == 1 )) && fail 'refusing to prune while Runner.Worker owns an active job'
         fail 'refusing to prune because runner job state is missing or unreadable'
     fi
-    cache_device="$("$findmnt_bin" -n -o MAJ:MIN -T "$cache_root")" ||
+    cache_device="$("$findmnt_bin" -f -r -n -o MAJ:MIN -T "$cache_root")" ||
         fail 'cannot resolve cache device'
-    cache_mount="$("$findmnt_bin" -n -o TARGET -T "$cache_root")" ||
+    cache_mount="$("$findmnt_bin" -f -r -n -o TARGET -T "$cache_root")" ||
         fail 'cannot resolve cache mount'
     for index in 0 1; do prune_slot "$index"; done
 }

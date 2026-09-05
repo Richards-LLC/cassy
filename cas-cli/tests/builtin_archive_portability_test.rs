@@ -680,21 +680,25 @@ fn builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime() {
     // inspection catches checkout reads even when the test is not itself a
     // builtin inspection. Keep intentional source-text mentions in this guard
     // behind a named allowlist with a reason rather than weakening the scan.
+    for (allowed_name, reason) in COMPILE_TIME_CHECKOUT_READ_ALLOWLIST {
+        assert!(
+            !allowed_name.is_empty() && !reason.trim().is_empty(),
+            "compile-time checkout read allowlist entries require a source path and reason"
+        );
+    }
     for (name, source) in FIXTURE_SOURCES {
         if !name.starts_with("cas-cli/tests/") {
             continue;
         }
+        let allowlist_reason = COMPILE_TIME_CHECKOUT_READ_ALLOWLIST
+            .iter()
+            .find_map(|(allowed_name, reason)| (*allowed_name == *name).then_some(*reason));
         for (line_number, line) in source.lines().enumerate() {
             let needle = "env!(\"CARGO_MANIFEST_DIR\")";
             if line.contains(needle)
-                && !COMPILE_TIME_CHECKOUT_READ_ALLOWLIST
-                    .iter()
-                    .any(|(allowed_name, _reason)| allowed_name == name)
+                && allowlist_reason.is_none()
             {
-                violations.push(format!(
-                    "{name}:{}: {needle}",
-                    line_number + 1
-                ));
+                violations.push(format!("{name}:{}: {needle}", line_number + 1));
             }
         }
     }

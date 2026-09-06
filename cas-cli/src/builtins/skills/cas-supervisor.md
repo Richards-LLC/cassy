@@ -60,10 +60,9 @@ Match controls via [model-selection.md](cas-supervisor/references/model-selectio
 
 ## Public-surface review
 
-Before merge, review public surfaces on the taste lane against the
-cas-codebase-design critique rubric. Record 1–5 scores for distinctiveness,
-fit, and hierarchy; each must meet the 4/5 floor, or the exception and its
-remedy must be explicit in the review receipt.
+Before merge, use the cas-codebase-design taste rubric: record 1–5
+distinctiveness, fit, and hierarchy scores (4/5 floor; document any exception
+and remedy in the review receipt).
 
 ## Release train
 

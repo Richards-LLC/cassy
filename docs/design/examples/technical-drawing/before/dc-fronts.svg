@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180mm" viewBox="0 0 1072 520" role="img" aria-labelledby="dc-fronts-title dc-fronts-desc">
+            <title id="dc-fronts-title">Closed and open front elevations</title>
+            <desc id="dc-fronts-desc">Aligned front elevations on a one-inch grid show the closed doors and false front, then open doors exposing the dartboard, upper opening, divider, and drawer bay.</desc>
+            <defs>
+              <pattern id="dc-fronts-grid" width="6" height="6" patternUnits="userSpaceOnUse"><path d="M1.5 0V6M3 0V6M4.5 0V6M0 1.5H6M0 3H6M0 4.5H6" stroke="#e7ece9" stroke-width="0.5"/><path d="M0 0H6V6" fill="none" stroke="#c4d0c9" stroke-width="0.9"/></pattern>
+              <marker id="dc-fronts-arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse"><path d="M0 0L8 4L0 8Z" fill="#0b6b78"/></marker>
+            </defs>
+            <rect width="1072" height="520" fill="url(#dc-fronts-grid)"/>
+            <text x="24" y="30" class="note-text" font-size="14">PRINT SCALE 1:24 · one major square = 1″ of the object</text>
+            <text x="150" y="66" text-anchor="middle" class="view-label" font-size="17">FRONT ELEVATION · CLOSED</text>
+            <rect x="60" y="92" width="180" height="228" class="part"/>
+            <rect x="60.4" y="92.4" width="89.25" height="193.5" fill="#eef3ef" stroke="#243c32" stroke-width="2.5"/>
+            <rect x="150.4" y="92.4" width="89.2" height="193.5" fill="#eef3ef" stroke="#243c32" stroke-width="2.5"/>
+            <rect x="60.4" y="287" width="179.2" height="33" class="part"/>
+            <text x="105" y="122" text-anchor="middle" class="part-label" font-size="14">LEFT DOOR</text><text x="195" y="142" text-anchor="middle" class="part-label" font-size="14">RIGHT DOOR</text>
+            <text x="150" y="318" text-anchor="middle" class="part-label" font-size="14">FALSE FRONT</text>
+            <circle cx="135" cy="190" r="4" class="safety-mark"/><circle cx="165" cy="190" r="4" class="safety-mark"/><circle cx="150" cy="303" r="4" class="safety-mark"/>
+            <text x="150" y="378" text-anchor="middle" class="dimension-text" font-size="13">each door 14-7/8″ W × 32-1/4″ H</text>
+            <text x="150" y="402" text-anchor="middle" class="dimension-text" font-size="13">false front 29-7/8″ W × 5-1/2″ H</text>
+            <line x1="60" y1="348" x2="240" y2="348" class="dimension" marker-start="url(#dc-fronts-arrow)" marker-end="url(#dc-fronts-arrow)"/>
+            <text x="150" y="343" text-anchor="middle" class="dimension-text" font-size="14">30″ overall</text>
+            <line x1="36" y1="92" x2="36" y2="320" class="dimension" marker-start="url(#dc-fronts-arrow)" marker-end="url(#dc-fronts-arrow)"/>
+            <text x="4" y="210" class="dimension-text" font-size="14">38″</text>
+
+            <text x="715" y="66" text-anchor="middle" class="view-label" font-size="17">FRONT ELEVATION · DOORS OPEN</text>
+            <rect x="625" y="92" width="180" height="228" fill="#fff" stroke="#243c32" stroke-width="3"/>
+            <rect x="629.5" y="96.5" width="171" height="185.25" fill="#eef3ef" stroke="#243c32" stroke-width="2"/>
+            <circle cx="715" cy="189" r="53.25" fill="#fff" stroke="#243c32" stroke-width="3"/>
+            <circle cx="715" cy="189" r="5" class="safety-mark"/>
+            <line x1="629.5" y1="286.25" x2="800.5" y2="286.25" stroke="#243c32" stroke-width="4"/>
+            <rect x="629.5" y="290.75" width="171" height="29.25" class="reference"/>
+            <rect x="530" y="93" width="89.25" height="193.5" fill="#eef3ef" stroke="#243c32" stroke-width="3"/>
+            <rect x="811" y="93" width="89.25" height="193.5" fill="#eef3ef" stroke="#243c32" stroke-width="3"/>
+            <line x1="619" y1="92" x2="619" y2="286" class="reference"/><line x1="811" y1="92" x2="811" y2="286" class="reference"/>
+            <text x="715" y="113" text-anchor="middle" class="dimension-text" font-size="12">upper opening 28-1/2″ W</text><text x="715" y="129" text-anchor="middle" class="dimension-text" font-size="12">× 30-7/8″ H</text>
+            <text x="715" y="151" text-anchor="middle" class="part-label" font-size="14">CABINET BACK</text>
+            <text x="715" y="255" text-anchor="middle" class="dimension-text" font-size="13">dartboard Ø 17-3/4″</text>
+            <text x="715" y="280" text-anchor="middle" class="part-label" font-size="14">DRAWER DIVIDER</text>
+            <text x="715" y="311" text-anchor="middle" class="dimension-text" font-size="13">drawer bay 4-7/8″ H</text>
+            <text x="575" y="310" text-anchor="middle" class="part-label" font-size="14">LEFT DOOR</text><text x="856" y="310" text-anchor="middle" class="part-label" font-size="14">RIGHT DOOR</text>
+            <line x1="850" y1="454" x2="994" y2="454" class="dimension" stroke-width="5"/>
+            <line x1="850" y1="444" x2="850" y2="464" class="dimension"/><line x1="994" y1="444" x2="994" y2="464" class="dimension"/>
+            <text x="922" y="486" text-anchor="middle" class="dimension-text" font-size="14">24″ object · bar prints 1″ at 1:24</text>
+          </svg>

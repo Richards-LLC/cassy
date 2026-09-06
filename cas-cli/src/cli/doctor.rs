@@ -1061,11 +1061,13 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             });
             checks.push(issue_repositories_check(&config));
         }
-        Err(_) => {
+        Err(error) => {
             checks.push(Check {
                 name: "configuration".to_string(),
                 status: CheckStatus::Warning,
-                message: "Using defaults (no config.toml found)".to_string(),
+                message: format!(
+                    "{error}; restore a known-good config.toml backup, then rerun `cas doctor`"
+                ),
             });
             checks.push(issue_repositories_check(&Config::default()));
         }

@@ -522,6 +522,40 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-writing-for-agents/SKILL.md",
         content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
+    // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
+    // calls, so the codex and grok twins are byte-identical to this source.
+    BuiltinFile {
+        path: "skills/cas-cli-craft/SKILL.md",
+        content: include_str!("builtins/skills/cas-cli-craft/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/concept-brief.md",
+        content: include_str!("builtins/skills/cas-cli-craft/references/concept-brief.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/output-contract.md",
+        content: include_str!("builtins/skills/cas-cli-craft/references/output-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/critique-rubric.md",
+        content: include_str!("builtins/skills/cas-cli-craft/references/critique-rubric.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/status-screen.md",
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/status-screen.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/doctor-report.md",
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/doctor-report.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/long-running.md",
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/long-running.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/before-after.md",
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/before-after.md"),
+    },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
@@ -539,6 +573,12 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/skills/cas-image-generate/references/output-checklist.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/skills/cas-image-generate/references/providers.md") },
     BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/skills/cas-image-generate/scripts/generate-image.sh") },
+    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/skills/cas-technical-drawing/SKILL.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/skills/cas-technical-drawing/references/model-schema.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/skills/cas-technical-drawing/references/drafting-conventions.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/skills/cas-technical-drawing/references/likeness-critique.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/skills/cas-technical-drawing/scripts/draft.mjs") },
+    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/skills/cas-technical-drawing/examples/shelf-box.json") },
 ];
 
 /// Built-in Workflow scripts shipped to `.claude/workflows/` on `cas update --sync`.
@@ -962,6 +1002,40 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-writing-for-agents/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-writing-for-agents/SKILL.md"),
     },
+    // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
+    // calls, so the codex and grok twins are byte-identical to this source.
+    BuiltinFile {
+        path: "skills/cas-cli-craft/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-cli-craft/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/concept-brief.md",
+        content: include_str!("builtins/codex/skills/cas-cli-craft/references/concept-brief.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/output-contract.md",
+        content: include_str!("builtins/codex/skills/cas-cli-craft/references/output-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/critique-rubric.md",
+        content: include_str!("builtins/codex/skills/cas-cli-craft/references/critique-rubric.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/status-screen.md",
+        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/status-screen.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/doctor-report.md",
+        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/doctor-report.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/long-running.md",
+        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/long-running.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/before-after.md",
+        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/before-after.md"),
+    },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-diagnosing-bugs/SKILL.md"),
@@ -979,6 +1053,12 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/output-checklist.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/providers.md") },
     BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/codex/skills/cas-image-generate/scripts/generate-image.sh") },
+    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/SKILL.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/model-schema.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/drafting-conventions.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/likeness-critique.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/codex/skills/cas-technical-drawing/scripts/draft.mjs") },
+    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/codex/skills/cas-technical-drawing/examples/shelf-box.json") },
 ];
 
 /// All built-in agents managed by Cassy for Grok (EPIC cas-8888, Phase 5 /
@@ -1438,6 +1518,40 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-writing-for-agents/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-writing-for-agents/SKILL.md"),
     },
+    // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
+    // calls, so the codex and grok twins are byte-identical to this source.
+    BuiltinFile {
+        path: "skills/cas-cli-craft/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-cli-craft/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/concept-brief.md",
+        content: include_str!("builtins/grok/skills/cas-cli-craft/references/concept-brief.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/output-contract.md",
+        content: include_str!("builtins/grok/skills/cas-cli-craft/references/output-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/critique-rubric.md",
+        content: include_str!("builtins/grok/skills/cas-cli-craft/references/critique-rubric.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/status-screen.md",
+        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/status-screen.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/doctor-report.md",
+        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/doctor-report.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/long-running.md",
+        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/long-running.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/references/exemplars/before-after.md",
+        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/before-after.md"),
+    },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-diagnosing-bugs/SKILL.md"),
@@ -1455,6 +1569,12 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/output-checklist.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/providers.md") },
     BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/grok/skills/cas-image-generate/scripts/generate-image.sh") },
+    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/SKILL.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/model-schema.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/drafting-conventions.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/likeness-critique.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/grok/skills/cas-technical-drawing/scripts/draft.mjs") },
+    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/grok/skills/cas-technical-drawing/examples/shelf-box.json") },
 ];
 
 /// OpenCode does not load a filesystem skill/agent home for its generated
@@ -1697,6 +1817,22 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/cas-html-reports"),
         codex: Some("skills/cas-html-reports"),
         grok: Some("skills/cas-html-reports"),
+        note: "",
+    },
+    RequiredCapability {
+        id: "cas-cli-craft",
+        claude: Some("skills/cas-cli-craft"),
+        codex: Some("skills/cas-cli-craft"),
+        grok: Some("skills/cas-cli-craft"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-f0f0: technical drawings render from one model with a Node script and
+        // make no CAS MCP calls, so the twins are byte-identical to the Claude source.
+        id: "cas-technical-drawing",
+        claude: Some("skills/cas-technical-drawing"),
+        codex: Some("skills/cas-technical-drawing"),
+        grok: Some("skills/cas-technical-drawing"),
         note: "",
     },
     RequiredCapability {
@@ -4666,6 +4802,95 @@ This is the body content."#;
     /// contract that makes it useful: live-token grounding, the fixed 8
     /// sections, keep-block preservation, and the memory pointer.
     #[test]
+    /// cas-4df0: the terminal craft skill ships for every harness with its
+    /// contract, rubric, and the four exemplars; the twins are byte-identical
+    /// because the skill makes no CAS tool calls.
+    #[test]
+    fn test_builtin_skills_contains_cas_cli_craft() {
+        const FILES: &[&str] = &[
+            "skills/cas-cli-craft/SKILL.md",
+            "skills/cas-cli-craft/references/concept-brief.md",
+            "skills/cas-cli-craft/references/output-contract.md",
+            "skills/cas-cli-craft/references/critique-rubric.md",
+            "skills/cas-cli-craft/references/exemplars/status-screen.md",
+            "skills/cas-cli-craft/references/exemplars/doctor-report.md",
+            "skills/cas-cli-craft/references/exemplars/long-running.md",
+            "skills/cas-cli-craft/references/exemplars/before-after.md",
+        ];
+        let claude_files: Vec<(&str, &str)> = FILES
+            .iter()
+            .map(|path| {
+                (
+                    *path,
+                    BUILTIN_SKILLS
+                        .iter()
+                        .find(|b| b.path == *path)
+                        .unwrap_or_else(|| panic!("{path} missing from claude catalog"))
+                        .content,
+                )
+            })
+            .collect();
+        for (label, catalog) in [("codex", CODEX_BUILTIN_SKILLS), ("grok", GROK_BUILTIN_SKILLS)] {
+            for (path, claude_content) in &claude_files {
+                let twin = catalog
+                    .iter()
+                    .find(|b| b.path == *path)
+                    .unwrap_or_else(|| panic!("{path} missing from {label} catalog"));
+                assert_eq!(
+                    twin.content, *claude_content,
+                    "{label} {path} must be byte-identical to the claude source"
+                );
+            }
+        }
+        let skill = claude_files[0].1;
+        assert!(is_managed_by_cas(skill), "cas-cli-craft SKILL.md must be managed_by: cas");
+        assert!(
+            skill.lines().count() <= 80,
+            "cas-cli-craft SKILL.md must stay under ~80 lines: {}",
+            skill.lines().count()
+        );
+        for required in [
+            "name: cas-cli-craft",
+            "description: Use when",
+            "references/concept-brief.md",
+            "references/output-contract.md",
+            "references/critique-rubric.md",
+            "scripts/terminal-qa.mjs",
+            "NO_COLOR",
+            "`--json`",
+            "80 columns",
+            "exemplars/status-screen.md",
+            "exemplars/doctor-report.md",
+            "exemplars/long-running.md",
+            "exemplars/before-after.md",
+        ] {
+            assert!(
+                skill.contains(required),
+                "cas-cli-craft SKILL.md missing required marker: {required:?}"
+            );
+        }
+        let rubric = claude_files[3].1;
+        for zero in [
+            "overflow",
+            "word-split",
+            "contrast",
+            "truncation-without-escape",
+            "unicode-without-fallback",
+            "color-under-no-color",
+            "control-when-piped",
+            "json-contract",
+        ] {
+            assert!(
+                rubric.contains(zero),
+                "critique rubric must name the terminal-qa check {zero:?} as a mechanical zero"
+            );
+        }
+        assert!(
+            rubric.contains("terminal-qa.mjs"),
+            "critique rubric must require the terminal-qa receipt"
+        );
+    }
+
     fn test_builtin_skills_contains_design_spec() {
         for (label, catalog) in [
             ("claude", BUILTIN_SKILLS),

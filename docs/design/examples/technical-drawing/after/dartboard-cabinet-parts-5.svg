@@ -1,0 +1,186 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="279.4mm" height="215.9mm" viewBox="0 0 279.4 215.9" data-draft="1" data-sheet-mm="279.4 215.9" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif">
+<defs>
+<pattern id="dartboard-cabinet-parts-5-front-grid" width="6.35" height="6.35" patternUnits="userSpaceOnUse"><line x1="1.588" y1="0" x2="1.588" y2="6.35" stroke="#e3e7e4" stroke-width="0.12"/><line x1="0" y1="1.588" x2="6.35" y2="1.588" stroke="#e3e7e4" stroke-width="0.12"/><line x1="3.175" y1="0" x2="3.175" y2="6.35" stroke="#e3e7e4" stroke-width="0.12"/><line x1="0" y1="3.175" x2="6.35" y2="3.175" stroke="#e3e7e4" stroke-width="0.12"/><line x1="4.762" y1="0" x2="4.762" y2="6.35" stroke="#e3e7e4" stroke-width="0.12"/><line x1="0" y1="4.762" x2="6.35" y2="4.762" stroke="#e3e7e4" stroke-width="0.12"/><path d="M0 0H6.35V6.35" fill="none" stroke="#c5ccc7" stroke-width="0.2"/></pattern>
+</defs>
+<rect x="0" y="0" width="279.4" height="215.9" fill="#fff"/>
+<rect x="14" y="14" width="251.4" height="77.45" fill="none" stroke="#1b1f24" stroke-width="0.25" class="card"/>
+<text x="17" y="19.2" font-size="3.5" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="700">9  DOOR PANEL</text>
+<text x="262.4" y="19.2" font-size="2.6" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333" text-anchor="end">QTY 2 · BIRCH PLYWOOD 1/4</text>
+<line x1="14" y1="22" x2="265.4" y2="22" stroke="#1b1f24" stroke-width="0.25"/>
+<g class="view" data-view="front" data-vid="68" data-kind="ortho" data-scale="2.117" data-origin="96.985 59.052">
+<line x1="96.985" y1="59.052" x2="151.886" y2="59.052" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="x" data-len="25.938"/>
+<line x1="96.985" y1="40.928" x2="151.886" y2="40.928" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="x" data-len="25.938"/>
+<line x1="96.985" y1="59.052" x2="96.985" y2="40.928" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="z" data-len="8.563"/>
+<line x1="151.886" y1="59.052" x2="151.886" y2="40.928" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="z" data-len="8.563"/>
+<line x1="96.985" y1="59.052" x2="151.886" y2="59.052" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="x" data-len="25.938"/>
+<line x1="96.985" y1="40.928" x2="151.886" y2="40.928" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="x" data-len="25.938"/>
+<line x1="96.985" y1="59.052" x2="96.985" y2="40.928" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="z" data-len="8.563"/>
+<line x1="151.886" y1="59.052" x2="151.886" y2="40.928" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="z" data-len="8.563"/>
+<rect x="96.985" y="40.928" width="54.901" height="18.124" class="extent" fill="none" stroke="none" data-part="panel-l" data-size="25.938 8.563"/>
+</g>
+<g class="view" data-view="top" data-vid="69" data-kind="ortho" data-scale="2.117" data-origin="96.985 31.398">
+<line x1="96.985" y1="31.398" x2="151.886" y2="31.398" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="x" data-len="25.938"/>
+<line x1="96.985" y1="31.928" x2="151.886" y2="31.928" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="x" data-len="25.938"/>
+<line x1="96.985" y1="31.398" x2="96.985" y2="31.928" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="y" data-len="0.25"/>
+<line x1="151.886" y1="31.398" x2="151.886" y2="31.928" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="y" data-len="0.25"/>
+<line x1="96.985" y1="31.398" x2="151.886" y2="31.398" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="x" data-len="25.938"/>
+<line x1="96.985" y1="31.928" x2="151.886" y2="31.928" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="x" data-len="25.938"/>
+<line x1="96.985" y1="31.398" x2="96.985" y2="31.928" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="y" data-len="0.25"/>
+<line x1="151.886" y1="31.398" x2="151.886" y2="31.928" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="y" data-len="0.25"/>
+<rect x="96.985" y="31.398" width="54.901" height="0.529" class="extent" fill="none" stroke="none" data-part="panel-l" data-size="25.938 0.25"/>
+</g>
+<g class="view" data-view="right" data-vid="70" data-kind="ortho" data-scale="2.117" data-origin="172.415 59.052">
+<line x1="172.415" y1="59.052" x2="171.886" y2="59.052" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="y" data-len="0.25"/>
+<line x1="172.415" y1="40.928" x2="171.886" y2="40.928" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="y" data-len="0.25"/>
+<line x1="172.415" y1="59.052" x2="172.415" y2="40.928" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="z" data-len="8.563"/>
+<line x1="171.886" y1="59.052" x2="171.886" y2="40.928" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="panel-l" data-axis="z" data-len="8.563"/>
+<line x1="172.415" y1="59.052" x2="171.886" y2="59.052" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="y" data-len="0.25"/>
+<line x1="172.415" y1="40.928" x2="171.886" y2="40.928" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="y" data-len="0.25"/>
+<line x1="172.415" y1="59.052" x2="172.415" y2="40.928" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="z" data-len="8.563"/>
+<line x1="171.886" y1="59.052" x2="171.886" y2="40.928" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="panel-l" data-axis="z" data-len="8.563"/>
+<rect x="171.886" y="40.928" width="0.529" height="18.124" class="extent" fill="none" stroke="none" data-part="panel-l" data-size="0.25 8.563"/>
+</g>
+<g class="dim" data-view="front" data-vid="68" data-axis="x" data-row="1" data-side="bottom" data-from="0" data-to="25.938" data-value="25.938" data-overall="1" data-chain="96.985 151.886">
+<line x1="96.985" y1="60.252" x2="96.985" y2="71.052" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="151.886" y1="60.252" x2="151.886" y2="71.052" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="96.985" y1="69.052" x2="151.886" y2="69.052" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="96.985,69.052 99.985,69.552 99.985,68.552" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="151.886,69.052 148.886,68.552 148.886,69.552" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="124.435" y="72.402" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">25-15/16</text>
+</g>
+<g class="dim" data-view="front" data-vid="68" data-axis="z" data-row="1" data-side="left" data-from="0" data-to="8.563" data-value="8.563" data-overall="1" data-chain="40.928 59.052">
+<line x1="95.785" y1="59.052" x2="84.985" y2="59.052" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="95.785" y1="40.928" x2="84.985" y2="40.928" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="86.985" y1="59.052" x2="86.985" y2="52.24" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="86.985" y1="47.74" x2="86.985" y2="40.928" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="86.985,59.052 87.485,56.052 86.485,56.052" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="86.985,40.928 86.485,43.928 87.485,43.928" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="86.985" y="51.04" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">8-9/16</text>
+</g>
+<g class="dim" data-view="top" data-vid="69" data-axis="y" data-row="1" data-side="left" data-from="0" data-to="0.25" data-value="0.25" data-overall="1" data-chain="31.398 31.928">
+<line x1="95.785" y1="31.398" x2="84.985" y2="31.398" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="95.785" y1="31.928" x2="84.985" y2="31.928" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="86.985" y1="27.998" x2="86.985" y2="35.328" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="86.985,31.398 87.485,28.398 86.485,28.398" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="86.985,31.928 86.485,34.928 87.485,34.928" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="80.985" y="26.548" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">1/4</text>
+</g>
+<g class="dim" data-view="right" data-vid="70" data-axis="y" data-row="1" data-side="bottom" data-from="0" data-to="0.25" data-value="0.25" data-overall="1" data-chain="171.886 172.415">
+<line x1="172.415" y1="60.252" x2="172.415" y2="71.052" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="171.886" y1="60.252" x2="171.886" y2="71.052" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="175.815" y1="69.052" x2="168.486" y2="69.052" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="172.415,69.052 175.415,69.552 175.415,68.552" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="171.886,69.052 168.886,68.552 168.886,69.552" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="176.815" y="70.102" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="start">1/4</text>
+</g>
+<text x="17" y="88.45" font-size="2.4" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">SCALE 1:12 · L 25-15/16 × W 8-9/16 × T 1/4</text>
+<rect x="14" y="95.45" width="251.4" height="77.45" fill="none" stroke="#1b1f24" stroke-width="0.25" class="card"/>
+<text x="17" y="100.65" font-size="3.5" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="700">10  DOOR DART-HOLDER RAIL</text>
+<text x="262.4" y="100.65" font-size="2.6" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333" text-anchor="end">QTY 4 · POPLAR 1X4</text>
+<line x1="14" y1="103.45" x2="265.4" y2="103.45" stroke="#1b1f24" stroke-width="0.25"/>
+<g class="view" data-view="front" data-vid="71" data-kind="ortho" data-scale="6.35" data-origin="96.919 138.319">
+<rect x="90.919" y="122.794" width="62.8" height="21.525" fill="url(#dartboard-cabinet-parts-5-front-grid)" stroke="none" class="grid" transform="translate(-6 0)"/>
+<line x1="96.919" y1="138.319" x2="147.719" y2="138.319" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="x" data-len="8"/>
+<line x1="96.919" y1="128.794" x2="147.719" y2="128.794" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="x" data-len="8"/>
+<line x1="96.919" y1="138.319" x2="96.919" y2="128.794" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="z" data-len="1.5"/>
+<line x1="147.719" y1="138.319" x2="147.719" y2="128.794" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="z" data-len="1.5"/>
+<line x1="96.919" y1="138.319" x2="147.719" y2="138.319" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="x" data-len="8"/>
+<line x1="96.919" y1="128.794" x2="147.719" y2="128.794" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="x" data-len="8"/>
+<line x1="96.919" y1="138.319" x2="96.919" y2="128.794" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="z" data-len="1.5"/>
+<line x1="147.719" y1="138.319" x2="147.719" y2="128.794" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="z" data-len="1.5"/>
+<rect x="96.919" y="128.794" width="50.8" height="9.525" class="extent" fill="none" stroke="none" data-part="dart-l-1" data-size="8 1.5"/>
+</g>
+<g class="view" data-view="top" data-vid="72" data-kind="ortho" data-scale="6.35" data-origin="96.919 115.031">
+<line x1="96.919" y1="115.031" x2="147.719" y2="115.031" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="x" data-len="8"/>
+<line x1="96.919" y1="119.794" x2="147.719" y2="119.794" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="x" data-len="8"/>
+<line x1="96.919" y1="115.031" x2="96.919" y2="119.794" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="y" data-len="0.75"/>
+<line x1="147.719" y1="115.031" x2="147.719" y2="119.794" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="y" data-len="0.75"/>
+<line x1="96.919" y1="115.031" x2="147.719" y2="115.031" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="x" data-len="8"/>
+<line x1="96.919" y1="119.794" x2="147.719" y2="119.794" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="x" data-len="8"/>
+<line x1="96.919" y1="115.031" x2="96.919" y2="119.794" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="y" data-len="0.75"/>
+<line x1="147.719" y1="115.031" x2="147.719" y2="119.794" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="y" data-len="0.75"/>
+<rect x="96.919" y="115.031" width="50.8" height="4.763" class="extent" fill="none" stroke="none" data-part="dart-l-1" data-size="8 0.75"/>
+</g>
+<g class="view" data-view="right" data-vid="73" data-kind="ortho" data-scale="6.35" data-origin="172.481 138.319">
+<line x1="172.481" y1="138.319" x2="167.719" y2="138.319" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="y" data-len="0.75"/>
+<line x1="172.481" y1="128.794" x2="167.719" y2="128.794" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="y" data-len="0.75"/>
+<line x1="172.481" y1="138.319" x2="172.481" y2="128.794" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="z" data-len="1.5"/>
+<line x1="167.719" y1="138.319" x2="167.719" y2="128.794" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="dart-l-1" data-axis="z" data-len="1.5"/>
+<line x1="172.481" y1="138.319" x2="167.719" y2="138.319" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="y" data-len="0.75"/>
+<line x1="172.481" y1="128.794" x2="167.719" y2="128.794" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="y" data-len="0.75"/>
+<line x1="172.481" y1="138.319" x2="172.481" y2="128.794" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="z" data-len="1.5"/>
+<line x1="167.719" y1="138.319" x2="167.719" y2="128.794" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="dart-l-1" data-axis="z" data-len="1.5"/>
+<rect x="167.719" y="128.794" width="4.762" height="9.525" class="extent" fill="none" stroke="none" data-part="dart-l-1" data-size="0.75 1.5"/>
+</g>
+<g class="dim" data-view="front" data-vid="71" data-axis="x" data-row="1" data-side="bottom" data-from="0" data-to="8" data-value="8" data-overall="1" data-chain="96.919 147.719">
+<line x1="96.919" y1="139.519" x2="96.919" y2="150.319" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="147.719" y1="139.519" x2="147.719" y2="150.319" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="96.919" y1="148.319" x2="147.719" y2="148.319" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="96.919,148.319 99.919,148.819 99.919,147.819" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="147.719,148.319 144.719,147.819 144.719,148.819" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="122.319" y="151.669" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">8</text>
+</g>
+<g class="dim" data-view="front" data-vid="71" data-axis="z" data-row="1" data-side="left" data-from="0" data-to="1.5" data-value="1.5" data-overall="1" data-chain="128.794 138.319">
+<line x1="95.719" y1="138.319" x2="84.919" y2="138.319" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="95.719" y1="128.794" x2="84.919" y2="128.794" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="86.919" y1="141.719" x2="86.919" y2="125.394" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="86.919,138.319 86.419,141.319 87.419,141.319" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="86.919,128.794 87.419,125.794 86.419,125.794" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="80.919" y="145.269" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">1-1/2</text>
+</g>
+<g class="dim" data-view="top" data-vid="72" data-axis="y" data-row="1" data-side="left" data-from="0" data-to="0.75" data-value="0.75" data-overall="1" data-chain="115.031 119.794">
+<line x1="95.719" y1="115.031" x2="84.919" y2="115.031" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="95.719" y1="119.794" x2="84.919" y2="119.794" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="86.919" y1="111.631" x2="86.919" y2="123.194" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="86.919,115.031 87.419,112.031 86.419,112.031" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="86.919,119.794 86.419,122.794 87.419,122.794" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="80.919" y="110.181" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">3/4</text>
+</g>
+<g class="dim" data-view="right" data-vid="73" data-axis="y" data-row="1" data-side="bottom" data-from="0" data-to="0.75" data-value="0.75" data-overall="1" data-chain="167.719 172.481">
+<line x1="172.481" y1="139.519" x2="172.481" y2="150.319" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="167.719" y1="139.519" x2="167.719" y2="150.319" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="175.881" y1="148.319" x2="164.319" y2="148.319" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="172.481,148.319 175.481,148.819 175.481,147.819" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="167.719,148.319 164.719,147.819 164.719,148.819" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="176.881" y="149.369" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="start">3/4</text>
+</g>
+<text x="17" y="169.9" font-size="2.4" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">SCALE 1:4 · L 8 × W 1-1/2 × T 3/4</text>
+<rect x="10" y="10" width="259.4" height="195.9" fill="none" stroke="#1b1f24" stroke-width="0.5" class="border"/>
+<g class="title-block">
+<rect x="144.4" y="177.9" width="125" height="28" fill="#fff" stroke="#1b1f24" stroke-width="0.5"/>
+<line x1="144.4" y1="186.9" x2="269.4" y2="186.9" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="144.4" y1="196.4" x2="269.4" y2="196.4" stroke="#1b1f24" stroke-width="0.25"/>
+<text x="145.9" y="180.7" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">PROJECT</text>
+<text x="145.9" y="185.9" font-size="5" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="700">Dartboard cabinet</text>
+<text x="145.9" y="189.7" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">SHEET TITLE</text>
+<text x="145.9" y="194.2" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">PART DRAWINGS 5</text>
+<line x1="178.4" y1="196.4" x2="178.4" y2="205.9" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="202.4" y1="196.4" x2="202.4" y2="205.9" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="222.4" y1="196.4" x2="222.4" y2="205.9" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="242.4" y1="196.4" x2="242.4" y2="205.9" stroke="#1b1f24" stroke-width="0.25"/>
+<text x="145.9" y="199.2" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">SCALE</text>
+<text x="145.9" y="203.7" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">AS NOTED</text>
+<text x="179.9" y="199.2" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">UNITS</text>
+<text x="179.9" y="203.7" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">inches</text>
+<text x="203.9" y="199.2" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">SHEET</text>
+<text x="203.9" y="203.7" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">22 OF 26</text>
+<text x="223.9" y="199.2" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">DATE</text>
+<text x="223.9" y="203.7" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">2026-09-06</text>
+<text x="243.9" y="199.2" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">REV</text>
+<text x="243.9" y="203.7" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">B</text>
+</g>
+<g class="projection-symbol">
+<text x="104.4" y="184.1" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">THIRD ANGLE PROJECTION</text>
+<polygon points="105.4,187.9 113.4,187.9 113.4,195.9 105.4,192.9" fill="none" stroke="#1b1f24" stroke-width="0.25"/>
+<circle cx="121.4" cy="191.9" r="4" fill="none" stroke="#1b1f24" stroke-width="0.25"/>
+<circle cx="121.4" cy="191.9" r="2" fill="none" stroke="#1b1f24" stroke-width="0.25"/>
+<text x="104.4" y="201.9" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">DRAWN: draft.mjs (README + …</text>
+</g>
+<g class="notes" data-block="14 178.9 98.4 195.4">
+<text x="14" y="181.1" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">EACH CARD STATES ITS OWN SCALE · DIMENSIONS ARE FINISHED SIZES</text>
+<text x="14" y="184.1" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">FRAMELESS: DOORS OVERLAY THE CARCASS FRONT EDGES · 1/16 SIDE</text>
+<text x="14" y="187.1" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">REVEALS · 1/8 CENTRE GAP</text>
+<text x="14" y="190.1" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">BACK SLIDES INTO GLUE-FREE 1/4 GROOVES · HOUSED RAILS CARRY THE</text>
+<text x="14" y="193.1" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">LOAD INTO THE SIDES</text>
+</g>
+</svg>

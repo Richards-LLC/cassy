@@ -185,11 +185,13 @@ fn parse_colorfgbg_value(val: &str) -> Option<bool> {
     let bg_str = parts.last()?;
     let bg: u8 = bg_str.parse().ok()?;
 
-    // ANSI color indices:
-    // 0=black, 1=red, 2=green, 3=yellow, 4=blue, 5=magenta, 6=cyan, 7=white
-    // 8-15 are bright variants
-    // 0 (black) and 8-15 (bright colors as bg) are considered dark backgrounds
-    Some(bg == 0 || bg >= 8)
+    // ANSI color indices: 0=black … 7=white, 8-15 the bright variants.
+    // Vim's rule, which the terminals that set this variable were written
+    // against: 0–6 and 8 (black, the dark hues, bright black) are dark; 7 and
+    // 9–15 (white, the bright hues, bright white) are light. Konsole and rxvt
+    // report a white background as `0;15`, which the old `bg >= 8` test
+    // classified as dark and so painted near-white text on white (cas-4df0).
+    Some(bg <= 6 || bg == 8)
 }
 
 /// Determine if an RGB color is "dark" using relative luminance.
@@ -356,8 +358,15 @@ mod tests {
     }
 
     #[test]
-    fn test_colorfgbg_light_default() {
-        assert_eq!(parse_colorfgbg_value("0;6"), Some(false));
+    fn test_colorfgbg_light_bright_white_bg() {
+        // Konsole and rxvt on a white background.
+        assert_eq!(parse_colorfgbg_value("0;15"), Some(false));
+    }
+
+    #[test]
+    fn test_colorfgbg_dark_hue_bg() {
+        // A cyan background is a dark background under vim's rule.
+        assert_eq!(parse_colorfgbg_value("0;6"), Some(true));
     }
 
     #[test]

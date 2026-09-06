@@ -57,65 +57,18 @@
       "b096606a438257dc0611121c0ad6ca2ba5e2800fb8a3061053285e39a10e29a4"
     ],
     "skills/cas-dataviz/references/quality-checklist.md": [
-      "247a2c46dc906abf9b305b4ae2bfd94b4fe37a6c4c9a0c2ee1d759d44d1a6dc8",
       "80f2925c1ed46aa9f7680355684ca7813d1ad16d3123fea2432781ac9cd905e0",
-      "b88751483ecc8b3e2e0cf8cfbd232905b275f2638653f21b2ef632f3d81e0fd9",
-      "d58991d5b9a21e5b5720577eabd30b3b02c8bf33445520a4b09ddad380626678"
-    ],
-    "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html": [
-      "36d334edb0d25ee07aca6a55c91cf72e6d04b59e548e1660a452d20334c26e6b",
-      "cf3c84dd46f63005c57b67c480cd522e2e8d75be9f703b85332176824968e40c"
-    ],
-    "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html": [
-      "09b3353e5a4a8077422c561a88e893ca0b3384a5bcc2dc74be7fcd6b6321b038",
-      "1563f22a9fa56177c1932771eaa71defb06ee0b5e7ed972c672959bfe287ec49",
-      "208017d8a09371f446d705d5dfcd371689de4cf189b95250ab9369d73ce515fb",
-      "8e4f57005d6a8edc2b277f121ddb76c5ff02518ab5ea68c087a48ec30ceb7f17",
-      "a9f6f594190eb759b11a238f5fa599c8d48a6fc3db67905f44feb145ea4f9920",
-      "f485d50227eaa45a4191cde87485e9df5aad7e8da4a06666fa2c68d0d49aa24b"
-    ],
-    "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md": [
-      "7c417a836cc265ff809b8fa5a54fcc24debf837741c6406ebb839d66cd31f6b4"
-    ],
-    "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md": [
-      "9960262f6266130e391f3356dc36395163bcdacb89b439b4cf19836e28a75f2a"
-    ],
-    "skills/cas-html-reports/references/examples/benchmark-small-multiples.html": [
-      "84ef58dd5a39bb44fd3d58a45e5470d0279a784f82a25eeacc726c6057151ddb",
-      "8598c6075b560ddc1e18070c96ca3d02fe5194eaafec7bf959977d974b61f5aa",
-      "bc476b9bd0312dbde1ac0d96af5625e7755e0f194a6eb47630abe57af6ce8163",
-      "c2bc1d442026439ecedcc70a7f8adfee19d1247beea5947ceb29aac1783f33d1"
-    ],
-    "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md": [
-      "d1fe766f03f5942d5832fdca33500c78d35f8f073930d19cc308142bdf5d2218"
-    ],
-    "skills/cas-html-reports/references/examples/executive-variance-brief.html": [
-      "2237411c07e69d604d5d165b8b810225d3bc41a43fc32084ba64a1cf8507b85c",
-      "5624f64f272312fc8a7e06c9792ae7c83f01afdc91911213aa22720ab143ea40"
-    ],
-    "skills/cas-html-reports/references/examples/executive-variance-brief.why.md": [
-      "bd1bbc5697df581f9f76eb08ef5afbcb541e1c65ca34ff43d707ea0ee023b554"
-    ],
-    "skills/cas-html-reports/references/examples/investigation-annotated-timeline.html": [
-      "5c64578a0b7cbf219cffde7c6f949eba8525f9b67a334e41280be6ddae4eec12",
-      "a9e070fc155a745fc24beeda58b6478eead293027552b7bfed88e61df7781ad9"
-    ],
-    "skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md": [
-      "4ffe1eeb99e4ae9f02d28f60bee99bfa5ce68957e87b2863c1b6879daf1882bb"
+      "b88751483ecc8b3e2e0cf8cfbd232905b275f2638653f21b2ef632f3d81e0fd9"
     ],
     "skills/cas-html-reports/references/presentation-rules.md": [
       "116f918bdc85e7a3922664b8f2416e145d69955ce54e9d187700fd80ef928c94",
-      "b3aa4e224c7cb2c17081e7428c86ede5088e7cfbbc59bd901c86ffb415453bd8",
       "fc82f138ab0e22de22db3429134f1ac32a094829795ed5a17728fb1ec4bb0186"
     ],
     "skills/cas-html-reports/references/report-types.md": [
       "862b7dea5b648ec2185d90d1903120de7e4d9ad90ee97e716e420a56e153e0ce",
-      "bd97cffcc8d346cd623d34455248b0743e2a10e40526007448f1488938a11337",
       "f51e1e11829bf361483971145f8e6428cd73304405b5212d32e2148c988a57c2"
     ],
     "skills/cas-html-reports/references/review-checklist.md": [
-      "de19d31ff57b81a717bac14dcf3c43b0235c4775d74f745c7ee8db44651b14ff",
-      "de85d4d0af9db1225e14381464db5cdfa4798e35041167a04120064f64fafcce",
       "e16f440a723f3b43be28f1eb9aaf0ed3fb14f18343ab0c755a7d14fab01efd21",
       "eace9385d9e5d8967a4c3d4cdf2d5cd680bbe1d6bbf0673a1ec679d0fbfd467c"
     ],
@@ -124,8 +77,6 @@
       "2da6116697f892707a9542ce2219f79130af2fc018be4421aac58dd27a405303"
     ],
     "skills/cas-html-reports/references/technical-contract.md": [
-      "9d905e9b5b830f26554904db1b89f304303d1b2a84702efc4c36f81c368d4d6a",
-      "c24d0c85d29713205a75cb408ab44b94de1cc7211f286a52f88329447aa3ea96",
       "f0731b4fc55a1436241cb526179f396987e961e29a0b801123433b220aea4dda"
     ],
     "skills/cas-ideate/references/post-ideation-workflow.md": [
@@ -554,28 +505,15 @@
       "f86bae7c3c1cd3fcb9320d2837ddf9ab1d77622b12ea47a47141e6c19192f360",
       "ff4e8fb59dd7dcbcdc46a7aae58a2995726f27fa981d15e3dc4b03c4d9222510"
     ],
-    "skills/cas-ui-craft/references/concept-brief.md": [
-      "c7b79d99cf1af124281e13790d6ab2654aa5c1f9e717e6fafc93783811ed4b07"
+    "skills/cas-technical-drawing/references/drafting-conventions.md": [
+      "339e0bd53bfee106b484b8bd6901387ebe31cf6362965ef9e3fb16a0f03a4016",
+      "4b3e5b186190070d5a61fdf39db1efaf07937a9acd3f1ca7b0564c49969bdba8"
     ],
-    "skills/cas-ui-craft/references/critique-rubric.md": [
-      "e297a9ce3f79a2187c1b598731fd6b3918aa002139d7b069fffc183f49a25e16",
-      "e39773b8cd65b342e6c2ef187efef130f0da358ca003db8412d181972ac909f3"
+    "skills/cas-technical-drawing/references/likeness-critique.md": [
+      "07137fc37aab082c1ff8520a022ed0c7c3df49483316686d6ffee895aa590d5f"
     ],
-    "skills/cas-ui-craft/references/exemplars/before-after.html": [
-      "c8c50345f94536ca1f9780d45218f6bdfb17d9dceff90a12c06d8ca51f92f645"
-    ],
-    "skills/cas-ui-craft/references/exemplars/dashboard.html": [
-      "5df4d082d4ce624b1e0734f18665a5e0c548d200943201af458e9d4e4601ae70",
-      "d6aa2747130e8898acf8bcd1949cbb9b4aff610f870e10279644726120280308"
-    ],
-    "skills/cas-ui-craft/references/exemplars/product-page.html": [
-      "cd875363557bdac3f44755efb339518c8c1bf33ed387760d207832bc22047eea"
-    ],
-    "skills/cas-ui-craft/references/exemplars/report.html": [
-      "f5887aed01b83cd2bbd35b6d26fff53fda4ebf242f417ec2180424d86836645b"
-    ],
-    "skills/cas-ui-craft/references/form-vocabulary.md": [
-      "44fa6e8bd93020c51e58ca53a56a3a181bab824b5dc75fb2b762d6cb92f6e0c1"
+    "skills/cas-technical-drawing/references/model-schema.md": [
+      "d8d0e9114e8cb1e6f6f6a5b40742716a5b571f6dcafea869aee060457c1988b0"
     ],
     "skills/cas-viktor/references/gateway.md": [
       "65083b61b372954719adb237624e7b5f32315ef20541f93cd8ef30c76b3767e8",
@@ -764,16 +702,6 @@
       "1614f1242b7fc916add8846fa66de1a59288602a7d7e8c5c16c27830c03098c0",
       "61d2229a75b2a44c6a8dd516fa1830e14c4e2f956b5f34ba44b76658aedda550",
       "a9ec32fd0060f0b856b5e4680f678fd29c6bffa815023de30200e41b28a57e28"
-    ],
-    "skills/design-spec/references/design-tokens.json": [
-      "11672f6a1d451344c9ccfbcff1f7230282587d9901337e44f37678293eeb28d9",
-      "3f58b3d57ce12a1129457714fba66553ad4d67399ed35e3fbd01d9cd4ececd26",
-      "5b939b73e5dfae3de49e5b488f030b2e927828d38643c04d225d810400851cee"
-    ],
-    "skills/design-spec/references/petrastella-design-language.md": [
-      "997b4bf17927193b81bbf807750a8f6dd7d9160c79d5aa234337386a089fbd12",
-      "d328055725ea9e7808971a2d9ac0850e02ff05a3773b53541befa5eb932aa483",
-      "f2ec54d015b063af278f8bf69a34b0f96eb65c442bdc3380019d75e55c802316"
     ],
     "skills/fallow/references/cli-reference.md": [
       "7a4944f1a5ced9b9f6599da03c8ef6ebd6268c7bbdc32a27adfa6d77db0b037d",

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180mm" viewBox="0 0 1072 560" role="img" aria-labelledby="dc-side-plan-title dc-side-plan-desc">
+            <title id="dc-side-plan-title">Side elevation and plan view</title>
+            <desc id="dc-side-plan-desc">Aligned side and plan views show the thirty-eight-inch height, nine-and-one-quarter-inch depth, thirty-inch width, grooved back, three-inch board stack, and remaining clearance.</desc>
+            <defs>
+              <pattern id="dc-side-plan-grid" width="9" height="9" patternUnits="userSpaceOnUse"><path d="M2.25 0V9M4.5 0V9M6.75 0V9M0 2.25H9M0 4.5H9M0 6.75H9" stroke="#e7ece9" stroke-width="0.55"/><path d="M0 0H9V9" fill="none" stroke="#c4d0c9" stroke-width="1"/></pattern>
+              <marker id="dc-side-plan-arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse"><path d="M0 0L8 4L0 8Z" fill="#0b6b78"/></marker>
+            </defs>
+            <rect width="1072" height="560" fill="url(#dc-side-plan-grid)"/>
+            <text x="24" y="30" class="note-text" font-size="14">PRINT SCALE 1:16 · one major square = 1″ of the object</text>
+            <text x="180" y="66" text-anchor="middle" class="view-label" font-size="17">SIDE ELEVATION</text>
+            <rect x="120" y="88" width="83.25" height="342" class="part"/>
+            <line x1="199" y1="88" x2="199" y2="430" class="reference"/>
+            <rect x="192.5" y="135" width="6.75" height="220" fill="#e8f0ea" stroke="#243c32" stroke-width="2"/>
+            <rect x="188" y="160" width="4.5" height="175" fill="#d7e4da" stroke="#243c32" stroke-width="2"/>
+            <rect x="172.25" y="175" width="15.75" height="145" rx="7" fill="#fff" stroke="#243c32" stroke-width="2.5"/>
+            <text x="161" y="112" text-anchor="middle" class="part-label" font-size="14">CARCASS SIDE</text>
+            <text x="235" y="145" class="part-label" font-size="14">CABINET BACK</text>
+            <text x="235" y="170" class="part-label" font-size="14">BACKER RAIL + BACKER</text>
+            <text x="235" y="195" class="part-label" font-size="14">DARTBOARD</text>
+            <line x1="120" y1="460" x2="203.25" y2="460" class="dimension" marker-start="url(#dc-side-plan-arrow)" marker-end="url(#dc-side-plan-arrow)"/>
+            <text x="161.5" y="454" text-anchor="middle" class="dimension-text" font-size="14">9-1/4″ depth</text>
+            <line x1="90" y1="88" x2="90" y2="430" class="dimension" marker-start="url(#dc-side-plan-arrow)" marker-end="url(#dc-side-plan-arrow)"/>
+            <text x="44" y="265" class="dimension-text" font-size="14">38″ height</text>
+            <line x1="172.25" y1="370" x2="199" y2="370" class="dimension" marker-start="url(#dc-side-plan-arrow)" marker-end="url(#dc-side-plan-arrow)"/>
+            <text x="215" y="375" class="dimension-text" font-size="13">3″ stack</text>
+            <text x="215" y="398" class="note-text" font-size="12">3/4″ rail + 1/2″ backer + 1-3/4″ board</text>
+            <text x="215" y="421" class="dimension-text" font-size="13">5-3/4″ clear to front plane</text>
+
+            <text x="710" y="150" text-anchor="middle" class="view-label" font-size="17">PLAN</text>
+            <rect x="575" y="180" width="270" height="83.25" class="part"/>
+            <line x1="837.75" y1="180" x2="837.75" y2="263.25" class="reference"/>
+            <text x="710" y="206" text-anchor="middle" class="part-label" font-size="14">CARCASS TOP / BOTTOM FOOTPRINT</text>
+            <text x="830" y="172" text-anchor="end" class="part-label" font-size="14">CABINET BACK</text>
+            <line x1="575" y1="292" x2="845" y2="292" class="dimension" marker-start="url(#dc-side-plan-arrow)" marker-end="url(#dc-side-plan-arrow)"/>
+            <text x="710" y="286" text-anchor="middle" class="dimension-text" font-size="14">30″ width</text>
+            <line x1="875" y1="180" x2="875" y2="263.25" class="dimension" marker-start="url(#dc-side-plan-arrow)" marker-end="url(#dc-side-plan-arrow)"/>
+            <text x="890" y="226" class="dimension-text" font-size="14">9-1/4″ depth</text>
+            <text x="620" y="250" class="note-text" font-size="13">front plane</text>
+            <text x="830" y="245" text-anchor="end" class="dimension-text" font-size="12">back face inset 1/4″</text>
+            <line x1="850" y1="494" x2="994" y2="494" class="dimension" stroke-width="5"/>
+            <line x1="850" y1="484" x2="850" y2="504" class="dimension"/><line x1="994" y1="484" x2="994" y2="504" class="dimension"/>
+            <text x="922" y="526" text-anchor="middle" class="dimension-text" font-size="14">16″ object · bar prints 1″ at 1:16</text>
+          </svg>

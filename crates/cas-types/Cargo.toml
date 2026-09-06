@@ -1,6 +1,6 @@
 [package]
 name = "cas-types"
-version = "3.17.2"
+version = "3.17.3"
 edition = "2024"
 rust-version = "1.88"
 description = "Core types for CAS (Coding Agent System)"

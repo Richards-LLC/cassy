@@ -460,7 +460,7 @@ mod tests {
 
     #[derive(Debug, Clone, Copy)]
     struct SupervisorHarnessRequirement {
-        supervisor_skills: [&'static str; 2],
+        supervisor_skills: [&'static str; 3],
         ambient_recall: AmbientRecallDelivery,
     }
 
@@ -472,24 +472,40 @@ mod tests {
     fn supervisor_harness_requirement(harness: SupervisorCli) -> SupervisorHarnessRequirement {
         match harness {
             SupervisorCli::Claude => SupervisorHarnessRequirement {
-                supervisor_skills: ["cas-supervisor", "cas-supervisor-checklist"],
+                supervisor_skills: [
+                    "cas-supervisor",
+                    "cas-supervisor-checklist",
+                    "cas-codebase-design",
+                ],
                 ambient_recall: AmbientRecallDelivery::SessionStart,
             },
             SupervisorCli::Codex => SupervisorHarnessRequirement {
                 // Codex's checklist is the intentional no-hooks compensation
                 // twin. It is still the universal supervisor-checklist
                 // capability, but its shipped skill name is harness-specific.
-                supervisor_skills: ["cas-supervisor", "cas-codex-supervisor-checklist"],
+                supervisor_skills: [
+                    "cas-supervisor",
+                    "cas-codex-supervisor-checklist",
+                    "cas-codebase-design",
+                ],
                 ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
             },
             SupervisorCli::Grok => SupervisorHarnessRequirement {
-                supervisor_skills: ["cas-supervisor", "cas-supervisor-checklist"],
+                supervisor_skills: [
+                    "cas-supervisor",
+                    "cas-supervisor-checklist",
+                    "cas-codebase-design",
+                ],
                 ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
             },
             // OpenCode receives the same generated supervisor skill projection
             // and queued ambient-recall delivery as Grok.
             SupervisorCli::OpenCode => SupervisorHarnessRequirement {
-                supervisor_skills: ["cas-supervisor", "cas-supervisor-checklist"],
+                supervisor_skills: [
+                    "cas-supervisor",
+                    "cas-supervisor-checklist",
+                    "cas-codebase-design",
+                ],
                 ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
             },
         }

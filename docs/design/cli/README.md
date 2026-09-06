@@ -10,9 +10,11 @@ and a before/after capture set under `captures/`.
 | `cas update --check` | [cas-update.brief.md](cas-update.brief.md) | [captures/before/cas-update-check](captures/before/cas-update-check/report.md) | [captures/after/cas-update-check](captures/after/cas-update-check/report.md) |
 | `cas factory status` | [cas-factory-status.brief.md](cas-factory-status.brief.md) | [captures/before/cas-factory-status](captures/before/cas-factory-status/report.md) | [captures/after/cas-factory-status](captures/after/cas-factory-status/report.md) |
 
-Each capture directory holds, per run, the raw `.ansi` stream, the ANSI-stripped `.txt`, one
-`.html` per width that stacks the four palettes (open it in a browser to see the light and dark
-renders side by side), and `report.md` / `report.json` whose first line is the receipt.
+Each capture directory keeps the 80-column `.html` that stacks the four palettes (open it in a
+browser to see the light and dark renders side by side), the ANSI-stripped 80-column dark and
+light `.txt`, and `report.md`, whose first line is the receipt. The gate also writes the raw
+`.ansi` streams, the 120-column, Solarized, piped, `NO_COLOR`, C-locale and `--json` captures,
+and `report.json`; those are regenerated on demand and not committed.
 
 ## Regenerate
 

@@ -405,12 +405,13 @@ fn redact_dynamic_values(s: &str) -> String {
         .replace_all(&result, "Cloud bucket `[BUCKET]`")
         .to_string();
 
-    // The header includes the canonical project id. Temp fixtures have a
-    // generated folder id, so normalize that value independently of the cloud
-    // bucket row.
-    let project_re = regex::Regex::new(r"cas doctor · [^·\n]+ ·").unwrap();
+    // The verdict line (cas-4df0) ends `· <canonical id> · <version>`. Temp
+    // fixtures have a generated folder id, so normalize that value
+    // independently of the cloud bucket row.
+    let project_re =
+        regex::Regex::new(r"(?m)^(\[(?:OK|WARN|ERROR)\] [^·\n]+ · \d+ ok) · [^·\n]+ ·").unwrap();
     result = project_re
-        .replace_all(&result, "cas doctor · [PROJECT] ·")
+        .replace_all(&result, "$1 · [PROJECT] ·")
         .to_string();
 
     // Redact counts that follow "entries:", "tasks:", etc.

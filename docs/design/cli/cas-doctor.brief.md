@@ -27,7 +27,7 @@ this brief covers the render only.
 
 Before (build `eda3dfd1`): `terminal-qa: FAIL cas-doctor · 12 runs · 841 fail · 24 warn` — 788 contrast, 28 word-split, 24 overflow, 1 unicode-without-fallback.
 
-After: `terminal-qa: PASS cas-doctor · 12 runs · 0 fail · 0 warn · 0 allowed · docs/design/cli/captures/after/cas-doctor/report.json`
+After: `terminal-qa: PASS cas-doctor · 12 runs · 0 fail · 0 warn · 0 allowed · docs/design/cli/captures/after/cas-doctor/report.md`
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

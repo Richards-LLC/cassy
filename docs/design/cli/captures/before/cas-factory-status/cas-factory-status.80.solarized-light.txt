@@ -1,7 +1,0 @@
-═══ Status for session: cas-src-lively-panther-31 ═══
-                Project: /home/pippenz/Petrastella/cas-src
-        Pending prompts: 0
-            Ready tasks: 98
-      In-progress tasks: 10
-                 Agents: 1
-Actionable-idle minutes: 0

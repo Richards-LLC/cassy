@@ -4256,10 +4256,13 @@ This is the body content."#;
                 );
             }
 
-            // The rendered exemplars must practice what the contract preaches.
+            // The rendered exemplars must practice what the contract preaches:
+            // nothing loads at render time. Links a reader may click are allowed
+            // (the before/after pair cites vendor sources by URL), so the ban is
+            // on load-bearing markup, not on the string "https://".
             for example in &FILES[RENDERED] {
                 let html = get(example);
-                for banned in ["https://", "http://", "@import", "<img", "cdn."] {
+                for banned in ["src=", "@import", "<img", "<link", "cdn."] {
                     assert!(
                         !html.to_lowercase().contains(banned),
                         "{label} {example} must be self-contained (found {banned:?})"

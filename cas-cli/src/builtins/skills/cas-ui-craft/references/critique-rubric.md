@@ -26,7 +26,9 @@ PASS line into the critique table's craft evidence. Until the script exists in t
 perform the same checks by hand on the four renders in step 1 and say so in the evidence.
 
 For a mergeable public surface, run `node scripts/visual-qa.mjs <artifact> --strict` and require a
-committed `docs/factory/data/visual-qa/visual-qa.md` PASS plus matching JSON/screenshots; review
+PASS receipt under `artifacts_root/<task-id>/visual-qa/` (`visual-qa.md`, JSON, and screenshots); if
+the production report is committed, commit only its small `visual-qa.md` beside it, never JSON or
+screenshots; review
 every allowlist entry for its finding type, selector, and specific reason.
 
 ## Dimensions and anchors

@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Checkout p95 latency regression — incident review, 2026-08-27 → 2026-08-30</title>
+<style>
+  /* Petrastella tokens — names match design-tokens.json. Override in DESIGN.md, never here. */
+  :root{
+    --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;
+    --ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;
+    --action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;
+    --good-tint:rgba(42,122,84,.10);--warning-tint:rgba(140,95,6,.10);--danger-tint:rgba(179,38,30,.10);--focus:#2E3A9F;
+    --display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
+    --body:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s6:24px;--s8:32px;--s12:48px;--s16:64px;--s24:96px;
+    --container:1120px;--gutter:24px;--margin-col:240px;--radius-chip:4px;--radius-panel:8px;
+    --motion-chrome:120ms;--ease:cubic-bezier(.2,0,0,1);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#12141A;--surface:#191C24;--surface-hero:#241E1E;--line:#2B3040;--line-strong:#6B7390;
+      --ink:#E9E6E0;--ink-muted:#A3A7B4;--verdict:#A9B3FF;--verdict-soft:rgba(169,179,255,.16);--evidence:#A3A7B4;
+      --action:#A9B3FF;--good:#5FC492;--warning:#E2B14D;--danger:#EF7B72;
+      --good-tint:rgba(95,196,146,.14);--warning-tint:rgba(226,177,77,.14);--danger-tint:rgba(239,123,114,.14);--focus:#A9B3FF;
+    }
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);font:400 17px/26px var(--body)}
+  a{color:var(--action);text-decoration-thickness:1px;text-underline-offset:3px}
+  a:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  .skip{position:absolute;left:-9999px}.skip:focus{left:var(--s4);top:var(--s4);background:var(--surface);padding:var(--s2) var(--s3);z-index:2}
+  .wrap{max-width:var(--container);margin:0 auto;padding:0 var(--gutter)}
+  .eyebrow{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);margin:0}
+  p{max-width:68ch;margin:0 0 var(--s4)}
+  h2{font:600 27px/32px var(--body);letter-spacing:-.01em;margin:0 0 var(--s2)}
+  h3{font:600 17px/26px var(--body);margin:0 0 var(--s2)}
+  .caption{font:400 14px/20px var(--body);color:var(--ink-muted)}
+  .src{font:400 12px/16px var(--mono);color:var(--ink-muted);margin-top:var(--s2)}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+  /* Verdict hero — nothing else above the fold */
+  .hero{background:var(--surface-hero);padding:var(--s8) 0 var(--s6)}
+  .hero .grid{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s4) var(--s8);align-items:end}
+  .verdict{font:400 clamp(30px,4.6vw,52px)/1.08 var(--display);letter-spacing:-.015em;max-width:22ch;margin:var(--s2) 0 0}
+  .verdict em{font-style:italic;color:var(--verdict)}
+  .rule{height:3px;background:var(--verdict);border:0;margin:var(--s4) 0 var(--s2);width:120px}
+  .hero figure{margin:0}
+  .hero svg{display:block;width:100%;height:auto}
+  @media (min-width:820px){.hero{padding:var(--s12) 0 var(--s8)}.hero .grid{grid-template-columns:minmax(0,7fr) minmax(0,8fr)}}
+
+  /* Sections with a right margin rail for notes */
+  main{padding:var(--s8) 0 var(--s16)}
+  section{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s4) var(--gutter);padding:var(--s8) 0;border-top:1px solid var(--line)}
+  .body,.rail{grid-column:1;min-width:0}
+  .note{font:400 14px/20px var(--body);color:var(--evidence);border-left:1px solid var(--line-strong);padding:0 0 0 var(--s3);margin:0 0 var(--s2);max-width:60ch}
+  .note .eyebrow{margin-bottom:var(--s1);color:var(--verdict)}
+  .note p{margin:0;max-width:none}
+  @media (min-width:1080px){
+    section{grid-template-columns:minmax(0,1fr) var(--margin-col)}
+    .rail{grid-column:2;grid-row:1;align-self:start;display:flex;flex-direction:column;gap:var(--s4)}
+    .note{margin:0}
+  }
+
+  /* Brief */
+  details.brief{border:1px solid var(--line);border-radius:var(--radius-panel);padding:var(--s3) var(--s4);background:var(--surface);margin:var(--s6) 0 0}
+  details.brief summary{cursor:pointer;font:600 14px/20px var(--body);color:var(--action)}
+  details.brief dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--s2) var(--s4);margin:var(--s3) 0 0;font-size:15px;line-height:22px}
+  details.brief dt{font:600 12px/22px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-muted)}
+  details.brief dd{margin:0}
+  @media (max-width:480px){details.brief dl{grid-template-columns:1fr}}
+
+  /* Annotated timeline */
+  .timeline{list-style:none;margin:var(--s4) 0 0;padding:0;position:relative}
+  .timeline li{display:grid;grid-template-columns:96px 20px minmax(0,1fr);gap:0 var(--s3);position:relative}
+  .timeline .t{font:400 13px/22px var(--mono);color:var(--ink-muted);text-align:right;padding-top:2px}
+  .timeline .spine{position:relative}
+  .timeline .spine::before{content:"";position:absolute;left:9px;top:0;bottom:0;width:1px;background:var(--line-strong)}
+  .timeline .dot{position:absolute;left:5px;top:9px;width:9px;height:9px;border-radius:50%;background:var(--surface);border:1.5px solid var(--line-strong)}
+  .timeline li.decisive .dot{background:var(--verdict);border-color:var(--verdict);width:11px;height:11px;left:4px;top:8px}
+  .timeline li.bad .dot{border-color:var(--danger);background:var(--danger-tint)}
+  .timeline li.good .dot{border-color:var(--good);background:var(--good-tint)}
+  .timeline .ev{padding:0 0 var(--s4)}
+  .timeline .ev b{font-weight:600}
+  .timeline li.decisive .ev b{color:var(--verdict)}
+  .timeline .elapsed{grid-column:2 / span 2;font:400 12px/16px var(--mono);color:var(--ink-muted);padding:0 0 var(--s3) 32px;margin-top:-6px}
+  .timeline .annot{display:block;font:400 14px/20px var(--body);color:var(--evidence);border-left:1px solid var(--line-strong);padding-left:var(--s3);margin-top:var(--s2);max-width:56ch}
+  .tag{display:inline-block;font:600 11px/16px var(--mono);letter-spacing:.04em;padding:0 6px;border-radius:var(--radius-chip);border:1px solid currentColor;margin-left:var(--s2);vertical-align:1px}
+  .tag.bad{color:var(--danger)}.tag.good{color:var(--good)}
+
+  /* Evidence ledger */
+  table.ledger{border-collapse:collapse;width:100%;background:var(--surface);margin:var(--s3) 0 0}
+  table.ledger caption{text-align:left;font:400 17px/26px var(--body);padding:0 0 var(--s2);caption-side:top}
+  table.ledger th{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);text-align:left;padding:var(--s2) var(--s3);border-bottom:1px solid var(--line)}
+  table.ledger td{padding:var(--s2) var(--s3);border-bottom:1px solid var(--line);vertical-align:top;font:400 15px/22px var(--body)}
+  table.ledger th.n,table.ledger td.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+  table.ledger tbody th,table.ledger tfoot td:first-child{font:400 15px/22px var(--body);text-transform:none;letter-spacing:0;color:var(--ink)}
+  table.ledger td.s{font:400 12px/18px var(--mono);color:var(--ink-muted)}
+  table.ledger tr.decisive td{background:var(--verdict-soft)}
+  table.ledger tr.decisive td:first-child{box-shadow:inset 3px 0 0 var(--verdict)}
+  table.ledger tfoot td{font-weight:600;border-top:1px solid var(--line-strong);border-bottom:0}
+  .scroll{overflow-x:auto}
+
+  /* Small multiples */
+  .multiples{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--s4);margin:var(--s3) 0 0}
+  @media (min-width:820px){.multiples{grid-template-columns:repeat(4,minmax(0,1fr))}}
+  .multiples figure{margin:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-panel);padding:var(--s3)}
+  .multiples figcaption{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);display:flex;flex-wrap:wrap;justify-content:space-between;gap:var(--s1) var(--s2)}
+  .multiples figcaption .peak{font-weight:400;text-transform:none;letter-spacing:0;white-space:nowrap}
+  .multiples figure.decisive figcaption{color:var(--verdict)}
+  .multiples svg{display:block;width:100%;height:auto;margin-top:var(--s2)}
+
+  /* Pull-quote */
+  blockquote{margin:var(--s3) 0 0;background:var(--surface-hero);padding:var(--s6);max-width:none}
+  blockquote p{font:italic 400 21px/30px var(--display);max-width:40ch;margin:0}
+  blockquote footer{font:400 12px/16px var(--mono);color:var(--ink-muted);margin-top:var(--s3)}
+
+  /* Critique */
+  table.score{border-collapse:collapse;width:100%;margin:var(--s3) 0 0}
+  table.score th,table.score td{text-align:left;padding:var(--s2) var(--s3);border-bottom:1px solid var(--line);vertical-align:top;font-size:15px;line-height:22px}
+  table.score th{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}
+  table.score caption{text-align:left;caption-side:top;padding:0 0 var(--s2)}
+  table.score tbody th{font:400 15px/22px var(--body);text-transform:none;letter-spacing:0;color:var(--ink)}
+  table.score td.n{font:500 27px/32px var(--mono);font-variant-numeric:tabular-nums;text-align:center;width:64px}
+  table.score td.n.v{color:var(--verdict)}
+
+  footer.prov{border-top:1px solid var(--line-strong);padding:var(--s6) 0 var(--s12);font:400 14px/20px var(--body);color:var(--ink-muted)}
+  footer.prov code,td code{font:13px var(--mono);background:var(--surface);border:1px solid var(--line);padding:0 4px;border-radius:var(--radius-chip)}
+  details.data{margin-top:var(--s3)}details.data summary{font:600 14px/20px var(--body);color:var(--action);cursor:pointer}
+
+  @media (prefers-reduced-motion:no-preference){a,summary{transition:color var(--motion-chrome) var(--ease)}}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+  @media print{
+    :root{--bg:#fff;--surface:#fff;--surface-hero:#fff;--line:#DAD3C7;--line-strong:#8F8371;--ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;--action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E}
+    body{font-size:12pt;line-height:1.45}
+    .hero{padding:12pt 0}
+    section{grid-template-columns:1fr;break-inside:auto}
+    .rail{display:block}.note{margin:0 0 8pt}
+    details{display:block}details>summary{display:none}details>*{display:block}
+    table,figure,blockquote,.timeline li{break-inside:avoid}
+    thead{display:table-header-group}
+    a[href^="http"]::after{content:" (" attr(href) ")";font-size:9pt}
+    .multiples{grid-template-columns:repeat(2,1fr)}
+    svg{max-width:100%}
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Incident review · Practitioner · 2026-08-27 → 2026-08-30 · Checkout service</p>
+    <div class="grid">
+      <div>
+        <h1 class="verdict">One deploy, not a trend: checkout p95 <em>tripled</em> four minutes after 4.18.0 shipped and fell back within the hour of rollback.</h1>
+        <hr class="rule">
+        <p class="src">checkout.latency p95 · 1-min buckets · prod, all regions · 2026-08-27 00:00Z – 2026-08-30 00:00Z · n = 4.42M requests</p>
+      </div>
+      <figure>
+        <svg viewBox="0 0 640 244" role="img" aria-labelledby="hero-t hero-d" preserveAspectRatio="xMidYMid meet">
+          <title id="hero-t">Checkout p95 over 72 hours: flat near 410 ms, a vertical step to 1,240 ms at the 4.18.0 promotion, and a return to 415 ms after rollback</title>
+          <desc id="hero-d">Line chart. Hourly p95 latency stays between 398 and 421 milliseconds from 2026-08-27 00:00Z until 2026-08-29 14:07Z, rises to about 1,240 milliseconds within four minutes of the 4.18.0 promotion, stays there until the 15:31Z rollback, and is back at 418 milliseconds by 16:23Z.</desc>
+          <rect x="543.1" y="18" width="10.5" height="196" fill="var(--verdict-soft)"/>
+          <g stroke="var(--line)" stroke-width="1">
+            <line x1="56" y1="214" x2="620" y2="214"/>
+            <line x1="56" y1="158" x2="620" y2="158"/>
+            <line x1="56" y1="102" x2="620" y2="102"/>
+            <line x1="56" y1="46" x2="620" y2="46"/>
+          </g>
+          <g font-family="var(--mono)" font-size="11" fill="var(--ink-muted)">
+            <text x="48" y="218" text-anchor="end">0</text>
+            <text x="48" y="162" text-anchor="end">400</text>
+            <text x="48" y="106" text-anchor="end">800</text>
+            <text x="48" y="50" text-anchor="end">1,200</text>
+            <text x="56" y="10">p95, ms</text>
+            <text x="56" y="236">08-27</text>
+            <text x="244" y="236" text-anchor="middle">08-28</text>
+            <text x="432" y="236" text-anchor="middle">08-29</text>
+            <text x="620" y="236" text-anchor="end">08-30</text>
+          </g>
+          <polyline fill="none" stroke="var(--ink-muted)" stroke-width="1.5" stroke-linejoin="round" points="56.0,157.2 103.0,156.0 150.0,158.3 197.0,155.1 244.0,156.7 291.0,155.6 338.0,157.6 385.0,156.3 432.0,155.3 479.0,157.9 526.0,156.5 541.7,156.3"/>
+          <polyline fill="none" stroke="var(--verdict)" stroke-width="2.5" stroke-linecap="round" points="541.7,156.3 543.1,40.7"/>
+          <polyline fill="none" stroke="var(--verdict)" stroke-width="2.5" stroke-linejoin="round" points="543.1,40.7 546.4,38.9 549.5,39.8 553.6,41.7"/>
+          <polyline fill="none" stroke="var(--ink-muted)" stroke-width="1.5" stroke-linejoin="round" points="553.6,41.7 557.3,126.9 560.3,155.5 573.0,156.7 620.0,155.9"/>
+          <g font-family="var(--mono)" font-size="11">
+            <text x="536" y="30" text-anchor="end" fill="var(--verdict)" font-weight="600">1,240 ms · 4.18.0 promoted 14:07Z</text>
+            <line x1="538" y1="30" x2="543" y2="38" stroke="var(--verdict)" stroke-width="1"/>
+            <text x="536" y="126" text-anchor="end" fill="var(--ink-muted)">rollback 15:31Z</text>
+            <line x1="553.6" y1="41.7" x2="553.6" y2="120" stroke="var(--ink-muted)" stroke-width="1" stroke-dasharray="2 3"/>
+            <line x1="538" y1="122" x2="553.6" y2="120" stroke="var(--ink-muted)" stroke-width="1"/>
+            <text x="300" y="150" fill="var(--ink-muted)">p95 ≈ 410 ms for six days</text>
+          </g>
+        </svg>
+        <figcaption class="caption">The step is the argument. A trend would slope; a deploy is a wall.</figcaption>
+      </figure>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <div class="wrap">
+
+    <details class="brief" open>
+      <summary>Concept brief — report.html</summary>
+      <dl>
+        <dt>Single idea</dt><dd>One deploy, not a trend, caused the regression — and the shape of the p95 line proves it without a word of prose.</dd>
+        <dt>Hero form</dt><dd>A 72-hour p95 line as the figure: six flat days, one vertical step, one return. The step <em>is</em> the claim; the annotated timeline is the second section because its height would push the figure below the fold at 390×844.</dd>
+        <dt>Emotional register</dt><dd>Calm, certain, unhurried — sandstone hero, serif verdict, no status colour above the fold, elapsed times printed instead of inferred.</dd>
+        <dt>Distinctive move</dt><dd>The reasoning lives in the margin: every design decision and every caveat is a marginal note in a 240px rail, connected to the thing it annotates, so the main column carries only evidence.</dd>
+        <dt>Deliberately omitted</dt><dd>No KPI card row (four numbers in boxes show no argument), no severity badge in the hero (the verdict mark is not a status), no table of contents, no dashboard-style dark gradient.</dd>
+      </dl>
+    </details>
+
+    <section aria-labelledby="h-timeline">
+      <div class="body">
+      <h2 id="h-timeline">Eighty-four minutes from promotion to rollback</h2>
+      <p>The timeline answers the question the hero raises: if a deploy did this, why did it take an hour and a half to reverse? Elapsed time is printed on the spine so nobody has to subtract timestamps.</p>
+      <ol class="timeline">
+        <li>
+          <span class="t">08-29 13:58Z</span><span class="spine"><span class="dot"></span></span>
+          <span class="ev"><b>checkout@4.18.0 canary passes</b> — 2% of traffic, p95 402 ms, no alerts.</span>
+        </li>
+        <li class="elapsed-row"><span class="elapsed">+9 min</span></li>
+        <li class="decisive">
+          <span class="t">14:07Z</span><span class="spine"><span class="dot"></span></span>
+          <span class="ev"><b>4.18.0 promoted to 100%</b> — the decisive event.
+            <span class="annot">The build adds a synchronous <code>validate_address</code> call to a third-party API, awaited inside the request path. Mean call time 820 ms; it only runs when the address carries a unit number, which the canary's 2% sample never hit.</span>
+          </span>
+        </li>
+        <li><span class="elapsed">+4 min</span></li>
+        <li class="bad">
+          <span class="t">14:11Z</span><span class="spine"><span class="dot"></span></span>
+          <span class="ev"><b>p95 crosses 1,000 ms</b><span class="tag bad">alert</span> — <code>checkout-p95-high</code> fires; p95 1,238 ms.</span>
+        </li>
+        <li><span class="elapsed">+19 min</span></li>
+        <li>
+          <span class="t">14:30Z</span><span class="spine"><span class="dot"></span></span>
+          <span class="ev"><b>On-call engaged</b> — first hypothesis is the database; ruled out at 14:52Z (db p95 flat at 38 ms).</span>
+        </li>
+        <li><span class="elapsed">+24 min</span></li>
+        <li>
+          <span class="t">14:54Z</span><span class="spine"><span class="dot"></span></span>
+          <span class="ev"><b>Diff review finds the blocking call</b> — 4.18.0 vs 4.17.3, 41 files; the validator is the only change on the request path.</span>
+        </li>
+        <li><span class="elapsed">+37 min</span></li>
+        <li>
+          <span class="t">15:31Z</span><span class="spine"><span class="dot"></span></span>
+          <span class="ev"><b>Rollback to 4.17.3 started</b> — 84 min after promotion; 37 of them spent waiting for a second approver.</span>
+        </li>
+        <li><span class="elapsed">+52 min</span></li>
+        <li class="good">
+          <span class="t">16:23Z</span><span class="spine"><span class="dot"></span></span>
+          <span class="ev"><b>p95 back at 418 ms</b><span class="tag good">clear</span> — alert resolves; drain of in-flight validator calls accounts for the tail.</span>
+        </li>
+      </ol>
+      <p class="src">Source: deploy log <code>deploys/checkout/2026-08-29.jsonl</code>; alert history <code>alerts/checkout-p95-high</code>; on-call note <code>oncall/2026-08-29-checkout.md</code>. Times UTC.</p>
+      </div>
+      <div class="rail">
+        <aside class="note"><p class="eyebrow">Design note · Fit to argument</p><p>The line, not the timeline, is the hero because its geometry equals the claim: a wall, not a slope. The timeline explains duration, which is the second question, so it is the second section.</p></aside>
+        <aside class="note"><p class="eyebrow">Design note · Hierarchy</p><p>Nothing sits above the verdict — no KPI cards, no severity badge, no contents. The eyebrow names the type, audience, and window in one mono line so the reader knows what they hold without a block of metadata.</p></aside>
+        <aside class="note"><p class="eyebrow">Design note · Distinctiveness</p><p>The verdict is set in the display serif on the sandstone surface, and only the one word that carries the magnitude takes the indigo. A template would bold it; this italicises it.</p></aside>
+        <aside class="note"><p class="eyebrow">Design note · Craft</p><p>Elapsed time is printed on the spine in mono between events. Timestamps alone make the reader subtract; the 37-minute approval wait is the finding, so it must be visible as a number.</p></aside>
+        <aside class="note"><p class="eyebrow">Design note · Accessibility</p><p>Status colour marks only the alert firing (danger) and clearing (good), each with a text tag. The decisive event is indigo, which is never a status, so nothing on the timeline reads as "bad" by colour alone.</p></aside>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-ledger">
+      <div class="body">
+      <h2 id="h-ledger">The numbers by window</h2>
+      <p>Five windows cover the 72 hours. The elevated window is the one the argument turns on: it is banded, and every row names where its number came from.</p>
+      <div class="scroll">
+      <table class="ledger">
+        <caption>Checkout latency and volume by window, 2026-08-27 00:00Z – 2026-08-30 00:00Z, prod, all regions</caption>
+        <thead><tr><th scope="col">Window</th><th scope="col" class="n">Duration</th><th scope="col" class="n">p50 ms</th><th scope="col" class="n">p95 ms</th><th scope="col" class="n">Requests</th><th scope="col" class="n">&gt; 1 s</th><th scope="col">Source</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Baseline, 08-27 00:00 → 08-29 14:07</th><td class="n">62 h 07 m</td><td class="n">188</td><td class="n">410</td><td class="n">3,791,204</td><td class="n">2,106</td><td class="s">metrics: checkout.latency, 1-min p95, mean of buckets</td></tr>
+          <tr><th scope="row">Promotion → alert, 14:07 → 14:11</th><td class="n">4 m</td><td class="n">611</td><td class="n">1,238</td><td class="n">4,412</td><td class="n">1,873</td><td class="s">metrics: same series; alert eval log</td></tr>
+          <tr class="decisive"><th scope="row">Elevated, 14:11 → 15:31</th><td class="n">1 h 20 m</td><td class="n">642</td><td class="n">1,244</td><td class="n">88,960</td><td class="n">57,824</td><td class="s">metrics: same series; deploy log for bounds</td></tr>
+          <tr><th scope="row">Rollback drain, 15:31 → 16:23</th><td class="n">52 m</td><td class="n">301</td><td class="n">622</td><td class="n">57,105</td><td class="n">1,709</td><td class="s">metrics: same series; alert clear at 16:23:10Z</td></tr>
+          <tr><th scope="row">Recovered, 16:23 → 08-30 00:00</th><td class="n">7 h 37 m</td><td class="n">190</td><td class="n">415</td><td class="n">478,319</td><td class="n">246</td><td class="s">metrics: same series</td></tr>
+        </tbody>
+        <tfoot><tr><td>Incident, 14:07 → 16:23</td><td class="n">2 h 16 m</td><td class="n">—</td><td class="n">—</td><td class="n">150,477</td><td class="n">61,406</td><td class="s">sum of the three incident rows</td></tr></tfoot>
+      </table>
+      </div>
+      <p class="src">Requests over 1 s in the elevated window: 65% of traffic, against 0.06% at baseline. Precision: p50/p95 to the millisecond as recorded; no rounding.</p>
+      </div>
+      <div class="rail">
+        <aside class="note"><p class="eyebrow">Design note · Hierarchy</p><p>The ledger is the third element on the page, not the first. A reader who wants to audit gets exact values here; a reader who wants the answer already has it.</p></aside>
+        <aside class="note"><p class="eyebrow">Design note · Craft</p><p>Numbers are mono, tabular, right-aligned; the unit appears once in the header; the sum row sits above a stronger rule. No zebra stripes, no box, no icons — a ledger is ruled, never boxed.</p></aside>
+        <aside class="note"><p class="eyebrow">Design note · Fit to argument</p><p>The decisive row carries the verdict-soft band and a left rule in indigo. It is the only coloured row: the argument turns on one window, so one window is marked.</p></aside>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-regions">
+      <div class="body">
+      <h2 id="h-regions">All four regions stepped in the same minute</h2>
+      <p>A regional cause — a bad node, a cross-region hop — would show up as one panel diverging. Shared scale, shared alignment: the only difference is magnitude, and ap-south is highest because its validator endpoint is farthest.</p>
+      <div class="multiples">
+        <figure class="decisive">
+          <figcaption><span>eu-west · 71% traffic</span><span class="peak num">peak 1,244</span></figcaption>
+          <svg viewBox="0 0 300 120" role="img" aria-label="eu-west p95: flat at 410 ms, step to 1,244 ms at 14:07Z, back to 414 ms by 16:23Z"><title>eu-west p95 over 72 hours</title>
+            <rect x="253.3" y="10" width="5.3" height="94" fill="var(--verdict-soft)"/>
+            <line x1="8" y1="80.5" x2="292" y2="80.5" stroke="var(--line)"/><line x1="8" y1="33.5" x2="292" y2="33.5" stroke="var(--line)"/>
+            <text x="10" y="77" font-family="var(--mono)" font-size="9" fill="var(--ink-muted)">400</text><text x="10" y="30" font-family="var(--mono)" font-size="9" fill="var(--ink-muted)">1,200 ms</text>
+            <polyline fill="none" stroke="var(--ink-muted)" stroke-width="1.5" points="8.0,79.9 55.3,80.2 102.7,79.6 150.0,80.0 197.3,79.8 244.7,80.0 252.6,79.9"/>
+            <polyline fill="none" stroke="var(--verdict)" stroke-width="2.5" points="252.6,79.9 253.3,30.9 256.5,30.6 258.6,31.4"/>
+            <polyline fill="none" stroke="var(--ink-muted)" stroke-width="1.5" points="258.6,31.4 260.4,67.5 261.9,79.3 292.0,79.7"/>
+          </svg>
+        </figure>
+        <figure>
+          <figcaption><span>us-east · 17%</span><span class="peak num">peak 1,190</span></figcaption>
+          <svg viewBox="0 0 300 120" role="img" aria-label="us-east p95: flat at 410 ms, step to 1,190 ms at 14:07Z, back to 414 ms by 16:23Z"><title>us-east p95 over 72 hours</title>
+            <line x1="8" y1="80.5" x2="292" y2="80.5" stroke="var(--line)"/><line x1="8" y1="33.5" x2="292" y2="33.5" stroke="var(--line)"/>
+            <text x="10" y="77" font-family="var(--mono)" font-size="9" fill="var(--ink-muted)">400</text><text x="10" y="30" font-family="var(--mono)" font-size="9" fill="var(--ink-muted)">1,200 ms</text>
+            <polyline fill="none" stroke="var(--ink-muted)" stroke-width="1.5" points="8.0,79.9 55.3,80.2 102.7,79.6 150.0,80.0 197.3,79.8 244.7,80.0 252.6,79.9 253.3,34.1 256.5,33.7 258.6,34.6 260.4,69.0 261.9,79.3 292.0,79.7"/>
+          </svg>
+        </figure>
+        <figure>
+          <figcaption><span>ap-south · 8%</span><span class="peak num">peak 1,420</span></figcaption>
+          <svg viewBox="0 0 300 120" role="img" aria-label="ap-south p95: flat at 410 ms, step to 1,420 ms at 14:07Z, back to 414 ms by 16:23Z"><title>ap-south p95 over 72 hours</title>
+            <line x1="8" y1="80.5" x2="292" y2="80.5" stroke="var(--line)"/><line x1="8" y1="33.5" x2="292" y2="33.5" stroke="var(--line)"/>
+            <text x="10" y="77" font-family="var(--mono)" font-size="9" fill="var(--ink-muted)">400</text><text x="10" y="30" font-family="var(--mono)" font-size="9" fill="var(--ink-muted)">1,200 ms</text>
+            <polyline fill="none" stroke="var(--ink-muted)" stroke-width="1.5" points="8.0,79.9 55.3,80.2 102.7,79.6 150.0,80.0 197.3,79.8 244.7,80.0 252.6,79.9 253.3,20.6 256.5,20.2 258.6,21.1 260.4,62.3 261.9,79.3 292.0,79.7"/>
+          </svg>
+        </figure>
+        <figure>
+          <figcaption><span>sa-east · 4%</span><span class="peak num">peak 1,105</span></figcaption>
+          <svg viewBox="0 0 300 120" role="img" aria-label="sa-east p95: flat at 410 ms, step to 1,105 ms at 14:07Z, back to 414 ms by 16:23Z"><title>sa-east p95 over 72 hours</title>
+            <line x1="8" y1="80.5" x2="292" y2="80.5" stroke="var(--line)"/><line x1="8" y1="33.5" x2="292" y2="33.5" stroke="var(--line)"/>
+            <text x="10" y="77" font-family="var(--mono)" font-size="9" fill="var(--ink-muted)">400</text><text x="10" y="30" font-family="var(--mono)" font-size="9" fill="var(--ink-muted)">1,200 ms</text>
+            <polyline fill="none" stroke="var(--ink-muted)" stroke-width="1.5" points="8.0,79.9 55.3,80.2 102.7,79.6 150.0,80.0 197.3,79.8 244.7,80.0 252.6,79.9 253.3,39.1 256.5,38.7 258.6,39.6 260.4,71.6 261.9,79.3 292.0,79.7"/>
+          </svg>
+        </figure>
+      </div>
+      <details class="data">
+        <summary>Data behind the four panels and the hero line</summary>
+        <div class="scroll">
+        <table class="ledger">
+          <caption>p95 latency in milliseconds at the sampled points, by region and for all regions combined</caption>
+          <thead><tr><th scope="col">Point (UTC)</th><th scope="col" class="n">All</th><th scope="col" class="n">eu-west</th><th scope="col" class="n">us-east</th><th scope="col" class="n">ap-south</th><th scope="col" class="n">sa-east</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">08-27 00:00</th><td class="n">406</td><td class="n">410</td><td class="n">410</td><td class="n">410</td><td class="n">410</td></tr>
+            <tr><th scope="row">08-27 12:00</th><td class="n">398</td><td class="n">405</td><td class="n">405</td><td class="n">405</td><td class="n">405</td></tr>
+            <tr><th scope="row">08-28 00:00</th><td class="n">409</td><td class="n">415</td><td class="n">415</td><td class="n">415</td><td class="n">415</td></tr>
+            <tr><th scope="row">08-28 12:00</th><td class="n">403</td><td class="n">408</td><td class="n">408</td><td class="n">408</td><td class="n">408</td></tr>
+            <tr><th scope="row">08-29 00:00</th><td class="n">419</td><td class="n">412</td><td class="n">412</td><td class="n">412</td><td class="n">412</td></tr>
+            <tr><th scope="row">08-29 14:00</th><td class="n">412</td><td class="n">411</td><td class="n">411</td><td class="n">411</td><td class="n">411</td></tr>
+            <tr class="decisive"><th scope="row">08-29 14:11</th><td class="n">1,238</td><td class="n">1,244</td><td class="n">1,190</td><td class="n">1,420</td><td class="n">1,105</td></tr>
+            <tr><th scope="row">08-29 15:00</th><td class="n">1,244</td><td class="n">1,250</td><td class="n">1,196</td><td class="n">1,426</td><td class="n">1,111</td></tr>
+            <tr><th scope="row">08-29 15:31</th><td class="n">1,231</td><td class="n">1,235</td><td class="n">1,181</td><td class="n">1,411</td><td class="n">1,096</td></tr>
+            <tr><th scope="row">08-29 16:00</th><td class="n">622</td><td class="n">622</td><td class="n">595</td><td class="n">710</td><td class="n">553</td></tr>
+            <tr><th scope="row">08-29 16:23</th><td class="n">418</td><td class="n">420</td><td class="n">420</td><td class="n">420</td><td class="n">420</td></tr>
+            <tr><th scope="row">08-30 00:00</th><td class="n">415</td><td class="n">414</td><td class="n">414</td><td class="n">414</td><td class="n">414</td></tr>
+          </tbody>
+        </table>
+        </div>
+      </details>
+      <p class="src">Source: <code>checkout.latency</code> p95 by <code>region</code> label, 1-min buckets, sampled at the points listed; traffic shares from the same series' request counts.</p>
+      </div>
+      <div class="rail">
+        <aside class="note"><p class="eyebrow">Design note · Fit to argument</p><p>Small multiples on one scale exclude the alternative explanation in a glance: four identical steps at one minute cannot be a regional fault. The panel that fired the alert carries the verdict mark; the others stay muted.</p></aside>
+        <aside class="note"><p class="eyebrow">Design note · Accessibility</p><p>Every panel is an SVG with a role, a title, and an aria-label that says its numbers in words; the exact values sit in a real table under the panels so a screen reader and a spreadsheet both get them.</p></aside>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-voice">
+      <div class="body">
+      <h2 id="h-voice">Why the canary missed it</h2>
+      <blockquote>
+        <p>The canary looked clean because the validator only blocks when the address has a unit number. Two percent of traffic for nine minutes never hit one.</p>
+        <footer>On-call note, 2026-08-29 14:54Z · <code>oncall/2026-08-29-checkout.md</code></footer>
+      </blockquote>
+      <p>The follow-up is a canary rule, not a latency rule: a code path that is conditional on request content must be exercised by the canary's traffic shape, or the canary is measuring nothing. That change is tracked separately from this review.</p>
+      </div>
+      <div class="rail">
+        <aside class="note"><p class="eyebrow">Design note · Distinctiveness</p><p>One sentence from a human, in the serif italic on the sandstone surface, does what a "Root cause" heading and three bullets would not: it is memorable, and it is evidence with a source line.</p></aside>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-critique">
+      <div class="body">
+      <h2 id="h-critique">Critique</h2>
+      <p>Scored against the cas-ui-craft rubric after rendering at 1280×800, 390×844, print, and with JavaScript disabled. The public-surface floor (distinctiveness, fit, hierarchy ≥ 4) holds.</p>
+      <table class="score">
+        <caption class="caption">Rubric scores, 1–5, with the evidence that earned each</caption>
+        <thead><tr><th scope="col">Dimension</th><th scope="col">Score</th><th scope="col">Evidence</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Distinctiveness</th><td class="n v">4</td><td>Serif verdict on sandstone, the margin rail carrying every design decision, a serif pull-quote as the root-cause section.</td></tr>
+          <tr><th scope="row">Fit to argument</th><td class="n v">5</td><td>The hero line's vertical step is the sentence; the four identical steps in the multiples close the alternative.</td></tr>
+          <tr><th scope="row">Hierarchy</th><td class="n v">4</td><td>Verdict, figure, rule, provenance, then the brief; at 390px the brief still sits below the fold, but the timeline's annotation competes slightly with its event text.</td></tr>
+          <tr><th scope="row">Craft</th><td class="n">4</td><td>Tokens only, tabular mono numbers, printed elapsed times; the hero annotation label runs close to the plot's right edge at 820px.</td></tr>
+          <tr><th scope="row">Accessibility</th><td class="n">5</td><td>Minimum text contrast 5.8:1 light, 7.7:1 dark; SVGs titled and tabled; status colour always paired with a tag; JS-off and print lose nothing.</td></tr>
+        </tbody>
+      </table>
+      <p class="src">Scored by the authoring session on 2026-09-06; second reader pending.</p>
+      </div>
+    </section>
+
+  </div>
+</main>
+
+<footer class="prov">
+  <div class="wrap">
+    <p class="eyebrow">Provenance</p>
+    <p>Markdown source: <code>docs/incidents/2026-08-29-checkout-p95.md</code> (this HTML is rendered from it, same commit). Metrics: <code>checkout.latency</code> p95 and p50, 1-min buckets, prod, 2026-08-27 00:00Z – 2026-08-30 00:00Z, queried 2026-08-30 09:12Z. Deploys: <code>deploys/checkout/2026-08-29.jsonl</code>. Alerts: <code>alerts/checkout-p95-high</code>. On-call note: <code>oncall/2026-08-29-checkout.md</code>. Diff: <code>checkout@4.17.3..4.18.0</code>, 41 files. All figures are measured, none modelled; percentiles as recorded, no rounding.</p>
+    <p>Illustrative dataset written for the cas-ui-craft skill; the service, versions, and numbers are fictional and internally consistent.</p>
+  </div>
+</footer>
+</body>
+</html>

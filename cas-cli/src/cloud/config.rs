@@ -8,14 +8,11 @@
 // #![allow(dead_code)] // Check unused
 
 use chrono::{DateTime, Utc};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use url::Url;
 
 use crate::error::CasError;
@@ -366,135 +363,6 @@ pub fn project_aliases_from_config_toml(cas_root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Salt same-process temp paths; the PID separates independent MCP servers.
-static PROJECT_CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-
-struct ProjectConfigWriteLock {
-    file: fs::File,
-}
-
-impl Drop for ProjectConfigWriteLock {
-    fn drop(&mut self) {
-        if let Err(error) = FileExt::unlock(&self.file) {
-            tracing::error!(%error, "failed to release project config write lock");
-        }
-    }
-}
-
-fn lock_project_config(cas_root: &Path) -> Result<ProjectConfigWriteLock, CasError> {
-    fs::create_dir_all(cas_root).map_err(|error| {
-        CasError::Other(format!(
-            "Failed to create project config directory {cas_root:?}: {error}"
-        ))
-    })?;
-    // The lock needs a stable inode of its own. Locking config.toml itself is
-    // ineffective after an atomic rename replaces that file's inode.
-    let lock_path = cas_root.join(".config.toml.cas-write.lock");
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|error| {
-            CasError::Other(format!(
-                "Failed to open project config lock {lock_path:?}: {error}"
-            ))
-        })?;
-    file.lock_exclusive().map_err(|error| {
-        CasError::Other(format!(
-            "Failed to lock project config {lock_path:?}: {error}"
-        ))
-    })?;
-    Ok(ProjectConfigWriteLock { file })
-}
-
-fn atomic_replace_project_config(path: &Path, contents: &str) -> Result<(), CasError> {
-    let parent = path.parent().ok_or_else(|| {
-        CasError::Other(format!(
-            "Cannot atomically write project config without a parent: {path:?}"
-        ))
-    })?;
-    let sequence = PROJECT_CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temp_path = parent.join(format!(
-        ".config.toml.cas-write.{}.{sequence}.tmp",
-        std::process::id()
-    ));
-    atomic_replace_project_config_via(path, contents, &temp_path, |from, to| {
-        fs::rename(from, to)
-    })
-}
-
-/// Write, sync, and atomically rename a same-directory temp into place. On
-/// Unix, the temp starts as `0600` before any config bytes are written; the
-/// destination's existing permissions are restored before rename. Until
-/// `commit` succeeds, the existing config is untouched; every error removes
-/// only the uniquely-created temp owned by this call.
-fn atomic_replace_project_config_via<F>(
-    path: &Path,
-    contents: &str,
-    temp_path: &Path,
-    commit: F,
-) -> Result<(), CasError>
-where
-    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
-{
-    atomic_replace_project_config_via_with_created_hook(
-        path,
-        contents,
-        temp_path,
-        |_| Ok(()),
-        commit,
-    )
-}
-
-fn atomic_replace_project_config_via_with_created_hook<F, H>(
-    path: &Path,
-    contents: &str,
-    temp_path: &Path,
-    after_create: H,
-    commit: F,
-) -> Result<(), CasError>
-where
-    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
-    H: FnOnce(&fs::File) -> std::io::Result<()>,
-{
-    let permissions = fs::metadata(path)
-        .ok()
-        .map(|metadata| metadata.permissions());
-    let mut options = fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut temp = options.open(temp_path).map_err(|error| {
-        CasError::Other(format!(
-            "Failed to create temporary project config {temp_path:?}: {error}"
-        ))
-    })?;
-
-    let result = (|| -> std::io::Result<()> {
-        after_create(&temp)?;
-        temp.write_all(contents.as_bytes())?;
-        temp.flush()?;
-        if let Some(permissions) = permissions {
-            temp.set_permissions(permissions)?;
-        }
-        temp.sync_all()?;
-        drop(temp);
-        commit(temp_path, path)
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(temp_path);
-        return Err(CasError::Other(format!(
-            "Failed to atomically write project config {path:?}: {error}"
-        )));
-    }
-    Ok(())
-}
-
 fn update_project_config_toml_with<F, H>(
     cas_root: &Path,
     update: F,
@@ -504,11 +372,19 @@ where
     F: FnOnce(&mut toml::value::Table) -> Result<bool, CasError>,
     H: FnOnce(),
 {
-    let _lock = lock_project_config(cas_root)?;
+    let _lock = crate::config::lock_project_config(cas_root)
+        .map_err(|error| CasError::Other(format!("Failed to lock project config: {error}")))?;
     let toml_path = cas_root.join("config.toml");
     let mut doc: toml::Value = match std::fs::read_to_string(&toml_path) {
-        Ok(content) => toml::from_str(&content)
-            .map_err(|e| CasError::Other(format!("Failed to parse config.toml: {e}")))?,
+        Ok(content) => toml::from_str(&content).map_err(|e| {
+            let line = e
+                .span()
+                .map(|span| content[..span.start].bytes().filter(|b| *b == b'\n').count() + 1)
+                .unwrap_or(1);
+            CasError::Other(format!(
+                "Failed to parse config.toml at line {line}: {e}; restore a known-good config.toml backup before retrying"
+            ))
+        })?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             toml::Value::Table(toml::value::Table::new())
         }
@@ -524,7 +400,12 @@ where
     let serialized = toml::to_string_pretty(&doc)
         .map_err(|e| CasError::Other(format!("Failed to serialize config.toml: {e}")))?;
     before_commit();
-    atomic_replace_project_config(&toml_path, &serialized)
+    crate::config::atomic_replace_project_config(&toml_path, &serialized)
+        .map_err(|error| {
+            CasError::Other(format!(
+                "Failed to atomically write project config: {error}"
+            ))
+        })
 }
 
 fn update_project_config_toml<F>(cas_root: &Path, update: F) -> Result<(), CasError>
@@ -1861,6 +1742,9 @@ impl CloudConfig {
 #[cfg(test)]
 mod tests {
     use crate::cloud::config::*;
+    use crate::config::{
+        atomic_replace_project_config_via, atomic_replace_project_config_via_with_created_hook,
+    };
     use crate::test_support::TestEnvGuard;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;

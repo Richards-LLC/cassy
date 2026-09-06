@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Northlight — find the failing step in under a minute (cas-ui-craft exemplar: product page)</title>
+<style>
+  /* Petrastella tokens — names match design-spec/references/design-tokens.json */
+  :root{
+    --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;
+    --ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;
+    --action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;--danger-tint:rgba(179,38,30,0.10);--focus:#2E3A9F;
+    --font-display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
+    --font-body:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --font-mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-6:24px;--space-8:32px;--space-12:48px;--space-16:64px;--space-24:96px;
+    --container:1120px;--gutter:24px;--margin-column:240px;--measure:68ch;
+    --radius-chip:4px;--radius-panel:8px;--motion-chrome:120ms;--ease:cubic-bezier(.2,0,0,1);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#12141A;--surface:#191C24;--surface-hero:#241E1E;--line:#2B3040;--line-strong:#6B7390;
+      --ink:#E9E6E0;--ink-muted:#A3A7B4;--verdict:#A9B3FF;--verdict-soft:rgba(169,179,255,0.16);--evidence:#A3A7B4;
+      --action:#A9B3FF;--good:#5FC492;--warning:#E2B14D;--danger:#EF7B72;--danger-tint:rgba(239,123,114,0.14);--focus:#A9B3FF;
+    }
+  }
+  *{box-sizing:border-box}
+  html{background:var(--bg)}
+  body{margin:0;color:var(--ink);font:400 17px/26px var(--font-body);-webkit-font-smoothing:antialiased}
+  a{color:var(--action);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px;transition:color var(--motion-chrome) var(--ease)}
+  a:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:3px;border-radius:2px}
+  .skip{position:absolute;left:-9999px}.skip:focus{left:var(--space-4);top:var(--space-4);background:var(--surface);padding:var(--space-2) var(--space-3);z-index:2}
+  .wrap{max-width:var(--container);margin:0 auto;padding:0 var(--gutter)}
+
+  /* Type steps */
+  .eyebrow{font:600 12px/16px var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}
+  .caption{font-size:14px;line-height:20px;color:var(--ink-muted)}
+  .lede{font-size:21px;line-height:30px}
+  h2{font:600 27px/32px var(--font-body);letter-spacing:-.01em;margin:0 0 var(--space-4)}
+  h1.verdict{font:400 clamp(32px,4.6vw,52px)/1.08 var(--font-display);letter-spacing:-.015em;max-width:22ch;margin:var(--space-3) 0 var(--space-4)}
+  .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+  p{max-width:var(--measure);margin:0 0 var(--space-4)}
+
+  /* Dot plot: colours come from the tokens so dark mode and print follow */
+  .dotplot{font-family:var(--font-body)}
+  .dotplot .band{fill:var(--verdict-soft)}
+  .dotplot .axis{stroke:var(--line);stroke-width:1}
+  .dotplot .ticks text{font:400 13px var(--font-mono);fill:var(--ink-muted)}
+  .dotplot .dumbbell line{stroke:var(--ink-muted);stroke-width:1}
+  .dotplot .hollow circle{fill:var(--surface-hero);stroke:var(--ink-muted);stroke-width:1.5}
+  .dotplot .filled circle{fill:var(--verdict)}
+  .dotplot .rlabel text{font:400 14px var(--font-body);fill:var(--ink)}
+  .dotplot .vlabel text{font:400 13px var(--font-mono);fill:var(--ink-muted)}
+  .dotplot .verdict-label{font:600 13px var(--font-mono);fill:var(--verdict)}
+  @media print{.dotplot .hollow circle{fill:#fff}}
+
+  /* Chrome */
+  header.top{border-bottom:1px solid var(--line)}
+  header.top .wrap{display:flex;align-items:baseline;justify-content:space-between;gap:var(--space-4);padding-top:var(--space-4);padding-bottom:var(--space-4)}
+  .wordmark{font:400 21px/30px var(--font-display);color:var(--ink);text-decoration:none}
+  .wordmark b{color:var(--verdict);font-weight:400}
+  nav.top a{margin-left:var(--space-6);font-size:14px;text-decoration:none}
+  nav.top a:hover{text-decoration:underline}
+
+  /* Hero */
+  .hero{background:var(--surface-hero)}
+  .hero .wrap{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--space-6);padding-top:var(--space-8);padding-bottom:var(--space-8)}
+  .hero .rule{height:3px;background:var(--verdict);width:120px;margin:0 0 var(--space-3)}
+  .hero .prov{font:400 14px/20px var(--font-mono);color:var(--ink-muted);margin:0}
+  .hero figure{margin:0;min-width:0}
+  .hero figure svg{width:100%;height:auto;display:block}
+  .hero figcaption{font-size:14px;line-height:20px;color:var(--ink-muted);margin-top:var(--space-2)}
+  .hero figcaption b{color:var(--ink);font-weight:600}
+  @media (min-width:820px){
+    .hero .wrap{grid-template-columns:minmax(0,5fr) minmax(0,6fr);align-items:center;padding-top:var(--space-12);padding-bottom:var(--space-12)}
+  }
+
+  /* One column + margin rail: each .row is a block and the notes that annotate it */
+  .page{display:block}
+  .row{display:grid;grid-template-columns:minmax(0,1fr);column-gap:var(--space-8);padding-top:var(--space-12)}
+  .row.tight{padding-top:var(--space-6)}
+  .block{grid-column:1;min-width:0}
+  .rail{grid-column:1;min-width:0}
+  aside.note{margin:var(--space-3) 0 0;padding:var(--space-3) 0 0;border-top:1px solid var(--line);font-size:14px;line-height:20px;color:var(--evidence);max-width:var(--measure)}
+  aside.note .eyebrow{display:block;margin-bottom:var(--space-1);color:var(--verdict)}
+  aside.note p{margin:0;max-width:none}
+  @media (min-width:1080px){
+    .row{grid-template-columns:minmax(0,1fr) var(--margin-column)}
+    .rail{grid-column:2;align-self:start;border-left:1px solid var(--line);padding-left:var(--space-4)}
+    aside.note{margin:0 0 var(--space-6);padding:0;border-top:0}
+  }
+
+  /* Brief */
+  details.brief{border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:var(--space-3) 0}
+  details.brief summary{cursor:pointer;list-style:none;display:flex;gap:var(--space-3);align-items:baseline}
+  details.brief summary::-webkit-details-marker{display:none}
+  details.brief summary::before{content:"–";font-family:var(--font-mono);color:var(--ink-muted)}
+  details.brief:not([open]) summary::before{content:"+"}
+  details.brief dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--space-2) var(--space-4);margin:var(--space-3) 0 0;max-width:var(--measure)}
+  details.brief dt{font:600 12px/26px var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}
+  details.brief dd{margin:0}
+  @media (max-width:480px){details.brief dl{grid-template-columns:1fr;gap:var(--space-1) 0}details.brief dt{line-height:16px;margin-top:var(--space-2)}}
+
+  /* Timeline */
+  ol.timeline{list-style:none;margin:0;padding:0;max-width:var(--measure)}
+  ol.timeline li{display:grid;grid-template-columns:88px 24px minmax(0,1fr);grid-template-rows:auto auto;column-gap:var(--space-3);position:relative}
+  ol.timeline li::before{content:"";position:absolute;left:111px;top:0;bottom:0;width:1px;background:var(--line-strong)}
+  ol.timeline li:first-child::before{top:12px}
+  ol.timeline li:last-child::before{bottom:auto;height:12px}
+  ol.timeline .gap{grid-column:1;grid-row:1;font:400 12px/16px var(--font-mono);color:var(--ink-muted);text-align:right;padding-bottom:var(--space-2)}
+  ol.timeline .t{grid-column:1;grid-row:2;font:400 15px/22px var(--font-mono);font-variant-numeric:tabular-nums;color:var(--ink-muted);text-align:right;padding-top:2px}
+  ol.timeline .spine{grid-column:2;grid-row:2;position:relative}
+  ol.timeline .dot{position:absolute;left:7px;top:8px;width:9px;height:9px;border-radius:50%;background:var(--bg);border:1.5px solid var(--line-strong)}
+  ol.timeline .ev{grid-column:3;grid-row:2;padding:0 0 var(--space-4)}
+  ol.timeline .ev code{font:400 15px/22px var(--font-mono);color:var(--ink)}
+  ol.timeline .ev .caption{display:block}
+  ol.timeline li.fail .dot{background:var(--danger);border-color:var(--danger)}
+  ol.timeline li.fail .ev code{color:var(--danger)}
+  ol.timeline li.decisive .dot{background:var(--verdict);border-color:var(--verdict);width:11px;height:11px;left:6px;top:7px}
+  ol.timeline li.decisive .ev{border-left:3px solid var(--verdict);background:var(--verdict-soft);margin-left:-12px;padding:var(--space-2) var(--space-3) var(--space-2) var(--space-3);margin-bottom:var(--space-4)}
+  ol.timeline li.decisive .ev code{color:var(--ink)}
+  @media (max-width:480px){ol.timeline li{grid-template-columns:64px 24px minmax(0,1fr)}ol.timeline li::before{left:87px}ol.timeline .t{font-size:13px}}
+  .tag{display:inline-block;font:600 12px/16px var(--font-mono);letter-spacing:.04em;padding:1px 6px;border-radius:var(--radius-chip);border:1px solid currentColor;margin-left:var(--space-2);vertical-align:2px}
+  .tag.danger{color:var(--danger)}
+  .tag.verdict{color:var(--verdict)}
+
+  /* Pull-quote */
+  blockquote.pull{margin:0;padding:var(--space-6) var(--space-8);background:var(--surface-hero);border-left:3px solid var(--verdict);max-width:var(--measure)}
+  blockquote.pull p{font:italic 400 21px/30px var(--font-display);margin:0 0 var(--space-3);max-width:none}
+  blockquote.pull footer{font:400 14px/20px var(--font-mono);color:var(--ink-muted)}
+
+  /* Ledgers */
+  .ledger-wrap{overflow-x:auto;max-width:100%}
+  table.ledger{border-collapse:collapse;width:100%;max-width:100%;background:transparent}
+  table.ledger caption{text-align:left;font:400 17px/26px var(--font-body);color:var(--ink);padding:0 0 var(--space-3);caption-side:top}
+  table.ledger th,table.ledger td{padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  table.ledger th{font:600 12px/16px var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);padding-top:0}
+  table.ledger th:first-child,table.ledger td:first-child{padding-left:0}
+  table.ledger td.num,table.ledger th.num{text-align:right;font:400 15px/22px var(--font-mono);font-variant-numeric:tabular-nums}
+  table.ledger th.num{font-size:12px;line-height:16px;font-weight:600}
+  table.ledger tbody th{font:400 17px/26px var(--font-body);color:var(--ink);text-transform:none;letter-spacing:0}
+  table.ledger tr.sum td,table.ledger tr.sum th{font-weight:600;border-top:1px solid var(--line-strong);border-bottom:0}
+  table.ledger .src{font:400 14px/20px var(--font-mono);color:var(--ink-muted)}
+
+  /* Pricing */
+  table.pricing{min-width:620px}
+  table.pricing th.plan{font:400 21px/30px var(--font-display);text-transform:none;letter-spacing:0;color:var(--ink);padding-bottom:var(--space-1)}
+  table.pricing th.plan .price{display:block;font:500 15px/22px var(--font-mono);color:var(--ink-muted)}
+  table.pricing th.plan .price b{color:var(--ink);font-weight:500}
+  table.pricing td.plan-cell{font:400 15px/22px var(--font-mono);color:var(--ink)}
+  table.pricing .rec{border-left:3px solid var(--verdict);background:var(--verdict-soft)}
+  table.pricing th.rec .eyebrow{display:block;color:var(--verdict);margin-bottom:var(--space-1)}
+  table.pricing td.na{color:var(--ink-muted)}
+  table.pricing tr.cta td{border-bottom:0;padding-top:var(--space-3)}
+  a.textbtn{display:inline-block;font:600 15px/22px var(--font-body);color:var(--action);text-decoration:none;border-bottom:1.5px solid var(--action);padding:2px 0}
+  a.textbtn:hover{border-bottom-width:2.5px}
+  a.textbtn::after{content:" →"}
+
+  .cta-line{font:400 34px/38px var(--font-display);max-width:22ch;margin:0 0 var(--space-3)}
+  footer.site{border-top:1px solid var(--line);margin-top:var(--space-16);padding:var(--space-6) 0 var(--space-12);font:400 14px/20px var(--font-mono);color:var(--ink-muted)}
+  footer.site p{max-width:none;margin:0 0 var(--space-1)}
+
+  .sr{position:absolute;left:-9999px}
+  details.data{margin-top:var(--space-3)}
+  details.data summary{cursor:pointer;font-size:14px;color:var(--action)}
+
+  @media (prefers-reduced-motion: reduce){*{transition:none !important;animation:none !important}}
+  @media print{
+    :root{--bg:#fff;--surface:#fff;--surface-hero:#fff;--ink:#000;--ink-muted:#444;--evidence:#444;--line:#bbb;--line-strong:#666;--verdict:#1c2a8f;--verdict-soft:#e8ebf8;--action:#1c2a8f}
+    body{font-size:11pt;line-height:1.45}
+    header.top nav,.skip{display:none}
+    .hero .wrap{grid-template-columns:1fr 1fr;padding:12pt 0}
+    .row{grid-template-columns:1fr;padding-top:18pt;break-inside:avoid}
+    .rail{grid-column:1;border-left:0;padding-left:0}
+    aside.note{border-top:1px solid var(--line);padding:6pt 0 0;margin:6pt 0 0}
+    details{display:block}details>summary{display:none}details>*{display:block}
+    details.brief dl{display:grid}
+    table.ledger{break-inside:auto}thead{display:table-header-group}tr{break-inside:avoid}
+    .ledger-wrap{overflow:visible}table.pricing{min-width:0}
+    blockquote.pull{border:1px solid var(--line)}
+    a[href^="http"]::after{content:" (" attr(href) ")";font-size:9pt;color:#555}
+    a.textbtn::after{content:""}
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="wordmark" href="#main">North<b>light</b></a>
+    <nav class="top" aria-label="Page">
+      <a href="#how">How it works</a>
+      <a href="#pricing">Pricing</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" aria-labelledby="verdict">
+  <div class="wrap">
+    <div>
+      <p class="eyebrow">Session replay for command-line agents · study of 40 runs</p>
+      <h1 class="verdict" id="verdict">With a replay, reviewers found the failing step in under a minute. Reading the transcript, the median took eleven.</h1>
+      <div class="rule" aria-hidden="true"></div>
+      <p class="prov">8 reviewers · 40 runs · internal study 2026-08 · minutes to first correct identification</p>
+    </div>
+    <figure>
+      <svg viewBox="0 0 560 300" role="img" aria-labelledby="dp-title dp-desc" class="dotplot">
+        <title id="dp-title">Minutes to find the failing step, per reviewer: reading the transcript versus with Northlight</title>
+        <desc id="dp-desc">Eight reviewers sorted by transcript time. Hollow grey dots mark minutes spent reading the transcript, from 22 down to 4.5. Filled indigo dots mark minutes with Northlight, all between 0.5 and 1.4, inside the shaded under-one-minute band.</desc>
+        <!-- x(m) = 100 + m/24*340 ; rows y = 38 + i*30 -->
+        <rect class="band" x="100" y="12" width="14.2" height="250"/>
+        <text class="verdict-label" x="120" y="24">under 1 min</text>
+        <line class="axis" x1="100" y1="262" x2="440" y2="262"/>
+        <g class="ticks" text-anchor="middle">
+          <text x="100" y="281">0</text><text x="170.8" y="281">5</text><text x="241.7" y="281">10</text><text x="312.5" y="281">15</text><text x="383.3" y="281">20</text><text x="440" y="281">24</text>
+          <text x="270" y="297">minutes to first correct identification</text>
+        </g>
+        <g class="dumbbell">
+          <line x1="115.6" y1="38" x2="411.7" y2="38"/><line x1="112.8" y1="68" x2="362.1" y2="68"/><line x1="111.3" y1="98" x2="298.3" y2="98"/><line x1="119.8" y1="128" x2="277.1" y2="128"/>
+          <line x1="108.5" y1="158" x2="227.5" y2="158"/><line x1="109.9" y1="188" x2="220.4" y2="188"/><line x1="112.8" y1="218" x2="185" y2="218"/><line x1="107.1" y1="248" x2="163.8" y2="248"/>
+        </g>
+        <g class="hollow">
+          <circle cx="411.7" cy="38" r="5"/><circle cx="362.1" cy="68" r="5"/><circle cx="298.3" cy="98" r="5"/><circle cx="277.1" cy="128" r="5"/>
+          <circle cx="227.5" cy="158" r="5"/><circle cx="220.4" cy="188" r="5"/><circle cx="185" cy="218" r="5"/><circle cx="163.8" cy="248" r="5"/>
+        </g>
+        <g class="filled">
+          <circle cx="115.6" cy="38" r="5.5"/><circle cx="112.8" cy="68" r="5.5"/><circle cx="111.3" cy="98" r="5.5"/><circle cx="119.8" cy="128" r="5.5"/>
+          <circle cx="108.5" cy="158" r="5.5"/><circle cx="109.9" cy="188" r="5.5"/><circle cx="112.8" cy="218" r="5.5"/><circle cx="107.1" cy="248" r="5.5"/>
+        </g>
+        <g class="rlabel" text-anchor="end">
+          <text x="90" y="43">Reviewer 1</text><text x="90" y="73">Reviewer 2</text><text x="90" y="103">Reviewer 3</text><text x="90" y="133">Reviewer 4</text>
+          <text x="90" y="163">Reviewer 5</text><text x="90" y="193">Reviewer 6</text><text x="90" y="223">Reviewer 7</text><text x="90" y="253">Reviewer 8</text>
+        </g>
+        <g class="vlabel">
+          <text x="422" y="43">22.0 transcript</text>
+          <text x="372.1" y="73">18.5</text><text x="308.3" y="103">14.0</text><text x="287.1" y="133">12.5</text>
+          <text x="237.5" y="163">9.0</text><text x="230.4" y="193">8.5</text><text x="195" y="223">6.0</text><text x="173.8" y="253">4.5</text>
+        </g>
+        <text class="verdict-label" x="128" y="58">1.1 with Northlight</text>
+      </svg>
+      <figcaption>Every reviewer, every run: the filled dot is the Northlight time. <b>Median 0.85 min against 10.75.</b> Source: internal study, August 2026, 40 runs with a known failing step.</figcaption>
+      <details class="data">
+        <summary>Data for this figure</summary>
+        <div class="ledger-wrap">
+        <table class="ledger">
+          <caption>Minutes to first correct identification of the failing step</caption>
+          <thead><tr><th scope="col">Reviewer</th><th scope="col" class="num">Transcript</th><th scope="col" class="num">Northlight</th><th scope="col" class="num">Ratio</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Reviewer 1</th><td class="num">22.0</td><td class="num">1.1</td><td class="num">20×</td></tr>
+            <tr><th scope="row">Reviewer 2</th><td class="num">18.5</td><td class="num">0.9</td><td class="num">21×</td></tr>
+            <tr><th scope="row">Reviewer 3</th><td class="num">14.0</td><td class="num">0.8</td><td class="num">18×</td></tr>
+            <tr><th scope="row">Reviewer 4</th><td class="num">12.5</td><td class="num">1.4</td><td class="num">9×</td></tr>
+            <tr><th scope="row">Reviewer 5</th><td class="num">9.0</td><td class="num">0.6</td><td class="num">15×</td></tr>
+            <tr><th scope="row">Reviewer 6</th><td class="num">8.5</td><td class="num">0.7</td><td class="num">12×</td></tr>
+            <tr><th scope="row">Reviewer 7</th><td class="num">6.0</td><td class="num">0.9</td><td class="num">7×</td></tr>
+            <tr><th scope="row">Reviewer 8</th><td class="num">4.5</td><td class="num">0.5</td><td class="num">9×</td></tr>
+            <tr class="sum"><th scope="row">Median</th><td class="num">10.75</td><td class="num">0.85</td><td class="num">13×</td></tr>
+          </tbody>
+        </table>
+        </div>
+      </details>
+    </figure>
+  </div>
+</section>
+
+<div class="wrap page">
+
+  <div class="row tight">
+  <details class="brief block" open>
+    <summary><span class="eyebrow">Concept brief</span><span class="caption">product-page.html · written before the first line of markup</span></summary>
+    <dl>
+      <dt>Single idea</dt><dd>Reviewers find the failing step in under a minute instead of reading the whole transcript.</dd>
+      <dt>Hero form</dt><dd>Dot plot (dumbbell): eight reviewers, transcript time hollow, Northlight time filled. Every filled dot collapsing into the under-one-minute band <em>is</em> the claim; nothing needs to be read to see it.</dd>
+      <dt>Emotional register</dt><dd>Calm, certain, a little dry — sandstone hero, serif verdict, no status colour above the fold, a study citation where a template would put a tagline.</dd>
+      <dt>Distinctive move</dt><dd>The whole page is one ledger-width column with a margin rail; the product is explained by a single recorded session drawn as a timeline, not by feature cards.</dd>
+      <dt>Deliberately omitted</dt><dd>No logo band, no gradient blob, no product screenshot in the hero, no three-card feature grid, no testimonial carousel, no filled gradient buttons, no “trusted by” wall.</dd>
+    </dl>
+  </details>
+  <div class="rail">
+  <aside class="note">
+    <span class="eyebrow">Design note · Fit to argument</span>
+    <p>The hero is a figure, not a screenshot. A screenshot shows what the product looks like; the dumbbell shows what it does to a reviewer’s afternoon. The shape — eight lines all ending in one band — is the sentence above it.</p>
+  </aside>
+  <aside class="note">
+    <span class="eyebrow">Design note · Distinctiveness</span>
+    <p>The verdict is set in the display serif on the sandstone surface, regular weight, with a 3px indigo rule. Launch pages default to a 700-weight sans over a gradient; this reads like a finding, which is what a study result is.</p>
+  </aside>
+  </div>
+  </div>
+
+  <div class="row">
+  <section class="block" id="how" aria-labelledby="how-h">
+    <h2 id="how-h">How it works: one recorded session</h2>
+    <p class="lede">Northlight records every tool call an agent makes, replays the run as a timeline, and marks the first non-zero exit — and the first claim that contradicts it.</p>
+    <ol class="timeline">
+      <li><span class="t">00:00.0</span><span class="spine"><span class="dot"></span></span><span class="ev"><code>cas task start deploy-4f2</code><span class="caption">run begins; environment snapshot recorded</span></span></li>
+      <li><span class="gap">+3.2 s</span><span class="t">00:03.2</span><span class="spine"><span class="dot"></span></span><span class="ev"><code>read infra/deploy.yml</code><span class="caption">file hash pinned so the replay shows the exact bytes read</span></span></li>
+      <li><span class="gap">+0.9 s</span><span class="t">00:04.1</span><span class="spine"><span class="dot"></span></span><span class="ev"><code>edit infra/deploy.yml</code><span class="caption">diff captured at the step, not reconstructed later</span></span></li>
+      <li><span class="gap">+15.7 s</span><span class="t">00:19.8</span><span class="spine"><span class="dot"></span></span><span class="ev"><code>terraform plan</code><span class="caption">exit 0 · 2 to add, 1 to change</span></span></li>
+      <li class="fail"><span class="gap">+0.6 s</span><span class="t">00:20.4</span><span class="spine"><span class="dot"></span></span><span class="ev"><code>terraform apply -auto-approve</code><span class="tag danger">exit 1</span><span class="caption">“Error acquiring the state lock: lock held by run 9c1e”</span></span></li>
+      <li class="fail"><span class="gap">+0.5 s</span><span class="t">00:20.9</span><span class="spine"><span class="dot"></span></span><span class="ev"><code>terraform apply -auto-approve</code><span class="tag danger">exit 1</span><span class="caption">retried; same lock</span></span></li>
+      <li class="decisive"><span class="gap">+0.1 s</span><span class="t">00:21.0</span><span class="spine"><span class="dot"></span></span><span class="ev"><code>agent: “Deployed to staging; all checks green.”</code><span class="tag verdict">claim contradicts exit 1</span><span class="caption">This is where a reviewer lands when they open the run. Northlight pins the first failing exit and the first sentence that says otherwise.</span></span></li>
+      <li><span class="gap">+20.6 s</span><span class="t">00:41.6</span><span class="spine"><span class="dot"></span></span><span class="ev"><code>run ends</code><span class="caption">reported success · actual state unchanged</span></span></li>
+    </ol>
+  </section>
+  <div class="rail">
+  <aside class="note">
+    <span class="eyebrow">Design note · Distinctiveness</span>
+    <p>“How it works” is one real session drawn as an annotated timeline, not three feature cards with icons. The product’s whole value is the moment at 00:21.0; a card grid has no way to point at a moment.</p>
+  </aside>
+  <aside class="note">
+    <span class="eyebrow">Design note · Craft</span>
+    <p>Elapsed time is printed on the spine (+15.7 s, +0.1 s), so nobody subtracts timestamps. Red marks only the two real failures; the decisive event is indigo, because it is the argument, not a status.</p>
+  </aside>
+  </div>
+  </div>
+
+  <div class="row">
+  <section class="block" aria-label="What a reviewer said">
+    <blockquote class="pull">
+      <p>I stopped reading transcripts. I open the timeline, go to the first red tick, and I am looking at the exact tool call and the sentence that lied about it.</p>
+      <footer>Reviewer 3 · platform team · 40-run study, 2026-08</footer>
+    </blockquote>
+  </section>
+  <div class="rail">
+  <aside class="note">
+    <span class="eyebrow">Design note · Hierarchy</span>
+    <p>One pull-quote, and it does not restate a number the figure already proved; it adds the reviewer’s method. A second quote or a carousel would compete with the verdict for the reader’s memory.</p>
+  </aside>
+  </div>
+  </div>
+
+  <div class="row">
+  <section class="block" aria-labelledby="get-h">
+    <h2 id="get-h">What you get</h2>
+    <div class="ledger-wrap">
+    <table class="ledger">
+      <caption>Six capabilities, what each records, and where it appears in the replay.</caption>
+      <thead><tr><th scope="col">Capability</th><th scope="col">What is recorded</th><th scope="col">Where it appears</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Tool-call capture</th><td>Every command, argument, exit code, and byte of output, with the file hashes it read.</td><td class="src">timeline · every tick</td></tr>
+        <tr><th scope="row">Timeline replay</th><td>The run as a spine with elapsed time between calls, scrubbable to any step.</td><td class="src">timeline</td></tr>
+        <tr><th scope="row">First-failure jump</th><td>The first non-zero exit, and every retry of it, pinned as the landing point.</td><td class="src">timeline · red tick</td></tr>
+        <tr><th scope="row">Claim check</th><td>Agent statements that contradict a recorded exit code or diff.</td><td class="src">timeline · indigo tick</td></tr>
+        <tr><th scope="row">Diff at step</th><td>The working tree exactly as it was when a step ran, not at the end.</td><td class="src">step panel</td></tr>
+        <tr><th scope="row">Export</th><td>One self-contained HTML file per run; opens offline, prints, pastes into a review.</td><td class="src">run menu</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+  <div class="rail">
+  <aside class="note">
+    <span class="eyebrow">Design note · Craft</span>
+    <p>Capabilities are a ruled ledger with a source column, not six cards with icons. A ledger lets the reader scan the middle column in one pass; cards force six separate reads and add ink that carries nothing.</p>
+  </aside>
+  </div>
+  </div>
+
+  <div class="row">
+  <section class="block" id="pricing" aria-labelledby="pricing-h">
+    <h2 id="pricing-h">Pricing</h2>
+    <p>Rows are what you get; the recommended column carries the indigo rule. Every plan includes the first-failure jump.</p>
+    <div class="ledger-wrap">
+    <table class="ledger pricing">
+      <caption>Three plans, compared by capability.</caption>
+      <thead>
+        <tr>
+          <th scope="col"><span class="sr">Capability</span></th>
+          <th scope="col" class="plan">Solo<span class="price"><b>$0</b> · one seat</span></th>
+          <th scope="col" class="plan rec"><span class="eyebrow">Recommended</span>Team<span class="price"><b>$29</b> per seat / month</span></th>
+          <th scope="col" class="plan">Org<span class="price"><b>Custom</b> · annual</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row">Runs recorded per month</th><td class="plan-cell">200</td><td class="plan-cell rec">Unlimited</td><td class="plan-cell">Unlimited</td></tr>
+        <tr><th scope="row">Retention</th><td class="plan-cell">14 days</td><td class="plan-cell rec">1 year</td><td class="plan-cell">Your policy</td></tr>
+        <tr><th scope="row">Seats</th><td class="plan-cell">1</td><td class="plan-cell rec">Up to 50</td><td class="plan-cell">Unlimited</td></tr>
+        <tr><th scope="row">First-failure jump</th><td class="plan-cell">Included</td><td class="plan-cell rec">Included</td><td class="plan-cell">Included</td></tr>
+        <tr><th scope="row">Claim check</th><td class="plan-cell na">—</td><td class="plan-cell rec">Included</td><td class="plan-cell">Included</td></tr>
+        <tr><th scope="row">Export to single-file HTML</th><td class="plan-cell">Included</td><td class="plan-cell rec">Included</td><td class="plan-cell">Included</td></tr>
+        <tr><th scope="row">Self-hosted recorder</th><td class="plan-cell na">—</td><td class="plan-cell na rec">—</td><td class="plan-cell">Included</td></tr>
+        <tr><th scope="row">Support</th><td class="plan-cell">Community</td><td class="plan-cell rec">Next business day</td><td class="plan-cell">Named engineer</td></tr>
+        <tr class="cta"><td></td><td><a class="textbtn" href="#main">Start with Solo</a></td><td class="rec"><a class="textbtn" href="#main">Start a Team trial</a></td><td><a class="textbtn" href="#main">Talk to us</a></td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+  <div class="rail">
+  <aside class="note">
+    <span class="eyebrow">Design note · Distinctiveness</span>
+    <p>Pricing is a ledger, not three cards with buttons. Rows are capabilities, so a reader compares down a column instead of hunting across cards; the recommendation is a rule and a tint, not a “most popular” ribbon.</p>
+  </aside>
+  <aside class="note">
+    <span class="eyebrow">Design note · Accessibility</span>
+    <p>Actions are text buttons in the action colour with a visible underline and a 2px focus ring — no filled gradient buttons, so the indigo means the same thing everywhere on the page. At 390px the table scrolls inside its own container; the page never scrolls sideways.</p>
+  </aside>
+  </div>
+  </div>
+
+  <div class="row">
+  <section class="block" aria-labelledby="cta-h">
+    <p class="cta-line" id="cta-h">Open a failing run and be at the failing step before the coffee is poured.</p>
+    <p><a class="textbtn" href="#pricing">Choose a plan</a></p>
+  </section>
+  <div class="rail">
+  <aside class="note">
+    <span class="eyebrow">Design note · Hierarchy</span>
+    <p>One closing line in the serif, one link. There is no logo wall and no “trusted by” band anywhere on the page: the study at the top is the proof, and a wall of logos would ask the reader to trust names instead of the figure.</p>
+  </aside>
+  </div>
+  </div>
+
+  <div class="row">
+  <section class="block" aria-labelledby="crit-h">
+    <h2 id="crit-h">Critique</h2>
+    <p class="caption">Scored against cas-ui-craft/references/critique-rubric.md after render, at 1280×800, 390×844, print preview, and with JavaScript disabled.</p>
+    <div class="ledger-wrap">
+    <table class="ledger">
+      <caption>Rubric scores for this page; the public-surface floor (distinctiveness, fit, hierarchy ≥ 4) holds.</caption>
+      <thead><tr><th scope="col">Dimension</th><th scope="col" class="num">Score</th><th scope="col">Evidence</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Distinctiveness</th><td class="num">5</td><td>Serif verdict on sandstone, single ledger column with a margin rail, the product explained by one timeline; nothing here ships from a landing-page template.</td></tr>
+        <tr><th scope="row">Fit to argument</th><td class="num">5</td><td>Eight dumbbells collapsing into the under-one-minute band are the sentence; the prose only names the median.</td></tr>
+        <tr><th scope="row">Hierarchy</th><td class="num">4</td><td>Verdict, figure, rule, then a clear step down; the brief’s open state at 1280 sits closer to the hero than ideal.</td></tr>
+        <tr><th scope="row">Craft</th><td class="num">4</td><td>Tokens throughout, elapsed times printed, tabular numerals in every ledger; the pricing header wraps at 820px.</td></tr>
+        <tr><th scope="row">Accessibility</th><td class="num">5</td><td>Minimum pair 5.8:1 light, 7.7:1 dark; figure has title, description, and a data table; JS-off and print lose nothing; 390px has no horizontal scroll.</td></tr>
+      </tbody>
+      <tfoot><tr class="sum"><th scope="row">Floor</th><td class="num">holds</td><td class="src">scored by the authoring session on 2026-09-06</td></tr></tfoot>
+    </table>
+    </div>
+  </section>
+  <div class="rail">
+  
+  </div>
+  </div>
+
+</div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <p>Northlight is a fictional product used as the cas-ui-craft product-page exemplar. Every number on this page is invented for the example.</p>
+    <p>Tokens: design-spec/references/design-tokens.json · brief embedded above · rendered from a single self-contained file, no network, no script.</p>
+  </div>
+</footer>
+</body>
+</html>

@@ -25,7 +25,9 @@ pub fn execute(args: &DefaultArgs) -> anyhow::Result<()> {
     let host_dir = host_cas_dir();
     std::fs::create_dir_all(&host_dir)?;
 
-    let mut config = Config::load(&host_dir).unwrap_or_default();
+    // Config::load returns defaults only when no config exists; preserve its
+    // parse error so this mutation cannot overwrite a malformed document.
+    let mut config = Config::load(&host_dir)?;
     set_supervisor_harness(&mut config, provider);
     config.save(&host_dir)?;
 
@@ -86,5 +88,27 @@ mod tests {
             config.llm.as_ref().unwrap().supervisor.as_ref().unwrap().harness.as_deref(),
             Some("grok")
         );
+    }
+
+    #[test]
+    fn execute_preserves_malformed_host_config() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let host_dir = host_cas_dir();
+        std::fs::create_dir_all(&host_dir).unwrap();
+        let config_path = host_dir.join("config.toml");
+        let original = "[project]\naliases = []\nlse\n";
+        std::fs::write(&config_path, original).unwrap();
+
+        let error = execute(&DefaultArgs {
+            provider: "codex".to_string(),
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains("Failed to parse config.toml at line 3"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), original);
     }
 }

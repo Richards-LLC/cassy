@@ -120,14 +120,20 @@ impl ColorPalette {
             primary_400: Color::Rgb(40, 180, 170),
             primary_500: Color::Rgb(30, 140, 135),
 
-            // More saturated for light background
-            success: Color::Rgb(40, 160, 80),
+            // Meaning colours for a light background (cas-4df0). Each sits in
+            // the narrow luminance band that reads as a mark (≥ 3:1) on white
+            // and on Solarized light (#fdf6e3) while still carrying the
+            // near-black chip foreground at ≥ 4.5:1 (the contrast guard in
+            // palette.rs). Text never uses them: a verdict word is bold in the
+            // terminal's own foreground. The previous warning measured 2.8:1
+            // on white.
+            success: Color::Rgb(30, 150, 75),
             success_dim: Color::Rgb(200, 240, 210),
-            warning: Color::Rgb(210, 140, 50),
+            warning: Color::Rgb(176, 112, 16),
             warning_dim: Color::Rgb(255, 245, 200),
             error: Color::Rgb(200, 60, 60),
             error_dim: Color::Rgb(255, 220, 220),
-            info: Color::Rgb(50, 150, 210),
+            info: Color::Rgb(40, 130, 200),
             info_dim: Color::Rgb(220, 235, 255),
 
             purple: Color::Rgb(130, 80, 200),

@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Q2 2026 financial brief — operating income 9 % over plan on a revenue beat that gross margin did not keep (2026-07-14)</title>
+<style>
+  :root{
+    color-scheme: light dark;
+    /* Petrastella design language — tokens from skills/design-spec/references/design-tokens.json (no DESIGN.md applies) */
+    --bg:#F7F4EE; --surface:#FFFFFF; --surface-hero:#F1E7DD; --line:#DAD3C7; --line-strong:#8F8371;
+    --ink:#1B1D24; --muted:#5A5F6E; --verdict:#2E3A9F; --verdict-soft:#DDE1F7; --evidence:#5A5F6E; --action:#2E3A9F;
+    --good:#226845; --warning:#7F5504; --danger:#B3261E;
+    --s1:#2E3A9F; --s2:#B0574F; --s3:#1F7A85;
+    --display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
+    --sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#12141A; --surface:#191C24; --surface-hero:#241E1E; --line:#2B3040; --line-strong:#6B7390;
+           --ink:#E9E6E0; --muted:#A3A7B4; --verdict:#A9B3FF; --verdict-soft:rgba(169,179,255,0.16); --evidence:#A3A7B4; --action:#A9B3FF;
+           --good:#5FC492; --warning:#E2B14D; --danger:#EF7B72; --s1:#A9B3FF; --s2:#F2A49C; --s3:#6FD0DC; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 var(--sans)}
+  :focus-visible{outline:3px solid var(--action);outline-offset:2px}
+  a{color:var(--evidence)}
+  :focus-visible{outline:3px solid var(--evidence);outline-offset:2px}
+  .skip{position:absolute;left:-9999px}.skip:focus{position:static;display:inline-block;margin:8px}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  header{padding:22px 0 14px;background:var(--surface-hero);color:var(--ink);border-bottom:3px solid var(--verdict)}
+  .eyebrow{font:500 12px/1.4 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  h1{font:400 clamp(26px,3.2vw,36px)/1.12 var(--display);margin:8px 0 6px;max-width:34ch}
+  h1 em{font-style:italic;color:var(--verdict)}
+  .meta{color:var(--muted);font-size:14px;margin:0}
+  main{padding:8px 0 48px}
+  section{margin:30px 0 0}
+  h2{font:600 22px/1.25 var(--sans);letter-spacing:-.01em;margin:0 0 8px}
+  p{max-width:78ch}
+  code{font:.92em var(--mono)}
+  .hero{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(240px,1fr);gap:22px;align-items:start;margin-top:12px}
+  @media (max-width:820px){.hero{grid-template-columns:1fr}}
+  figure{margin:0}
+  figcaption{color:var(--muted);font-size:13px;margin-top:8px;max-width:90ch}
+  .chart{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 12px 6px}
+  .chart svg{width:100%;height:auto;display:block}
+  .axis{stroke:var(--line)}.zero{stroke:var(--ink);stroke-width:1.2}
+  .lbl{font:13px var(--sans);fill:var(--ink)}.sub{font:12px var(--sans);fill:var(--muted)}
+  .val{font:13px var(--mono);fill:var(--ink)}
+  .fav{fill:var(--good)}.unf{fill:var(--danger)}
+  .fc{fill:url(#hatch)}
+  .ann{font:italic 15px var(--display);fill:var(--danger)}
+  .kpis{display:grid;gap:10px}
+  .kpi{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+  .kpi .l{font:600 12px/1.4 var(--sans);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .kpi .v{font:400 28px/1.1 var(--display);margin:2px 0}
+  .kpi .d{font:13px var(--mono);color:var(--muted)}
+  .kpi .d b{font-weight:600;color:var(--ink)}
+  .kpi.unf .v{color:var(--danger)}
+  .sowhat{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:8px}
+  .sowhat div{border-top:2px solid var(--verdict);padding-top:8px;font-size:15px}
+  .sowhat b{display:block;font:400 18px/1.3 var(--display);margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;background:transparent;border-top:1px solid var(--line-strong);border-bottom:1px solid var(--line-strong);margin-top:10px}
+  caption{text-align:left;font:400 15px/1.4 var(--display);color:var(--muted);padding:0 0 6px}
+  th,td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:15px}
+  thead th{font:600 12px/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:transparent}
+  th[scope=row]{font-weight:500}
+  .num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:14px}
+  tr.total th,tr.total td{font-weight:700;border-top:2px solid var(--ink)}
+  tbody tr:last-child td,tbody tr:last-child th{border-bottom:0}
+  .scroll{overflow-x:auto}
+  .ask{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px}
+  @media (max-width:760px){.ask{grid-template-columns:1fr}}
+  .option{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px 18px;position:relative}
+  .option.rec{border:2px solid var(--good)}
+  .option h3{margin:0 0 6px;font:400 20px/1.2 var(--display)}
+  .option p{font-size:14px;margin:6px 0 0}
+  .stamp{display:inline-block;font:400 12px/1 var(--display);letter-spacing:.18em;text-transform:uppercase;padding:6px 8px 5px;border:1.5px solid currentColor;color:var(--good);position:absolute;top:14px;right:14px}
+  .option .bar{height:10px;background:var(--line);margin:8px 0 4px;position:relative}
+  .option .bar span{position:absolute;left:0;top:0;bottom:0;background:var(--good)}
+  .option .bar span.h{background:repeating-linear-gradient(45deg,var(--good) 0 3px,transparent 3px 6px)}
+  details{margin-top:12px}summary{cursor:pointer;color:var(--evidence)}
+  footer{border-top:1px solid var(--line);padding:18px 0 40px;color:var(--muted);font-size:13px}
+  @media print{
+    :root{--bg:#fff;--surface:#fff;--surface-hero:#fff;--ink:#000;--muted:#333;--line:#999;--line-strong:#555;--verdict:#2E3A9F;--verdict-soft:#eee;--evidence:#444;--action:#2E3A9F;--good:#1f5a3e;--warning:#6f5206;--danger:#8f1e18;--s1:#2E3A9F;--s2:#8f3d36;--s3:#175f68}
+    body{font-size:11pt}.skip{display:none}.hero{grid-template-columns:1fr}
+    figure,tr,.kpi,.option,.sowhat div{break-inside:avoid}table{break-inside:auto}thead{display:table-header-group}
+    details{display:block}details>summary{display:none}
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the variance ladder</a>
+<header><div class="wrap">
+  <div class="eyebrow">Financial report · executive · Q2 2026 · preliminary close</div>
+  <h1>Operating income finished 9 % over plan on a revenue beat that <em>gross margin did not keep</em></h1>
+  <p class="meta">Q2 2026 (Apr–Jun) versus plan; comparison to Q1 2026 in the line-item table. Currency USD, thousands. Preliminary close as of 2026-07-14; FX at plan rates.</p>
+</div></header>
+
+<main id="main" class="wrap">
+
+<section aria-labelledby="var-h">
+  <h2 id="var-h">Where the $412 K beat came from, and where $138 K of it leaked</h2>
+  <div class="hero">
+    <figure aria-labelledby="fig1-cap">
+      <div class="chart">
+        <svg viewBox="0 0 640 330" role="img" aria-labelledby="fig1-t fig1-d">
+          <title id="fig1-t">Operating income variance versus plan, Q2 2026, decomposed by driver, with the Q3 forecast hatched</title>
+          <desc id="fig1-d">Revenue contributed plus 550 thousand dollars versus plan. Cost of goods sold took back 138 thousand. Operating expenses contributed plus 62 thousand from under-hiring, offset by minus 62 thousand of marketing overspend. Net operating income variance: plus 412 thousand, 9 percent over plan. The Q3 forecast variance of plus 180 thousand is hatched and assumes gross margin recovers to 61 percent.</desc>
+          <defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="var(--surface)"/><rect width="2.5" height="6" fill="var(--good)"/></pattern></defs>
+          <!-- label column x 10–160; zero at x=370; scale 0.36 px per $K → +550 = 198 px -->
+          <line class="zero" x1="370" y1="20" x2="370" y2="286"/>
+          <line class="axis" x1="172" y1="286" x2="568" y2="286"/>
+          <text class="sub" x="172" y="304" text-anchor="middle">−$550 K</text><text class="sub" x="370" y="304" text-anchor="middle">0 vs plan</text><text class="sub" x="568" y="304" text-anchor="middle">+$550 K</text>
+          <text class="sub" x="10" y="322">favorable = right of zero; unfavorable = left; forecast = hatched</text>
+          <text class="lbl" x="10" y="42">Revenue</text><rect class="fav" x="370" y="30" width="198" height="18"/><text class="val" x="574" y="44">+550</text>
+          <text class="lbl" x="10" y="82">Cost of goods sold</text><rect class="unf" x="320.3" y="70" width="49.7" height="18"/><text class="val" x="315" y="84" text-anchor="end">−138</text>
+          <text class="ann" x="376" y="84">margin fell 61.0 → 59.4 %: the leak</text>
+          <text class="lbl" x="10" y="122">Opex · people</text><rect class="fav" x="370" y="110" width="22.3" height="18"/><text class="val" x="398" y="124">+62 (under-hiring)</text>
+          <text class="lbl" x="10" y="162">Opex · marketing</text><rect class="unf" x="347.7" y="150" width="22.3" height="18"/><text class="val" x="342" y="164" text-anchor="end">−62</text>
+          <line class="axis" x1="172" y1="186" x2="568" y2="186"/>
+          <text class="lbl" x="10" y="212" font-weight="700">Operating income</text><rect class="fav" x="370" y="200" width="148.3" height="20"/><text class="val" x="524" y="215" font-weight="700">+412 · +9 %</text>
+          <text class="lbl" x="10" y="256">Q3 forecast</text><rect class="fc" x="370" y="244" width="64.8" height="18" stroke="var(--good)"/><text class="val" x="441" y="258">+180 at 61 % margin</text>
+        </svg>
+      </div>
+      <figcaption id="fig1-cap">Figure 1. Operating income variance versus plan, Q2 2026, by driver; USD thousands; positive = above plan. Q3 forecast is hatched and assumes gross margin returns to 61 %. Source: general ledger close, extracted 2026-07-14; line items in the table below.</figcaption>
+    </figure>
+    <div class="kpis" aria-label="Key figures">
+      <div class="kpi"><div class="l">Revenue</div><div class="v">$8.95 M</div><div class="d">vs plan $8.40 M · <b>+$550 K · +6.5 %</b> ↑</div></div>
+      <div class="kpi unf"><div class="l">Gross margin</div><div class="v">59.4 %</div><div class="d">vs plan 61.0 % · <b>−1.6 pts</b> ↓</div></div>
+      <div class="kpi"><div class="l">Operating income</div><div class="v">$4.99 M</div><div class="d">vs plan $4.58 M · <b>+$412 K · +9.0 %</b> ↑</div></div>
+      <div class="kpi"><div class="l">Cash at close</div><div class="v">$21.3 M</div><div class="d">vs Q1 $20.1 M · <b>+$1.2 M · +6.0 %</b> ↑</div></div>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="so-h">
+  <h2 id="so-h">So what</h2>
+  <div class="sowhat">
+    <div><b>The beat is real but lower quality than it looks.</b> $550 K of revenue upside converted to $412 K of operating income; at plan margin it would have been $550 K.</div>
+    <div><b>The margin leak is one product line.</b> 1.4 of the 1.6 points came from the hardware bundle, sold at launch pricing 8 % below list.</div>
+    <div><b>Q3 depends on one decision.</b> Ending launch pricing on 1 August recovers margin to 61 % and yields the hatched +$180 K; holding it yields roughly +$40 K.</div>
+  </div>
+</section>
+
+<section aria-labelledby="ask-h">
+  <h2 id="ask-h">The ask: end hardware-bundle launch pricing on 1 August</h2>
+  <p>Decision needed from the pricing committee by 2026-07-25. The figure shows Q3 operating income variance under each option; the hatched fill is forecast, not measured.</p>
+  <figure aria-labelledby="fig2-cap">
+    <div class="ask">
+      <div class="option">
+        <h3>Hold launch pricing through Q3</h3>
+        <div class="bar" role="img" aria-label="Q3 forecast plus 40 thousand versus plan"><span class="h" style="width:22%"></span></div>
+        <p>Forecast +$40 K vs plan. Keeps bundle attach rate at 31 %; margin stays near 59.5 %.</p>
+      </div>
+      <div class="option rec">
+        <span class="stamp">Recommended</span>
+        <h3>End launch pricing 1 August</h3>
+        <div class="bar" role="img" aria-label="Q3 forecast plus 180 thousand versus plan"><span class="h" style="width:100%"></span></div>
+        <p>Forecast +$180 K vs plan. Assumes attach rate falls to 26 % (the pre-launch level) and margin recovers to 61 %.</p>
+      </div>
+    </div>
+    <figcaption id="fig2-cap">Figure 2. Q3 2026 operating income variance versus plan under each option, USD thousands, same scale (bar full width = +$180 K). Both bars are forecast (hatched). Assumptions in the section below.</figcaption>
+  </figure>
+</section>
+
+<section aria-labelledby="li-h">
+  <h2 id="li-h">Line items</h2>
+  <div class="scroll"><table>
+    <caption>Q2 2026 versus plan and versus Q1 2026 — USD thousands; negatives in parentheses; sums bold</caption>
+    <thead><tr><th scope="col">Line</th><th scope="col" class="num">Q2 actual</th><th scope="col" class="num">Q2 plan</th><th scope="col" class="num">Δ vs plan</th><th scope="col" class="num">Δ %</th><th scope="col" class="num">Q1 actual</th><th scope="col" class="num">Δ vs Q1</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">Revenue</th><td class="num">8,950</td><td class="num">8,400</td><td class="num">550</td><td class="num">6.5</td><td class="num">8,210</td><td class="num">740</td></tr>
+      <tr><th scope="row">Cost of goods sold</th><td class="num">(3,634)</td><td class="num">(3,276)</td><td class="num">(358)</td><td class="num">(10.9)</td><td class="num">(3,203)</td><td class="num">(431)</td></tr>
+      <tr class="total"><th scope="row">Gross profit</th><td class="num">5,316</td><td class="num">5,124</td><td class="num">192</td><td class="num">3.7</td><td class="num">5,007</td><td class="num">309</td></tr>
+      <tr><th scope="row">Opex · people</th><td class="num">(2,438)</td><td class="num">(2,500)</td><td class="num">62</td><td class="num">2.5</td><td class="num">(2,390)</td><td class="num">(48)</td></tr>
+      <tr><th scope="row">Opex · marketing</th><td class="num">(612)</td><td class="num">(550)</td><td class="num">(62)</td><td class="num">(11.3)</td><td class="num">(505)</td><td class="num">(107)</td></tr>
+      <tr><th scope="row">Opex · other</th><td class="num">(1,276)</td><td class="num">(1,496)</td><td class="num">220</td><td class="num">14.7</td><td class="num">(1,301)</td><td class="num">25</td></tr>
+      <tr class="total"><th scope="row">Operating income</th><td class="num">4,990</td><td class="num">4,578</td><td class="num">412</td><td class="num">9.0</td><td class="num">4,811</td><td class="num">179</td></tr>
+    </tbody>
+  </table></div>
+  <p class="meta" style="margin-top:8px">Figure 1 nets the COGS variance against the plan-margin revenue contribution: revenue at plan margin (+550) less the margin shortfall on actual revenue (−138) equals the +192 gross-profit variance shown here. Opex · other (+220) is timing of a cloud commitment and is excluded from the driver decomposition as non-recurring.</p>
+</section>
+
+<section aria-labelledby="as-h">
+  <h2 id="as-h">Assumptions and adjustments</h2>
+  <details open><summary>Forecast, FX, one-offs</summary>
+    <p>Q3 forecast uses the Q2 exit run-rate, plan FX (EUR 1.08, GBP 1.27), and the pricing decision above; no new hires beyond the eleven already accepted. Opex · other includes a $220 K cloud commitment invoiced in July rather than June (timing, reversed in Q3). No restatements. Close is preliminary; final close 2026-07-31 may move COGS by up to ±$40 K for inbound freight accruals.</p>
+  </details>
+</section>
+
+</main>
+<footer><div class="wrap">
+  <p><b>Methodology and provenance.</b> Source system: general ledger, Q2 2026 preliminary close, extracted 2026-07-14 07:40 UTC by <code>finance/close/q2-2026-extract.sql</code>. Plan: board-approved FY2026 plan v3 (2026-01-20). Margin by product line: <code>finance/close/q2-2026-margin-by-line.csv</code>. Attach-rate assumption: pre-launch (Q1) observed 26 %; launch period 31 %. Estimates are labeled forecast and hatched in every figure.</p>
+  <p>Markdown source of truth: <code>docs/finance/2026-07-14-q2-brief.md</code>. No network, no scripts, no external assets. Petrastella design language, default tokens.</p>
+</div></footer>
+</body>
+</html>

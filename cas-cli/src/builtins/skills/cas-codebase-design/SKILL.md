@@ -80,6 +80,48 @@ Keep internal seams private. Replace old shallow-module tests with tests at the
 deepened interface once that interface covers the behavior; do not layer tests
 that assert internals or must change with every refactor.
 
+## API and developer-experience taste
+
+Public interfaces are product surfaces, not only type signatures. Apply the
+depth and locality test to resource names, verbs, errors, receipts, response
+shapes, and command output.
+
+- **Names:** Use domain nouns for resources and precise verbs for actions; keep
+  one term aligned across API, CLI, MCP, persistence, and docs. Use CRUD verbs
+  for CRUD and state-transition verbs for commands; do not let a transport
+  rename the concept.
+- **Errors:** Say what failed, identify the resource or state involved, and name
+  the remedy. Keep stable machine-readable codes or fields beside human text;
+  callers should not parse prose to recover the next step.
+- **Receipts and retries:** When a mutation may be retried, accept or derive a
+  stable idempotency key and return a durable receipt or result identifier.
+  Replaying the same request is a safe, observable no-op or the same result;
+  distinguish accepted, completed, and rejected states.
+- **Response shape:** Keep the outer shape and field meanings stable across
+  success, error, CLI, and MCP paths. Add fields compatibly, represent empty or
+  null values explicitly, and put outcome, remedy, and receipt where callers
+  can find them.
+- **Readable output:** CLI and MCP output should scan like a small report: lead
+  with status and outcome, group related fields, and end with the next action or
+  receipt. Follow the `cas-update-and-doctor-read-like-reports` precedent when
+  shaping operational output.
+
+### Critique rubric
+
+Before merge, score a public surface from 1–5 on:
+
+- **Distinctiveness:** terms and output feel intentional and coherent, not
+  generic or arbitrary.
+- **Fit:** the surface matches domain language, caller context, transport, and
+  established project conventions.
+- **Hierarchy:** the primary outcome, remedy, and receipt are visible before
+  secondary detail.
+
+Set a floor of 4/5 for distinctiveness, fit, and hierarchy. Record the scores,
+one concrete observation, and a revision or reason for any exception. This
+critique aids design review; it does not replace type, test, or compatibility
+checks.
+
 ## Completion
 
 Done when a task note (`mcp__cas__task action=notes note_type=decision`) lists:

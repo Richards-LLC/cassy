@@ -4000,7 +4000,7 @@ fn ensure_team_project_registration_with_output(
     // bucket we register is exactly the bucket rows are pushed into.
     let canonical_id = crate::cloud::resolve_canonical_id_for_sync(cas_root).map_err(|error| {
         anyhow::anyhow!(
-            "Cannot register this project with team {team_id}: {error}. Run `cas cloud project set <canonical-id>` (see `cas cloud projects`)."
+            "Cannot register this project with team {team_id}: {error}. Run `cas cloud sync` to register this project."
         )
     })?;
 
@@ -4970,7 +4970,9 @@ fn execute_team_memories(
             if prev_lines > 0 {
                 clear_inline(prev_lines)?;
             }
-            anyhow::bail!("Project not found in this team.");
+            anyhow::bail!(
+                "Project not found in this team (project_not_found). Run `cas cloud sync` to register this project."
+            );
         }
         Err(e) => {
             if prev_lines > 0 {
@@ -6140,7 +6142,7 @@ fn inspect_purge_state(
     Ok((analysis, refusals))
 }
 
-fn execute_purge_foreign(
+pub(crate) fn execute_purge_foreign(
     args: &CloudPurgeForeignArgs,
     cli: &Cli,
     cas_root: &Path,
@@ -6583,6 +6585,59 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
     }
 
     Ok(())
+}
+
+/// Doctor's consent-fix entry point for foreign cloud scopes. A doctor apply
+/// always executes the same purge dry run first and independently recomputes
+/// the safety refusals before deleting anything. A refusal is returned as
+/// `false`, so callers cannot accidentally continue to `cas cloud sync` after
+/// a failed or unsafe preview.
+pub(crate) fn doctor_purge_foreign(
+    cli: &Cli,
+    cas_root: &Path,
+    apply: bool,
+) -> anyhow::Result<bool> {
+    let dry_run = CloudPurgeForeignArgs {
+        dry_run: true,
+        force: false,
+        allow_majority_foreign: false,
+        yes: false,
+        stale_days: PURGE_STALE_THRESHOLD_DAYS,
+    };
+    execute_purge_foreign(&dry_run, cli, cas_root)?;
+
+    let project_id = crate::cloud::resolve_canonical_id_for_sync(cas_root)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let tasks_before = open_task_store_local(cas_root)?.list(None)?.len();
+    let (_, refusals) = inspect_purge_state(
+        cas_root,
+        &project_id,
+        tasks_before,
+        PURGE_STALE_THRESHOLD_DAYS,
+        false,
+    )?;
+    if !refusals.is_empty() || !apply {
+        return Ok(false);
+    }
+
+    let apply_args = CloudPurgeForeignArgs {
+        dry_run: false,
+        force: false,
+        allow_majority_foreign: false,
+        yes: true,
+        stale_days: PURGE_STALE_THRESHOLD_DAYS,
+    };
+    execute_purge_foreign(&apply_args, cli, cas_root)?;
+    execute_sync(
+        &CloudSyncArgs {
+            dry_run: false,
+            full: false,
+            rehome: false,
+        },
+        cli,
+        cas_root,
+    )?;
+    Ok(true)
 }
 
 #[cfg(test)]

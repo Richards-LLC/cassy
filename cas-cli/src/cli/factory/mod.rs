@@ -780,10 +780,10 @@ pub enum FactoryCommands {
         inject_slo_failure: Option<String>,
     },
 
-    /// Classify a worker as alive / wedged / starved / dead (cas-4513).
+    /// Classify a worker as alive / wedged / approval-hung / starved / dead (cas-4513).
     ///
     /// Exit codes (differentiated so supervisor scripts can branch without
-    /// parsing stdout): 0=alive, 1=wedged, 2=starved, 3=dead.
+    /// parsing stdout): 0=alive, 1=wedged, 2=starved, 3=dead, 5=approval-hung.
     IsWedged {
         /// Worker name (as shown in `cas factory agents`)
         worker: String,
@@ -1075,7 +1075,9 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         if let Err(e) = std::fs::create_dir_all(&host_dir) {
             eprintln!("Warning: could not create ~/.cas/: {e}");
         } else {
-            let mut global_cfg = Config::load(&host_dir).unwrap_or_default();
+            // Do not turn a malformed host config into defaults before this
+            // mutation: saving those defaults would destroy the original.
+            let mut global_cfg = Config::load(&host_dir)?;
             set_supervisor_harness(&mut global_cfg, &effective_args.supervisor_cli);
             if let Err(e) = global_cfg.save(&host_dir) {
                 eprintln!("Warning: could not persist supervisor default: {e}");
@@ -1929,6 +1931,52 @@ mod tests {
         assert_eq!(specs[0].model.as_deref(), Some("claude-fable-5-1"));
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::Medium));
         assert!(notice.contains("claude_fable"), "{notice}");
+    }
+
+    #[test]
+    fn supervisor_lane_cli_launch_summary_names_opus_fallback() {
+        let registry = cas_factory::embedded_registry().unwrap();
+        let now = cas_factory::CapabilitySnapshot::now_ms();
+        let mut snapshot = CapabilitySnapshot::default();
+        snapshot.record(
+            cas_factory::recipe_route_identity(
+                &registry.recipes["claude_fable"],
+                "default",
+            ),
+            cas_factory::CapabilityEvidence::new(
+                cas_factory::CapabilityAvailability::Unavailable,
+                now,
+            )
+            .with_reason("Claude Fable account unavailable"),
+        );
+        snapshot.record(
+            cas_factory::recipe_route_identity(
+                &registry.recipes["claude_opus"],
+                "default",
+            ),
+            cas_factory::CapabilityEvidence::new(
+                cas_factory::CapabilityAvailability::Available,
+                now,
+            ),
+        );
+
+        let (specs, notice) = resolve_lane_worker_specs(
+            "supervisor",
+            1,
+            &["supervisor-worker".to_string()],
+            cas_mux::SupervisorCli::Claude,
+            &[],
+            &snapshot,
+        )
+        .expect("supervisor fallback should resolve");
+        assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
+        assert!(
+            notice.contains(
+                "fallback: claude_opus (primary claude_fable unavailable: Claude Fable account unavailable)"
+            ),
+            "{notice}"
+        );
     }
 
     // EPIC cas-8888 (cas-964a, Phase 3): resolve_cli_choice's Grok arm.

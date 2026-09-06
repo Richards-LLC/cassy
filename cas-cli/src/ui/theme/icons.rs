@@ -4,6 +4,16 @@
 pub struct Icons;
 
 impl Icons {
+    /// `→` on UTF-8 terminals, `->` otherwise.
+    pub fn arrow_right(glyphs: bool) -> &'static str {
+        if glyphs { Self::ARROW_RIGHT } else { "->" }
+    }
+
+    /// `·` on UTF-8 terminals, `-` otherwise; the field separator of a verdict line.
+    pub fn separator_dot(glyphs: bool) -> &'static str {
+        if glyphs { Self::MIDDLE_DOT } else { "-" }
+    }
+
     // Status indicators
     pub const CHECK: &'static str = "\u{2713}"; // ✓
     pub const CROSS: &'static str = "\u{2717}"; // ✗
@@ -67,6 +77,7 @@ impl Icons {
 
     // List markers
     pub const BULLET: &'static str = "\u{2022}"; // •
+    pub const MIDDLE_DOT: &'static str = "\u{00B7}"; // ·
     pub const DASH: &'static str = "\u{2013}"; // –
     pub const LIST_POINTER: &'static str = "\u{203A} "; // ›
     pub const LIST_POINTER_ACTIVE: &'static str = "\u{25B6} "; // ▶

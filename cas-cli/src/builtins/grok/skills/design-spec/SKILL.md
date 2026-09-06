@@ -32,6 +32,20 @@ Probe in this order and stop at the first that exists:
 
 Record the token file path — it becomes the freshness anchor and is cited in the Overview section.
 
+**No token source found (greenfield):** the project inherits the Petrastella design language.
+Copy the values in [references/design-tokens.json](references/design-tokens.json) into the
+framework's native token form (CSS custom properties in the global stylesheet, `theme.extend`,
+`quasar.variables.scss`, …), commit that file, and treat it as the token source from here on.
+[references/petrastella-design-language.md](references/petrastella-design-language.md) explains
+each role's intent and the type pairing (serif argument, sans reading, mono numbers) that
+survives every override. Add `inherits: petrastella` to the frontmatter.
+
+**Token source found:** add `inherits: petrastella | neutral | none` to the frontmatter and, in
+Colors and Typography, name each Petrastella role the project overrides and what it keeps.
+`neutral` is the design language's documented white-label fallback and requires the brand reason
+in Overview; it is never chosen for lack of a decision. `cas-ui-craft` reads this file before
+any render, so an override recorded here is an override every surface will honour.
+
 ### 2. Read canonical components (for the Components section)
 
 Pick 5–10 real components that define the visual language, then name the file each pattern lives in:
@@ -52,6 +66,7 @@ Write to `DESIGN.md`: **YAML frontmatter (normative, machine-readable) + 8 markd
 Frontmatter keys (omit a key only when the project genuinely has no such token — never invent values):
 
 - `source` — repo-relative path(s) of the token source
+- `inherits` — `petrastella` | `neutral` | `none`; which base language the tokens descend from
 - `theme` — `dark-first` | `light-first` | `dual`
 - `colors` — by **role** (`bg`, `surface`, `surface-raised`, `border`, `text`, `text-muted`, `primary`, `accent`, `success`, `warning`, `danger`), value = the token name AND its resolved value
 - `typography` — `families` (role → stack), `scale` (name → size/line-height/weight)

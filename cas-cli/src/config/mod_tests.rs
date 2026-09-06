@@ -371,6 +371,60 @@ fn test_load_merges_stale_yaml_into_toml() {
 }
 
 #[test]
+fn config_save_replaces_the_whole_document_and_preserves_project_aliases() {
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[hooks]\nai_context = false\n\n[project]\ncanonical_id = \"github.com/foo/bar\"\naliases = [\"legacy-bar\"]\n",
+    )
+    .unwrap();
+
+    let mut config = Config::load(temp.path()).unwrap();
+    config.set("hooks.ai_context", "true").unwrap();
+    config.save_toml(temp.path()).unwrap();
+
+    let raw = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    let parsed: toml::Value = toml::from_str(&raw).unwrap();
+    assert_eq!(parsed["hooks"]["ai_context"].as_bool(), Some(true));
+    assert_eq!(
+        parsed["project"]["canonical_id"].as_str(),
+        Some("github.com/foo/bar")
+    );
+    assert_eq!(
+        parsed["project"]["aliases"].as_array().unwrap(),
+        &[toml::Value::String("legacy-bar".to_string())]
+    );
+    assert!(
+        temp.path().join(".config.toml.cas-write.lock").exists(),
+        "config saves must use the shared project-config lock"
+    );
+    assert!(
+        !raw.contains("\nlse\n"),
+        "a short project block must never leave stale bytes in the document"
+    );
+}
+
+#[test]
+fn malformed_config_error_names_line_and_repair_remedy() {
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\naliases = []\nlse\n[hooks]\nai_context = false\n\n[project]\naliases = []\ncanonical_id = \"cas-src\"\n",
+    )
+    .unwrap();
+
+    let error = Config::load(temp.path()).unwrap_err().to_string();
+    assert!(
+        error.contains("line 3"),
+        "error must identify the bad line: {error}"
+    );
+    assert!(
+        error.contains("Restore a known-good config.toml backup"),
+        "error must name the repair remedy: {error}"
+    );
+}
+
+#[test]
 fn test_config_get_set() {
     let mut config = Config::default();
 

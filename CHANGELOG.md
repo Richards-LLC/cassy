@@ -7,6 +7,58 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.17.3] - 2026-09-06
+
+### Added
+- A vendored design system for every project: the `cas-ui-craft` skill with a
+  required concept brief, a form vocabulary beyond tables and cards, a critique
+  rubric with a floor score, and four annotated exemplars; the Petrastella
+  design language and design tokens (colour pairs computed per scheme, series
+  palette validated by `cas-dataviz`); the `cas-frontend-engineering` skill;
+  and an API/DX taste section in `cas-codebase-design` with a public-surface
+  review gate for workers and supervisors.
+- `scripts/visual-qa.mjs`: a strict headless visual-QA gate that renders in
+  light and dark at desktop and phone widths and fails on contrast, clipped,
+  overlapping, overflowing, or invisible text; wired into report review, the
+  UI critique rubric, and the worker close checklist.
+- `cas-cli-craft` skill and `scripts/terminal-qa.mjs`: terminal output craft
+  with a gate for contrast, overflow, word splits, truncation, numeric
+  alignment, Unicode fallbacks, colour under NO_COLOR, and JSON contracts.
+- `cas-technical-drawing` skill with a parametric SVG drafting renderer
+  (orthographic, isometric, section, exploded, joint and part sheets) and
+  mechanical checks, demonstrated on a woodworking cabinet.
+- `cas doctor --host` and `--full`: host-level findings are reported once per
+  run instead of per project, with a published check matrix classifying every
+  check as auto-fix, consent-fix, human, or info.
+- A cross-project factory model history extractor and scorecard
+  (`scripts/factory-model-history.py`) covering every harness home, with the
+  model lane rubric review rewritten under the new design system.
+
+### Changed
+- `cas-html-reports` and `cas-dataviz` now require a concept brief before any
+  render, default to the Petrastella design language with a `DESIGN.md`
+  override, and ship ambitious annotated examples with before/after pairs.
+- `cas doctor`, `cas update --check`, and `cas factory status` render
+  verdict-first with marks-only colour, folded repeats, wrapped remedies, a
+  light-safe palette, and a corrected `COLORFGBG` light-terminal detection.
+- `cas doctor --fix` applies safe repairs (known-repo pruning, code and search
+  index rebuilds, stale projections) and previews consent repairs, applying
+  them only with `--yes` or one terminal confirmation; a symbol index with no
+  eligible files is now informational.
+- The factory `heavy` lane routes to Codex GPT-6 Astra at high with Sol as the
+  fallback; `taste` and `supervisor` fall back to Claude Opus 5 at high.
+
+### Fixed
+- Claude factory workers no longer hang on “Waiting for team lead approval”
+  for shell commands that remove or rewrite files inside their worktree; the
+  launcher sets bypass permission mode, the workspace guard understands
+  variable `rm` targets and heredoc writes, and worker status reports a
+  pending leader approval as its own state.
+- Epic creation records the canonical `epic/<slug>-<id>` branch as the
+  WorkTarget, spawning refuses to recompute a title-derived base, and a spawn
+  fast-forward refreshes any checkout that has the epic branch out.
+- Codex cached input tokens are billed once in the model scorecard.
+
 ## [3.17.2] - 2026-09-05
 
 ### Added

@@ -747,7 +747,7 @@ impl CasCore {
                 if let Ok(git_ops) =
                     GitOperations::detect_repo_root(project_root).map(GitOperations::new)
                 {
-                    let branch_name = format!("epic/{}-{}", slugify_for_branch(&task.title), id);
+                    let branch_name = crate::mcp::tools::epic_branch_name(&task.title, &id);
                     // Base epic branches on the configured trunk, never on
                     // the caller's incidental HEAD (cas-dc28).
                     let trunk = declared_context
@@ -794,6 +794,29 @@ impl CasCore {
                                 if updated_task.branch.as_deref().unwrap_or("").is_empty() {
                                     updated_task.branch = Some(branch_name.clone());
                                 }
+                                // A newly-created epic owns its coordination
+                                // branch. Persist that same canonical ref as
+                                // its WorkTarget so child creation, spawn, and
+                                // close all consume recorded authority rather
+                                // than re-slugging the title later.
+                                if updated_task.deliverables.work_target.is_none()
+                                    && let Some(repo) = project_root.to_str()
+                                {
+                                    match super::repo_context::declare_work_target(
+                                        &self.cas_root,
+                                        Some(repo),
+                                        Some(&branch_name),
+                                    ) {
+                                        Ok(target) => {
+                                            updated_task.deliverables.work_target = target;
+                                        }
+                                        Err(error) => {
+                                            eprintln!(
+                                                "[Cassy] Warning: Failed to persist epic WorkTarget for {branch_name}: {error}"
+                                            );
+                                        }
+                                    }
+                                }
                                 let _ = task_store.update(&updated_task);
                             }
 
@@ -804,13 +827,23 @@ impl CasCore {
                                     v == "1" || v == "true" || v == "on"
                                 })
                                 .unwrap_or(false);
-                            if created && push_enabled {
-                                if let Err(e) = git_ops.push_branch(&branch_name) {
-                                    eprintln!(
-                                        "[Cassy] Warning: Failed to push epic branch to origin: {e}"
-                                    );
+                            let push_state = if !push_enabled {
+                                "Push state: local-only (CAS_PUSH_EPIC_BRANCH is disabled)."
+                                    .to_string()
+                            } else if created {
+                                match git_ops.push_branch(&branch_name) {
+                                    Ok(()) => {
+                                        format!("Push state: published {branch_name} to origin.")
+                                    }
+                                    Err(error) => format!(
+                                        "Push state: local-only; publishing {branch_name} to origin failed: {error}."
+                                    ),
                                 }
-                            }
+                            } else {
+                                format!(
+                                    "Push state: local branch {branch_name} already existed; no publish was needed."
+                                )
+                            };
 
                             let divergence = base_choice
                                 .notice
@@ -834,7 +867,7 @@ impl CasCore {
                                 })
                                 .unwrap_or_default();
                             Some(format!(
-                                "\n\n🌿 Epic branch created: {branch_name}\n   Base: '{base_ref}' @ {sha_preview}. Workers will branch from this when spawned.{freshness}{divergence}"
+                                "\n\n🌿 Epic branch created: {branch_name}\n   Base: '{base_ref}' @ {sha_preview}. Workers will branch from this when spawned.\n   {push_state}{freshness}{divergence}"
                             ))
                         }
                         Err(e) => {

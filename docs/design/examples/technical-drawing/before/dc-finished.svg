@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180mm" viewBox="0 0 1072 640" role="img" aria-labelledby="dc-finished-title dc-finished-desc">
+            <title id="dc-finished-title">Finished dartboard cabinet in thirty-degree isometric projection</title>
+            <desc id="dc-finished-desc">Completed closed cabinet on a one-inch grid with overall width thirty inches, height thirty-eight inches, and depth nine and one-quarter inches.</desc>
+            <defs>
+              <pattern id="dc-finished-grid" width="9" height="9" patternUnits="userSpaceOnUse"><path d="M2.25 0V9M4.5 0V9M6.75 0V9M0 2.25H9M0 4.5H9M0 6.75H9" stroke="#e7ece9" stroke-width="0.55"/><path d="M0 0H9V9" fill="none" stroke="#c4d0c9" stroke-width="1"/></pattern>
+              <marker id="dc-finished-arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse"><path d="M0 0L8 4L0 8Z" fill="#0b6b78"/></marker>
+            </defs>
+            <rect width="1072" height="640" fill="url(#dc-finished-grid)"/>
+            <text x="28" y="34" class="view-label" font-size="18">FINISHED PIECE · 30° ISOMETRIC</text>
+            <text x="28" y="58" class="note-text" font-size="14">PRINT SCALE 1:16 · one major square = 1″ of the object</text>
+            <polygon points="280,140 550,140 622,98 352,98" class="part"/>
+            <polygon points="550,140 622,98 622,440 550,482" class="part"/>
+            <rect x="280" y="140" width="270" height="342" class="part"/>
+            <rect x="284" y="144" width="132" height="288" fill="#eef3ef" stroke="#243c32" stroke-width="3"/>
+            <rect x="418" y="144" width="128" height="288" fill="#eef3ef" stroke="#243c32" stroke-width="3"/>
+            <rect x="284" y="437" width="262" height="41" fill="#f7eedc" stroke="#243c32" stroke-width="3"/>
+            <text x="410" y="119" text-anchor="middle" class="part-label" font-size="16">CARCASS TOP</text>
+            <line x1="622" y1="270" x2="648" y2="270" class="dimension"/>
+            <text x="656" y="276" class="part-label" font-size="16">RIGHT CARCASS SIDE</text>
+            <text x="350" y="210" text-anchor="middle" class="part-label" font-size="16">LEFT DOOR</text>
+            <text x="482" y="210" text-anchor="middle" class="part-label" font-size="16">RIGHT DOOR</text>
+            <text x="415" y="477" text-anchor="middle" class="part-label" font-size="16">DRAWER FALSE FRONT</text>
+            <circle cx="394" cy="288" r="7" class="safety-mark"/><circle cx="440" cy="288" r="7" class="safety-mark"/><circle cx="415" cy="458" r="7" class="safety-mark"/>
+            <path d="M298 158H402V418H298ZM432 158H532V418H432Z" class="reference"/>
+            <line x1="280" y1="515" x2="550" y2="515" class="dimension" marker-start="url(#dc-finished-arrow)" marker-end="url(#dc-finished-arrow)"/>
+            <line x1="280" y1="486" x2="280" y2="525" class="extension"/><line x1="550" y1="486" x2="550" y2="525" class="extension"/>
+            <text x="415" y="510" text-anchor="middle" class="dimension-text" font-size="17">30″ W</text>
+            <line x1="245" y1="140" x2="245" y2="482" class="dimension" marker-start="url(#dc-finished-arrow)" marker-end="url(#dc-finished-arrow)"/>
+            <line x1="235" y1="140" x2="280" y2="140" class="extension"/><line x1="235" y1="482" x2="280" y2="482" class="extension"/>
+            <text x="177" y="315" class="dimension-text" font-size="17">38″ H</text>
+            <line x1="572" y1="82" x2="644" y2="40" class="dimension" marker-start="url(#dc-finished-arrow)" marker-end="url(#dc-finished-arrow)"/>
+            <line x1="550" y1="140" x2="572" y2="82" class="extension"/><line x1="622" y1="98" x2="644" y2="40" class="extension"/>
+            <text x="660" y="42" class="dimension-text" font-size="17">9-1/4″ D</text>
+            <text x="695" y="475" class="note-text" font-size="15">Frameless · two full-overlay Shaker doors</text>
+            <text x="695" y="498" class="note-text" font-size="15">Full-width false front below doors</text>
+            <line x1="860" y1="578" x2="1004" y2="578" class="dimension" stroke-width="5"/>
+            <line x1="860" y1="568" x2="860" y2="588" class="dimension"/><line x1="1004" y1="568" x2="1004" y2="588" class="dimension"/>
+            <text x="932" y="605" text-anchor="middle" class="dimension-text" font-size="14">16″ object · bar prints 1″ at 1:16</text>
+          </svg>

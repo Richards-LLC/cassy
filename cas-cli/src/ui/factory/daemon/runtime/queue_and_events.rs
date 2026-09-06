@@ -6416,7 +6416,7 @@ impl FactoryDaemon {
 
                 // Create epic branch when transitioning from Idle
                 if matches!(previous_state, crate::ui::factory::app::EpicState::Idle) {
-                    match self.app.create_epic_branch(&epic_title) {
+                    match self.app.create_epic_branch(&epic_title, &epic_id) {
                         Ok(branch) => {
                             tracing::info!(
                                 "EPIC {} started - created branch '{}' for workers",

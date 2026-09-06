@@ -1,9 +1,10 @@
 # Report types × audiences
 
 Pick one **type** (what the report is) and one **audience** (who reads it first). The type fixes the
-sections and the mandatory visuals; the audience fixes the order of depth and the vocabulary. Every
-report also obeys the invariant technical contract (`technical-contract.md`) and the presentation
-rules (`presentation-rules.md`).
+sections, the mandatory visuals, and the **hero figure** — the form that shows the argument above the
+fold; the audience fixes the order of depth and the vocabulary. Every report also obeys the invariant
+technical contract (`technical-contract.md`) and the presentation rules (`presentation-rules.md`),
+and every report commits a concept brief (`cas-ui-craft`) that names its hero and the reason for it.
 
 ## The audience axis
 
@@ -12,12 +13,35 @@ relegated, and which words are allowed.
 
 | Audience | Leads with | Depth policy | Vocabulary |
 | --- | --- | --- | --- |
-| **Executive** | The selected type's one-sentence lead: a decision/number for evaluative work, or a capability/system takeaway for explanatory work | One screen of substance; ≤5 KPI cards when the selected type calls for them; at most one chart or diagram above the fold; everything else in expandable or lower sections; methodology is present but LAST | Plain business language. No tool names, no file paths, no method jargon in the top third |
-| **Practitioner** | The verdict plus the evidence that establishes it | Full depth inline. Evidence tables, reproduction steps, and provenance are primary content, not appendices | Precise and technical. Symbol names, file:line, commands, versions |
+| **Executive** | The hero figure, then the selected type's one-sentence lead: a decision/number for evaluative work, a capability/system takeaway for explanatory work | One screen of substance; ≤5 KPI cards when the selected type calls for them; at most one chart or diagram above the fold; everything else in expandable or lower sections; methodology is present but LAST | Plain business language. No tool names, no file paths, no method jargon in the top third |
+| **Practitioner** | The hero figure and the verdict, then the evidence that establishes it | Full depth inline. Evidence tables, reproduction steps, and provenance are primary content, not appendices | Precise and technical. Symbol names, file:line, commands, versions |
 | **External** (client, partner, public) | The outcome and what it means for the reader | Full narrative depth, but internal mechanics abstracted to outcomes | No internal jargon, no ticket IDs, no team or agent names, no process narration |
 
 **Audience rewrites the top of the page, not the bottom.** Every audience's report still contains the
 evidence and the provenance — the executive version relegates them, it does not delete them.
+
+## The hero figure per type
+
+The hero is the first thing the reader sees and it shows the argument; a paragraph, a KPI row, or a
+table of everything is not a hero. The default below is the form that fits each type's question; take
+another from the `cas-ui-craft` vocabulary when the data argues for it, and write the reason in the
+concept brief either way.
+
+| Type | Default hero | Why that form |
+| --- | --- | --- |
+| Investigation / diagnostic | Annotated timeline | The verdict is a causal claim about *when*; the reader must see symptom, change, and fix on one axis |
+| Metrics / mining analysis | Variance ladder or slope against baseline | The finding is a delta; the form makes the delta the mark |
+| Decision brief | Ledger (claim vs evidence per option, or per row of the status quo) | The recommendation rests on a contradiction the reader must see side by side |
+| Comparison / benchmark | Small multiples on one shared scale | Candidates are compared by eye; shared scale keeps the eye honest, the crossover is annotated |
+| Incident / post-mortem | Annotated timeline with detection and mitigation marked | Duration and the gap between symptom and detection are the impact |
+| Status / release summary | Was → now dumbbell or slope per workstream | The report is about change since last time |
+| Financial report | Signed variance bars on a zero line, forecast hatched | The delta is the message and the scenario encoding is the discipline |
+| Product / feature showcase | Capability map or product journey | The thesis is what is newly possible along a path |
+| System / architecture explainer | End-to-end system flow with labeled arrows | The takeaway is what moves through the system |
+| Executive / C-suite brief | The one figure that carries the conclusion, plus the ask as a closing figure | One screen, one argument, one decision |
+| Board / stakeholder update | Recurring KPI small multiples with trend | Same metrics every edition; trend is the story |
+| Client-facing deliverable | Outcome figure in the client's units | The reader wants the result, not the method |
+| Research / market analysis | Thesis with evidence-for and evidence-against as a two-column ledger | Counter-evidence is required, so the form gives it equal space |
 
 **Executive is an audience, not an automatic decision brief.** A product showcase or system explainer
 for executives leads with its capability or system takeaway; it does not require an ask, a decision,

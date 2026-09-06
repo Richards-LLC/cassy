@@ -160,6 +160,12 @@ pub struct ProjectConfig {
     /// to a path-hash slug for the fs-root edge case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_id: Option<String>,
+
+    /// Cloud-provided aliases mirrored by the project identity cache. Keeping
+    /// this field in the typed config prevents a normal config save from
+    /// dropping aliases written by the cloud sync path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 /// Sync configuration

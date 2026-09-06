@@ -1,7 +1,7 @@
 mod get;
 mod global;
 mod hooks_traits;
-mod io;
+pub(crate) mod io;
 mod list;
 mod set;
 

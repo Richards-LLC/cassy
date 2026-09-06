@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      .card { box-sizing: border-box; width: min(100% - 32px, 640px); margin: 16px; padding: 16px; background: #f4f7fb; border: 1px solid #172033; }
+      a { color: #0645ad; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f4f7fb; background: #172033; }
+        .card { background: #253452; border-color: #8aa4d6; }
+        a { color: #b8d0ff; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Readable report</h1>
+      <p>Every line fits its container and remains readable in either color scheme.</p>
+      <a href="#details">Read details</a>
+    </main>
+  </body>
+</html>

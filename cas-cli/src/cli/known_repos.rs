@@ -220,12 +220,12 @@ fn execute_prune_missing(dry_run: bool) -> Result<()> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct PruneMissingReport {
-    missing: usize,
-    removed: usize,
+pub(crate) struct PruneMissingReport {
+    pub(crate) missing: usize,
+    pub(crate) removed: usize,
 }
 
-fn prune_missing(dry_run: bool) -> Result<PruneMissingReport> {
+pub(crate) fn prune_missing(dry_run: bool) -> Result<PruneMissingReport> {
     let store = open_host_known_repo_store()?;
     let missing = store
         .list()?

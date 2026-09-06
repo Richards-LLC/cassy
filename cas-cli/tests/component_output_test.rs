@@ -298,6 +298,13 @@ fn pty_doctor_has_expected_sections() {
 
     let mut runner = pty_cas_in_dir(&temp, &["doctor"]);
 
+    // TTY doctor offers the safe auto-fix set before rendering the report.
+    // Decline it so this section test can observe the full report.
+    runner
+        .wait_for_text_timeout("doctor found safe automatic fixes", Duration::from_secs(10))
+        .unwrap();
+    runner.send_input("n").unwrap();
+
     // Wait for the output to stabilize
     runner
         .wait_for_text_timeout("Store", Duration::from_secs(10))
@@ -309,8 +316,11 @@ fn pty_doctor_has_expected_sections() {
     let scr = screen_with_size(&output, 80, 200);
 
     // Verify key sections are present
+    scr.assert_contains("Host").unwrap();
+    scr.assert_contains("host:").unwrap();
     scr.assert_contains("database").unwrap();
     scr.assert_contains("schema").unwrap();
+    scr.assert_contains("symbol index").unwrap();
 }
 
 // ============================================================================
@@ -405,12 +415,13 @@ fn redact_dynamic_values(s: &str) -> String {
         .replace_all(&result, "Cloud bucket `[BUCKET]`")
         .to_string();
 
-    // The header includes the canonical project id. Temp fixtures have a
-    // generated folder id, so normalize that value independently of the cloud
-    // bucket row.
-    let project_re = regex::Regex::new(r"cas doctor · [^·\n]+ ·").unwrap();
+    // The verdict line (cas-4df0) ends `· <canonical id> · <version>`. Temp
+    // fixtures have a generated folder id, so normalize that value
+    // independently of the cloud bucket row.
+    let project_re =
+        regex::Regex::new(r"(?m)^(\[(?:OK|WARN|ERROR)\] [^·\n]+ · \d+ ok) · [^·\n]+ ·").unwrap();
     result = project_re
-        .replace_all(&result, "cas doctor · [PROJECT] ·")
+        .replace_all(&result, "$1 · [PROJECT] ·")
         .to_string();
 
     // Redact counts that follow "entries:", "tasks:", etc.

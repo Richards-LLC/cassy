@@ -177,6 +177,16 @@ fn slugify_for_branch(title: &str) -> String {
         .collect()
 }
 
+/// Return the canonical branch name for a newly-created epic.
+///
+/// Keep the task id outside the truncated title slug so two long titles cannot
+/// silently collide, and so every creator/consumer agrees on the same ref.
+pub(crate) fn epic_branch_name(title: &str, epic_id: &str) -> String {
+    let slugified = slugify_for_branch(title);
+    let slug = slugified.trim_end_matches('-');
+    format!("epic/{slug}-{}", epic_id.trim())
+}
+
 // ============================================================================
 // Epic Merge Check Helper
 // ============================================================================

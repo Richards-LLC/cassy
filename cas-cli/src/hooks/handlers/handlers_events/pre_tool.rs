@@ -1323,13 +1323,214 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
     tokens
 }
 
+/// Collect the finite values that are visible in the simple shell forms used
+/// by factory workers (`NAME=value` and `for NAME in ...`). This is not a
+/// general shell evaluator: an unrecognised or unbound variable remains in the
+/// returned path and therefore fails the workspace containment check closed.
+fn factory_shell_variable_values(
+    tokens: &[ShellToken],
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut values = std::collections::HashMap::new();
+    if let Ok(home) = std::env::var("HOME") {
+        values.insert("HOME".to_string(), vec![home]);
+    }
+    for token in tokens {
+        let ShellToken::Word(word) = token else {
+            continue;
+        };
+        let Some((name, value)) = word.split_once('=') else {
+            continue;
+        };
+        if is_shell_variable_name(name) {
+            values.insert(name.to_string(), vec![value.to_string()]);
+        }
+    }
+
+    let mut index = 0;
+    while index + 3 < tokens.len() {
+        let Some(ShellToken::Word(keyword)) = tokens.get(index) else {
+            index += 1;
+            continue;
+        };
+        if keyword != "for" {
+            index += 1;
+            continue;
+        }
+        let (Some(ShellToken::Word(name)), Some(ShellToken::Word(in_keyword))) =
+            (tokens.get(index + 1), tokens.get(index + 2))
+        else {
+            index += 1;
+            continue;
+        };
+        if !is_shell_variable_name(name) || in_keyword != "in" {
+            index += 1;
+            continue;
+        }
+        let mut loop_values = Vec::new();
+        let mut cursor = index + 3;
+        while cursor < tokens.len() {
+            match tokens.get(cursor) {
+                Some(ShellToken::Word(word)) if word == "do" => break,
+                Some(ShellToken::Operator(';')) | Some(ShellToken::Operator('&')) => break,
+                Some(ShellToken::Word(word)) => loop_values.push(word.clone()),
+                _ => {}
+            }
+            cursor += 1;
+        }
+        if !loop_values.is_empty() {
+            values.insert(name.clone(), loop_values);
+        }
+        index = cursor;
+    }
+    values
+}
+
+fn is_shell_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+/// Expand only variables whose values are finite and explicit in the command.
+/// The bounded Cartesian product prevents a crafted command from making the
+/// hook allocate without limit; retaining the original word on overflow keeps
+/// the containment check fail-closed.
+fn expand_factory_shell_word(
+    word: &str,
+    values: &std::collections::HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    const MAX_EXPANSIONS: usize = 64;
+    let chars: Vec<char> = word.chars().collect();
+    let mut expanded = vec![String::new()];
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '$' {
+            for value in &mut expanded {
+                value.push(chars[index]);
+            }
+            index += 1;
+            continue;
+        }
+        let (end, name) = if chars.get(index + 1) == Some(&'{') {
+            let Some(close) = chars[index + 2..].iter().position(|ch| *ch == '}') else {
+                for value in &mut expanded {
+                    value.push('$');
+                }
+                index += 1;
+                continue;
+            };
+            let end = index + 2 + close;
+            (end + 1, chars[index + 2..end].iter().collect::<String>())
+        } else {
+            let mut end = index + 1;
+            while end < chars.len() && (chars[end] == '_' || chars[end].is_ascii_alphanumeric()) {
+                end += 1;
+            }
+            if end == index + 1 {
+                for value in &mut expanded {
+                    value.push('$');
+                }
+                index += 1;
+                continue;
+            }
+            (end, chars[index + 1..end].iter().collect::<String>())
+        };
+        let Some(replacements) = values.get(&name) else {
+            for value in &mut expanded {
+                value.extend(chars[index..end].iter().copied());
+            }
+            index = end;
+            continue;
+        };
+        if replacements.is_empty()
+            || expanded.len().saturating_mul(replacements.len()) > MAX_EXPANSIONS
+        {
+            return vec![word.to_string()];
+        }
+        let mut next = Vec::with_capacity(expanded.len() * replacements.len());
+        for prefix in &expanded {
+            for replacement in replacements {
+                next.push(format!("{prefix}{replacement}"));
+            }
+        }
+        expanded = next;
+        index = end;
+    }
+    expanded
+}
+
+/// Extract the file argument from the narrow Python heredoc rewrite shape
+/// emitted by factory workers. A heredoc's body is opaque to the shell-token
+/// recognizer above, but `open(path, 'w')` is still a real write target and
+/// must remain inside the factory workspace contract. Unknown expressions are
+/// ignored here and remain subject to Claude's own permission classifier.
+fn bash_heredoc_write_targets(command: &str) -> Vec<String> {
+    if !command.contains("<<") {
+        return Vec::new();
+    }
+    let mut assignments = std::collections::HashMap::new();
+    for line in command.lines() {
+        let trimmed = line.trim();
+        let Some(equal) = trimmed.find('=') else {
+            continue;
+        };
+        let name = trimmed[..equal].trim();
+        let value = trimmed[equal + 1..].trim();
+        if is_shell_variable_name(name) {
+            if let Some(quoted) = quoted_string_value(value) {
+                assignments.insert(name.to_string(), quoted.to_string());
+            }
+        }
+    }
+
+    let mut targets = Vec::new();
+    let mut remainder = command;
+    while let Some(open) = remainder.find("open(") {
+        let args = &remainder[open + "open(".len()..];
+        let first = args.trim_start();
+        let (target, consumed) = if let Some(quoted) = quoted_string_value(first) {
+            (Some(quoted.to_string()), quoted.len() + 2)
+        } else {
+            let end = first
+                .find(|ch: char| ch == ',' || ch == ')' || ch.is_whitespace())
+                .unwrap_or(first.len());
+            let name = &first[..end];
+            (assignments.get(name).cloned(), end)
+        };
+        if let Some(target) = target {
+            targets.push(target);
+        }
+        let advance =
+            (open + "open(".len() + first.len().min(consumed.max(1))).min(remainder.len());
+        remainder = &remainder[advance..];
+    }
+    targets
+}
+
+fn quoted_string_value(value: &str) -> Option<&str> {
+    let mut chars = value.char_indices();
+    let (_, quote) = chars.next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let (end, _) = chars.find(|(_, ch)| *ch == quote)?;
+    Some(&value[1..end])
+}
+
 /// Identify shell words that are actual output targets, without treating every
 /// path-shaped argument as a write. This deliberately handles only the small
 /// set of write forms guarded by the factory workspace contract; unrecognised
 /// shell syntax is left to the shell rather than guessed at.
 fn bash_write_targets(command: &str) -> Vec<String> {
     let tokens = factory_shell_tokens(command);
+    let variable_values = factory_shell_variable_values(&tokens);
     let mut targets = Vec::new();
+
+    let mut add_target = |target: &str| {
+        targets.extend(expand_factory_shell_word(target, &variable_values));
+    };
 
     // A `>` outside quotes always names its destination in the next shell
     // word. Repeated `>` tokens cover append redirections, while the numeric
@@ -1337,9 +1538,12 @@ fn bash_write_targets(command: &str) -> Vec<String> {
     for (index, token) in tokens.iter().enumerate() {
         if token == &ShellToken::Operator('>') {
             if let Some(ShellToken::Word(target)) = tokens.get(index + 1) {
-                targets.push(target.clone());
+                add_target(target);
             }
         }
+    }
+    for target in bash_heredoc_write_targets(command) {
+        add_target(&target);
     }
 
     // Cover the explicit file-creation commands guarded by the original
@@ -1360,6 +1564,14 @@ fn bash_write_targets(command: &str) -> Vec<String> {
             }
             ShellToken::Operator(_) => index += 1,
             ShellToken::Word(command) if command_position => {
+                // `do`/`then` introduce a new command position without an
+                // operator token. Recognising them lets the small parser see
+                // commands inside `for` loops and shell conditionals.
+                if matches!(command.as_str(), "do" | "then" | "else" | "elif") {
+                    command_position = true;
+                    index += 1;
+                    continue;
+                }
                 // Shell prefixes do not occupy command position: `env X=1
                 // touch /tmp/x`, `sudo touch /tmp/x`, and `command touch
                 // /tmp/x` still execute the creation command that follows.
@@ -1375,7 +1587,7 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or(command);
-                if !matches!(command, "touch" | "mkdir" | "tee" | "cp" | "mv") {
+                if !matches!(command, "touch" | "mkdir" | "tee" | "cp" | "mv" | "rm") {
                     index += 1;
                     continue;
                 }
@@ -1399,10 +1611,12 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                 }
                 if matches!(command, "cp" | "mv") {
                     if let Some(destination) = operands.pop() {
-                        targets.push(destination);
+                        add_target(&destination);
                     }
                 } else {
-                    targets.extend(operands);
+                    for operand in operands {
+                        add_target(&operand);
+                    }
                 }
                 index = cursor;
             }
@@ -1503,6 +1717,18 @@ fn factory_write_violation(
     };
 
     raw_paths.into_iter().find_map(|raw_path| {
+        // A variable that survived the finite expansion above may resolve to
+        // an absolute path only when Bash runs it. Treating the literal
+        // `$NAME` as relative to the worktree would create an escape hatch.
+        // Known `$HOME` and command-local assignment/loop variables have
+        // already been expanded; the remainder is deliberately fail-closed.
+        if raw_path.contains('$') {
+            return Some(FactoryWriteViolation {
+                evaluated_path: raw_path.clone(),
+                resolved_path: std::path::PathBuf::from(&raw_path),
+                matched_rule: "unresolved shell variable",
+            });
+        }
         unsanctioned_factory_path_with_worktree(
             input,
             configured_artifacts_root,
@@ -1798,6 +2024,55 @@ mod workspace_contract_tests {
             assert!(
                 targets.iter().any(|actual| actual == target),
                 "merged parser must retain guarded target {target:?}: {targets:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_rm_targets_expand_loop_variables() {
+        let targets = bash_write_targets(
+            "B=cas-cli/src/builtins; for h in codex grok; do for sk in cas-html-reports cas-dataviz; do rm -rf $B/$h/skills/$sk; done; done",
+        );
+        for target in [
+            "cas-cli/src/builtins/codex/skills/cas-html-reports",
+            "cas-cli/src/builtins/codex/skills/cas-dataviz",
+            "cas-cli/src/builtins/grok/skills/cas-html-reports",
+            "cas-cli/src/builtins/grok/skills/cas-dataviz",
+        ] {
+            assert!(
+                targets.iter().any(|actual| actual == target),
+                "rm target should be expanded and guarded: {target:?}; got {targets:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_python_heredoc_extracts_open_rewrite_target() {
+        let targets = bash_write_targets(
+            "python3 - <<'PY'\np='cas-cli/src/builtins/skills/example.html'; s=open(p).read(); open(p,'w').write(s)\nPY",
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|target| target == "cas-cli/src/builtins/skills/example.html"),
+            "Python heredoc open() target must be guarded: {targets:?}"
+        );
+    }
+
+    #[test]
+    fn factory_guard_allows_variable_rm_and_heredoc_inside_registered_worktree() {
+        let cwd = tempfile::tempdir().expect("worktree");
+        let mut env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", None)]);
+        env.set("CAS_CLONE_PATH", cwd.path());
+        for command in [
+            "B=cas-cli/src/builtins; for h in codex grok; do rm -rf $B/$h/skills/cas-dataviz; done",
+            "python3 - <<'PY'\np='cas-cli/src/builtins/skills/example.html'; open(p,'w').write('ok')\nPY",
+        ] {
+            let input = bash_input(command, cwd.path());
+            assert_eq!(
+                factory_unsanctioned_write_path(&input, &None, None, false),
+                None,
+                "registered worktree write should be sanctioned: {command}"
             );
         }
     }

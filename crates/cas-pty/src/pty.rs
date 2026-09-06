@@ -238,8 +238,8 @@ pub fn missing_contract_elements(text: &str, role: ContractRole) -> Vec<&'static
 pub fn claude_supervisor_contract(worker_list: &str) -> String {
     format!(
         "You are the Cassy Factory Supervisor. Coordinate only: plan epics, assign tasks, \
-monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and \
-cas-supervisor-checklist; MCP tools are namespaced mcp__cas__<tool> (e.g. mcp__cas__task, \
+monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor, \
+cas-supervisor-checklist, and cas-codebase-design; MCP tools are namespaced mcp__cas__<tool> (e.g. mcp__cas__task, \
 mcp__cas__coordination). Worker messages (status/blocker/ready) arrive asynchronously as new \
 injected turns; each is a triage trigger, not a fresh startup — read it, then \
 assign/answer/redirect/merge and reply via `mcp__cas__coordination action=message \
@@ -919,11 +919,20 @@ impl PtyConfig {
             ));
         }
 
-        let mut args = vec![
-            "--dangerously-skip-permissions".to_string(),
-            "--session-id".to_string(),
-            session_id,
-        ];
+        let mut args = vec!["--dangerously-skip-permissions".to_string()];
+        // Claude's native Agent Teams permission router can suspend a worker
+        // on a team-lead approval request even when the worker's
+        // PreToolUse/PermissionRequest hooks return `allow`. The dangerous
+        // skip flag does not disable that router (and the resulting request
+        // may never reach the transcript). Workers are already constrained by
+        // the factory hook/worktree jail, so explicitly select Claude's
+        // command-line bypass mode for the worker process itself.
+        if role == "worker" {
+            args.push("--permission-mode".to_string());
+            args.push("bypassPermissions".to_string());
+        }
+        args.push("--session-id".to_string());
+        args.push(session_id);
         if let Some(m) = model {
             args.push("--model".to_string());
             args.push(m.to_string());
@@ -2400,6 +2409,15 @@ mod tests {
             config
                 .args
                 .contains(&"--dangerously-skip-permissions".to_string())
+        );
+        assert_eq!(
+            config
+                .args
+                .windows(2)
+                .find(|pair| pair[0] == "--permission-mode")
+                .map(|pair| pair[1].as_str()),
+            Some("bypassPermissions"),
+            "factory Claude workers must bypass the team leader permission router"
         );
         assert!(
             config

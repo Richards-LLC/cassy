@@ -5,9 +5,29 @@ reports. They apply to every report type; the financial and executive types enfo
 
 ## The governing principle
 
-**Same things look the same. Different things look different.** Within a report and across successive
-editions of the same report, a given series, scenario, or status must keep its color, its fill, its
-position, and its label. A reader who learns your notation once should never have to relearn it.
+**The argument is visible; the notation keeps it legible.** The hero figure named in the concept brief
+shows the claim before any prose. Everything else on the page serves that figure: evidence twins,
+marginal notes, the closing figure that carries the ask.
+
+**Same things look the same, different things look different** is the constraint that makes the
+argument readable, not the goal. Within a report and across successive editions, a series keeps its
+color, a scenario keeps its fill, a status keeps its glyph and position, and a reader who learns the
+notation once never relearns it. A report that satisfies this constraint and has no hero has failed.
+
+## Form vocabulary
+
+Take the form from `cas-ui-craft` and write the reason in the brief. The forms a report reaches for
+most, with the reader task each one fits:
+
+| Reader task | Form | The reason it fits |
+| --- | --- | --- |
+| See a claim next to what contradicts or supports it | Ledger: two aligned columns per row, a verdict stamp in the gutter | Contradiction is spatial; the eye reads across |
+| Compare several similar series | Small multiples on one shared scale | Differences carry the work, not chart furniture |
+| Show change between two states | Slope or dumbbell | The delta is the mark, and direction is the shape |
+| Show when things happened relative to each other | Annotated timeline | Causality is an ordering claim |
+| Show a count as parts of a whole | Waffle or dot plot | Every unit is visible; nothing is hidden in a wedge |
+| Carry the one sentence that must survive | Pull-quote set in the display face | Typographic weight is hierarchy |
+| Attach a caveat to the evidence it qualifies | Marginal note beside the row or mark | Proximity beats a footnote |
 
 ## Scenario encoding (actual / plan / forecast)
 

@@ -1,4 +1,122 @@
 use crate::config::*;
+use fs2::FileExt;
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Salt same-process temp paths; the PID separates independent Cassy
+/// processes. The lock file itself is stable across atomic replacements.
+static PROJECT_CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) struct ProjectConfigWriteLock {
+    file: fs::File,
+}
+
+impl Drop for ProjectConfigWriteLock {
+    fn drop(&mut self) {
+        if let Err(error) = FileExt::unlock(&self.file) {
+            tracing::error!(%error, "failed to release project config write lock");
+        }
+    }
+}
+
+/// Lock the project config's stable sidecar inode. Locking config.toml itself
+/// would not serialize writers after an atomic rename replaces its inode.
+pub(crate) fn lock_project_config(cas_dir: &Path) -> std::io::Result<ProjectConfigWriteLock> {
+    fs::create_dir_all(cas_dir)?;
+    let lock_path = cas_dir.join(".config.toml.cas-write.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+    file.lock_exclusive()?;
+    Ok(ProjectConfigWriteLock { file })
+}
+
+/// Write a complete TOML document through a same-directory temp file, fsync,
+/// and atomic rename. The destination is never opened for in-place writes.
+pub(crate) fn write_project_config_toml(cas_dir: &Path, contents: &str) -> std::io::Result<()> {
+    let _lock = lock_project_config(cas_dir)?;
+    let path = cas_dir.join("config.toml");
+    atomic_replace_project_config(&path, contents)
+}
+
+pub(crate) fn atomic_replace_project_config(path: &Path, contents: &str) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("cannot atomically write project config without a parent: {path:?}"),
+        )
+    })?;
+    let sequence = PROJECT_CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temp_path = parent.join(format!(
+        ".config.toml.cas-write.{}.{sequence}.tmp",
+        std::process::id()
+    ));
+    atomic_replace_project_config_via(path, contents, &temp_path, |from, to| fs::rename(from, to))
+}
+
+/// Testable implementation of the complete-document replacement contract.
+pub(crate) fn atomic_replace_project_config_via<F>(
+    path: &Path,
+    contents: &str,
+    temp_path: &Path,
+    commit: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    atomic_replace_project_config_via_with_created_hook(
+        path,
+        contents,
+        temp_path,
+        |_| Ok(()),
+        commit,
+    )
+}
+
+pub(crate) fn atomic_replace_project_config_via_with_created_hook<F, H>(
+    path: &Path,
+    contents: &str,
+    temp_path: &Path,
+    after_create: H,
+    commit: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    H: FnOnce(&fs::File) -> std::io::Result<()>,
+{
+    let permissions = fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut temp = options.open(temp_path)?;
+
+    let result = (|| -> std::io::Result<()> {
+        after_create(&temp)?;
+        temp.write_all(contents.as_bytes())?;
+        temp.flush()?;
+        if let Some(permissions) = permissions {
+            temp.set_permissions(permissions)?;
+        }
+        temp.sync_all()?;
+        drop(temp);
+        commit(temp_path, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp_path);
+    }
+    result
+}
 
 impl Config {
     /// Load configuration from .cas directory
@@ -16,8 +134,15 @@ impl Config {
         // Try TOML first (preferred format)
         if toml_path.exists() {
             let content = std::fs::read_to_string(&toml_path)?;
-            let mut config: Self = toml::from_str(&content)
-                .map_err(|e| MemError::Parse(format!("Failed to parse config.toml: {e}")))?;
+            let mut config: Self = toml::from_str(&content).map_err(|e| {
+                let line = e
+                    .span()
+                    .map(|span| content[..span.start].bytes().filter(|b| *b == b'\n').count() + 1)
+                    .unwrap_or(1);
+                MemError::Parse(format!(
+                    "Failed to parse config.toml at line {line}: {e}. Restore a known-good config.toml backup, then rerun `cas doctor`."
+                ))
+            })?;
 
             // If YAML also exists, merge any settings that are missing from TOML.
             // This handles the case where something wrote to config.yaml after
@@ -89,10 +214,9 @@ impl Config {
 
     /// Save configuration as TOML
     pub fn save_toml(&self, cas_dir: &std::path::Path) -> Result<(), MemError> {
-        let config_path = cas_dir.join("config.toml");
         let content = toml::to_string_pretty(self)
             .map_err(|e| MemError::Parse(format!("Failed to serialize config to TOML: {e}")))?;
-        std::fs::write(config_path, content)?;
+        write_project_config_toml(cas_dir, &content)?;
         Ok(())
     }
 

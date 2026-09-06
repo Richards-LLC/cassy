@@ -2,9 +2,9 @@ use std::io;
 
 use crate::cli::{Cli, ListArgs};
 use crate::store::{find_cas_root_from, open_agent_store, open_prompt_queue_store};
-use crate::ui::components::{Formatter, KeyValue, Renderable, StatusLine};
+use crate::ui::components::{Formatter, Renderable, StatusLine, Verdict};
 use crate::ui::factory::{SessionInfo, SessionManager, list_sessions};
-use crate::ui::theme::ActiveTheme;
+use crate::ui::theme::{ActiveTheme, Icons};
 use anyhow::{Result, anyhow, bail};
 use cas_factory::{DirectorData, SessionType};
 use cas_types::{AgentStatus, Event};
@@ -462,26 +462,221 @@ pub(super) fn execute_status(
     let theme = ActiveTheme::default();
     let mut stdout = io::stdout();
     let mut fmt = Formatter::stdout(&mut stdout, theme);
-
-    fmt.heading(&format!("Status for session: {}", session.name))?;
-    KeyValue::new()
-        .add(
-            "Project",
-            session.metadata.project_dir.clone().unwrap_or_default(),
-        )
-        .add("Pending prompts", pending.to_string())
-        .add("Ready tasks", tasks_ready.len().to_string())
-        .add("In-progress tasks", tasks_in_progress.len().to_string())
-        .add("Agents", agents.len().to_string())
-        .add(
-            "Actionable-idle minutes",
-            session
-                .metadata
-                .actionable_idle_minutes_at(chrono::Utc::now())
-                .to_string(),
-        )
-        .render(&mut fmt)?;
+    let idle_minutes = session
+        .metadata
+        .actionable_idle_minutes_at(chrono::Utc::now());
+    render_status(
+        &mut fmt,
+        &StatusView {
+            session: &session.name,
+            project: session.metadata.project_dir.as_deref().unwrap_or_default(),
+            pending,
+            ready: tasks_ready.len(),
+            in_progress: tasks_in_progress.len(),
+            epics: epics.len(),
+            idle_minutes,
+            agents: &agents,
+            full: cli.full,
+        },
+        chrono::Utc::now(),
+    )?;
+    fmt.flush()?;
     Ok(())
+}
+
+/// Everything the human status screen shows, gathered so the render is a pure
+/// function of data and can be pinned at a fixed width (cas-cli-craft).
+struct StatusView<'a> {
+    pub session: &'a str,
+    pub project: &'a str,
+    pub pending: usize,
+    pub ready: usize,
+    pub in_progress: usize,
+    pub epics: usize,
+    pub idle_minutes: u64,
+    pub agents: &'a [AgentSummaryJson],
+    /// `--full`: never truncate a cell.
+    pub full: bool,
+}
+
+/// Verdict → grouped rows → agents ledger. The first line answers "is the
+/// session moving"; everything under the rule is evidence.
+fn render_status(
+    fmt: &mut Formatter<'_>,
+    view: &StatusView<'_>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> io::Result<()> {
+    let dot = Icons::separator_dot(fmt.unicode());
+    let active = view
+        .agents
+        .iter()
+        .filter(|agent| agent.status == "active")
+        .count();
+    let (verdict, word) = if view.agents.is_empty() {
+        (Verdict::Warning, "no agents".to_string())
+    } else if view.idle_minutes > 0 {
+        (
+            Verdict::Warning,
+            format!("idle {} min", view.idle_minutes),
+        )
+    } else {
+        (Verdict::Ok, "active".to_string())
+    };
+    let agents_word = if view.agents.len() == 1 { "agent" } else { "agents" };
+    fmt.verdict(
+        verdict,
+        &word,
+        &format!(
+            "{} {dot} {} {agents_word} {dot} {} ready {dot} {} in progress",
+            view.session,
+            view.agents.len(),
+            view.ready,
+            view.in_progress
+        ),
+    )?;
+    fmt.rule()?;
+
+    let width = fmt.width().max(40) as usize;
+    let row = |fmt: &mut Formatter<'_>, label: &str, value: String| -> io::Result<()> {
+        let label = format!("{label:<10}");
+        let available = width.saturating_sub(label.len()).max(1);
+        fmt.write_bold_plain(&label)?;
+        if view.full {
+            fmt.write_text(&value)?;
+        } else {
+            let unicode = fmt.unicode();
+            fmt.write_text(&truncate_cell(&value, available, unicode))?;
+        }
+        fmt.newline()
+    };
+    row(fmt, "Project", view.project.to_string())?;
+    row(
+        fmt,
+        "Queue",
+        format!(
+            "{} pending {}",
+            view.pending,
+            if view.pending == 1 { "prompt" } else { "prompts" }
+        ),
+    )?;
+    row(
+        fmt,
+        "Tasks",
+        format!(
+            "{} ready {dot} {} in progress {dot} {} epics open",
+            view.ready, view.in_progress, view.epics
+        ),
+    )?;
+    row(
+        fmt,
+        "Agents",
+        format!(
+            "{active} active {dot} {} other {dot} {} actionable-idle min",
+            view.agents.len().saturating_sub(active),
+            view.idle_minutes
+        ),
+    )?;
+
+    if view.agents.is_empty() {
+        fmt.newline()?;
+        return fmt.remedy(0, "cas factory spawn");
+    }
+
+    // Agents ledger: one row per agent, columns sized from the data, the
+    // heartbeat age right-aligned so the stale one stands out.
+    fmt.newline()?;
+    let rows: Vec<[String; 4]> = view
+        .agents
+        .iter()
+        .map(|agent| {
+            [
+                agent.name.clone(),
+                agent.status.clone(),
+                agent
+                    .current_task
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string()),
+                heartbeat_age(agent.last_heartbeat_rfc3339.as_deref(), now),
+            ]
+        })
+        .collect();
+    let headers = ["agent", "status", "task", "last seen"];
+    let mut widths = headers.map(str::len);
+    for row in &rows {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(cell.chars().count());
+        }
+    }
+    let fixed = widths[1] + widths[2] + widths[3] + 3 * 2;
+    if !view.full {
+        widths[0] = widths[0].min(width.saturating_sub(fixed).max(8));
+    }
+    let header = format!(
+        "{:<w0$}  {:<w1$}  {:<w2$}  {:>w3$}",
+        headers[0],
+        headers[1],
+        headers[2],
+        headers[3],
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+        w3 = widths[3]
+    );
+    fmt.write_bold_plain(&header)?;
+    fmt.newline()?;
+    for row in rows {
+        let name = if view.full {
+            row[0].clone()
+        } else {
+            truncate_cell(&row[0], widths[0], fmt.unicode())
+        };
+        fmt.write_text(&format!(
+            "{:<w0$}  {:<w1$}  {:<w2$}  {:>w3$}",
+            name,
+            row[1],
+            row[2],
+            row[3],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3]
+        ))?;
+        fmt.newline()?;
+    }
+    fmt.newline()?;
+    fmt.receipt(&format!(
+        "--json for the queue peek and activity {dot} --full for untruncated values"
+    ))
+}
+
+/// Cut a cell to `width` cells with a trailing ellipsis; `--full` and `--json`
+/// carry the untruncated value.
+fn truncate_cell(value: &str, width: usize, glyphs: bool) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    let ellipsis = if glyphs { "\u{2026}" } else { "..." };
+    let keep = width.saturating_sub(ellipsis.chars().count()).max(1);
+    let mut cut: String = value.chars().take(keep).collect();
+    cut.push_str(ellipsis);
+    cut
+}
+
+/// `12s ago`, `4m ago`, `2h ago`, or `never` for an agent with no heartbeat.
+fn heartbeat_age(rfc3339: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let Some(ts) = rfc3339.and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok()) else {
+        return "never".to_string();
+    };
+    let secs = (now - ts.with_timezone(&chrono::Utc)).num_seconds().max(0);
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -838,4 +1033,143 @@ struct QueuedPromptJson {
     source: String,
     target: String,
     created_at_rfc3339: String,
+}
+
+#[cfg(test)]
+mod status_render_tests {
+    use super::*;
+    use crate::ui::components::OutputMode;
+
+    fn agent(name: &str, status: &str, task: Option<&str>, seen_secs_ago: i64) -> AgentSummaryJson {
+        let now = chrono::Utc::now();
+        AgentSummaryJson {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            status: status.to_string(),
+            current_task: task.map(str::to_string),
+            latest_activity: None,
+            last_heartbeat_rfc3339: Some(
+                (now - chrono::Duration::seconds(seen_secs_ago)).to_rfc3339(),
+            ),
+        }
+    }
+
+    fn render_at(width: u16, view: &StatusView<'_>) -> String {
+        let mut bytes = Vec::new();
+        {
+            let mut fmt = Formatter::new(
+                &mut bytes,
+                OutputMode::Plain,
+                ActiveTheme::default_dark(),
+                width,
+            );
+            render_status(&mut fmt, view, chrono::Utc::now()).expect("render");
+        }
+        String::from_utf8(bytes).expect("utf-8")
+    }
+
+    /// cas-4df0: verdict first, four labelled rows, an agents ledger with the
+    /// age right-aligned, receipt last; nothing wider than the terminal.
+    #[test]
+    fn status_screen_leads_with_the_verdict_and_fits_eighty_columns() {
+        let agents = vec![
+            agent("lively-panther-31", "active", None, 12),
+            agent("golden-koala-58", "active", Some("cas-4df0"), 3),
+        ];
+        let view = StatusView {
+            session: "cas-src-lively-panther-31",
+            project: "/srv/work/cas-src",
+            pending: 0,
+            ready: 98,
+            in_progress: 11,
+            epics: 4,
+            idle_minutes: 0,
+            agents: &agents,
+            full: false,
+        };
+        let out = render_at(80, &view);
+        assert!(
+            out.starts_with(
+                "[OK] active · cas-src-lively-panther-31 · 2 agents · 98 ready · 11 in progress\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("Project   /srv/work/cas-src\n"), "{out}");
+        assert!(out.contains("Queue     0 pending prompts\n"), "{out}");
+        assert!(out.contains("Tasks     98 ready · 11 in progress · 4 epics open\n"), "{out}");
+        assert!(out.contains("Agents    2 active · 0 other · 0 actionable-idle min\n"), "{out}");
+        let header = out
+            .lines()
+            .find(|line| line.starts_with("agent "))
+            .expect("ledger header");
+        let row = out
+            .lines()
+            .find(|line| line.starts_with("golden-koala-58"))
+            .expect("ledger row");
+        assert_eq!(
+            header.len(),
+            row.len(),
+            "age is right-aligned under the header:\n{header}\n{row}"
+        );
+        assert!(row.ends_with("3s ago"), "{row}");
+        assert!(row.contains("cas-4df0"), "{row}");
+        assert!(out.trim_end().ends_with("--full for untruncated values"), "{out}");
+        for line in out.lines() {
+            assert!(line.chars().count() <= 80, "overflow: {line:?}");
+        }
+    }
+
+    #[test]
+    fn status_verdicts_name_idle_minutes_and_missing_agents() {
+        let idle = StatusView {
+            session: "s",
+            project: "/srv/work/p",
+            pending: 2,
+            ready: 1,
+            in_progress: 0,
+            epics: 1,
+            idle_minutes: 14,
+            agents: &[agent("a", "active", None, 1)],
+            full: false,
+        };
+        let out = render_at(80, &idle);
+        assert!(out.starts_with("[WARN] idle 14 min · "), "{out}");
+
+        let empty = StatusView {
+            agents: &[],
+            idle_minutes: 0,
+            ..idle
+        };
+        let out = render_at(80, &empty);
+        assert!(out.starts_with("[WARN] no agents · "), "{out}");
+        assert!(out.contains("→ cas factory spawn"), "{out}");
+    }
+
+    #[test]
+    fn long_agent_names_truncate_with_an_ellipsis_unless_full() {
+        let long = "a-very-long-agent-name-that-would-push-the-ledger-past-the-terminal-edge-xx";
+        let agents = vec![agent(long, "active", Some("cas-0000"), 5)];
+        let mut view = StatusView {
+            session: "s",
+            project: "/srv/work/p",
+            pending: 0,
+            ready: 0,
+            in_progress: 0,
+            epics: 0,
+            idle_minutes: 0,
+            agents: &agents,
+            full: false,
+        };
+        let out = render_at(80, &view);
+        let row = out
+            .lines()
+            .find(|line| line.starts_with("a-very-long"))
+            .expect("row");
+        assert!(row.contains('\u{2026}'), "{row}");
+        assert!(row.chars().count() <= 80, "{row}");
+
+        view.full = true;
+        let out = render_at(80, &view);
+        assert!(out.contains(long), "--full keeps the whole name:\n{out}");
+    }
 }

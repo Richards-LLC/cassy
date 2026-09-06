@@ -16,6 +16,82 @@ use ratatui::style::Color as RatatuiColor;
 
 use crate::ui::theme::{ActiveTheme, Icons};
 
+/// The one-word outcome of a command; drives the mark glyph and its colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Ok,
+    Warning,
+    Error,
+    Info,
+}
+
+impl Verdict {
+    /// The mark: a glyph on UTF-8 terminals, a bracketed word otherwise.
+    pub fn label(self, glyphs: bool) -> &'static str {
+        match (self, glyphs) {
+            (Verdict::Ok, true) => Icons::CHECK,
+            (Verdict::Warning, true) => Icons::WARNING,
+            (Verdict::Error, true) => Icons::CROSS,
+            (Verdict::Info, true) => Icons::INFO,
+            (Verdict::Ok, false) => "[OK]",
+            (Verdict::Warning, false) => "[WARN]",
+            (Verdict::Error, false) => "[ERROR]",
+            (Verdict::Info, false) => "[INFO]",
+        }
+    }
+}
+
+/// Whether the process locale can display UTF-8 glyphs and box drawing.
+///
+/// `LC_ALL` overrides `LC_CTYPE`, which overrides `LANG`; a locale that names
+/// no UTF-8 encoding (`C`, `POSIX`, `en_US.ISO-8859-1`) gets ASCII. With no
+/// locale variable set at all the terminal is assumed to be UTF-8, which is
+/// what every modern emulator defaults to.
+pub fn locale_is_utf8() -> bool {
+    for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            let lower = value.to_ascii_lowercase();
+            return lower.contains("utf-8") || lower.contains("utf8");
+        }
+    }
+    true
+}
+
+/// Text punctuation for a locale that cannot show it: `×` → `x`, `…` → `...`,
+/// `→` → `->`, `—` → `--`, `·` → `-`, and so on. Letters and anything not in
+/// the table pass through unchanged — a path or a name is content, not
+/// decoration.
+pub fn ascii_fallback(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.is_ascii() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\u{00d7}' => out.push('x'),
+            '\u{2026}' => out.push_str("..."),
+            '\u{2192}' => out.push_str("->"),
+            '\u{2190}' => out.push_str("<-"),
+            '\u{2014}' => out.push_str("--"),
+            '\u{2013}' | '\u{00b7}' | '\u{2500}' | '\u{2550}' => out.push('-'),
+            '\u{2502}' | '\u{2551}' => out.push('|'),
+            '\u{2022}' => out.push('*'),
+            '\u{2018}' | '\u{2019}' => out.push('\''),
+            '\u{201c}' | '\u{201d}' => out.push('"'),
+            '\u{00a0}' => out.push(' '),
+            '\u{2713}' | '\u{2714}' => out.push_str("[OK]"),
+            '\u{2717}' | '\u{2718}' => out.push_str("[ERROR]"),
+            '\u{26a0}' => out.push_str("[WARN]"),
+            other => out.push(other),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// Output mode controlling style behavior
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
@@ -365,6 +441,133 @@ impl<'w> Formatter<'w> {
             write!(self.writer, "[{key}] {description}")?;
         }
         self.newline()
+    }
+
+    // ========================================================================
+    // Command grammar (cas-cli-craft): verdict → rows → remedies → receipts
+    // ========================================================================
+
+    /// Whether marks render as glyphs (`✓`) rather than bracketed words
+    /// (`[OK]`): styled output on a UTF-8 locale. Piped output keeps the
+    /// bracketed words so a log reads without a font.
+    pub fn glyphs(&self) -> bool {
+        self.mode == OutputMode::Styled && locale_is_utf8()
+    }
+
+    /// Whether text punctuation may be Unicode (`·`, `…`, `→`, `─`): any
+    /// output on a UTF-8 locale, piped or not. A C locale gets ASCII.
+    pub fn unicode(&self) -> bool {
+        locale_is_utf8()
+    }
+
+    /// The mark for a verdict: a coloured glyph on UTF-8 terminals, a bracketed
+    /// word everywhere else. Colour touches the mark only; its meaning is also
+    /// carried by the glyph or word, so a monochrome reader loses nothing.
+    pub fn mark(&mut self, verdict: Verdict) -> io::Result<()> {
+        let label = verdict.label(self.glyphs());
+        if self.mode == OutputMode::Styled {
+            let color = self.verdict_color(verdict);
+            self.write_bold_colored(label, color)
+        } else {
+            write!(self.writer, "{label}")
+        }
+    }
+
+    /// The verdict line: `✓ healthy · 24 checks · 1.2s`. The mark is coloured,
+    /// the word is bold in the terminal's own foreground, the detail is plain.
+    pub fn verdict(&mut self, verdict: Verdict, word: &str, detail: &str) -> io::Result<()> {
+        self.mark(verdict)?;
+        self.write_raw(" ")?;
+        self.write_bold_plain(word)?;
+        if !detail.is_empty() {
+            self.write_raw(" ")?;
+            self.write_raw(Icons::separator_dot(self.unicode()))?;
+            self.write_raw(" ")?;
+            self.write_text(detail)?;
+        }
+        self.newline()
+    }
+
+    /// Body text in the terminal's default foreground, with Unicode punctuation
+    /// transliterated when the locale cannot show it.
+    pub fn write_text(&mut self, text: &str) -> io::Result<()> {
+        if self.unicode() {
+            self.write_raw(text)
+        } else {
+            let fallback = ascii_fallback(text);
+            self.write_raw(&fallback)
+        }
+    }
+
+    /// Bold text in the terminal's default foreground (no explicit colour).
+    pub fn write_bold_plain(&mut self, text: &str) -> io::Result<()> {
+        if self.mode == OutputMode::Styled {
+            emit(self.writer, &SetAttribute(Attribute::Bold))?;
+            self.writer.write_all(text.as_bytes())?;
+            emit(self.writer, &SetAttribute(Attribute::Reset))
+        } else {
+            write!(self.writer, "{text}")
+        }
+    }
+
+    /// A single muted rule under the verdict, at most 80 cells wide. An
+    /// unknown or absurd width (under 40) renders as at 80, like every
+    /// verdict-first command does.
+    pub fn rule(&mut self) -> io::Result<()> {
+        let width = match self.width as usize {
+            width if width < 40 => 80,
+            width => width.min(80),
+        };
+        let line = if self.unicode() {
+            Icons::SEPARATOR.repeat(width)
+        } else {
+            "-".repeat(width)
+        };
+        if self.mode == OutputMode::Styled {
+            self.write_muted(&line)?;
+        } else {
+            write!(self.writer, "{line}")?;
+        }
+        self.newline()
+    }
+
+    /// A remedy: `→ command`, the arrow muted and the command in the default
+    /// foreground so it copies cleanly. `indent` is the number of leading cells.
+    pub fn remedy(&mut self, indent: usize, command: &str) -> io::Result<()> {
+        let arrow = Icons::arrow_right(self.unicode());
+        self.write_raw(&" ".repeat(indent))?;
+        if self.mode == OutputMode::Styled {
+            self.write_muted(arrow)?;
+        } else {
+            write!(self.writer, "{arrow}")?;
+        }
+        self.write_raw(" ")?;
+        self.write_text(command)?;
+        self.newline()
+    }
+
+    /// A receipt line: counts, elapsed time, artifact paths. Muted, last.
+    pub fn receipt(&mut self, text: &str) -> io::Result<()> {
+        let text = if self.unicode() {
+            std::borrow::Cow::Borrowed(text)
+        } else {
+            ascii_fallback(text)
+        };
+        if self.mode == OutputMode::Styled {
+            self.write_muted(&text)?;
+        } else {
+            write!(self.writer, "{text}")?;
+        }
+        self.newline()
+    }
+
+    fn verdict_color(&self, verdict: Verdict) -> RatatuiColor {
+        match verdict {
+            Verdict::Ok => self.theme.palette.status_success,
+            Verdict::Warning => self.theme.palette.status_warning,
+            Verdict::Error => self.theme.palette.status_error,
+            Verdict::Info => self.theme.palette.status_info,
+        }
     }
 
     /// Print a progress indicator: `[████░░░░] 50%`

@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Investigation — nightly index rebuild timeouts began with the 2026-07-29 batch-size deploy (2026-08-07)</title>
+<style>
+  /* Petrastella design language, default tokens. Semantic roles, declared once. */
+  :root{
+    color-scheme: light dark;
+    /* Petrastella design language — tokens from skills/design-spec/references/design-tokens.json (no DESIGN.md applies) */
+    --bg:#F7F4EE; --surface:#FFFFFF; --surface-hero:#F1E7DD; --line:#DAD3C7; --line-strong:#8F8371;
+    --ink:#1B1D24; --muted:#5A5F6E; --verdict:#2E3A9F; --verdict-soft:#DDE1F7; --evidence:#5A5F6E; --action:#2E3A9F;
+    --good:#226845; --warning:#7F5504; --danger:#B3261E;
+    --s1:#2E3A9F; --s2:#B0574F; --s3:#1F7A85;
+    --display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
+    --sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#12141A; --surface:#191C24; --surface-hero:#241E1E; --line:#2B3040; --line-strong:#6B7390;
+           --ink:#E9E6E0; --muted:#A3A7B4; --verdict:#A9B3FF; --verdict-soft:rgba(169,179,255,0.16); --evidence:#A3A7B4; --action:#A9B3FF;
+           --good:#5FC492; --warning:#E2B14D; --danger:#EF7B72; --s1:#A9B3FF; --s2:#F2A49C; --s3:#6FD0DC; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 var(--sans)}
+  :focus-visible{outline:3px solid var(--action);outline-offset:2px}
+  a{color:var(--evidence)}
+  :focus-visible{outline:3px solid var(--evidence);outline-offset:2px}
+  .skip{position:absolute;left:-9999px}.skip:focus{position:static;display:inline-block;margin:8px}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  header{padding:22px 0 14px;background:var(--surface-hero);color:var(--ink);border-bottom:3px solid var(--verdict)}
+  .eyebrow{font:500 12px/1.4 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  h1{font:400 clamp(26px,3.2vw,36px)/1.12 var(--display);margin:8px 0 6px;max-width:32ch}
+  h1 em{font-style:italic;color:var(--verdict)}
+  .meta{color:var(--muted);font-size:14px;margin:0}
+  main{padding:8px 0 48px}
+  section{margin:32px 0 0}
+  h2{font:600 22px/1.25 var(--sans);letter-spacing:-.01em;margin:0 0 8px}
+  p{max-width:78ch}
+  code{font:.92em var(--mono);background:var(--surface);border:1px solid var(--line);padding:0 4px;border-radius:3px}
+  figure{margin:14px 0 0}
+  figcaption{color:var(--muted);font-size:13px;margin-top:8px;max-width:90ch}
+  .chart{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 12px 6px}
+  .chart svg{width:100%;height:auto;display:block}
+  .axis{stroke:var(--line)}.tick{font:12px var(--sans);fill:var(--muted)}
+  .series{fill:none;stroke:var(--evidence);stroke-width:1.5}
+  .pt{fill:var(--evidence)}.pt.timeout{fill:var(--danger)}
+  .threshold{stroke:var(--danger);stroke-dasharray:5 4;stroke-width:1.2}
+  .deploy{stroke:var(--verdict);stroke-width:2.5}
+  .fix{stroke:var(--good);stroke-width:2.5}
+  .ann{font:13px var(--sans);fill:var(--ink)}.ann.v{fill:var(--danger)}.ann.w{fill:var(--verdict)}.ann.a{fill:var(--good)}
+  .ann-display{font:italic 15px var(--display);fill:var(--verdict)}
+  .conn{stroke:var(--muted);stroke-width:1;fill:none}
+  .verdict{border-left:3px solid var(--verdict);padding:6px 0 6px 18px;margin:18px 0 0;max-width:78ch}
+  .verdict p{font:400 20px/1.4 var(--display);margin:0}
+  .verdict .conf{font:13px var(--sans);color:var(--muted);margin-top:6px}
+  table{border-collapse:collapse;width:100%;background:transparent;border-top:1px solid var(--line-strong);border-bottom:1px solid var(--line-strong);margin-top:10px}
+  caption{text-align:left;font:400 15px/1.4 var(--display);color:var(--muted);padding:0 0 6px}
+  th,td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:15px}
+  thead th{font:600 12px/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:transparent}
+  tbody tr:last-child td,tbody tr:last-child th{border-bottom:0}
+  th[scope=row]{font-weight:600}
+  .num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:14px}
+  .scroll{overflow-x:auto}
+  ol.chain{counter-reset:c;list-style:none;padding:0;margin:8px 0 0;max-width:86ch}
+  ol.chain li{counter-increment:c;display:grid;grid-template-columns:36px 1fr;gap:8px;padding:8px 0;border-top:1px solid var(--line)}
+  ol.chain li::before{content:counter(c);font:400 22px/1 var(--display);color:var(--verdict)}
+  .margin{font-size:14px;color:var(--muted);border-left:2px solid var(--line);padding-left:12px;margin:10px 0 0;max-width:60ch}
+  pre{background:var(--surface);border:1px solid var(--line);padding:10px 12px;overflow-x:auto;font:13px/1.5 var(--mono)}
+  footer{border-top:1px solid var(--line);padding:18px 0 40px;color:var(--muted);font-size:13px}
+  @media print{
+    :root{--bg:#fff;--surface:#fff;--surface-hero:#fff;--ink:#000;--muted:#333;--line:#999;--line-strong:#555;--verdict:#2E3A9F;--verdict-soft:#eee;--evidence:#444;--action:#2E3A9F;--good:#1f5a3e;--warning:#6f5206;--danger:#8f1e18;--s1:#2E3A9F;--s2:#8f3d36;--s3:#175f68}
+    body{font-size:11pt}.skip{display:none}
+    figure,tr,.verdict,ol.chain li{break-inside:avoid}table{break-inside:auto}thead{display:table-header-group}
+    a[href^="http"]::after{content:" (" attr(href) ")";font-size:9pt}
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the timeline</a>
+<header><div class="wrap">
+  <div class="eyebrow">Investigation · practitioner · 2026-08-07</div>
+  <h1>Nightly index rebuilds began timing out the night the batch size went to 5 000 — <em>and stopped the night it went back</em></h1>
+  <p class="meta">Question: why did the nightly index rebuild start exceeding its 30-minute timeout after 2026-07-29? Source of truth: <a href="./2026-08-07-index-rebuild-timeouts.md">2026-08-07-index-rebuild-timeouts.md</a> · concept brief: <a href="./2026-08-07-index-rebuild-timeouts.brief.md">.brief.md</a></p>
+</div></header>
+
+<main id="main" class="wrap">
+
+<section aria-labelledby="tl-h">
+  <h2 id="tl-h">Seventeen nights on one axis</h2>
+  <figure aria-labelledby="fig1-cap">
+    <div class="chart">
+      <svg viewBox="0 0 1100 330" role="img" aria-labelledby="fig1-t fig1-d">
+        <title id="fig1-t">Nightly rebuild duration, 2026-07-22 to 2026-08-07, with the batch-size deploy and the revert marked</title>
+        <desc id="fig1-d">Durations sit between 16 and 19 minutes until 2026-07-28. The 2026-07-29 deploy raised the batch size from 500 to 5 000; from that night every rebuild exceeded the 30-minute timeout, peaking at 47 minutes on 2026-08-04. The 2026-08-06 revert returned the duration to 18 minutes on 2026-08-06 and 17 minutes on 2026-08-07.</desc>
+        <!-- y axis: 0–50 min → y 270..30 (4.8 px/min). x: 17 nights, 60 px apart from x=80 -->
+        <line class="axis" x1="80" y1="30" x2="80" y2="270"/><line class="axis" x1="80" y1="270" x2="1040" y2="270"/>
+        <text class="tick" x="70" y="274" text-anchor="end">0</text>
+        <text class="tick" x="70" y="178" text-anchor="end">20</text>
+        <text class="tick" x="70" y="82" text-anchor="end">40 min</text>
+        <line class="axis" x1="80" y1="174" x2="1040" y2="174"/><line class="axis" x1="80" y1="78" x2="1040" y2="78"/>
+        <!-- timeout threshold at 30 min → y=126 -->
+        <line class="threshold" x1="80" y1="126" x2="1040" y2="126"/>
+        <text class="ann v" x="86" y="120">30-minute timeout</text>
+        <!-- deploy marker on 07-29 (index 7 → x=500) and revert on 08-06 (index 15 → x=980) -->
+        <line class="deploy" x1="500" y1="30" x2="500" y2="270"/>
+        <text class="ann w" x="506" y="44">deploy 07-29 · batch 500 → 5 000 · <tspan style="font-family:var(--mono)">a1b2c3d</tspan></text>
+        <line class="fix" x1="980" y1="30" x2="980" y2="270"/>
+        <text class="ann a" x="974" y="44" text-anchor="end">revert 08-06 · <tspan style="font-family:var(--mono)">e4f5a6b</tspan></text>
+        <!-- series: durations (min): 17,18,16,18,17,19,18,  38,41,39,44,42,47,43,40,  18,17 -->
+        <polyline class="series" points="80,188 140,184 200,193 260,184 320,188 380,179 440,184 500,88 560,73 620,83 680,59 740,68 800,44 860,64 920,78 980,184 1040,188"/>
+        <g class="pt"><circle cx="80" cy="188" r="4"/><circle cx="140" cy="184" r="4"/><circle cx="200" cy="193" r="4"/><circle cx="260" cy="184" r="4"/><circle cx="320" cy="188" r="4"/><circle cx="380" cy="179" r="4"/><circle cx="440" cy="184" r="4"/><circle cx="980" cy="184" r="4"/><circle cx="1040" cy="188" r="4"/></g>
+        <g class="pt timeout"><circle cx="500" cy="88" r="4.5"/><circle cx="560" cy="73" r="4.5"/><circle cx="620" cy="83" r="4.5"/><circle cx="680" cy="59" r="4.5"/><circle cx="740" cy="68" r="4.5"/><circle cx="800" cy="44" r="4.5"/><circle cx="860" cy="64" r="4.5"/><circle cx="920" cy="78" r="4.5"/></g>
+        <!-- annotations -->
+        <path class="conn" d="M800 44 L800 22"/>
+        <text class="ann-display" x="800" y="18" text-anchor="middle">47 min on 08-04: every night over the line for eight nights</text>
+        <path class="conn" d="M440 184 L440 230"/>
+        <text class="ann" x="440" y="246" text-anchor="middle">18 min the night before the deploy</text>
+        <path class="conn" d="M980 184 L980 230"/>
+        <text class="ann a" x="980" y="246" text-anchor="middle">18 min the night of the revert</text>
+        <!-- x ticks -->
+        <text class="tick" x="80" y="292" text-anchor="middle">07-22</text><text class="tick" x="260" y="292" text-anchor="middle">07-25</text><text class="tick" x="440" y="292" text-anchor="middle">07-28</text><text class="tick" x="620" y="292" text-anchor="middle">07-31</text><text class="tick" x="800" y="292" text-anchor="middle">08-03</text><text class="tick" x="980" y="292" text-anchor="middle">08-06</text>
+        <text class="tick" x="560" y="318" text-anchor="middle">nightly rebuild, 02:00 UTC · duration in minutes · filled red = exceeded timeout</text>
+      </svg>
+    </div>
+    <figcaption id="fig1-cap">Figure 1. Nightly index rebuild duration, 17 nights. Every night after the 2026-07-29 deploy exceeded the 30-minute timeout; the first night after the revert did not. Source: <code>rebuild_runs</code> table, query in Provenance; extracted 2026-08-07 09:12 UTC. Values in the evidence table below.</figcaption>
+  </figure>
+  <div class="verdict">
+    <p>The 2026-07-29 change of <code>INDEX_BATCH_SIZE</code> from 500 to 5 000 (<code>a1b2c3d</code>) caused the timeouts: rebuild time rose from 16–19 minutes to 38–47 minutes the same night and returned to 18 minutes the night the value was reverted.</p>
+    <div class="conf">Confidence: high. One variable changed, the effect appeared and disappeared with it, and the mechanism (Postgres statement memory spill above 4 000 rows per batch) reproduces locally.</div>
+  </div>
+</section>
+
+<section aria-labelledby="ov-h">
+  <h2 id="ov-h">Overview</h2>
+  <div class="scroll"><table>
+    <caption>Investigation summary</caption>
+    <thead><tr><th scope="col">Question</th><th scope="col">Verdict</th><th scope="col">Confidence</th><th scope="col">Scope examined</th><th scope="col">Date</th><th scope="col">Author</th></tr></thead>
+    <tbody><tr><td>Why do nightly index rebuilds time out since 2026-07-29?</td><td>Batch size 5 000 spills statement memory; reverted 2026-08-06</td><td>High</td><td>17 nightly runs, 3 deploys, local reproduction</td><td>2026-08-07</td><td>indexing on-call</td></tr></tbody>
+  </table></div>
+</section>
+
+<section aria-labelledby="ev-h">
+  <h2 id="ev-h">Evidence</h2>
+  <div class="scroll"><table>
+    <caption>Nightly rebuild durations (table twin of Figure 1) and what each row proves</caption>
+    <thead><tr><th scope="col">Night (UTC)</th><th scope="col" class="num">Duration (min)</th><th scope="col">Outcome</th><th scope="col">Deploys that day</th><th scope="col">What it proves</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">07-22 → 07-28</th><td class="num">17, 18, 16, 18, 17, 19, 18</td><td>completed</td><td>none touching indexing</td><td>Stable baseline of 16–19 min for a week</td></tr>
+      <tr><th scope="row">07-29</th><td class="num">38</td><td><b>timeout</b></td><td><code>a1b2c3d</code> batch 500 → 5 000</td><td>The change and the first timeout are the same night</td></tr>
+      <tr><th scope="row">07-30 → 08-05</th><td class="num">41, 39, 44, 42, 47, 43, 40</td><td><b>timeout</b> ×7</td><td>2 unrelated deploys (07-31, 08-02)</td><td>Persistent, not a one-off; unrelated deploys did not move it</td></tr>
+      <tr><th scope="row">08-06</th><td class="num">18</td><td>completed</td><td><code>e4f5a6b</code> batch 5 000 → 500</td><td>Removing the variable removes the effect</td></tr>
+      <tr><th scope="row">08-07</th><td class="num">17</td><td>completed</td><td>none</td><td>Recovery holds a second night</td></tr>
+    </tbody>
+  </table></div>
+  <p class="margin">The corpus grew 2.1 % over the window (1.94 M → 1.98 M documents). Growth of that size cannot account for a 2.3× duration change; it was ruled out by re-running the 07-28 snapshot at batch 5 000, which took 40 min.</p>
+</section>
+
+<section aria-labelledby="chain-h">
+  <h2 id="chain-h">Reasoning chain</h2>
+  <ol class="chain">
+    <li><span>Duration was flat for a week, then more than doubled on the night of one deploy that touched only <code>INDEX_BATCH_SIZE</code>.</span></li>
+    <li><span>Two later deploys that did not touch indexing left the duration unchanged; the corpus grew 2.1 %. Neither explains a 2.3× change.</span></li>
+    <li><span>Postgres logs from 07-29 onward show <code>temporary file: size 1.4 GB</code> on every <code>INSERT … ON CONFLICT</code> batch; at batch 500 no temporary files appear. The spill is the mechanism.</span></li>
+    <li><span>Reverting the batch size on 08-06 returned the duration to 18 min the same night. Cause established by insertion and removal.</span></li>
+  </ol>
+  <p class="margin">Ruled out: corpus growth (re-run of the 07-28 snapshot), the 07-31 connection-pool change (reverted in a local run with no effect), and disk pressure (free space never dropped below 61 %).</p>
+</section>
+
+<section aria-labelledby="fal-h">
+  <h2 id="fal-h">What would falsify this</h2>
+  <p>A rebuild at batch 500 that exceeds 30 minutes on a corpus under 2.1 M documents, or a rebuild at batch 5 000 that completes under 20 minutes with <code>work_mem</code> unchanged. Neither has been observed.</p>
+</section>
+
+<section aria-labelledby="next-h">
+  <h2 id="next-h">Next actions</h2>
+  <div class="scroll"><table>
+    <caption>Actions, owners, and verification</caption>
+    <thead><tr><th scope="col">Action</th><th scope="col">Owner</th><th scope="col">Verified by</th></tr></thead>
+    <tbody>
+      <tr><td>Keep batch at 500; add a guard that refuses values above 2 000 without a <code>work_mem</code> raise</td><td>indexing on-call</td><td>config validation test</td></tr>
+      <tr><td>Alert when rebuild duration exceeds 1.5× the trailing 7-night median</td><td>observability</td><td>synthetic 30-min run trips the alert</td></tr>
+      <tr><td>Load-test batch sizes 500–4 000 against the 08-07 snapshot before any future change</td><td>indexing</td><td>results table attached to the PR</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+</main>
+<footer><div class="wrap">
+  <p><b>Provenance.</b> Durations: <code>SELECT night, duration_min, outcome FROM rebuild_runs WHERE night BETWEEN '2026-07-22' AND '2026-08-07' ORDER BY night;</code> on the metrics replica, 2026-08-07 09:12 UTC. Deploys: <code>git log --since=2026-07-22 --until=2026-08-07 -- config/indexing.toml</code> at <code>e4f5a6b</code>. Postgres logs: <code>/var/log/postgresql/postgresql-2026-07-29.log</code> through <code>-08-06.log</code>, grep <code>temporary file</code>. Local reproduction: <code>scripts/rebuild-index.sh --snapshot 2026-07-28 --batch 5000</code>, 40 min 12 s.</p>
+  <p>Markdown source of truth: <code>docs/investigations/2026-08-07-index-rebuild-timeouts.md</code>. No network, no scripts, no external assets. Petrastella design language, default tokens.</p>
+</div></footer>
+</body>
+</html>

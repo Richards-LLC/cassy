@@ -649,6 +649,19 @@ mod tests {
         .with_variant("xhigh")
     }
 
+    /// Regeneration helper for `opencode_projection.snapshot.json` (cas-1f6e):
+    /// `CAS_OPENCODE_SNAPSHOT_OUT=crates/cas-mux/src/opencode_projection.snapshot.json \
+    ///  cargo nextest run -p cas-mux --run-ignored ignored-only write_projection_snapshot`
+    /// then review the diff and name the changed prompt line in the commit.
+    #[test]
+    #[ignore = "writes the reviewed snapshot; run on purpose after a prompt change"]
+    fn write_projection_snapshot_to_env_path() {
+        let Ok(out) = std::env::var("CAS_OPENCODE_SNAPSHOT_OUT") else {
+            return;
+        };
+        std::fs::write(&out, render_opencode_config(&spec())).expect("write snapshot");
+    }
+
     #[test]
     fn projection_config_is_deterministic_and_contains_both_primary_agents() {
         let first = render_opencode_config(&spec());

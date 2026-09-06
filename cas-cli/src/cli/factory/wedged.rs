@@ -106,6 +106,163 @@ pub(crate) const CODEX_TRANSCRIPT_FRESH_WINDOW: Duration = Duration::from_secs(5
 /// bounding memory.
 pub(crate) const CRASH_SIGNATURE_TAIL_LINES: usize = 200;
 
+/// How long an unread Claude Code team permission request must remain pending
+/// before it is an operator-visible approval hang rather than a transient
+/// routing delay. The inbox is the authoritative signal because Claude can
+/// suspend before writing the corresponding `tool_use` to its transcript.
+pub(crate) const LEADER_APPROVAL_PENDING_THRESHOLD_SECS: u64 = 5 * 60;
+
+const PENDING_COMMAND_EXCERPT_CHARS: usize = 240;
+
+/// A Claude Code team permission request that is still waiting in the lead's
+/// inbox. This deliberately carries a bounded command excerpt: it is enough
+/// to identify the blocked operation without copying a potentially large or
+/// secret-bearing tool payload into every status poll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingPermission {
+    pub request_id: Option<String>,
+    pub tool_name: String,
+    pub command_excerpt: String,
+    pub age_secs: u64,
+}
+
+fn command_excerpt(command: &str) -> String {
+    let collapsed = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut excerpt: String = collapsed
+        .chars()
+        .take(PENDING_COMMAND_EXCERPT_CHARS)
+        .collect();
+    if collapsed.chars().count() > PENDING_COMMAND_EXCERPT_CHARS {
+        excerpt.push('…');
+    }
+    excerpt
+}
+
+fn claude_config_root(account_dir: Option<&str>) -> Option<PathBuf> {
+    let expand_home = |value: &str| {
+        value.strip_prefix("~/").map_or_else(
+            || PathBuf::from(value),
+            |suffix| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(suffix))
+                    .unwrap_or_else(|| PathBuf::from(value))
+            },
+        )
+    };
+    let configured = account_dir
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(expand_home)
+        .or_else(|| {
+            std::env::var_os("CLAUDE_CONFIG_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        });
+    configured.or_else(|| {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(".claude"))
+    })
+}
+
+fn pending_permission_from_inbox(
+    inbox: &serde_json::Value,
+    worker_name: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<PendingPermission> {
+    let mut newest: Option<(chrono::DateTime<chrono::Utc>, PendingPermission)> = None;
+    for entry in inbox.as_array()? {
+        if entry.get("from").and_then(serde_json::Value::as_str) != Some(worker_name)
+            || entry.get("read").and_then(serde_json::Value::as_bool) != Some(false)
+        {
+            continue;
+        }
+        let Some(text) = entry.get("text").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Ok(request) = serde_json::from_str::<serde_json::Value>(text) else {
+            continue;
+        };
+        if request.get("type").and_then(serde_json::Value::as_str) != Some("permission_request") {
+            continue;
+        }
+        let timestamp = entry
+            .get("timestamp")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc));
+        let Some(timestamp) = timestamp else {
+            continue;
+        };
+        let tool_name = request
+            .get("tool_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let command = request
+            .get("input")
+            .and_then(|input| input.get("command"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let pending = PendingPermission {
+            request_id: request
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            tool_name,
+            command_excerpt: command_excerpt(command),
+            age_secs: (now - timestamp).num_seconds().max(0) as u64,
+        };
+        if newest
+            .as_ref()
+            .is_none_or(|(newest_timestamp, _)| timestamp > *newest_timestamp)
+        {
+            newest = Some((timestamp, pending));
+        }
+    }
+    newest.map(|(_, pending)| pending)
+}
+
+/// Read Claude Code's durable team-lead inbox. This is intentionally
+/// best-effort: missing/unreadable state means the caller must fall back to
+/// transcript and process evidence, never that a permission wait is present.
+pub(crate) fn pending_permission_for_worker(
+    worker_name: &str,
+    factory_session: Option<&str>,
+    account_dir: Option<&str>,
+) -> Option<PendingPermission> {
+    let session = factory_session?.trim();
+    if session.is_empty() {
+        return None;
+    }
+    let path = claude_config_root(account_dir)?
+        .join("teams")
+        .join(session)
+        .join("inboxes")
+        .join("team-lead.json");
+    let body = std::fs::read_to_string(path).ok()?;
+    let inbox = serde_json::from_str(&body).ok()?;
+    pending_permission_from_inbox(&inbox, worker_name, chrono::Utc::now())
+}
+
+/// A pending team permission request is a hang only when the worker process
+/// remains alive and the process table proves there is no child doing the
+/// requested work. `Unavailable` is not treated as an empty process list.
+pub(crate) fn is_leader_approval_hang(
+    pid_alive: bool,
+    pending_permission: Option<&PendingPermission>,
+    background_processes: &BackgroundProcessState,
+) -> bool {
+    pid_alive
+        && pending_permission
+            .is_some_and(|pending| pending.age_secs >= LEADER_APPROVAL_PENDING_THRESHOLD_SECS)
+        && matches!(
+            background_processes,
+            BackgroundProcessState::Available(processes) if processes.is_empty()
+        )
+}
+
 /// Evidence collected by [`classify_worker`], surfaced verbatim in
 /// `cas factory is-wedged` output so a supervisor can audit the decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +290,9 @@ pub(crate) struct WorkerEvidence {
     /// backgrounded builds continue after the harness reports no in-flight
     /// tool call (cas-058e).
     pub background_processes: BackgroundProcessState,
+    /// Unread Claude team-lead permission request, if one was found for this
+    /// worker. This signal is independent of transcript `tool_use` records.
+    pub pending_permission: Option<PendingPermission>,
 }
 
 /// A descendant process that is doing worker-owned work in the background.
@@ -177,6 +337,10 @@ pub(crate) enum WorkerLivenessState {
     /// PID alive, transcript fresh, crash signature matched. Worker is in
     /// the Bun/React-Ink wedge — SIGKILL + respawn is the recovery.
     Wedged,
+    /// PID alive, no child process is doing the work, and Claude's team-lead
+    /// inbox has held an unread permission request past the operator grace
+    /// window. The request may not have a transcript `tool_use` record at all.
+    ApprovalHang,
     /// PID alive, transcript stale (no writes in
     /// [`TRANSCRIPT_FRESH_WINDOW`]). Likely scheduler-starved or hung on a
     /// tool call. Often resolves with patience; not automatically fatal.
@@ -204,6 +368,7 @@ impl WorkerLivenessState {
         match self {
             WorkerLivenessState::Alive => 0,
             WorkerLivenessState::Wedged => 1,
+            WorkerLivenessState::ApprovalHang => 5,
             WorkerLivenessState::Starved => 2,
             WorkerLivenessState::Dead => 3,
             WorkerLivenessState::Unverified => 4,
@@ -214,6 +379,7 @@ impl WorkerLivenessState {
         match self {
             WorkerLivenessState::Alive => "alive",
             WorkerLivenessState::Wedged => "wedged",
+            WorkerLivenessState::ApprovalHang => "approval-hang",
             WorkerLivenessState::Starved => "starved",
             WorkerLivenessState::Dead => "dead",
             WorkerLivenessState::Unverified => "unverified",
@@ -720,6 +886,38 @@ where
     G: FnOnce(&Path) -> Option<Duration>,
     H: FnOnce(u32) -> bool,
 {
+    classify_worker_with_pending(
+        pid,
+        transcript_path,
+        clone_path,
+        session_id,
+        cli,
+        pid_alive_probe,
+        worktree_age_probe,
+        process_busy_probe,
+        None,
+    )
+}
+
+/// Classify a worker with an optional Claude team permission request. The
+/// ordinary classifier remains available to pure callers that do not have a
+/// worker identity from which to resolve the team inbox.
+pub(crate) fn classify_worker_with_pending<F, G, H>(
+    pid: Option<u32>,
+    transcript_path: Option<&Path>,
+    clone_path: Option<&Path>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+    pid_alive_probe: F,
+    worktree_age_probe: G,
+    process_busy_probe: H,
+    pending_permission: Option<PendingPermission>,
+) -> (WorkerLivenessState, WorkerEvidence)
+where
+    F: FnOnce(u32) -> bool,
+    G: FnOnce(&Path) -> Option<Duration>,
+    H: FnOnce(u32) -> bool,
+{
     let pid_alive = pid.map(pid_alive_probe).unwrap_or(false);
     let process_busy = pid
         .filter(|_| pid_alive)
@@ -738,7 +936,14 @@ where
         .filter(|_| pid_alive)
         .map(background_processes_for)
         .unwrap_or(BackgroundProcessState::Unavailable);
-    let state = if background_processes.is_active() {
+    let state = if is_leader_approval_hang(
+        pid_alive,
+        pending_permission.as_ref(),
+        &background_processes,
+    ) && !in_flight
+    {
+        WorkerLivenessState::ApprovalHang
+    } else if background_processes.is_active() {
         classify_from_evidence_with_background(
             pid_alive,
             age_opt,
@@ -770,6 +975,7 @@ where
         session_id: session_id.to_string(),
         in_flight_tool_call: in_flight,
         background_processes,
+        pending_permission,
     };
     (state, evidence)
 }
@@ -895,6 +1101,7 @@ pub(crate) fn resolve_worker(cas_root: &Path, worker_name: &str) -> Result<Resol
         cli,
         transcript_path,
         account_dir,
+        factory_session: agent.factory_session.clone(),
     })
 }
 
@@ -913,6 +1120,10 @@ pub(crate) struct ResolvedWorker {
     pub cli: cas_mux::SupervisorCli,
     pub transcript_path: Option<PathBuf>,
     pub account_dir: Option<String>,
+    /// Native Claude Agent Teams session containing the lead inbox. Kept
+    /// alongside the worker identity so `is-wedged` can inspect pending
+    /// permission state without guessing from the current process env.
+    pub factory_session: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -934,7 +1145,16 @@ pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: boo
         // with codex binary preferred over cas-serve descendants).
         let resolved_pid = find_worker_pid(&RealProcessTable, &w.name);
         let pid = pick_kill_pid(w.pid, resolved_pid);
-        let (fallback, mut evidence) = classify_worker(
+        let env_factory_session = std::env::var("CAS_FACTORY_SESSION")
+            .ok()
+            .filter(|session| !session.trim().is_empty());
+        let factory_session = w
+            .factory_session
+            .as_deref()
+            .or(env_factory_session.as_deref());
+        let pending_permission =
+            pending_permission_for_worker(&w.name, factory_session, w.account_dir.as_deref());
+        let (fallback, mut evidence) = classify_worker_with_pending(
             pid,
             if w.cli == cas_mux::SupervisorCli::OpenCode {
                 None
@@ -947,6 +1167,7 @@ pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: boo
             crate::mcp::daemon::pid_alive,
             worktree_recent_edit_age,
             process_cpu_busy,
+            pending_permission,
         );
         let opencode_observation = if w.cli == cas_mux::SupervisorCli::OpenCode {
             opencode_liveness::observe(
@@ -1403,18 +1624,36 @@ fn process_command_name(pid: u32) -> String {
         .unwrap_or_else(|| "<command unavailable>".to_string())
 }
 
-/// `cas serve` is a persistent harness sidecar inherited by every worker;
-/// treating it as a job would suppress stall detection forever. It is not a
-/// user background command, unlike the cargo/rustc descendants this feature
-/// reports.
+/// Persistent MCP/harness sidecars are inherited by every worker; treating
+/// them as jobs would suppress stall detection forever. They are not user
+/// background commands, unlike the cargo/rustc descendants this feature
+/// reports. Keep this allowlist tied to their command-line identity rather
+/// than filtering every `node`/`npm` process a worker might intentionally run.
 #[cfg(target_os = "linux")]
 fn is_cas_sidecar(command: &str, pid: u32) -> bool {
-    if command != "cas" && !command.starts_with("cas-") {
+    let Some(raw) = std::fs::read(format!("/proc/{pid}/cmdline")).ok() else {
         return false;
+    };
+    is_known_sidecar_commandline(command, &raw)
+}
+
+#[cfg(target_os = "linux")]
+fn is_known_sidecar_commandline(command: &str, raw: &[u8]) -> bool {
+    if (command == "cas" || command.starts_with("cas-"))
+        && raw.split(|byte| *byte == 0).any(|part| part == b"serve")
+    {
+        return true;
     }
-    std::fs::read(format!("/proc/{pid}/cmdline"))
-        .ok()
-        .is_some_and(|raw| raw.split(|b| *b == 0).any(|part| part == b"serve"))
+    let commandline = String::from_utf8_lossy(raw).to_ascii_lowercase();
+    [
+        "@playwright/mcp",
+        "playwright-mcp",
+        ".playwright-mcp-profile",
+        "@neondatabase/mcp-server-neon",
+        "mcp-server-neon",
+    ]
+    .iter()
+    .any(|marker| commandline.contains(marker))
 }
 
 /// Sum of user+system jiffies from `/proc/<pid>/stat` (fields 14 and 15
@@ -1872,6 +2111,24 @@ fn format_state_human(state: &WorkerLivenessState, ev: &WorkerEvidence) -> Strin
             s.push_str("  background-process state unavailable\n");
         }
     }
+    if let Some(pending) = &ev.pending_permission {
+        let request = pending
+            .request_id
+            .as_deref()
+            .map(|id| format!(" request {id}"))
+            .unwrap_or_default();
+        s.push_str(&format!(
+            "  pending permission: {}{} ({}s; command: {})\n",
+            pending.tool_name, request, pending.age_secs, pending.command_excerpt
+        ));
+        if matches!(state, WorkerLivenessState::ApprovalHang) {
+            s.push_str(
+                "  awaiting leader approval: no active child process; inspect or resolve the team inbox request\n",
+            );
+        } else {
+            s.push_str("  awaiting leader approval: request is still pending\n");
+        }
+    }
     s
 }
 
@@ -1896,6 +2153,19 @@ fn format_state_json(state: &WorkerLivenessState, ev: &WorkerEvidence) -> String
         "worktree_edit_age_secs": ev.worktree_edit_age_secs,
         "session_id": ev.session_id,
         "in_flight_tool_call": ev.in_flight_tool_call,
+        "approval_status": ev.pending_permission.as_ref().map(|_| {
+            if matches!(state, WorkerLivenessState::ApprovalHang) {
+                "awaiting leader approval"
+            } else {
+                "leader approval pending"
+            }
+        }),
+        "pending_permission": ev.pending_permission.as_ref().map(|pending| serde_json::json!({
+            "request_id": pending.request_id,
+            "tool_name": pending.tool_name,
+            "command_excerpt": pending.command_excerpt,
+            "age_secs": pending.age_secs,
+        })),
         "background_processes": match &ev.background_processes {
             BackgroundProcessState::Available(processes) => serde_json::Value::Array(processes.iter().map(|process| serde_json::json!({
                 "command": process.command,
@@ -2289,9 +2559,136 @@ mod tests {
         // cas-4513 AC: supervisor bash scripts branch on exit code.
         assert_eq!(WorkerLivenessState::Alive.exit_code(), 0);
         assert_eq!(WorkerLivenessState::Wedged.exit_code(), 1);
+        assert_eq!(WorkerLivenessState::ApprovalHang.exit_code(), 5);
         assert_eq!(WorkerLivenessState::Starved.exit_code(), 2);
         assert_eq!(WorkerLivenessState::Dead.exit_code(), 3);
         assert_eq!(WorkerLivenessState::Unverified.exit_code(), 4);
+    }
+
+    #[test]
+    fn pending_permission_parser_uses_newest_unread_request_and_excerpt() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T18:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let inbox = serde_json::json!([
+            {
+                "from": "worker",
+                "read": false,
+                "timestamp": "2026-09-06T17:50:00Z",
+                "text": serde_json::json!({
+                    "type": "permission_request",
+                    "request_id": "old",
+                    "tool_name": "Bash",
+                    "input": {"command": "echo old"}
+                }).to_string()
+            },
+            {
+                "from": "worker",
+                "read": false,
+                "timestamp": "2026-09-06T17:54:00Z",
+                "text": serde_json::json!({
+                    "type": "permission_request",
+                    "request_id": "new",
+                    "tool_name": "Bash",
+                    "input": {"command": "python3 - <<'PY'\nrewrite target\nPY"}
+                }).to_string()
+            },
+            {
+                "from": "other-worker",
+                "read": false,
+                "timestamp": "2026-09-06T17:59:00Z",
+                "text": serde_json::json!({
+                    "type": "permission_request",
+                    "request_id": "other",
+                    "tool_name": "Bash",
+                    "input": {"command": "echo other"}
+                }).to_string()
+            },
+            {
+                "from": "worker",
+                "read": true,
+                "timestamp": "2026-09-06T17:59:30Z",
+                "text": serde_json::json!({"type": "permission_request"}).to_string()
+            }
+        ]);
+        let pending = pending_permission_from_inbox(&inbox, "worker", now)
+            .expect("unread worker permission request");
+        assert_eq!(pending.request_id.as_deref(), Some("new"));
+        assert_eq!(pending.tool_name, "Bash");
+        assert_eq!(pending.age_secs, 360);
+        assert_eq!(
+            pending.command_excerpt,
+            "python3 - <<'PY' rewrite target PY"
+        );
+    }
+
+    #[test]
+    fn pending_permission_requires_live_worker_and_empty_process_tree() {
+        let pending = PendingPermission {
+            request_id: Some("perm".to_string()),
+            tool_name: "Bash".to_string(),
+            command_excerpt: "rm -rf $B/$h/$sk".to_string(),
+            age_secs: LEADER_APPROVAL_PENDING_THRESHOLD_SECS,
+        };
+        assert!(is_leader_approval_hang(
+            true,
+            Some(&pending),
+            &BackgroundProcessState::Available(vec![])
+        ));
+        assert!(!is_leader_approval_hang(
+            false,
+            Some(&pending),
+            &BackgroundProcessState::Available(vec![])
+        ));
+        assert!(!is_leader_approval_hang(
+            true,
+            Some(&pending),
+            &BackgroundProcessState::Available(vec![BackgroundProcess {
+                command: "python3".to_string(),
+                age_secs: 1,
+            }])
+        ));
+        assert!(!is_leader_approval_hang(
+            true,
+            Some(&pending),
+            &BackgroundProcessState::Unavailable
+        ));
+    }
+
+    #[test]
+    fn classification_surfaces_pending_permission_without_transcript_tool_use() {
+        let pending = PendingPermission {
+            request_id: Some("perm".to_string()),
+            tool_name: "Bash".to_string(),
+            command_excerpt: "python3 -<<'PY' rewrite.html PY".to_string(),
+            age_secs: LEADER_APPROVAL_PENDING_THRESHOLD_SECS,
+        };
+        let (state, evidence) = classify_worker_with_pending(
+            Some(std::process::id()),
+            None,
+            None,
+            "session",
+            cas_mux::SupervisorCli::Claude,
+            |_| true,
+            |_| None,
+            |_| false,
+            Some(pending.clone()),
+        );
+        assert_eq!(state, WorkerLivenessState::ApprovalHang);
+        assert_eq!(evidence.pending_permission, Some(pending));
+        assert!(!evidence.in_flight_tool_call);
+        let human = format_state_human(&state, &evidence);
+        assert!(human.contains("awaiting leader approval"));
+        assert!(human.contains("python3 -<<'PY' rewrite.html PY"));
+        let json: serde_json::Value =
+            serde_json::from_str(&format_state_json(&state, &evidence)).expect("valid JSON");
+        assert_eq!(json["approval_status"], "awaiting leader approval");
+        assert_eq!(json["pending_permission"]["tool_name"], "Bash");
+        assert!(
+            json["pending_permission"]["command_excerpt"]
+                .as_str()
+                .is_some_and(|command| command.contains("rewrite.html"))
+        );
     }
 
     #[test]
@@ -2636,6 +3033,7 @@ mod tests {
             session_id: "ses-xyz".to_string(),
             in_flight_tool_call: false,
             background_processes: BackgroundProcessState::Available(vec![]),
+            pending_permission: None,
         };
         let out = format_state_human(&WorkerLivenessState::Wedged, &ev);
         assert!(out.contains("state: wedged"));
@@ -2666,6 +3064,7 @@ mod tests {
             session_id: "ses-abc".to_string(),
             in_flight_tool_call: false,
             background_processes: BackgroundProcessState::Unavailable,
+            pending_permission: None,
         };
         let out = format_state_human(&WorkerLivenessState::Dead, &ev);
         assert!(out.contains("pid: <none>"));
@@ -2687,6 +3086,7 @@ mod tests {
             session_id: "ses\"id".to_string(),
             in_flight_tool_call: false,
             background_processes: BackgroundProcessState::Available(vec![]),
+            pending_permission: None,
         };
         let out = format_state_json(&WorkerLivenessState::Alive, &ev);
         // Should be parseable as JSON.
@@ -2976,6 +3376,21 @@ mod tests {
         assert!(BackgroundProcessState::Available(processes).is_active());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn known_mcp_sidecars_do_not_count_as_worker_background_jobs() {
+        assert!(is_known_sidecar_commandline(
+            "npm",
+            b"npm\0exec\0@playwright/mcp@0.0.70\0"
+        ));
+        assert!(is_known_sidecar_commandline(
+            "node",
+            b"node\0.../@playwright/mcp/cli.js\0"
+        ));
+        assert!(is_known_sidecar_commandline("cas", b"cas\0serve\0"));
+        assert!(!is_known_sidecar_commandline("node", b"node\0server.js\0"));
+    }
+
     #[test]
     fn format_state_human_names_background_processes_and_unavailable_state() {
         let active = WorkerEvidence {
@@ -2991,6 +3406,7 @@ mod tests {
                 command: "cargo".to_string(),
                 age_secs: 1_832,
             }]),
+            pending_permission: None,
         };
         assert!(
             format_state_human(&WorkerLivenessState::Alive, &active)
@@ -3069,6 +3485,7 @@ mod tests {
             session_id: "ses\nfoo\\bar".to_string(),
             in_flight_tool_call: false,
             background_processes: BackgroundProcessState::Available(vec![]),
+            pending_permission: None,
         };
         let out = format_state_json(&WorkerLivenessState::Alive, &ev);
         // Parse round-trip. If escaping is wrong, this panics with a clear

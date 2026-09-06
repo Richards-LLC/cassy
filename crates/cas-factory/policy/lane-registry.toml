@@ -60,7 +60,16 @@ default_effort = "medium"
 # Explicit Astra requests retain the existing Cassy effort vocabulary.
 allowed_efforts = ["minimal", "low", "medium", "high", "xhigh"]
 status = "active"
-reason = "Not routed for supervisor or taste: observed 2026-09-05 to hold finished workers and stop driving epics; explicit-request only."
+reason = "Heavy route; excluded from supervisor and taste after the observed 2026-09-05 stall holding finished workers and stopping epic drive."
+required_capability = "codex-account"
+
+[recipes.codex_astra_high]
+harness = "codex"
+provider = "openai"
+model = "gpt-6-astra"
+default_effort = "high"
+allowed_efforts = ["high", "xhigh"]
+status = "active"
 required_capability = "codex-account"
 
 [recipes.codex_sol]
@@ -100,19 +109,18 @@ candidates = ["codex_luna", "claude_opus"]
 
 [lanes.taste]
 candidates = ["claude_fable"]
-# Fable/medium is the taste route; unavailable Fable fails closed.
-# Keep the only taste fallback as an explicit, reviewable registry edge while
-# disabling it in the shipped policy. A host may remove this guard only when
-# its own routing policy permits taste to degrade to Luna.
+# Fable/medium is the taste route; an unavailable Fable falls back loudly to
+# Claude Opus 5/high so the operator can see the degraded route.
 fallbacks = ["claude_opus"]
-no_fallback = true
+no_fallback = false
 
 [lanes.supervisor]
 candidates = ["claude_fable"]
 # Claude Fable is the supervisor default; an unavailable Claude account must
-# fail closed rather than silently put the coordinator on another harness.
+# fall back loudly to Claude Opus 5/high rather than silently failing closed.
 fallbacks = ["claude_opus"]
-no_fallback = true
+no_fallback = false
 
 [lanes.heavy]
-candidates = ["codex_sol", "codex_luna"]
+candidates = ["codex_astra_high"]
+fallbacks = ["codex_sol"]

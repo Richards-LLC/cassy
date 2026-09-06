@@ -225,5 +225,12 @@ pub use access::{
     save_global_config, set_telemetry_consent,
 };
 
+pub(crate) use access::io::{atomic_replace_project_config, lock_project_config};
+
+#[cfg(test)]
+pub(crate) use access::io::{
+    atomic_replace_project_config_via, atomic_replace_project_config_via_with_created_hook,
+};
+
 #[cfg(test)]
 mod mod_tests;

@@ -1,0 +1,9 @@
+{
+  "entries": [
+    {
+      "type": "contrast",
+      "selector": "#intentional-example",
+      "reason": "Example entry: replace with a reviewed, intentional exception or remove it."
+    }
+  ]
+}

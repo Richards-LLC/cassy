@@ -67,7 +67,7 @@ Open the focused file in `cas-supervisor/references/`: preflight, intake, planni
 
 ## Cross-team routing
 
-Route every bug through the issue-repository registry: `issues.repo` for the current project, `issues.components.cassy` for Cassy runtime/hooks/MCP, `issues.components.mecha_cassy` for the Slack hub, and `issues.components.cloud` for Cloud sync/relay/pairing; inspect with `cas config get issues.repo` and the three `issues.components.*` keys. A bug hit during operation gets a ticket in the matching repo before you move on; `filing-cas-bugs` has the filing and receipt policy.
+Route every bug through the issue-repository registry: `issues.repo` for the current project, `issues.components.cassy` for Cassy runtime/hooks/MCP, `issues.components.mecha_cassy` for the Slack hub, and `issues.components.cloud` for Cloud sync/relay/pairing; inspect with `cas config get issues.repo` and the three `issues.components.*` keys. If you hit a bug during operation, file a ticket in the matching repo before moving on; `filing-cas-bugs` has the filing and receipt policy.
 
 ## Context budgeting
 

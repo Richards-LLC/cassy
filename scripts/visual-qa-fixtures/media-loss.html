@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <style>
+      body { margin: 0; color: #172033; background: #fff; font: 16px/1.4 Arial, sans-serif; }
+      @media print { #print-only-screen { display: none; } }
+    </style>
+  </head>
+  <body>
+    <main id="dynamic-content"></main>
+    <p id="print-only-screen">This long review conclusion must remain available on paper and with JavaScript disabled.</p>
+    <script>document.querySelector('#dynamic-content').textContent = 'This dynamically rendered conclusion is intentionally absent without JavaScript.';</script>
+  </body>
+</html>

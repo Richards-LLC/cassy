@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #111; background: #fff; }
+      .contrast { color: #fff; background: #fff; }
+      .clipped { width: 180px; height: 32px; overflow: hidden; border: 2px solid #111; }
+      .clipped p { margin: 0; height: 120px; }
+      .overlap { position: relative; height: 44px; }
+      .overlap span { position: absolute; inset: 0 auto auto 0; }
+      .overlap span + span { left: 12px; }
+      .invisible { opacity: 0; }
+      .truncated { width: 120px; height: 22px; overflow: hidden; white-space: nowrap; }
+      .outside { position: absolute; left: 100vw; }
+    </style>
+  </head>
+  <body>
+    <p id="white-on-white" class="contrast">White on white text</p>
+    <div id="clipped-card" class="clipped"><p>Content extends below the clipped card.</p></div>
+    <div id="overlap" class="overlap"><span>First overlapping label</span><span>Second overlapping label</span></div>
+    <p id="invisible" class="invisible">Invisible text should be reported.</p>
+    <div id="truncated" class="truncated">This fixed container truncates without an ellipsis.</div>
+    <p id="outside" class="outside">Outside viewport</p>
+  </body>
+</html>

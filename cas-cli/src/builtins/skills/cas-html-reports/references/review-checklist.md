@@ -1,6 +1,23 @@
 # Pre-commit review checklist
 
-Run this before committing the pair. Anything unchecked is a defect, not a nitpick. Eleven dimensions.
+Run this before committing the trio (markdown, concept brief, HTML). Anything unchecked is a defect,
+not a nitpick. Twelve dimensions; the first one gates the rest.
+
+## 0. Concept brief and critique
+
+- [ ] `<basename>.brief.md` exists beside the markdown and names the single idea, the hero form with
+      its reason, the emotional register, one distinctive move, and what was omitted.
+- [ ] The hero is a figure that shows the argument, visible above the fold at 1280×800 and at 390×844.
+      A paragraph, a KPI row, or a table of everything is not a hero.
+- [ ] The `cas-ui-craft` critique table is appended to the brief under `## Critique` with evidence per
+      score: distinctiveness, fit to argument, hierarchy, craft, accessibility, each 1–5. The first
+      three are 4 or above and no dimension is 0.
+- [ ] Four headless renders exist — 1280 and 390 px, light and dark — and were looked at: no text pair
+      under 4.5:1 in either scheme, no clipped or overflowing text, no rule or neighbour crossing a
+      glyph or mark, no page-level horizontal scroll at 390 px. `scripts/visual-qa.mjs` PASS where the
+      project has it.
+- [ ] The tokens in `:root` are the project's `DESIGN.md` or `design-tokens.json`, by name; the brief
+      says which.
 
 ## 1. Content fidelity
 
@@ -11,8 +28,8 @@ Run this before committing the pair. Anything unchecked is a defect, not a nitpi
 
 ## 2. Information architecture
 
-- [ ] The selected type's lead is the first thing on the page (conclusion for evaluative reports;
-      capability or system takeaway for explanatory reports).
+- [ ] The hero figure is the first thing on the page, followed by the selected type's lead (conclusion
+      for evaluative reports; capability or system takeaway for explanatory reports).
 - [ ] The required sections for this report type are present, in the prescribed order.
 - [ ] An overview table appears before the detail when the selected type requires one.
 - [ ] The depth order matches the audience (executive: detail relegated, methodology last).
@@ -90,7 +107,18 @@ Run this before committing the pair. Anything unchecked is a defect, not a nitpi
 - [ ] For client-facing reports: no internal ticket IDs, team names, tool names, or process narration
       anywhere in the HTML.
 
+## 12. Automated visual QA receipt
+
+- [ ] Run `node scripts/visual-qa.mjs --strict` against the
+      report in light and dark at 1280px and 390px; receipts live under
+      `artifacts_root/<task-id>/visual-qa/` (`visual-qa.md`, JSON, and screenshots). If the
+      production report is committed, commit only its small `visual-qa.md` beside it, never JSON
+      or screenshots.
+- [ ] The receipt is `PASS`; every allowlisted exception appears in the allowlist file with a
+      selector, finding type, and specific reason.
+
 ## The two-minute version
 
-If you check nothing else: **conclusion first, JS off and nothing is lost, no external requests, print
-preview is clean, every number has a source, and the markdown says exactly what the HTML says.**
+If you check nothing else: **the hero shows the argument, the brief is committed and scores 4+, JS off
+and nothing is lost, no external requests, print preview is clean, every number has a source, and the
+markdown says exactly what the HTML says.**

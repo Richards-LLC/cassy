@@ -107,6 +107,16 @@ not a nitpick. Twelve dimensions; the first one gates the rest.
 - [ ] For client-facing reports: no internal ticket IDs, team names, tool names, or process narration
       anywhere in the HTML.
 
+## 12. Automated visual QA receipt
+
+- [ ] Run `node scripts/visual-qa.mjs --strict` against the
+      report in light and dark at 1280px and 390px; receipts live under
+      `artifacts_root/<task-id>/visual-qa/` (`visual-qa.md`, JSON, and screenshots). If the
+      production report is committed, commit only its small `visual-qa.md` beside it, never JSON
+      or screenshots.
+- [ ] The receipt is `PASS`; every allowlisted exception appears in the allowlist file with a
+      selector, finding type, and specific reason.
+
 ## The two-minute version
 
 If you check nothing else: **the hero shows the argument, the brief is committed and scores 4+, JS off

@@ -25,6 +25,12 @@ clipping, overlap, and phone-width overflow, and prints PASS or the failing node
 PASS line into the critique table's craft evidence. Until the script exists in the project,
 perform the same checks by hand on the four renders in step 1 and say so in the evidence.
 
+For a mergeable public surface, run `node scripts/visual-qa.mjs <artifact> --strict` and require a
+PASS receipt under `artifacts_root/<task-id>/visual-qa/` (`visual-qa.md`, JSON, and screenshots); if
+the production report is committed, commit only its small `visual-qa.md` beside it, never JSON or
+screenshots; review
+every allowlist entry for its finding type, selector, and specific reason.
+
 ## Dimensions and anchors
 
 | Dimension | 1 | 3 | 5 |

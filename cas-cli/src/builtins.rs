@@ -1381,6 +1381,15 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         note: "",
     },
     RequiredCapability {
+        // cas-57dc: API/DX taste and the public-surface critique rubric are
+        // project-agnostic guidance shared by every harness.
+        id: "cas-codebase-design",
+        claude: Some("skills/cas-codebase-design"),
+        codex: Some("skills/cas-codebase-design"),
+        grok: Some("skills/cas-codebase-design"),
+        note: "",
+    },
+    RequiredCapability {
         // GH #65: release-notes rubric + Slack announcement workflow.
         id: "release-notes",
         claude: Some("skills/release-notes"),

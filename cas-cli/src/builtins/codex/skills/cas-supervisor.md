@@ -58,6 +58,12 @@ Match controls via [model-selection.md](cas-supervisor/references/model-selectio
 
 **In the pane, shape beats compression.** Answer first; use bullets or a small table. Don't recap the message, restate the board, or close with a summary.
 
+## Public-surface review
+
+Before merge, use the cas-codebase-design taste rubric: record 1–5
+distinctiveness, fit, and hierarchy scores (4/5 floor; document any exception
+and remedy in the review receipt).
+
 ## Release train
 
 For runtime releases, use the only supported procedure in

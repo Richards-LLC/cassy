@@ -13,11 +13,15 @@ impl FactoryApp {
     /// default branch. Either way, the base is fetched and resolved
     /// against its remote tip before branching — a stale local base can
     /// never silently seed a new epic branch (BUG-epic-branch-stale-local-base).
-    pub fn create_epic_branch(&self, epic_title: &str) -> anyhow::Result<String> {
+    pub fn create_epic_branch(
+        &self,
+        epic_title: &str,
+        epic_id: &str,
+    ) -> anyhow::Result<String> {
         use crate::config::Config;
         use crate::worktree::GitOperations;
 
-        let branch_name = epic_branch_name(epic_title);
+        let branch_name = epic_branch_name(epic_title, epic_id);
         let git_ops = GitOperations::new(self.project_dir.clone());
         let trunk = Config::configured_epic_base_branch(&self.project_dir)
             .unwrap_or_else(|| git_ops.detect_default_branch());

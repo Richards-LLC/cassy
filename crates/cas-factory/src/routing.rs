@@ -651,6 +651,7 @@ pub fn resolve_lane_from_registry(
     let primary_recipe_id = candidates.first().cloned();
     let now_ms = CapabilitySnapshot::now_ms();
     let mut skipped = Vec::new();
+    let mut primary_unavailable_reason = None;
 
     for (index, recipe_id) in candidates.into_iter().enumerate() {
         let recipe = &registry.recipes[&recipe_id];
@@ -661,6 +662,9 @@ pub fn resolve_lane_from_registry(
                 .unwrap_or("recipe is suspended")
                 .trim();
             skipped.push(format!("recipe {recipe_id:?} is suspended ({reason})"));
+            if index == 0 {
+                primary_unavailable_reason = Some(reason.to_string());
+            }
             if lane_definition.no_fallback {
                 break;
             }
@@ -680,9 +684,11 @@ pub fn resolve_lane_from_registry(
                     Vec::new()
                 } else {
                     vec![format!(
-                        "lane={lane_name:?} selected fallback recipe {recipe_id:?} instead of primary recipe {:?}: {}",
+                        "fallback: {recipe_id} (primary {} unavailable: {})",
                         primary_recipe_id.as_deref().unwrap_or("unknown"),
-                        skipped.join("; ")
+                        primary_unavailable_reason
+                            .as_deref()
+                            .unwrap_or("capability is unavailable")
                     )]
                 };
                 return Ok(routing_decision(lane_name, recipe_id, recipe, warning));
@@ -693,6 +699,9 @@ pub fn resolve_lane_from_registry(
                     .and_then(|status| status.reason.as_deref())
                     .unwrap_or("capability is unavailable");
                 skipped.push(format!("recipe {recipe_id:?} is unavailable ({reason})"));
+                if index == 0 {
+                    primary_unavailable_reason = Some(reason.to_string());
+                }
                 if lane_definition.no_fallback {
                     break;
                 }
@@ -1033,6 +1042,16 @@ pub fn render_route_table() -> Result<String, RoutingError> {
         flattened_candidates(registry, lane_name, &mut lane_recipes);
         assigned_recipes.extend(lane_recipes);
         let recipe = &registry.recipes[&decision.recipe_id];
+        let fallback = if registry.lanes[lane_name].no_fallback {
+            "disabled".to_string()
+        } else if !registry.lanes[lane_name].fallbacks.is_empty() {
+            format!(
+                "fallback: {}",
+                registry.lanes[lane_name].fallbacks.join(", ")
+            )
+        } else {
+            "ordered candidates".to_string()
+        };
         output.push_str(&format!(
             "| `{lane_name}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |  |\n",
             decision.recipe_id,
@@ -1041,11 +1060,7 @@ pub fn render_route_table() -> Result<String, RoutingError> {
             recipe.model,
             recipe.default_effort,
             recipe_status_name(recipe.status),
-            if registry.lanes[lane_name].no_fallback {
-                "disabled"
-            } else {
-                "ordered candidates"
-            },
+            fallback,
         ));
     }
 
@@ -1065,7 +1080,7 @@ pub fn render_route_table() -> Result<String, RoutingError> {
     }
 
     output.push_str(
-        "\nLane request mode: call `coordination spawn_workers` with `lane=<lane>`. The registry resolves the ordered candidates; any non-primary selection is reported as a warning with the selected recipe and reason. Lanes marked `disabled` fail closed when their primary is unavailable.\n",
+        "\nLane request mode: call `coordination spawn_workers` with `lane=<lane>`. The registry resolves the ordered candidates; any fallback selection is reported loudly as `fallback: <recipe> (primary <recipe> unavailable: <reason>)` in the spawn receipt and launch summary. Lanes marked `disabled` fail closed when their primary is unavailable.\n",
     );
 
     output.push_str(GENERATED_ROUTE_TABLE_END);
@@ -1087,8 +1102,16 @@ pub fn render_spawn_recipes(tool_prefix: &str) -> Result<String, RoutingError> {
     for lane_name in ordered_lane_names(registry) {
         let decision = resolve_lane(lane_name, &CapabilitySnapshot::default())?;
         let recipe = &registry.recipes[&decision.recipe_id];
+        let fallback_note = if registry.lanes[lane_name].fallbacks.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " (fallback: {})",
+                registry.lanes[lane_name].fallbacks.join(", ")
+            )
+        };
         output.push_str(&format!(
-            "# {lane_name} — recipe {}\n{tool_prefix}coordination action=spawn_workers count=1 isolate=true cli={} model={} effort={}\n\n",
+            "# {lane_name} — recipe {}{fallback_note}\n{tool_prefix}coordination action=spawn_workers count=1 isolate=true cli={} model={} effort={}\n\n",
             decision.recipe_id,
             recipe.harness.backend().name(),
             recipe.model,

@@ -780,10 +780,10 @@ pub enum FactoryCommands {
         inject_slo_failure: Option<String>,
     },
 
-    /// Classify a worker as alive / wedged / starved / dead (cas-4513).
+    /// Classify a worker as alive / wedged / approval-hung / starved / dead (cas-4513).
     ///
     /// Exit codes (differentiated so supervisor scripts can branch without
-    /// parsing stdout): 0=alive, 1=wedged, 2=starved, 3=dead.
+    /// parsing stdout): 0=alive, 1=wedged, 2=starved, 3=dead, 5=approval-hung.
     IsWedged {
         /// Worker name (as shown in `cas factory agents`)
         worker: String,

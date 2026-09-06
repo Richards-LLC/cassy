@@ -10718,6 +10718,50 @@ mod tests {
     }
 
     #[test]
+    fn lane_spawn_specs_name_fallback_in_the_spawn_receipt_warning() {
+        let registry = cas_factory::embedded_registry().unwrap();
+        let now = cas_factory::CapabilitySnapshot::now_ms();
+        let mut snapshot = cas_factory::CapabilitySnapshot::default();
+        snapshot.record(
+            cas_factory::recipe_route_identity(
+                &registry.recipes["claude_fable"],
+                "default",
+            ),
+            cas_factory::CapabilityEvidence::new(
+                cas_factory::CapabilityAvailability::Unavailable,
+                now,
+            )
+            .with_reason("Claude Fable account unavailable"),
+        );
+        snapshot.record(
+            cas_factory::recipe_route_identity(
+                &registry.recipes["claude_opus"],
+                "default",
+            ),
+            cas_factory::CapabilityEvidence::new(
+                cas_factory::CapabilityAvailability::Available,
+                now,
+            ),
+        );
+
+        let (specs, recipe, warnings) = build_lane_spawn_specs(
+            1,
+            "taste",
+            None,
+            None,
+            &snapshot,
+        )
+        .expect("taste fallback should resolve");
+        assert_eq!(recipe, "claude_opus");
+        assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
+        assert_eq!(
+            warnings,
+            ["fallback: claude_opus (primary claude_fable unavailable: Claude Fable account unavailable)"],
+        );
+    }
+
+    #[test]
     fn lane_spawn_specs_reject_explicit_worker_recipe_fields() {
         let snapshot = cas_factory::CapabilitySnapshot::default();
         let error = build_lane_spawn_specs(

@@ -3006,6 +3006,32 @@ pub fn preview_all_builtins_for_harness(
     }
 }
 
+/// Preview the stack-aware managed files used by a project sync.
+pub fn preview_all_builtins_for_project(
+    harness: SupervisorCli,
+    project_root: &Path,
+) -> std::io::Result<Vec<BuiltinChange>> {
+    let target_dir = match harness {
+        SupervisorCli::Claude => project_root.join(".claude"),
+        SupervisorCli::Codex => project_root.join(".codex"),
+        SupervisorCli::Grok => project_root.join(".grok"),
+        SupervisorCli::OpenCode => return Ok(Vec::new()),
+    };
+    let (agents, skills): (&[BuiltinFile], Vec<BuiltinFile>) = match harness {
+        SupervisorCli::Claude => (BUILTIN_AGENTS, filtered_project_skills(BUILTIN_SKILLS, project_root)),
+        SupervisorCli::Codex => (CODEX_BUILTIN_AGENTS, filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root)),
+        SupervisorCli::Grok => (GROK_BUILTIN_AGENTS, filtered_project_skills(GROK_BUILTIN_SKILLS, project_root)),
+        SupervisorCli::OpenCode => unreachable!(),
+    };
+    let mut changes = Vec::new();
+    for builtin in agents.iter().chain(skills.iter()) {
+        if let Some((old, new)) = preview_builtin(builtin, &target_dir)? {
+            changes.push(BuiltinChange { path: builtin.path.to_string(), old_content: old.clone(), new_content: new, is_new: old.is_empty() });
+        }
+    }
+    Ok(changes)
+}
+
 // =============================================================================
 // Factory Guidance Functions (for HooksConfig)
 // =============================================================================

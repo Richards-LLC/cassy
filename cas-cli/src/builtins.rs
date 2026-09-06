@@ -408,6 +408,13 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
             "builtins/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
     },
+    // cas-frontend-engineering skill: project-agnostic implementation craft
+    // for component boundaries, state, accessibility, performance, tokens,
+    // motion, and Playwright acceptance.
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/SKILL.md",
+        content: include_str!("builtins/skills/cas-frontend-engineering/SKILL.md"),
+    },
     // fallow skill: vendored from https://github.com/fallow-rs/fallow-skills
     // (MIT, Bart Waardenburg). Codebase intelligence for JS/TS — dead code,
     // duplication, complexity, boundaries, feature flags. SKILL.md +
@@ -761,6 +768,13 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-nuxt-playwright/references/auth-fixture-template.md",
         content: include_str!(
             "builtins/codex/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
+        ),
+    },
+    // cas-frontend-engineering skill — codex mirror.
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/SKILL.md",
+        content: include_str!(
+            "builtins/codex/skills/cas-frontend-engineering/SKILL.md"
         ),
     },
     // fallow skill — codex mirror. See the claude-side entry above for the
@@ -1157,6 +1171,13 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
             "builtins/grok/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
     },
+    // cas-frontend-engineering skill — grok mirror.
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/SKILL.md",
+        content: include_str!(
+            "builtins/grok/skills/cas-frontend-engineering/SKILL.md"
+        ),
+    },
     BuiltinFile {
         path: "skills/cas-codex-exec/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-codex-exec/SKILL.md"),
@@ -1439,6 +1460,15 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/cas-nuxt-playwright"),
         codex: Some("skills/cas-nuxt-playwright"),
         grok: Some("skills/cas-nuxt-playwright"),
+        note: "",
+    },
+    RequiredCapability {
+        // Project-agnostic implementation guidance belongs in every harness;
+        // the skill has no harness-specific tool syntax.
+        id: "cas-frontend-engineering",
+        claude: Some("skills/cas-frontend-engineering"),
+        codex: Some("skills/cas-frontend-engineering"),
+        grok: Some("skills/cas-frontend-engineering"),
         note: "",
     },
     RequiredCapability {

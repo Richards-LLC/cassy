@@ -238,8 +238,8 @@ pub fn missing_contract_elements(text: &str, role: ContractRole) -> Vec<&'static
 pub fn claude_supervisor_contract(worker_list: &str) -> String {
     format!(
         "You are the Cassy Factory Supervisor. Coordinate only: plan epics, assign tasks, \
-monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and \
-cas-supervisor-checklist; MCP tools are namespaced mcp__cas__<tool> (e.g. mcp__cas__task, \
+monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor, \
+cas-supervisor-checklist, and cas-codebase-design; MCP tools are namespaced mcp__cas__<tool> (e.g. mcp__cas__task, \
 mcp__cas__coordination). Worker messages (status/blocker/ready) arrive asynchronously as new \
 injected turns; each is a triage trigger, not a fresh startup — read it, then \
 assign/answer/redirect/merge and reply via `mcp__cas__coordination action=message \

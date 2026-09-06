@@ -919,11 +919,20 @@ impl PtyConfig {
             ));
         }
 
-        let mut args = vec![
-            "--dangerously-skip-permissions".to_string(),
-            "--session-id".to_string(),
-            session_id,
-        ];
+        let mut args = vec!["--dangerously-skip-permissions".to_string()];
+        // Claude's native Agent Teams permission router can suspend a worker
+        // on a team-lead approval request even when the worker's
+        // PreToolUse/PermissionRequest hooks return `allow`. The dangerous
+        // skip flag does not disable that router (and the resulting request
+        // may never reach the transcript). Workers are already constrained by
+        // the factory hook/worktree jail, so explicitly select Claude's
+        // command-line bypass mode for the worker process itself.
+        if role == "worker" {
+            args.push("--permission-mode".to_string());
+            args.push("bypassPermissions".to_string());
+        }
+        args.push("--session-id".to_string());
+        args.push(session_id);
         if let Some(m) = model {
             args.push("--model".to_string());
             args.push(m.to_string());
@@ -2400,6 +2409,15 @@ mod tests {
             config
                 .args
                 .contains(&"--dangerously-skip-permissions".to_string())
+        );
+        assert_eq!(
+            config
+                .args
+                .windows(2)
+                .find(|pair| pair[0] == "--permission-mode")
+                .map(|pair| pair[1].as_str()),
+            Some("bypassPermissions"),
+            "factory Claude workers must bypass the team leader permission router"
         );
         assert!(
             config

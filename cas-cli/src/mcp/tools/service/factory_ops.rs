@@ -3375,6 +3375,20 @@ impl CasService {
                 let git_info = worktree_status.git_info;
                 let session_uuid = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
                 let worker_cli = worker_cli_from_agent(agent);
+                // Claude can suspend a team worker before writing its
+                // `tool_use` to the transcript. Read the native lead inbox
+                // independently so status remains actionable for both the
+                // destructive Bash classifier and heredoc/file-rewrite
+                // cases observed in the factory.
+                let pending_permission = (worker_cli == cas_mux::SupervisorCli::Claude)
+                    .then(|| {
+                        crate::cli::factory::wedged::pending_permission_for_worker(
+                            &agent.name,
+                            agent.factory_session.as_deref().or(factory_session.as_deref()),
+                            agent.metadata.get("worker_account_dir").map(String::as_str),
+                        )
+                    })
+                    .flatten();
                 let opencode_observation = (worker_cli == cas_mux::SupervisorCli::OpenCode)
                     .then(|| {
                         crate::mcp::tools::service::opencode_liveness::observe(
@@ -3684,13 +3698,20 @@ impl CasService {
                 // exactly as `is-wedged` does; an unreadable process tree is
                 // deliberately not positive evidence and therefore cannot
                 // suppress a real stall.
-                let background_processes = crate::cli::factory::wedged::find_worker_pid(
+                let worker_pid = crate::cli::factory::wedged::find_worker_pid(
                     &crate::cli::factory::wedged::RealProcessTable,
                     &agent.name,
                 )
-                .or(agent.pid)
-                .map(crate::cli::factory::wedged::background_processes_for)
-                .unwrap_or(crate::cli::factory::wedged::BackgroundProcessState::Unavailable);
+                .or(agent.pid);
+                let worker_pid_alive = worker_pid.is_some_and(crate::mcp::daemon::pid_alive);
+                let background_processes = worker_pid
+                    .map(crate::cli::factory::wedged::background_processes_for)
+                    .unwrap_or(crate::cli::factory::wedged::BackgroundProcessState::Unavailable);
+                let approval_hang = crate::cli::factory::wedged::is_leader_approval_hang(
+                    worker_pid_alive,
+                    pending_permission.as_ref(),
+                    &background_processes,
+                ) && !in_flight_tool_call;
                 let mut has_active_work = crate::cli::factory::wedged::has_active_work(
                     in_flight_tool_call,
                     &background_processes,
@@ -3716,12 +3737,13 @@ impl CasService {
                         chrono::Utc::now(),
                     )
                 });
-                let stalled = is_worker_stalled(
-                    has_in_progress_task,
-                    last_activity.map(|(secs, _)| secs),
-                    stall_threshold_secs,
-                    has_active_work,
-                );
+                let stalled = !approval_hang
+                    && is_worker_stalled(
+                        has_in_progress_task,
+                        last_activity.map(|(secs, _)| secs),
+                        stall_threshold_secs,
+                        has_active_work,
+                    );
                 // cas-e728 (GH #105): inbox depth is rendered on EVERY row, not
                 // only on a row that already tripped the stall path. The most
                 // common "handed work and did not wake" shape is a worker with
@@ -3758,7 +3780,22 @@ impl CasService {
                     elapsed,
                     worker_inbox,
                 );
-                let activity_info = if let Some(alert) = priority_alert {
+                let approval_info = pending_permission.as_ref().map(|pending| {
+                    if approval_hang {
+                        format!(
+                            "\n    awaiting leader approval: {} ({}s pending; command: {}) — no active child process",
+                            pending.tool_name, pending.age_secs, pending.command_excerpt
+                        )
+                    } else {
+                        format!(
+                            "\n    leader approval pending: {} ({}s; command: {})",
+                            pending.tool_name, pending.age_secs, pending.command_excerpt
+                        )
+                    }
+                });
+                let activity_info = if let Some(approval) = approval_info {
+                    approval
+                } else if let Some(alert) = priority_alert {
                     alert
                 } else if !has_in_progress_task {
                     match last_activity {

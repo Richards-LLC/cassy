@@ -6,27 +6,32 @@ FAIL cut-list     "Drawer box front/back": model 26-3/4 × 4 × 3/4 vs cut list 
 PASS proportion   [ortho] front: 32 part extent(s) match the model within 1%
 PASS proportion   [ortho] top: 32 part extent(s) match the model within 1%
 PASS proportion   [ortho] right: 32 part extent(s) match the model within 1%
-PASS collision    [ortho] 60 text elements clear of strokes and each other
+PASS collision    [ortho] 61 text elements clear of strokes and each other
 PASS dimensions   [ortho] 11 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [ortho] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [ortho] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [iso] iso: all 122 axis edges lie on 30°/150°/90°
 PASS axis-scale   [iso] iso: equal axis scales (x=1.587, y=1.587, z=1.588 mm/unit)
 PASS proportion   [iso] iso: 0 part extent(s) match the model within 1% (32 partly occluded, silhouette not measurable)
 PASS collision    [iso] 31 text elements clear of strokes and each other
 PASS dimensions   [iso] 3 dimensions consistent; 0 chain(s) sum to their overall
+PASS notes-block  [iso] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [iso] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS proportion   [section-a] right: 0 part extent(s) match the model within 1% (22 partly occluded, silhouette not measurable)
 PASS collision    [section-a] 43 text elements clear of strokes and each other
 PASS dimensions   [section-a] 10 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [section-a] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [section-a] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS proportion   [section-b] top: 0 part extent(s) match the model within 1% (25 partly occluded, silhouette not measurable)
 PASS collision    [section-b] 34 text elements clear of strokes and each other
 PASS dimensions   [section-b] 4 dimensions consistent; 0 chain(s) sum to their overall
+PASS notes-block  [section-b] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [section-b] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [exploded] iso: all 266 axis edges lie on 30°/150°/90°
 PASS axis-scale   [exploded] iso: equal axis scales (x=1.588, y=1.587, z=1.588 mm/unit)
 PASS proportion   [exploded] iso: 0 part extent(s) match the model within 1% (32 partly occluded, silhouette not measurable)
-PASS collision    [exploded] 36 text elements clear of strokes and each other
+PASS collision    [exploded] 37 text elements clear of strokes and each other
+PASS notes-block  [exploded] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [exploded] smallest text 2.00 mm at print scale
 PASS projection   [joint-1] iso-separated: all 32 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-1] iso-separated: equal axis scales (x=6.350, y=6.349, z=6.350 mm/unit)
@@ -37,6 +42,7 @@ PASS proportion   [joint-1] iso-assembled: 0 part extent(s) match the model with
 PASS proportion   [joint-1] top: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-1] 40 text elements clear of strokes and each other
 PASS dimensions   [joint-1] 7 dimensions consistent; 2 chain(s) sum to their overall
+PASS notes-block  [joint-1] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-1] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [joint-2] iso-separated: all 27 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-2] iso-separated: equal axis scales (x=12.700, y=12.702, z=12.700 mm/unit)
@@ -47,6 +53,7 @@ PASS proportion   [joint-2] iso-assembled: 0 part extent(s) match the model with
 PASS proportion   [joint-2] top: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-2] 37 text elements clear of strokes and each other
 PASS dimensions   [joint-2] 4 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [joint-2] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-2] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [joint-3] iso-separated: all 23 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-3] iso-separated: equal axis scales (x=12.700, y=12.702, z=12.700 mm/unit)
@@ -57,6 +64,7 @@ PASS proportion   [joint-3] iso-assembled: 0 part extent(s) match the model with
 PASS proportion   [joint-3] right: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-3] 37 text elements clear of strokes and each other
 PASS dimensions   [joint-3] 4 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [joint-3] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-3] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [joint-4] iso-separated: all 17 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-4] iso-separated: equal axis scales (x=12.700, y=12.700, z=12.700 mm/unit)
@@ -67,6 +75,7 @@ PASS proportion   [joint-4] iso-assembled: 0 part extent(s) match the model with
 PASS proportion   [joint-4] front: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-4] 37 text elements clear of strokes and each other
 PASS dimensions   [joint-4] 4 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [joint-4] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-4] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [joint-5] iso-separated: all 27 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-5] iso-separated: equal axis scales (x=12.700, y=12.700, z=12.700 mm/unit)
@@ -77,6 +86,7 @@ PASS proportion   [joint-5] iso-assembled: 0 part extent(s) match the model with
 PASS proportion   [joint-5] front: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-5] 37 text elements clear of strokes and each other
 PASS dimensions   [joint-5] 4 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [joint-5] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-5] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [joint-6] iso-separated: all 52 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-6] iso-separated: equal axis scales (x=3.175, y=3.175, z=3.175 mm/unit)
@@ -87,6 +97,7 @@ PASS proportion   [joint-6] iso-assembled: 0 part extent(s) match the model with
 PASS proportion   [joint-6] front: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-6] 37 text elements clear of strokes and each other
 PASS dimensions   [joint-6] 4 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [joint-6] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-6] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [joint-7] iso-separated: all 46 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-7] iso-separated: equal axis scales (x=3.174, y=3.175, z=3.175 mm/unit)
@@ -97,6 +108,7 @@ PASS proportion   [joint-7] iso-assembled: 0 part extent(s) match the model with
 PASS proportion   [joint-7] front: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-7] 37 text elements clear of strokes and each other
 PASS dimensions   [joint-7] 4 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [joint-7] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-7] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [joint-8] iso-separated: all 27 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-8] iso-separated: equal axis scales (x=12.699, y=12.702, z=12.700 mm/unit)
@@ -107,6 +119,7 @@ PASS proportion   [joint-8] iso-assembled: 0 part extent(s) match the model with
 PASS proportion   [joint-8] top: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-8] 37 text elements clear of strokes and each other
 PASS dimensions   [joint-8] 4 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [joint-8] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-8] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [joint-9] iso-separated: all 22 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-9] iso-separated: equal axis scales (x=12.700, y=12.700, z=12.700 mm/unit)
@@ -117,6 +130,7 @@ PASS proportion   [joint-9] iso-assembled: 0 part extent(s) match the model with
 PASS proportion   [joint-9] right: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-9] 37 text elements clear of strokes and each other
 PASS dimensions   [joint-9] 4 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [joint-9] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-9] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [joint-10] iso-separated: all 50 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-10] iso-separated: equal axis scales (x=12.700, y=12.700, z=12.700 mm/unit)
@@ -127,6 +141,7 @@ PASS proportion   [joint-10] iso-assembled: 0 part extent(s) match the model wit
 PASS proportion   [joint-10] top: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-10] 40 text elements clear of strokes and each other
 PASS dimensions   [joint-10] 7 dimensions consistent; 2 chain(s) sum to their overall
+PASS notes-block  [joint-10] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-10] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [joint-11] iso-separated: all 27 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-11] iso-separated: equal axis scales (x=12.700, y=12.700, z=12.700 mm/unit)
@@ -137,6 +152,7 @@ PASS proportion   [joint-11] iso-assembled: 0 part extent(s) match the model wit
 PASS proportion   [joint-11] front: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-11] 37 text elements clear of strokes and each other
 PASS dimensions   [joint-11] 4 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [joint-11] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-11] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS projection   [joint-12] iso-separated: all 22 axis edges lie on 30°/150°/90°
 PASS axis-scale   [joint-12] iso-separated: equal axis scales (x=12.700, y=12.698, z=12.700 mm/unit)
@@ -147,6 +163,7 @@ PASS proportion   [joint-12] iso-assembled: 0 part extent(s) match the model wit
 PASS proportion   [joint-12] right: 0 part extent(s) match the model within 1% (2 partly occluded, silhouette not measurable)
 PASS collision    [joint-12] 37 text elements clear of strokes and each other
 PASS dimensions   [joint-12] 4 dimensions consistent; 1 chain(s) sum to their overall
+PASS notes-block  [joint-12] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [joint-12] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS proportion   [parts-1] front: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-1] top: 1 part extent(s) match the model within 1%
@@ -156,6 +173,7 @@ PASS proportion   [parts-1] top: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-1] right: 1 part extent(s) match the model within 1%
 PASS collision    [parts-1] 59 text elements clear of strokes and each other
 PASS dimensions   [parts-1] 26 dimensions consistent; 3 chain(s) sum to their overall
+PASS notes-block  [parts-1] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [parts-1] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS proportion   [parts-2] front: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-2] top: 1 part extent(s) match the model within 1%
@@ -165,6 +183,7 @@ PASS proportion   [parts-2] top: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-2] right: 1 part extent(s) match the model within 1%
 PASS collision    [parts-2] 35 text elements clear of strokes and each other
 PASS dimensions   [parts-2] 8 dimensions consistent; 0 chain(s) sum to their overall
+PASS notes-block  [parts-2] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [parts-2] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS proportion   [parts-3] front: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-3] top: 1 part extent(s) match the model within 1%
@@ -174,6 +193,7 @@ PASS proportion   [parts-3] top: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-3] right: 1 part extent(s) match the model within 1%
 PASS collision    [parts-3] 35 text elements clear of strokes and each other
 PASS dimensions   [parts-3] 8 dimensions consistent; 0 chain(s) sum to their overall
+PASS notes-block  [parts-3] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [parts-3] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS proportion   [parts-4] front: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-4] top: 1 part extent(s) match the model within 1%
@@ -183,6 +203,7 @@ PASS proportion   [parts-4] top: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-4] right: 1 part extent(s) match the model within 1%
 PASS collision    [parts-4] 53 text elements clear of strokes and each other
 PASS dimensions   [parts-4] 22 dimensions consistent; 4 chain(s) sum to their overall
+PASS notes-block  [parts-4] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [parts-4] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS proportion   [parts-5] front: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-5] top: 1 part extent(s) match the model within 1%
@@ -192,6 +213,7 @@ PASS proportion   [parts-5] top: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-5] right: 1 part extent(s) match the model within 1%
 PASS collision    [parts-5] 35 text elements clear of strokes and each other
 PASS dimensions   [parts-5] 8 dimensions consistent; 0 chain(s) sum to their overall
+PASS notes-block  [parts-5] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [parts-5] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS proportion   [parts-6] front: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-6] top: 1 part extent(s) match the model within 1%
@@ -201,6 +223,7 @@ PASS proportion   [parts-6] top: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-6] right: 1 part extent(s) match the model within 1%
 PASS collision    [parts-6] 47 text elements clear of strokes and each other
 PASS dimensions   [parts-6] 18 dimensions consistent; 2 chain(s) sum to their overall
+PASS notes-block  [parts-6] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [parts-6] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS proportion   [parts-7] front: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-7] top: 1 part extent(s) match the model within 1%
@@ -210,14 +233,17 @@ PASS proportion   [parts-7] top: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-7] right: 1 part extent(s) match the model within 1%
 PASS collision    [parts-7] 46 text elements clear of strokes and each other
 PASS dimensions   [parts-7] 17 dimensions consistent; 2 chain(s) sum to their overall
+PASS notes-block  [parts-7] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [parts-7] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS proportion   [parts-8] front: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-8] top: 1 part extent(s) match the model within 1%
 PASS proportion   [parts-8] right: 1 part extent(s) match the model within 1%
 PASS collision    [parts-8] 28 text elements clear of strokes and each other
 PASS dimensions   [parts-8] 4 dimensions consistent; 0 chain(s) sum to their overall
+PASS notes-block  [parts-8] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [parts-8] smallest text 2.00 mm, smallest dimension text 3.00 mm at print scale
 PASS collision    [parts-list] 101 text elements clear of strokes and each other
+PASS notes-block  [parts-list] 1 text block(s) hold every line clear of the scale bar
 PASS text-size    [parts-list] smallest text 2.00 mm at print scale
 
-2 FAIL · 221 findings
+2 FAIL · 247 findings

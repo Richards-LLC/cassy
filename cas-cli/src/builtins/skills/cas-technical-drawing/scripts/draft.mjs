@@ -955,23 +955,36 @@ function sheetFrame(svg, model, info) {
   svg.close("g");
   // scale bar, bottom left
   if (info.scale) scaleBar(svg, MARGIN + 4, h - MARGIN - 8, info.scale, model.units, info.scaleLabel);
-  // reference + notes, above the scale bar, left
-  let ny = h - MARGIN - TITLE_BLOCK.h + 2;
+  // reference + notes: a declared block above the scale bar, left. Every line is rendered; the
+  // pitch and font shrink to fit the block (font floor 2.0 mm), and the `notes-block` check fails
+  // any text that leaves the block or meets the scale bar — nothing is ever silently dropped.
   const notes = [...(info.notes || [])];
   if (model.reference?.path && info.n === 1) notes.unshift(`REFERENCE: ${model.reference.path}`);
-  const noteWidth = sx - 6 - (MARGIN + 4);
-  const lines = [];
-  for (const n of notes) {
-    const maxChars = Math.floor(noteWidth / (2.2 * CHAR_W));
-    let rest = String(n);
-    while (rest.length > maxChars) {
-      let cut = rest.lastIndexOf(" ", maxChars);
-      if (cut < maxChars / 2) cut = maxChars;
-      lines.push(rest.slice(0, cut).trim()); rest = rest.slice(cut).trim();
+  const block = { x0: MARGIN + 4, y0: h - MARGIN - TITLE_BLOCK.h + 1, x1: sx - 6, y1: h - MARGIN - 10.5 };
+  const wrap = (font) => {
+    const maxChars = Math.floor((block.x1 - block.x0) / (font * CHAR_W));
+    const out = [];
+    for (const n of notes) {
+      let rest = String(n);
+      while (rest.length > maxChars) {
+        let cut = rest.lastIndexOf(" ", maxChars);
+        if (cut < maxChars / 2) cut = maxChars;
+        out.push(rest.slice(0, cut).trim()); rest = rest.slice(cut).trim();
+      }
+      out.push(rest);
     }
-    lines.push(rest);
+    return out;
+  };
+  let font = 2.2, lines = wrap(font), pitch = 3.0;
+  const avail = block.y1 - block.y0;
+  if (lines.length * pitch > avail) {
+    font = 2.0; lines = wrap(font);
+    pitch = Math.max(2.4, Math.min(3.0, avail / Math.max(lines.length, 1)));
   }
-  for (const l of lines.slice(0, 5)) { svg.text(MARGIN + 4, ny + 2.5, l, { "font-size": 2.2, fill: "#333" }); ny += 3.0; }
+  svg.open("g", { class: "notes", "data-block": `${r3(block.x0)} ${r3(block.y0)} ${r3(block.x1)} ${r3(block.y1)}` });
+  let ny = block.y0;
+  for (const l of lines) { svg.text(block.x0, ny + font, l, { "font-size": font, fill: "#333" }); ny += pitch; }
+  svg.close("g");
 }
 
 function scaleBar(svg, x, y, scale, units, label) {
@@ -2050,6 +2063,29 @@ export function checkSvg(text, opts = {}) {
   if (dims.length) {
     if (dimProblems.length) add("dimensions", "FAIL", `${dimProblems.length} dimension defect(s): ${dimProblems.slice(0, 5).join("; ")}`, { items: dimProblems });
     else add("dimensions", "PASS", `${dims.length} dimensions consistent; ${chains} chain(s) sum to their overall`);
+  }
+
+  // 4b. declared text blocks: every text stays inside its block and clear of the scale bar
+  const blocks = els.filter((e) => e.tag === "g" && e.attrs["data-block"]);
+  if (blocks.length) {
+    const barEls = strokeEls.filter((e) => e.groups.some((g) => (g.attrs.class || "").split(/\s+/).includes("scale-bar")));
+    let bar = null;
+    for (const e of barEls) for (const [p, q] of segmentsOf(e)) {
+      bar = bar || { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+      bar.x0 = Math.min(bar.x0, p[0], q[0]); bar.x1 = Math.max(bar.x1, p[0], q[0]); bar.y0 = Math.min(bar.y0, p[1], q[1]); bar.y1 = Math.max(bar.y1, p[1], q[1]);
+    }
+    const barTexts = texts.filter((t) => t.el.groups.some((g) => (g.attrs.class || "").split(/\s+/).includes("scale-bar")));
+    for (const t of barTexts) { bar = bar || { x0: t.x0, y0: t.y0, x1: t.x1, y1: t.y1 }; bar.x0 = Math.min(bar.x0, t.x0); bar.y0 = Math.min(bar.y0, t.y0); bar.x1 = Math.max(bar.x1, t.x1); bar.y1 = Math.max(bar.y1, t.y1); }
+    const probs = [];
+    for (const g of blocks) {
+      const [bx0, by0, bx1, by1] = g.attrs["data-block"].split(/\s+/).map(Number);
+      for (const t of texts.filter((tt) => inGroup(tt.el, g))) {
+        if (t.x0 < bx0 - 0.3 || t.x1 > bx1 + 0.3 || t.y0 < by0 - 0.3 || t.y1 > by1 + 0.3) probs.push(`"${t.content}" leaves its ${g.attrs.class || "text"} block`);
+        else if (bar && rectsOverlap({ x0: t.x0 + 0.3, y0: t.y0 + 0.3, x1: t.x1 - 0.3, y1: t.y1 - 0.3 }, bar)) probs.push(`"${t.content}" meets the scale bar`);
+      }
+    }
+    if (probs.length) add("notes-block", "FAIL", `${probs.length} text line(s) outside their block: ${probs.slice(0, 4).join("; ")}`, { items: probs });
+    else add("notes-block", "PASS", `${blocks.length} text block(s) hold every line clear of the scale bar`);
   }
 
   // 5. text size at print scale

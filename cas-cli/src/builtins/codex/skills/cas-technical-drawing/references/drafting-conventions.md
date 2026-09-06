@@ -49,6 +49,7 @@ The SVG's `width`/`height` are in mm and the viewBox is the sheet in mm, so an u
 | `proportion` | bounding box of each part's drawn lines vs its declared extent × scale | > 1% and > 0.15 mm off (parts with occluded silhouettes are reported, not judged) |
 | `collision` | text vs strokes outside its own group, text vs text, numeric text inside a filled outline | any hit after a 0.3 mm inset |
 | `dimensions` | label value vs measured span, from/to vs value, chain sums vs overall | > 1/128 in or 0.05 mm |
+| `notes-block` | every line of a declared text block (notes, reference) against the block bounds and the scale bar | any line outside its block or touching the scale bar (the renderer never drops a line; it shrinks pitch and font to the 2.0 mm floor) |
 | `text-size` | smallest text and smallest dimension text in mm on paper | < 2.0 mm / < 2.5 mm (configurable) |
 | `cut-size` | part extents vs `size` | > 1/64 in or 0.5 mm |
 | `joints` | stated vs derived width/depth, rabbet at edge, dado interior, through cuts, tenon shoulders | > 1/64 in; slack > 1/8 in behind the male |

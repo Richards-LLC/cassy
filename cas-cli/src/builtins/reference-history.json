@@ -511,6 +511,28 @@
       "f86bae7c3c1cd3fcb9320d2837ddf9ab1d77622b12ea47a47141e6c19192f360",
       "ff4e8fb59dd7dcbcdc46a7aae58a2995726f27fa981d15e3dc4b03c4d9222510"
     ],
+    "skills/cas-ui-craft/references/concept-brief.md": [
+      "c7b79d99cf1af124281e13790d6ab2654aa5c1f9e717e6fafc93783811ed4b07"
+    ],
+    "skills/cas-ui-craft/references/critique-rubric.md": [
+      "e297a9ce3f79a2187c1b598731fd6b3918aa002139d7b069fffc183f49a25e16",
+      "e39773b8cd65b342e6c2ef187efef130f0da358ca003db8412d181972ac909f3"
+    ],
+    "skills/cas-ui-craft/references/exemplars/before-after.html": [
+      "c8c50345f94536ca1f9780d45218f6bdfb17d9dceff90a12c06d8ca51f92f645"
+    ],
+    "skills/cas-ui-craft/references/exemplars/dashboard.html": [
+      "d6aa2747130e8898acf8bcd1949cbb9b4aff610f870e10279644726120280308"
+    ],
+    "skills/cas-ui-craft/references/exemplars/product-page.html": [
+      "cd875363557bdac3f44755efb339518c8c1bf33ed387760d207832bc22047eea"
+    ],
+    "skills/cas-ui-craft/references/exemplars/report.html": [
+      "f5887aed01b83cd2bbd35b6d26fff53fda4ebf242f417ec2180424d86836645b"
+    ],
+    "skills/cas-ui-craft/references/form-vocabulary.md": [
+      "44fa6e8bd93020c51e58ca53a56a3a181bab824b5dc75fb2b762d6cb92f6e0c1"
+    ],
     "skills/cas-viktor/references/gateway.md": [
       "65083b61b372954719adb237624e7b5f32315ef20541f93cd8ef30c76b3767e8",
       "937eeb4281e59852a50d96316f7e85847f424a04c4a0c6b8a5b4148faa45ae1c",
@@ -698,6 +720,14 @@
       "1614f1242b7fc916add8846fa66de1a59288602a7d7e8c5c16c27830c03098c0",
       "61d2229a75b2a44c6a8dd516fa1830e14c4e2f956b5f34ba44b76658aedda550",
       "a9ec32fd0060f0b856b5e4680f678fd29c6bffa815023de30200e41b28a57e28"
+    ],
+    "skills/design-spec/references/design-tokens.json": [
+      "11672f6a1d451344c9ccfbcff1f7230282587d9901337e44f37678293eeb28d9",
+      "5b939b73e5dfae3de49e5b488f030b2e927828d38643c04d225d810400851cee"
+    ],
+    "skills/design-spec/references/petrastella-design-language.md": [
+      "d328055725ea9e7808971a2d9ac0850e02ff05a3773b53541befa5eb932aa483",
+      "f2ec54d015b063af278f8bf69a34b0f96eb65c442bdc3380019d75e55c802316"
     ],
     "skills/fallow/references/cli-reference.md": [
       "7a4944f1a5ced9b9f6599da03c8ef6ebd6268c7bbdc32a27adfa6d77db0b037d",

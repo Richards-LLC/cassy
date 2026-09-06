@@ -1,0 +1,796 @@
+{
+  "$schema": "https://design-tokens.github.io/community-group/format/",
+  "$description": "Petrastella design language tokens. Source of truth: petrastella-design-language.md beside this file. Projects copy these into their own token file and override in DESIGN.md; a neutral palette is a documented fallback, never the default.",
+  "$version": "1.0.0",
+  "color": {
+    "light": {
+      "bg": {
+        "$type": "color",
+        "$value": "#F7F4EE",
+        "$description": "Warm stone paper. Page background."
+      },
+      "surface": {
+        "$type": "color",
+        "$value": "#FFFFFF",
+        "$description": "Cards, ledgers, figure panels."
+      },
+      "surface-hero": {
+        "$type": "color",
+        "$value": "#F1E7DD",
+        "$description": "Petra sandstone tint. Verdict hero and pull-quote surfaces only."
+      },
+      "line": {
+        "$type": "color",
+        "$value": "#DAD3C7",
+        "$description": "Hairlines, ledger rules, axes."
+      },
+      "line-strong": {
+        "$type": "color",
+        "$value": "#8F8371",
+        "$description": "Verdict rule, table sum rule."
+      },
+      "ink": {
+        "$type": "color",
+        "$value": "#1B1D24",
+        "$description": "Body and display text."
+      },
+      "ink-muted": {
+        "$type": "color",
+        "$value": "#5A5F6E",
+        "$description": "Captions, provenance, marginal notes, axis labels."
+      },
+      "verdict": {
+        "$type": "color",
+        "$value": "#2E3A9F",
+        "$description": "Stella indigo. The decisive mark in the hero figure and the verdict rule. Never a status."
+      },
+      "verdict-soft": {
+        "$type": "color",
+        "$value": "#DDE1F7",
+        "$description": "Band behind the decisive interval or row."
+      },
+      "evidence": {
+        "$type": "color",
+        "$value": "#5A5F6E",
+        "$description": "Same value as ink-muted, on purpose: evidence is quiet."
+      },
+      "action": {
+        "$type": "color",
+        "$value": "#2E3A9F",
+        "$description": "Links, buttons, focus ring. Shares the verdict hue: one accent, two jobs, never in the same figure as a status."
+      },
+      "good": {
+        "$type": "color",
+        "$value": "#226845"
+      },
+      "warning": {
+        "$type": "color",
+        "$value": "#7F5504"
+      },
+      "danger": {
+        "$type": "color",
+        "$value": "#B3261E"
+      },
+      "good-tint": {
+        "$type": "color",
+        "$value": "rgba(34,104,69,0.10)"
+      },
+      "warning-tint": {
+        "$type": "color",
+        "$value": "rgba(127,85,4,0.10)"
+      },
+      "danger-tint": {
+        "$type": "color",
+        "$value": "rgba(179,38,30,0.10)"
+      },
+      "focus": {
+        "$type": "color",
+        "$value": "#2E3A9F"
+      }
+    },
+    "dark": {
+      "bg": {
+        "$type": "color",
+        "$value": "#12141A"
+      },
+      "surface": {
+        "$type": "color",
+        "$value": "#191C24"
+      },
+      "surface-hero": {
+        "$type": "color",
+        "$value": "#241E1E",
+        "$description": "Sandstone tint at night: rose-brown, not grey."
+      },
+      "line": {
+        "$type": "color",
+        "$value": "#2B3040"
+      },
+      "line-strong": {
+        "$type": "color",
+        "$value": "#6B7390"
+      },
+      "ink": {
+        "$type": "color",
+        "$value": "#E9E6E0",
+        "$description": "Warm white, not #FFF."
+      },
+      "ink-muted": {
+        "$type": "color",
+        "$value": "#A3A7B4"
+      },
+      "verdict": {
+        "$type": "color",
+        "$value": "#A9B3FF"
+      },
+      "verdict-soft": {
+        "$type": "color",
+        "$value": "rgba(169,179,255,0.16)"
+      },
+      "evidence": {
+        "$type": "color",
+        "$value": "#A3A7B4"
+      },
+      "action": {
+        "$type": "color",
+        "$value": "#A9B3FF"
+      },
+      "good": {
+        "$type": "color",
+        "$value": "#5FC492"
+      },
+      "warning": {
+        "$type": "color",
+        "$value": "#E2B14D"
+      },
+      "danger": {
+        "$type": "color",
+        "$value": "#EF7B72"
+      },
+      "good-tint": {
+        "$type": "color",
+        "$value": "rgba(95,196,146,0.14)"
+      },
+      "warning-tint": {
+        "$type": "color",
+        "$value": "rgba(226,177,77,0.14)"
+      },
+      "danger-tint": {
+        "$type": "color",
+        "$value": "rgba(239,123,114,0.14)"
+      },
+      "focus": {
+        "$type": "color",
+        "$value": "#A9B3FF"
+      }
+    },
+    "series": {
+      "$description": "Fixed categorical order for color-by-series. A series keeps its slot across every figure in a document. Slot 2 (rose) is skipped in any figure that also carries a danger status. Validate any subset with cas-dataviz validate_palette.js against the surface in use.",
+      "light": {
+        "$type": "color",
+        "$value": [
+          "#2E3A9F",
+          "#B0574F",
+          "#1F7A85",
+          "#7A4A9C",
+          "#6B7A2A",
+          "#6B7280"
+        ]
+      },
+      "dark": {
+        "$type": "color",
+        "$value": [
+          "#A9B3FF",
+          "#F2A49C",
+          "#6FD0DC",
+          "#C9A6EE",
+          "#B9CB6A",
+          "#9AA1AF"
+        ]
+      }
+    },
+    "magnitude": {
+      "$description": "Single-hue ramp for quantity. Light surfaces darken; dark surfaces lighten.",
+      "light": {
+        "$type": "color",
+        "$value": [
+          "#E5E8F8",
+          "#B7BEEB",
+          "#8590DA",
+          "#5563C2",
+          "#2E3A9F"
+        ]
+      },
+      "dark": {
+        "$type": "color",
+        "$value": [
+          "#2A3050",
+          "#3F4A8C",
+          "#5B69C4",
+          "#8592EA",
+          "#A9B3FF"
+        ]
+      }
+    },
+    "polarity": {
+      "$description": "Diverging pair with a neutral midpoint. Sign is always also printed.",
+      "light": {
+        "$type": "color",
+        "$value": [
+          "#B3261E",
+          "#DAD3C7",
+          "#226845"
+        ]
+      },
+      "dark": {
+        "$type": "color",
+        "$value": [
+          "#EF7B72",
+          "#2B3040",
+          "#5FC492"
+        ]
+      }
+    },
+    "pairs": {
+      "$description": "Every sanctioned text-on-surface pairing with its WCAG contrast ratio, computed from the values above (tints composited over bg). Minimum 4.5:1; a pairing not listed here is not sanctioned for text. Regenerate the ratios whenever a value changes; the design-language doc states the same numbers.",
+      "light": {
+        "ink-on-bg": {
+          "foreground": "ink",
+          "background": "bg",
+          "ratio": 15.33
+        },
+        "ink-on-surface": {
+          "foreground": "ink",
+          "background": "surface",
+          "ratio": 16.83
+        },
+        "ink-on-surface-hero": {
+          "foreground": "ink",
+          "background": "surface-hero",
+          "ratio": 13.8
+        },
+        "ink-on-verdict-soft": {
+          "foreground": "ink",
+          "background": "verdict-soft",
+          "ratio": 12.97
+        },
+        "ink-muted-on-bg": {
+          "foreground": "ink-muted",
+          "background": "bg",
+          "ratio": 5.8
+        },
+        "ink-muted-on-surface": {
+          "foreground": "ink-muted",
+          "background": "surface",
+          "ratio": 6.37
+        },
+        "ink-muted-on-surface-hero": {
+          "foreground": "ink-muted",
+          "background": "surface-hero",
+          "ratio": 5.22
+        },
+        "verdict-on-bg": {
+          "foreground": "verdict",
+          "background": "bg",
+          "ratio": 8.61
+        },
+        "verdict-on-surface": {
+          "foreground": "verdict",
+          "background": "surface",
+          "ratio": 9.45
+        },
+        "verdict-on-surface-hero": {
+          "foreground": "verdict",
+          "background": "surface-hero",
+          "ratio": 7.75
+        },
+        "verdict-on-verdict-soft": {
+          "foreground": "verdict",
+          "background": "verdict-soft",
+          "ratio": 7.29
+        },
+        "action-on-bg": {
+          "foreground": "action",
+          "background": "bg",
+          "ratio": 8.61
+        },
+        "action-on-surface": {
+          "foreground": "action",
+          "background": "surface",
+          "ratio": 9.45
+        },
+        "good-on-bg": {
+          "foreground": "good",
+          "background": "bg",
+          "ratio": 6.1
+        },
+        "good-on-surface": {
+          "foreground": "good",
+          "background": "surface",
+          "ratio": 6.7
+        },
+        "good-on-good-tint": {
+          "foreground": "good",
+          "background": "good-tint",
+          "ratio": 5.3
+        },
+        "warning-on-bg": {
+          "foreground": "warning",
+          "background": "bg",
+          "ratio": 5.97
+        },
+        "warning-on-surface": {
+          "foreground": "warning",
+          "background": "surface",
+          "ratio": 6.56
+        },
+        "warning-on-warning-tint": {
+          "foreground": "warning",
+          "background": "warning-tint",
+          "ratio": 5.19
+        },
+        "danger-on-bg": {
+          "foreground": "danger",
+          "background": "bg",
+          "ratio": 5.95
+        },
+        "danger-on-surface": {
+          "foreground": "danger",
+          "background": "surface",
+          "ratio": 6.54
+        },
+        "danger-on-danger-tint": {
+          "foreground": "danger",
+          "background": "danger-tint",
+          "ratio": 5.06
+        }
+      },
+      "dark": {
+        "ink-on-bg": {
+          "foreground": "ink",
+          "background": "bg",
+          "ratio": 14.78
+        },
+        "ink-on-surface": {
+          "foreground": "ink",
+          "background": "surface",
+          "ratio": 13.67
+        },
+        "ink-on-surface-hero": {
+          "foreground": "ink",
+          "background": "surface-hero",
+          "ratio": 13.18
+        },
+        "ink-on-verdict-soft": {
+          "foreground": "ink",
+          "background": "verdict-soft",
+          "ratio": 10.91
+        },
+        "ink-muted-on-bg": {
+          "foreground": "ink-muted",
+          "background": "bg",
+          "ratio": 7.67
+        },
+        "ink-muted-on-surface": {
+          "foreground": "ink-muted",
+          "background": "surface",
+          "ratio": 7.09
+        },
+        "ink-muted-on-surface-hero": {
+          "foreground": "ink-muted",
+          "background": "surface-hero",
+          "ratio": 6.83
+        },
+        "verdict-on-bg": {
+          "foreground": "verdict",
+          "background": "bg",
+          "ratio": 9.27
+        },
+        "verdict-on-surface": {
+          "foreground": "verdict",
+          "background": "surface",
+          "ratio": 8.58
+        },
+        "verdict-on-surface-hero": {
+          "foreground": "verdict",
+          "background": "surface-hero",
+          "ratio": 8.27
+        },
+        "verdict-on-verdict-soft": {
+          "foreground": "verdict",
+          "background": "verdict-soft",
+          "ratio": 6.84
+        },
+        "action-on-bg": {
+          "foreground": "action",
+          "background": "bg",
+          "ratio": 9.27
+        },
+        "action-on-surface": {
+          "foreground": "action",
+          "background": "surface",
+          "ratio": 8.58
+        },
+        "good-on-bg": {
+          "foreground": "good",
+          "background": "bg",
+          "ratio": 8.59
+        },
+        "good-on-surface": {
+          "foreground": "good",
+          "background": "surface",
+          "ratio": 7.95
+        },
+        "good-on-good-tint": {
+          "foreground": "good",
+          "background": "good-tint",
+          "ratio": 6.7
+        },
+        "warning-on-bg": {
+          "foreground": "warning",
+          "background": "bg",
+          "ratio": 9.32
+        },
+        "warning-on-surface": {
+          "foreground": "warning",
+          "background": "surface",
+          "ratio": 8.62
+        },
+        "warning-on-warning-tint": {
+          "foreground": "warning",
+          "background": "warning-tint",
+          "ratio": 7.21
+        },
+        "danger-on-bg": {
+          "foreground": "danger",
+          "background": "bg",
+          "ratio": 6.79
+        },
+        "danger-on-surface": {
+          "foreground": "danger",
+          "background": "surface",
+          "ratio": 6.28
+        },
+        "danger-on-danger-tint": {
+          "foreground": "danger",
+          "background": "danger-tint",
+          "ratio": 5.58
+        }
+      },
+      "minimum": 5.06
+    }
+  },
+  "typography": {
+    "family": {
+      "display": {
+        "$type": "fontFamily",
+        "$value": [
+          "Iowan Old Style",
+          "Palatino Linotype",
+          "Palatino",
+          "Book Antiqua",
+          "Georgia",
+          "Times New Roman",
+          "serif"
+        ],
+        "$description": "Verdict sentences, page titles, pull-quotes. Regular weight only; italic allowed."
+      },
+      "body": {
+        "$type": "fontFamily",
+        "$value": [
+          "Inter",
+          "ui-sans-serif",
+          "system-ui",
+          "-apple-system",
+          "Segoe UI",
+          "Roboto",
+          "sans-serif"
+        ]
+      },
+      "mono": {
+        "$type": "fontFamily",
+        "$value": [
+          "JetBrains Mono",
+          "IBM Plex Mono",
+          "ui-monospace",
+          "SFMono-Regular",
+          "Menlo",
+          "Consolas",
+          "monospace"
+        ],
+        "$description": "Ledger numbers, timestamps, eyebrows, provenance, code."
+      }
+    },
+    "scale": {
+      "$description": "Base 17px, ratio 1.25. Values are px size / line-height / weight / family.",
+      "eyebrow": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "12px",
+          "lineHeight": "16px",
+          "fontWeight": 600,
+          "fontFamily": "mono",
+          "letterSpacing": "0.08em",
+          "textTransform": "uppercase"
+        }
+      },
+      "caption": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "14px",
+          "lineHeight": "20px",
+          "fontWeight": 400,
+          "fontFamily": "body"
+        }
+      },
+      "body": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "17px",
+          "lineHeight": "26px",
+          "fontWeight": 400,
+          "fontFamily": "body"
+        }
+      },
+      "lede": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "21px",
+          "lineHeight": "30px",
+          "fontWeight": 400,
+          "fontFamily": "body"
+        }
+      },
+      "heading": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "27px",
+          "lineHeight": "32px",
+          "fontWeight": 600,
+          "fontFamily": "body",
+          "letterSpacing": "-0.01em"
+        }
+      },
+      "title": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "34px",
+          "lineHeight": "38px",
+          "fontWeight": 400,
+          "fontFamily": "display"
+        }
+      },
+      "verdict": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "clamp(32px, 4.6vw, 52px)",
+          "lineHeight": 1.08,
+          "fontWeight": 400,
+          "fontFamily": "display",
+          "letterSpacing": "-0.015em",
+          "maxWidth": "22ch"
+        }
+      },
+      "hero-number": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "clamp(56px, 8vw, 96px)",
+          "lineHeight": 1,
+          "fontWeight": 500,
+          "fontFamily": "mono",
+          "fontVariantNumeric": "tabular-nums",
+          "letterSpacing": "-0.03em"
+        }
+      },
+      "ledger": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "15px",
+          "lineHeight": "22px",
+          "fontWeight": 400,
+          "fontFamily": "mono",
+          "fontVariantNumeric": "tabular-nums"
+        }
+      }
+    },
+    "measure": {
+      "$type": "dimension",
+      "$value": "68ch",
+      "$description": "Maximum body line length."
+    }
+  },
+  "space": {
+    "$description": "4px base. Sections breathe at 48 and 64; the hero at 96.",
+    "1": {
+      "$type": "dimension",
+      "$value": "4px"
+    },
+    "2": {
+      "$type": "dimension",
+      "$value": "8px"
+    },
+    "3": {
+      "$type": "dimension",
+      "$value": "12px"
+    },
+    "4": {
+      "$type": "dimension",
+      "$value": "16px"
+    },
+    "6": {
+      "$type": "dimension",
+      "$value": "24px"
+    },
+    "8": {
+      "$type": "dimension",
+      "$value": "32px"
+    },
+    "12": {
+      "$type": "dimension",
+      "$value": "48px"
+    },
+    "16": {
+      "$type": "dimension",
+      "$value": "64px"
+    },
+    "24": {
+      "$type": "dimension",
+      "$value": "96px"
+    }
+  },
+  "layout": {
+    "container": {
+      "$type": "dimension",
+      "$value": "1120px"
+    },
+    "gutter": {
+      "$type": "dimension",
+      "$value": "24px"
+    },
+    "margin-column": {
+      "$type": "dimension",
+      "$value": "240px",
+      "$description": "Marginal-note rail, present at and above the wide breakpoint."
+    },
+    "breakpoint": {
+      "phone": {
+        "$type": "dimension",
+        "$value": "480px"
+      },
+      "tablet": {
+        "$type": "dimension",
+        "$value": "820px"
+      },
+      "wide": {
+        "$type": "dimension",
+        "$value": "1080px",
+        "$description": "Marginal notes move into the rail; below this they render inline under their anchor."
+      }
+    }
+  },
+  "radius": {
+    "chip": {
+      "$type": "dimension",
+      "$value": "4px"
+    },
+    "panel": {
+      "$type": "dimension",
+      "$value": "8px"
+    },
+    "ledger": {
+      "$type": "dimension",
+      "$value": "0px",
+      "$description": "Ledgers and tables are ruled, never boxed."
+    }
+  },
+  "elevation": {
+    "paper": {
+      "$type": "shadow",
+      "$value": "none",
+      "$description": "Nothing on the page floats. Hierarchy is type, rule weight, and surface tint."
+    },
+    "overlay": {
+      "$type": "shadow",
+      "$value": "0 24px 80px rgba(18,20,26,0.40)",
+      "$description": "Dialogs and toasts only."
+    }
+  },
+  "motion": {
+    "chrome": {
+      "$type": "duration",
+      "$value": "120ms",
+      "$description": "Hover, focus, toggle. ease-out."
+    },
+    "reveal": {
+      "$type": "duration",
+      "$value": "200ms",
+      "$description": "Panel and details open. ease-out. Nothing longer."
+    },
+    "easing": {
+      "$type": "cubicBezier",
+      "$value": [
+        0.2,
+        0,
+        0,
+        1
+      ]
+    },
+    "reduced": {
+      "$type": "string",
+      "$value": "prefers-reduced-motion: reduce disables every transition; no animation may carry information."
+    }
+  },
+  "chart": {
+    "stroke": {
+      "$type": "dimension",
+      "$value": "1.5px",
+      "$description": "Lines and slope segments."
+    },
+    "hairline": {
+      "$type": "dimension",
+      "$value": "1px",
+      "$description": "Axes, gridlines, ledger rules; color = line."
+    },
+    "mark-decisive": {
+      "$type": "dimension",
+      "$value": "2.5px",
+      "$description": "The one mark that carries the argument; color = verdict."
+    },
+    "encodings": {
+      "actual": {
+        "$type": "string",
+        "$value": "solid fill"
+      },
+      "plan": {
+        "$type": "string",
+        "$value": "1.5px outline, no fill"
+      },
+      "forecast": {
+        "$type": "string",
+        "$value": "45deg hatch, 4px pitch"
+      },
+      "estimate": {
+        "$type": "string",
+        "$value": "dashed stroke 4 3 plus an interval band at 18% alpha"
+      },
+      "missing": {
+        "$type": "string",
+        "$value": "gap in the line and a hollow marker labelled n/a"
+      }
+    }
+  },
+  "components": {
+    "verdict-hero": {
+      "$description": "Eyebrow (mono) → verdict sentence (display, ≤ 22 words) → decisive figure beside it on wide, below it on narrow → 3px verdict rule → one-line provenance (mono, ink-muted). Surface: surface-hero. Nothing else above the fold."
+    },
+    "evidence-ledger": {
+      "$description": "A table styled as a ledger: caption above in body type; header row mono eyebrow; hairline rules only; numbers mono tabular right-aligned; sum row bold above a line-strong rule; last column names the source of each row. No zebra, no box, no rounded corners."
+    },
+    "annotated-timeline": {
+      "$description": "Vertical spine (line-strong) with mono timestamps on the left, events on the right, the decisive event marked in verdict with its annotation drawn as a marginal note connected by a hairline. Elapsed time between events is printed, not inferred."
+    }
+  },
+  "container": {
+    "$description": "Rules for any box that holds text. They exist because the recurring defects on our surfaces are white-on-white text, borders cutting through content, and clipped overflow.",
+    "text-box-height": {
+      "$type": "string",
+      "$value": "never a fixed height; use min-height. A fixed height is allowed only with an explicit overflow strategy declared on the same rule: overflow:auto (scroll inside), text-overflow:ellipsis with a title attribute, or line-clamp with a visible affordance."
+    },
+    "overflow-default": {
+      "$type": "string",
+      "$value": "overflow:visible for prose and figures; overflow-x:auto for tables and ledgers wider than their column; overflow:hidden only on a purely decorative surface that contains no text."
+    },
+    "foreground-inherits": {
+      "$type": "string",
+      "$value": "a surface that changes background must set color on the same rule. Setting bg without fg is how ink-on-ink and white-on-white happen."
+    },
+    "phone-wrap": {
+      "$type": "string",
+      "$value": "every text node must wrap or scroll inside its container at 390px; no horizontal page scroll. Mono figures may use white-space:nowrap only inside a scroll container."
+    },
+    "border-clearance": {
+      "$type": "string",
+      "$value": "padding inside a bordered box is at least space.3 (12px) on every side; a border may never cross a glyph or a chart mark."
+    }
+  }
+}

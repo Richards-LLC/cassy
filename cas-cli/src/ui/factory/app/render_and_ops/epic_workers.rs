@@ -958,6 +958,36 @@ fn fast_forward_epic_base_from_parent(
         ));
     }
 
+    // A ref update is invisible to any checkout that has this branch out:
+    // inventory and guard those checkouts before moving the ref, then refresh
+    // them after the compare-and-swap so spawn cannot strand a stale index.
+    let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
+    let branch = epic_branch
+        .strip_prefix("refs/heads/")
+        .unwrap_or(epic_branch);
+    let checkouts = git.list_worktrees().map_err(|error| {
+        format!("could not inventory checkouts for epic base '{epic_branch}': {error}")
+    })?;
+    let checkouts: Vec<_> = checkouts
+        .into_iter()
+        .filter(|checkout| checkout.branch.as_deref() == Some(branch))
+        .collect();
+    for checkout in &checkouts {
+        let dirty = git.classify_dirty_status(&checkout.path).map_err(|error| {
+            format!(
+                "could not inspect checkout {} before advancing epic base '{epic_branch}': {error}",
+                checkout.path.display()
+            )
+        })?;
+        if dirty.is_blocked() {
+            return Err(format!(
+                "epic base '{epic_branch}' is checked out with tracked changes at {} ({})",
+                checkout.path.display(),
+                dirty.describe_blocking()
+            ));
+        }
+    }
+
     let refname = if epic_branch.starts_with("refs/heads/") {
         epic_branch.to_string()
     } else if epic_branch.starts_with("refs/") || epic_branch.starts_with("origin/") {
@@ -977,6 +1007,17 @@ fn fast_forward_epic_base_from_parent(
             "could not fast-forward epic base '{epic_branch}' from recorded parent '{parent_ref}': {}",
             String::from_utf8_lossy(&update.stderr).trim()
         ));
+    }
+
+    for checkout in checkouts {
+        if let crate::worktree::git::CheckoutRefresh::LeftStale { reason } =
+            git.refresh_linked_checkout(&checkout.path, branch, &epic_sha, &parent_sha)
+        {
+            return Err(format!(
+                "epic base '{epic_branch}' advanced but checkout {} could not be refreshed: {reason}",
+                checkout.path.display()
+            ));
+        }
     }
 
     // Publishing is best-effort. The local fast-forward is already the safe
@@ -4311,6 +4352,50 @@ mod spawn_base_tests {
             worker_path.join("parent-advance.txt").exists(),
             "the worker must be cut from the refreshed local tip, not the stale base"
         );
+    }
+
+    #[test]
+    fn epic_base_refresh_realigns_a_linked_checkout_before_spawn() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        branch_at(&repo, "epic/behind", "main");
+
+        let sibling = tmp.path().join("supervisor-merge");
+        let added = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                sibling.to_str().unwrap(),
+                "epic/behind",
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+
+        commit(&repo, "parent-advance.txt", "parent advanced locally");
+        let parent_tip = head_sha(&repo, "main");
+        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+            .unwrap()
+            .unwrap();
+
+        assert!(notice.contains("LOCAL-ONLY"), "{notice}");
+        assert_eq!(head_sha(&sibling, "HEAD"), parent_tip);
+        assert!(sibling.join("parent-advance.txt").is_file());
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&sibling)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty(), "linked checkout was left dirty");
     }
 
     #[test]

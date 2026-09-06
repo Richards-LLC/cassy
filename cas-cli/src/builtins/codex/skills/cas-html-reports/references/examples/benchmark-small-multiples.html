@@ -7,39 +7,41 @@
 <style>
   :root{
     color-scheme: light dark;
-    --bg:#f6f2ea; --surface:#fffdf8; --ink:#1b1a1f; --muted:#5b5852; --line:#d9d2c5;
-    --verdict:#8a2d18; --evidence:#1e5a86; --warning:#8a6508; --action:#2a6b4c;
-    /* categorical series, fixed order, validated with cas-dataviz validate_palette.js */
-    --s1:#2a6fc9; --s2:#c9552a; --s3:#1d8f66;
+    /* Petrastella design language — tokens from skills/design-spec/references/design-tokens.json (no DESIGN.md applies) */
+    --bg:#F7F4EE; --surface:#FFFFFF; --surface-hero:#F1E7DD; --line:#DAD3C7; --line-strong:#8F8371;
+    --ink:#1B1D24; --muted:#5A5F6E; --verdict:#2E3A9F; --verdict-soft:#DDE1F7; --evidence:#5A5F6E; --action:#2E3A9F;
+    --good:#226845; --warning:#7F5504; --danger:#B3261E;
+    --s1:#2E3A9F; --s2:#B0574F; --s3:#1F7A85;
     --display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
-    --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
-    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   }
   @media (prefers-color-scheme: dark){
-    :root{ --bg:#16151a; --surface:#1e1d24; --ink:#ebe6dc; --muted:#a7a196; --line:#37353e;
-           --verdict:#e6906f; --evidence:#82b7e3; --warning:#e3b84f; --action:#7fcaa5;
-           --s1:#3f86dc; --s2:#d86a35; --s3:#22a06e; }
+    :root{ --bg:#12141A; --surface:#191C24; --surface-hero:#241E1E; --line:#2B3040; --line-strong:#6B7390;
+           --ink:#E9E6E0; --muted:#A3A7B4; --verdict:#A9B3FF; --verdict-soft:rgba(169,179,255,0.16); --evidence:#A3A7B4; --action:#A9B3FF;
+           --good:#5FC492; --warning:#E2B14D; --danger:#EF7B72; --s1:#A9B3FF; --s2:#F2A49C; --s3:#6FD0DC; }
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 var(--sans)}
+  :focus-visible{outline:3px solid var(--action);outline-offset:2px}
   a{color:var(--evidence)}
   :focus-visible{outline:3px solid var(--evidence);outline-offset:2px}
   .skip{position:absolute;left:-9999px}.skip:focus{position:static;display:inline-block;margin:8px}
   .wrap{max-width:1120px;margin:0 auto;padding:0 24px}
-  header{padding:22px 0 12px;border-bottom:1px solid var(--line)}
+  header{padding:22px 0 14px;background:var(--surface-hero);color:var(--ink);border-bottom:3px solid var(--verdict)}
   .eyebrow{font:500 12px/1.4 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
   h1{font:400 clamp(26px,3.2vw,36px)/1.12 var(--display);margin:8px 0 6px;max-width:34ch}
   h1 em{font-style:italic;color:var(--verdict)}
   .meta{color:var(--muted);font-size:14px;margin:0}
   main{padding:8px 0 48px}
   section{margin:30px 0 0}
-  h2{font:400 24px/1.2 var(--display);margin:0 0 8px}
+  h2{font:600 22px/1.25 var(--sans);letter-spacing:-.01em;margin:0 0 8px}
   p{max-width:78ch}
   code{font:.92em var(--mono)}
   figure{margin:0}
   figcaption{color:var(--muted);font-size:13px;margin-top:8px;max-width:90ch}
   .multiples{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin-top:10px}
-  .panel{background:var(--surface);border:1px solid var(--line);padding:12px 12px 6px}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 12px 6px}
   .panel h3{margin:0 0 2px;font:600 14px/1.3 var(--sans)}
   .panel .u{margin:0 0 6px;font:12px var(--mono);color:var(--muted)}
   .panel svg{width:100%;height:auto;display:block}
@@ -54,10 +56,10 @@
   .legend .k1::before{border-color:var(--s1)}.legend .k2::before{border-color:var(--s2);border-top-style:dashed}.legend .k3::before{border-color:var(--s3);border-top-style:dotted}
   .winner{border-left:3px solid var(--verdict);padding:6px 0 6px 18px;margin:18px 0 0;max-width:78ch}
   .winner p{font:400 20px/1.4 var(--display);margin:0}
-  table{border-collapse:collapse;width:100%;background:var(--surface);border:1px solid var(--line);margin-top:10px}
+  table{border-collapse:collapse;width:100%;background:transparent;border-top:1px solid var(--line-strong);border-bottom:1px solid var(--line-strong);margin-top:10px}
   caption{text-align:left;font:400 15px/1.4 var(--display);color:var(--muted);padding:0 0 6px}
   th,td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:15px}
-  thead th{font:600 12px/1.4 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:var(--bg)}
+  thead th{font:600 12px/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:transparent}
   th[scope=row]{font-weight:600}
   .num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:14px}
   td.best{font-weight:700;text-decoration:underline;text-decoration-color:var(--verdict);text-underline-offset:3px}
@@ -67,7 +69,7 @@
   pre{background:var(--surface);border:1px solid var(--line);padding:10px 12px;overflow-x:auto;font:13px/1.5 var(--mono)}
   footer{border-top:1px solid var(--line);padding:18px 0 40px;color:var(--muted);font-size:13px}
   @media print{
-    :root{--bg:#fff;--surface:#fff;--ink:#000;--muted:#333;--line:#999;--verdict:#7a2510;--evidence:#164a70;--s1:#1f4e9c;--s2:#a3411c;--s3:#176e4f}
+    :root{--bg:#fff;--surface:#fff;--surface-hero:#fff;--ink:#000;--muted:#333;--line:#999;--line-strong:#555;--verdict:#2E3A9F;--verdict-soft:#eee;--evidence:#444;--action:#2E3A9F;--good:#1f5a3e;--warning:#6f5206;--danger:#8f1e18;--s1:#2E3A9F;--s2:#8f3d36;--s3:#175f68}
     body{font-size:11pt}.skip{display:none}
     .panel,figure,tr,.winner{break-inside:avoid}table{break-inside:auto}thead{display:table-header-group}
   }
@@ -78,7 +80,7 @@
 <header><div class="wrap">
   <div class="eyebrow">Comparison / benchmark · practitioner · 2026-08-20</div>
   <h1>tantivy wins above 200 k documents; sqlite-fts wins below it — <em>the crossover is the decision</em></h1>
-  <p class="meta">Three full-text backends on the same corpus at four sizes, ten iterations each after warm-up. Reference candidate: sqlite-fts (current). Source of truth: <a href="./2026-08-20-fts-backend-benchmark.md">2026-08-20-fts-backend-benchmark.md</a> · <a href="./2026-08-20-fts-backend-benchmark.concept.md">concept brief</a></p>
+  <p class="meta">Three full-text backends on the same corpus at four sizes, ten iterations each after warm-up. Reference candidate: sqlite-fts (current). Source of truth: <a href="./2026-08-20-fts-backend-benchmark.md">2026-08-20-fts-backend-benchmark.md</a> · <a href="./2026-08-20-fts-backend-benchmark.brief.md">concept brief</a></p>
 </div></header>
 
 <main id="main" class="wrap">
@@ -200,7 +202,7 @@
 
 </main>
 <footer><div class="wrap">
-  <p><b>Provenance.</b> <code>bench/fts/run.sh --sizes 50k,100k,200k,400k --iterations 10 --warmup 3</code> at commit <code>c0ffee1</code>, 2026-08-19 21:04–23:41 UTC. Raw results: <code>bench/fts/results/2026-08-19/*.jsonl</code>. Aggregation: <code>bench/fts/summarize.py</code>. Palette validated with <code>node validate_palette.js "#2a6fc9,#c9552a,#1d8f66" --mode light --surface "#fffdf8"</code>.</p>
+  <p><b>Provenance.</b> <code>bench/fts/run.sh --sizes 50k,100k,200k,400k --iterations 10 --warmup 3</code> at commit <code>c0ffee1</code>, 2026-08-19 21:04–23:41 UTC. Raw results: <code>bench/fts/results/2026-08-19/*.jsonl</code>. Aggregation: <code>bench/fts/summarize.py</code>. Series colours are <code>color.series</code> slots 1–3 from the design tokens. <code>node validate_palette.js "#2E3A9F,#B0574F,#1F7A85" --mode light --surface "#FFFFFF"</code>: CVD separation, normal-vision floor, and contrast pass; the lightness band (slot 1) and chroma floor (slot 3) fail, so line style and end labels are the mandatory secondary encoding and the token owner has been asked to retune the slots.</p>
   <p>Markdown source of truth: <code>docs/benchmarks/2026-08-20-fts-backend-benchmark.md</code>. No network, no scripts, no external assets. Petrastella design language, default tokens.</p>
 </div></footer>
 </body>

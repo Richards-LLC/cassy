@@ -48,20 +48,29 @@ violated, the artifact is not shippable — fix it before committing.
 
 ## 4. Theme and design language
 
-- **The Petrastella design language is the default look.** Its type pair (a serif display face for the
-  verdict and headings, a system sans for body, tabular mono for numbers), spacing scale, semantic
-  color roles, and chart grammar are the report's tokens unless the project's `DESIGN.md` overrides
-  them. Read `DESIGN.md` first when it exists; take the tokens it names. A neutral grey theme is the
-  fallback when neither exists, never a choice made to be safe.
-- **Colors are semantic roles, declared once.** Define them as CSS custom properties named by intent —
-  `--verdict` for the conclusion and its marks, `--evidence` for measured data, `--warning` for what
-  needs attention, `--action` for the ask — plus ink, muted ink, surface, and rule. Reference the
-  roles everywhere; no hex values scattered through rules. Series colors come from the categorical
-  palette in a fixed order so the same series has the same color in every figure and every edition.
-- **Light and dark via `prefers-color-scheme`**, both meeting the contrast floor. Print is always light.
-- **Expression lives in composition and type, not in effects.** No gradients, glass, glows, drop
-  shadows carrying no meaning, or animated counters. A distinctive report has a distinctive hero and
-  one typographic move; it does not have a different theme.
+- **The palette is the project's `DESIGN.md` or the Petrastella tokens.** Read `DESIGN.md` first when
+  it exists and take the tokens it names. Without one, declare the tokens from
+  `design-spec/references/design-tokens.json` (rationale in `petrastella-design-language.md`): warm
+  stone paper, a sandstone hero surface, serif display for the verdict and title, body sans, tabular
+  mono for numbers, and semantic color roles. Neutral grey is the white-label fallback; a brief that
+  chooses it names the brand reason in its *omitted* field.
+- **Colors are semantic roles, declared once in `:root`** by the token names — `bg`, `surface`,
+  `surface-hero`, `line`, `line-strong`, `ink`, `ink-muted`, `verdict`, `verdict-soft`, `evidence`,
+  `action`, `good`, `warning`, `danger` — and referenced everywhere; no rule carries a hex value the
+  tokens do not. `verdict` marks the one decisive mark and the verdict rule and is never a status;
+  `evidence` is quiet on purpose; status uses `good`/`warning`/`danger` with a label or shape beside
+  it. Series colors come from `color.series` in fixed order so the same series has the same color in
+  every figure and every edition.
+- **Light and dark via `prefers-color-scheme`**, both meeting the contrast floor; the token file lists
+  every sanctioned text-on-surface pair with its ratio. A rule that sets a background sets its
+  foreground on the same rule. Print is always light.
+- **Containers never clip text.** No fixed height on a text-bearing box without a declared overflow
+  strategy on the same rule; tables and ledgers wider than their column scroll inside a container;
+  padding inside a bordered box is at least 12px; a border never crosses a glyph or a chart mark.
+- **Expression lives in composition and type, not in effects.** Nothing on the page floats: no
+  gradients, glass, glows, shadows carrying no meaning, or animated counters. Ledgers and tables are
+  ruled, never boxed; figure panels take the panel radius. A distinctive report has a distinctive
+  hero and one typographic move; it does not have a different theme.
 
 ## 5. Print
 

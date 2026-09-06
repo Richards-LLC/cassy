@@ -16,7 +16,7 @@ Put the evidence *on the figure*: annotate the decisive point, bar, interval, or
 
 ## Choose the form, and say why
 
-Every figure in a report has a one-line reason in the concept brief (`cas-ui-craft` format, committed beside the markdown): the reader's task, the form, and why that form fits. "A table" needs a reason as much as a slope chart does. Choose from the reader's task, then take the least-ink form that does it:
+Every figure in a report has a one-line reason in the concept brief (`<basename>.brief.md`, from `cas-ui-craft/references/concept-brief.md`, committed beside the markdown): the reader's task, the form, and why that form fits. "A table" needs a reason as much as a slope chart does. Choose from the reader's task, then take the least-ink form that does it:
 
 | Reader's task | Prefer | Avoid |
 | --- | --- | --- |
@@ -43,17 +43,17 @@ When quantitative or enumerable prose becomes a wall of text, convert the part r
 3. Format numbers before drawing: compact figures only where scanning benefits (`12.4K`, `$4.2M`); unit in the title, subtitle, or axis; one precision per column; thousands separators; never mix percent, fraction, and percentage-point changes.
 4. Show uncertainty when the data has it: intervals or bands for estimates, n for samples, missing-data marks, and a plainly labelled baseline or forecast (forecast is hatched, plan is outlined, actual is solid). No false precision from rounded or partial data.
 5. Draw quiet structure: direct labels for the endpoint, extreme, or annotated insight; hairline axes and grid; thin marks; white space. A legend supports two or more series and never substitutes for annotation. Expression lives in the annotation and the typographic hierarchy, not in effects.
-6. Assign color last, from the design language's semantic roles: `--evidence` for measured marks, `--verdict` for the mark the argument rests on, `--warning` for what needs attention, `--action` for the ask; one hue light-to-dark for magnitude; the categorical palette in fixed order for identity; a warm/cool pair with a neutral midpoint for polarity. Color follows an entity, never its rank after filtering. Take the roles from the project's `DESIGN.md` when it exists, otherwise from the Petrastella defaults.
-7. Validate any categorical palette with `node scripts/validate_palette.js "#hex,#hex" --surface "#ffffff"` (light) or `--mode dark --surface "#1e1d24"`; record the command in provenance. Do not eyeball contrast or separability. The validator ships in every harness mirror.
+6. Assign color last, from the design tokens' semantic roles: `evidence` (quiet) for measured marks, `verdict` for the one mark the argument rests on, `good`/`warning`/`danger` for status with a label or shape beside it; `color.magnitude` (one hue, light-to-dark) for quantity; `color.series` in fixed slot order for identity; `color.polarity` (warm/cool with a neutral midpoint, sign always printed) for direction. Color follows an entity, never its rank after filtering. Take the tokens from the project's `DESIGN.md` when it exists, otherwise from `design-spec/references/design-tokens.json`.
+7. Validate any categorical palette — including a subset of `color.series` — with `node scripts/validate_palette.js "#hex,#hex" --surface "#FFFFFF"` (light) or `--mode dark --surface "#191C24"`; record the command in provenance. Do not eyeball contrast or separability. The validator ships in every harness mirror.
 8. Add a text alternative (`role="img"` plus `<title>`/`<desc>` or `aria-label` carrying every value) and an adjacent real `<table>` twin. In a report, the figure's caption states its source and extraction time.
 9. **Visually verify the rendered artifact — mandatory.** Screenshot with headless Chrome at a desktop width and a phone-class `390×844` viewport, in light and dark; for a report, also render print/PDF. Look for label collisions, overflow and clipping, contrast in situ, broken layout, and the 30-second argument test. Grepping HTML for expected strings or tags is **not** visual verification: it proves markup exists, not that a human can read it.
-10. Score the figure with the `cas-ui-craft` critique (distinctiveness, fit to argument, hierarchy, craft, accessibility). A public-surface figure ships at 4 or above on the first three.
+10. Score the figure with the `cas-ui-craft` critique (`references/critique-rubric.md`: distinctiveness, fit to argument, hierarchy, craft, accessibility) and append the table to the brief. A public-surface figure ships at 4 or above on the first three and with no mechanical defect (clipped text, a contrast pair under 4.5:1 in either scheme, overlap, phone-width overflow scores 0); `node scripts/visual-qa.mjs <artifact>` PASS is the receipt where the project has it.
 
 ## Cassy output contexts
 
 For durable Cassy reports, use static inline SVG and CSS inside one self-contained HTML file: no charting library, CDN, build step, or external asset. This deliberately inverts the bundled skill's interaction-first default: hover is an optional enhancement (CSS-only tooltips are fine), static legibility leads because a figure must survive GitHub embeds, PDF, and print. Use real `<table>` markup for the evidence twin, explicit provenance beneath the figure, and `@media print` rules that retain title, annotation, legend, and table without clipping.
 
-This also inverts two dashboard defaults: use the bundled validator plus the design language's roles rather than a full reference theme, and document filters when useful without making them a default for committed evidence artifacts.
+This also inverts two dashboard defaults: use the bundled validator plus the design tokens' roles rather than a full reference theme, and document filters when useful without making them a default for committed evidence artifacts.
 
 GitHub issues and PRs need a compact static SVG or table with the same claim-title and provenance. Terminal-adjacent Markdown should use a small aligned table or Unicode sparkline; do not simulate a dense dashboard in text.
 

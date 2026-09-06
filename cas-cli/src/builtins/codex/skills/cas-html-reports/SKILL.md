@@ -24,23 +24,26 @@ this skill tells you where each of those lands in a report.
    text before any presentation decision. If the markdown is weak, the HTML is decoration on nothing.
 2. **Pick your cell**: report type × audience, from `references/report-types.md`. The cell fixes the
    required sections, their order, and the **hero figure** the type owes the reader.
-3. **Write the concept brief** and commit it beside the markdown as
-   `<basename>.concept.md`, in the format `cas-ui-craft` prescribes: the single idea; the hero form and
-   the stated reason it fits the argument; the emotional register; one distinctive compositional or
-   typographic move; what is deliberately omitted. A brief whose hero is "a paragraph", "a KPI row", or
-   "a table of everything" is rejected before rendering: the hero shows the argument, it does not
-   summarize the document. Choose the form from the `cas-ui-craft` vocabulary (ledger, slope, small
-   multiples, dot or waffle plot, annotated timeline, dumbbell, marginal notes, pull-quote) and write
-   the reason in the brief; "a table" needs a reason as much as anything else does.
+3. **Write the concept brief** (`cas-ui-craft` step 1) and commit it beside the markdown as
+   `<basename>.brief.md`, from `cas-ui-craft/references/concept-brief.md`: the single idea; the hero
+   form and the reason its shape is the claim; the emotional register; one distinctive move; what is
+   deliberately omitted. A brief whose hero is "a paragraph", "a KPI row", or "a table of everything"
+   is rejected before rendering: the hero shows the argument, it does not summarize the document.
+   Choose the form from `cas-ui-craft/references/form-vocabulary.md` (ledger, slope, small multiples,
+   dot or waffle plot, annotated timeline, dumbbell, marginal notes, pull-quote) and write the reason;
+   "a table" needs a reason as much as anything else does.
 4. **Render the HTML** beside the markdown: same directory, same basename, `.html`. Obey
    `references/technical-contract.md` (one file, progressive enhancement, accessibility, print,
    provenance, design language) and `references/presentation-rules.md` (encodings, scales, numbers).
    Chart construction follows `cas-dataviz`.
-5. **Critique it** with the `cas-ui-craft` rubric — distinctiveness, fit to argument, hierarchy,
-   craft, accessibility, each 1–5 — and record the scores at the end of the concept brief. A report
-   ships only at 4 or above on the first three. Then run `references/review-checklist.md`: open it in
-   a browser at desktop and phone widths, print-preview it, disable JavaScript and reload. A grep for
-   expected tags is not a review.
+5. **Score it with the `cas-ui-craft` rubric** (`references/critique-rubric.md`): distinctiveness,
+   fit to argument, hierarchy, craft, accessibility, each 1–5, appended to the brief under
+   `## Critique` with one line of evidence per score. A report ships only at 4 or above on the first
+   three and with no mechanical defect (a contrast pair under 4.5:1 in either scheme, clipped or
+   overflowing text, a rule crossing a glyph, phone-width overflow scores 0 and blocks). Evidence is
+   the four headless renders — 1280 and 390 px, light and dark — plus print preview and a JS-disabled
+   reload, or `node scripts/visual-qa.mjs <artifact>` PASS where the project has it; then run
+   `references/review-checklist.md`. A grep for expected tags is not a review.
 6. **Commit all three files together**: markdown, concept brief, HTML. An HTML artifact without its
    markdown source is a provenance failure; a markdown report whose HTML is stale is worse than no
    HTML at all; a rendered report without its brief cannot be critiqued.
@@ -97,9 +100,10 @@ These hold for every type, audience, and domain; rationale in `references/techni
 - **Print-ready.** A print stylesheet that expands every panel, shows link targets, never clips a figure.
 - **Provenance per figure.** Every number and figure names its source — query, file, commit, window.
 - **Copyable.** Numbers and tables survive selection and paste into a spreadsheet or a message.
-- **Design language by default.** The Petrastella design language (type pair, spacing scale, semantic
-  color roles, chart grammar) is the look unless the project's `DESIGN.md` overrides it. A neutral
-  grey theme is a fallback for the absence of both, never a choice.
+- **Design language by default.** The palette, type pair, spacing, and chart grammar are the
+  project's `DESIGN.md` or, without one, the Petrastella tokens
+  (`design-spec/references/design-tokens.json`, explained in `petrastella-design-language.md`).
+  Neutral grey is the white-label fallback a brief must name a reason for, never a default.
 
 ## Presentation rules
 

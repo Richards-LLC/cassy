@@ -5,13 +5,18 @@ not a nitpick. Twelve dimensions; the first one gates the rest.
 
 ## 0. Concept brief and critique
 
-- [ ] `<basename>.concept.md` exists beside the markdown and names the single idea, the hero form with
+- [ ] `<basename>.brief.md` exists beside the markdown and names the single idea, the hero form with
       its reason, the emotional register, one distinctive move, and what was omitted.
 - [ ] The hero is a figure that shows the argument, visible above the fold at 1280×800 and at 390×844.
       A paragraph, a KPI row, or a table of everything is not a hero.
-- [ ] The `cas-ui-craft` critique scores are recorded in the brief: distinctiveness, fit to argument,
-      hierarchy, craft, accessibility, each 1–5. The first three are 4 or above.
-- [ ] The design language in use is the Petrastella default or the project's `DESIGN.md`; the brief
+- [ ] The `cas-ui-craft` critique table is appended to the brief under `## Critique` with evidence per
+      score: distinctiveness, fit to argument, hierarchy, craft, accessibility, each 1–5. The first
+      three are 4 or above and no dimension is 0.
+- [ ] Four headless renders exist — 1280 and 390 px, light and dark — and were looked at: no text pair
+      under 4.5:1 in either scheme, no clipped or overflowing text, no rule or neighbour crossing a
+      glyph or mark, no page-level horizontal scroll at 390 px. `scripts/visual-qa.mjs` PASS where the
+      project has it.
+- [ ] The tokens in `:root` are the project's `DESIGN.md` or `design-tokens.json`, by name; the brief
       says which.
 
 ## 1. Content fidelity

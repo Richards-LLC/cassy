@@ -9,7 +9,7 @@ Before shipping, verify each answer is yes.
 4. Are units, precision, locale separators, and percent versus percentage-point changes consistent?
 5. Are uncertainty, forecasts, missing values, sample size, and baselines labelled where they affect interpretation?
 6. Do small multiples share scale, ordering, and visual treatment? Is there exactly one axis per plot?
-7. Is color applied by meaning, taken from the design language's semantic roles (or the project's `DESIGN.md`), and validated where categorical colors identify series?
+7. Is color applied by meaning, taken from the design tokens' semantic roles and `color.series` (or the project's `DESIGN.md`), and validated where categorical colors identify series?
 8. Can a reader obtain every value through labels, the table, or text without hover or color perception?
 9. Does the static HTML use inline SVG/CSS, avoid external dependencies, state figure provenance, and print without clipping?
 10. Did you actually render and inspect desktop and `390×844` headless-browser screenshots in light and dark, plus print/PDF for a report, for collisions, clipping, contrast in situ, layout, and the 30-second argument? HTML/tag greps do not count as visual verification.

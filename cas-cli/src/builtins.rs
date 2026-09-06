@@ -356,8 +356,8 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-html-reports/references/examples/before-after/rubric-review-after.html"),
     },
     BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.concept.md",
-        content: include_str!("builtins/skills/cas-html-reports/references/examples/before-after/rubric-review.concept.md"),
+        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
@@ -763,8 +763,8 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/before-after/rubric-review-after.html"),
     },
     BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.concept.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/before-after/rubric-review.concept.md"),
+        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
@@ -1179,8 +1179,8 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/before-after/rubric-review-after.html"),
     },
     BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.concept.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/before-after/rubric-review.concept.md"),
+        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
@@ -3970,7 +3970,7 @@ This is the body content."#;
             "skills/cas-html-reports/references/examples/executive-variance-brief.why.md",
             "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
             "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html",
-            "skills/cas-html-reports/references/examples/before-after/rubric-review.concept.md",
+            "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
             "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
         ];
         // FILES[6..10] are the rendered exemplars held to the contract; the

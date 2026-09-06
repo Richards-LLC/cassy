@@ -407,17 +407,46 @@ check_version_literals() {
     fi
 }
 
+# Runtime reads of the producer checkout through CARGO_MANIFEST_DIR pass on
+# every build host and fail on the merge-queue shard runner, which has only the
+# compiled test binary (cas-1f6e: a builtins unit test read docs/design copies
+# that way; the archive row could not catch it because the producer path still
+# existed here). The Rust guard below scans the embedded integration-test
+# sources; this scan covers the src-side test modules the guard cannot embed.
+# Compile-time `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), ...))` and
+# `include_bytes!` are shard-safe and are not matched.
+readonly src_runtime_manifest_dir_pattern='Path::new\(env!\("CARGO_MANIFEST_DIR"\)\)|PathBuf::from\(env!\("CARGO_MANIFEST_DIR"\)\)|env!\("CARGO_MANIFEST_DIR"\)\)\.(join|parent)\('
+# cas::test_paths::workspace_root() is the one sanctioned runtime probe; its
+# callers guard it with an explicit SKIP when the checkout is absent.
+readonly src_runtime_manifest_dir_allowlist='cas-cli/src/test_paths.rs'
+
+check_src_runtime_manifest_dir_reads() {
+    local hits
+    hits="$(grep -rnE --include='*.rs' "$src_runtime_manifest_dir_pattern" cas-cli/src 2>/dev/null \
+        | grep -vF "$src_runtime_manifest_dir_allowlist:" || true)"
+    if [[ -n "$hits" ]]; then
+        printf 'fixture-paths: cas-cli/src test modules read the producer checkout at runtime; embed the file with include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..")) instead:\n%s\n' "$hits"
+        return 1
+    fi
+    printf 'fixture-paths: no runtime CARGO_MANIFEST_DIR reads under cas-cli/src (allowlist: %s)\n' \
+        "$src_runtime_manifest_dir_allowlist"
+}
+
 check_fixture_paths() {
     "$cargo_bin" nextest run -p cas --test builtin_archive_portability_test \
-        builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime
+        builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime || return 1
+    check_src_runtime_manifest_dir_reads
 }
 
 check_workspace_tests() {
     "$cargo_bin" check --workspace --tests
 }
 
+# The merge queue validates the whole workspace, so the suite and archive rows
+# do too (cas-1f6e: a cas-mux snapshot test failed in the queue after a local
+# `-p cas` gate passed). The non-cas crates add roughly a minute to each row.
 check_nextest() {
-    "$cargo_bin" nextest run -p cas
+    "$cargo_bin" nextest run --workspace
 }
 
 check_doctests() {
@@ -551,7 +580,7 @@ check_archive_mode() {
         return 1
     }
     archive_path="$(make_archive_path)"
-    if "$cargo_bin" nextest archive -p cas --archive-file "$archive"; then
+    if "$cargo_bin" nextest archive --workspace --archive-file "$archive"; then
         :
     else
         status=$?
@@ -773,19 +802,19 @@ run_check version-literals \
     'find source/test files for <version> (excluding manifests, CHANGELOG, reference-history, failure-log)' \
     check_version_literals
 run_check fixture-paths \
-    "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime" \
+    "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime; no runtime CARGO_MANIFEST_DIR reads under cas-cli/src" \
     check_fixture_paths
 run_check workspace-tests \
     "$cargo_bin check --workspace --tests" \
     check_workspace_tests
 run_check nextest \
-    "$cargo_bin nextest run -p cas" \
+    "$cargo_bin nextest run --workspace" \
     check_nextest
 run_check doctests \
     "$cargo_bin test -p cas --doc" \
     check_doctests
 run_check archive-mode \
-    "$cargo_bin nextest archive -p cas --archive-file <home-disk>/suite.tar.zst; archive run outside checkout with remap and rg removed" \
+    "$cargo_bin nextest archive --workspace --archive-file <home-disk>/suite.tar.zst; archive run outside checkout with remap and rg removed" \
     check_archive_mode
 run_check snapshot-portability \
     'env -u COLUMNS TMPDIR=<deep path> cargo nextest run -p cas --test component_output_test' \

@@ -20,7 +20,7 @@ You coordinate workers to complete EPICs. You are a planner, not an implementer.
 - **Maintain situational awareness.** Hold a one-sentence frame of what this project is and how the request fits before acting. If frame and request suggest different actions, name the mismatch.
 - **Counter-propose when you see a better path.** Required anchors: citable source, concrete cost of current approach, concrete benefit of alternative. No anchors → execute or ask.
 - **Self-challenge before touching shared surfaces.** Before editing skills, agents, hooks, shared config, or templates: "who reads this, and does it fit all of them?"
-- **Tier every spawn — never fleet-default.** Explicit `cli=`/`model=`/`effort=` every spawn. Registry lanes: **light** Claude/Haiku 4.5/low, **standard** Codex/GPT-5.6 Luna/xhigh, **taste** Claude/Fable 5.1/medium, and **heavy** Codex/GPT-5.6 Sol/high. Terra is a standing suspension and must not be spawned. Use taste for judgment and public decisions; use heavy for implementation risk. The generated route table and recipes live in [model-selection.md](cas-supervisor/references/model-selection.md).
+- **Tier every spawn — never fleet-default.** Explicit `cli=`/`model=`/`effort=` every spawn. Registry lanes: **light** Claude/Haiku 4.5/low, **standard** Codex/GPT-5.6 Luna/xhigh, **taste** Claude/Fable 5.1/medium with Opus 5/high fallback, and **heavy** Codex/GPT-6 Astra/high with Sol/high fallback. Terra is a standing suspension and must not be spawned. Use taste for judgment and public decisions; use heavy for implementation risk. The generated route table and recipes live in [model-selection.md](cas-supervisor/references/model-selection.md).
 - **Worker liveness:** fresh heartbeat **or** live OS process; never shut down on `None active` alone — see [worker-recovery.md](cas-supervisor/references/worker-recovery.md).
 - **Workspace contract:** source/build stays in the worktree; durable proof goes in `[factory] artifacts_root/<task-id>/`, never `/tmp`.
 - **No shell polling or sleeping.** Never poll or sleep in a shell; use `coordination remind` to schedule follow-up.
@@ -38,7 +38,7 @@ Place the session on the highest true rung every turn, then own the action that 
 
 ## Operating flow
 
-Run `/cas-supervisor-checklist`, complete preflight and intake, create/pin the EPIC, then spawn a tiered mix, assign, and end the turn. Use `count=2 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh` for standard tasks plus `count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high` for a heavy one; use the registry's Claude Haiku 4.5/low route for genuinely light chores and Claude Fable 5.1/medium for taste work. Use `update`, not `transfer`, for assignments. One-off follow-up: `spawn_workers count=1 task_id=<task-id>`.
+Run `/cas-supervisor-checklist`, complete preflight and intake, create/pin the EPIC, then spawn a tiered mix, assign, and end the turn. Use `count=2 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh` for standard tasks plus `count=1 isolate=true cli=codex model=gpt-6-astra effort=high` for a heavy one; use the registry's Claude Haiku 4.5/low route for genuinely light chores and Claude Fable 5.1/medium for taste work (Opus 5/high fallback). Use `update`, not `transfer`, for assignments. One-off follow-up: `spawn_workers count=1 task_id=<task-id>`.
 
 ## Heterogeneous Teams (Claude supervisor + Codex workers)
 

@@ -3004,7 +3004,8 @@ This is the body content."#;
             "Claude/Haiku 4.5/low",
             "Codex/GPT-5.6 Luna/xhigh",
             "Claude/Fable 5.1/medium",
-            "Codex/GPT-5.6 Sol/high",
+            "Codex/GPT-6 Astra/high",
+            "Opus 5/high fallback",
             "standing suspension",
             "generated route table and recipes",
         ] {
@@ -3051,11 +3052,11 @@ This is the body content."#;
         );
 
         // The shared body must retain explicit complete-call controls and the
-        // registry's heavy route on every twin without duplicating workflow.
+        // registry's Astra heavy route on every twin without duplicating workflow.
         for (label, body) in [("claude", claude), ("codex", codex), ("grok", grok)] {
             assert!(
-                body.contains("Codex/GPT-5.6 Sol/high"),
-                "{label} cas-supervisor.md must retain the heavy registry route"
+                body.contains("Codex/GPT-6 Astra/high"),
+                "{label} cas-supervisor.md must retain the Astra heavy registry route"
             );
             assert!(
                 body.contains("pass complete `cli=`, `model=`, and `effort=` controls"),
@@ -5315,7 +5316,6 @@ This is the body content."#;
             {
                 for stale in [
                     "Claude/Opus 5/high",
-                    "Claude Opus 5/high",
                     "Claude Opus 5 at high",
                     "Opus is the normal taste",
                     "Opus is a normal taste",
@@ -5337,7 +5337,7 @@ This is the body content."#;
                         builtin.path
                     );
                     assert!(recipes.contains(&format!(
-                        "# taste — recipe claude_fable\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium"
+                        "# taste — recipe claude_fable (fallback: claude_opus)\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium"
                     )));
                 }
             }
@@ -6325,7 +6325,7 @@ This is the body content."#;
             "Claude/Haiku 4.5/low",
             "Codex/GPT-5.6 Luna/xhigh",
             "Claude/Fable 5.1/medium",
-            "Codex/GPT-5.6 Sol/high",
+            "Codex/GPT-6 Astra/high",
             "standing suspension",
             "generated route table and recipes",
         ] {

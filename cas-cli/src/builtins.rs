@@ -4689,14 +4689,26 @@ This is the body content."#;
         }
 
         // docs/design/ is the repo-level statement of the language; it is the same
-        // bytes projects receive, never a second edition.
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        for (builtin, doc) in [
-            (FILES[8], "docs/design/petrastella-design-language.md"),
-            (FILES[9], "docs/design/design-tokens.json"),
+        // bytes projects receive, never a second edition. The copies are embedded
+        // at compile time (cas-1f6e): a runtime read of the producer path passed
+        // on every build host and failed on the merge-queue shard runner, where
+        // only the compiled test binary exists — the fixture-paths class.
+        const DESIGN_LANGUAGE_DOC: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/design/petrastella-design-language.md"
+        ));
+        const DESIGN_TOKENS_DOC: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/design/design-tokens.json"
+        ));
+        for (builtin, doc, on_disk) in [
+            (
+                FILES[8],
+                "docs/design/petrastella-design-language.md",
+                DESIGN_LANGUAGE_DOC,
+            ),
+            (FILES[9], "docs/design/design-tokens.json", DESIGN_TOKENS_DOC),
         ] {
-            let on_disk = std::fs::read_to_string(repo_root.join(doc))
-                .unwrap_or_else(|err| panic!("{doc} must exist beside the builtin copy: {err}"));
             let shipped = claude_bodies
                 .iter()
                 .find(|(path, _)| *path == builtin)

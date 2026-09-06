@@ -133,7 +133,7 @@ printf 'ZIG=%s :: %s\n' "${ZIG:-unset}" "$*" \
 printf 'RUSTC_WRAPPER=%s CARGO_HOME=%s :: %s\n' "${RUSTC_WRAPPER:-unset}" "${CARGO_HOME:-unset}" "$*" \
   >>"${GATE_FIXTURE_ARCHIVE_ENV_LOG:-/dev/null}"
 if [[ "$*" == 'check --workspace --tests' && "${GATE_FIXTURE_CHECK_FAIL:-}" == 1 ]]; then exit 1; fi
-if [[ "$*" == 'nextest run -p cas'* && "${GATE_FIXTURE_NEXTEST_FAIL:-}" == 1 ]]; then exit 1; fi
+if [[ "$*" == 'nextest run --workspace'* && "${GATE_FIXTURE_NEXTEST_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == *'builtin_archive_portability_test'* && "${GATE_FIXTURE_FIXTURE_PATHS_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'test -p cas --doc' && "${GATE_FIXTURE_DOCTEST_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "${GATE_FIXTURE_SNAPSHOT_FAIL:-}" == 1 ]]; then
@@ -142,7 +142,7 @@ fi
 if [[ "${GATE_FIXTURE_DRIFT_FAIL:-}" == 1 ]]; then
   case "$*" in *builtin_flavor_drift_test*) exit 1;; esac
 fi
-if [[ "$*" == 'nextest archive -p cas'* ]]; then
+if [[ "$*" == 'nextest archive --workspace'* ]]; then
   archive_file=''
   for arg in "$@"; do [[ "$arg" == *.tar.zst ]] && archive_file="$arg"; done
   [[ -n "$archive_file" ]] && printf archive >"$archive_file"
@@ -232,6 +232,48 @@ run_scenario archive-run GATE_FIXTURE_ARCHIVE_FAIL archive-mode
 run_scenario snapshot-run GATE_FIXTURE_SNAPSHOT_FAIL snapshot-portability
 run_scenario projection-run GATE_FIXTURE_DRIFT_FAIL builtin-projections
 run_scenario fixture-paths-run GATE_FIXTURE_FIXTURE_PATHS_FAIL fixture-paths
+
+# cas-1f6e. A src-side test module that reads the producer checkout at runtime
+# through CARGO_MANIFEST_DIR passes on the build host and fails on the
+# merge-queue shard runner; the fixture-paths row must name the file and line.
+repo="$(new_fixture src-runtime-manifest-dir)"
+mkdir -p "$repo/cas-cli/src/inspect"
+cat >"$repo/cas-cli/src/inspect/mod.rs" <<'EOF'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reads_producer_copy() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let _ = std::fs::read_to_string(root.join("docs/design/design-tokens.json"));
+    }
+}
+EOF
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only fixture-paths 2>&1 || true)"
+assert_named_failure fixture-paths "$output"
+grep -qF 'cas-cli/src/inspect/mod.rs:5' <<<"$output" && ok 'fixture-paths names the runtime CARGO_MANIFEST_DIR read' \
+    || bad "fixture-paths did not name the src runtime read: $output"
+
+# The compile-time form is shard-safe and must stay green; the sanctioned
+# cas::test_paths probe is allowlisted by path.
+repo="$(new_fixture src-compile-time-include)"
+mkdir -p "$repo/cas-cli/src/inspect"
+cat >"$repo/cas-cli/src/inspect/mod.rs" <<'EOF'
+#[cfg(test)]
+mod tests {
+    const DOC: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/design/design-tokens.json"));
+    const BYTES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../casdemo.png"));
+    #[test]
+    fn embedded() { assert!(!DOC.is_empty() && !BYTES.is_empty()); }
+}
+EOF
+cat >"$repo/cas-cli/src/test_paths.rs" <<'EOF'
+pub fn workspace_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+EOF
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only fixture-paths 2>&1 || true)"
+grep -qF 'PASS fixture-paths' <<<"$output" && ok 'fixture-paths allows compile-time includes and the test_paths probe' \
+    || bad "fixture-paths rejected a shard-safe include: $output"
 
 # 8. Ledger regeneration must be compared to the committed file.
 run_scenario reference-ledger GATE_FIXTURE_REFERENCE_FAIL builtin-projections

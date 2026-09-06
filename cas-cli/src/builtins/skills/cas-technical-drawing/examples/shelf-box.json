@@ -1,0 +1,17 @@
+{
+  "project": "Shelf box", "title": "Shelf box", "units": "in", "date": "2026-09-06",
+  "parts": [
+    {"id": "side-l", "name": "Side", "size": ["12", "6", "3/4"], "at": [0, 0, 0], "dims": ["3/4", "6", "12"], "material": "poplar"},
+    {"id": "side-r", "name": "Side", "size": ["12", "6", "3/4"], "at": ["9-1/4", 0, 0], "dims": ["3/4", "6", "12"], "material": "poplar"},
+    {"id": "top", "name": "Top", "size": ["9-1/4", "6", "3/4"], "at": ["3/8", 0, "11-1/4"], "dims": ["9-1/4", "6", "3/4"], "material": "poplar"},
+    {"id": "shelf", "name": "Shelf", "size": ["9-1/4", "6", "3/4"], "at": ["3/8", 0, "5"], "dims": ["9-1/4", "6", "3/4"], "material": "poplar"}
+  ],
+  "joints": [
+    {"type": "rabbet", "female": "side-l", "male": "top", "width": "3/4", "depth": "3/8"},
+    {"type": "rabbet", "female": "side-r", "male": "top", "width": "3/4", "depth": "3/8"},
+    {"type": "dado", "female": "side-l", "male": "shelf", "width": "3/4", "depth": "3/8"},
+    {"type": "dado", "female": "side-r", "male": "shelf", "width": "3/4", "depth": "3/8"}
+  ],
+  "sections": [{"name": "A", "axis": "y", "at": 3, "look": "-"}],
+  "dims": [{"view": "front", "axis": "z", "from": 0, "to": 5, "row": 1}, {"view": "front", "axis": "z", "from": 5, "to": "5-3/4", "row": 1}]
+}

@@ -451,6 +451,12 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/skills/cas-image-generate/references/output-checklist.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/skills/cas-image-generate/references/providers.md") },
     BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/skills/cas-image-generate/scripts/generate-image.sh") },
+    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/skills/cas-technical-drawing/SKILL.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/skills/cas-technical-drawing/references/model-schema.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/skills/cas-technical-drawing/references/drafting-conventions.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/skills/cas-technical-drawing/references/likeness-critique.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/skills/cas-technical-drawing/scripts/draft.mjs") },
+    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/skills/cas-technical-drawing/examples/shelf-box.json") },
 ];
 
 /// Built-in Workflow scripts shipped to `.claude/workflows/` on `cas update --sync`.
@@ -803,6 +809,12 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/output-checklist.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/providers.md") },
     BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/codex/skills/cas-image-generate/scripts/generate-image.sh") },
+    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/SKILL.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/model-schema.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/drafting-conventions.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/likeness-critique.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/codex/skills/cas-technical-drawing/scripts/draft.mjs") },
+    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/codex/skills/cas-technical-drawing/examples/shelf-box.json") },
 ];
 
 /// All built-in agents managed by Cassy for Grok (EPIC cas-8888, Phase 5 /
@@ -1191,6 +1203,12 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/output-checklist.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/providers.md") },
     BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/grok/skills/cas-image-generate/scripts/generate-image.sh") },
+    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/SKILL.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/model-schema.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/drafting-conventions.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/likeness-critique.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/grok/skills/cas-technical-drawing/scripts/draft.mjs") },
+    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/grok/skills/cas-technical-drawing/examples/shelf-box.json") },
 ];
 
 /// OpenCode does not load a filesystem skill/agent home for its generated
@@ -1424,6 +1442,15 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/cas-html-reports"),
         codex: Some("skills/cas-html-reports"),
         grok: Some("skills/cas-html-reports"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-f0f0: technical drawings render from one model with a Node script and
+        // make no CAS MCP calls, so the twins are byte-identical to the Claude source.
+        id: "cas-technical-drawing",
+        claude: Some("skills/cas-technical-drawing"),
+        codex: Some("skills/cas-technical-drawing"),
+        grok: Some("skills/cas-technical-drawing"),
         note: "",
     },
     RequiredCapability {

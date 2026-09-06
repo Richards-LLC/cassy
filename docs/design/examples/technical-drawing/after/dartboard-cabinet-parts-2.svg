@@ -1,0 +1,184 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="279.4mm" height="215.9mm" viewBox="0 0 279.4 215.9" data-draft="1" data-sheet-mm="279.4 215.9" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif">
+<defs>
+
+</defs>
+<rect x="0" y="0" width="279.4" height="215.9" fill="#fff"/>
+<rect x="14" y="14" width="251.4" height="77.45" fill="none" stroke="#1b1f24" stroke-width="0.25" class="card"/>
+<text x="17" y="19.2" font-size="3.5" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="700">3  DRAWER DIVIDER</text>
+<text x="262.4" y="19.2" font-size="2.6" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333" text-anchor="end">QTY 1 · POPLAR 1X10</text>
+<line x1="14" y1="22" x2="265.4" y2="22" stroke="#1b1f24" stroke-width="0.25"/>
+<g class="view" data-view="front" data-vid="50" data-kind="ortho" data-scale="1.588" data-origin="100.887 57.266">
+<line x1="100.887" y1="57.266" x2="147.322" y2="57.266" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="x" data-len="29.25"/>
+<line x1="100.887" y1="43.375" x2="147.322" y2="43.375" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="x" data-len="29.25"/>
+<line x1="100.887" y1="57.266" x2="100.887" y2="43.375" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="z" data-len="8.75"/>
+<line x1="147.322" y1="57.266" x2="147.322" y2="43.375" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="z" data-len="8.75"/>
+<line x1="100.887" y1="57.266" x2="147.322" y2="57.266" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="x" data-len="29.25"/>
+<line x1="100.887" y1="43.375" x2="147.322" y2="43.375" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="x" data-len="29.25"/>
+<line x1="100.887" y1="57.266" x2="100.887" y2="43.375" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="z" data-len="8.75"/>
+<line x1="147.322" y1="57.266" x2="147.322" y2="43.375" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="z" data-len="8.75"/>
+<rect x="100.887" y="43.375" width="46.434" height="13.891" class="extent" fill="none" stroke="none" data-part="divider" data-size="29.25 8.75"/>
+</g>
+<g class="view" data-view="top" data-vid="51" data-kind="ortho" data-scale="1.588" data-origin="100.887 33.184">
+<line x1="100.887" y1="33.184" x2="147.322" y2="33.184" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="x" data-len="29.25"/>
+<line x1="100.887" y1="34.375" x2="147.322" y2="34.375" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="x" data-len="29.25"/>
+<line x1="100.887" y1="33.184" x2="100.887" y2="34.375" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="y" data-len="0.75"/>
+<line x1="147.322" y1="33.184" x2="147.322" y2="34.375" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="y" data-len="0.75"/>
+<line x1="100.887" y1="33.184" x2="147.322" y2="33.184" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="x" data-len="29.25"/>
+<line x1="100.887" y1="34.375" x2="147.322" y2="34.375" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="x" data-len="29.25"/>
+<line x1="100.887" y1="33.184" x2="100.887" y2="34.375" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="y" data-len="0.75"/>
+<line x1="147.322" y1="33.184" x2="147.322" y2="34.375" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="y" data-len="0.75"/>
+<rect x="100.887" y="33.184" width="46.434" height="1.191" class="extent" fill="none" stroke="none" data-part="divider" data-size="29.25 0.75"/>
+</g>
+<g class="view" data-view="right" data-vid="52" data-kind="ortho" data-scale="1.588" data-origin="168.513 57.266">
+<line x1="168.513" y1="57.266" x2="167.322" y2="57.266" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="y" data-len="0.75"/>
+<line x1="168.513" y1="43.375" x2="167.322" y2="43.375" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="y" data-len="0.75"/>
+<line x1="168.513" y1="57.266" x2="168.513" y2="43.375" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="z" data-len="8.75"/>
+<line x1="167.322" y1="57.266" x2="167.322" y2="43.375" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="divider" data-axis="z" data-len="8.75"/>
+<line x1="168.513" y1="57.266" x2="167.322" y2="57.266" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="y" data-len="0.75"/>
+<line x1="168.513" y1="43.375" x2="167.322" y2="43.375" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="y" data-len="0.75"/>
+<line x1="168.513" y1="57.266" x2="168.513" y2="43.375" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="z" data-len="8.75"/>
+<line x1="167.322" y1="57.266" x2="167.322" y2="43.375" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="divider" data-axis="z" data-len="8.75"/>
+<rect x="167.322" y="43.375" width="1.191" height="13.891" class="extent" fill="none" stroke="none" data-part="divider" data-size="0.75 8.75"/>
+</g>
+<g class="dim" data-view="front" data-vid="50" data-axis="x" data-row="1" data-side="bottom" data-from="0" data-to="29.25" data-value="29.25" data-overall="1" data-chain="100.887 147.322">
+<line x1="100.887" y1="58.466" x2="100.887" y2="69.266" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="147.322" y1="58.466" x2="147.322" y2="69.266" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="100.887" y1="67.266" x2="147.322" y2="67.266" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="100.887,67.266 103.887,67.766 103.887,66.766" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="147.322,67.266 144.322,66.766 144.322,67.766" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="124.105" y="70.616" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">29-1/4</text>
+</g>
+<g class="dim" data-view="front" data-vid="50" data-axis="z" data-row="1" data-side="left" data-from="0" data-to="8.75" data-value="8.75" data-overall="1" data-chain="43.375 57.266">
+<line x1="99.687" y1="57.266" x2="88.887" y2="57.266" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="99.687" y1="43.375" x2="88.887" y2="43.375" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="90.887" y1="57.266" x2="90.887" y2="52.57" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="90.887" y1="48.07" x2="90.887" y2="43.375" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="90.887,57.266 91.387,54.266 90.387,54.266" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="90.887,43.375 90.387,46.375 91.387,46.375" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="90.887" y="51.37" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">8-3/4</text>
+</g>
+<g class="dim" data-view="top" data-vid="51" data-axis="y" data-row="1" data-side="left" data-from="0" data-to="0.75" data-value="0.75" data-overall="1" data-chain="33.184 34.375">
+<line x1="99.687" y1="33.184" x2="88.887" y2="33.184" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="99.687" y1="34.375" x2="88.887" y2="34.375" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="90.887" y1="29.784" x2="90.887" y2="37.775" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="90.887,33.184 91.387,30.184 90.387,30.184" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="90.887,34.375 90.387,37.375 91.387,37.375" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="84.887" y="28.334" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">3/4</text>
+</g>
+<g class="dim" data-view="right" data-vid="52" data-axis="y" data-row="1" data-side="bottom" data-from="0" data-to="0.75" data-value="0.75" data-overall="1" data-chain="167.322 168.513">
+<line x1="168.513" y1="58.466" x2="168.513" y2="69.266" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="167.322" y1="58.466" x2="167.322" y2="69.266" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="171.913" y1="67.266" x2="163.922" y2="67.266" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="168.513,67.266 171.513,67.766 171.513,66.766" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="167.322,67.266 164.322,66.766 164.322,67.766" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="172.913" y="68.316" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="start">3/4</text>
+</g>
+<text x="17" y="88.45" font-size="2.4" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">SCALE 1:16 · L 29-1/4 × W 8-3/4 × T 3/4</text>
+<rect x="14" y="95.45" width="251.4" height="77.45" fill="none" stroke="#1b1f24" stroke-width="0.25" class="card"/>
+<text x="17" y="100.65" font-size="3.5" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="700">4  UPPER WALL-MOUNT RAIL</text>
+<text x="262.4" y="100.65" font-size="2.6" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333" text-anchor="end">QTY 1 · POPLAR 1X4</text>
+<line x1="14" y1="103.45" x2="265.4" y2="103.45" stroke="#1b1f24" stroke-width="0.25"/>
+<g class="view" data-view="front" data-vid="53" data-kind="ortho" data-scale="3.175" data-origin="77.075 137.922">
+<line x1="77.075" y1="137.922" x2="169.944" y2="137.922" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="x" data-len="29.25"/>
+<line x1="77.075" y1="126.809" x2="169.944" y2="126.809" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="x" data-len="29.25"/>
+<line x1="77.075" y1="137.922" x2="77.075" y2="126.809" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="z" data-len="3.5"/>
+<line x1="169.944" y1="137.922" x2="169.944" y2="126.809" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="z" data-len="3.5"/>
+<line x1="77.075" y1="137.922" x2="169.944" y2="137.922" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="x" data-len="29.25"/>
+<line x1="77.075" y1="126.809" x2="169.944" y2="126.809" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="x" data-len="29.25"/>
+<line x1="77.075" y1="137.922" x2="77.075" y2="126.809" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="z" data-len="3.5"/>
+<line x1="169.944" y1="137.922" x2="169.944" y2="126.809" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="z" data-len="3.5"/>
+<rect x="77.075" y="126.809" width="92.869" height="11.112" class="extent" fill="none" stroke="none" data-part="rail-upper" data-size="29.25 3.5"/>
+</g>
+<g class="view" data-view="top" data-vid="54" data-kind="ortho" data-scale="3.175" data-origin="77.075 115.428">
+<line x1="77.075" y1="115.428" x2="169.944" y2="115.428" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="x" data-len="29.25"/>
+<line x1="77.075" y1="117.809" x2="169.944" y2="117.809" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="x" data-len="29.25"/>
+<line x1="77.075" y1="115.428" x2="77.075" y2="117.809" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="y" data-len="0.75"/>
+<line x1="169.944" y1="115.428" x2="169.944" y2="117.809" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="y" data-len="0.75"/>
+<line x1="77.075" y1="115.428" x2="169.944" y2="115.428" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="x" data-len="29.25"/>
+<line x1="77.075" y1="117.809" x2="169.944" y2="117.809" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="x" data-len="29.25"/>
+<line x1="77.075" y1="115.428" x2="77.075" y2="117.809" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="y" data-len="0.75"/>
+<line x1="169.944" y1="115.428" x2="169.944" y2="117.809" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="y" data-len="0.75"/>
+<rect x="77.075" y="115.428" width="92.869" height="2.381" class="extent" fill="none" stroke="none" data-part="rail-upper" data-size="29.25 0.75"/>
+</g>
+<g class="view" data-view="right" data-vid="55" data-kind="ortho" data-scale="3.175" data-origin="192.325 137.922">
+<line x1="192.325" y1="137.922" x2="189.944" y2="137.922" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="y" data-len="0.75"/>
+<line x1="192.325" y1="126.809" x2="189.944" y2="126.809" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="y" data-len="0.75"/>
+<line x1="192.325" y1="137.922" x2="192.325" y2="126.809" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="z" data-len="3.5"/>
+<line x1="189.944" y1="137.922" x2="189.944" y2="126.809" class="hid" stroke="#4a5058" stroke-width="0.35" stroke-dasharray="1.6 0.8" data-part="rail-upper" data-axis="z" data-len="3.5"/>
+<line x1="192.325" y1="137.922" x2="189.944" y2="137.922" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="y" data-len="0.75"/>
+<line x1="192.325" y1="126.809" x2="189.944" y2="126.809" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="y" data-len="0.75"/>
+<line x1="192.325" y1="137.922" x2="192.325" y2="126.809" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="z" data-len="3.5"/>
+<line x1="189.944" y1="137.922" x2="189.944" y2="126.809" class="obj" stroke="#1b1f24" stroke-width="0.7" stroke-linecap="round" data-part="rail-upper" data-axis="z" data-len="3.5"/>
+<rect x="189.944" y="126.809" width="2.381" height="11.112" class="extent" fill="none" stroke="none" data-part="rail-upper" data-size="0.75 3.5"/>
+</g>
+<g class="dim" data-view="front" data-vid="53" data-axis="x" data-row="1" data-side="bottom" data-from="0" data-to="29.25" data-value="29.25" data-overall="1" data-chain="77.075 169.944">
+<line x1="77.075" y1="139.122" x2="77.075" y2="149.922" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="169.944" y1="139.122" x2="169.944" y2="149.922" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="77.075" y1="147.922" x2="169.944" y2="147.922" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="77.075,147.922 80.075,148.422 80.075,147.422" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="169.944,147.922 166.944,147.422 166.944,148.422" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="123.509" y="151.272" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">29-1/4</text>
+</g>
+<g class="dim" data-view="front" data-vid="53" data-axis="z" data-row="1" data-side="left" data-from="0" data-to="3.5" data-value="3.5" data-overall="1" data-chain="126.809 137.922">
+<line x1="75.875" y1="137.922" x2="65.075" y2="137.922" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="75.875" y1="126.809" x2="65.075" y2="126.809" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="67.075" y1="137.922" x2="67.075" y2="134.616" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="67.075" y1="130.116" x2="67.075" y2="126.809" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="67.075,137.922 67.575,134.922 66.575,134.922" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="67.075,126.809 66.575,129.809 67.575,129.809" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="67.075" y="133.416" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">3-1/2</text>
+</g>
+<g class="dim" data-view="top" data-vid="54" data-axis="y" data-row="1" data-side="left" data-from="0" data-to="0.75" data-value="0.75" data-overall="1" data-chain="115.428 117.809">
+<line x1="75.875" y1="115.428" x2="65.075" y2="115.428" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="75.875" y1="117.809" x2="65.075" y2="117.809" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="67.075" y1="112.028" x2="67.075" y2="121.209" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="67.075,115.428 67.575,112.428 66.575,112.428" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="67.075,117.809 66.575,120.809 67.575,120.809" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="61.075" y="110.578" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="middle">3/4</text>
+</g>
+<g class="dim" data-view="right" data-vid="55" data-axis="y" data-row="1" data-side="bottom" data-from="0" data-to="0.75" data-value="0.75" data-overall="1" data-chain="189.944 192.325">
+<line x1="192.325" y1="139.122" x2="192.325" y2="149.922" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="189.944" y1="139.122" x2="189.944" y2="149.922" class="ext" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="195.725" y1="147.922" x2="186.544" y2="147.922" class="dim-line" stroke="#1b1f24" stroke-width="0.25"/>
+<polygon points="192.325,147.922 195.325,148.422 195.325,147.422" class="arrow" fill="#1b1f24" stroke="none"/>
+<polygon points="189.944,147.922 186.944,147.422 186.944,148.422" class="arrow" fill="#1b1f24" stroke="none"/>
+<text x="196.725" y="148.972" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" text-anchor="start">3/4</text>
+</g>
+<text x="17" y="169.9" font-size="2.4" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">SCALE 1:8 · L 29-1/4 × W 3-1/2 × T 3/4</text>
+<rect x="10" y="10" width="259.4" height="195.9" fill="none" stroke="#1b1f24" stroke-width="0.5" class="border"/>
+<g class="title-block">
+<rect x="144.4" y="177.9" width="125" height="28" fill="#fff" stroke="#1b1f24" stroke-width="0.5"/>
+<line x1="144.4" y1="186.9" x2="269.4" y2="186.9" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="144.4" y1="196.4" x2="269.4" y2="196.4" stroke="#1b1f24" stroke-width="0.25"/>
+<text x="145.9" y="180.7" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">PROJECT</text>
+<text x="145.9" y="185.9" font-size="5" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="700">Dartboard cabinet</text>
+<text x="145.9" y="189.7" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">SHEET TITLE</text>
+<text x="145.9" y="194.2" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">PART DRAWINGS 2</text>
+<line x1="178.4" y1="196.4" x2="178.4" y2="205.9" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="202.4" y1="196.4" x2="202.4" y2="205.9" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="222.4" y1="196.4" x2="222.4" y2="205.9" stroke="#1b1f24" stroke-width="0.25"/>
+<line x1="242.4" y1="196.4" x2="242.4" y2="205.9" stroke="#1b1f24" stroke-width="0.25"/>
+<text x="145.9" y="199.2" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">SCALE</text>
+<text x="145.9" y="203.7" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">AS NOTED</text>
+<text x="179.9" y="199.2" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">UNITS</text>
+<text x="179.9" y="203.7" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">inches</text>
+<text x="203.9" y="199.2" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">SHEET</text>
+<text x="203.9" y="203.7" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">19 OF 26</text>
+<text x="223.9" y="199.2" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">DATE</text>
+<text x="223.9" y="203.7" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">2026-09-06</text>
+<text x="243.9" y="199.2" font-size="2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">REV</text>
+<text x="243.9" y="203.7" font-size="3" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#1b1f24" font-weight="500">B</text>
+</g>
+<g class="projection-symbol">
+<text x="104.4" y="184.1" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">THIRD ANGLE PROJECTION</text>
+<polygon points="105.4,187.9 113.4,187.9 113.4,195.9 105.4,192.9" fill="none" stroke="#1b1f24" stroke-width="0.25"/>
+<circle cx="121.4" cy="191.9" r="4" fill="none" stroke="#1b1f24" stroke-width="0.25"/>
+<circle cx="121.4" cy="191.9" r="2" fill="none" stroke="#1b1f24" stroke-width="0.25"/>
+<text x="104.4" y="201.9" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#555">DRAWN: draft.mjs (README + …</text>
+</g>
+<text x="14" y="182.4" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">EACH CARD STATES ITS OWN SCALE · DIMENSIONS ARE FINISHED SIZES</text>
+<text x="14" y="185.4" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">FRAMELESS: DOORS OVERLAY THE CARCASS FRONT EDGES · 1/16 SIDE</text>
+<text x="14" y="188.4" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">REVEALS · 1/8 CENTRE GAP</text>
+<text x="14" y="191.4" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">BACK SLIDES INTO GLUE-FREE 1/4 GROOVES · HOUSED RAILS CARRY THE</text>
+<text x="14" y="194.4" font-size="2.2" font-family="'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" fill="#333">LOAD INTO THE SIDES</text>
+</svg>

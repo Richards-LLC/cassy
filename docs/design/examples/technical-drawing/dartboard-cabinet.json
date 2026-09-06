@@ -1,0 +1,1442 @@
+{
+ "project": "Dartboard cabinet",
+ "title": "Dartboard cabinet",
+ "units": "in",
+ "sheet": "letter",
+ "date": "2026-09-06",
+ "revision": "B",
+ "author": "draft.mjs (README + cutlist.json)",
+ "reference": {
+  "path": "projects/dartboard-cabinet/reference/Recommended Dartboard Cabinet Plan.png",
+  "features": [
+   "tall, shallow wall box: 30 W \u00d7 38 H \u00d7 9-1/4 D",
+   "two full-overlay Shaker doors with flat plywood panels, 1/8 centre gap",
+   "full-width drawer with false front below the doors",
+   "frameless carcass: sides run full height, top and bottom captured in rabbets",
+   "round board centred in the upper opening, backer rails behind it"
+  ]
+ },
+ "notes": [
+  "FRAMELESS: DOORS OVERLAY THE CARCASS FRONT EDGES \u00b7 1/16 SIDE REVEALS \u00b7 1/8 CENTRE GAP",
+  "BACK SLIDES INTO GLUE-FREE 1/4 GROOVES \u00b7 HOUSED RAILS CARRY THE LOAD INTO THE SIDES"
+ ],
+ "parts": [
+  {
+   "id": "side-l",
+   "name": "Carcass side",
+   "size": [
+    "38",
+    "9-1/4",
+    "3/4"
+   ],
+   "at": [
+    "0",
+    "0",
+    "0"
+   ],
+   "dims": [
+    "3/4",
+    "9-1/4",
+    "38"
+   ],
+   "material": "poplar 1x10",
+   "group": "carcass"
+  },
+  {
+   "id": "side-r",
+   "name": "Carcass side",
+   "size": [
+    "38",
+    "9-1/4",
+    "3/4"
+   ],
+   "at": [
+    "29-1/4",
+    "0",
+    "0"
+   ],
+   "dims": [
+    "3/4",
+    "9-1/4",
+    "38"
+   ],
+   "material": "poplar 1x10",
+   "group": "carcass"
+  },
+  {
+   "id": "top",
+   "name": "Carcass top/bottom",
+   "size": [
+    "29-1/4",
+    "9-1/4",
+    "3/4"
+   ],
+   "at": [
+    "3/8",
+    "0",
+    "37-1/4"
+   ],
+   "dims": [
+    "29-1/4",
+    "9-1/4",
+    "3/4"
+   ],
+   "material": "poplar 1x10",
+   "group": "carcass"
+  },
+  {
+   "id": "bottom",
+   "name": "Carcass top/bottom",
+   "size": [
+    "29-1/4",
+    "9-1/4",
+    "3/4"
+   ],
+   "at": [
+    "3/8",
+    "0",
+    "0"
+   ],
+   "dims": [
+    "29-1/4",
+    "9-1/4",
+    "3/4"
+   ],
+   "material": "poplar 1x10",
+   "group": "carcass"
+  },
+  {
+   "id": "divider",
+   "name": "Drawer divider",
+   "size": [
+    "29-1/4",
+    "8-3/4",
+    "3/4"
+   ],
+   "at": [
+    "3/8",
+    "1/2",
+    "5-5/8"
+   ],
+   "dims": [
+    "29-1/4",
+    "8-3/4",
+    "3/4"
+   ],
+   "material": "poplar 1x10",
+   "group": "carcass",
+   "notes": "8-3/4 deep so the sliding back passes behind it; the cut list's 9-1/4 collides with the back"
+  },
+  {
+   "id": "rail-upper",
+   "name": "Upper wall-mount rail",
+   "size": [
+    "29-1/4",
+    "3-1/2",
+    "3/4"
+   ],
+   "at": [
+    "3/8",
+    "1/2",
+    "33-3/4"
+   ],
+   "dims": [
+    "29-1/4",
+    "3/4",
+    "3-1/2"
+   ],
+   "material": "poplar 1x4",
+   "group": "carcass"
+  },
+  {
+   "id": "rail-backer-1",
+   "name": "Dartboard backer mounting rail",
+   "size": [
+    "29-1/4",
+    "2",
+    "3/4"
+   ],
+   "at": [
+    "3/8",
+    "1/2",
+    "14"
+   ],
+   "dims": [
+    "29-1/4",
+    "3/4",
+    "2"
+   ],
+   "material": "poplar 1x4",
+   "group": "carcass"
+  },
+  {
+   "id": "rail-backer-2",
+   "name": "Dartboard backer mounting rail",
+   "size": [
+    "29-1/4",
+    "2",
+    "3/4"
+   ],
+   "at": [
+    "3/8",
+    "1/2",
+    "27"
+   ],
+   "dims": [
+    "29-1/4",
+    "3/4",
+    "2"
+   ],
+   "material": "poplar 1x4",
+   "group": "carcass"
+  },
+  {
+   "id": "back",
+   "name": "Cabinet back",
+   "size": [
+    "36-15/16",
+    "28-15/16",
+    "1/4"
+   ],
+   "at": [
+    "17/32",
+    "1/4",
+    "17/32"
+   ],
+   "dims": [
+    "28-15/16",
+    "1/4",
+    "36-15/16"
+   ],
+   "material": "birch plywood 1/4",
+   "group": "carcass"
+  },
+  {
+   "id": "stile-l1",
+   "name": "Door stile",
+   "size": [
+    "32-1/4",
+    "3-1/2",
+    "3/4"
+   ],
+   "at": [
+    "1/16",
+    "9-1/4",
+    "5-11/16"
+   ],
+   "dims": [
+    "3-1/2",
+    "3/4",
+    "32-1/4"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-l"
+  },
+  {
+   "id": "stile-l2",
+   "name": "Door stile",
+   "size": [
+    "32-1/4",
+    "3-1/2",
+    "3/4"
+   ],
+   "at": [
+    "11-7/16",
+    "9-1/4",
+    "5-11/16"
+   ],
+   "dims": [
+    "3-1/2",
+    "3/4",
+    "32-1/4"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-l"
+  },
+  {
+   "id": "rail-l-top",
+   "name": "Door rail",
+   "size": [
+    "8-5/8",
+    "3-1/2",
+    "3/4"
+   ],
+   "at": [
+    "3-3/16",
+    "9-1/4",
+    "34-7/16"
+   ],
+   "dims": [
+    "8-5/8",
+    "3/4",
+    "3-1/2"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-l"
+  },
+  {
+   "id": "rail-l-bot",
+   "name": "Door rail",
+   "size": [
+    "8-5/8",
+    "3-1/2",
+    "3/4"
+   ],
+   "at": [
+    "3-3/16",
+    "9-1/4",
+    "5-11/16"
+   ],
+   "dims": [
+    "8-5/8",
+    "3/4",
+    "3-1/2"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-l"
+  },
+  {
+   "id": "panel-l",
+   "name": "Door panel",
+   "size": [
+    "25-15/16",
+    "8-9/16",
+    "1/4"
+   ],
+   "at": [
+    "3-7/32",
+    "9-1/2",
+    "8-27/32"
+   ],
+   "dims": [
+    "8-9/16",
+    "1/4",
+    "25-15/16"
+   ],
+   "material": "birch plywood 1/4",
+   "group": "door-l"
+  },
+  {
+   "id": "dart-l-1",
+   "name": "Door dart-holder rail",
+   "size": [
+    "8",
+    "1-1/2",
+    "3/4"
+   ],
+   "at": [
+    "3-1/2",
+    "8-1/2",
+    "14-1/4"
+   ],
+   "dims": [
+    "8",
+    "3/4",
+    "1-1/2"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-l"
+  },
+  {
+   "id": "dart-l-2",
+   "name": "Door dart-holder rail",
+   "size": [
+    "8",
+    "1-1/2",
+    "3/4"
+   ],
+   "at": [
+    "3-1/2",
+    "8-1/2",
+    "26-1/4"
+   ],
+   "dims": [
+    "8",
+    "3/4",
+    "1-1/2"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-l"
+  },
+  {
+   "id": "stile-r1",
+   "name": "Door stile",
+   "size": [
+    "32-1/4",
+    "3-1/2",
+    "3/4"
+   ],
+   "at": [
+    "15-1/16",
+    "9-1/4",
+    "5-11/16"
+   ],
+   "dims": [
+    "3-1/2",
+    "3/4",
+    "32-1/4"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-r"
+  },
+  {
+   "id": "stile-r2",
+   "name": "Door stile",
+   "size": [
+    "32-1/4",
+    "3-1/2",
+    "3/4"
+   ],
+   "at": [
+    "26-7/16",
+    "9-1/4",
+    "5-11/16"
+   ],
+   "dims": [
+    "3-1/2",
+    "3/4",
+    "32-1/4"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-r"
+  },
+  {
+   "id": "rail-r-top",
+   "name": "Door rail",
+   "size": [
+    "8-5/8",
+    "3-1/2",
+    "3/4"
+   ],
+   "at": [
+    "18-3/16",
+    "9-1/4",
+    "34-7/16"
+   ],
+   "dims": [
+    "8-5/8",
+    "3/4",
+    "3-1/2"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-r"
+  },
+  {
+   "id": "rail-r-bot",
+   "name": "Door rail",
+   "size": [
+    "8-5/8",
+    "3-1/2",
+    "3/4"
+   ],
+   "at": [
+    "18-3/16",
+    "9-1/4",
+    "5-11/16"
+   ],
+   "dims": [
+    "8-5/8",
+    "3/4",
+    "3-1/2"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-r"
+  },
+  {
+   "id": "panel-r",
+   "name": "Door panel",
+   "size": [
+    "25-15/16",
+    "8-9/16",
+    "1/4"
+   ],
+   "at": [
+    "18-7/32",
+    "9-1/2",
+    "8-27/32"
+   ],
+   "dims": [
+    "8-9/16",
+    "1/4",
+    "25-15/16"
+   ],
+   "material": "birch plywood 1/4",
+   "group": "door-r"
+  },
+  {
+   "id": "dart-r-1",
+   "name": "Door dart-holder rail",
+   "size": [
+    "8",
+    "1-1/2",
+    "3/4"
+   ],
+   "at": [
+    "18-1/2",
+    "8-1/2",
+    "14-1/4"
+   ],
+   "dims": [
+    "8",
+    "3/4",
+    "1-1/2"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-r"
+  },
+  {
+   "id": "dart-r-2",
+   "name": "Door dart-holder rail",
+   "size": [
+    "8",
+    "1-1/2",
+    "3/4"
+   ],
+   "at": [
+    "18-1/2",
+    "8-1/2",
+    "26-1/4"
+   ],
+   "dims": [
+    "8",
+    "3/4",
+    "1-1/2"
+   ],
+   "material": "poplar 1x4",
+   "group": "door-r"
+  },
+  {
+   "id": "false-front",
+   "name": "Drawer false front",
+   "size": [
+    "29-7/8",
+    "5-1/2",
+    "3/4"
+   ],
+   "at": [
+    "1/16",
+    "9-1/4",
+    "1/16"
+   ],
+   "dims": [
+    "29-7/8",
+    "3/4",
+    "5-1/2"
+   ],
+   "material": "poplar 1x10",
+   "group": "drawer"
+  },
+  {
+   "id": "drawer-side-l",
+   "name": "Drawer box side",
+   "size": [
+    "8",
+    "4",
+    "3/4"
+   ],
+   "at": [
+    "1-1/4",
+    "1-1/4",
+    "1-1/4"
+   ],
+   "dims": [
+    "3/4",
+    "8",
+    "4"
+   ],
+   "material": "poplar 1x6",
+   "group": "drawer"
+  },
+  {
+   "id": "drawer-side-r",
+   "name": "Drawer box side",
+   "size": [
+    "8",
+    "4",
+    "3/4"
+   ],
+   "at": [
+    "28",
+    "1-1/4",
+    "1-1/4"
+   ],
+   "dims": [
+    "3/4",
+    "8",
+    "4"
+   ],
+   "material": "poplar 1x6",
+   "group": "drawer"
+  },
+  {
+   "id": "drawer-front",
+   "name": "Drawer box front/back",
+   "size": [
+    "26-3/4",
+    "4",
+    "3/4"
+   ],
+   "at": [
+    "1-5/8",
+    "8-1/2",
+    "1-1/4"
+   ],
+   "dims": [
+    "26-3/4",
+    "3/4",
+    "4"
+   ],
+   "material": "poplar 1x6",
+   "group": "drawer",
+   "notes": "26-3/4 with 3/8 tongues; the cut list's 26 only suits a butt joint"
+  },
+  {
+   "id": "drawer-back",
+   "name": "Drawer box front/back",
+   "size": [
+    "26-3/4",
+    "4",
+    "3/4"
+   ],
+   "at": [
+    "1-5/8",
+    "1-1/4",
+    "1-1/4"
+   ],
+   "dims": [
+    "26-3/4",
+    "3/4",
+    "4"
+   ],
+   "material": "poplar 1x6",
+   "group": "drawer"
+  },
+  {
+   "id": "drawer-bottom",
+   "name": "Drawer bottom",
+   "size": [
+    "26-7/16",
+    "6-15/16",
+    "1/4"
+   ],
+   "at": [
+    "1-25/32",
+    "1-25/32",
+    "1-1/2"
+   ],
+   "dims": [
+    "26-7/16",
+    "6-15/16",
+    "1/4"
+   ],
+   "material": "birch plywood 1/4",
+   "group": "drawer"
+  },
+  {
+   "id": "organizer-1",
+   "name": "Drawer organizer divider",
+   "size": [
+    "6-1/2",
+    "2",
+    "3/4"
+   ],
+   "at": [
+    "8-1/8",
+    "2",
+    "1-3/4"
+   ],
+   "dims": [
+    "3/4",
+    "6-1/2",
+    "2"
+   ],
+   "material": "poplar 1x6",
+   "group": "drawer"
+  },
+  {
+   "id": "organizer-2",
+   "name": "Drawer organizer divider",
+   "size": [
+    "6-1/2",
+    "2",
+    "3/4"
+   ],
+   "at": [
+    "14-5/8",
+    "2",
+    "1-3/4"
+   ],
+   "dims": [
+    "3/4",
+    "6-1/2",
+    "2"
+   ],
+   "material": "poplar 1x6",
+   "group": "drawer"
+  },
+  {
+   "id": "organizer-3",
+   "name": "Drawer organizer divider",
+   "size": [
+    "6-1/2",
+    "2",
+    "3/4"
+   ],
+   "at": [
+    "21-1/8",
+    "2",
+    "1-3/4"
+   ],
+   "dims": [
+    "3/4",
+    "6-1/2",
+    "2"
+   ],
+   "material": "poplar 1x6",
+   "group": "drawer"
+  }
+ ],
+ "joints": [
+  {
+   "type": "tenon",
+   "female": "stile-l1",
+   "male": "rail-l-top",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "tenon-l1-top",
+   "occurs": "8 rail-to-stile joints (4 per door)"
+  },
+  {
+   "type": "tenon",
+   "female": "stile-l1",
+   "male": "rail-l-bot",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "tenon-l1-bot",
+   "occurs": "8 rail-to-stile joints (4 per door)"
+  },
+  {
+   "type": "groove",
+   "female": "stile-l1",
+   "male": "panel-l",
+   "depth": "3/8",
+   "run": "z",
+   "id": "groove-stile-l1",
+   "occurs": "all 4 stiles, full length"
+  },
+  {
+   "type": "tenon",
+   "female": "stile-l2",
+   "male": "rail-l-top",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "tenon-l2-top",
+   "occurs": "8 rail-to-stile joints (4 per door)"
+  },
+  {
+   "type": "tenon",
+   "female": "stile-l2",
+   "male": "rail-l-bot",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "tenon-l2-bot",
+   "occurs": "8 rail-to-stile joints (4 per door)"
+  },
+  {
+   "type": "groove",
+   "female": "stile-l2",
+   "male": "panel-l",
+   "depth": "3/8",
+   "run": "z",
+   "id": "groove-stile-l2",
+   "occurs": "all 4 stiles, full length"
+  },
+  {
+   "type": "groove",
+   "female": "rail-l-top",
+   "male": "panel-l",
+   "depth": "3/8",
+   "run": "x",
+   "id": "groove-rail-l-top",
+   "occurs": "all 4 rails, full length"
+  },
+  {
+   "type": "groove",
+   "female": "rail-l-bot",
+   "male": "panel-l",
+   "depth": "3/8",
+   "run": "x",
+   "id": "groove-rail-l-bot",
+   "occurs": "all 4 rails, full length"
+  },
+  {
+   "type": "tenon",
+   "female": "stile-r1",
+   "male": "rail-r-top",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "tenon-r1-top",
+   "occurs": "8 rail-to-stile joints (4 per door)"
+  },
+  {
+   "type": "tenon",
+   "female": "stile-r1",
+   "male": "rail-r-bot",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "tenon-r1-bot",
+   "occurs": "8 rail-to-stile joints (4 per door)"
+  },
+  {
+   "type": "groove",
+   "female": "stile-r1",
+   "male": "panel-r",
+   "depth": "3/8",
+   "run": "z",
+   "id": "groove-stile-r1",
+   "occurs": "all 4 stiles, full length"
+  },
+  {
+   "type": "tenon",
+   "female": "stile-r2",
+   "male": "rail-r-top",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "tenon-r2-top",
+   "occurs": "8 rail-to-stile joints (4 per door)"
+  },
+  {
+   "type": "tenon",
+   "female": "stile-r2",
+   "male": "rail-r-bot",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "tenon-r2-bot",
+   "occurs": "8 rail-to-stile joints (4 per door)"
+  },
+  {
+   "type": "groove",
+   "female": "stile-r2",
+   "male": "panel-r",
+   "depth": "3/8",
+   "run": "z",
+   "id": "groove-stile-r2",
+   "occurs": "all 4 stiles, full length"
+  },
+  {
+   "type": "groove",
+   "female": "rail-r-top",
+   "male": "panel-r",
+   "depth": "3/8",
+   "run": "x",
+   "id": "groove-rail-r-top",
+   "occurs": "all 4 rails, full length"
+  },
+  {
+   "type": "groove",
+   "female": "rail-r-bot",
+   "male": "panel-r",
+   "depth": "3/8",
+   "run": "x",
+   "id": "groove-rail-r-bot",
+   "occurs": "all 4 rails, full length"
+  },
+  {
+   "type": "rabbet",
+   "female": "side-l",
+   "male": "top",
+   "width": "3/4",
+   "depth": "3/8",
+   "id": "rabbet-l-top",
+   "occurs": "4 corners: top and bottom into both sides"
+  },
+  {
+   "type": "rabbet",
+   "female": "side-l",
+   "male": "bottom",
+   "width": "3/4",
+   "depth": "3/8",
+   "id": "rabbet-l-bottom"
+  },
+  {
+   "type": "dado",
+   "female": "side-l",
+   "male": "divider",
+   "width": "3/4",
+   "depth": "3/8",
+   "id": "dado-l-divider",
+   "occurs": "both sides, lower edge 5-5/8 above the bottom",
+   "run": "y"
+  },
+  {
+   "type": "dado",
+   "female": "side-l",
+   "male": "rail-upper",
+   "width": "3-1/2",
+   "depth": "3/8",
+   "run": "y",
+   "id": "dado-l-rail-upper",
+   "occurs": "both sides, immediately below the top"
+  },
+  {
+   "type": "dado",
+   "female": "side-l",
+   "male": "rail-backer-1",
+   "width": "2",
+   "depth": "3/8",
+   "run": "y",
+   "id": "dado-l-backer-1",
+   "occurs": "both sides \u00d7 2 rails; heights follow the measured backer"
+  },
+  {
+   "type": "dado",
+   "female": "side-l",
+   "male": "rail-backer-2",
+   "width": "2",
+   "depth": "3/8",
+   "run": "y",
+   "id": "dado-l-backer-2"
+  },
+  {
+   "type": "groove",
+   "female": "side-l",
+   "male": "back",
+   "depth": "1/4",
+   "run": "z",
+   "id": "groove-l-back",
+   "occurs": "both sides and the bottom; the top captures it last"
+  },
+  {
+   "type": "rabbet",
+   "female": "side-r",
+   "male": "top",
+   "width": "3/4",
+   "depth": "3/8",
+   "id": "rabbet-r-top",
+   "occurs": "4 corners: top and bottom into both sides"
+  },
+  {
+   "type": "rabbet",
+   "female": "side-r",
+   "male": "bottom",
+   "width": "3/4",
+   "depth": "3/8",
+   "id": "rabbet-r-bottom"
+  },
+  {
+   "type": "dado",
+   "female": "side-r",
+   "male": "divider",
+   "width": "3/4",
+   "depth": "3/8",
+   "id": "dado-r-divider",
+   "occurs": "both sides, lower edge 5-5/8 above the bottom",
+   "run": "y"
+  },
+  {
+   "type": "dado",
+   "female": "side-r",
+   "male": "rail-upper",
+   "width": "3-1/2",
+   "depth": "3/8",
+   "run": "y",
+   "id": "dado-r-rail-upper",
+   "occurs": "both sides, immediately below the top"
+  },
+  {
+   "type": "dado",
+   "female": "side-r",
+   "male": "rail-backer-1",
+   "width": "2",
+   "depth": "3/8",
+   "run": "y",
+   "id": "dado-r-backer-1",
+   "occurs": "both sides \u00d7 2 rails; heights follow the measured backer"
+  },
+  {
+   "type": "dado",
+   "female": "side-r",
+   "male": "rail-backer-2",
+   "width": "2",
+   "depth": "3/8",
+   "run": "y",
+   "id": "dado-r-backer-2"
+  },
+  {
+   "type": "groove",
+   "female": "side-r",
+   "male": "back",
+   "depth": "1/4",
+   "run": "z",
+   "id": "groove-r-back",
+   "occurs": "both sides and the bottom; the top captures it last"
+  },
+  {
+   "type": "groove",
+   "female": "top",
+   "male": "back",
+   "depth": "1/4",
+   "run": "x",
+   "id": "groove-top-back"
+  },
+  {
+   "type": "groove",
+   "female": "bottom",
+   "male": "back",
+   "depth": "1/4",
+   "run": "x",
+   "id": "groove-bottom-back"
+  },
+  {
+   "type": "tenon",
+   "female": "drawer-side-l",
+   "male": "drawer-front",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "drawer-corner-l-front",
+   "occurs": "all 4 drawer corners (locking rabbet, drawn as its tongue-and-groove core)"
+  },
+  {
+   "type": "tenon",
+   "female": "drawer-side-l",
+   "male": "drawer-back",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "drawer-corner-l-back",
+   "occurs": "all 4 drawer corners (locking rabbet, drawn as its tongue-and-groove core)"
+  },
+  {
+   "type": "groove",
+   "female": "drawer-side-l",
+   "male": "drawer-bottom",
+   "depth": "1/4",
+   "run": "y",
+   "id": "groove-drawer-side-l",
+   "occurs": "all 4 box parts, 1/4 up from the lower edge"
+  },
+  {
+   "type": "tenon",
+   "female": "drawer-side-r",
+   "male": "drawer-front",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "drawer-corner-r-front",
+   "occurs": "all 4 drawer corners (locking rabbet, drawn as its tongue-and-groove core)"
+  },
+  {
+   "type": "tenon",
+   "female": "drawer-side-r",
+   "male": "drawer-back",
+   "tenon_thickness": "1/4",
+   "depth": "3/8",
+   "id": "drawer-corner-r-back",
+   "occurs": "all 4 drawer corners (locking rabbet, drawn as its tongue-and-groove core)"
+  },
+  {
+   "type": "groove",
+   "female": "drawer-side-r",
+   "male": "drawer-bottom",
+   "depth": "1/4",
+   "run": "y",
+   "id": "groove-drawer-side-r",
+   "occurs": "all 4 box parts, 1/4 up from the lower edge"
+  },
+  {
+   "type": "groove",
+   "female": "drawer-front",
+   "male": "drawer-bottom",
+   "depth": "1/4",
+   "run": "x",
+   "id": "groove-drawer-front"
+  },
+  {
+   "type": "groove",
+   "female": "drawer-back",
+   "male": "drawer-bottom",
+   "depth": "1/4",
+   "run": "x",
+   "id": "groove-drawer-back"
+  }
+ ],
+ "sections": [
+  {
+   "name": "A",
+   "axis": "x",
+   "at": "15",
+   "look": "-",
+   "title": "vertical section on the centreline, looking left",
+   "dims": [
+    {
+     "axis": "y",
+     "from": "0",
+     "to": "1/4",
+     "row": 1,
+     "side": "bottom"
+    },
+    {
+     "axis": "y",
+     "from": "1/4",
+     "to": "1/2",
+     "row": 1,
+     "side": "bottom"
+    },
+    {
+     "axis": "y",
+     "from": "1/2",
+     "to": "9-1/4",
+     "row": 1,
+     "side": "bottom"
+    },
+    {
+     "axis": "y",
+     "from": "9-1/4",
+     "to": "10",
+     "row": 1,
+     "side": "bottom"
+    },
+    {
+     "axis": "z",
+     "from": "0",
+     "to": "3/4",
+     "row": 1,
+     "side": "left"
+    },
+    {
+     "axis": "z",
+     "from": "3/4",
+     "to": "5-5/8",
+     "row": 1,
+     "side": "left"
+    },
+    {
+     "axis": "z",
+     "from": "5-5/8",
+     "to": "6-3/8",
+     "row": 1,
+     "side": "left"
+    },
+    {
+     "axis": "z",
+     "from": "6-3/8",
+     "to": "37-1/4",
+     "row": 1,
+     "side": "left"
+    },
+    {
+     "axis": "z",
+     "from": "37-1/4",
+     "to": "38",
+     "row": 1,
+     "side": "left"
+    }
+   ]
+  },
+  {
+   "name": "B",
+   "axis": "z",
+   "at": "15",
+   "look": "-",
+   "title": "plan section through the lower backer rail and dart holders, looking down",
+   "dims": [
+    {
+     "axis": "x",
+     "from": "0",
+     "to": "3/4",
+     "row": 1,
+     "side": "bottom"
+    },
+    {
+     "axis": "x",
+     "from": "3/4",
+     "to": "29-1/4",
+     "row": 1,
+     "side": "bottom"
+    },
+    {
+     "axis": "x",
+     "from": "29-1/4",
+     "to": "30",
+     "row": 1,
+     "side": "bottom"
+    }
+   ]
+  }
+ ],
+ "dims": [
+  {
+   "view": "front",
+   "axis": "x",
+   "from": "1/16",
+   "to": "14-15/16",
+   "row": 1
+  },
+  {
+   "view": "front",
+   "axis": "x",
+   "from": "15-1/16",
+   "to": "29-15/16",
+   "row": 1
+  },
+  {
+   "view": "front",
+   "axis": "z",
+   "from": "1/16",
+   "to": "5-9/16",
+   "row": 1
+  },
+  {
+   "view": "front",
+   "axis": "z",
+   "from": "5-11/16",
+   "to": "37-15/16",
+   "row": 1
+  },
+  {
+   "view": "right",
+   "axis": "y",
+   "from": "0",
+   "to": "9-1/4",
+   "row": 1
+  },
+  {
+   "view": "right",
+   "axis": "y",
+   "from": "9-1/4",
+   "to": "10",
+   "row": 1
+  },
+  {
+   "view": "top",
+   "axis": "y",
+   "from": "1/2",
+   "to": "9-1/4",
+   "row": 1,
+   "side": "left",
+   "note": "front plane to back face"
+  },
+  {
+   "view": "front",
+   "axis": "x",
+   "from": "3/4",
+   "to": "29-1/4",
+   "row": 1,
+   "variant": "doors-open"
+  },
+  {
+   "view": "front",
+   "axis": "z",
+   "from": "0",
+   "to": "3/4",
+   "row": 1,
+   "variant": "doors-open"
+  },
+  {
+   "view": "front",
+   "axis": "z",
+   "from": "3/4",
+   "to": "5-5/8",
+   "row": 1,
+   "variant": "doors-open"
+  },
+  {
+   "view": "front",
+   "axis": "z",
+   "from": "5-5/8",
+   "to": "6-3/8",
+   "row": 1,
+   "variant": "doors-open"
+  },
+  {
+   "view": "front",
+   "axis": "z",
+   "from": "6-3/8",
+   "to": "37-1/4",
+   "row": 1,
+   "variant": "doors-open"
+  },
+  {
+   "view": "front",
+   "axis": "z",
+   "from": "37-1/4",
+   "to": "38",
+   "row": 1,
+   "variant": "doors-open"
+  }
+ ],
+ "overlays": [
+  {
+   "view": "front",
+   "variant": "doors-open",
+   "type": "circle",
+   "center": [
+    "15",
+    "21-13/16"
+   ],
+   "r": "8-7/8",
+   "label": "DARTBOARD \u00d8 17-3/4 (REF)",
+   "label2": "BULL 68 in ABOVE FLOOR"
+  }
+ ],
+ "variants": {
+  "doors-open": {
+   "omit": [
+    "stile-l1",
+    "stile-l2",
+    "rail-l-top",
+    "rail-l-bot",
+    "panel-l",
+    "dart-l-1",
+    "dart-l-2",
+    "stile-r1",
+    "stile-r2",
+    "rail-r-top",
+    "rail-r-bot",
+    "panel-r",
+    "dart-r-1",
+    "dart-r-2"
+   ]
+  }
+ },
+ "explode": {
+  "side-l": [
+   -6,
+   0,
+   0
+  ],
+  "side-r": [
+   6,
+   0,
+   0
+  ],
+  "top": [
+   0,
+   0,
+   5
+  ],
+  "bottom": [
+   0,
+   0,
+   -5
+  ],
+  "back": [
+   0,
+   -5,
+   0
+  ],
+  "false-front": [
+   0,
+   10,
+   0
+  ],
+  "stile-l1": [
+   -4,
+   7,
+   0
+  ],
+  "stile-l2": [
+   -4,
+   7,
+   0
+  ],
+  "rail-l-top": [
+   -4,
+   7,
+   0
+  ],
+  "rail-l-bot": [
+   -4,
+   7,
+   0
+  ],
+  "panel-l": [
+   -4,
+   7,
+   0
+  ],
+  "dart-l-1": [
+   -4,
+   7,
+   0
+  ],
+  "dart-l-2": [
+   -4,
+   7,
+   0
+  ],
+  "stile-r1": [
+   4,
+   7,
+   0
+  ],
+  "stile-r2": [
+   4,
+   7,
+   0
+  ],
+  "rail-r-top": [
+   4,
+   7,
+   0
+  ],
+  "rail-r-bot": [
+   4,
+   7,
+   0
+  ],
+  "panel-r": [
+   4,
+   7,
+   0
+  ],
+  "dart-r-1": [
+   4,
+   7,
+   0
+  ],
+  "dart-r-2": [
+   4,
+   7,
+   0
+  ],
+  "drawer-side-l": [
+   0,
+   5,
+   0
+  ],
+  "drawer-side-r": [
+   0,
+   5,
+   0
+  ],
+  "drawer-front": [
+   0,
+   5,
+   0
+  ],
+  "drawer-back": [
+   0,
+   5,
+   0
+  ],
+  "drawer-bottom": [
+   0,
+   5,
+   0
+  ],
+  "organizer-1": [
+   0,
+   5,
+   0
+  ],
+  "organizer-2": [
+   0,
+   5,
+   0
+  ],
+  "organizer-3": [
+   0,
+   5,
+   0
+  ]
+ }
+}

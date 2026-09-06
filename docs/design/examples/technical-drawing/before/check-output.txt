@@ -1,0 +1,27 @@
+== dc-finished.svg (build-guide figure, audited at its 180 mm print width)
+FAIL projection   (whole file): 59.2% of stroke length on isometric axes; dominant angles 90° (53%), 0° (39%), 150° (6%), 111° (2%) (untagged drawing — tag edges with data-axis for an exact audit)
+FAIL collision    1 text collision(s): "DRAWER FALSE FRONT" crosses <rect class="">
+PASS text-size    smallest text 2.35 mm at print scale
+
+2 FAIL · 3 findings
+== dc-fronts.svg (build-guide figure, audited at its 180 mm print width)
+FAIL collision    6 text collision(s): "CABINET BACK" crosses <circle class="">; "DRAWER DIVIDER" crosses <rect class="">; "upper opening 28-1/2″ W" sits inside a drawn outline <rect> (values belong outside the part); "× 30-7/8″ H" sits inside a drawn outline <rect> (values belong outside the part); "dartboard Ø 17-3/4″" sits inside a drawn outline <rect> (values belong outside the part); "drawer bay 4-7/8″ H" sits inside a drawn outline <rect> (values belong outside the part)
+PASS text-size    smallest text 2.01 mm at print scale
+
+1 FAIL · 2 findings
+== dc-side-plan.svg (build-guide figure, audited at its 180 mm print width)
+FAIL collision    3 text collision(s): "CARCASS SIDE" crosses <line class="reference">; "38″ height" crosses <line class="dimension">; "front plane" overlaps "back face inset 1/4″"
+PASS text-size    smallest text 2.01 mm at print scale
+
+1 FAIL · 2 findings
+== dc-part01.svg (build-guide figure, audited at its 180 mm print width)
+PASS collision    6 text elements clear of strokes and each other
+FAIL text-size    smallest text "PRINT SCALE 1:8 · one major square = 1″" is 1.04 mm on paper (floor 2 mm)
+
+1 FAIL · 2 findings
+== dc-rabbet-teach.svg (build-guide figure, audited at its 180 mm print width)
+FAIL projection   (whole file): 47.0% of stroke length on isometric axes; dominant angles 0° (24%), 90° (19%), 30° (16%), 29° (11%) (untagged drawing — tag edges with data-axis for an exact audit)
+FAIL collision    10 text collision(s): "SIDE · FEMALE RABBET" crosses <polygon class="waste">; "SIDE · FEMALE RABBET" crosses <polygon class="glue">; "TOP / BOTTOM · PLAIN MALE END" crosses <polygon class="keep-top">; "TOP / BOTTOM · PLAIN MALE END" crosses <polygon class="keep-side">; "GLUE: FLOOR + SHOULDER" crosses <polygon class="keep-end">; "GLUE: FLOOR + SHOULDER" crosses <polygon class="waste">; …
+FAIL text-size    smallest text "RIGHT · SHOULDER CLOSED" is 0.49 mm on paper (floor 2 mm)
+
+3 FAIL · 3 findings

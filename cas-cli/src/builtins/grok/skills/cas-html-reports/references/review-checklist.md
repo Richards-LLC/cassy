@@ -90,6 +90,14 @@ Run this before committing the pair. Anything unchecked is a defect, not a nitpi
 - [ ] For client-facing reports: no internal ticket IDs, team names, tool names, or process narration
       anywhere in the HTML.
 
+## 12. Automated visual QA receipt
+
+- [ ] Run `node scripts/visual-qa.mjs --strict` against the
+      report in light and dark at 1280px and 390px; the committed receipt is
+      `docs/factory/data/visual-qa/visual-qa.md` with matching JSON and screenshots.
+- [ ] The receipt is `PASS`; every allowlisted exception appears in the allowlist file with a
+      selector, finding type, and specific reason.
+
 ## The two-minute version
 
 If you check nothing else: **conclusion first, JS off and nothing is lost, no external requests, print

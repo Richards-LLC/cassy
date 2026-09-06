@@ -112,6 +112,10 @@ This is a requirement, not a suggestion; bare assertions are not evidence.
 - **Public surface:** user-visible surface → critique rubric score recorded
   (floor 4/5 on distinctiveness, fit, hierarchy).
 - **User-visible change:** assess release-notes impact.
+- **User-visible surface:** run `node scripts/visual-qa.mjs --strict`
+  for the changed HTML/UI surface in light and dark at 1280px and 390px; record the committed
+  `docs/factory/data/visual-qa/visual-qa.md` PASS receipt path and any allowlist reasons in the
+  pre-close note.
 
 ## Blockers
 

@@ -95,8 +95,8 @@ file a ticket in the matching repo before moving on; see the supervisor's
 
 ## cas-src surface checklist — required before close
 
-In the pre-close note, record a proof for every applicable item and why each N/A is not applicable;
-This is a requirement, not a suggestion; bare assertions fail.
+In the pre-close task note, every applicable entry must paste its proving file, command, or test; every `not applicable` entry must state why. Bare assertions are non-compliant.
+This is a requirement, not a suggestion.
 
 - **Builtin skill/agent:** update Claude, Codex, and Grok mirrors and run the
   flavor-drift test.

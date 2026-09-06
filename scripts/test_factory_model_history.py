@@ -61,6 +61,11 @@ class FactoryModelHistoryFixtures(unittest.TestCase):
                 "payload": {"type": "function_call", "name": "grep"},
             },
             {
+                "timestamp": "2026-09-01T10:04:30.000Z",
+                "type": "response_item",
+                "payload": {"type": "custom_tool_call", "name": "shell"},
+            },
+            {
                 "timestamp": "2026-09-01T10:05:00.000Z",
                 "type": "token_usage_record",
                 "payload": {
@@ -86,7 +91,39 @@ class FactoryModelHistoryFixtures(unittest.TestCase):
         self.assertEqual(result.cached_input_tokens, 5)
         self.assertEqual(result.output_tokens, 12)
         self.assertEqual(result.reasoning_tokens, 3)
-        self.assertEqual(result.tool_calls, 2)
+        self.assertEqual(result.tool_calls, 3)
+
+    def test_turn_context_fills_missing_spawn_metadata(self):
+        rows = [
+            {
+                "timestamp": "2026-09-01T10:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "session_id": "codex-fallback",
+                    "cwd": "/tmp/project/.cas/worktrees/worker-fallback",
+                },
+            },
+            {
+                "timestamp": "2026-09-01T10:01:00.000Z",
+                "type": "turn_context",
+                "payload": {
+                    "cwd": "/tmp/project/.cas/worktrees/worker-fallback",
+                    "collaboration_mode": {"settings": {"model": "gpt-rollout", "reasoning_effort": "xhigh"}},
+                },
+            },
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as stream:
+            for row in rows:
+                stream.write(json.dumps(row) + "\n")
+            stream.flush()
+            transcript = MODULE.parse_codex_rollout(Path(stream.name))
+        db_row = {field: "" for field in MODULE.SESSION_FIELDS}
+        db_row.update({"project": "project", "worker_name": "worker-fallback", "model": "", "effort": ""})
+        attached, join = MODULE.attach_transcripts([db_row], [transcript], Path("/tmp"))
+        self.assertEqual(attached[0]["model"], "gpt-rollout")
+        self.assertEqual(attached[0]["effort"], "xhigh")
+        self.assertEqual(attached[0]["transcript_joined"], "yes")
+        self.assertEqual(join["transcript_joined"], 1)
 
     def test_codex_legacy_token_count_uses_last_turn_usage(self):
         rows = [

@@ -106,8 +106,8 @@ CSV_COLUMN_DESCRIPTIONS = {
     "spawn_id": "spawn_queue row ID",
     "spawn_at": "spawn or registered-at timestamp",
     "cli": "spawned CLI",
-    "model": "model from transcript, then spawn metadata",
-    "effort": "effort from transcript, then spawn metadata",
+    "model": "model from rollout turn_context, then spawn metadata",
+    "effort": "effort from rollout turn_context, then spawn metadata",
     "transcript_join_key": "bounded project + worker-name join key",
     "transcript_joined": "yes when a transcript matched the DB worker row",
     "session_first_at": "first timestamp observed in the transcript",
@@ -132,7 +132,7 @@ CSV_COLUMN_DESCRIPTIONS = {
     "cache_creation_input_tokens": "summed Claude cache-creation input tokens",
     "output_tokens": "summed explicit output tokens",
     "reasoning_tokens": "summed explicit reasoning/thinking tokens",
-    "tool_calls": "Codex function calls or Claude tool_use blocks",
+    "tool_calls": "Codex function_call/custom_tool_call records or Claude tool_use blocks",
     "cost_usd": "price-file-derived usage cost; blank without a verified price",
 }
 
@@ -332,6 +332,29 @@ def _row_timestamp(row: dict[str, Any], payload: Any = None) -> Any:
     return value
 
 
+def _turn_context_metadata(payload: dict[str, Any]) -> tuple[str, str]:
+    """Read model/effort from rollout turn_context metadata.
+
+    Older and newer Codex rollouts place effort under different names, and a
+    few records nest the values in collaboration-mode settings.  This metadata
+    is the transcript fallback when the CAS spawn row has no worker_spec.
+    """
+
+    settings = payload.get("collaboration_mode")
+    if isinstance(settings, dict):
+        settings = settings.get("settings")
+    if not isinstance(settings, dict):
+        settings = {}
+    model = payload.get("model") or settings.get("model")
+    effort = (
+        payload.get("effort")
+        or payload.get("reasoning_effort")
+        or settings.get("effort")
+        or settings.get("reasoning_effort")
+    )
+    return str(model or ""), str(effort or "")
+
+
 def parse_codex_rollout(path: Path) -> Transcript:
     result = Transcript("codex", path)
     modern_usages: list[dict[str, Any]] = []
@@ -359,10 +382,11 @@ def parse_codex_rollout(path: Path) -> Transcript:
                 result.cwd = str(payload.get("cwd") or result.cwd)
             elif row.get("type") == "turn_context":
                 result.cwd = str(payload.get("cwd") or result.cwd)
-                result.model = str(payload.get("model") or result.model)
-                result.effort = str(payload.get("effort") or result.effort)
+                model, effort = _turn_context_metadata(payload)
+                result.model = model or result.model
+                result.effort = effort or result.effort
             if row.get("type") == "response_item":
-                if payload.get("type") == "function_call":
+                if payload.get("type") in {"function_call", "custom_tool_call"}:
                     result.tool_calls += 1
             if row.get("type") == "token_usage_record":
                 usage = payload.get("usage")
@@ -1100,14 +1124,16 @@ def _source_summary(sources: list[dict[str, Any]], join: dict[str, Any], prices_
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    def clean(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        return "\n".join(line.rstrip() for line in value.strip().splitlines())
+
     with path.open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         for row in rows:
-            cleaned = {
-                key: value.strip() if isinstance(value, str) else value
-                for key, value in row.items()
-            }
+            cleaned = {key: clean(value) for key, value in row.items()}
             writer.writerow(cleaned)
 
 

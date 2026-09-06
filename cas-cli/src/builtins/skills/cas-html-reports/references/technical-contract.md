@@ -46,13 +46,31 @@ violated, the artifact is not shippable — fix it before committing.
   summary of what it shows, and the underlying numbers in a real table (visible or in a `<details>`).
 - Respect `prefers-reduced-motion`; there should be little motion to begin with.
 
-## 4. Theme
+## 4. Theme and design language
 
-- Support light and dark via `prefers-color-scheme`. Define colors as CSS custom properties once and
-  reference them everywhere — no hard-coded hex values scattered through rules.
-- The palette is neutral and restrained: one accent, one warn, one bad, one good, plus greys. Data
-  colors come from the palette in a fixed order so the same series gets the same color in every figure.
-- Print rendering is always light regardless of the screen theme.
+- **The palette is the project's `DESIGN.md` or the Petrastella tokens.** Read `DESIGN.md` first when
+  it exists and take the tokens it names. Without one, declare the tokens from
+  `design-spec/references/design-tokens.json` (rationale in `petrastella-design-language.md`): warm
+  stone paper, a sandstone hero surface, serif display for the verdict and title, body sans, tabular
+  mono for numbers, and semantic color roles. Neutral grey is the white-label fallback; a brief that
+  chooses it names the brand reason in its *omitted* field.
+- **Colors are semantic roles, declared once in `:root`** by the token names — `bg`, `surface`,
+  `surface-hero`, `line`, `line-strong`, `ink`, `ink-muted`, `verdict`, `verdict-soft`, `evidence`,
+  `action`, `good`, `warning`, `danger` — and referenced everywhere; no rule carries a hex value the
+  tokens do not. `verdict` marks the one decisive mark and the verdict rule and is never a status;
+  `evidence` is quiet on purpose; status uses `good`/`warning`/`danger` with a label or shape beside
+  it. Series colors come from `color.series` in fixed order so the same series has the same color in
+  every figure and every edition.
+- **Light and dark via `prefers-color-scheme`**, both meeting the contrast floor; the token file lists
+  every sanctioned text-on-surface pair with its ratio. A rule that sets a background sets its
+  foreground on the same rule. Print is always light.
+- **Containers never clip text.** No fixed height on a text-bearing box without a declared overflow
+  strategy on the same rule; tables and ledgers wider than their column scroll inside a container;
+  padding inside a bordered box is at least 12px; a border never crosses a glyph or a chart mark.
+- **Expression lives in composition and type, not in effects.** Nothing on the page floats: no
+  gradients, glass, glows, shadows carrying no meaning, or animated counters. Ledgers and tables are
+  ruled, never boxed; figure panels take the panel radius. A distinctive report has a distinctive
+  hero and one typographic move; it does not have a different theme.
 
 ## 5. Print
 
@@ -104,6 +122,10 @@ Each of these has been observed to make a report worse; none are stylistic prefe
 - **JS-only content.** Content that vanishes with JS disabled did not survive the reader's browser.
 - **Decorative dashboards.** Gradients, glass effects, animated counters, hero images, and gauges that
   encode one number in 400 pixels. Ink that carries no data is noise.
+- **A KPI row as the hero.** Five numbers in five boxes summarize the document; they do not show the
+  argument. The hero is the figure the concept brief names.
+- **Safe sameness.** A report whose only design decision was "match the last one" has no hero, no
+  move, and nothing a reader remembers. Consistency is the constraint on the argument, not the argument.
 - **Two absolute bars where a variance was the point.** Make the reader subtract and they will misread it.
 - **Color-only status.** Red/green with no label fails for a colorblind reader and for a printout.
 - **Rotating metrics between editions.** A recurring report whose KPI set changes cannot be trended.

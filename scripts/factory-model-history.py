@@ -93,6 +93,67 @@ SCORECARD_FIELDS = [
     "cost_usd",
 ]
 
+CSV_COLUMN_DESCRIPTIONS = {
+    "project": "basename of the project containing the CAS DB",
+    "project_path": "absolute project root",
+    "worker_name": "factory worker name from the DB or transcript worktree path",
+    "session_id": "Codex/Claude session ID, or an explicit DB fallback key",
+    "harness": "codex, claude, or db when no transcript matched",
+    "source_db": "read-only CAS database path",
+    "source_transcript": "Codex/Claude JSONL path, blank when unavailable",
+    "source_factory_logs": "sibling .cas/logs directory scanned",
+    "factory_session": "CAS factory session identifier",
+    "spawn_id": "spawn_queue row ID",
+    "spawn_at": "spawn or registered-at timestamp",
+    "cli": "spawned CLI",
+    "model": "model from rollout turn_context, then spawn metadata",
+    "effort": "effort from rollout turn_context, then spawn metadata",
+    "transcript_join_key": "bounded project + worker-name join key",
+    "transcript_joined": "yes when a transcript matched the DB worker row",
+    "session_first_at": "first timestamp observed in the transcript",
+    "session_last_at": "last timestamp observed in the transcript",
+    "task_id": "DB task ID; blank for transcript-only or taskless rows",
+    "task_title": "DB task title",
+    "task_status": "DB task status",
+    "task_closed": "yes only when task status is closed",
+    "task_created_at": "DB task creation timestamp",
+    "task_closed_at": "DB task close timestamp",
+    "lease_acquired_at": "first claimed lease timestamp",
+    "lease_released_at": "last released/revoked/expired lease timestamp",
+    "lease_terminal_event": "last lease terminal event",
+    "send_back_count": "request_changes / Changes requested occurrences in task notes",
+    "urgent_stop_count": "urgent-stop / halt marker occurrences in task notes",
+    "merge_required_count": "MERGE REQUIRED occurrences in task notes",
+    "close_reason": "DB task close reason",
+    "first_push_at": "first positive pushed marker in a matching factory log",
+    "minutes_to_first_push": "minutes from transcript first timestamp to first push",
+    "input_tokens": "summed explicit input tokens",
+    "cached_input_tokens": "summed cached/cache-read input tokens",
+    "cache_creation_input_tokens": "summed Claude cache-creation input tokens",
+    "output_tokens": "summed explicit output tokens",
+    "reasoning_tokens": "summed explicit reasoning/thinking tokens",
+    "tool_calls": "Codex function_call/custom_tool_call records or Claude tool_use blocks",
+    "cost_usd": "price-file-derived usage cost; blank without a verified price",
+}
+
+SCORECARD_COLUMN_DESCRIPTIONS = {
+    "scope": "project or overall model/effort aggregation",
+    "project": "project name; blank for overall rows",
+    "model": "model grouping",
+    "effort": "effort grouping",
+    "sessions": "distinct worker sessions",
+    "tasks_delivered": "distinct closed task IDs",
+    "send_backs": "deduplicated send-back occurrences",
+    "send_back_rate": "send-backs divided by delivered tasks",
+    "urgent_stops": "deduplicated urgent-stop occurrences",
+    "median_minutes_to_first_push": "median delivered-task minutes to first push",
+    "median_input_tokens_per_delivered_task": "median session input tokens divided by delivered tasks in that session",
+    "median_cached_input_tokens_per_delivered_task": "median cached tokens divided by delivered tasks in that session",
+    "median_output_tokens_per_delivered_task": "median output tokens divided by delivered tasks in that session",
+    "median_tool_calls_per_delivered_task": "median tool calls divided by delivered tasks in that session",
+    "cost_usd": "sum of price-file-derived session costs",
+}
+
 
 def parse_timestamp(value: Any) -> Optional[datetime]:
     """Parse the ISO timestamps used by CAS, Codex, and Claude records."""
@@ -228,6 +289,7 @@ def _usage_values(usage: dict[str, Any]) -> tuple[int, int, int, int, int]:
 class Transcript:
     harness: str
     path: Path
+    source_home: str = ""
     session_id: str = ""
     worker_name: str = ""
     cwd: str = ""
@@ -270,6 +332,29 @@ def _row_timestamp(row: dict[str, Any], payload: Any = None) -> Any:
     return value
 
 
+def _turn_context_metadata(payload: dict[str, Any]) -> tuple[str, str]:
+    """Read model/effort from rollout turn_context metadata.
+
+    Older and newer Codex rollouts place effort under different names, and a
+    few records nest the values in collaboration-mode settings.  This metadata
+    is the transcript fallback when the CAS spawn row has no worker_spec.
+    """
+
+    settings = payload.get("collaboration_mode")
+    if isinstance(settings, dict):
+        settings = settings.get("settings")
+    if not isinstance(settings, dict):
+        settings = {}
+    model = payload.get("model") or settings.get("model")
+    effort = (
+        payload.get("effort")
+        or payload.get("reasoning_effort")
+        or settings.get("effort")
+        or settings.get("reasoning_effort")
+    )
+    return str(model or ""), str(effort or "")
+
+
 def parse_codex_rollout(path: Path) -> Transcript:
     result = Transcript("codex", path)
     modern_usages: list[dict[str, Any]] = []
@@ -297,10 +382,11 @@ def parse_codex_rollout(path: Path) -> Transcript:
                 result.cwd = str(payload.get("cwd") or result.cwd)
             elif row.get("type") == "turn_context":
                 result.cwd = str(payload.get("cwd") or result.cwd)
-                result.model = str(payload.get("model") or result.model)
-                result.effort = str(payload.get("effort") or result.effort)
+                model, effort = _turn_context_metadata(payload)
+                result.model = model or result.model
+                result.effort = effort or result.effort
             if row.get("type") == "response_item":
-                if payload.get("type") == "function_call":
+                if payload.get("type") in {"function_call", "custom_tool_call"}:
                     result.tool_calls += 1
             if row.get("type") == "token_usage_record":
                 usage = payload.get("usage")
@@ -354,22 +440,43 @@ def parse_claude_transcript(path: Path) -> Transcript:
     return result
 
 
-def discover_transcripts(codex_root: Path, claude_root: Path) -> list[Transcript]:
+def discover_transcripts(codex_roots: Iterable[Path], claude_roots: Iterable[Path]) -> tuple[list[Transcript], list[dict[str, Any]]]:
     transcripts: list[Transcript] = []
-    for root, parser in ((codex_root, parse_codex_rollout), (claude_root, parse_claude_transcript)):
-        if not root.exists():
-            continue
-        try:
-            paths = sorted(root.rglob("*.jsonl"))
-        except OSError:
-            continue
-        for path in paths:
-            transcript = parser(path)
-            # Global transcript directories include ordinary interactive
-            # sessions.  Only worktree sessions are factory sessions.
-            if transcript.worker_name:
-                transcripts.append(transcript)
-    return transcripts
+    home_inventory: list[dict[str, Any]] = []
+    for roots, parser in (((Path(root) for root in codex_roots), parse_codex_rollout), ((Path(root) for root in claude_roots), parse_claude_transcript)):
+        for root in roots:
+            if not root.exists():
+                home_inventory.append({"home": str(root), "harness": "codex" if parser is parse_codex_rollout else "claude", "files": 0, "factory_files": 0})
+                continue
+            try:
+                paths = sorted(root.rglob("*.jsonl"))
+            except OSError:
+                home_inventory.append({"home": str(root), "harness": "codex" if parser is parse_codex_rollout else "claude", "files": 0, "factory_files": 0})
+                continue
+            inventory = {
+                "home": str(root),
+                "harness": "codex" if parser is parse_codex_rollout else "claude",
+                "files": len(paths),
+                "factory_files": 0,
+            }
+            for path in paths:
+                transcript = parser(path)
+                transcript.source_home = str(root)
+                # Global transcript directories include ordinary interactive
+                # sessions.  Only worktree sessions are factory sessions.
+                if transcript.worker_name:
+                    transcripts.append(transcript)
+                    inventory["factory_files"] += 1
+            home_inventory.append(inventory)
+    return transcripts, home_inventory
+
+
+def default_harness_roots(root: Path) -> tuple[list[Path], list[Path]]:
+    """Return every configured Codex/Claude home under the host root."""
+
+    codex = sorted(path for path in root.glob(".codex*/sessions") if path.is_dir())
+    claude = sorted(path for path in root.glob(".claude*/projects") if path.is_dir())
+    return codex, claude
 
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
@@ -715,7 +822,7 @@ def _transcript_project(transcript: Transcript, root: Path) -> str:
     return project_name(path, root)
 
 
-def attach_transcripts(rows: list[dict[str, Any]], transcripts: list[Transcript], root: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def attach_transcripts(rows: list[dict[str, Any]], transcripts: list[Transcript], root: Path, home_inventory: Optional[list[dict[str, Any]]] = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     grouped_rows: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped_rows[(row["project"], row["worker_name"])].append(row)
@@ -725,11 +832,24 @@ def attach_transcripts(rows: list[dict[str, Any]], transcripts: list[Transcript]
     matched: set[str] = set()
     join = {
         "transcript_files": len(transcripts),
+        "transcript_jsonl_files": sum(int(home.get("files", 0)) for home in (home_inventory or [])),
         "transcript_joined": 0,
         "transcript_only": 0,
         "db_rows_without_transcript": 0,
         "join_key": "project + worker_name from transcript cwd `.cas/worktrees/<worker>`",
+        "transcript_homes": [],
     }
+    home_stats: dict[str, dict[str, Any]] = defaultdict(lambda: {"files": 0, "factory_files": 0, "joined": 0, "transcript_only": 0})
+    for inventory in home_inventory or []:
+        home_stats[inventory["home"]].update(
+            {
+                "harness": inventory.get("harness", "unknown"),
+                "files": int(inventory.get("files", 0)),
+                "factory_files": int(inventory.get("factory_files", 0)),
+            }
+        )
+    for transcript in transcripts:
+        home_stats[transcript.source_home].setdefault("factory_files", 0)
     for key, transcript_group in grouped_transcripts.items():
         target_rows = grouped_rows.get(key, [])
         for transcript in transcript_group:
@@ -757,6 +877,7 @@ def attach_transcripts(rows: list[dict[str, Any]], transcripts: list[Transcript]
                     row["tool_calls"] = transcript.tool_calls
                 matched.add(str(transcript.path))
                 join["transcript_joined"] += 1
+                home_stats[transcript.source_home]["joined"] += 1
             else:
                 project_path = project_path_from_cwd(transcript.cwd)
                 row = {field: "" for field in SESSION_FIELDS}
@@ -785,6 +906,7 @@ def attach_transcripts(rows: list[dict[str, Any]], transcripts: list[Transcript]
                 rows.append(row)
                 matched.add(str(transcript.path))
                 join["transcript_only"] += 1
+                home_stats[transcript.source_home]["transcript_only"] += 1
     for row in rows:
         if not row["session_id"]:
             row["session_id"] = f"db:{row['factory_session'] or 'unknown'}:{row['worker_name']}"
@@ -793,6 +915,14 @@ def attach_transcripts(rows: list[dict[str, Any]], transcripts: list[Transcript]
             join["db_rows_without_transcript"] += 1
     join["transcript_join_miss_rate"] = round(join["transcript_only"] / max(1, len(transcripts)) * 100, 2)
     join["db_row_join_miss_rate"] = round(join["db_rows_without_transcript"] / max(1, len(rows)) * 100, 2)
+    join["transcript_homes"] = [
+        {
+            "home": home,
+            **stats,
+            "miss_rate": round(stats["transcript_only"] / max(1, stats.get("factory_files", 0)) * 100, 2),
+        }
+        for home, stats in sorted(home_stats.items())
+    ]
     return rows, join
 
 
@@ -948,11 +1078,19 @@ def _source_summary(sources: list[dict[str, Any]], join: dict[str, Any], prices_
         "## Source coverage and join evidence",
         "",
         "- Database → transcript key: `project + worker_name`; worker name comes from `spawn_queue.spawn_worker` / `agents.name` and transcript `cwd` segment `.cas/worktrees/<worker>`. This is a bounded name join, not an inferred task join.",
-        f"- Transcript files parsed: {join.get('transcript_files', 0)}; joined to DB worker rows: {join.get('transcript_joined', 0)}; transcript-only sessions: {join.get('transcript_only', 0)}; transcript→DB miss rate: {join.get('transcript_join_miss_rate', 0):.2f}%.",
+        f"- Transcript JSONL files scanned: {join.get('transcript_jsonl_files', 0)}; factory transcript files parsed: {join.get('transcript_files', 0)}; joined to DB worker rows: {join.get('transcript_joined', 0)}; transcript-only sessions: {join.get('transcript_only', 0)}; transcript→DB miss rate: {join.get('transcript_join_miss_rate', 0):.2f}%.",
         f"- DB session rows without a transcript match: {join.get('db_rows_without_transcript', 0)} ({join.get('db_row_join_miss_rate', 0):.2f}% of emitted rows).",
         f"- Prices JSON: `{prices_status}`. Blank `cost_usd` means the model has no supplied price entry; no price was inferred.",
         "",
     ]
+    lines.append("### Transcript homes")
+    lines.append("")
+    for home in join.get("transcript_homes", []):
+        lines.append(
+            f"- `{home['home']}` ({home.get('harness', 'unknown')}): {home['files']} JSONL files, {home.get('factory_files', 0)} factory files, {home['joined']} DB joins, {home['transcript_only']} transcript-only; home miss rate {home['miss_rate']:.2f}% of factory files.")
+    if not join.get("transcript_homes"):
+        lines.append("- No configured Codex/Claude transcript homes were present or readable.")
+    lines.append("")
     for source in sources:
         unavailable = list(source.get("unavailable") or [])
         if source.get("error"):
@@ -972,16 +1110,31 @@ def _source_summary(sources: list[dict[str, Any]], join: dict[str, Any], prices_
             "- Exact first-push time is populated only when a JSON factory log record names the worker (and task when available) and contains a positive `pushed` marker. Missing markers remain blank; commit time is not substituted.",
             "- Codex usage sums modern `token_usage_record.payload.usage` records or legacy `event_msg.payload.info.last_token_usage` records (modern records win if both exist); Claude usage sums assistant `message.usage`. Cache-read and cache-creation are retained separately, and reasoning comes only from an explicit usage field.",
             "- Transcript task IDs are unavailable in the transcript sources, so task attribution comes only from DB spawn/lease rows. Transcript-only rows intentionally have a blank task ID.",
+            "",
+            "### CSV columns",
+            "",
+            "Session CSV (`factory-model-history-YYYY-MM-DD.csv`):",
+            "",
         ]
     )
+    lines.extend(f"- `{field}`: {CSV_COLUMN_DESCRIPTIONS[field]}." for field in SESSION_FIELDS)
+    lines.extend(["", "Scorecard CSV (`factory-model-scorecard-YYYY-MM-DD.csv`):", ""])
+    lines.extend(f"- `{field}`: {SCORECARD_COLUMN_DESCRIPTIONS[field]}." for field in SCORECARD_FIELDS)
     return lines
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    def clean(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        return "\n".join(line.rstrip() for line in value.strip().splitlines())
+
     with path.open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
-        writer.writerows(rows)
+        for row in rows:
+            cleaned = {key: clean(value) for key, value in row.items()}
+            writer.writerow(cleaned)
 
 
 def write_scorecard_markdown(path: Path, score_rows: list[dict[str, Any]], source_lines: list[str], date_text: str) -> None:
@@ -1006,11 +1159,11 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list[dict[str, 
     output_dir = Path(args.output_dir).expanduser().resolve()
     db_paths = discover_database_paths(root)
     rows, sources = extract_databases(db_paths)
-    transcripts = discover_transcripts(
-        Path(args.codex_sessions).expanduser().resolve(),
-        Path(args.claude_projects).expanduser().resolve(),
-    )
-    rows, join = attach_transcripts(rows, transcripts, root)
+    default_codex, default_claude = default_harness_roots(root)
+    codex_roots = [Path(path).expanduser().resolve() for path in (args.codex_roots or default_codex)]
+    claude_roots = [Path(path).expanduser().resolve() for path in (args.claude_roots or default_claude)]
+    transcripts, home_inventory = discover_transcripts(codex_roots, claude_roots)
+    rows, join = attach_transcripts(rows, transcripts, root, home_inventory)
     prices, prices_status = load_prices(Path(args.prices).expanduser().resolve())
     apply_costs(rows, prices)
     compute_push_minutes(rows)
@@ -1037,6 +1190,8 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list[dict[str, 
         "scorecard_rows": len(score_rows),
         "join": join,
         "prices": prices_status,
+        "codex_roots": [str(path) for path in codex_roots],
+        "claude_roots": [str(path) for path in claude_roots],
     }
     return rows, score_rows, summary
 
@@ -1044,8 +1199,12 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list[dict[str, 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default="/home/pippenz", help="Root to walk for project .cas/cas.db stores")
-    parser.add_argument("--codex-sessions", default="/home/pippenz/.codex/sessions", help="Codex rollout root")
-    parser.add_argument("--claude-projects", default="/home/pippenz/.claude-daniel@petrastella.io/projects", help="Claude transcript project root")
+    parser.add_argument("--codex-root", dest="codex_roots", action="append", help="One Codex sessions root; repeat for multiple harness homes (default: ~/.codex*/sessions)")
+    parser.add_argument("--claude-root", dest="claude_roots", action="append", help="One Claude projects root; repeat for multiple harness homes (default: ~/.claude*/projects)")
+    # Retain the first implementation's explicit names as aliases so existing
+    # fixture/research invocations remain reproducible.
+    parser.add_argument("--codex-sessions", dest="codex_roots", action="append", help=argparse.SUPPRESS)
+    parser.add_argument("--claude-projects", dest="claude_roots", action="append", help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", default=str(Path(__file__).resolve().parents[1] / "docs/factory/data"), help="Generated output directory")
     parser.add_argument("--prices", default=str(Path(__file__).resolve().parents[1] / "docs/factory/data/model-prices.json"), help="Model prices JSON")
     parser.add_argument("--date", default="", help="Output date (UTC), default today")

@@ -61,6 +61,11 @@ class FactoryModelHistoryFixtures(unittest.TestCase):
                 "payload": {"type": "function_call", "name": "grep"},
             },
             {
+                "timestamp": "2026-09-01T10:04:30.000Z",
+                "type": "response_item",
+                "payload": {"type": "custom_tool_call", "name": "shell"},
+            },
+            {
                 "timestamp": "2026-09-01T10:05:00.000Z",
                 "type": "token_usage_record",
                 "payload": {
@@ -86,7 +91,85 @@ class FactoryModelHistoryFixtures(unittest.TestCase):
         self.assertEqual(result.cached_input_tokens, 5)
         self.assertEqual(result.output_tokens, 12)
         self.assertEqual(result.reasoning_tokens, 3)
-        self.assertEqual(result.tool_calls, 2)
+        self.assertEqual(result.tool_calls, 3)
+
+    def test_turn_context_fills_missing_spawn_metadata(self):
+        rows = [
+            {
+                "timestamp": "2026-09-01T10:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "session_id": "codex-fallback",
+                    "cwd": "/tmp/project/.cas/worktrees/worker-fallback",
+                },
+            },
+            {
+                "timestamp": "2026-09-01T10:01:00.000Z",
+                "type": "turn_context",
+                "payload": {
+                    "cwd": "/tmp/project/.cas/worktrees/worker-fallback",
+                    "collaboration_mode": {"settings": {"model": "gpt-rollout", "reasoning_effort": "xhigh"}},
+                },
+            },
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as stream:
+            for row in rows:
+                stream.write(json.dumps(row) + "\n")
+            stream.flush()
+            transcript = MODULE.parse_codex_rollout(Path(stream.name))
+        db_row = {field: "" for field in MODULE.SESSION_FIELDS}
+        db_row.update({"project": "project", "worker_name": "worker-fallback", "model": "", "effort": ""})
+        attached, join = MODULE.attach_transcripts([db_row], [transcript], Path("/tmp"))
+        self.assertEqual(attached[0]["model"], "gpt-rollout")
+        self.assertEqual(attached[0]["effort"], "xhigh")
+        self.assertEqual(attached[0]["transcript_joined"], "yes")
+        self.assertEqual(join["transcript_joined"], 1)
+
+    def test_codex_legacy_token_count_uses_last_turn_usage(self):
+        rows = [
+            {
+                "timestamp": "2026-09-01T10:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "session_id": "codex-legacy",
+                    "cwd": "/tmp/project/.cas/worktrees/worker-legacy",
+                },
+            },
+            {
+                "timestamp": "2026-09-01T10:01:00.000Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-legacy", "effort": "xhigh"},
+            },
+            {
+                "timestamp": "2026-09-01T10:02:00.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 99,
+                            "cached_input_tokens": 90,
+                            "output_tokens": 99,
+                        },
+                        "last_token_usage": {
+                            "input_tokens": 11,
+                            "cached_input_tokens": 9,
+                            "output_tokens": 7,
+                            "reasoning_output_tokens": 3,
+                        },
+                    },
+                },
+            },
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as stream:
+            for row in rows:
+                stream.write(json.dumps(row) + "\n")
+            stream.flush()
+            result = MODULE.parse_codex_rollout(Path(stream.name))
+        self.assertEqual(result.input_tokens, 11)
+        self.assertEqual(result.cached_input_tokens, 9)
+        self.assertEqual(result.output_tokens, 7)
+        self.assertEqual(result.reasoning_tokens, 3)
 
     def test_claude_transcript_reads_usage_tools_and_metadata(self):
         rows = [
@@ -177,6 +260,10 @@ class FactoryModelHistoryFixtures(unittest.TestCase):
                 (json.dumps({"cli": "codex", "model": "gpt-fixture", "effort": "high"}),),
             )
             db.execute(
+                "INSERT INTO spawn_queue VALUES (2, 'spawn', NULL, ?, 'factory-1', NULL, NULL, '2026-09-01T10:00:02+00:00')",
+                (json.dumps({"cli": "codex", "model": "gpt-fixture", "effort": "high"}),),
+            )
+            db.execute(
                 "INSERT INTO agents VALUES ('agent-1', 'worker-1', ?, 'factory-1', '2026-09-01T10:00:01+00:00')",
                 (json.dumps({"worker_cli": "codex"}),),
             )
@@ -215,6 +302,7 @@ class FactoryModelHistoryFixtures(unittest.TestCase):
         self.assertEqual(rows[0]["merge_required_count"], 1)
         self.assertEqual(rows[0]["first_push_at"], "2026-09-01T10:20:00.000Z")
         self.assertEqual(source["task_notes_storage"], "tasks.notes")
+        self.assertEqual(source["unassigned_spawn_rows"], 1)
 
     def test_discovery_skips_worktrees_artifacts_and_epic_directories(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -230,6 +318,90 @@ class FactoryModelHistoryFixtures(unittest.TestCase):
                 path.touch()
             found = MODULE.discover_database_paths(root)
         self.assertEqual(found, [root / "project" / ".cas" / "cas.db"])
+
+    def test_default_harness_roots_include_every_matching_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected_codex = []
+            expected_claude = []
+            for home in (".codex", ".codex-support@example", ".codex-extra"):
+                path = root / home / "sessions"
+                path.mkdir(parents=True)
+                expected_codex.append(path)
+            for home in (".claude", ".claude-alt", ".claude-user@example"):
+                path = root / home / "projects"
+                path.mkdir(parents=True)
+                expected_claude.append(path)
+            codex, claude = MODULE.default_harness_roots(root)
+        self.assertEqual(codex, sorted(expected_codex))
+        self.assertEqual(claude, sorted(expected_claude))
+
+    def test_transcript_inventory_counts_all_files_and_factory_joins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex = root / ".codex" / "sessions"
+            codex.mkdir(parents=True)
+            (codex / "interactive.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"cwd": "/tmp/project"}}) + "\n")
+            (codex / "worker.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "session_id": "codex-factory",
+                            "cwd": "/tmp/project/.cas/worktrees/worker-inventory",
+                        },
+                    }
+                )
+                + "\n"
+            )
+            transcripts, inventory = MODULE.discover_transcripts([codex], [])
+        self.assertEqual(len(transcripts), 1)
+        self.assertEqual(inventory[0]["files"], 2)
+        self.assertEqual(inventory[0]["factory_files"], 1)
+
+    def test_cost_and_scorecard_are_blank_or_calculated_only_from_prices(self):
+        rows = [
+            {
+                field: ""
+                for field in MODULE.SESSION_FIELDS
+            }
+            for _ in range(1)
+        ]
+        rows[0].update(
+            {
+                "project": "project",
+                "session_id": "session-1",
+                "model": "gpt-fixture",
+                "effort": "high",
+                "task_id": "task-1",
+                "task_status": "closed",
+                "input_tokens": 1000,
+                "cached_input_tokens": 500,
+                "output_tokens": 250,
+                "reasoning_tokens": 100,
+            }
+        )
+        MODULE.apply_costs(
+            rows,
+            {
+                "models": {
+                    "gpt-fixture": {
+                        "input_per_million": 1,
+                        "cached_input_per_million": 0.5,
+                        "output_per_million": 2,
+                        "reasoning_per_million": 3,
+                    }
+                }
+            },
+        )
+        self.assertEqual(rows[0]["cost_usd"], "0.002050")
+        summary = MODULE.scorecard(rows)
+        self.assertEqual(summary[0]["tasks_delivered"], 1)
+        self.assertEqual(summary[0]["cost_usd"], "0.002050")
+
+        blank_rows = [dict(rows[0], model="unknown-model", cost_usd="")]
+        MODULE.apply_costs(blank_rows, {})
+        self.assertEqual(blank_rows[0]["cost_usd"], "")
 
 
 

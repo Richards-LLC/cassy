@@ -172,6 +172,129 @@
   </table>
 </section>
 
+<section id="models">
+  <h2>Model intelligence, cost and efficiency</h2>
+  <p>Added 2026-09-06 (task cas-3372, worker vivid-kestrel-88). Part A is what vendors and third parties publish per model and effort; Part B is what this host measured per delivery over the whole retained horizon 2026-08-20 → 2026-09-06 (rows in <code>2026-09-06-model-lane-history.csv</code>); Part C is the synthesis. All external figures retrieved 2026-09-06. <span class="tag">V</span> vendor-published · <span class="tag">3P</span> third party (Artificial Analysis, Epoch, goml.io, vellum.ai, jessemoraga.com). "unknown" = not found at the URLs checked, never zero.</p>
+
+  <h3>A · Effort vocabulary by provider</h3>
+  <table>
+    <thead><tr><th>Provider / model</th><th>Exposed levels</th><th>Default</th><th>Our minimal</th><th>Our xhigh</th><th>Source</th></tr></thead>
+    <tbody>
+      <tr><td>OpenAI GPT-5.6 Luna / Sol / Terra</td><td>none, low, medium, high, xhigh, max (+ reasoning.mode standard/pro; Codex adds <code>ultra</code> on Sol)</td><td>medium</td><td>none (closest: <code>none</code>)</td><td>xhigh</td><td><a href="https://developers.openai.com/api/docs/guides/reasoning">reasoning guide</a>, <a href="https://github.com/openai/codex/issues/33233">codex#33233</a></td></tr>
+      <tr><td>OpenAI GPT-6 Astra</td><td>low, medium, high, xhigh, max</td><td>medium</td><td>none</td><td>xhigh</td><td><a href="https://developers.openai.com/api/docs/models/gpt-6-astra">model page</a></td></tr>
+      <tr><td>Anthropic Fable 5.1 / Opus 5 / Sonnet 5</td><td>low, medium, high, xhigh, max (<code>output_config.effort</code>; Claude Code <code>--effort</code>)</td><td><b>high</b> (Claude Code and API)</td><td>none (lowest is low)</td><td>xhigh</td><td><a href="https://docs.anthropic.com/en/docs/build-with-claude/effort">effort docs</a></td></tr>
+      <tr><td>Anthropic Haiku 4.5</td><td>no effort parameter; manual <code>thinking.budget_tokens</code></td><td>—</td><td>thinking off</td><td>128K budget</td><td><a href="https://platform.claude.com/docs/en/models/haiku-4-5/overview">model page</a></td></tr>
+      <tr><td>xAI Grok 4.5</td><td>low, medium, high (reasoning cannot be disabled)</td><td>high</td><td>none</td><td>none</td><td><a href="https://docs.x.ai/developers/model-capabilities/text/reasoning">reasoning docs</a></td></tr>
+      <tr><td>Alibaba Qwen 3.8 Max</td><td><code>enable_thinking</code> + numeric <code>thinking_budget</code> ≤ 262,144</td><td>thinking on</td><td>thinking off</td><td>budget = max</td><td><a href="https://docs.modelstudio.console.alibabacloud.com/en/model-studio/deep-thinking">deep-thinking docs</a></td></tr>
+    </tbody>
+  </table>
+  <p class="meta">Codex's <code>model_context_window</code> 258,400 on this host is the Codex 272K profile minus headroom; the API window for every GPT-5.6 model and Astra is 1,050,000 and Codex can be raised to 872,000 (<a href="https://github.com/openai/codex/issues/39144">codex#39144</a>).</p>
+
+  <h3>A · Price, context and headline scores per model</h3>
+  <p>USD per 1M tokens, Standard tier (OpenAI ≤272K prompt). No vendor publishes τ²-bench / BFCL / ToolBench for any of these models; the only published tool-use signals are Qwen's Toolathlon and AA's τ³-Banking. Per-effort rows exist only where someone published them.</p>
+  <table>
+    <thead><tr><th>Model (role)</th><th class="num">In / cached / out</th><th class="num">Context</th><th>Effort row</th><th>Coding</th><th>Tool calling</th><th>Long-horizon</th><th>Token efficiency</th><th>Source</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="2"><b>GPT-5.6 Luna</b> (standard)</td><td class="num" rowspan="2">$0.20 / $0.02 / $1.20</td><td class="num" rowspan="2">1.05M / 128K</td><td>max <span class="tag">3P</span></td><td>SWE-Bench Pro 62.7% · TB 2.1 84.7% · DeepSWE 67.2%</td><td>unknown</td><td>OSWorld 2.0 45.6% · BrowseComp 83.3%</td><td>AA II 51 at $0.21/task; 130M output tokens for the index</td><td><a href="https://www.goml.io/blog/gpt-5-6-benchmarks">goml</a>, <a href="https://artificialanalysis.ai/articles/gpt-5-6-has-landed">AA</a>, <a href="https://artificialanalysis.ai/models/gpt-5-6-luna">AA model</a></td></tr>
+      <tr><td>xhigh (ours)</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td><a href="https://openai.com/index/gpt-5-6/">openai.com</a> (no per-effort text)</td></tr>
+      <tr><td rowspan="3"><b>GPT-5.6 Sol</b> (heavy)</td><td class="num" rowspan="3">$4 / $0.40 / $20 (promo to 2026-11-21)</td><td class="num" rowspan="3">1.05M / 128K</td><td>max <span class="tag">V</span>/<span class="tag">3P</span></td><td>AA CAI 80 (V) · TB 2.1 88.8% (91.9% ultra) · SWE-Bench Pro 64.6% · TB 4.0 37.3% (V)</td><td>unknown</td><td>OSWorld 2.0 62.6% · BrowseComp 92.2% (V)</td><td>AA II 59 at $1.04/task, ~15K output tokens/task</td><td><a href="https://openai.com/index/gpt-5-6/">openai.com</a>, <a href="https://openai.com/index/gpt-6-astra/">Astra post</a>, <a href="https://artificialanalysis.ai/articles/gpt-5-6-has-landed">AA</a></td></tr>
+      <tr><td>high (ours)</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>—</td></tr>
+      <tr><td>medium <span class="tag">3P</span></td><td>AA II 46</td><td>unknown</td><td>unknown</td><td>$3.08/M blended · 72 tok/s</td><td><a href="https://artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium">AA</a></td></tr>
+      <tr><td><b>GPT-5.6 Terra</b> (suspended)</td><td class="num">$2 / $0.20 / $12</td><td class="num">1.05M / 128K</td><td>max <span class="tag">3P</span></td><td>SWE-Bench Pro 63.4% · TB 2.1 87.4%</td><td>unknown</td><td>OSWorld 2.0 50.2%</td><td>AA II 55 at $0.55/task; "a Luna or Sol effort is more intelligent at no extra cost"</td><td><a href="https://www.goml.io/blog/gpt-5-6-benchmarks">goml</a>, <a href="https://artificialanalysis.ai/articles/gpt-5-6-intelligence-vs-cost-across-sol-terra-luna">AA</a></td></tr>
+      <tr><td rowspan="3"><b>GPT-6 Astra</b> (directed heavy)</td><td class="num" rowspan="3">$10 / $1 / $50</td><td class="num" rowspan="3">1.05M / 128K</td><td>unstated <span class="tag">V</span></td><td>TB 4.0 57.9% (Sol 37.3, Fable 5.1 55.8) · DeepSWE 74.1% · AA CAI 67.0</td><td>unknown</td><td>TB-Science 64.6% · ExploitBench 100%</td><td>"~9% and 63% lower cost per task" than Sol / Fable 5.1 on TB 4.0</td><td><a href="https://openai.com/index/gpt-6-astra/">openai.com</a></td></tr>
+      <tr><td>max <span class="tag">3P</span></td><td>AA II 61 (= Sol max); Epoch ECI 169 rank 1</td><td>unknown</td><td>unknown</td><td>~10% fewer tokens than Sol max but 75% more $/task; ~1/3 Sol's and ~1/5 Opus 5's tokens on CAI</td><td><a href="https://artificialanalysis.ai/articles/benchmarking-gpt-6-astra">AA</a>, <a href="https://epoch.ai/models/gpt-6-astra">Epoch</a></td></tr>
+      <tr><td>high (ours) / medium</td><td>unknown / AA II 52</td><td>unknown</td><td>unknown</td><td>medium: 61 tok/s, TTFT 9.65 s</td><td><a href="https://artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium">AA</a></td></tr>
+      <tr><td rowspan="4"><b>Claude Fable 5.1</b> (taste, supervisor)</td><td class="num" rowspan="4">$10 / $0.25 read · $20 write-1h / $50</td><td class="num" rowspan="4">1M / 128K</td><td>unstated <span class="tag">V</span></td><td>TB 4.0 55.8% · CursorBench 73.4%</td><td>"+9 pts over Fable 5 on τ³-Banking" (AA, no absolute)</td><td>OSWorld 2.0 77.9% / 41.7% strict · TB-Science 52.6%</td><td>"25% less than Fable 5, up to ~45% agentic" (cache-read cut)</td><td><a href="https://www.anthropic.com/claude-fable-and-mythos-5-1">anthropic.com</a></td></tr>
+      <tr><td>max / xhigh <span class="tag">3P</span></td><td>AA II 66 ($3.76/task, 143.7M tokens) / 65 ($2.72)</td><td>unknown</td><td>TB 2.1 91.4% · HLE 59.1%</td><td>five levels span <b>11×</b> output tokens</td><td><a href="https://artificialanalysis.ai/articles/claude-fable-5-1">AA</a></td></tr>
+      <tr><td>high (what runs)</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>—</td></tr>
+      <tr><td>medium (registry) / low</td><td>V prose: "at Low or Medium … similar to or better than Fable 5 at a much lower cost" / AA II 58</td><td>unknown</td><td>unknown</td><td>low: 13.1M tokens on the index</td><td><a href="https://www.anthropic.com/claude-fable-and-mythos-5-1">anthropic.com</a>, <a href="https://artificialanalysis.ai/articles/claude-fable-5-1">AA</a></td></tr>
+      <tr><td rowspan="2"><b>Claude Opus 5</b> (fallback)</td><td class="num" rowspan="2">$5 / $0.50 read · $10 write-1h / $25</td><td class="num" rowspan="2">1M / 128K</td><td>unstated <span class="tag">V</span>/<span class="tag">3P</span></td><td>TB 4.0 52.3% · CursorBench 70.0% (V) · SWE-bench Verified 96.0, Pro 79.2 (3P card reading)</td><td>unknown</td><td>OSWorld 2.0 75.4% / 39.6%</td><td>"26% fewer tokens than Opus 4.8 at max" (customer quote)</td><td><a href="https://www.anthropic.com/news/claude-opus-5">anthropic.com</a>, <a href="https://jessemoraga.com/2026/07/25/claude-opus-5-benchmarks/">3P</a></td></tr>
+      <tr><td>max / xhigh / high (ours)</td><td>AA II 61 ($2.03/task at launch) / AA CAI joint first / unknown</td><td>unknown</td><td>TB 2.1 89%</td><td>output tokens span ~8× low→max</td><td><a href="https://artificialanalysis.ai/articles/opus-5">AA</a></td></tr>
+      <tr><td><b>Claude Haiku 4.5</b> (light)</td><td class="num">$1 / $0.10 read · $2 write-1h / $5</td><td class="num">200K / 64K</td><td>no effort; thinking budget <span class="tag">V</span></td><td>SWE-bench Verified 73.3% (128K budget) · TB Terminus-2 40.2% no-think, 41.8% 32K</td><td>τ²-bench reported, value in an image (unknown)</td><td>OSWorld-Verified: method published, value unknown</td><td>AA II 22 at $0.20/task</td><td><a href="https://www.anthropic.com/news/claude-haiku-4-5">anthropic.com</a>, <a href="https://artificialanalysis.ai/models/claude-4-5-haiku-reasoning">AA</a></td></tr>
+      <tr><td><b>Claude Sonnet 5</b> (reference)</td><td class="num">$2 / $0.20 / $10</td><td class="num">1M / 128K</td><td>unstated <span class="tag">3P</span></td><td>SWE-bench Verified 85.2 · TB 2.1 80.4</td><td>unknown</td><td>unknown</td><td>medium "comparable to Sonnet 4.6 at high"</td><td><a href="https://docs.anthropic.com/en/docs/build-with-claude/effort">docs</a></td></tr>
+      <tr><td><b>Grok 4.5</b> (Grok default)</td><td class="num">$2 / $0.30 / $6</td><td class="num">500K</td><td>high (default) <span class="tag">V</span>/<span class="tag">3P</span></td><td>DeepSWE 1.0 62.0% (AA-run); SWE-Bench Pro / TB 2.1 in model-card PDF, not extracted</td><td>τ³-Banking in model card, unknown</td><td>SWE-Marathon listed, unknown</td><td>15,954 output tokens per SWE-Bench Pro task vs Opus 4.8 67,020 (V); AA 64M tokens/index, $0.31/task, CAI 76 at $2.49/task</td><td><a href="https://x.ai/news/grok-4-5">x.ai</a>, <a href="https://artificialanalysis.ai/models/grok-4-5">AA</a></td></tr>
+      <tr><td><b>Qwen 3.8 Max</b> (OpenCode, gated)</td><td class="num">$2 / $0.25 / $6</td><td class="num">1M / 131K</td><td>thinking on <span class="tag">V</span>/<span class="tag">3P</span></td><td>SWE-bench Pro 67.7 · TB 2.1 86.6</td><td>Toolathlon 72.5 (V) · AA τ³-Banking 51.3%</td><td>OSWorld-Verified 86.1</td><td>AA II 47 but 150M tokens/index ("very verbose"); OpenCode dropped enable_thinking on the wire (1.18.25)</td><td><a href="https://go.tabbit.ai/model/qwen3-8-max/reviews/qwen-official-release-notes-and-complete-performance-results">mirror</a>, <a href="https://artificialanalysis.ai/models/qwen3-8-max">AA</a>, <a href="https://github.com/anomalyco/opencode/issues/46647">opencode#46647</a></td></tr>
+    </tbody>
+  </table>
+
+  <h3>B · What this host measured, 2026-08-20 → 2026-09-06</h3>
+  <div class="grid2">
+    <figure aria-labelledby="fig2cap">
+      <svg viewBox="0 0 520 250" width="100%" height="auto" role="img" aria-describedby="fig2desc">
+        <desc id="fig2desc">Cost per merged delivery at 2026-09-06 list price, log-scaled bars: Luna xhigh $0.51, Terra high $2.28, Sol high $8.80, Astra high estimated $22, Opus 5 high $26.52.</desc>
+        <g font-family="system-ui,sans-serif" font-size="12" fill="currentColor">
+          <line x1="130" y1="16" x2="130" y2="196" stroke="#5b6478" stroke-width="1"/>
+          <!-- bars: width = 100 * log10(cost*10) -> $0.51:71 $2.28:136 $8.80:194 $22:234 $26.52:242 -->
+          <text x="122" y="38" text-anchor="end">Luna / xhigh · n=173</text>
+          <rect x="132" y="26" width="71" height="16" rx="4" fill="#5fd39a"/><text x="208" y="38" font-weight="700">$0.51</text>
+          <text x="122" y="74" text-anchor="end">Terra / high · n=42</text>
+          <rect x="132" y="62" width="136" height="16" rx="4" fill="#8fd3ff"/><text x="273" y="74" font-weight="700">$2.28</text>
+          <text x="122" y="110" text-anchor="end">Sol / high · n=12</text>
+          <rect x="132" y="98" width="194" height="16" rx="4" fill="#f5c04a"/><text x="331" y="110" font-weight="700">$8.80</text>
+          <text x="122" y="146" text-anchor="end">Astra / high · n=0</text>
+          <rect x="132" y="134" width="234" height="16" rx="4" fill="none" stroke="#ff6b7a" stroke-dasharray="4 3"/><text x="371" y="146" font-weight="700">≈$22 (est.)</text>
+          <text x="122" y="182" text-anchor="end">Opus 5 / high · n=38</text>
+          <rect x="132" y="170" width="242" height="16" rx="4" fill="#ff6b7a"/><text x="379" y="182" font-weight="700">$26.52</text>
+          <text x="132" y="215" fill="#9aa5bb">log scale · solid = measured from rollouts · dashed = Sol's token profile at Astra list price</text>
+          <text x="132" y="232" fill="#9aa5bb">shadow price: both harnesses run on subscriptions</text>
+        </g>
+      </svg>
+      <figcaption id="fig2cap">Figure 2. Cost per merged delivery per lane at 2026-09-06 Standard list prices (Claude cache writes at the 1-hour rate, which is every cache write in the transcripts). Source: per-turn token counts in <code>~/.codex/sessions</code> and per-message usage in the Claude transcripts, joined to task notes; rows in <code>2026-09-06-model-lane-history.csv</code>. Data table at right.</figcaption>
+    </figure>
+    <div>
+      <table>
+        <thead><tr><th>Lane as run</th><th class="num">Deliveries</th><th class="num">Send-backs</th><th class="num">Urgent stops</th><th class="num">Output tok / delivery</th><th class="num">Tool calls / delivery</th><th class="num">Median min to first push</th><th class="num">Cost / delivery</th></tr></thead>
+        <tbody>
+          <tr><td>standard · Luna / xhigh</td><td class="num">173</td><td class="num">16 (9%)</td><td class="num">4</td><td class="num">47,512</td><td class="num">143</td><td class="num">18.5</td><td class="num"><b>$0.51</b></td></tr>
+          <tr><td>heavy · Sol / high</td><td class="num">12</td><td class="num">1 (8%)</td><td class="num">0</td><td class="num">38,118</td><td class="num">125</td><td class="num">6.9</td><td class="num"><b>$8.80</b></td></tr>
+          <tr><td>former standard · Terra / high</td><td class="num">42</td><td class="num">1 (2%)</td><td class="num">0</td><td class="num">21,041</td><td class="num">69</td><td class="num">6.2</td><td class="num"><b>$2.28</b></td></tr>
+          <tr><td>former taste · Opus 5 / high</td><td class="num">38</td><td class="num">0 (0%)*</td><td class="num">2</td><td class="num">102,080</td><td class="num">78</td><td class="num">16.2</td><td class="num"><b>$26.52</b></td></tr>
+          <tr><td>subset 09-05 16:20Z→ · Luna / xhigh</td><td class="num">20</td><td class="num">3 (15%)</td><td class="num">2</td><td class="num">44,525</td><td class="num">138</td><td class="num">18.9</td><td class="num">$0.50</td></tr>
+          <tr><td>subset 09-05 16:20Z→ · Sol / high</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num">59,648</td><td class="num">224</td><td class="num">51.3</td><td class="num">$16.39</td></tr>
+          <tr><td>directed heavy · Astra / high</td><td class="num">0</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">≈$22 est.</td></tr>
+          <tr><td>light · Haiku; taste · Fable as worker</td><td class="num">0</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        </tbody>
+      </table>
+      <p class="meta">Send-back = a <code>request_changes</code> decision note, counted once per task (the 09-05 brief above counted CI reds and message rejections too: 5 on 19 vs 3 on 20 here). * The Opus burst's supervisor may have rejected by message; 2 urgent stops in that window. Uncached input per delivery: Luna 416K, Sol 367K, Terra 199K, Opus 0.3K; cached input: Luna 18.4M, Sol 16.4M, Terra 8.1M, Opus 41.8M.</p>
+    </div>
+  </div>
+  <h3>Supervisor sessions</h3>
+  <table>
+    <thead><tr><th>Session start</th><th>Model / effort</th><th class="num">Active min</th><th class="num">Cache write (1 h)</th><th class="num">Cache read</th><th class="num">Output</th><th class="num">Tool calls</th><th class="num">Cost @ list</th></tr></thead>
+    <tbody>
+      <tr><td>2026-08-27 → 08-31 (5 sessions)</td><td>Fable 5 / high</td><td class="num">2,010</td><td class="num">6,769,623</td><td class="num">768,496,885</td><td class="num">1,187,008</td><td class="num">424</td><td class="num">unknown (Fable 5 price not researched)</td></tr>
+      <tr><td>2026-09-02 00:32Z</td><td>Fable 5.1 / high</td><td class="num">1,011</td><td class="num">2,586,733</td><td class="num">281,569,004</td><td class="num">387,535</td><td class="num">70</td><td class="num">$141.93</td></tr>
+      <tr><td>2026-09-03 17:00Z</td><td>Fable 5.1 / high</td><td class="num">1,001</td><td class="num">4,619,897</td><td class="num">568,043,654</td><td class="num">976,282</td><td class="num">150</td><td class="num">$284.15</td></tr>
+      <tr><td>2026-09-05 16:20Z (this brief's author)</td><td>Fable 5.1 / <b>high</b></td><td class="num">1,470</td><td class="num">3,463,853</td><td class="num">191,707,518</td><td class="num">289,686</td><td class="num">89</td><td class="num"><b>$131.78</b></td></tr>
+    </tbody>
+  </table>
+  <p class="meta">Every supervisor session ran at effort=high (Claude Code default; the spawn path never sets <code>effortLevel</code>); the registry's <code>medium</code> has never executed. The 09-05 supervisor day is 13× the $10.05 of the 20 Luna deliveries it reviewed; 53% of it is 1-hour cache writes at $20/M, 36% cache reads, 11% output. Astra has no cas-src rollout in the horizon; the 9 h stall cannot be re-measured from transcripts.</p>
+
+  <h3>C · Cost × intelligence × efficiency per lane at its configured effort</h3>
+  <table>
+    <thead><tr><th>Lane</th><th>Route</th><th>Published intelligence (coding)</th><th>Published tool calling</th><th class="num">Send-back rate</th><th class="num">Output / delivery</th><th class="num">Tool calls / delivery</th><th class="num">Cost / delivery</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr><td>standard</td><td>Luna / xhigh</td><td>SWE-Bench Pro 62.7 · TB 2.1 84.7 (3P, max)</td><td>unknown</td><td class="num">9% (n=173)</td><td class="num">47,512</td><td class="num">143</td><td class="num">$0.51</td><td>cheapest by 4× (Terra) to 50× (Opus); most send-backs in absolute terms, lowest cost per send-back</td></tr>
+      <tr><td>heavy (today)</td><td>Sol / high</td><td>AA CAI 80 · TB 2.1 88.8 (max)</td><td>unknown</td><td class="num">8% (n=12)</td><td class="num">38,118</td><td class="num">125</td><td class="num">$8.80</td><td>17× Luna for a send-back rate inside Luna's noise; fastest first push</td></tr>
+      <tr><td>heavy (directed)</td><td>Astra / high</td><td>TB 4.0 57.9 vs Sol 37.3; AA: Sol's II at +75% $/task</td><td>unknown</td><td class="num">no data</td><td class="num">no data</td><td class="num">no data</td><td class="num">≈$22</td><td>only lane with a published intelligence gain; zero local evidence; 2.5× Sol</td></tr>
+      <tr><td>heavy (alt.)</td><td>Luna / xhigh</td><td>as standard</td><td>unknown</td><td class="num">9%</td><td class="num">47,512</td><td class="num">143</td><td class="num">$0.51</td><td>already the de-facto rescue lane (finished cas-c674 after Sol)</td></tr>
+      <tr><td>taste + supervisor (registry)</td><td>Fable 5.1 / medium</td><td>V: "similar to or better than Fable 5"; AA low→max 58→66</td><td>unknown</td><td class="num">never ran</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td>untested; every real session was high</td></tr>
+      <tr><td>taste + supervisor (actual)</td><td>Fable 5.1 / high</td><td>unknown per-effort; xhigh AA II 65</td><td>unknown</td><td class="num">—</td><td class="num">290K–976K / session</td><td class="num">70–150 / session</td><td class="num">$132–$284 / session</td><td>most expensive seat in the factory; 1-h cache writes dominate</td></tr>
+      <tr><td>fallback</td><td>Opus 5 / high</td><td>TB 4.0 52.3 · SWE-bench Verified 96.0 (3P)</td><td>unknown</td><td class="num">0% (n=38)*</td><td class="num">102,080</td><td class="num">78</td><td class="num">$26.52</td><td>2× Luna's output, half the tool calls, 52× the cost</td></tr>
+      <tr><td>light</td><td>Haiku 4.5 / low</td><td>SWE-bench Verified 73.3 (128K thinking)</td><td>τ²-bench unknown</td><td class="num">never ran</td><td class="num">—</td><td class="num">—</td><td class="num">≤$1 est.</td><td><code>low</code> is meaningless on Haiku; needs a thinking budget, not an effort</td></tr>
+    </tbody>
+  </table>
+  <h3>Recommendations, in order of evidence</h3>
+  <ol class="opt">
+    <li><b>Heavy: Sol/high primary, Luna/xhigh first fallback, Astra/high explicit-only until five measured deliveries.</b> Sol 8% send-backs on 12 at $8.80; Luna 9% on 173 at $0.51; Astra 0 deliveries at 2.5× Sol's price. Astra's published edge (TB 4.0 57.9 vs 37.3; AA "Pareto frontier of token efficiency") is the reason to measure it: run the next five heavy tasks as Astra/high and Sol/high pairs on the same brief and compare send-backs, tool calls and output tokens from the rollouts.</li>
+    <li><b>Supervisor: measure Fable medium before deciding, and make the registry say what runs.</b> Every supervisor session ran high because Claude Code defaults to high and the spawn path never sets <code>effortLevel</code>. A supervisor day is $132–$284 at list, 13–28× the workers it reviews. Experiment: two consecutive supervisor days at medium scored by the 3.17.2 actionable-idle metric and send-back counts. Until then set supervisor/taste <code>default_effort = "high"</code>.</li>
+    <li><b>Cut the supervisor's cache-write bill.</b> 53% of the 09-05 supervisor cost is 1-hour-TTL cache writes ($20/M on Fable 5.1, 80× the read price). A harness setting, not a model choice; a 5-minute TTL is worth a one-day trial with the same metric.</li>
+    <li><b>Light: give Haiku a thinking budget or delete the lane.</b> Haiku has no effort parameter; its one coding score (73.3%) needs a 128K thinking budget. Encode <code>thinking_budget</code> in the recipe with marker-tested chores, or route light at Luna/xhigh — what happens today, at $0.51.</li>
+    <li><b>Track output tokens and tool calls per delivery per lane, weekly, from the rollouts.</b> They are in every rollout and are what vendors will not publish per effort. Luna's p50→p90 output spread (45K→74K) and Opus's 102K/78-call profile are the first local intelligence-vs-efficiency signal; send-back rate alone cannot separate "cheap and sloppy" from "expensive and careful".</li>
+  </ol>
+  <p class="meta">What the data cannot answer: Sol vs Luna vs Astra on identical tasks (rec. 1), Fable medium vs high on identical supervision (rec. 2), and any tool-calling score for the OpenAI or Anthropic models (no τ²/BFCL figures published).</p>
+</section>
+
 <section id="fails">
   <h2>Where the rubric fails</h2>
   <div class="grid2">
@@ -213,7 +336,7 @@
 
 <footer>
   <div class="wrap">
-    <p><b>Provenance.</b> Registry: <code>crates/cas-factory/policy/lane-registry.toml</code> at epic 736bb1fe64176204b77e46b960ad23fba7d8cbba. Delivery and send-back counts: supervisor merge and review notes on epic cas-80b6 and task notes on cas-4626, c650, 62ca, bd04, bddf, a49c, 41ae, d05f, 47ea, e159, c674, 9eae1, 72f7, 16ee, a65d, 6e24, 1e85, 826a. Stall: cas-20a3 note 2026-09-05 15:10Z; operator message 17:27Z. Release timings: <code>~/.cas/artifacts/release/v3.17.1-epic-80b6-merge/FINAL-HANDOFF.md</code> and <code>…/v3.17.2-epic-80b6-merge/FINAL-HANDOFF.md</code>. Directive: operator message 2026-09-06 00:10Z; task cas-255e.</p>
+    <p><b>Provenance.</b> Registry: <code>crates/cas-factory/policy/lane-registry.toml</code> at epic 736bb1fe64176204b77e46b960ad23fba7d8cbba. Delivery and send-back counts: supervisor merge and review notes on epic cas-80b6 and task notes on cas-4626, c650, 62ca, bd04, bddf, a49c, 41ae, d05f, 47ea, e159, c674, 9eae1, 72f7, 16ee, a65d, 6e24, 1e85, 826a. Stall: cas-20a3 note 2026-09-05 15:10Z; operator message 17:27Z. Release timings: <code>~/.cas/artifacts/release/v3.17.1-epic-80b6-merge/FINAL-HANDOFF.md</code> and <code>…/v3.17.2-epic-80b6-merge/FINAL-HANDOFF.md</code>. Directive: operator message 2026-09-06 00:10Z; task cas-255e. Model section (cas-3372): external figures retrieved 2026-09-06 via exa-search from the URLs linked inline; internal figures from <code>~/.codex/sessions/2026/08/20…09/06</code> rollouts (per-turn <code>token_count</code>, <code>turn_context</code>, tool calls), <code>~/.claude-daniel@petrastella.io/projects/…cas-src*</code> transcripts (per-message usage, 1-h cache writes), <code>.cas/cas.db</code> task notes and <code>spawn_queue</code>, and <code>.cas/logs/factory-session-*.log</code>; row-level data in <code>docs/factory/2026-09-06-model-lane-history.csv</code>, method in the <code>.md</code> beside it.</p>
     <p>Markdown source of truth: <code>docs/factory/2026-09-06-model-lane-rubric-review.md</code>. This file renders with no network, no scripts, and no external assets.</p>
   </div>
 </footer>

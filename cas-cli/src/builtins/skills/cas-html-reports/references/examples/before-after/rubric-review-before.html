@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model lane rubric review — 2026-09-06</title>
+<style>
+  :root{
+    --bg:#0f1117;--panel:#161a24;--panel-2:#1c2130;--line:#2a3142;--text:#e8ecf4;--muted:#9aa5bb;
+    --accent:#7aa2ff;--ok:#5fd39a;--warn:#f5c04a;--bad:#ff6b7a;--info:#8fd3ff;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Inter,sans-serif;
+  }
+  @media (prefers-color-scheme: light){
+    :root{--bg:#f6f7fb;--panel:#ffffff;--panel-2:#f0f2f8;--line:#d9dee9;--text:#161a24;--muted:#5b6478;--accent:#2f5fd8;--ok:#1f8f5f;--warn:#b7791f;--bad:#c93648;--info:#1f6fa8}
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 var(--sans)}
+  a{color:var(--accent)}
+  header.hero{padding:56px 24px 32px;background:
+    radial-gradient(1200px 400px at 10% -10%, rgba(122,162,255,.18), transparent 60%),
+    radial-gradient(900px 300px at 90% 0%, rgba(255,107,122,.14), transparent 60%);
+    border-bottom:1px solid var(--line)}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+  .eyebrow{font:600 12px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  h1{font-size:clamp(28px,4vw,42px);line-height:1.1;margin:12px 0 10px;letter-spacing:-.02em}
+  .verdict{font-size:19px;max-width:860px;color:var(--text)}
+  .verdict strong{color:var(--warn)}
+  .meta{margin-top:18px;color:var(--muted);font-size:14px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin:26px 0 0}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+  .kpi .n{font:700 34px/1 var(--sans);letter-spacing:-.02em}
+  .kpi .l{color:var(--muted);font-size:13px;margin-top:6px}
+  .kpi.ok .n{color:var(--ok)}.kpi.bad .n{color:var(--bad)}.kpi.warn .n{color:var(--warn)}.kpi.info .n{color:var(--info)}
+  main{padding:32px 0 64px}
+  section{margin:0 0 40px}
+  h2{font-size:22px;letter-spacing:-.01em;margin:0 0 14px;padding-top:8px;border-top:1px solid var(--line)}
+  h3{font-size:16px;margin:18px 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600}
+  p{max-width:860px}
+  table{border-collapse:collapse;width:100%;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:var(--panel-2);font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  tr:last-child td{border-bottom:0}
+  .tag{display:inline-block;font:600 11px/1 var(--mono);padding:4px 7px;border-radius:6px;border:1px solid var(--line);color:var(--muted);letter-spacing:.04em}
+  .tag.ok{color:var(--ok);border-color:rgba(95,211,154,.4)}.tag.bad{color:var(--bad);border-color:rgba(255,107,122,.4)}.tag.warn{color:var(--warn);border-color:rgba(245,192,74,.4)}.tag.info{color:var(--info);border-color:rgba(143,211,255,.4)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media (max-width:820px){.grid2{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+  .card h4{margin:0 0 6px;font-size:16px}
+  .card p{margin:0;color:var(--text);font-size:15px}
+  .card .why{color:var(--muted);font-size:13px;margin-top:8px}
+  ol.opt{counter-reset:o;list-style:none;padding:0;margin:0;display:grid;gap:12px}
+  ol.opt li{counter-increment:o;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px 16px 62px;position:relative}
+  ol.opt li::before{content:counter(o);position:absolute;left:18px;top:14px;width:30px;height:30px;border-radius:50%;background:var(--accent);color:#0b1020;font:700 15px/30px var(--sans);text-align:center}
+  ol.opt li b{display:block;margin-bottom:4px}
+  figure{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+  figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+  .decision{background:linear-gradient(135deg,rgba(122,162,255,.14),rgba(95,211,154,.10));border:1px solid var(--line);border-radius:16px;padding:22px 24px}
+  .decision .opts{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px}
+  @media (max-width:820px){.decision .opts{grid-template-columns:1fr}}
+  .opt-b{outline:2px solid var(--ok);outline-offset:-2px}
+  footer{border-top:1px solid var(--line);padding:24px 0 48px;color:var(--muted);font-size:13px}
+  footer code,td code,p code{font:13px var(--mono);background:var(--panel-2);padding:1px 5px;border-radius:5px}
+  details{margin-top:10px}
+  summary{cursor:pointer;color:var(--accent)}
+  .sr{position:absolute;left:-9999px}
+  @media print{
+    body{background:#fff;color:#000}
+    header.hero{background:none;border:0}
+    .kpi,.card,figure,table,ol.opt li,.decision{break-inside:avoid;border-color:#bbb}
+    details{display:block}details>summary{display:none}details>*{display:block}
+    a::after{content:" (" attr(href) ")";font-size:11px;color:#555}
+  }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">Cassy factory · decision brief · 2026-09-06</div>
+    <h1>Model lane rubric: routed by reputation, not by measurement</h1>
+    <p class="verdict">In the one window with hard numbers, the lane that carried the work is absent from the risk-bearing lane, the model with the only recorded stall is being promoted into it, and both judgment lanes now fall back silently to the model they replaced. <strong>Three numbers would fix that, and one already ships in 3.17.2.</strong></p>
+    <div class="meta">Evidence window 2026-09-05 16:20Z → 2026-09-06 00:10Z (cas-80b6 rescue; releases 3.17.1 and 3.17.2). Author: supervisor session golden-panda-80. Registry at epic 736bb1fe plus directive cas-255e.</div>
+    <div class="kpis" aria-label="Key numbers">
+      <div class="kpi ok"><div class="n">19</div><div class="l">deliveries merged from the standard lane (Luna / xhigh)</div></div>
+      <div class="kpi warn"><div class="n">5</div><div class="l">send-backs on those 19 (26%)</div></div>
+      <div class="kpi bad"><div class="n">1 / 1</div><div class="l">heavy-lane (Sol / high) deliveries sent back</div></div>
+      <div class="kpi bad"><div class="n">9 h</div><div class="l">supervisor actionable-idle on 2026-09-05 (attributed to Astra)</div></div>
+      <div class="kpi info"><div class="n">0</div><div class="l">deliveries from Astra, Haiku, or Fable as workers in the window</div></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section id="rubric">
+  <h2>The rubric as directed</h2>
+  <p>Effective once task cas-255e lands. Source: <code>crates/cas-factory/policy/lane-registry.toml</code> at epic 736bb1fe, amended by the 2026-09-06 00:10Z directive.</p>
+  <table>
+    <thead><tr><th>Lane</th><th>Primary</th><th>Effort</th><th>Fallback</th><th>Intended use</th><th>Evidence in window</th></tr></thead>
+    <tbody>
+      <tr><td>light</td><td>Claude Haiku 4.5</td><td>low</td><td>Codex Luna / xhigh</td><td>mechanical chores</td><td><span class="tag warn">unused</span></td></tr>
+      <tr><td>standard</td><td>Codex GPT-5.6 Luna</td><td>xhigh</td><td>Claude Opus 5 / high</td><td>ordinary implementation</td><td><span class="tag ok">19 merged · 5 send-backs</span></td></tr>
+      <tr><td>taste</td><td>Claude Fable 5.1</td><td>medium</td><td>Claude Opus 5 / high</td><td>public surfaces, prompts, docs, judgment</td><td><span class="tag info">supervisor only</span></td></tr>
+      <tr><td>supervisor</td><td>Claude Fable 5.1</td><td>medium</td><td>Claude Opus 5 / high</td><td>factory coordinator</td><td><span class="tag ok">this session · 0 stalls</span></td></tr>
+      <tr><td>heavy</td><td>Codex GPT-6 Astra</td><td>high</td><td>Codex GPT-5.6 Sol / high</td><td>implementation with safety risk</td><td><span class="tag bad">Astra: 0 deliveries, 1 stall · Sol: 1 / 1 sent back</span></td></tr>
+    </tbody>
+  </table>
+  <p class="meta">Explicit-only recipes: Sol (former heavy), Terra (suspended 2026-08-27), Qwen 3.8 Max via OpenCode (receipt-gated).</p>
+</section>
+
+<section id="evidence">
+  <h2>What the evidence window shows</h2>
+  <div class="grid2">
+    <figure aria-labelledby="fig1cap">
+      <svg viewBox="0 0 520 230" width="100%" height="auto" role="img" aria-describedby="fig1desc">
+        <desc id="fig1desc">Deliveries and send-backs per lane. Standard: 19 deliveries, 5 send-backs. Heavy: 1 delivery, 1 send-back. Taste, light, Astra: 0.</desc>
+        <g font-family="system-ui,sans-serif" font-size="12" fill="currentColor">
+          <line x1="120" y1="20" x2="120" y2="200" stroke="#5b6478" stroke-width="1"/>
+          <!-- standard -->
+          <text x="110" y="52" text-anchor="end">standard (Luna)</text>
+          <rect x="122" y="38" width="380" height="14" rx="4" fill="#5fd39a"/>
+          <rect x="122" y="54" width="100" height="10" rx="4" fill="#f5c04a"/>
+          <text x="508" y="50" text-anchor="end" fill="#0b1020" font-weight="700">19</text>
+          <text x="226" y="63" fill="currentColor">5 send-backs</text>
+          <!-- heavy -->
+          <text x="110" y="100" text-anchor="end">heavy (Sol)</text>
+          <rect x="122" y="86" width="20" height="14" rx="4" fill="#5fd39a"/>
+          <rect x="122" y="102" width="20" height="10" rx="4" fill="#f5c04a"/>
+          <text x="148" y="98">1 delivery</text>
+          <text x="148" y="111">1 send-back</text>
+          <!-- astra -->
+          <text x="110" y="142" text-anchor="end">Astra (any lane)</text>
+          <rect x="122" y="128" width="2" height="14" fill="#5fd39a"/>
+          <text x="130" y="140" fill="#ff6b7a">0 deliveries · 1 supervisor stall (9 h)</text>
+          <!-- light -->
+          <text x="110" y="176" text-anchor="end">light (Haiku)</text>
+          <rect x="122" y="162" width="2" height="14" fill="#5fd39a"/>
+          <text x="130" y="174">0 — never spawned</text>
+          <!-- legend -->
+          <rect x="122" y="208" width="12" height="10" fill="#5fd39a"/><text x="138" y="217">merged deliveries</text>
+          <rect x="260" y="208" width="12" height="10" fill="#f5c04a"/><text x="276" y="217">send-backs before merge</text>
+        </g>
+      </svg>
+      <figcaption id="fig1cap">Figure 1. Merged deliveries and send-backs per lane, 2026-09-05 16:20Z–2026-09-06 00:10Z. Source: supervisor review and merge notes on epic cas-80b6. Data table below.</figcaption>
+    </figure>
+    <div>
+      <table>
+        <thead><tr><th>Lane (model / effort)</th><th class="num">Workers</th><th class="num">Deliveries</th><th class="num">Send-backs</th><th class="num">CI reds</th><th class="num">Merged</th></tr></thead>
+        <tbody>
+          <tr><td>standard (Luna / xhigh)</td><td class="num">8</td><td class="num">19</td><td class="num">5</td><td class="num">1</td><td class="num"><b>19</b></td></tr>
+          <tr><td>heavy (Sol / high)</td><td class="num">1</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num"><b>1</b>*</td></tr>
+          <tr><td>taste (Fable / medium)</td><td class="num">0†</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+          <tr><td>light (Haiku / low)</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td></tr>
+          <tr><td>Astra (any)</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td></tr>
+        </tbody>
+      </table>
+      <p class="meta">* finished by a Luna worker after the Sol delivery deleted the supervisor skill's Operating flow section and conflicted with the epic. † Fable ran only as the supervisor (this session).</p>
+      <details><summary>Send-back detail</summary>
+        <p>Standard: cas-62ca ×2 (doctor snapshot row missed; managed-block line budget), cas-d05f ×2 (fixture escaped the checkout; then a helper-contract change that generalised the same defect), cas-1e85 ×1 (release-note "Was" wording). Heavy: cas-c674 ×1 (see note). Both merge-queue failures on 3.17.1 came from a test written by an earlier lane (cas-bfd6), not from work in this window.</p>
+      </details>
+    </div>
+  </div>
+  <h3>Release latency in the window</h3>
+  <table>
+    <thead><tr><th>Release</th><th>From</th><th>To</th><th class="num">Elapsed</th><th>Gates</th><th>Queue runs</th></tr></thead>
+    <tbody>
+      <tr><td>3.17.1</td><td>rescue start 16:20Z</td><td>published 21:17Z</td><td class="num">4 h 57 m</td><td>3</td><td>3 (2 failed on a fixture from cas-bfd6)</td></tr>
+      <tr><td>3.17.2</td><td>"cut it now" 22:06Z</td><td>published 23:23Z</td><td class="num"><b>1 h 17 m</b></td><td>1</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="fails">
+  <h2>Where the rubric fails</h2>
+  <div class="grid2">
+    <div class="card"><h4>1 · Heavy is routed on reputation against the data</h4><p>Astra has zero worker deliveries in the window and one recorded coordination stall. Sol has one delivery and one send-back. Luna has nineteen merged deliveries and is not in heavy at all.</p><div class="why">Heavy is the lane for safety-critical implementation, where "quietly stops" is the worst failure mode.</div></div>
+    <div class="card"><h4>2 · Silent fallback to the replaced default</h4><p>Opus 5/high was the built-in supervisor default until 22:00Z on 2026-09-05. It is now the automatic backup for both judgment lanes. A bad auth hour changes the coordinator's behaviour with nobody deciding it.</p><div class="why">cas-255e adds a loud receipt. Loud is not approved.</div></div>
+    <div class="card"><h4>3 · Effort has no stated rationale</h4><p>Luna xhigh only; Fable medium; Astra medium by recipe but high in heavy; Sol high; Haiku low. A reader cannot tell cost decisions from quality decisions.</p></div>
+    <div class="card"><h4>4 · Nothing is measured</h4><p>Every routing change this week came from anecdote: Astra→Fable taste, Fable supervisor, Opus fallbacks, Astra heavy. The actionable-idle metric in 3.17.2 is the first number the rubric has ever had.</p></div>
+    <div class="card"><h4>5 · The light lane is decorative</h4><p>Zero uses in the window. Every mechanical chore went to Luna because Haiku is not trusted with builtin marker tests.</p></div>
+    <div class="card"><h4>6 · Cross-harness fallback inside a lane</h4><p>Standard falls back from Codex to Claude: different hooks, skill mirror, and account, mid-epic.</p></div>
+    <div class="card"><h4>7 · Fallback edges declared but disabled</h4><p>Until cas-255e lands, taste and supervisor carry a fallback that never fires while the comment says "fail closed". A registry that documents one policy and executes another is a review hazard.</p></div>
+  </div>
+</section>
+
+<section id="opts">
+  <h2>Optimizations, in order of leverage</h2>
+  <ol class="opt">
+    <li><b>Measure three numbers per lane, per week</b> from data CAS already records: send-backs per delivery (request_changes notes), actionable-idle minutes (3.17.2 metric), assignment-to-first-push minutes (lease start vs first pushed tip). Print them in the generated route table so the rubric and its scorecard are read together.</li>
+    <li><b>Promote by trial, not by directive.</b> Keep Sol as heavy primary; make Astra/high the heavy fallback for two weeks; promote only if its send-back rate is at or below Sol's on at least five deliveries.</li>
+    <li><b>Make fallbacks explicit decisions.</b> A lane fallback fires only after the supervisor is told the primary is unavailable and the receipt names both recipes. For the supervisor lane, prefer fail-closed plus an operator alert over a silent model change.</li>
+    <li><b>Add an effort column with a reason.</b> One sentence per lane: why this effort, what it costs relative to the lane below, and what evidence would change it.</li>
+    <li><b>Retire or re-scope light.</b> Route it at Luna/xhigh for tiny chores (what happens today anyway) or give Haiku a bounded class of work with its own marker tests.</li>
+    <li><b>Keep fallbacks inside a harness.</b> Standard should fall back to another Codex recipe or fail closed; cross-harness fallbacks belong to the operator, not the registry.</li>
+    <li><b>Give Luna a seat in heavy.</b> On this window's evidence it is the safest implementation lane we have; at minimum it should be the heavy fallback ahead of Sol.</li>
+  </ol>
+</section>
+
+<section id="decision">
+  <div class="decision">
+    <h2 style="border:0;padding:0;margin-bottom:4px">Decision requested</h2>
+    <p>cas-255e is implementing the rubric as directed. Choose one:</p>
+    <div class="opts">
+      <div class="card"><h4>A · Ship as directed</h4><p>Heavy on Astra/high now; start the three-number scorecard; revisit in two weeks with data.</p></div>
+      <div class="card opt-b"><h4>B · Amend cas-255e (recommended)</h4><p>Heavy stays on Sol with Astra/high as the fallback; keep the Opus fallbacks but loud; add the scorecard. Promote Astra only on evidence.</p></div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><b>Provenance.</b> Registry: <code>crates/cas-factory/policy/lane-registry.toml</code> at epic 736bb1fe64176204b77e46b960ad23fba7d8cbba. Delivery and send-back counts: supervisor merge and review notes on epic cas-80b6 and task notes on cas-4626, c650, 62ca, bd04, bddf, a49c, 41ae, d05f, 47ea, e159, c674, 9eae1, 72f7, 16ee, a65d, 6e24, 1e85, 826a. Stall: cas-20a3 note 2026-09-05 15:10Z; operator message 17:27Z. Release timings: <code>~/.cas/artifacts/release/v3.17.1-epic-80b6-merge/FINAL-HANDOFF.md</code> and <code>…/v3.17.2-epic-80b6-merge/FINAL-HANDOFF.md</code>. Directive: operator message 2026-09-06 00:10Z; task cas-255e.</p>
+    <p>Markdown source of truth: <code>docs/factory/2026-09-06-model-lane-rubric-review.md</code>. This file renders with no network, no scripts, and no external assets.</p>
+  </div>
+</footer>
+</body>
+</html>

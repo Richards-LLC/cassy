@@ -46,13 +46,22 @@ violated, the artifact is not shippable — fix it before committing.
   summary of what it shows, and the underlying numbers in a real table (visible or in a `<details>`).
 - Respect `prefers-reduced-motion`; there should be little motion to begin with.
 
-## 4. Theme
+## 4. Theme and design language
 
-- Support light and dark via `prefers-color-scheme`. Define colors as CSS custom properties once and
-  reference them everywhere — no hard-coded hex values scattered through rules.
-- The palette is neutral and restrained: one accent, one warn, one bad, one good, plus greys. Data
-  colors come from the palette in a fixed order so the same series gets the same color in every figure.
-- Print rendering is always light regardless of the screen theme.
+- **The Petrastella design language is the default look.** Its type pair (a serif display face for the
+  verdict and headings, a system sans for body, tabular mono for numbers), spacing scale, semantic
+  color roles, and chart grammar are the report's tokens unless the project's `DESIGN.md` overrides
+  them. Read `DESIGN.md` first when it exists; take the tokens it names. A neutral grey theme is the
+  fallback when neither exists, never a choice made to be safe.
+- **Colors are semantic roles, declared once.** Define them as CSS custom properties named by intent —
+  `--verdict` for the conclusion and its marks, `--evidence` for measured data, `--warning` for what
+  needs attention, `--action` for the ask — plus ink, muted ink, surface, and rule. Reference the
+  roles everywhere; no hex values scattered through rules. Series colors come from the categorical
+  palette in a fixed order so the same series has the same color in every figure and every edition.
+- **Light and dark via `prefers-color-scheme`**, both meeting the contrast floor. Print is always light.
+- **Expression lives in composition and type, not in effects.** No gradients, glass, glows, drop
+  shadows carrying no meaning, or animated counters. A distinctive report has a distinctive hero and
+  one typographic move; it does not have a different theme.
 
 ## 5. Print
 
@@ -104,6 +113,10 @@ Each of these has been observed to make a report worse; none are stylistic prefe
 - **JS-only content.** Content that vanishes with JS disabled did not survive the reader's browser.
 - **Decorative dashboards.** Gradients, glass effects, animated counters, hero images, and gauges that
   encode one number in 400 pixels. Ink that carries no data is noise.
+- **A KPI row as the hero.** Five numbers in five boxes summarize the document; they do not show the
+  argument. The hero is the figure the concept brief names.
+- **Safe sameness.** A report whose only design decision was "match the last one" has no hero, no
+  move, and nothing a reader remembers. Consistency is the constraint on the argument, not the argument.
 - **Two absolute bars where a variance was the point.** Make the reader subtract and they will misread it.
 - **Color-only status.** Red/green with no label fails for a colorblind reader and for a printout.
 - **Rotating metrics between editions.** A recurring report whose KPI set changes cannot be trended.

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Three of nineteen standard-lane deliveries carried every send-back — 2026-09-06</title>
+<style>
+  :root{
+    color-scheme: light dark;
+    --bg:#f6f2ea; --surface:#fffdf8; --ink:#1b1a1f; --muted:#5b5852; --line:#d9d2c5;
+    --verdict:#8a2d18; --evidence:#1e5a86; --action:#2a6b4c;
+    --display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#16151a; --surface:#1e1d24; --ink:#ebe6dc; --muted:#a7a196; --line:#37353e;
+           --verdict:#e6906f; --evidence:#82b7e3; --action:#7fcaa5; }
+  }
+  body{max-width:760px;margin:2rem auto;padding:0 1rem;background:var(--bg);color:var(--ink);font:16px/1.5 var(--sans)}
+  h1{font:400 1.5rem/1.25 var(--display);margin:0 0 .35rem}
+  p.sub{color:var(--muted);margin:0 0 1rem}
+  figure{margin:1.25rem 0;background:var(--surface);border:1px solid var(--line);padding:12px 14px 8px}
+  svg{width:100%;height:auto;display:block}
+  .dot{fill:var(--evidence)}
+  .ring{fill:none;stroke:var(--verdict);stroke-width:1.75}
+  .task{font:12px var(--mono);fill:var(--muted)}
+  .ann{font:italic 14px var(--display);fill:var(--verdict)}
+  .lbl{font:12px var(--sans);fill:var(--muted)}
+  .conn{stroke:var(--verdict);stroke-width:1;fill:none}
+  figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+  table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;background:var(--surface);border:1px solid var(--line)}
+  caption{text-align:left;font:400 15px var(--display);color:var(--muted);padding-bottom:6px}
+  th,td{padding:.45rem .6rem;border-bottom:1px solid var(--line);text-align:left}
+  thead th{font:600 12px var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:var(--bg)}
+  td.num,th.num{text-align:right;font-family:var(--mono)}
+  tbody tr:last-child td,tbody tr:last-child th{border-bottom:0}
+  @media print{ :root{--bg:#fff;--surface:#fff;--ink:#000;--muted:#333;--line:#999;--verdict:#7a2510;--evidence:#164a70} body{margin:0;max-width:none} figure,tr{break-inside:avoid} }
+</style>
+</head>
+<body>
+<main>
+  <h1>Three of nineteen standard-lane deliveries carried every send-back; sixteen merged clean</h1>
+  <p class="sub">Deliveries reviewed by the supervisor, 2026-09-05 16:20Z – 2026-09-06 00:10Z, standard lane only; unit: one delivery. A ring marks each send-back the delivery received before it merged.</p>
+  <figure aria-labelledby="fig-title fig-desc">
+    <svg viewBox="0 0 720 200" role="img">
+      <title id="fig-title">Nineteen standard-lane deliveries as dots; three carry rings for their five send-backs</title>
+      <desc id="fig-desc">Nineteen dots in order of merge. Sixteen are plain. The dots for cas-62ca and cas-d05f each carry two rings; the dot for cas-1e85 carries one. Five send-backs on three deliveries; a 26 percent send-back rate concentrated on 16 percent of deliveries.</desc>
+      <!-- 19 dots, 34 px apart from x=30; rings drawn as concentric circles on the sent-back deliveries -->
+      <g class="dot">
+        <circle cx="30" cy="70" r="7"/><circle cx="64" cy="70" r="7"/><circle cx="98" cy="70" r="7"/><circle cx="132" cy="70" r="7"/>
+        <circle cx="166" cy="70" r="7"/><circle cx="200" cy="70" r="7"/><circle cx="234" cy="70" r="7"/><circle cx="268" cy="70" r="7"/>
+        <circle cx="302" cy="70" r="7"/><circle cx="336" cy="70" r="7"/><circle cx="370" cy="70" r="7"/><circle cx="404" cy="70" r="7"/>
+        <circle cx="438" cy="70" r="7"/><circle cx="472" cy="70" r="7"/><circle cx="506" cy="70" r="7"/><circle cx="540" cy="70" r="7"/>
+        <circle cx="574" cy="70" r="7"/><circle cx="608" cy="70" r="7"/><circle cx="642" cy="70" r="7"/>
+      </g>
+      <!-- rings: cas-62ca ×2 at dot 5, cas-d05f ×2 at dot 11, cas-1e85 ×1 at dot 16 -->
+      <g class="ring">
+        <circle cx="166" cy="70" r="11"/><circle cx="166" cy="70" r="15"/>
+        <circle cx="370" cy="70" r="11"/><circle cx="370" cy="70" r="15"/>
+        <circle cx="540" cy="70" r="11"/>
+      </g>
+      <text class="task" x="166" y="104" text-anchor="middle">cas-62ca ×2</text>
+      <text class="task" x="370" y="104" text-anchor="middle">cas-d05f ×2</text>
+      <text class="task" x="540" y="104" text-anchor="middle">cas-1e85 ×1</text>
+      <path class="conn" d="M166 50 V32 H370 V50 M540 50 V32 H370"/>
+      <text class="ann" x="370" y="24" text-anchor="middle">5 send-backs on 3 deliveries: 26 % of send-backs, 16 % of deliveries</text>
+      <text class="lbl" x="30" y="140">merge order →</text>
+      <text class="lbl" x="642" y="140" text-anchor="end">19 merged</text>
+      <circle class="dot" cx="36" cy="172" r="5"/><text class="lbl" x="48" y="176">one delivery</text>
+      <circle class="ring" cx="180" cy="172" r="7"/><text class="lbl" x="194" y="176">one send-back before merge</text>
+    </svg>
+    <figcaption>One mark per delivery keeps the population visible: a bar reading "5 of 19" would hide that the send-backs cluster on three tasks. Source: supervisor review notes on epic cas-80b6; exact rows in the table.</figcaption>
+  </figure>
+  <table>
+    <caption>Standard-lane deliveries with send-backs (table twin of the figure)</caption>
+    <thead><tr><th scope="col">Delivery</th><th scope="col" class="num">Send-backs</th><th scope="col">Reason</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">cas-62ca</th><td class="num">2</td><td>doctor snapshot row missed; managed-block line budget</td></tr>
+      <tr><th scope="row">cas-d05f</th><td class="num">2</td><td>fixture escaped the checkout; helper contract change generalised the same defect</td></tr>
+      <tr><th scope="row">cas-1e85</th><td class="num">1</td><td>release-note "Was" wording</td></tr>
+      <tr><th scope="row">16 other deliveries</th><td class="num">0</td><td>merged without a corrective commit</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Provenance:</strong> supervisor merge and review notes on epic cas-80b6, 2026-09-05 16:20Z – 2026-09-06 00:10Z; "send-back" is a review rejection or CI red requiring a corrective commit before merge. Rendered with no network, scripts, or external assets; Petrastella design language, default tokens.</p>
+</main>
+</body>
+</html>

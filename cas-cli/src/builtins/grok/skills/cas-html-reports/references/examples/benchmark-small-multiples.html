@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Benchmark — tantivy wins above 200 k documents; sqlite-fts wins below it (2026-08-20)</title>
+<style>
+  :root{
+    color-scheme: light dark;
+    --bg:#f6f2ea; --surface:#fffdf8; --ink:#1b1a1f; --muted:#5b5852; --line:#d9d2c5;
+    --verdict:#8a2d18; --evidence:#1e5a86; --warning:#8a6508; --action:#2a6b4c;
+    /* categorical series, fixed order, validated with cas-dataviz validate_palette.js */
+    --s1:#2a6fc9; --s2:#c9552a; --s3:#1d8f66;
+    --display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#16151a; --surface:#1e1d24; --ink:#ebe6dc; --muted:#a7a196; --line:#37353e;
+           --verdict:#e6906f; --evidence:#82b7e3; --warning:#e3b84f; --action:#7fcaa5;
+           --s1:#3f86dc; --s2:#d86a35; --s3:#22a06e; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 var(--sans)}
+  a{color:var(--evidence)}
+  :focus-visible{outline:3px solid var(--evidence);outline-offset:2px}
+  .skip{position:absolute;left:-9999px}.skip:focus{position:static;display:inline-block;margin:8px}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+  header{padding:22px 0 12px;border-bottom:1px solid var(--line)}
+  .eyebrow{font:500 12px/1.4 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  h1{font:400 clamp(26px,3.2vw,36px)/1.12 var(--display);margin:8px 0 6px;max-width:34ch}
+  h1 em{font-style:italic;color:var(--verdict)}
+  .meta{color:var(--muted);font-size:14px;margin:0}
+  main{padding:8px 0 48px}
+  section{margin:30px 0 0}
+  h2{font:400 24px/1.2 var(--display);margin:0 0 8px}
+  p{max-width:78ch}
+  code{font:.92em var(--mono)}
+  figure{margin:0}
+  figcaption{color:var(--muted);font-size:13px;margin-top:8px;max-width:90ch}
+  .multiples{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin-top:10px}
+  .panel{background:var(--surface);border:1px solid var(--line);padding:12px 12px 6px}
+  .panel h3{margin:0 0 2px;font:600 14px/1.3 var(--sans)}
+  .panel .u{margin:0 0 6px;font:12px var(--mono);color:var(--muted)}
+  .panel svg{width:100%;height:auto;display:block}
+  .axis{stroke:var(--line)}.tick{font:11px var(--sans);fill:var(--muted)}
+  .l1{fill:none;stroke:var(--s1);stroke-width:2}.l2{fill:none;stroke:var(--s2);stroke-width:2;stroke-dasharray:6 3}.l3{fill:none;stroke:var(--s3);stroke-width:2;stroke-dasharray:2 3}
+  .p1{fill:var(--s1)}.p2{fill:var(--s2)}.p3{fill:var(--s3)}
+  .n1{font:12px var(--sans);fill:var(--s1)}.n2{font:12px var(--sans);fill:var(--s2)}.n3{font:12px var(--sans);fill:var(--s3)}
+  .ann{font:italic 14px var(--display);fill:var(--verdict)}
+  .cross{stroke:var(--verdict);stroke-width:1;stroke-dasharray:3 3}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;margin-top:8px;color:var(--muted)}
+  .legend span::before{content:"";display:inline-block;width:22px;height:0;border-top:3px solid;margin-right:6px;vertical-align:middle}
+  .legend .k1::before{border-color:var(--s1)}.legend .k2::before{border-color:var(--s2);border-top-style:dashed}.legend .k3::before{border-color:var(--s3);border-top-style:dotted}
+  .winner{border-left:3px solid var(--verdict);padding:6px 0 6px 18px;margin:18px 0 0;max-width:78ch}
+  .winner p{font:400 20px/1.4 var(--display);margin:0}
+  table{border-collapse:collapse;width:100%;background:var(--surface);border:1px solid var(--line);margin-top:10px}
+  caption{text-align:left;font:400 15px/1.4 var(--display);color:var(--muted);padding:0 0 6px}
+  th,td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:15px}
+  thead th{font:600 12px/1.4 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:var(--bg)}
+  th[scope=row]{font-weight:600}
+  .num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:14px}
+  td.best{font-weight:700;text-decoration:underline;text-decoration-color:var(--verdict);text-underline-offset:3px}
+  tbody tr:last-child td,tbody tr:last-child th{border-bottom:0}
+  .scroll{overflow-x:auto}
+  .margin{font-size:14px;color:var(--muted);border-left:2px solid var(--line);padding-left:12px;margin:10px 0 0;max-width:60ch}
+  pre{background:var(--surface);border:1px solid var(--line);padding:10px 12px;overflow-x:auto;font:13px/1.5 var(--mono)}
+  footer{border-top:1px solid var(--line);padding:18px 0 40px;color:var(--muted);font-size:13px}
+  @media print{
+    :root{--bg:#fff;--surface:#fff;--ink:#000;--muted:#333;--line:#999;--verdict:#7a2510;--evidence:#164a70;--s1:#1f4e9c;--s2:#a3411c;--s3:#176e4f}
+    body{font-size:11pt}.skip{display:none}
+    .panel,figure,tr,.winner{break-inside:avoid}table{break-inside:auto}thead{display:table-header-group}
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the results</a>
+<header><div class="wrap">
+  <div class="eyebrow">Comparison / benchmark · practitioner · 2026-08-20</div>
+  <h1>tantivy wins above 200 k documents; sqlite-fts wins below it — <em>the crossover is the decision</em></h1>
+  <p class="meta">Three full-text backends on the same corpus at four sizes, ten iterations each after warm-up. Reference candidate: sqlite-fts (current). Source of truth: <a href="./2026-08-20-fts-backend-benchmark.md">2026-08-20-fts-backend-benchmark.md</a> · <a href="./2026-08-20-fts-backend-benchmark.concept.md">concept brief</a></p>
+</div></header>
+
+<main id="main" class="wrap">
+
+<section aria-labelledby="res-h">
+  <h2 id="res-h">Four metrics, one x axis, one crossover</h2>
+  <figure aria-labelledby="fig1-cap">
+    <div class="multiples">
+      <!-- x: 50k,100k,200k,400k at x=40,120,200,280 (log-ish spacing, evenly placed). y bottom=120, top=16 -->
+      <div class="panel"><h3>Query latency p50</h3><p class="u">ms · lower is better</p>
+        <svg viewBox="0 0 320 150" role="img" aria-label="p50 latency: sqlite-fts 2.1, 2.9, 4.8, 9.6 ms; tantivy 3.4, 3.6, 3.9, 4.4 ms; pg-trgm 4.0, 6.1, 9.8, 11.9 ms across 50k to 400k documents">
+          <line class="axis" x1="40" y1="16" x2="40" y2="120"/><line class="axis" x1="40" y1="120" x2="300" y2="120"/>
+          <text class="tick" x="34" y="124" text-anchor="end">0</text><text class="tick" x="34" y="20" text-anchor="end">12</text>
+          <polyline class="l1" points="40,101.8 120,94.8 200,78.4 280,36.8"/>
+          <polyline class="l2" points="40,90.5 120,88.8 200,86.2 280,81.9"/>
+          <polyline class="l3" points="40,85.3 120,67.1 200,35.1 280,16.9"/>
+          <line class="cross" x1="200" y1="16" x2="200" y2="120"/>
+          <text class="ann" x="196" y="30" text-anchor="end">crossover 200 k</text>
+          <text class="n1" x="284" y="40">9.6</text><text class="n2" x="284" y="85">4.4</text><text class="n3" x="284" y="20">11.9</text>
+          <text class="tick" x="40" y="138" text-anchor="middle">50 k</text><text class="tick" x="120" y="138" text-anchor="middle">100 k</text><text class="tick" x="200" y="138" text-anchor="middle">200 k</text><text class="tick" x="280" y="138" text-anchor="middle">400 k</text>
+        </svg></div>
+      <div class="panel"><h3>Query latency p99</h3><p class="u">ms · lower is better</p>
+        <svg viewBox="0 0 320 150" role="img" aria-label="p99 latency: sqlite-fts 14, 22, 48, 112 ms; tantivy 19, 21, 24, 29 ms; pg-trgm 31, 52, 88, 118 ms">
+          <line class="axis" x1="40" y1="16" x2="40" y2="120"/><line class="axis" x1="40" y1="120" x2="300" y2="120"/>
+          <text class="tick" x="34" y="124" text-anchor="end">0</text><text class="tick" x="34" y="20" text-anchor="end">120</text>
+          <polyline class="l1" points="40,107.9 120,100.9 200,78.4 280,23"/>
+          <polyline class="l2" points="40,103.5 120,101.8 200,99.2 280,94.9"/>
+          <polyline class="l3" points="40,93.1 120,75 200,43.7 280,17.8"/>
+          <line class="cross" x1="200" y1="16" x2="200" y2="120"/>
+          <text class="ann" x="196" y="30" text-anchor="end">4× gap at 400 k</text>
+          <text class="n1" x="284" y="27">112</text><text class="n2" x="284" y="99">29</text><text class="n3" x="284" y="17">118</text>
+          <text class="tick" x="40" y="138" text-anchor="middle">50 k</text><text class="tick" x="120" y="138" text-anchor="middle">100 k</text><text class="tick" x="200" y="138" text-anchor="middle">200 k</text><text class="tick" x="280" y="138" text-anchor="middle">400 k</text>
+        </svg></div>
+      <div class="panel"><h3>Index build time</h3><p class="u">seconds · lower is better</p>
+        <svg viewBox="0 0 320 150" role="img" aria-label="Build time: sqlite-fts 18, 37, 76, 158 s; tantivy 9, 17, 34, 71 s; pg-trgm 41, 88, 171, 236 s">
+          <line class="axis" x1="40" y1="16" x2="40" y2="120"/><line class="axis" x1="40" y1="120" x2="300" y2="120"/>
+          <text class="tick" x="34" y="124" text-anchor="end">0</text><text class="tick" x="34" y="20" text-anchor="end">240</text>
+          <polyline class="l1" points="40,112.2 120,104 200,87.1 280,51.5"/>
+          <polyline class="l2" points="40,116.1 120,112.6 200,105.3 280,89.2"/>
+          <polyline class="l3" points="40,102.2 120,81.9 200,45.9 280,17.7"/>
+          <text class="n1" x="284" y="55">158</text><text class="n2" x="284" y="93">71</text><text class="n3" x="284" y="17">236</text>
+          <text class="tick" x="40" y="138" text-anchor="middle">50 k</text><text class="tick" x="120" y="138" text-anchor="middle">100 k</text><text class="tick" x="200" y="138" text-anchor="middle">200 k</text><text class="tick" x="280" y="138" text-anchor="middle">400 k</text>
+        </svg></div>
+      <div class="panel"><h3>Resident memory</h3><p class="u">MB · lower is better</p>
+        <svg viewBox="0 0 320 150" role="img" aria-label="Resident memory: sqlite-fts 120, 190, 340, 620 MB; tantivy 210, 290, 460, 810 MB; pg-trgm 380, 560, 890, 1180 MB">
+          <line class="axis" x1="40" y1="16" x2="40" y2="120"/><line class="axis" x1="40" y1="120" x2="300" y2="120"/>
+          <text class="tick" x="34" y="124" text-anchor="end">0</text><text class="tick" x="34" y="20" text-anchor="end">1 200</text>
+          <polyline class="l1" points="40,109.6 120,103.5 200,90.5 280,66.3"/>
+          <polyline class="l2" points="40,101.8 120,94.9 200,80.1 280,49.8"/>
+          <polyline class="l3" points="40,87.1 120,71.5 200,42.9 280,17.8"/>
+          <text class="ann" x="200" y="30" text-anchor="end">where sqlite-fts still wins</text>
+          <text class="n1" x="284" y="70">620</text><text class="n2" x="284" y="53">810</text><text class="n3" x="284" y="17">1 180</text>
+          <text class="tick" x="40" y="138" text-anchor="middle">50 k</text><text class="tick" x="120" y="138" text-anchor="middle">100 k</text><text class="tick" x="200" y="138" text-anchor="middle">200 k</text><text class="tick" x="280" y="138" text-anchor="middle">400 k</text>
+        </svg></div>
+    </div>
+    <div class="legend" aria-hidden="true"><span class="k1">sqlite-fts (reference)</span><span class="k2">tantivy</span><span class="k3">pg-trgm</span></div>
+    <figcaption id="fig1-cap">Figure 1. Four metrics across corpus size, 50 k–400 k documents. Each panel has its own y scale (its top tick) and all panels share the x axis; within a panel every candidate is on the same scale. Line style distinguishes candidates in print. Median of 10 iterations after 3 warm-ups; values in the table below. Source: <code>bench/fts/run.sh</code> at <code>c0ffee1</code>, 2026-08-19.</figcaption>
+  </figure>
+  <div class="winner">
+    <p>Winner: <b>tantivy</b> above 200 k documents, by 3.9× on p99 latency at 400 k (29 ms vs 112 ms) and 2.2× on build time, at the cost of 31 % more resident memory. Below 200 k, sqlite-fts remains faster at p50 and cheaper in memory, and nothing justifies a migration.</p>
+  </div>
+</section>
+
+<section aria-labelledby="ov-h">
+  <h2 id="ov-h">Results at 400 k documents</h2>
+  <div class="scroll"><table>
+    <caption>Candidates × metrics at the largest corpus size; best value per column underlined. Median of 10 iterations.</caption>
+    <thead><tr><th scope="col">Candidate</th><th scope="col" class="num">p50 (ms)</th><th scope="col" class="num">p99 (ms)</th><th scope="col" class="num">Build (s)</th><th scope="col" class="num">RSS (MB)</th><th scope="col" class="num">Index size (MB)</th><th scope="col" class="num">vs reference, p99</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">sqlite-fts (reference)</th><td class="num">9.6</td><td class="num">112</td><td class="num">158</td><td class="num best">620</td><td class="num best">1 040</td><td class="num">1.00×</td></tr>
+      <tr><th scope="row">tantivy</th><td class="num best">4.4</td><td class="num best">29</td><td class="num best">71</td><td class="num">810</td><td class="num">1 310</td><td class="num">0.26×</td></tr>
+      <tr><th scope="row">pg-trgm</th><td class="num">11.9</td><td class="num">118</td><td class="num">236</td><td class="num">1 180</td><td class="num">2 450</td><td class="num">1.05×</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section aria-labelledby="all-h">
+  <h2 id="all-h">All sizes (table twin of Figure 1)</h2>
+  <div class="scroll"><table>
+    <caption>Median values by corpus size; p50 and p99 in ms, build in s, RSS in MB</caption>
+    <thead><tr><th scope="col">Candidate</th><th scope="col">Metric</th><th scope="col" class="num">50 k</th><th scope="col" class="num">100 k</th><th scope="col" class="num">200 k</th><th scope="col" class="num">400 k</th></tr></thead>
+    <tbody>
+      <tr><th scope="row" rowspan="4">sqlite-fts</th><td>p50</td><td class="num">2.1</td><td class="num">2.9</td><td class="num">4.8</td><td class="num">9.6</td></tr>
+      <tr><td>p99</td><td class="num">14</td><td class="num">22</td><td class="num">48</td><td class="num">112</td></tr>
+      <tr><td>build</td><td class="num">18</td><td class="num">37</td><td class="num">76</td><td class="num">158</td></tr>
+      <tr><td>RSS</td><td class="num">120</td><td class="num">190</td><td class="num">340</td><td class="num">620</td></tr>
+      <tr><th scope="row" rowspan="4">tantivy</th><td>p50</td><td class="num">3.4</td><td class="num">3.6</td><td class="num">3.9</td><td class="num">4.4</td></tr>
+      <tr><td>p99</td><td class="num">19</td><td class="num">21</td><td class="num">24</td><td class="num">29</td></tr>
+      <tr><td>build</td><td class="num">9</td><td class="num">17</td><td class="num">34</td><td class="num">71</td></tr>
+      <tr><td>RSS</td><td class="num">210</td><td class="num">290</td><td class="num">460</td><td class="num">810</td></tr>
+      <tr><th scope="row" rowspan="4">pg-trgm</th><td>p50</td><td class="num">4.0</td><td class="num">6.1</td><td class="num">9.8</td><td class="num">11.9</td></tr>
+      <tr><td>p99</td><td class="num">31</td><td class="num">52</td><td class="num">88</td><td class="num">118</td></tr>
+      <tr><td>build</td><td class="num">41</td><td class="num">88</td><td class="num">171</td><td class="num">236</td></tr>
+      <tr><td>RSS</td><td class="num">380</td><td class="num">560</td><td class="num">890</td><td class="num">1 180</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section aria-labelledby="har-h">
+  <h2 id="har-h">Harness</h2>
+  <div class="scroll"><table>
+    <caption>What was held constant</caption>
+    <thead><tr><th scope="col">Factor</th><th scope="col">Value</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">Hardware</th><td>8 vCPU, 32 GB, NVMe; single tenant; CPU governor <code>performance</code></td></tr>
+      <tr><th scope="row">Versions</th><td>sqlite 3.46 (FTS5), tantivy 0.22, PostgreSQL 16.3 with pg_trgm 1.6</td></tr>
+      <tr><th scope="row">Corpus</th><td>Synthetic docs from the production schema, 50 k / 100 k / 200 k / 400 k, mean 1.9 KB, same seed for every candidate</td></tr>
+      <tr><th scope="row">Queries</th><td>1 000 recorded production queries replayed in the same order; p50/p99 over the full set</td></tr>
+      <tr><th scope="row">Iterations</th><td>3 warm-ups discarded, 10 measured, median reported; spread under 6 % for every cell</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section aria-labelledby="lose-h">
+  <h2 id="lose-h">Where the loser wins</h2>
+  <p>sqlite-fts stays ahead at p50 up to 100 k documents (2.9 ms vs 3.6 ms) and uses 24–35 % less memory at every size. A deployment that never exceeds 150 k documents and runs on a 1 GB instance should keep it. pg-trgm never wins a column, but it needs no separate process, which this benchmark does not price.</p>
+  <p class="margin">Not measured: concurrent writers, snapshot restore time, and query-language differences (tantivy has no <code>NEAR</code>). Each could move the decision for a specific product; none changes the crossover.</p>
+</section>
+
+</main>
+<footer><div class="wrap">
+  <p><b>Provenance.</b> <code>bench/fts/run.sh --sizes 50k,100k,200k,400k --iterations 10 --warmup 3</code> at commit <code>c0ffee1</code>, 2026-08-19 21:04–23:41 UTC. Raw results: <code>bench/fts/results/2026-08-19/*.jsonl</code>. Aggregation: <code>bench/fts/summarize.py</code>. Palette validated with <code>node validate_palette.js "#2a6fc9,#c9552a,#1d8f66" --mode light --surface "#fffdf8"</code>.</p>
+  <p>Markdown source of truth: <code>docs/benchmarks/2026-08-20-fts-backend-benchmark.md</code>. No network, no scripts, no external assets. Petrastella design language, default tokens.</p>
+</div></footer>
+</body>
+</html>

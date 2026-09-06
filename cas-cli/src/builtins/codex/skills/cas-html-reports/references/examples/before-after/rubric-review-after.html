@@ -8,28 +8,23 @@
   /* Petrastella design language — default tokens (no DESIGN.md applies to docs/factory). */
   :root{
     color-scheme: light dark;
-    /* Petrastella design language — tokens from skills/design-spec/references/design-tokens.json (no DESIGN.md applies) */
-    --bg:#F7F4EE; --surface:#FFFFFF; --surface-hero:#F1E7DD; --line:#DAD3C7; --line-strong:#8F8371;
-    --ink:#1B1D24; --muted:#5A5F6E; --verdict:#2E3A9F; --verdict-soft:#DDE1F7; --evidence:#5A5F6E; --action:#2E3A9F;
-    --good:#226845; --warning:#7F5504; --danger:#B3261E;
-    --s1:#2E3A9F; --s2:#B0574F; --s3:#1F7A85;
+    --bg:#f6f2ea; --surface:#fffdf8; --ink:#1b1a1f; --muted:#5b5852; --line:#d9d2c5;
+    --verdict:#8a2d18; --evidence:#1e5a86; --warning:#8a6508; --action:#2a6b4c;
     --display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
-    --sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-    --mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
   }
   @media (prefers-color-scheme: dark){
-    :root{ --bg:#12141A; --surface:#191C24; --surface-hero:#241E1E; --line:#2B3040; --line-strong:#6B7390;
-           --ink:#E9E6E0; --muted:#A3A7B4; --verdict:#A9B3FF; --verdict-soft:rgba(169,179,255,0.16); --evidence:#A3A7B4; --action:#A9B3FF;
-           --good:#5FC492; --warning:#E2B14D; --danger:#EF7B72; --s1:#A9B3FF; --s2:#F2A49C; --s3:#6FD0DC; }
+    :root{ --bg:#16151a; --surface:#1e1d24; --ink:#ebe6dc; --muted:#a7a196; --line:#37353e;
+           --verdict:#e6906f; --evidence:#82b7e3; --warning:#e3b84f; --action:#7fcaa5; }
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 var(--sans)}
-  :focus-visible{outline:3px solid var(--action);outline-offset:2px}
   a{color:var(--evidence)}
   :focus-visible{outline:3px solid var(--evidence);outline-offset:2px}
   .skip{position:absolute;left:-9999px}.skip:focus{position:static;display:inline-block;margin:8px}
   .wrap{max-width:1180px;margin:0 auto;padding:0 24px}
-  header{padding:22px 0 14px;background:var(--surface-hero);color:var(--ink);border-bottom:3px solid var(--verdict)}
+  header{padding:22px 0 12px;border-bottom:1px solid var(--line)}
   .eyebrow{font:500 12px/1.4 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
   h1{font:400 clamp(26px,3.4vw,38px)/1.1 var(--display);letter-spacing:-.01em;margin:8px 0 8px;max-width:30ch}
   h1 em{font-style:italic;color:var(--verdict)}
@@ -38,29 +33,29 @@
   main{padding:8px 0 48px}
   section{margin:36px 0 0}
   section#ledger{margin-top:18px}
-  h2{font:600 24px/1.25 var(--sans);letter-spacing:-.01em;margin:0 0 6px}
+  h2{font:400 26px/1.2 var(--display);margin:0 0 6px}
   h3{font:600 13px/1.4 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:22px 0 8px}
   p{max-width:78ch}
   code{font:.92em var(--mono);background:var(--surface);border:1px solid var(--line);padding:0 4px;border-radius:3px}
   .stamp{display:inline-block;font:400 12px/1 var(--display);letter-spacing:.18em;text-transform:uppercase;padding:6px 8px 5px;border:1.5px solid currentColor;border-radius:2px;white-space:nowrap}
-  .stamp.contradicted{color:var(--danger)}
+  .stamp.contradicted{color:var(--verdict)}
   .stamp.untested,.stamp.unused{color:var(--warning)}
-  .stamp.consistent{color:var(--good)}
-  .stamp.recommended{color:var(--good);font-size:13px}
+  .stamp.consistent{color:var(--action)}
+  .stamp.recommended{color:var(--action);font-size:13px}
 
   /* Hero: the ledger + marginal notes */
   .hero{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:28px;align-items:start;margin-top:10px}
   @media (max-width:700px){.ledger thead{display:none}.ledger tr,.ledger th,.ledger td{display:block;width:auto}.ledger tr{border-bottom:2px solid var(--line)}.ledger th[scope=row]{border-bottom:0;padding-bottom:4px}.ledger td.gutter{text-align:left;border:0;background:none;padding:2px 14px 6px}.ledger td.says{border-bottom:0;padding-top:4px}.ledger td.says::before{content:attr(data-col);display:block;font:600 11px/1.4 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}}
   @media (max-width:960px){.hero{grid-template-columns:1fr}}
-  table{border-collapse:collapse;width:100%;background:transparent;border-top:1px solid var(--line-strong);border-bottom:1px solid var(--line-strong)}
+  table{border-collapse:collapse;width:100%;background:var(--surface);border:1px solid var(--line)}
   caption{text-align:left;font:400 15px/1.4 var(--display);color:var(--muted);padding:0 0 8px}
   th,td{padding:10px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-  thead th{font:600 12px/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:transparent}
+  thead th{font:600 12px/1.4 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:var(--bg)}
   tbody tr:last-child td,tbody tr:last-child th{border-bottom:0}
   .num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono);font-size:14px}
   .ledger th[scope=row]{font:600 15px/1.35 var(--sans);white-space:nowrap;width:150px}
   .ledger th[scope=row] small{display:block;font:400 12px/1.4 var(--mono);color:var(--muted);white-space:normal}
-  .ledger td.gutter{text-align:center;width:150px;vertical-align:middle;background:var(--verdict-soft);border-left:1px solid var(--line);border-right:1px solid var(--line)}
+  .ledger td.gutter{text-align:center;width:150px;vertical-align:middle;background:var(--bg);border-left:1px solid var(--line);border-right:1px solid var(--line)}
   .ledger td.says{font-size:15px}
   .ledger td.says b{font-weight:600}
   .ledger .rule{display:block;color:var(--muted);font-size:13px;margin-top:4px}
@@ -81,19 +76,19 @@
   /* Small multiples */
   .multiples{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:14px;margin-top:10px}
   figure + .scroll{margin-top:16px}
-  .panel{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 12px 8px}
+  .panel{background:var(--surface);border:1px solid var(--line);padding:12px 12px 8px}
   .panel h4{margin:0 0 2px;font:600 14px/1.3 var(--sans)}
   .panel .sub{margin:0 0 6px;font:400 12px/1.3 var(--mono);color:var(--muted)}
   .panel svg{width:100%;height:auto;display:block}
   .bar{fill:var(--evidence)}
-  .bar.sendback{fill:none;stroke:var(--danger);stroke-width:1.5}
-  .bar.merged{fill:var(--good)}
-  .bar.workers{fill:var(--line-strong)}
+  .bar.sendback{fill:none;stroke:var(--verdict);stroke-width:1.5}
+  .bar.merged{fill:var(--action)}
+  .bar.workers{fill:var(--muted)}
   .lbl{font:12px var(--sans);fill:var(--muted)}
   .val{font:12px var(--mono);fill:var(--ink)}
   .axis{stroke:var(--line);stroke-width:1}
   .zero{stroke:var(--muted);stroke-width:1}
-  .note{font:12px var(--sans);fill:var(--danger)}
+  .note{font:12px var(--sans);fill:var(--verdict)}
   figure{margin:0}
   figcaption{color:var(--muted);font-size:13px;margin-top:10px;max-width:90ch}
   details{margin-top:10px;font-size:14px}summary{cursor:pointer;color:var(--evidence)}
@@ -111,22 +106,22 @@
   /* Closing figure: the decision */
   .decision{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:12px}
   @media (max-width:760px){.decision{grid-template-columns:1fr}}
-  .option{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px 18px;position:relative}
-  .option.rec{border-color:var(--good);border-width:2px}
+  .option{background:var(--surface);border:1px solid var(--line);padding:16px 18px;position:relative}
+  .option.rec{border-color:var(--action);border-width:2px}
   .option h4{margin:0 0 8px;font:400 20px/1.2 var(--display)}
   .option .stamp{position:absolute;top:14px;right:14px}
   .edge{display:grid;grid-template-columns:1fr 28px 1fr;gap:8px;align-items:center;margin:10px 0 8px;font:13px var(--mono)}
   .edge .box{border:1px solid var(--line);padding:8px 10px;background:var(--bg)}
   .edge .box small{display:block;color:var(--muted);font-family:var(--sans)}
-  .edge .box.primary{border-color:var(--verdict);border-width:2px}
+  .edge .box.primary{border-color:var(--evidence);border-width:2px}
   .edge svg{width:28px;height:16px;display:block}
   .option p{font-size:14px;margin:6px 0 0}
-  .option .rule{font-size:13px;color:var(--good);margin-top:8px;border-top:1px dashed var(--line);padding-top:8px}
+  .option .rule{font-size:13px;color:var(--action);margin-top:8px;border-top:1px dashed var(--line);padding-top:8px}
 
   footer{border-top:1px solid var(--line);padding:20px 0 48px;color:var(--muted);font-size:13px}
   footer p{max-width:none}
   @media print{
-    :root{--bg:#fff;--surface:#fff;--surface-hero:#fff;--ink:#000;--muted:#333;--line:#999;--line-strong:#555;--verdict:#2E3A9F;--verdict-soft:#eee;--evidence:#444;--action:#2E3A9F;--good:#1f5a3e;--warning:#6f5206;--danger:#8f1e18;--s1:#2E3A9F;--s2:#8f3d36;--s3:#175f68}
+    :root{--bg:#fff;--surface:#fff;--ink:#000;--muted:#333;--line:#999;--verdict:#7a2510;--evidence:#164a70;--warning:#6f5206;--action:#1f5a3e}
     body{font-size:11pt}
     header{padding-top:0}
     .hero{grid-template-columns:1fr}
@@ -173,11 +168,11 @@
           <td class="gutter"><span class="stamp consistent">Consistent</span></td>
           <td class="says" data-col="Data says"><b><span class="n">8</span> workers, <span class="n">19</span> deliveries, <span class="n">19</span> merged.</b> <span class="n">5</span> send-backs on those 19 (26 %), <span class="n">1</span> CI red.
             <span class="dots"><svg viewBox="0 0 300 40" role="img" aria-label="Standard lane: 19 deliveries shown as dots, 5 send-backs shown as rings, 1 CI red shown as a cross">
-              <g fill="var(--verdict)"><circle cx="6" cy="8" r="4.5"/><circle cx="20" cy="8" r="4.5"/><circle cx="34" cy="8" r="4.5"/><circle cx="48" cy="8" r="4.5"/><circle cx="62" cy="8" r="4.5"/><circle cx="76" cy="8" r="4.5"/><circle cx="90" cy="8" r="4.5"/><circle cx="104" cy="8" r="4.5"/><circle cx="118" cy="8" r="4.5"/><circle cx="132" cy="8" r="4.5"/><circle cx="146" cy="8" r="4.5"/><circle cx="160" cy="8" r="4.5"/><circle cx="174" cy="8" r="4.5"/><circle cx="188" cy="8" r="4.5"/><circle cx="202" cy="8" r="4.5"/><circle cx="216" cy="8" r="4.5"/><circle cx="230" cy="8" r="4.5"/><circle cx="244" cy="8" r="4.5"/><circle cx="258" cy="8" r="4.5"/></g>
+              <g fill="var(--evidence)"><circle cx="6" cy="8" r="4.5"/><circle cx="20" cy="8" r="4.5"/><circle cx="34" cy="8" r="4.5"/><circle cx="48" cy="8" r="4.5"/><circle cx="62" cy="8" r="4.5"/><circle cx="76" cy="8" r="4.5"/><circle cx="90" cy="8" r="4.5"/><circle cx="104" cy="8" r="4.5"/><circle cx="118" cy="8" r="4.5"/><circle cx="132" cy="8" r="4.5"/><circle cx="146" cy="8" r="4.5"/><circle cx="160" cy="8" r="4.5"/><circle cx="174" cy="8" r="4.5"/><circle cx="188" cy="8" r="4.5"/><circle cx="202" cy="8" r="4.5"/><circle cx="216" cy="8" r="4.5"/><circle cx="230" cy="8" r="4.5"/><circle cx="244" cy="8" r="4.5"/><circle cx="258" cy="8" r="4.5"/></g>
               <text class="val" x="268" y="12">19</text>
-              <g fill="none" stroke="var(--danger)" stroke-width="1.5"><circle cx="6" cy="28" r="4.5"/><circle cx="20" cy="28" r="4.5"/><circle cx="34" cy="28" r="4.5"/><circle cx="48" cy="28" r="4.5"/><circle cx="62" cy="28" r="4.5"/></g>
+              <g fill="none" stroke="var(--verdict)" stroke-width="1.5"><circle cx="6" cy="28" r="4.5"/><circle cx="20" cy="28" r="4.5"/><circle cx="34" cy="28" r="4.5"/><circle cx="48" cy="28" r="4.5"/><circle cx="62" cy="28" r="4.5"/></g>
               <text class="val" x="72" y="32">5 send-backs</text>
-              <path d="M152 24 l8 8 m0 -8 l-8 8" stroke="var(--danger)" stroke-width="1.5"/><text class="val" x="166" y="32">1 CI red</text>
+              <path d="M152 24 l8 8 m0 -8 l-8 8" stroke="var(--verdict)" stroke-width="1.5"/><text class="val" x="166" y="32">1 CI red</text>
             </svg></span></td>
         </tr>
         <tr>
@@ -192,14 +187,14 @@
           <td class="says" data-col="Reputation says">Factory coordinator on Fable; if Fable is unavailable, silently return to Opus 5 / high, the default it replaced at 22:00Z on 2026-09-05.<sup class="ref">2</sup></td>
           <td class="gutter"><span class="stamp consistent">Consistent</span></td>
           <td class="says" data-col="Data says"><b>This session: <span class="n">0</span> stalls.</b> The previous supervisor, attributed by the operator to Astra, held finished workers with green proofs from about 06:00Z to 15:10Z on 2026-09-05: <span class="n">9 h</span> of actionable idle.
-            <span class="dots"><svg viewBox="0 0 300 18" role="img" aria-label="Supervisor lane: this session zero stalls; previous supervisor nine hours idle"><rect x="0" y="4" width="270" height="10" fill="none" stroke="var(--danger)" stroke-width="1.5"/><text class="val" x="4" y="13" fill="var(--danger)">9 h idle (previous supervisor, Astra)</text><rect x="276" y="4" width="3" height="10" fill="var(--good)"/><text class="val" x="283" y="13">0</text></svg></span></td>
+            <span class="dots"><svg viewBox="0 0 300 18" role="img" aria-label="Supervisor lane: this session zero stalls; previous supervisor nine hours idle"><rect x="0" y="4" width="270" height="10" fill="none" stroke="var(--verdict)" stroke-width="1.5"/><text class="val" x="4" y="13" fill="var(--verdict)">9 h idle (previous supervisor, Astra)</text><rect x="276" y="4" width="3" height="10" fill="var(--action)"/><text class="val" x="283" y="13">0</text></svg></span></td>
         </tr>
         <tr>
           <th scope="row">heavy<small>Codex GPT-6 Astra · high<br>fallback Codex GPT-5.6 Sol / high</small></th>
           <td class="says" data-col="Reputation says">Implementation with safety risk goes to the strongest hands: Astra, promoted by directive, with Sol behind it.<sup class="ref">1</sup><span class="rule">Effort: high in heavy, medium by recipe. No stated reason.<sup class="ref">3</sup></span></td>
           <td class="gutter"><span class="stamp contradicted">Contradicted</span></td>
           <td class="says" data-col="Data says"><b>Astra: <span class="n">0</span> deliveries, <span class="n">1</span> stall. Sol: <span class="n">1</span> delivery, <span class="n">1</span> send-back.</b> Luna, with <span class="n">19</span> merged, is not in the lane at all.
-            <span class="dots"><svg viewBox="0 0 300 40" role="img" aria-label="Heavy lane: Sol one delivery and one send-back; Astra zero deliveries and one stall"><circle cx="6" cy="8" r="4.5" fill="var(--verdict)"/><circle cx="20" cy="8" r="4.5" fill="none" stroke="var(--danger)" stroke-width="1.5"/><text class="val" x="30" y="12">Sol: 1 delivered, 1 sent back, finished by Luna</text><path d="M2 24 l8 8 m0 -8 l-8 8" stroke="var(--danger)" stroke-width="1.5"/><text class="val" x="16" y="32">Astra: 0 delivered, 1 coordination stall</text></svg></span></td>
+            <span class="dots"><svg viewBox="0 0 300 40" role="img" aria-label="Heavy lane: Sol one delivery and one send-back; Astra zero deliveries and one stall"><circle cx="6" cy="8" r="4.5" fill="var(--evidence)"/><circle cx="20" cy="8" r="4.5" fill="none" stroke="var(--verdict)" stroke-width="1.5"/><text class="val" x="30" y="12">Sol: 1 delivered, 1 sent back, finished by Luna</text><path d="M2 24 l8 8 m0 -8 l-8 8" stroke="var(--verdict)" stroke-width="1.5"/><text class="val" x="16" y="32">Astra: 0 delivered, 1 coordination stall</text></svg></span></td>
         </tr>
       </tbody>
     </table>
@@ -232,9 +227,9 @@
         <svg viewBox="0 0 240 112" role="img" aria-label="Standard lane: 8 workers, 19 deliveries, 5 send-backs, 19 merged, on a 0 to 20 scale">
           <line class="axis" x1="78" y1="4" x2="78" y2="96"/><line class="axis" x1="228" y1="4" x2="228" y2="96"/>
           <text class="lbl" x="74" y="16" text-anchor="end">workers</text><rect class="bar workers" x="78" y="8" width="60" height="10"/><text class="val" x="142" y="17">8</text>
-          <text class="lbl" x="74" y="38" text-anchor="end">deliveries</text><rect class="bar" x="78" y="30" width="142.5" height="10"/><text class="val" x="225" y="39" text-anchor="end" fill="#fff" style="fill:var(--surface)">19</text>
+          <text class="lbl" x="74" y="38" text-anchor="end">deliveries</text><rect class="bar" x="78" y="30" width="142.5" height="10"/><text class="val" x="225" y="39" text-anchor="end" fill="#fff" style="fill:#fff">19</text>
           <text class="lbl" x="74" y="60" text-anchor="end">send-backs</text><rect class="bar sendback" x="78.75" y="52.75" width="37.5" height="8.5"/><text class="val" x="120" y="61">5 · 1 CI red</text>
-          <text class="lbl" x="74" y="82" text-anchor="end">merged</text><rect class="bar merged" x="78" y="74" width="142.5" height="10"/><text class="val" x="225" y="83" text-anchor="end" style="fill:var(--surface)">19</text>
+          <text class="lbl" x="74" y="82" text-anchor="end">merged</text><rect class="bar merged" x="78" y="74" width="142.5" height="10"/><text class="val" x="225" y="83" text-anchor="end" style="fill:#fff">19</text>
           <text class="lbl" x="78" y="108">0</text><text class="lbl" x="228" y="108" text-anchor="end">20</text>
         </svg></div>
       <div class="panel"><h4>heavy</h4><p class="sub">Sol / high</p>
@@ -302,8 +297,8 @@
       <div class="panel"><h4>3.17.1</h4><p class="sub">rescue start 16:20Z → published 21:17Z</p>
         <svg viewBox="0 0 320 56" role="img" aria-label="Release 3.17.1 took 4 hours 57 minutes with three gates and three queue runs, two of which failed">
           <line class="axis" x1="10" y1="8" x2="10" y2="40"/><line class="axis" x1="310" y1="8" x2="310" y2="40"/>
-          <rect class="bar" x="10" y="12" width="297" height="14"/><text class="val" x="14" y="23" style="fill:var(--surface)">4 h 57 min</text>
-          <path d="M120 30 l6 6 m0 -6 l-6 6 M175 30 l6 6 m0 -6 l-6 6" stroke="var(--danger)" stroke-width="1.5"/>
+          <rect class="bar" x="10" y="12" width="297" height="14"/><text class="val" x="14" y="23" style="fill:#fff">4 h 57 min</text>
+          <path d="M120 30 l6 6 m0 -6 l-6 6 M175 30 l6 6 m0 -6 l-6 6" stroke="var(--verdict)" stroke-width="1.5"/>
           <text class="note" x="188" y="38">2 queue failures</text>
           <text class="lbl" x="10" y="52">0 h</text><text class="lbl" x="310" y="52" text-anchor="end">5 h</text>
         </svg></div>
@@ -377,7 +372,7 @@
 <footer>
   <div class="wrap">
     <p><b>Provenance.</b> Registry: <code>crates/cas-factory/policy/lane-registry.toml</code> at epic 736bb1fe64176204b77e46b960ad23fba7d8cbba. Delivery and send-back counts: supervisor merge and review notes on epic cas-80b6, 2026-09-05 16:20Z–2026-09-06 00:10Z; task notes on cas-4626, c650, 62ca, bd04, bddf, a49c, 41ae, d05f, 47ea, e159, c674, 9eae1, 72f7, 16ee, a65d, 6e24, 1e85, 826a. Stall: cas-20a3 note 15:10Z; operator message 2026-09-05 17:27Z. Release timings: <code>/home/pippenz/.cas/artifacts/release/v3.17.1-epic-80b6-merge/FINAL-HANDOFF.md</code> and <code>.../v3.17.2-epic-80b6-merge/FINAL-HANDOFF.md</code>. Directive: operator message 2026-09-06 00:10Z; task cas-255e.</p>
-    <p>Markdown source of truth: <a href="./2026-09-06-model-lane-rubric-review.md">2026-09-06-model-lane-rubric-review.md</a>. Concept brief: <a href="./2026-09-06-model-lane-rubric-review.brief.md">2026-09-06-model-lane-rubric-review.brief.md</a>. This file renders with no network, no scripts, and no external assets; Petrastella design language, default tokens.</p>
+    <p>Markdown source of truth: <a href="./2026-09-06-model-lane-rubric-review.md">2026-09-06-model-lane-rubric-review.md</a>. Concept brief: <a href="./rubric-review.concept.md">rubric-review.concept.md</a>. This file renders with no network, no scripts, and no external assets; Petrastella design language, default tokens.</p>
   </div>
 </footer>
 </body>

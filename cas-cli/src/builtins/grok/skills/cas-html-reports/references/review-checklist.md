@@ -1,6 +1,18 @@
 # Pre-commit review checklist
 
-Run this before committing the pair. Anything unchecked is a defect, not a nitpick. Eleven dimensions.
+Run this before committing the trio (markdown, concept brief, HTML). Anything unchecked is a defect,
+not a nitpick. Twelve dimensions; the first one gates the rest.
+
+## 0. Concept brief and critique
+
+- [ ] `<basename>.concept.md` exists beside the markdown and names the single idea, the hero form with
+      its reason, the emotional register, one distinctive move, and what was omitted.
+- [ ] The hero is a figure that shows the argument, visible above the fold at 1280×800 and at 390×844.
+      A paragraph, a KPI row, or a table of everything is not a hero.
+- [ ] The `cas-ui-craft` critique scores are recorded in the brief: distinctiveness, fit to argument,
+      hierarchy, craft, accessibility, each 1–5. The first three are 4 or above.
+- [ ] The design language in use is the Petrastella default or the project's `DESIGN.md`; the brief
+      says which.
 
 ## 1. Content fidelity
 
@@ -11,8 +23,8 @@ Run this before committing the pair. Anything unchecked is a defect, not a nitpi
 
 ## 2. Information architecture
 
-- [ ] The selected type's lead is the first thing on the page (conclusion for evaluative reports;
-      capability or system takeaway for explanatory reports).
+- [ ] The hero figure is the first thing on the page, followed by the selected type's lead (conclusion
+      for evaluative reports; capability or system takeaway for explanatory reports).
 - [ ] The required sections for this report type are present, in the prescribed order.
 - [ ] An overview table appears before the detail when the selected type requires one.
 - [ ] The depth order matches the audience (executive: detail relegated, methodology last).
@@ -92,5 +104,6 @@ Run this before committing the pair. Anything unchecked is a defect, not a nitpi
 
 ## The two-minute version
 
-If you check nothing else: **conclusion first, JS off and nothing is lost, no external requests, print
-preview is clean, every number has a source, and the markdown says exactly what the HTML says.**
+If you check nothing else: **the hero shows the argument, the brief is committed and scores 4+, JS off
+and nothing is lost, no external requests, print preview is clean, every number has a source, and the
+markdown says exactly what the HTML says.**

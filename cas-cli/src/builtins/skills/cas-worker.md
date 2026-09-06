@@ -95,9 +95,9 @@ file a ticket in the matching repo before moving on; see the supervisor's
 
 ## cas-src surface checklist — required before close
 
-In the pre-close task note, every applicable entry must paste its proving file, command, or test; every `not applicable` entry must state why. Bare assertions are non-compliant. For every applicable item, record the proving file, command, or test in the
-pre-close note. For every `not applicable` item, state why.
-This is a requirement, not a suggestion; bare assertions are not evidence.
+In the pre-close task note, every applicable entry must paste its proving file,
+command, or test; every `not applicable` entry must state why.
+This is a requirement, not a suggestion: bare assertions are not evidence.
 
 - **Builtin skill/agent:** update Claude, Codex, and Grok mirrors and run the
   flavor-drift test.
@@ -111,9 +111,8 @@ This is a requirement, not a suggestion; bare assertions are not evidence.
   remember/archive, snooze/unsnooze).
 - **Public surface:** user-visible surface → critique rubric score recorded
   (floor 4/5 on distinctiveness, fit, hierarchy).
-- **CLI/TUI surface** (anything a terminal prints for a person): apply the
-  `cas-cli-craft` skill and paste the `terminal-qa: PASS …` receipt line from
-  `node scripts/terminal-qa.mjs --label <command> -- <command …>`.
+- **CLI/TUI surface:** apply `cas-cli-craft`; paste the `terminal-qa: PASS …`
+  receipt from `node scripts/terminal-qa.mjs --label <cmd> -- <cmd …>`.
 - **User-visible change:** assess release-notes impact.
 
 ## Blockers

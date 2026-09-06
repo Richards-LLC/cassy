@@ -829,8 +829,15 @@ def apply_costs(rows: list[dict[str, Any]], prices: dict[str, Any]) -> None:
         output_rate = _price(entry, "output_per_million", "output", "output_usd_per_million")
         reasoning_rate = _price(entry, "reasoning_per_million", "reasoning")
         components = []
+        # Codex rollouts report cached_input_tokens as a subset of input_tokens
+        # (token_count: total_tokens == input_tokens + output_tokens); Claude
+        # transcripts report input_tokens net of cache reads. Bill the uncached
+        # remainder at the input rate so cached tokens are not charged twice.
+        billable_input = row["input_tokens"]
+        if str(row.get("harness") or "") == "codex":
+            billable_input = max(0, row["input_tokens"] - row["cached_input_tokens"])
         if input_rate is not None:
-            components.append(row["input_tokens"] * input_rate)
+            components.append(billable_input * input_rate)
         if cached_rate is not None:
             components.append(row["cached_input_tokens"] * cached_rate)
         if creation_rate is not None:

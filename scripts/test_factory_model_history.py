@@ -232,5 +232,30 @@ class FactoryModelHistoryFixtures(unittest.TestCase):
         self.assertEqual(found, [root / "project" / ".cas" / "cas.db"])
 
 
+
+
+class ApplyCostsSemantics(unittest.TestCase):
+    PRICES = {"models": {"m": {"input_per_million": 1.0, "cached_input_per_million": 0.1, "cache_creation_per_million": 2.0, "output_per_million": 10.0}}}
+
+    def test_codex_cached_tokens_are_a_subset_of_input(self):
+        row = {"harness": "codex", "model": "m", "input_tokens": 1_000_000, "cached_input_tokens": 900_000,
+               "cache_creation_input_tokens": 0, "output_tokens": 100_000, "reasoning_tokens": 0}
+        MODULE.apply_costs([row], self.PRICES)
+        # 100K uncached @ $1 + 900K cached @ $0.10 + 100K output @ $10 = 0.10 + 0.09 + 1.00
+        self.assertEqual(row["cost_usd"], f"{1.19:.6f}")
+
+    def test_claude_input_tokens_are_already_net_of_cache(self):
+        row = {"harness": "claude", "model": "m", "input_tokens": 100_000, "cached_input_tokens": 900_000,
+               "cache_creation_input_tokens": 50_000, "output_tokens": 100_000, "reasoning_tokens": 0}
+        MODULE.apply_costs([row], self.PRICES)
+        # 100K @ $1 + 900K @ $0.10 + 50K @ $2 + 100K @ $10 = 0.10 + 0.09 + 0.10 + 1.00
+        self.assertEqual(row["cost_usd"], f"{1.29:.6f}")
+
+    def test_unpriced_model_stays_blank(self):
+        row = {"harness": "codex", "model": "nope", "input_tokens": 10, "cached_input_tokens": 0,
+               "cache_creation_input_tokens": 0, "output_tokens": 10, "reasoning_tokens": 0, "cost_usd": ""}
+        MODULE.apply_costs([row], self.PRICES)
+        self.assertEqual(row["cost_usd"], "")
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,8 +3,8 @@
 ## Source coverage and join evidence
 
 - Database → transcript key: `project + worker_name`; worker name comes from `spawn_queue.spawn_worker` / `agents.name` and transcript `cwd` segment `.cas/worktrees/<worker>`. This is a bounded name join, not an inferred task join.
-- Transcript files parsed: 1703; joined to DB worker rows: 1338; transcript-only sessions: 365; transcript→DB miss rate: 21.43%.
-- DB session rows without a transcript match: 7590 (82.00% of emitted rows).
+- Transcript files parsed: 1705; joined to DB worker rows: 1339; transcript-only sessions: 366; transcript→DB miss rate: 21.47%.
+- DB session rows without a transcript match: 7590 (81.97% of emitted rows).
 - Prices JSON: `loaded`. Blank `cost_usd` means the model has no supplied price entry; no price was inferred.
 
 - `pippenz` DB `/home/pippenz/.cas/cas.db`: 0 spawn rows (0 without a resolvable worker name skipped), 0 lease events, 0 tasks; task notes source `tasks.notes`; factory logs `9` files/0 JSON lines.
@@ -15,7 +15,7 @@
 - `2022` DB `/home/pippenz/Petra Stella/Accounting/Roark Realty/2022/.cas/cas.db`: 0 spawn rows (0 without a resolvable worker name skipped), 0 lease events, 0 tasks; task notes source `tasks.notes`; factory logs `3` files/0 JSON lines.
 - `Petrastella` DB `/home/pippenz/Petrastella/.cas/cas.db`: 0 spawn rows (0 without a resolvable worker name skipped), 0 lease events, 693 tasks; task notes source `tasks.notes`; factory logs `2` files/0 JSON lines.
 - `abundant-mines` DB `/home/pippenz/Petrastella/abundant-mines/.cas/cas.db`: 232 spawn rows (58 without a resolvable worker name skipped), 739 lease events, 1335 tasks; task notes source `tasks.notes`; factory logs `17` files/4104 JSON lines.
-- `cas-src` DB `/home/pippenz/Petrastella/cas-src/.cas/cas.db`: 1009 spawn rows (179 without a resolvable worker name skipped), 4445 lease events, 2715 tasks; task notes source `tasks.notes`; factory logs `62` files/22728 JSON lines.
+- `cas-src` DB `/home/pippenz/Petrastella/cas-src/.cas/cas.db`: 1009 spawn rows (179 without a resolvable worker name skipped), 4448 lease events, 2716 tasks; task notes source `tasks.notes`; factory logs `62` files/22756 JSON lines.
 - `closure-club` DB `/home/pippenz/Petrastella/closure-club/.cas/cas.db`: 10 spawn rows (10 without a resolvable worker name skipped), 18 lease events, 13 tasks; task notes source `tasks.notes`; factory logs `3` files/0 JSON lines.
 - `country-liberty` DB `/home/pippenz/Petrastella/country-liberty/.cas/cas.db`: 0 spawn rows (0 without a resolvable worker name skipped), 0 lease events, 0 tasks; task notes source `tasks.notes`; factory logs `3` files/0 JSON lines.
 - `domdms` DB `/home/pippenz/Petrastella/domdms/.cas/cas.db`: 37 spawn rows (27 without a resolvable worker name skipped), 108 lease events, 258 tasks; task notes source `tasks.notes`; factory logs `4` files/0 JSON lines.
@@ -52,5 +52,5 @@
 
 - `task_notes` is not a table in the observed stores. Counts use the full `tasks.notes` field when present, falling back to `events.summary` only for `task_note_added` events; no note text is reconstructed beyond those stores.
 - Exact first-push time is populated only when a JSON factory log record names the worker (and task when available) and contains a positive `pushed` marker. Missing markers remain blank; commit time is not substituted.
-- Codex usage sums `token_usage_record.payload.usage`; Claude usage sums assistant `message.usage`. Cache-read and cache-creation are retained separately, and reasoning comes only from an explicit usage field.
+- Codex usage sums modern `token_usage_record.payload.usage` records or legacy `event_msg.payload.info.last_token_usage` records (modern records win if both exist); Claude usage sums assistant `message.usage`. Cache-read and cache-creation are retained separately, and reasoning comes only from an explicit usage field.
 - Transcript task IDs are unavailable in the transcript sources, so task attribution comes only from DB spawn/lease rows. Transcript-only rows intentionally have a blank task ID.

@@ -1,0 +1,1294 @@
+{
+  "label": "cas-factory-status",
+  "verdict": "FAIL",
+  "command": [
+    "/tmp/cas-before",
+    "factory",
+    "status"
+  ],
+  "widths": [
+    80,
+    120
+  ],
+  "palettes": [
+    "dark",
+    "light",
+    "solarized-dark",
+    "solarized-light"
+  ],
+  "strict": false,
+  "escape_flag": "--full",
+  "json_flag": "--json",
+  "runs": [
+    {
+      "name": "piped",
+      "width": null,
+      "palette": null,
+      "env": {},
+      "kind": "piped",
+      "exit_code": 0,
+      "lines": 7,
+      "max_width": 58,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.piped.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.piped.txt"
+      }
+    },
+    {
+      "name": "80.dark",
+      "width": 80,
+      "palette": "dark",
+      "env": {
+        "COLORFGBG": "15;0",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 7,
+      "max_width": 58,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.80.dark.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.80.dark.txt"
+      }
+    },
+    {
+      "name": "80.light",
+      "width": 80,
+      "palette": "light",
+      "env": {
+        "COLORFGBG": "0;15",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 7,
+      "max_width": 58,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.80.light.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.80.light.txt"
+      }
+    },
+    {
+      "name": "80.solarized-dark",
+      "width": 80,
+      "palette": "solarized-dark",
+      "env": {
+        "COLORFGBG": "15;0",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 7,
+      "max_width": 58,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.80.solarized-dark.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.80.solarized-dark.txt"
+      }
+    },
+    {
+      "name": "80.solarized-light",
+      "width": 80,
+      "palette": "solarized-light",
+      "env": {
+        "COLORFGBG": "0;15",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 7,
+      "max_width": 58,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.80.solarized-light.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.80.solarized-light.txt"
+      }
+    },
+    {
+      "name": "120.dark",
+      "width": 120,
+      "palette": "dark",
+      "env": {
+        "COLORFGBG": "15;0",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 7,
+      "max_width": 58,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.120.dark.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.120.dark.txt"
+      }
+    },
+    {
+      "name": "120.light",
+      "width": 120,
+      "palette": "light",
+      "env": {
+        "COLORFGBG": "0;15",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 7,
+      "max_width": 58,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.120.light.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.120.light.txt"
+      }
+    },
+    {
+      "name": "120.solarized-dark",
+      "width": 120,
+      "palette": "solarized-dark",
+      "env": {
+        "COLORFGBG": "15;0",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 7,
+      "max_width": 58,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.120.solarized-dark.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.120.solarized-dark.txt"
+      }
+    },
+    {
+      "name": "120.solarized-light",
+      "width": 120,
+      "palette": "solarized-light",
+      "env": {
+        "COLORFGBG": "0;15",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 7,
+      "max_width": 58,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.120.solarized-light.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.120.solarized-light.txt"
+      }
+    },
+    {
+      "name": "c-locale",
+      "width": 80,
+      "palette": null,
+      "env": {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "LANGUAGE": "C"
+      },
+      "kind": "c-locale",
+      "exit_code": 0,
+      "lines": 7,
+      "max_width": 58,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.c-locale.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.c-locale.txt"
+      }
+    },
+    {
+      "name": "no-color",
+      "width": 80,
+      "palette": null,
+      "env": {
+        "NO_COLOR": "1"
+      },
+      "kind": "no-color",
+      "exit_code": 0,
+      "lines": 7,
+      "max_width": 58,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.no-color.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.no-color.txt"
+      }
+    },
+    {
+      "name": "json",
+      "width": null,
+      "palette": null,
+      "env": {},
+      "kind": "json",
+      "flag": "--json",
+      "exit_code": 0,
+      "lines": 3529,
+      "max_width": 333,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.json.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.json.txt"
+      }
+    }
+  ],
+  "findings": [
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 1,
+      "column": 1,
+      "excerpt": "═══ Status for session: cas-src-lively-panther-31 ═══",
+      "detail": {
+        "kind": "text",
+        "sample": "═══ Status for session: cas-src-lively-p",
+        "fg": "#28b4aa",
+        "bg": "#ffffff",
+        "ratio": 2.56,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": true,
+        "dim": false
+      },
+      "fix": "text \"═══ Status for sessi\" is #28b4aa on #ffffff (2.56:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 2,
+      "column": 1,
+      "excerpt": "                Project: /home/pippenz/Petrastella/cas-src",
+      "detail": {
+        "kind": "text",
+        "sample": "Project",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Project\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 2,
+      "column": 26,
+      "excerpt": "                Project: /home/pippenz/Petrastella/cas-src",
+      "detail": {
+        "kind": "text",
+        "sample": "/home/pippenz/Petrastella/cas-src",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"/home/pippenz/Petras\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 3,
+      "column": 1,
+      "excerpt": "        Pending prompts: 0",
+      "detail": {
+        "kind": "text",
+        "sample": "Pending prompts",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Pending prompts\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 3,
+      "column": 26,
+      "excerpt": "        Pending prompts: 0",
+      "detail": {
+        "kind": "mark",
+        "sample": "0",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 3,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"0\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 4,
+      "column": 1,
+      "excerpt": "            Ready tasks: 98",
+      "detail": {
+        "kind": "text",
+        "sample": "Ready tasks",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Ready tasks\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 4,
+      "column": 26,
+      "excerpt": "            Ready tasks: 98",
+      "detail": {
+        "kind": "mark",
+        "sample": "98",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 3,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"98\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 5,
+      "column": 1,
+      "excerpt": "      In-progress tasks: 10",
+      "detail": {
+        "kind": "text",
+        "sample": "In-progress tasks",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"In-progress tasks\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 5,
+      "column": 26,
+      "excerpt": "      In-progress tasks: 10",
+      "detail": {
+        "kind": "mark",
+        "sample": "10",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 3,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"10\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 6,
+      "column": 1,
+      "excerpt": "                 Agents: 1",
+      "detail": {
+        "kind": "text",
+        "sample": "Agents",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Agents\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 6,
+      "column": 26,
+      "excerpt": "                 Agents: 1",
+      "detail": {
+        "kind": "mark",
+        "sample": "1",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 3,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"1\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 7,
+      "column": 1,
+      "excerpt": "Actionable-idle minutes: 0",
+      "detail": {
+        "kind": "text",
+        "sample": "Actionable-idle minutes",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Actionable-idle minu\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.light",
+      "line": 7,
+      "column": 26,
+      "excerpt": "Actionable-idle minutes: 0",
+      "detail": {
+        "kind": "mark",
+        "sample": "0",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 3,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"0\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 1,
+      "column": 1,
+      "excerpt": "═══ Status for session: cas-src-lively-panther-31 ═══",
+      "detail": {
+        "kind": "text",
+        "sample": "═══ Status for session: cas-src-lively-p",
+        "fg": "#28b4aa",
+        "bg": "#fdf6e3",
+        "ratio": 2.37,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": true,
+        "dim": false
+      },
+      "fix": "text \"═══ Status for sessi\" is #28b4aa on #fdf6e3 (2.37:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 2,
+      "column": 1,
+      "excerpt": "                Project: /home/pippenz/Petrastella/cas-src",
+      "detail": {
+        "kind": "text",
+        "sample": "Project",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Project\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 2,
+      "column": 26,
+      "excerpt": "                Project: /home/pippenz/Petrastella/cas-src",
+      "detail": {
+        "kind": "text",
+        "sample": "/home/pippenz/Petrastella/cas-src",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"/home/pippenz/Petras\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 3,
+      "column": 1,
+      "excerpt": "        Pending prompts: 0",
+      "detail": {
+        "kind": "text",
+        "sample": "Pending prompts",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Pending prompts\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 3,
+      "column": 26,
+      "excerpt": "        Pending prompts: 0",
+      "detail": {
+        "kind": "mark",
+        "sample": "0",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 3,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"0\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 4,
+      "column": 1,
+      "excerpt": "            Ready tasks: 98",
+      "detail": {
+        "kind": "text",
+        "sample": "Ready tasks",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Ready tasks\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 4,
+      "column": 26,
+      "excerpt": "            Ready tasks: 98",
+      "detail": {
+        "kind": "mark",
+        "sample": "98",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 3,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"98\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 5,
+      "column": 1,
+      "excerpt": "      In-progress tasks: 10",
+      "detail": {
+        "kind": "text",
+        "sample": "In-progress tasks",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"In-progress tasks\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 5,
+      "column": 26,
+      "excerpt": "      In-progress tasks: 10",
+      "detail": {
+        "kind": "mark",
+        "sample": "10",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 3,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"10\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 6,
+      "column": 1,
+      "excerpt": "                 Agents: 1",
+      "detail": {
+        "kind": "text",
+        "sample": "Agents",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Agents\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 6,
+      "column": 26,
+      "excerpt": "                 Agents: 1",
+      "detail": {
+        "kind": "mark",
+        "sample": "1",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 3,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"1\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 7,
+      "column": 1,
+      "excerpt": "Actionable-idle minutes: 0",
+      "detail": {
+        "kind": "text",
+        "sample": "Actionable-idle minutes",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Actionable-idle minu\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "80.solarized-light",
+      "line": 7,
+      "column": 26,
+      "excerpt": "Actionable-idle minutes: 0",
+      "detail": {
+        "kind": "mark",
+        "sample": "0",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 3,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"0\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 1,
+      "column": 1,
+      "excerpt": "═══ Status for session: cas-src-lively-panther-31 ═══",
+      "detail": {
+        "kind": "text",
+        "sample": "═══ Status for session: cas-src-lively-p",
+        "fg": "#28b4aa",
+        "bg": "#ffffff",
+        "ratio": 2.56,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": true,
+        "dim": false
+      },
+      "fix": "text \"═══ Status for sessi\" is #28b4aa on #ffffff (2.56:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 2,
+      "column": 1,
+      "excerpt": "                Project: /home/pippenz/Petrastella/cas-src",
+      "detail": {
+        "kind": "text",
+        "sample": "Project",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Project\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 2,
+      "column": 26,
+      "excerpt": "                Project: /home/pippenz/Petrastella/cas-src",
+      "detail": {
+        "kind": "text",
+        "sample": "/home/pippenz/Petrastella/cas-src",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"/home/pippenz/Petras\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 3,
+      "column": 1,
+      "excerpt": "        Pending prompts: 0",
+      "detail": {
+        "kind": "text",
+        "sample": "Pending prompts",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Pending prompts\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 3,
+      "column": 26,
+      "excerpt": "        Pending prompts: 0",
+      "detail": {
+        "kind": "mark",
+        "sample": "0",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 3,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"0\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 4,
+      "column": 1,
+      "excerpt": "            Ready tasks: 98",
+      "detail": {
+        "kind": "text",
+        "sample": "Ready tasks",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Ready tasks\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 4,
+      "column": 26,
+      "excerpt": "            Ready tasks: 98",
+      "detail": {
+        "kind": "mark",
+        "sample": "98",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 3,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"98\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 5,
+      "column": 1,
+      "excerpt": "      In-progress tasks: 10",
+      "detail": {
+        "kind": "text",
+        "sample": "In-progress tasks",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"In-progress tasks\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 5,
+      "column": 26,
+      "excerpt": "      In-progress tasks: 10",
+      "detail": {
+        "kind": "mark",
+        "sample": "10",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 3,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"10\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 6,
+      "column": 1,
+      "excerpt": "                 Agents: 1",
+      "detail": {
+        "kind": "text",
+        "sample": "Agents",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Agents\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 6,
+      "column": 26,
+      "excerpt": "                 Agents: 1",
+      "detail": {
+        "kind": "mark",
+        "sample": "1",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 3,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"1\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 7,
+      "column": 1,
+      "excerpt": "Actionable-idle minutes: 0",
+      "detail": {
+        "kind": "text",
+        "sample": "Actionable-idle minutes",
+        "fg": "#a0a2af",
+        "bg": "#ffffff",
+        "ratio": 2.54,
+        "floor": 4.5,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Actionable-idle minu\" is #a0a2af on #ffffff (2.54:1) under light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.light",
+      "line": 7,
+      "column": 26,
+      "excerpt": "Actionable-idle minutes: 0",
+      "detail": {
+        "kind": "mark",
+        "sample": "0",
+        "fg": "#e4e5eb",
+        "bg": "#ffffff",
+        "ratio": 1.26,
+        "floor": 3,
+        "palette": "light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"0\" is #e4e5eb on #ffffff (1.26:1) under light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 1,
+      "column": 1,
+      "excerpt": "═══ Status for session: cas-src-lively-panther-31 ═══",
+      "detail": {
+        "kind": "text",
+        "sample": "═══ Status for session: cas-src-lively-p",
+        "fg": "#28b4aa",
+        "bg": "#fdf6e3",
+        "ratio": 2.37,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": true,
+        "dim": false
+      },
+      "fix": "text \"═══ Status for sessi\" is #28b4aa on #fdf6e3 (2.37:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 2,
+      "column": 1,
+      "excerpt": "                Project: /home/pippenz/Petrastella/cas-src",
+      "detail": {
+        "kind": "text",
+        "sample": "Project",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Project\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 2,
+      "column": 26,
+      "excerpt": "                Project: /home/pippenz/Petrastella/cas-src",
+      "detail": {
+        "kind": "text",
+        "sample": "/home/pippenz/Petrastella/cas-src",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"/home/pippenz/Petras\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 3,
+      "column": 1,
+      "excerpt": "        Pending prompts: 0",
+      "detail": {
+        "kind": "text",
+        "sample": "Pending prompts",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Pending prompts\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 3,
+      "column": 26,
+      "excerpt": "        Pending prompts: 0",
+      "detail": {
+        "kind": "mark",
+        "sample": "0",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 3,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"0\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 4,
+      "column": 1,
+      "excerpt": "            Ready tasks: 98",
+      "detail": {
+        "kind": "text",
+        "sample": "Ready tasks",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Ready tasks\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 4,
+      "column": 26,
+      "excerpt": "            Ready tasks: 98",
+      "detail": {
+        "kind": "mark",
+        "sample": "98",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 3,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"98\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 5,
+      "column": 1,
+      "excerpt": "      In-progress tasks: 10",
+      "detail": {
+        "kind": "text",
+        "sample": "In-progress tasks",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"In-progress tasks\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 5,
+      "column": 26,
+      "excerpt": "      In-progress tasks: 10",
+      "detail": {
+        "kind": "mark",
+        "sample": "10",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 3,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"10\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 6,
+      "column": 1,
+      "excerpt": "                 Agents: 1",
+      "detail": {
+        "kind": "text",
+        "sample": "Agents",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Agents\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 6,
+      "column": 26,
+      "excerpt": "                 Agents: 1",
+      "detail": {
+        "kind": "mark",
+        "sample": "1",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 3,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"1\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 7,
+      "column": 1,
+      "excerpt": "Actionable-idle minutes: 0",
+      "detail": {
+        "kind": "text",
+        "sample": "Actionable-idle minutes",
+        "fg": "#a0a2af",
+        "bg": "#fdf6e3",
+        "ratio": 2.35,
+        "floor": 4.5,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "text \"Actionable-idle minu\" is #a0a2af on #fdf6e3 (2.35:1) under solarized-light; needs ≥ 4.5:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "contrast",
+      "severity": "fail",
+      "run": "120.solarized-light",
+      "line": 7,
+      "column": 26,
+      "excerpt": "Actionable-idle minutes: 0",
+      "detail": {
+        "kind": "mark",
+        "sample": "0",
+        "fg": "#e4e5eb",
+        "bg": "#fdf6e3",
+        "ratio": 1.17,
+        "floor": 3,
+        "palette": "solarized-light",
+        "bold": false,
+        "dim": false
+      },
+      "fix": "mark \"0\" is #e4e5eb on #fdf6e3 (1.17:1) under solarized-light; needs ≥ 3:1 — pick a mid-tone that survives both backgrounds or leave body text in the default foreground"
+    },
+    {
+      "check": "unicode-without-fallback",
+      "severity": "fail",
+      "run": "c-locale",
+      "line": 1,
+      "column": 30,
+      "excerpt": "═══ Status for session: cas-src-lively-panther-31 ═══",
+      "detail": {
+        "codepoints": [
+          "U+2550"
+        ],
+        "byte_offset": 29
+      },
+      "fix": "non-ASCII output (U+2550) under LC_ALL=C — fall back to ASCII marks and +-| rules when the locale is not UTF-8"
+    }
+  ],
+  "allowed": [],
+  "counts": {
+    "fail": 53,
+    "warn": 0,
+    "allowed": 0
+  },
+  "html": {
+    "80": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.80.html",
+    "120": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/cas-factory-status.120.html"
+  },
+  "report_json": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/report.json",
+  "report_md": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/report.md",
+  "generated_at": "2026-09-06T17:33:17.118Z",
+  "receipt": "terminal-qa: FAIL cas-factory-status · 12 runs · 53 fail · 0 warn · 0 allowed · .cas/worktrees/golden-koala-58/docs/design/cli/captures/before/cas-factory-status/report.json"
+}

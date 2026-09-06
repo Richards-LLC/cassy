@@ -791,26 +791,7 @@ fn file_mtime(path: &std::path::Path) -> Option<SystemTime> {
     fs::metadata(path).ok()?.modified().ok()
 }
 
-/// Convert a title to a branch-safe slug
-fn slugify(title: &str) -> String {
-    title
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-        .chars()
-        .take(50)
-        .collect()
-}
-
-/// Create the epic branch name from a title
-pub(crate) fn epic_branch_name(title: &str) -> String {
-    format!("epic/{}", slugify(title))
-}
+pub(crate) use crate::mcp::tools::epic_branch_name;
 
 /// Resolve the branch recorded on the active epic task.
 ///
@@ -831,7 +812,7 @@ pub(crate) fn epic_branch_for_state(data: &DirectorData, state: &EpicState) -> O
         .iter()
         .find(|epic| epic.id == *epic_id)
         .and_then(|epic| epic.branch.clone())
-        .or_else(|| Some(epic_branch_name(epic_title)))
+        .or_else(|| Some(epic_branch_name(epic_title, epic_id)))
 }
 
 /// cas-889d / cas-9eae: determine whether a task belongs to the current

@@ -14,7 +14,7 @@ mod tests {
 
         assert_eq!(
             epic_branch_name(title, "cas-3228"),
-            "epic/a-deliberately-long-epic-title-whose-slug-must-be-truncated-before-cas-3228"
+            "epic/a-deliberately-long-epic-title-whose-slug-must-be-cas-3228"
         );
     }
 

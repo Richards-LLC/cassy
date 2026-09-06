@@ -165,28 +165,37 @@
       }
     },
     "series": {
-      "$description": "Fixed categorical order for color-by-series. A series keeps its slot across every figure in a document. Slot 2 (rose) is skipped in any figure that also carries a danger status. Validate any subset with cas-dataviz validate_palette.js against the surface in use.",
+      "$description": "Fixed categorical order for color-by-series, five slots. A series keeps its slot across every figure in a document. Slot 2 (rose) is skipped in any figure that also carries a danger status. Every slot passes cas-dataviz validate_palette.js (lightness band, chroma floor >= 0.10, adjacent CVD and normal-vision separation, contrast >= 3:1) on surface and on bg in both schemes, for the 3-slot subset and the full set; validate any other subset against the surface in use. The former sixth slot (slate) reads as gray by that test and lives in series-neutral instead.",
       "light": {
         "$type": "color",
         "$value": [
-          "#2E3A9F",
-          "#B0574F",
-          "#1F7A85",
-          "#7A4A9C",
-          "#6B7A2A",
-          "#6B7280"
+          "#4C5CA8",
+          "#9D433B",
+          "#0095A0",
+          "#693F88",
+          "#5C6C00"
         ]
       },
       "dark": {
         "$type": "color",
         "$value": [
-          "#A9B3FF",
-          "#F2A49C",
-          "#6FD0DC",
-          "#C9A6EE",
-          "#B9CB6A",
-          "#9AA1AF"
+          "#7083D1",
+          "#C86A60",
+          "#00A5B4",
+          "#8C52B6",
+          "#819334"
         ]
+      }
+    },
+    "series-neutral": {
+      "$description": "Not a series slot. The 'other / rest / not measured' bucket, always with a direct label; deliberately below the chroma floor so it never competes with a slot.",
+      "light": {
+        "$type": "color",
+        "$value": "#6B7280"
+      },
+      "dark": {
+        "$type": "color",
+        "$value": "#9AA1AF"
       }
     },
     "magnitude": {

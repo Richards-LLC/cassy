@@ -119,16 +119,21 @@ Color by series uses a fixed order, and a series keeps its slot across every fig
 
 | Slot | Light | Dark |
 | --- | --- | --- |
-| 1 | #2E3A9F indigo | #A9B3FF |
-| 2 | #B0574F rose | #F2A49C |
-| 3 | #1F7A85 teal | #6FD0DC |
-| 4 | #7A4A9C plum | #C9A6EE |
-| 5 | #6B7A2A olive | #B9CB6A |
-| 6 | #6B7280 slate | #9AA1AF |
+| 1 | #4C5CA8 indigo | #7083D1 |
+| 2 | #9D433B rose | #C86A60 |
+| 3 | #0095A0 teal | #00A5B4 |
+| 4 | #693F88 plum | #8C52B6 |
+| 5 | #5C6C00 olive | #819334 |
+| neutral | #6B7280 slate | #9AA1AF |
 
 Slot 2 rose sits close to `danger` in dark mode; a figure that carries a danger status skips slot 2
-and takes slot 3. Magnitude is a single-hue indigo ramp (five steps in the tokens). Polarity is danger → line →
-good with the sign always printed. Validate any subset with the `cas-dataviz` palette script.
+and takes slot 3. The series slots share the verdict, rose and teal hues but sit in the chart lightness band
+(OKLCH L 0.43–0.77 light, 0.48–0.67 dark) with chroma ≥ 0.10, so `verdict` itself is never a series color.
+`neutral` (slate) is not a slot: it is the labelled other/rest bucket and reads as gray by design. Every slot,
+the 3-slot subset and the full set pass the `cas-dataviz` `validate_palette.js` checks on `surface` and `bg` in
+both schemes (receipts: docs/factory, task cas-fd80). Magnitude is a single-hue indigo ramp (five steps in
+the tokens). Polarity is danger → line → good with the sign always printed. Validate any other subset with the
+`cas-dataviz` palette script against the surface in use.
 
 Variance encodings are by fill, not only by hue: actual = solid; plan = 1.5px outline, no fill;
 forecast = 45° hatch at 4px pitch; estimate = dashed 4 3 with an 18%-alpha interval band; missing

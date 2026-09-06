@@ -58,7 +58,7 @@ Added 2026-09-06 by worker vivid-kestrel-88 (task cas-3372) at the operator's re
 between token efficiency, token cost, and intelligence, and even tool calling". Three parts: what the
 vendors and third parties publish per model and effort (A), what this host's own sessions measured per
 delivery over the whole retained horizon 2026-08-20 → 2026-09-06 (B, full table in
-`2026-09-06-model-lane-history.md` + `.csv`), and the synthesis (C). Every external number carries its
+`2026-09-06-model-lane-history.md` + `.csv`; cas-src only, all three Codex homes and all three Claude homes on the host), and the synthesis (C). Every external number carries its
 URL; all were retrieved 2026-09-06. "V" = vendor-published, "3P" = third party (Artificial Analysis =
 AA, Epoch, goml.io, vellum.ai, jessemoraga.com). Unknown means not found at the URLs checked, not zero.
 
@@ -182,77 +182,101 @@ chart without numbers.
 
 ### B. What this host measured
 
-Method and definitions are in `2026-09-06-model-lane-history.md`; rows in the `.csv`. Source: Codex
-rollouts (`~/.codex/sessions`, per-turn token counts and every tool call), Claude transcripts
-(`.claude-daniel@petrastella.io/projects/…cas-src*`, per-message usage), `cas.db` task notes
-(`request_changes` decisions), `spawn_queue.worker_spec`, and factory-session logs (urgent stops).
-Cost is a shadow price at 2026-09-06 list; both harnesses actually run on subscriptions.
+Method and definitions are in `2026-09-06-model-lane-history.md`; rows in the `.csv`. Sources: Codex
+rollouts in all three Codex homes (`~/.codex`, `~/.codex-support@gabber.studio`, `~/.codex-pippenz@gmail.com`;
+per-turn token counts and every tool call), Claude transcripts in all three Claude homes (per-message
+usage), `cas.db` task notes (`request_changes` decisions), `spawn_queue.worker_spec`, and factory-session
+logs (urgent stops). Cost is a shadow price at 2026-09-06 list; both harnesses actually run on subscriptions.
 
 | Lane as run (model / effort) | Deliveries | Workers | Send-backs | Send-back rate | Urgent stops | Uncached in / delivery | Cached in / delivery | Output / delivery | Tool calls / delivery | Median min to first push | Cost / merged delivery @ list |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| standard: Luna / xhigh | 173 | 111 | 16 | 9% | 4 | 416,114 | 18,359,369 | 47,512 | 143 | 18.5 | **$0.51** |
-| heavy: Sol / high | 12 | 10 | 1 | 8% | 0 | 366,598 | 16,434,624 | 38,118 | 125 | 6.9 | **$8.80** |
+| standard: Luna / xhigh | 212 | 133 | 26 | 12% | 25 | 401,318 | 17,757,010 | 46,395 | 139 | 17.0 | **$0.49** |
+| heavy: Sol / high | 51 | 23 | 8 | 16% | 20 | 254,657 | 12,649,266 | 36,353 | 103 | 12.1 | **$6.81** |
+| heavy as directed: Astra / high | 2 | 1 | 0 | 0% | 0 | 172,321 | 9,160,512 | 33,220 | 74 | 19.1 | **$12.54** |
+| Astra / medium | 1 | 1 | 1 | 100% | 1 | 147,945 | 9,859,456 | 26,733 | 95 | 11.8 | **$12.68** |
 | former standard: Terra / high (08-20 only) | 42 | 34 | 1 | 2% | 0 | 199,407 | 8,134,254 | 21,041 | 69 | 6.2 | **$2.28** |
-| former taste: Opus 5 / high | 38 | 21 | 0 | 0% | 2 | 303 | 41,779,207 | 102,080 | 78 | 16.2 | **$26.52** |
-| subset 09-05 16:20Z→: Luna / xhigh | 20 | 9 | 3 | 15% | 2 | 403,603 | 18,420,544 | 44,525 | 138 | 18.9 | $0.50 |
+| former taste / fallback: Opus 5 / high | 52 | 26 | 2 | 4% | 13 | 283 | 40,020,008 | 93,633 | 73 | 16.4 | **$25.47** |
+| subset 09-05 16:20Z→ (Fable-supervised): Luna / xhigh | 24 | 13 | 3 | 12% | 2 | 360,590 | 15,875,541 | 39,639 | 122 | 18.9 | $0.44 |
 | subset 09-05 16:20Z→: Sol / high | 1 | 1 | 1 | 100% | 0 | 472,340 | 33,266,432 | 59,648 | 224 | 51.3 | $16.39 |
-| heavy as directed: Astra / high | 0 | 0 | — | — | — | — | — | — | — | — | est. **$22** at Sol's token profile |
+| subset 09-04 22:22Z→09-05 16:20Z (Astra-supervised): Sol / high | 36 | 11 | 7 | 19% | 18 | 226,459 | 12,003,428 | 37,631 | 101 | 13.9 | $6.46 |
 | light: Haiku / low; taste: Fable as worker | 0 | 0 | — | — | — | — | — | — | — | — | — |
 
-Supervisor sessions (Claude, main checkout): all eight sessions since 2026-08-27 ran at **effort=high**,
-including every Fable 5.1 session; the registry's `medium` has never executed. The 2026-09-05 supervisor
-day cost $131.78 at list (cache writes 53% at the 1-hour TTL rate, cache reads 36%, output 11%) against
-$10.05 for the 20 Luna deliveries it reviewed. The 2026-09-03 session (the Opus burst's supervisor) cost
-$284.15 with 976K output tokens.
+Two findings the first pass missed because it read only one Codex home and one Claude home:
 
-Astra has no cas-src rollout in the retained horizon; the "9 h stall" attributed to it cannot be
-re-measured from transcripts on this host. The Opus burst's 0 send-backs on 38 deliveries sits beside
-2 urgent stops and a supervisor that may have rejected by message; treat it as unmeasured, not clean.
+**The 2026-09-05 stall was Codex GPT-6 Astra at medium.** The supervisor that held finished workers from
+~05:56Z to 15:10Z (agent loyal-crane-48, cas-20a3 note 15:10Z) is rollout
+`~/.codex-support@gabber.studio/sessions/2026/09/04/rollout-2026-09-04T18-22-16-01a06e83…`: Sol/high for
+17 minutes, Astra/high from 22:39Z, Astra/medium from 00:54Z (the `~/.codex/config.toml` default). The
+rollout has no events between 05:56Z and 11:48Z (352 minutes), and its continuation session (13:16–16:16Z,
+Astra/high then medium) has 34- and 65-minute gaps before the operator stepped in. The night cost $315.31
+at Astra list (86% of it cached input at $1/M; 1,345 tool calls; 197K output) — 2.2× the live Fable
+supervisor day. The deliveries it reviewed carry the horizon's worst outcomes: Sol 7 send-backs and 18
+urgent stops on 36 deliveries (19%), Luna 3 of 4 sent back, 11 urgent stops on one Opus worker. Whether
+that is the reviewer or the tasks, the rows cannot say; Sol's whole-horizon 16% send-back rate is
+mostly that night (P2 Sol: 0 send-backs on 10).
+
+**Every supervisor session ran Fable at effort=high, never medium.** All 17 Claude supervisor sessions
+since 2026-08-20 (three homes, Fable 5 then Fable 5.1) carry `effort: high` on every record; the
+registry's `supervisor` and `taste` lanes say `medium` and 3.17.2 shipped that default. Claude Code
+defaults to high and the spawn path never sets `effortLevel`, so the lane default in 3.17.2 differs
+from what produced every result in this brief. The transcripts cannot price the difference — no medium
+session exists; AA's ladder puts Fable 5.1 low→max at 11× output tokens. The live supervisor day costs
+$142 at list (50% 1-hour cache writes at $20/M, 39% cache reads, 11% output) against $10.5 for the 24
+Luna deliveries it reviewed.
+
+Astra as a worker: three deliveries on the Astra night (fair-swan-9 high ×2, 0 send-backs; fierce-dragon-53
+medium ×1, 1 send-back) at $12.5 each — 74–95 tool calls and 27–36K output tokens per delivery, in Sol's
+range, at 1.9× Sol's list cost per delivery. A sample, not a rate.
 
 ### C. Cost × intelligence × efficiency per lane at its configured effort
 
 | Lane | Route | Published intelligence (coding) | Published tool calling | Measured send-back rate | Measured output tokens / delivery | Measured tool calls / delivery | Measured cost / delivery @ list | Verdict |
 |---|---|---|---|---:|---:|---:|---:|---|
-| standard | Luna / xhigh | SWE-Bench Pro 62.7%, TB 2.1 84.7% (3P, max) | unknown | 9% (n=173) | 47,512 | 143 | $0.51 | cheapest delivery on the host by 4× (Terra) to 50× (Opus); most send-backs in absolute terms, lowest cost per send-back |
-| heavy (today) | Sol / high | AA CAI 80, TB 2.1 88.8% (max) | unknown | 8% (n=12) | 38,118 | 125 | $8.80 | 17× Luna's cost for a send-back rate inside Luna's noise; fastest first push (6.9 min) |
-| heavy (directed) | Astra / high | TB 4.0 57.9% vs Sol 37.3%; AA: same II as Sol max at 75% more per task | unknown | no data | no data | no data | ~$22 (est.) | the only lane whose intelligence gain is published; zero local evidence; 2.5× Sol at list |
-| heavy (alternative) | Luna / xhigh | as standard | unknown | 9% | 47,512 | 143 | $0.51 | already the de-facto rescue lane (finished cas-c674 after Sol) |
-| taste + supervisor (registry) | Fable 5.1 / medium | vendor: "similar to or better than Fable 5 at much lower cost"; AA: low 58 → max 66 | unknown | never ran | never ran | never ran | — | untested; every real session was high |
-| taste + supervisor (actual) | Fable 5.1 / high | unknown per-effort; xhigh AA II 65 | unknown | — | 290K–976K per session | 70–150 per session | $132–$284 per session | the most expensive seat in the factory; 1-h cache writes dominate |
-| fallback | Opus 5 / high | TB 4.0 52.3%; SWE-bench Verified 96.0 (3P) | unknown | 0% (n=38, unverified) | 102,080 | 78 | $26.52 | 2× Luna's output tokens per delivery, half the tool calls, 52× the cost |
+| standard | Luna / xhigh | SWE-Bench Pro 62.7%, TB 2.1 84.7% (3P, max) | unknown | 12% (n=212) | 46,395 | 139 | $0.49 | cheapest delivery on the host by 5× (Terra) to 52× (Opus); most send-backs in absolute terms, lowest cost per send-back |
+| heavy (today) | Sol / high | AA CAI 80, TB 2.1 88.8% (max) | unknown | 16% (n=51; 0% on the 10 P2 deliveries, 19% on the Astra night) | 36,353 | 103 | $6.81 | 14× Luna's cost; its send-back rate is not better than Luna's; fastest first push (12 min) |
+| heavy (directed) | Astra / high | TB 4.0 57.9% vs Sol 37.3%; AA: same II as Sol max at +75% $/task | unknown | 0% (n=2) | 33,220 | 74 | $12.54 | the only lane whose intelligence gain is published; two clean deliveries; 1.8× Sol at list; as supervisor it stalled for 352 min at medium |
+| heavy (alternative) | Luna / xhigh | as standard | unknown | 12% | 46,395 | 139 | $0.49 | already the de-facto rescue lane (finished cas-c674 after Sol) |
+| taste + supervisor (registry, 3.17.2) | Fable 5.1 / medium | vendor: "similar to or better than Fable 5 at much lower cost"; AA: low 58 → max 66 | unknown | never ran | never ran | never ran | — | untested; every real session was high |
+| taste + supervisor (actual) | Fable 5.1 / high | unknown per-effort; xhigh AA II 65 | unknown | — | 60K–976K per session | 6–150 per session | $15–$284 per session | the most expensive seat in the factory after the Astra night; 1-h cache writes dominate |
+| supervisor (2026-09-04/05 night) | Astra / medium | as heavy (directed) | unknown | reviewed lanes at 19–75% send-back | 197K per session | 1,345 per session | $315 per session | 352-min stall; cached input at $1/M is 4× Fable's read price |
+| fallback | Opus 5 / high | TB 4.0 52.3%; SWE-bench Verified 96.0 (3P) | unknown | 4% (n=52) | 93,633 | 73 | $25.47 | 2× Luna's output tokens per delivery, half the tool calls, 52× the cost; 13 urgent stops (11 on one worker) |
 | light | Haiku 4.5 / low | SWE-bench Verified 73.3% (128K thinking) | τ²-bench unknown | never ran | — | — | est. ≤$1 | `low` is meaningless on Haiku (no effort dial); the lane needs a thinking budget, not an effort |
 
 **Recommendations, in order of evidence.**
 
-1. **Heavy: keep Sol/high primary, make Luna/xhigh the first fallback, Astra/high explicit-only until it
-   has five measured deliveries.** Data: Sol 8% send-backs on 12 at $8.80; Luna 9% on 173 at $0.51; Astra
-   0 deliveries and a list price 2.5× Sol. Astra's published edge (TB 4.0 57.9 vs 37.3, AA "Pareto frontier
-   of token efficiency") is real and is exactly the reason to *measure* it: run the next five heavy tasks
-   as Astra/high and Sol/high pairs on the same brief and compare send-backs, tool calls and output tokens
-   from the rollouts. Luna/xhigh in heavy is not supported by any published intelligence number, only by
-   the host's send-back data, so it belongs as fallback, not primary.
-2. **Supervisor: measure Fable medium before deciding — and fix the registry to say what runs.** Every
+1. **Heavy: keep Sol/high primary, make Luna/xhigh the first fallback, hold Astra/high to explicit
+   requests until it has five measured deliveries.** Data: Sol 16% send-backs on 51 at $6.81 (0% on its
+   10 P2 deliveries); Luna 12% on 212 at $0.49; Astra 2 clean worker deliveries at $12.54 and one
+   supervisor night with a 352-minute stall at medium. Astra's published edge (TB 4.0 57.9 vs 37.3;
+   AA "Pareto frontier of token efficiency") and its two clean deliveries are exactly the reason to
+   *measure* it: run the next five heavy tasks as Astra/high and Sol/high pairs on the same brief and
+   compare send-backs, tool calls and output tokens from the rollouts. Never route Astra/medium to
+   anything that must drive: its only medium session is the stall.
+2. **Supervisor: measure Fable medium before deciding, and make the registry say what runs.** Every
    supervisor session ran high because Claude Code defaults to high and the spawn path never sets
-   `effortLevel`. Vendor prose says medium ≈ Fable 5; AA says low→max spans 11× output tokens. A
-   supervisor day is $132–$284 at list, 13–28× the workers it reviews. Experiment: two consecutive
-   supervisor days at medium with the 3.17.2 actionable-idle metric and send-back counts as the score.
-   Until then, change the registry's supervisor/taste `default_effort` to `high` so policy matches reality.
-3. **Cut the supervisor's cache-write bill.** 53% of the 09-05 supervisor cost is 1-hour-TTL cache writes
+   `effortLevel`. A supervisor day is $142–$284 at list, 13–28× the workers it reviews. Experiment: two
+   consecutive supervisor days at medium with the 3.17.2 actionable-idle metric and send-back counts as
+   the score. Until then change the registry's supervisor/taste `default_effort` to `high` so 3.17.2's
+   policy matches the sessions that produced its results.
+3. **Cut the supervisor's cache-write bill.** 50% of the live supervisor cost is 1-hour-TTL cache writes
    ($20/M on Fable 5.1, 80× the read price). That is a harness setting, not a model choice; a 5-minute
-   TTL halves the write rate and is worth a one-day trial with the same metric.
+   TTL halves the write rate and is worth a one-day trial with the same metric. For Codex supervisors the
+   equivalent lever is cached-input price: Astra's $1/M made cached context 86% of its $315 night.
 4. **Light lane: give Haiku a thinking budget or delete the lane.** Haiku has no effort parameter, so
    `low` routes nothing meaningful; its one published coding score (73.3%) needs a 128K thinking budget.
    Either encode `thinking_budget` in the recipe and give it marker-tested chores, or route light at
-   Luna/xhigh (which is what happens today, at $0.51).
-5. **Track two ratios per lane weekly from the rollouts: output tokens per delivery and tool calls per
-   delivery.** They are already in every rollout and they are what the vendors will not publish per
-   effort. Luna's p50→p90 output spread (45K→74K) and Opus's 102K/78-call profile (fewer, bigger steps)
-   are the first local intelligence-vs-efficiency signal we have; the send-back rate alone cannot
-   separate "cheap and sloppy" from "expensive and careful".
+   Luna/xhigh (which is what happens today, at $0.49).
+5. **Track two ratios per lane weekly from the rollouts — across every Codex and Claude home on the
+   host: output tokens per delivery and tool calls per delivery.** They are in every rollout and are what
+   the vendors will not publish per effort. Luna's p50→p90 output spread (44K→75K) and Opus's 94K/73-call
+   profile (fewer, bigger steps) are the first local intelligence-vs-efficiency signal we have; the
+   send-back rate alone cannot separate "cheap and sloppy" from "expensive and careful". The first pass of
+   this task missed every Astra session by reading one home; the scorecard must not.
 
 What the data cannot answer: Sol/high vs Luna/xhigh vs Astra/high on identical tasks (the A/B in
-recommendation 1), Fable medium vs high on identical supervision (recommendation 2), and any tool-calling
-score for the OpenAI or Anthropic models (no τ²/BFCL figures are published for any of them).
+recommendation 1), Fable medium vs high on identical supervision (recommendation 2), whether the Astra
+night's send-back rates belong to the reviewer or the tasks, and any tool-calling score for the OpenAI
+or Anthropic models (no τ²/BFCL figures are published for any of them).
 
 ## Where the rubric fails
 
@@ -314,7 +338,8 @@ The author recommends B.
 - Release timings: `/home/pippenz/.cas/artifacts/release/v3.17.1-epic-80b6-merge/FINAL-HANDOFF.md` and `.../v3.17.2-epic-80b6-merge/FINAL-HANDOFF.md`.
 - Directive: operator message 2026-09-06 00:10Z; task cas-255e.
 - Model section (cas-3372): external figures retrieved 2026-09-06 via exa-search from the URLs cited inline;
-  internal figures from `~/.codex/sessions/2026/08/20…09/06` rollouts (`token_count`, `turn_context`, tool
-  calls), `~/.claude-daniel@petrastella.io/projects/…cas-src*` transcripts (per-message usage; all cache
+  internal figures from Codex rollouts in `~/.codex`, `~/.codex-support@gabber.studio` and `~/.codex-pippenz@gmail.com` (`sessions/2026/08/20…09/06`) (`token_count`, `turn_context`, tool
+  calls), Claude transcripts in `~/.claude-daniel@petrastella.io`, `~/.claude-alt`, `~/.claude-pippenz@gmail.com` (`projects/…cas-src*`; per-message usage; all cache
   writes 1-hour TTL), `.cas/cas.db` task notes and `spawn_queue`, `.cas/logs/factory-session-*.log`;
   row-level data in `docs/factory/2026-09-06-model-lane-history.csv`, method in the `.md` beside it.
+- Stalled supervisor identity: `~/.codex-support@gabber.studio/sessions/2026/09/04/rollout-2026-09-04T18-22-16-01a06e83-f206-7f60-8a41-1c70f3fd1132.jsonl` (`turn_context` model/effort; timestamp gap 05:56Z→11:48Z) and its continuation `…/2026/09/05/rollout-2026-09-05T09-16-26-01a071b6-94d5-7061-b3b5-d6f136504a51.jsonl`; factory log `cas-src-daring-badger-54`, agent loyal-crane-48.

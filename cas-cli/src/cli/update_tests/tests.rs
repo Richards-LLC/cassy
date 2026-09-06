@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use crate::cli::Cli;
-use crate::ui::components::OutputMode;
+use crate::ui::components::{Formatter, OutputMode};
 
 #[test]
 fn test_is_newer() {
@@ -919,4 +919,108 @@ fn update_output_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn render_plain_at(width: u16, render: impl FnOnce(&mut Formatter<'_>) -> std::io::Result<()>) -> String {
+    let mut bytes = Vec::new();
+    {
+        let mut fmt = Formatter::new(
+            &mut bytes,
+            OutputMode::Plain,
+            crate::ui::theme::ActiveTheme::default_dark(),
+            width,
+        );
+        render(&mut fmt).expect("render");
+    }
+    String::from_utf8(bytes).expect("utf-8")
+}
+
+/// cas-4df0: `cas update --check` leads with the verdict, then two rows, then
+/// at most one remedy; the plain render fits 80 columns.
+#[test]
+fn check_report_leads_with_the_verdict_and_names_one_remedy() {
+    let clean = render_plain_at(80, |fmt| {
+        render_check_report(
+            fmt,
+            &CheckView {
+                current_version: "3.17.2",
+                latest_version: "3.17.2",
+                binary_update_available: false,
+                schema: Some((254, 254, 0)),
+            },
+        )
+    });
+    assert!(
+        clean.starts_with("[OK] up to date · Cassy 3.17.2 · schema v254\n"),
+        "{clean}"
+    );
+    assert!(clean.contains("Binary    3.17.2 installed · 3.17.2 latest"), "{clean}");
+    assert!(clean.contains("Schema    v254 applied · v254 latest"), "{clean}");
+    assert!(!clean.contains("→"), "nothing to do, no remedy: {clean}");
+
+    let pending = render_plain_at(80, |fmt| {
+        render_check_report(
+            fmt,
+            &CheckView {
+                current_version: "3.17.2",
+                latest_version: "3.18.0",
+                binary_update_available: true,
+                schema: Some((254, 256, 2)),
+            },
+        )
+    });
+    assert!(
+        pending.starts_with(
+            "[WARN] update available · 3.17.2 → 3.18.0 · 2 migrations pending\n"
+        ),
+        "{pending}"
+    );
+    assert!(pending.contains("  → cas update\n"), "{pending}");
+    assert!(pending.contains("cas update --dry-run previews the 2 pending"), "{pending}");
+
+    let uninitialized = render_plain_at(80, |fmt| {
+        render_check_report(
+            fmt,
+            &CheckView {
+                current_version: "3.17.2",
+                latest_version: "3.17.2",
+                binary_update_available: false,
+                schema: None,
+            },
+        )
+    });
+    assert!(uninitialized.contains("no Cassy store in this directory"), "{uninitialized}");
+    for line in clean.lines().chain(pending.lines()).chain(uninitialized.lines()) {
+        assert!(line.chars().count() <= 80, "overflow: {line:?}");
+    }
+}
+
+/// cas-4df0: the refresh banner is a verdict line whose detail keeps the
+/// exact count grammar that scripts and the integration tests grep for.
+#[test]
+fn refresh_banner_is_a_verdict_line_with_the_count_grammar_as_detail() {
+    let report = RefreshReport {
+        project_count: 2,
+        failed_count: 0,
+        skipped_unregistered: 0,
+        elapsed: std::time::Duration::from_millis(1200),
+    };
+    let banner = render_plain_at(80, |fmt| print_update_banner_with_formatter(fmt, &report));
+    assert!(
+        banner.starts_with(&format!(
+            "[OK] complete · Cassy {} · 2 projects refreshed · 0 failed",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{banner}"
+    );
+
+    let failed = RefreshReport {
+        project_count: 3,
+        failed_count: 1,
+        skipped_unregistered: 2,
+        elapsed: std::time::Duration::from_secs(4),
+    };
+    let banner = render_plain_at(80, |fmt| print_update_banner_with_formatter(fmt, &failed));
+    assert!(banner.starts_with("[ERROR] 1 project failed · "), "{banner}");
+    assert!(banner.contains("2 unregistered store(s) not refreshed"), "{banner}");
 }

@@ -1,12 +1,11 @@
 ---
 source: cas-cli/tests/component_output_test.rs
-assertion_line: 209
 expression: redacted
 ---
-cas doctor · [PROJECT] · [VERSION]
+[WARN] 3 warnings · 25 ok · [PROJECT] · [VERSION]
 ────────────────────────────────────────────────────────────────────────────────
 Host          [OK] registered project roots
-  [WARN] host                     host: [N] finding — see `cas doctor --host`
+  [WARN] host  host: [N] finding — see `cas doctor --host`
 Store         [OK] cas directory  [OK] database  [OK] schema  [OK] tables  [OK] entry store  [OK] memory stats  [OK] memory decay  [OK] rules  [OK] tasks
 Indexes       [OK] legacy search index  [OK] symbol index  [OK] embedding drain  [OK] embeddings
   [WARN] search index        Index not found at [CAS_PATH] Will be created on first search; Run a search to build it
@@ -15,4 +14,4 @@ Cloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [
 Config        [OK] configuration  [OK] issue repositories  [OK] MCP stdio upstreams  [OK] sync target  [OK] mcp config
 Integrations  [OK] integrations
 
-25 ok · 3 warnings · 0 errors · [DURATION]
+25 ok · 3 warnings · 0 errors · [DURATION] · cas doctor --verbose for timings and full messages

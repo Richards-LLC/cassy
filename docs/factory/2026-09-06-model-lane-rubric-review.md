@@ -1,9 +1,24 @@
 # Model lane rubric review — 2026-09-06
 
-Audience: operator (Daniel). Type: decision brief. Author: supervisor session golden-panda-80.
-Evidence window: 2026-09-05 16:20Z – 2026-09-06 00:10Z (the cas-80b6 rescue, releases 3.17.1 and 3.17.2).
+Audience: operator (Daniel). Type: decision brief. Author: supervisor session golden-panda-80; model
+section by worker vivid-kestrel-88 (cas-3372) and the cas-de0b scorecard; reordered verdict-first on
+2026-09-06 (cas-5d3c) with every number and provenance line of the earlier version kept.
+Evidence window: 2026-09-05 16:20Z – 2026-09-06 00:10Z (the cas-80b6 rescue, releases 3.17.1 and 3.17.2);
+host measurements over the retained horizon 2026-08-20 → 2026-09-06.
+Rendered as `2026-09-06-model-lane-rubric-review.html` (concept brief in `.brief.md`; the previous
+render is preserved as `.before.html`).
 
 ## Verdict
+
+Heavy goes to Astra at high, placed by hand; every other lane keeps its model, and no lane runs at
+medium.
+
+The figure that carries this is one dot per model × effort the host has actually run, at its cost per
+delivery (list price, log axis) against its send-back rate. The four placements sit on the floor of
+the plot, one per price tier — Luna at $0.49, Haiku at $1.46, Astra at $12.54, Fable — and the only two
+medium runs on record, Astra/medium at 100% and Fable 5.1/medium at 133%, are the only dots above the
+band. Samples smaller than five deliveries are drawn hollow with their n printed: Astra/high is two
+deliveries, not a rate.
 
 The rubric routes by reputation, not by measurement. In the one window where we have hard numbers,
 the lane that carried the work (Codex Luna at xhigh, "standard") is absent from the risk-bearing
@@ -11,6 +26,71 @@ lane ("heavy"), the model with the only recorded stall (Codex Astra) is being pr
 lane, and the two judgment lanes now fall back silently to the model they replaced. Nothing in the
 rubric names an effort rationale, a cost ceiling, or a promotion rule. Three numbers would fix that,
 and one of them already ships in 3.17.2.
+
+### Hero figure data
+
+Cost per delivery at 2026-09-06 list price and send-back rate, one row per model × effort the host has
+run. Basis B = cas-src per-delivery extraction (send-back = one `request_changes` decision per task);
+basis B.2 = cas-e208 extractor, all projects (send-back = every mention in notes, so a rate can exceed
+100%). Both tables are reproduced in full below; nothing here is re-derived.
+
+| Model / effort | Cost / delivery @ list | Send-back rate | n | Basis | Placement |
+|---|---:|---:|---:|---|---|
+| Codex GPT-5.6 Luna / xhigh | $0.49 | 12% | 212 | B | standard |
+| Claude Haiku 4.5 / low | $1.46 | 0% | 22 | B.2 | light |
+| Codex GPT-5.6 Terra / high | $2.28 | 2% | 42 | B | suspended 2026-08-27 |
+| Codex GPT-5.6 Sol / high | $6.81 | 16% | 51 | B | heavy fallback |
+| Codex GPT-6 Astra / high | $12.54 | 0% | 2 | B | heavy, placed by hand |
+| Codex GPT-6 Astra / medium | $12.68 | 100% | 1 | B | refused |
+| Claude Opus 5 / high | $25.47 | 4% | 52 | B | taste fallback |
+| Claude Fable 5.1 / medium (worker) | $103.02 | 133% mentions | 3 delivered | B.2 | refused |
+| Claude Fable 5.1 / high (worker) | $130.00 per delivered task (3 of 5 open; $22–$52 per delivery) | 0% | 2 delivered of 5 | B.2 | taste |
+
+## The placement
+
+One row per lane: the model and effort it gets, its fallback, and the measured number that puts it
+there. Every figure is from Part B, B.2 or C below.
+
+| Lane | Model / effort | Fallback | The number that places it | Sample |
+|---|---|---|---|---|
+| standard | Codex GPT-5.6 Luna / xhigh | — (Luna is itself the rescue lane for heavy) | $0.49 per merged delivery and 12% send-backs in cas-src; $0.69 and 272 deliveries across nine projects, the lowest send-back rates outside cas-src | n=212 (B), 272 (B.2) |
+| light | Claude Haiku 4.5, with a `thinking_budget` instead of `low` | Luna / xhigh for anything that touches code | 22 deliveries, 0 send-backs, $1.46 per delivered task — Slack/release-note and posting chores | n=22 (B.2) |
+| taste | Claude Fable 5.1 / high | Claude Opus 5 / high where it has a record (gabber-studio, pulse-card), not for Woodworking-style long jobs | 5 of 5 skill, design and document rewrites clean, none sent back | n=5 tasks, 2 delivered (B.2) |
+| supervisor | Claude Fable 5.1 / high; the registry should say `high` until a medium day is measured | fail closed plus an operator alert, never a silent model change | 0 stalls in 17 sessions; $142 per live session-day against $10.5 for the 24 Luna deliveries it reviewed | 17 sessions |
+| heavy | Codex GPT-6 Astra / high, placed by hand; `effort=high` pinned, medium refused | Codex GPT-5.6 Sol / high | two clean deliveries at $12.54, 27–36K output tokens, 69–78 tool calls, first push in 18–20 minutes; the only routed model with a published intelligence gain (TB 4.0 57.9 vs Sol 37.3) | n=2 (B) — a sample, not a rate |
+| refused | Astra / medium (the `~/.codex/config.toml` default); Fable 5.1 / medium as a lane default | — | the 352-minute supervisor stall of 2026-09-05 and 1 of 1 worker delivery sent back; Fable/medium 133% mentions on 3 delivered | n=1; n=3 |
+
+**Where to place Astra/high (Option A).** The evidence supports placing it, by hand, on tasks where
+the published intelligence gap matters and the run is short: safety-relevant implementation with a
+bounded brief (its two deliveries were 27–36K output tokens, 69–78 tool calls, first push in 18–20
+minutes). It does not support Astra on anything long-context or coordinating: cached input is 86% of
+its cost and its only medium session is the stall. Concretely:
+
+1. **Heavy = Astra/high with Sol/high as fallback, as directed; pin `effort=high` in the recipe and
+   refuse medium for heavy.** Every unpinned `codex` spawn inherits `~/.codex/config.toml`'s
+   `gpt-6-astra` / `medium`; the registry must not let heavy degrade to that.
+2. **Measure the first five Astra/high heavy deliveries against Sol/high pairs** (same brief, both
+   lanes) on send-backs, output tokens, tool calls and minutes to first push from the rollouts. Two
+   deliveries is a sample; five paired is a decision.
+3. **Luna/xhigh stays standard everywhere and is the rescue lane for heavy** — 272 deliveries across
+   nine projects at $0.69, the lowest send-back rates outside cas-src, and it finished cas-c674 after
+   Sol.
+4. **Light = Haiku 4.5 for Slack/release-note and posting chores** — 22 deliveries, 0 send-backs,
+   $1.46 — and give the recipe a `thinking_budget` instead of `low`. Route anything that touches code
+   to Luna.
+5. **Taste = Fable 5.1/high for skill, design and document rewrites** (5 of 5 clean); keep Opus 5/high
+   as the taste fallback where it has a record (gabber-studio, pulse-card), not for Woodworking-style
+   long jobs. Supervisor stays Fable 5.1 and the registry should say `high` until a medium day is
+   measured.
+6. **Fix attribution before the next scorecard**: 56% of horizon sessions have no model because the
+   spawn row lacks `worker_spec`; the extractor should read the rollout's `turn_context` for those, and
+   it should count shell tool calls and read all six harness homes in one run.
+
+What the data cannot answer: Astra/high vs Sol/high on identical tasks (item 2); Fable medium vs high
+on identical work (one medium worker session, zero medium supervisor sessions); whether Sol's 93% in
+gabber-studio and the Astra night's 19% are the reviewer or the tasks; and whether Opus 5's 179K-token
+deliveries are thoroughness or verbosity — the send-back rate says the former in gabber-studio and the
+latter in Woodworking.
 
 ## The rubric as directed (2026-09-06 00:10Z, task cas-255e in flight)
 
@@ -52,6 +132,28 @@ Release latency in the same window: 3.17.1 from rescue start to published 4 h 57
 merge-queue failures caused by a test from an earlier lane; 3.17.2 from "cut it now" to published
 77 min with one gate and one queue run.
 
+## Where the rubric fails
+
+1. **Heavy is routed on reputation against the data.** Astra has zero worker deliveries in the
+   window and one recorded coordination stall. Sol has one delivery and one send-back. Luna has
+   nineteen merged deliveries and is not in heavy at all.
+2. **Silent fallback to the replaced default.** Opus 5/high was the built-in supervisor default until
+   2026-09-05 22:00Z. It is now the automatic backup for both judgment lanes. A bad auth hour changes
+   the coordinator's behaviour with nobody deciding it. cas-255e adds a loud receipt; loud is not
+   approved.
+3. **Effort has no stated rationale.** Luna xhigh only; Fable medium; Astra medium by recipe but
+   high in heavy; Sol high; Haiku low. A reader cannot tell cost decisions from quality decisions.
+4. **Nothing is measured.** Every routing change this week (Astra→Fable taste, Fable supervisor,
+   Opus fallbacks, Astra heavy) came from anecdote. The actionable-idle metric that shipped in 3.17.2
+   is the first number the rubric has ever had.
+5. **The light lane is decorative.** Zero uses in the window. Every mechanical chore went to Luna
+   because Haiku is not trusted with builtin marker tests.
+6. **Cross-harness fallback inside a lane.** Standard falls back from Codex to Claude: different
+   hooks, skill mirror, and account mid-epic.
+7. **Fallback edges are declared but disabled.** Until cas-255e lands, taste and supervisor carry a
+   fallback that never fires; the comment says "fail closed". A registry that documents one policy
+   and executes another is a review hazard.
+
 ## Model intelligence, cost and efficiency
 
 Added 2026-09-06 by worker vivid-kestrel-88 (task cas-3372) at the operator's request: "it is a dance
@@ -61,124 +163,6 @@ delivery over the whole retained horizon 2026-08-20 → 2026-09-06 (B, full tabl
 `2026-09-06-model-lane-history.md` + `.csv`; cas-src only, all three Codex homes and all three Claude homes on the host), and the synthesis (C). Every external number carries its
 URL; all were retrieved 2026-09-06. "V" = vendor-published, "3P" = third party (Artificial Analysis =
 AA, Epoch, goml.io, vellum.ai, jessemoraga.com). Unknown means not found at the URLs checked, not zero.
-
-### A. What is published
-
-**Effort vocabulary.** No two providers expose the same dial, and none exposes `minimal` on the models we
-route. Mapping to Cassy's minimal/low/medium/high/xhigh:
-
-| Provider / model | Exposed levels | Default | Our `minimal` | Our `xhigh` | Source |
-|---|---|---|---|---|---|
-| OpenAI GPT-5.6 Luna / Sol / Terra (API `reasoning.effort`) | none, low, medium, high, xhigh, max (+ `reasoning.mode` standard/pro; Codex runtime adds `ultra` for Sol) | medium | no equivalent (`none` is closest) | xhigh | https://developers.openai.com/api/docs/guides/reasoning ; https://github.com/openai/codex/issues/33233 |
-| OpenAI GPT-6 Astra | low, medium, high, xhigh, max (no `none`) | medium | none | xhigh | https://developers.openai.com/api/docs/models/gpt-6-astra |
-| Anthropic Fable 5.1 / Opus 5 / Sonnet 5 (`output_config.effort`; Claude Code `--effort`) | low, medium, high, xhigh, max | high (Claude Code and API); medium in Claude.ai/Cowork | none (lowest is low) | xhigh | https://docs.anthropic.com/en/docs/build-with-claude/effort ; https://www.anthropic.com/claude-fable-and-mythos-5-1 |
-| Anthropic Haiku 4.5 | no effort parameter; manual `thinking.budget_tokens` only | — | thinking off | 128K budget | https://platform.claude.com/docs/en/models/haiku-4-5/overview |
-| xAI Grok 4.5 (`reasoning_effort`) | low, medium, high; reasoning cannot be disabled | high | none | none (xhigh exists only on grok-4.20-multi-agent) | https://docs.x.ai/developers/model-capabilities/text/reasoning |
-| Alibaba Qwen 3.8 Max | `enable_thinking` on/off + numeric `thinking_budget` (≤262,144); no named levels | thinking on | thinking off | budget = max | https://docs.modelstudio.console.alibabacloud.com/en/model-studio/deep-thinking |
-
-Codex's `model_context_window` of 258,400 on this host is the Codex default 272K profile minus headroom,
-not the API window: the API window for all GPT-5.6 models and Astra is 1,050,000 and Codex can be raised
-to 872,000 (https://github.com/openai/codex/issues/39144, https://github.com/openai/codex/pull/39102).
-
-**Per model.** Prices are USD per 1M tokens, Standard tier, ≤272K prompt (OpenAI) or base (others).
-Benchmarks are the vendor's headline coding score, a tool-calling score where one exists, and one
-long-horizon agentic score. No vendor publishes τ²-bench/BFCL/ToolBench for any of these models; the
-closest published tool-use signals are AA's τ³-Banking and Toolathlon.
-
-*OpenAI GPT-5.6 Luna (`gpt-5.6-luna`) — standard lane, light fallback.* Price $0.20 in / $0.02 cached /
-$1.20 out (cut 80% on 2026-07-30; https://developers.openai.com/api/docs/pricing). Context 1,050,000 / 128K out.
-
-| Effort | Coding | Tool calling | Long-horizon | Token efficiency | Source |
-|---|---|---|---|---|---|
-| max | SWE-Bench Pro 62.7% (3P); Terminal-Bench 2.1 84.7% (3P); DeepSWE 1.1 67.2% (3P) | unknown | OSWorld 2.0 45.6%, BrowseComp 83.3% (3P) | AA Intelligence Index 51 at $0.21/task; 130M output tokens for the whole AA index run ($213.83) | https://www.goml.io/blog/gpt-5-6-benchmarks ; https://artificialanalysis.ai/articles/gpt-5-6-has-landed ; https://artificialanalysis.ai/models/gpt-5-6-luna |
-| xhigh (ours) | unknown per-effort | unknown | unknown | unknown | not found at https://openai.com/index/gpt-5-6/ or the model page |
-| low / medium / high | unknown per-effort | unknown | unknown | unknown | same |
-
-*OpenAI GPT-5.6 Sol (`gpt-5.6-sol`) — heavy lane today.* Price $4 / $0.40 / $20 (promotional "at least
-through 2026-11-21"; launch was $5/$30; https://developers.openai.com/api/docs/models/gpt-5.6-sol). Context 1,050,000 / 128K.
-
-| Effort | Coding | Tool calling | Long-horizon | Token efficiency | Source |
-|---|---|---|---|---|---|
-| max | AA Coding Agent Index 80 (V, "less than half the output tokens" of Fable 5); Terminal-Bench 2.1 88.8% (3P; 91.9% at `ultra`); SWE-Bench Pro 64.6% (3P); Terminal-Bench 4.0 37.3% (V) | unknown | OSWorld 2.0 62.6%, BrowseComp 92.2% (V) | AA II 59 at $1.04/task, ~15K output tokens per task (3P) | https://openai.com/index/gpt-5-6/ ; https://openai.com/index/gpt-6-astra/ ; https://artificialanalysis.ai/articles/gpt-5-6-has-landed |
-| high (ours) | unknown per-effort | unknown | unknown | unknown | — |
-| medium | AA II 46 (3P) | unknown | unknown | blended $3.08/M, 72 tok/s | https://artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium |
-
-*OpenAI GPT-5.6 Terra (`gpt-5.6-terra`) — suspended.* Price $2 / $0.20 / $12. SWE-Bench Pro 63.4%,
-Terminal-Bench 2.1 87.4%, OSWorld 50.2% (3P, https://www.goml.io/blog/gpt-5-6-benchmarks). AA II 55 at
-$0.55/task; AA's verdict: "for any Terra effort level, there is a Luna or Sol effort level that is more
-intelligent at no extra cost" (https://artificialanalysis.ai/articles/gpt-5-6-intelligence-vs-cost-across-sol-terra-luna).
-No per-effort numbers published.
-
-*OpenAI GPT-6 Astra (`gpt-6-astra`) — directed heavy primary.* Price $10 / $1 / $50 (Fast mode 2×;
-https://developers.openai.com/api/docs/pricing). Context 1,050,000 / 128K.
-
-| Effort | Coding | Tool calling | Long-horizon | Token efficiency | Source |
-|---|---|---|---|---|---|
-| unstated (vendor table) | Terminal-Bench 4.0 57.9% (Sol 37.3%, Fable 5.1 55.8%); DeepSWE 1.1 74.1%; FrontierCode 1.1 64.5%; AA CAI 67.0 (Opus 5 68.1, Fable 5 67.2) | unknown (SOTA claimed on Agents' Last Exam, no number retrieved) | Terminal-Bench Science 64.6%; ExploitBench 100% | "~9% and 63% lower estimated API cost per task" than Sol and Fable 5.1 on TB 4.0 | https://openai.com/index/gpt-6-astra/ |
-| max | AA II 61 (= Sol max), ~10% fewer output tokens than Sol, but 75% more expensive per task; uses ~1/3 the tokens of Sol max and ~1/5 of Opus 5 xhigh on the AA CAI | unknown | Epoch ECI 169, rank 1 | "various effort levels occupy the Pareto frontier of token efficiency" | https://artificialanalysis.ai/articles/benchmarking-gpt-6-astra ; https://epoch.ai/models/gpt-6-astra |
-| high (ours) | unknown per-effort | unknown | unknown | unknown | — |
-| medium | AA II 52; 61 tok/s; TTFT 9.65 s | unknown | unknown | unknown | https://artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium |
-
-*Anthropic Claude Fable 5.1 (`claude-fable-5-1`) — taste and supervisor.* Price $10 in / $50 out; cache
-read $0.25 (0.025× — the one model with a deep cache-read discount); cache write $12.50 (5 min) / $20 (1 h)
-(https://docs.anthropic.com/en/docs/about-claude/pricing). Context 1M / 128K out. Adaptive thinking; effort is
-the only depth control. Default effort in Claude Code is **high**.
-
-| Effort | Coding | Tool calling | Long-horizon | Token efficiency | Source |
-|---|---|---|---|---|---|
-| unstated (vendor table) | Terminal-Bench 4.0 55.8%; CursorBench 73.4% | unknown (AA: "+9 points over Fable 5 on τ³-Banking", no absolute) | OSWorld 2.0 77.9% partial / 41.7% strict; Terminal-Bench-Science 52.6% | "25% less than Fable 5 for typical workloads, up to ~45% for agentic work" (cache-read cut) | https://www.anthropic.com/claude-fable-and-mythos-5-1 ; https://artificialanalysis.ai/articles/claude-fable-5-1 |
-| max | AA II 66 at $3.76/task; 143.7M output tokens on the index; Terminal-Bench 2.1 91.4% | unknown | HLE 59.1% | ~1.7× the output tokens of Fable 5 max | https://artificialanalysis.ai/articles/claude-fable-5-1 |
-| xhigh | AA II 65 at $2.72/task | unknown | unknown | — | same |
-| high (what actually runs) | unknown per-effort | unknown | unknown | unknown | — |
-| medium (registry) | vendor prose only: "at Low or Medium effort, Fable 5.1 achieves results similar to or better than Fable 5's at a much lower cost" | unknown | unknown | — | https://www.anthropic.com/claude-fable-and-mythos-5-1 |
-| low | AA II 58; 13.1M output tokens on the index (the five levels span **11×** in output tokens) | unknown | unknown | — | https://artificialanalysis.ai/articles/claude-fable-5-1 |
-
-*Anthropic Claude Opus 5 (`claude-opus-5`) — fallback for taste/supervisor/standard.* Price $5 / $25;
-cache read $0.50; cache write $6.25 / $10 (1 h). Context 1M / 128K. Thinking can be disabled only at effort ≤ high.
-
-| Effort | Coding | Tool calling | Long-horizon | Token efficiency | Source |
-|---|---|---|---|---|---|
-| unstated (vendor) | Terminal-Bench 4.0 52.3%; CursorBench 70.0%; SWE-bench Verified 96.0 and SWE-bench Pro 79.2 (3P reading of the system card) | unknown | OSWorld 2.0 75.4% / 39.6% | customer quotes: "26% fewer tokens than Opus 4.8 at max" | https://www.anthropic.com/claude-fable-and-mythos-5-1 ; https://www.anthropic.com/news/claude-opus-5 ; https://jessemoraga.com/2026/07/25/claude-opus-5-benchmarks/ |
-| max | AA II 61 at $2.03/task at launch (54 at $4.21 on index v4.2); Terminal-Bench 2.1 89% | unknown | HLE 53% | output tokens span ~8× low→max | https://artificialanalysis.ai/articles/opus-5 ; https://artificialanalysis.ai/models/claude-opus-5 |
-| xhigh | AA CAI joint first place with Claude Code | unknown | unknown | — | https://artificialanalysis.ai/articles/opus-5 |
-| high (ours) | unknown per-effort | unknown | unknown | unknown | — |
-| low | "even at its lowest effort setting, Opus 5 passes more tasks than any other model" on AutomationBench (V prose) | unknown | unknown | — | https://www.anthropic.com/news/claude-opus-5 |
-
-*Anthropic Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) — light lane.* Price $1 / $5; cache read $0.10;
-write $1.25 / $2. Context 200K / 64K. **No effort parameter**; the registry's `low` has no vendor meaning
-for this model. SWE-bench Verified 73.3% with a 128K thinking budget (V); Terminal-Bench (Terminus 2)
-40.21% without thinking, 41.75% with 32K (V); τ²-bench reported but the number is in an image (unknown);
-AA II 22 at $0.20/task (https://www.anthropic.com/news/claude-haiku-4-5 ; https://artificialanalysis.ai/models/claude-4-5-haiku-reasoning).
-
-*Anthropic Claude Sonnet 5 (reference, not routed).* $2 / $10, cache read $0.20; SWE-bench Verified
-85.2, Terminal-Bench 2.1 80.4 (3P); effort low…max, medium "comparable to Sonnet 4.6 at high"
-(https://docs.anthropic.com/en/docs/about-claude/pricing ; https://docs.anthropic.com/en/docs/build-with-claude/effort).
-
-*xAI Grok 4.5 (`grok-4.5`) — Grok default.* Price $2 / $0.30 cached / $6 (≥200K prompt: $4 / $0.60 / $12);
-context 500K (https://docs.x.ai/developers/models/grok-4.5). Only `high` is benchmarked: DeepSWE 1.0 62.0%
-(AA-run, in the vendor post); SWE-Bench Pro, Terminal-Bench 2.1 and τ³-Banking exist in the model card PDF
-but did not extract (unknown). Token efficiency is the vendor's headline: 15,954 output tokens per
-SWE-Bench Pro task vs Opus 4.8's 67,020 (https://x.ai/news/grok-4-5); AA: 64M output tokens for the index
-(median model 79M), $0.31/task, AA CAI 76 at $2.49/task and 1.9M tokens/task vs Fable 5 in Claude Code
-7.2M/$11.80 (https://artificialanalysis.ai/models/grok-4-5). OpenCode exposed no low/medium/high variants for
-grok-4.5 at retrieval (https://github.com/anomalyco/opencode/issues/39448).
-
-*Alibaba Qwen 3.8 Max (`qwen3.8-max`, OpenCode) — receipt-gated.* Price $2 / $6, implicit cache $0.25
-(international; $1.65/$4.95 in some regions; https://github.com/AlibabaCloud-Official/Qwen3.8-max ;
-https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max). Context 1M / 131K out. Thinking-on only:
-SWE-bench Pro 67.7 (Claude Code harness), Terminal-Bench 2.1 86.6, Toolathlon Verified 72.5 (the one
-vendor tool-calling number in this set), OSWorld-Verified 86.1 (V via mirrors:
-https://go.tabbit.ai/model/qwen3-8-max/reviews/qwen-official-release-notes-and-complete-performance-results);
-AA τ³-Banking 51.3% (2nd), AA II 47 but 150M output tokens on the index — "very verbose"
-(https://artificialanalysis.ai/models/qwen3-8-max). OpenCode's built-in `alibaba` provider dropped
-`enable_thinking`/`thinking_budget` from the wire in 1.18.25 (https://github.com/anomalyco/opencode/issues/46647),
-so OpenCode "effort" for this model was a no-op at retrieval.
-
-**What the published data cannot tell us.** (1) Nobody publishes per-effort scores for `high` or `xhigh`
-on the models we run at those levels; the only per-effort ladders are AA's (Fable 5.1 low→max: 58→66 for
-11× tokens; Opus 5 ~8× tokens; Sol/Astra medium vs max). (2) Tool-calling benchmarks are absent from every
-vendor page except Qwen's Toolathlon and AA's τ³-Banking. (3) Astra's per-effort behaviour is a vendor
-chart without numbers.
 
 ### B. What this host measured
 
@@ -338,59 +322,123 @@ sample size. No single ranking: the columns disagree, and that is the finding.
 | Fable 5.1 / high (supervisor) | reviewed Luna at 12% | $142–$284 per session-day | — | 0 stalls in 17 sessions | 70–150 per day | **coordination without stalls**, cache reads at $0.25/M | the most expensive seat after the Astra night; the registry's `medium` has never run |
 | Haiku 4.5 / low | 0% (B.2, n=22; 15 with tokens) | **$1.46** | 19.6 | 0 | 32 MCP | **the light lane exists after all**: 15 gabber-studio Slack release-note postings at $0.51–$4.26 each, none sent back | never used outside gabber-studio + abundant-mines; `low` sets nothing on Haiku |
 
-**Where to place Astra/high (Option A).** The evidence supports placing it, by hand, on tasks where
-the published intelligence gap matters and the run is short: safety-relevant implementation with a
-bounded brief (its two deliveries were 27–36K output tokens, 69–78 tool calls, first push in 18–20
-minutes). It does not support Astra on anything long-context or coordinating: cached input is 86% of
-its cost and its only medium session is the stall. Concretely:
+### A. What is published
 
-1. **Heavy = Astra/high with Sol/high as fallback, as directed; pin `effort=high` in the recipe and
-   refuse medium for heavy.** Every unpinned `codex` spawn inherits `~/.codex/config.toml`'s
-   `gpt-6-astra` / `medium`; the registry must not let heavy degrade to that.
-2. **Measure the first five Astra/high heavy deliveries against Sol/high pairs** (same brief, both
-   lanes) on send-backs, output tokens, tool calls and minutes to first push from the rollouts. Two
-   deliveries is a sample; five paired is a decision.
-3. **Luna/xhigh stays standard everywhere and is the rescue lane for heavy** — 272 deliveries across
-   nine projects at $0.69, the lowest send-back rates outside cas-src, and it finished cas-c674 after
-   Sol.
-4. **Light = Haiku 4.5 for Slack/release-note and posting chores** — 22 deliveries, 0 send-backs,
-   $1.46 — and give the recipe a `thinking_budget` instead of `low`. Route anything that touches code
-   to Luna.
-5. **Taste = Fable 5.1/high for skill, design and document rewrites** (5 of 5 clean); keep Opus 5/high
-   as the taste fallback where it has a record (gabber-studio, pulse-card), not for Woodworking-style
-   long jobs. Supervisor stays Fable 5.1 and the registry should say `high` until a medium day is
-   measured.
-6. **Fix attribution before the next scorecard**: 56% of horizon sessions have no model because the
-   spawn row lacks `worker_spec`; the extractor should read the rollout's `turn_context` for those, and
-   it should count shell tool calls and read all six harness homes in one run.
+**Effort vocabulary.** No two providers expose the same dial, and none exposes `minimal` on the models we
+route. Mapping to Cassy's minimal/low/medium/high/xhigh:
 
-What the data cannot answer: Astra/high vs Sol/high on identical tasks (item 2); Fable medium vs high
-on identical work (one medium worker session, zero medium supervisor sessions); whether Sol's 93% in
-gabber-studio and the Astra night's 19% are the reviewer or the tasks; and whether Opus 5's 179K-token
-deliveries are thoroughness or verbosity — the send-back rate says the former in gabber-studio and the
-latter in Woodworking.
+| Provider / model | Exposed levels | Default | Our `minimal` | Our `xhigh` | Source |
+|---|---|---|---|---|---|
+| OpenAI GPT-5.6 Luna / Sol / Terra (API `reasoning.effort`) | none, low, medium, high, xhigh, max (+ `reasoning.mode` standard/pro; Codex runtime adds `ultra` for Sol) | medium | no equivalent (`none` is closest) | xhigh | https://developers.openai.com/api/docs/guides/reasoning ; https://github.com/openai/codex/issues/33233 |
+| OpenAI GPT-6 Astra | low, medium, high, xhigh, max (no `none`) | medium | none | xhigh | https://developers.openai.com/api/docs/models/gpt-6-astra |
+| Anthropic Fable 5.1 / Opus 5 / Sonnet 5 (`output_config.effort`; Claude Code `--effort`) | low, medium, high, xhigh, max | high (Claude Code and API); medium in Claude.ai/Cowork | none (lowest is low) | xhigh | https://docs.anthropic.com/en/docs/build-with-claude/effort ; https://www.anthropic.com/claude-fable-and-mythos-5-1 |
+| Anthropic Haiku 4.5 | no effort parameter; manual `thinking.budget_tokens` only | — | thinking off | 128K budget | https://platform.claude.com/docs/en/models/haiku-4-5/overview |
+| xAI Grok 4.5 (`reasoning_effort`) | low, medium, high; reasoning cannot be disabled | high | none | none (xhigh exists only on grok-4.20-multi-agent) | https://docs.x.ai/developers/model-capabilities/text/reasoning |
+| Alibaba Qwen 3.8 Max | `enable_thinking` on/off + numeric `thinking_budget` (≤262,144); no named levels | thinking on | thinking off | budget = max | https://docs.modelstudio.console.alibabacloud.com/en/model-studio/deep-thinking |
 
-## Where the rubric fails
+Codex's `model_context_window` of 258,400 on this host is the Codex default 272K profile minus headroom,
+not the API window: the API window for all GPT-5.6 models and Astra is 1,050,000 and Codex can be raised
+to 872,000 (https://github.com/openai/codex/issues/39144, https://github.com/openai/codex/pull/39102).
 
-1. **Heavy is routed on reputation against the data.** Astra has zero worker deliveries in the
-   window and one recorded coordination stall. Sol has one delivery and one send-back. Luna has
-   nineteen merged deliveries and is not in heavy at all.
-2. **Silent fallback to the replaced default.** Opus 5/high was the built-in supervisor default until
-   2026-09-05 22:00Z. It is now the automatic backup for both judgment lanes. A bad auth hour changes
-   the coordinator's behaviour with nobody deciding it. cas-255e adds a loud receipt; loud is not
-   approved.
-3. **Effort has no stated rationale.** Luna xhigh only; Fable medium; Astra medium by recipe but
-   high in heavy; Sol high; Haiku low. A reader cannot tell cost decisions from quality decisions.
-4. **Nothing is measured.** Every routing change this week (Astra→Fable taste, Fable supervisor,
-   Opus fallbacks, Astra heavy) came from anecdote. The actionable-idle metric that shipped in 3.17.2
-   is the first number the rubric has ever had.
-5. **The light lane is decorative.** Zero uses in the window. Every mechanical chore went to Luna
-   because Haiku is not trusted with builtin marker tests.
-6. **Cross-harness fallback inside a lane.** Standard falls back from Codex to Claude: different
-   hooks, skill mirror, and account mid-epic.
-7. **Fallback edges are declared but disabled.** Until cas-255e lands, taste and supervisor carry a
-   fallback that never fires; the comment says "fail closed". A registry that documents one policy
-   and executes another is a review hazard.
+**Per model.** Prices are USD per 1M tokens, Standard tier, ≤272K prompt (OpenAI) or base (others).
+Benchmarks are the vendor's headline coding score, a tool-calling score where one exists, and one
+long-horizon agentic score. No vendor publishes τ²-bench/BFCL/ToolBench for any of these models; the
+closest published tool-use signals are AA's τ³-Banking and Toolathlon.
+
+*OpenAI GPT-5.6 Luna (`gpt-5.6-luna`) — standard lane, light fallback.* Price $0.20 in / $0.02 cached /
+$1.20 out (cut 80% on 2026-07-30; https://developers.openai.com/api/docs/pricing). Context 1,050,000 / 128K out.
+
+| Effort | Coding | Tool calling | Long-horizon | Token efficiency | Source |
+|---|---|---|---|---|---|
+| max | SWE-Bench Pro 62.7% (3P); Terminal-Bench 2.1 84.7% (3P); DeepSWE 1.1 67.2% (3P) | unknown | OSWorld 2.0 45.6%, BrowseComp 83.3% (3P) | AA Intelligence Index 51 at $0.21/task; 130M output tokens for the whole AA index run ($213.83) | https://www.goml.io/blog/gpt-5-6-benchmarks ; https://artificialanalysis.ai/articles/gpt-5-6-has-landed ; https://artificialanalysis.ai/models/gpt-5-6-luna |
+| xhigh (ours) | unknown per-effort | unknown | unknown | unknown | not found at https://openai.com/index/gpt-5-6/ or the model page |
+| low / medium / high | unknown per-effort | unknown | unknown | unknown | same |
+
+*OpenAI GPT-5.6 Sol (`gpt-5.6-sol`) — heavy lane today.* Price $4 / $0.40 / $20 (promotional "at least
+through 2026-11-21"; launch was $5/$30; https://developers.openai.com/api/docs/models/gpt-5.6-sol). Context 1,050,000 / 128K.
+
+| Effort | Coding | Tool calling | Long-horizon | Token efficiency | Source |
+|---|---|---|---|---|---|
+| max | AA Coding Agent Index 80 (V, "less than half the output tokens" of Fable 5); Terminal-Bench 2.1 88.8% (3P; 91.9% at `ultra`); SWE-Bench Pro 64.6% (3P); Terminal-Bench 4.0 37.3% (V) | unknown | OSWorld 2.0 62.6%, BrowseComp 92.2% (V) | AA II 59 at $1.04/task, ~15K output tokens per task (3P) | https://openai.com/index/gpt-5-6/ ; https://openai.com/index/gpt-6-astra/ ; https://artificialanalysis.ai/articles/gpt-5-6-has-landed |
+| high (ours) | unknown per-effort | unknown | unknown | unknown | — |
+| medium | AA II 46 (3P) | unknown | unknown | blended $3.08/M, 72 tok/s | https://artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium |
+
+*OpenAI GPT-5.6 Terra (`gpt-5.6-terra`) — suspended.* Price $2 / $0.20 / $12. SWE-Bench Pro 63.4%,
+Terminal-Bench 2.1 87.4%, OSWorld 50.2% (3P, https://www.goml.io/blog/gpt-5-6-benchmarks). AA II 55 at
+$0.55/task; AA's verdict: "for any Terra effort level, there is a Luna or Sol effort level that is more
+intelligent at no extra cost" (https://artificialanalysis.ai/articles/gpt-5-6-intelligence-vs-cost-across-sol-terra-luna).
+No per-effort numbers published.
+
+*OpenAI GPT-6 Astra (`gpt-6-astra`) — directed heavy primary.* Price $10 / $1 / $50 (Fast mode 2×;
+https://developers.openai.com/api/docs/pricing). Context 1,050,000 / 128K.
+
+| Effort | Coding | Tool calling | Long-horizon | Token efficiency | Source |
+|---|---|---|---|---|---|
+| unstated (vendor table) | Terminal-Bench 4.0 57.9% (Sol 37.3%, Fable 5.1 55.8%); DeepSWE 1.1 74.1%; FrontierCode 1.1 64.5%; AA CAI 67.0 (Opus 5 68.1, Fable 5 67.2) | unknown (SOTA claimed on Agents' Last Exam, no number retrieved) | Terminal-Bench Science 64.6%; ExploitBench 100% | "~9% and 63% lower estimated API cost per task" than Sol and Fable 5.1 on TB 4.0 | https://openai.com/index/gpt-6-astra/ |
+| max | AA II 61 (= Sol max), ~10% fewer output tokens than Sol, but 75% more expensive per task; uses ~1/3 the tokens of Sol max and ~1/5 of Opus 5 xhigh on the AA CAI | unknown | Epoch ECI 169, rank 1 | "various effort levels occupy the Pareto frontier of token efficiency" | https://artificialanalysis.ai/articles/benchmarking-gpt-6-astra ; https://epoch.ai/models/gpt-6-astra |
+| high (ours) | unknown per-effort | unknown | unknown | unknown | — |
+| medium | AA II 52; 61 tok/s; TTFT 9.65 s | unknown | unknown | unknown | https://artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium |
+
+*Anthropic Claude Fable 5.1 (`claude-fable-5-1`) — taste and supervisor.* Price $10 in / $50 out; cache
+read $0.25 (0.025× — the one model with a deep cache-read discount); cache write $12.50 (5 min) / $20 (1 h)
+(https://docs.anthropic.com/en/docs/about-claude/pricing). Context 1M / 128K out. Adaptive thinking; effort is
+the only depth control. Default effort in Claude Code is **high**.
+
+| Effort | Coding | Tool calling | Long-horizon | Token efficiency | Source |
+|---|---|---|---|---|---|
+| unstated (vendor table) | Terminal-Bench 4.0 55.8%; CursorBench 73.4% | unknown (AA: "+9 points over Fable 5 on τ³-Banking", no absolute) | OSWorld 2.0 77.9% partial / 41.7% strict; Terminal-Bench-Science 52.6% | "25% less than Fable 5 for typical workloads, up to ~45% for agentic work" (cache-read cut) | https://www.anthropic.com/claude-fable-and-mythos-5-1 ; https://artificialanalysis.ai/articles/claude-fable-5-1 |
+| max | AA II 66 at $3.76/task; 143.7M output tokens on the index; Terminal-Bench 2.1 91.4% | unknown | HLE 59.1% | ~1.7× the output tokens of Fable 5 max | https://artificialanalysis.ai/articles/claude-fable-5-1 |
+| xhigh | AA II 65 at $2.72/task | unknown | unknown | — | same |
+| high (what actually runs) | unknown per-effort | unknown | unknown | unknown | — |
+| medium (registry) | vendor prose only: "at Low or Medium effort, Fable 5.1 achieves results similar to or better than Fable 5's at a much lower cost" | unknown | unknown | — | https://www.anthropic.com/claude-fable-and-mythos-5-1 |
+| low | AA II 58; 13.1M output tokens on the index (the five levels span **11×** in output tokens) | unknown | unknown | — | https://artificialanalysis.ai/articles/claude-fable-5-1 |
+
+*Anthropic Claude Opus 5 (`claude-opus-5`) — fallback for taste/supervisor/standard.* Price $5 / $25;
+cache read $0.50; cache write $6.25 / $10 (1 h). Context 1M / 128K. Thinking can be disabled only at effort ≤ high.
+
+| Effort | Coding | Tool calling | Long-horizon | Token efficiency | Source |
+|---|---|---|---|---|---|
+| unstated (vendor) | Terminal-Bench 4.0 52.3%; CursorBench 70.0%; SWE-bench Verified 96.0 and SWE-bench Pro 79.2 (3P reading of the system card) | unknown | OSWorld 2.0 75.4% / 39.6% | customer quotes: "26% fewer tokens than Opus 4.8 at max" | https://www.anthropic.com/claude-fable-and-mythos-5-1 ; https://www.anthropic.com/news/claude-opus-5 ; https://jessemoraga.com/2026/07/25/claude-opus-5-benchmarks/ |
+| max | AA II 61 at $2.03/task at launch (54 at $4.21 on index v4.2); Terminal-Bench 2.1 89% | unknown | HLE 53% | output tokens span ~8× low→max | https://artificialanalysis.ai/articles/opus-5 ; https://artificialanalysis.ai/models/claude-opus-5 |
+| xhigh | AA CAI joint first place with Claude Code | unknown | unknown | — | https://artificialanalysis.ai/articles/opus-5 |
+| high (ours) | unknown per-effort | unknown | unknown | unknown | — |
+| low | "even at its lowest effort setting, Opus 5 passes more tasks than any other model" on AutomationBench (V prose) | unknown | unknown | — | https://www.anthropic.com/news/claude-opus-5 |
+
+*Anthropic Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) — light lane.* Price $1 / $5; cache read $0.10;
+write $1.25 / $2. Context 200K / 64K. **No effort parameter**; the registry's `low` has no vendor meaning
+for this model. SWE-bench Verified 73.3% with a 128K thinking budget (V); Terminal-Bench (Terminus 2)
+40.21% without thinking, 41.75% with 32K (V); τ²-bench reported but the number is in an image (unknown);
+AA II 22 at $0.20/task (https://www.anthropic.com/news/claude-haiku-4-5 ; https://artificialanalysis.ai/models/claude-4-5-haiku-reasoning).
+
+*Anthropic Claude Sonnet 5 (reference, not routed).* $2 / $10, cache read $0.20; SWE-bench Verified
+85.2, Terminal-Bench 2.1 80.4 (3P); effort low…max, medium "comparable to Sonnet 4.6 at high"
+(https://docs.anthropic.com/en/docs/about-claude/pricing ; https://docs.anthropic.com/en/docs/build-with-claude/effort).
+
+*xAI Grok 4.5 (`grok-4.5`) — Grok default.* Price $2 / $0.30 cached / $6 (≥200K prompt: $4 / $0.60 / $12);
+context 500K (https://docs.x.ai/developers/models/grok-4.5). Only `high` is benchmarked: DeepSWE 1.0 62.0%
+(AA-run, in the vendor post); SWE-Bench Pro, Terminal-Bench 2.1 and τ³-Banking exist in the model card PDF
+but did not extract (unknown). Token efficiency is the vendor's headline: 15,954 output tokens per
+SWE-Bench Pro task vs Opus 4.8's 67,020 (https://x.ai/news/grok-4-5); AA: 64M output tokens for the index
+(median model 79M), $0.31/task, AA CAI 76 at $2.49/task and 1.9M tokens/task vs Fable 5 in Claude Code
+7.2M/$11.80 (https://artificialanalysis.ai/models/grok-4-5). OpenCode exposed no low/medium/high variants for
+grok-4.5 at retrieval (https://github.com/anomalyco/opencode/issues/39448).
+
+*Alibaba Qwen 3.8 Max (`qwen3.8-max`, OpenCode) — receipt-gated.* Price $2 / $6, implicit cache $0.25
+(international; $1.65/$4.95 in some regions; https://github.com/AlibabaCloud-Official/Qwen3.8-max ;
+https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max). Context 1M / 131K out. Thinking-on only:
+SWE-bench Pro 67.7 (Claude Code harness), Terminal-Bench 2.1 86.6, Toolathlon Verified 72.5 (the one
+vendor tool-calling number in this set), OSWorld-Verified 86.1 (V via mirrors:
+https://go.tabbit.ai/model/qwen3-8-max/reviews/qwen-official-release-notes-and-complete-performance-results);
+AA τ³-Banking 51.3% (2nd), AA II 47 but 150M output tokens on the index — "very verbose"
+(https://artificialanalysis.ai/models/qwen3-8-max). OpenCode's built-in `alibaba` provider dropped
+`enable_thinking`/`thinking_budget` from the wire in 1.18.25 (https://github.com/anomalyco/opencode/issues/46647),
+so OpenCode "effort" for this model was a no-op at retrieval.
+
+**What the published data cannot tell us.** (1) Nobody publishes per-effort scores for `high` or `xhigh`
+on the models we run at those levels; the only per-effort ladders are AA's (Fable 5.1 low→max: 58→66 for
+11× tokens; Opus 5 ~8× tokens; Sol/Astra medium vs max). (2) Tool-calling benchmarks are absent from every
+vendor page except Qwen's Toolathlon and AA's τ³-Banking. (3) Astra's per-effort behaviour is a vendor
+chart without numbers.
 
 ## Optimizations, in order of leverage
 
@@ -422,6 +470,9 @@ Keep cas-255e as directed (it is implementing the rubric above), and choose one 
 
 The author recommends B.
 
+The operator chose A; Part C above is re-cut for it, and the Verdict and The placement sections carry
+Option A with items 1–6 as its conditions.
+
 ## Provenance
 
 - Registry: `crates/cas-factory/policy/lane-registry.toml` at epic 736bb1fe64176204b77e46b960ad23fba7d8cbba.
@@ -436,3 +487,6 @@ The author recommends B.
   row-level data in `docs/factory/2026-09-06-model-lane-history.csv`, method in the `.md` beside it.
 - Cross-project (cas-de0b): `scripts/factory-model-history.py` (cas-e208) run per home pair, unioned by `scripts/factory-model-history-union.py`; `docs/factory/data/model-prices.json`; `docs/factory/data/factory-model-history-2026-09-06.csv` (default homes, 9,259 rows), `…-allhomes-horizon.csv` (1,498 rows) and `…-scorecard-2026-09-06-allhomes-horizon.csv`; extractor receipt `~/.cas/artifacts/cas-e208/real-run-v2.log`.
 - Stalled supervisor identity: `~/.codex-support@gabber.studio/sessions/2026/09/04/rollout-2026-09-04T18-22-16-01a06e83-f206-7f60-8a41-1c70f3fd1132.jsonl` (`turn_context` model/effort; timestamp gap 05:56Z→11:48Z) and its continuation `…/2026/09/05/rollout-2026-09-05T09-16-26-01a071b6-94d5-7061-b3b5-d6f136504a51.jsonl`; factory log `cas-src-daring-badger-54`, agent loyal-crane-48.
+- Reorder (cas-5d3c): verdict-first restructure of this file on 2026-09-06; numbers unchanged (numeric-token
+  diff against the 926518fb version shows no loss); concept brief `2026-09-06-model-lane-rubric-review.brief.md`;
+  previous render `2026-09-06-model-lane-rubric-review.before.html`; visual-QA receipt `…rubric-review.visual-qa.md`.

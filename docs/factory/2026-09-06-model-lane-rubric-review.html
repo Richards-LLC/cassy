@@ -3,469 +3,769 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Model lane rubric review — 2026-09-06</title>
+<meta name="color-scheme" content="light dark">
+<title>Model lane rubric review — decision brief, 2026-09-06</title>
 <style>
+  /* Petrastella tokens — names match design-spec/references/design-tokens.json. Override in DESIGN.md, never here. */
   :root{
-    --bg:#0f1117;--panel:#161a24;--panel-2:#1c2130;--line:#2a3142;--text:#e8ecf4;--muted:#9aa5bb;
-    --accent:#7aa2ff;--ok:#5fd39a;--warn:#f5c04a;--bad:#ff6b7a;--info:#8fd3ff;
-    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Inter,sans-serif;
+    --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;
+    --ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;
+    --action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;
+    --good-tint:rgba(42,122,84,.10);--warning-tint:rgba(140,95,6,.10);--danger-tint:rgba(179,38,30,.10);--focus:#2E3A9F;
+    --display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
+    --body:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s6:24px;--s8:32px;--s12:48px;--s16:64px;--s24:96px;
+    --container:1120px;--gutter:24px;--radius-chip:4px;--radius-panel:8px;
+    --motion-chrome:120ms;--ease:cubic-bezier(.2,0,0,1);
+    --fig-bg:var(--bg);
   }
-  @media (prefers-color-scheme: light){
-    :root{--bg:#f6f7fb;--panel:#ffffff;--panel-2:#f0f2f8;--line:#d9dee9;--text:#161a24;--muted:#5b6478;--accent:#2f5fd8;--ok:#1f8f5f;--warn:#b7791f;--bad:#c93648;--info:#1f6fa8}
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#12141A;--surface:#191C24;--surface-hero:#241E1E;--line:#2B3040;--line-strong:#6B7390;
+      --ink:#E9E6E0;--ink-muted:#A3A7B4;--verdict:#A9B3FF;--verdict-soft:rgba(169,179,255,.16);--evidence:#A3A7B4;
+      --action:#A9B3FF;--good:#5FC492;--warning:#E2B14D;--danger:#EF7B72;
+      --good-tint:rgba(95,196,146,.14);--warning-tint:rgba(226,177,77,.14);--danger-tint:rgba(239,123,114,.14);--focus:#A9B3FF;
+    }
   }
   *{box-sizing:border-box}
-  html{scroll-behavior:smooth}
-  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 var(--sans)}
-  a{color:var(--accent)}
-  header.hero{padding:56px 24px 32px;background:
-    radial-gradient(1200px 400px at 10% -10%, rgba(122,162,255,.18), transparent 60%),
-    radial-gradient(900px 300px at 90% 0%, rgba(255,107,122,.14), transparent 60%);
-    border-bottom:1px solid var(--line)}
-  .wrap{max-width:1120px;margin:0 auto;padding:0 24px}
-  .eyebrow{font:600 12px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
-  h1{font-size:clamp(28px,4vw,42px);line-height:1.1;margin:12px 0 10px;letter-spacing:-.02em}
-  .verdict{font-size:19px;max-width:860px;color:var(--text)}
-  .verdict strong{color:var(--warn)}
-  .meta{margin-top:18px;color:var(--muted);font-size:14px}
-  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin:26px 0 0}
-  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
-  .kpi .n{font:700 34px/1 var(--sans);letter-spacing:-.02em}
-  .kpi .l{color:var(--muted);font-size:13px;margin-top:6px}
-  .kpi.ok .n{color:var(--ok)}.kpi.bad .n{color:var(--bad)}.kpi.warn .n{color:var(--warn)}.kpi.info .n{color:var(--info)}
-  main{padding:32px 0 64px}
-  section{margin:0 0 40px}
-  h2{font-size:22px;letter-spacing:-.01em;margin:0 0 14px;padding-top:8px;border-top:1px solid var(--line)}
-  h3{font-size:16px;margin:18px 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600}
-  p{max-width:860px}
-  table{border-collapse:collapse;width:100%;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
-  th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-  th{background:var(--panel-2);font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
-  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-  tr:last-child td{border-bottom:0}
-  .tag{display:inline-block;font:600 11px/1 var(--mono);padding:4px 7px;border-radius:6px;border:1px solid var(--line);color:var(--muted);letter-spacing:.04em}
-  .tag.ok{color:var(--ok);border-color:rgba(95,211,154,.4)}.tag.bad{color:var(--bad);border-color:rgba(255,107,122,.4)}.tag.warn{color:var(--warn);border-color:rgba(245,192,74,.4)}.tag.info{color:var(--info);border-color:rgba(143,211,255,.4)}
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-  @media (max-width:820px){.grid2{grid-template-columns:1fr}}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px}
-  .card h4{margin:0 0 6px;font-size:16px}
-  .card p{margin:0;color:var(--text);font-size:15px}
-  .card .why{color:var(--muted);font-size:13px;margin-top:8px}
-  ol.opt{counter-reset:o;list-style:none;padding:0;margin:0;display:grid;gap:12px}
-  ol.opt li{counter-increment:o;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px 16px 62px;position:relative}
-  ol.opt li::before{content:counter(o);position:absolute;left:18px;top:14px;width:30px;height:30px;border-radius:50%;background:var(--accent);color:#0b1020;font:700 15px/30px var(--sans);text-align:center}
-  ol.opt li b{display:block;margin-bottom:4px}
-  figure{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
-  figcaption{color:var(--muted);font-size:13px;margin-top:8px}
-  .decision{background:linear-gradient(135deg,rgba(122,162,255,.14),rgba(95,211,154,.10));border:1px solid var(--line);border-radius:16px;padding:22px 24px}
-  .decision .opts{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px}
-  @media (max-width:820px){.decision .opts{grid-template-columns:1fr}}
-  .opt-b{outline:2px solid var(--ok);outline-offset:-2px}
-  footer{border-top:1px solid var(--line);padding:24px 0 48px;color:var(--muted);font-size:13px}
-  footer code,td code,p code{font:13px var(--mono);background:var(--panel-2);padding:1px 5px;border-radius:5px}
-  details{margin-top:10px}
-  summary{cursor:pointer;color:var(--accent)}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);font:400 17px/26px var(--body)}
+  a{color:var(--action);text-decoration-thickness:1px;text-underline-offset:3px;overflow-wrap:anywhere}
+  a:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  .skip{position:absolute;left:-9999px}.skip:focus{left:var(--s4);top:var(--s4);background:var(--surface);color:var(--ink);padding:var(--s2) var(--s3);z-index:2}
+  .wrap{max-width:var(--container);margin:0 auto;padding:0 var(--gutter)}
+  .eyebrow{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);margin:0}
+  p{max-width:68ch;margin:0 0 var(--s4)}
+  p.lede{font:400 21px/30px var(--body)}
+  h2{font:600 27px/32px var(--body);letter-spacing:-.01em;margin:0 0 var(--s3)}
+  h3{font:600 21px/30px var(--body);letter-spacing:-.01em;margin:var(--s8) 0 var(--s2)}
+  h4{font:600 17px/26px var(--body);margin:var(--s6) 0 var(--s2)}
+  .caption{font:400 14px/20px var(--body);color:var(--ink-muted)}
+  .src{font:400 12px/16px var(--mono);color:var(--ink-muted);margin:var(--s2) 0 0;max-width:none;overflow-wrap:anywhere}
+  .num,.n{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  code{font:13px/1 var(--mono);background:var(--surface);border:1px solid var(--line);padding:1px 4px;border-radius:var(--radius-chip);overflow-wrap:anywhere}
+  ol.list,ul.list{max-width:68ch;padding-left:1.4em;margin:0 0 var(--s4)}
+  ol.list li,ul.list li{margin:0 0 var(--s3)}
+  ol.list{list-style:none;padding-left:0}
+  ol.list li{display:grid;grid-template-columns:2.4ch minmax(0,1fr);gap:0 var(--s2)}
+  ol.list .idx{font:400 15px/26px var(--mono);color:var(--ink-muted);font-variant-numeric:tabular-nums}
+  strong,b{font-weight:600}
   .sr{position:absolute;left:-9999px}
+  section.lede-block p{font:400 19px/28px var(--body)}
+  section.lede-block p:first-of-type{font-size:15px;line-height:22px;color:var(--ink-muted)}
+
+  /* Verdict hero — nothing else above the fold */
+  .hero{background:var(--surface-hero);color:var(--ink);padding:var(--s8) 0 var(--s6);--fig-bg:var(--surface-hero)}
+  .hero .grid{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s4) var(--s8);align-items:start}
+  .hero ol.dots li{padding:2px 0}
+  .verdict{font:400 clamp(32px,4.6vw,52px)/1.08 var(--display);letter-spacing:-.015em;max-width:22ch;margin:var(--s3) 0 0}
+  .verdict em{font-style:italic;color:var(--verdict)}
+  .rule{height:3px;background:var(--verdict);border:0;margin:var(--s4) 0 var(--s2);width:120px}
+  .hero figure{margin:0;min-width:0}
+  .hero figcaption{margin-top:var(--s3)}
+  @media (min-width:820px){.hero{padding:var(--s12) 0 var(--s8)}.hero .grid{grid-template-columns:minmax(0,6fr) minmax(0,8fr)}}
+
+  /* Dot plot rows: label | track | value. Hollow marks are samples under five; n is printed beside them. */
+  ol.dots{list-style:none;margin:0;padding:0}
+  ol.dots li{display:grid;grid-template-columns:minmax(0,1fr) 4.4rem;gap:0 var(--s3);align-items:start;padding:var(--s1) 0;min-width:0}
+  ol.dots li .who{display:block;font:400 13px/18px var(--body);color:var(--ink);grid-column:1 / span 2;grid-row:1;min-width:0}
+  ol.dots li .track{grid-row:2}
+  ol.dots .dot.lo{width:8px;height:8px;margin:-4px 0 0 -4px}
+  ol.dots li .who .tag{display:inline-block;font:600 11px/16px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-muted);margin-left:var(--s2);vertical-align:1px}
+  ol.dots li .who .tag.v{color:var(--verdict)}
+  ol.dots li .meta{display:inline;font:400 12px/16px var(--mono);color:var(--ink-muted);margin-left:var(--s2)}
+  ol.dots li .val{font:400 14px/20px var(--mono);font-variant-numeric:tabular-nums;text-align:right;color:var(--ink);grid-column:2;grid-row:2;min-width:0}
+  ol.dots li .track{position:relative;height:20px;grid-column:1;min-width:0}
+  ol.dots li .track::before{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:var(--line)}
+  ol.dots .band{position:absolute;top:-2px;bottom:-2px;left:0;background:var(--verdict-soft)}
+  ol.dots .stem{position:absolute;left:0;top:50%;height:1px;background:var(--line-strong)}
+  ol.dots .dot{position:absolute;top:50%;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:var(--evidence);border:2px solid var(--evidence)}
+  ol.dots .dot.hollow{background:var(--fig-bg)}
+  ol.dots .dot.v{background:var(--verdict);border-color:var(--verdict)}
+  ol.dots .dot.v.hollow{background:var(--fig-bg)}
+  ol.dots .seg{position:absolute;top:50%;height:2px;margin-top:-1px;background:var(--line-strong)}
+  ol.dots li.axis{grid-template-columns:minmax(0,1fr) 4.4rem;padding-top:var(--s2);border-top:1px solid var(--line);margin-top:var(--s1)}
+  ol.dots li.axis .track{height:18px;grid-row:1}
+  ol.dots li.axis .track::before{display:none}
+  ol.dots li.axis .tick{position:absolute;top:0;font:400 11px/16px var(--mono);color:var(--ink-muted);transform:translateX(-50%);white-space:nowrap}
+  ol.dots li.axis .tick.first{transform:none}
+  ol.dots li.axis .tick.last{transform:translateX(-100%)}
+  ol.dots li.axis .axis-name{grid-column:1 / span 2;grid-row:2;font:400 12px/16px var(--mono);color:var(--ink-muted);padding-top:var(--s1)}
+  ol.dots li.head{padding:0 0 var(--s1)}
+  ol.dots li.head .track{height:38px;grid-row:1;border-bottom:1px solid var(--line)}
+  ol.dots li.head .track::before{display:none}
+  ol.dots li.head .col{position:absolute;top:18px;font:600 11px/16px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-muted);transform:translateX(-50%);white-space:nowrap}
+  ol.dots li.head .harness{position:absolute;top:0;font:400 11px/16px var(--mono);color:var(--ink-muted);white-space:nowrap}
+  ol.dots .divider{position:absolute;left:50%;top:-4px;bottom:-4px;border-left:1px dashed var(--line-strong)}
+  @media (min-width:600px){
+    ol.dots li{grid-template-columns:minmax(0,16rem) minmax(0,1fr) 4.4rem;align-items:center}
+    ol.dots li .who{grid-column:1;grid-row:1;font-size:14px;line-height:20px}
+    ol.dots li .meta{display:block;margin-left:0}
+    ol.dots li .val{grid-column:3;grid-row:1}
+    ol.dots li .track{grid-column:2;grid-row:1}
+    ol.dots li.axis{grid-template-columns:minmax(0,16rem) minmax(0,1fr) 4.4rem}
+    ol.dots li.axis .axis-name{grid-column:1;grid-row:1;padding:0}
+    ol.dots li.axis .track{grid-column:2}
+    ol.dots li.head .track{grid-column:2}
+    ol.dots.wide li{grid-template-columns:minmax(0,20rem) minmax(0,1fr) 5.4rem}
+    ol.dots.wide li.axis{grid-template-columns:minmax(0,20rem) minmax(0,1fr) 5.4rem}
+  }
+  @media (min-width:600px){.hero ol.dots li .who{font-size:15px;line-height:22px}.hero ol.dots li{padding:var(--s1) 0}}
+  figure.fig{margin:var(--s4) 0 0;min-width:0}
+  figure.fig .claim{font:600 17px/26px var(--body);margin:0 0 var(--s3);max-width:68ch}
+  figure.fig figcaption{margin-top:var(--s3)}
+
+  /* Sections */
+  main{padding:var(--s8) 0 var(--s16)}
+  section{padding:var(--s8) 0;border-top:1px solid var(--line)}
+  section:first-of-type{border-top:0;padding-top:0}
+  .two{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s6) var(--s8)}
+  @media (min-width:820px){.two{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
+  aside.note{font:400 14px/20px var(--body);color:var(--evidence);border-left:1px solid var(--line-strong);padding:0 0 0 var(--s3);margin:var(--s3) 0 var(--s4);max-width:60ch}
+  aside.note p{margin:0 0 var(--s2);max-width:none}
+  aside.note .eyebrow{color:var(--verdict);margin-bottom:var(--s1)}
+
+  /* Evidence ledger — ruled, never boxed */
+  .scroll{overflow-x:auto;margin:var(--s3) 0 0}
+  table.ledger{border-collapse:collapse;width:100%;background:var(--surface);color:var(--ink);margin:0}
+  table.ledger caption{text-align:left;font:400 15px/22px var(--body);color:var(--ink);padding:0 0 var(--s2);caption-side:top;width:min(1072px,calc(100vw - 48px));box-sizing:border-box}
+  table.ledger th{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);text-align:left;padding:var(--s2) var(--s3);border-bottom:1px solid var(--line);vertical-align:bottom}
+  table.ledger td{padding:var(--s2) var(--s3);border-bottom:1px solid var(--line);vertical-align:top;font:400 14px/20px var(--body);min-width:6rem}
+  table.ledger th.n,table.ledger td.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap;min-width:0}
+  table.ledger tbody th{font:400 14px/20px var(--body);text-transform:none;letter-spacing:0;color:var(--ink);vertical-align:top;min-width:8rem}
+  table.ledger td.s{font:400 12px/18px var(--mono);color:var(--ink-muted)}
+  table.ledger tr.decisive td,table.ledger tr.decisive th{background:var(--verdict-soft);color:var(--ink)}
+  table.ledger tr.decisive td:first-child,table.ledger tr.decisive th:first-child{box-shadow:inset 3px 0 0 var(--verdict)}
+  table.ledger tfoot td{font-weight:600;border-top:1px solid var(--line-strong);border-bottom:0}
+  table.ledger td code{background:var(--bg)}
+  table.ledger.tight td,table.ledger.tight th{font-size:13px;line-height:18px;padding:6px var(--s2)}
+  table.ledger.tight tbody th{font-size:13px;line-height:18px;min-width:13rem}
+  table.ledger.tight thead th:first-child{min-width:13rem}
+  table.ledger.tight td{min-width:12rem}
+  table.ledger.tight td.n{min-width:0}
+  table.ledger.prose td:not(.n){min-width:22rem}
+
+  /* Annotated timeline */
+  .timeline{list-style:none;margin:var(--s4) 0 0;padding:0;position:relative;max-width:68ch}
+  .timeline li{display:grid;grid-template-columns:84px 20px minmax(0,1fr);gap:0 var(--s3);position:relative}
+  .timeline .t{font:400 13px/22px var(--mono);color:var(--ink-muted);text-align:right;padding-top:2px}
+  .timeline .spine{position:relative}
+  .timeline .spine::before{content:"";position:absolute;left:9px;top:0;bottom:0;width:1px;background:var(--line-strong)}
+  .timeline .dot{position:absolute;left:5px;top:9px;width:9px;height:9px;border-radius:50%;background:var(--bg);border:1.5px solid var(--line-strong)}
+  .timeline li.decisive .dot{background:var(--verdict);border-color:var(--verdict);width:11px;height:11px;left:4px;top:8px}
+  .timeline li.bad .dot{border-color:var(--danger);background:var(--danger-tint)}
+  .timeline li.good .dot{border-color:var(--good);background:var(--good-tint)}
+  .timeline .ev{padding:0 0 var(--s4);font-size:15px;line-height:22px}
+  .timeline .ev b{font-weight:600}
+  .timeline li.decisive .ev b{color:var(--verdict)}
+  .timeline li.gap{grid-template-columns:84px 20px minmax(0,1fr)}
+  .timeline .elapsed{grid-column:2 / span 2;font:400 12px/16px var(--mono);color:var(--ink-muted);padding:0 0 var(--s3) 32px;margin-top:-6px}
+  .timeline li.decisive .elapsed,.timeline .elapsed.v{color:var(--verdict);font-weight:600}
+  .timeline .annot{display:block;font:400 14px/20px var(--body);color:var(--evidence);border-left:1px solid var(--line-strong);padding-left:var(--s3);margin-top:var(--s2);max-width:56ch}
+  .tag{display:inline-block;font:600 11px/16px var(--mono);letter-spacing:.04em;padding:0 6px;border-radius:var(--radius-chip);border:1px solid currentColor;margin-left:var(--s2);vertical-align:1px}
+  .tag.bad{color:var(--danger)}.tag.good{color:var(--good)}
+
+  /* Small multiples */
+  .multiples{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s4);margin:var(--s3) 0 0}
+  @media (min-width:820px){.multiples{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  .multiples figure{margin:0;background:var(--surface);--fig-bg:var(--surface);border:1px solid var(--line);border-radius:var(--radius-panel);padding:var(--s3) var(--s4) var(--s4);min-width:0}
+  .multiples figcaption{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);margin:0 0 var(--s2)}
+  .multiples figure.decisive figcaption{color:var(--verdict)}
+  .multiples ol.dots li{grid-template-columns:minmax(0,1fr) 4.4rem;padding:2px 0}
+  .multiples ol.dots li .who{font-size:13px;line-height:18px}
+  .multiples ol.dots li .val{font-size:13px;line-height:18px}
+  .multiples ol.dots li .track{height:18px}
+  .multiples ol.dots .dot{width:10px;height:10px;margin:-5px 0 0 -5px}
+  @media (min-width:600px){
+    .multiples ol.dots li,.multiples ol.dots li.axis{grid-template-columns:minmax(0,12rem) minmax(0,1fr) 4.4rem}
+  }
+
+  /* Pull-quote */
+  blockquote{margin:var(--s4) 0;background:var(--surface-hero);color:var(--ink);padding:var(--s6);max-width:none}
+  blockquote p{font:italic 400 21px/30px var(--display);max-width:44ch;margin:0}
+  blockquote footer{font:400 12px/16px var(--mono);color:var(--ink-muted);margin-top:var(--s3)}
+
+  /* Ruled comparison (decision requested) */
+  .compare{display:grid;grid-template-columns:minmax(0,1fr);gap:0;margin:var(--s4) 0;border-top:1px solid var(--line-strong)}
+  .compare > div{padding:var(--s4) 0;border-bottom:1px solid var(--line);min-width:0}
+  .compare h4{margin:0 0 var(--s2)}
+  .compare .eyebrow{margin-bottom:var(--s1)}
+  .compare div.rec{box-shadow:inset 3px 0 0 var(--verdict);padding-left:var(--s4)}
+  @media (min-width:820px){.compare{grid-template-columns:repeat(2,minmax(0,1fr));gap:0 var(--s8)}.compare > div{border-bottom:1px solid var(--line)}}
+
+  /* Critique */
+  table.score{border-collapse:collapse;width:100%;margin:var(--s3) 0 0}
+  table.score th,table.score td{text-align:left;padding:var(--s2) var(--s3);border-bottom:1px solid var(--line);vertical-align:top;font-size:15px;line-height:22px}
+  table.score th{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}
+  table.score caption{text-align:left;caption-side:top;padding:0 0 var(--s2)}
+  table.score tbody th{font:400 15px/22px var(--body);text-transform:none;letter-spacing:0;color:var(--ink)}
+  table.score td.n{font:500 27px/32px var(--mono);font-variant-numeric:tabular-nums;text-align:center;width:64px}
+  table.score td.n.v{color:var(--verdict)}
+
+  footer.prov{border-top:1px solid var(--line-strong);padding:var(--s6) 0 var(--s12);font:400 14px/20px var(--body);color:var(--ink-muted)}
+  footer.prov ul{padding-left:1.2em;margin:0 0 var(--s3);max-width:none}
+  footer.prov li{margin:0 0 var(--s2);overflow-wrap:anywhere}
+  footer.prov code{font-size:12px}
+  details.data{margin-top:var(--s3)}details.data summary{font:600 14px/20px var(--body);color:var(--action);cursor:pointer}
+  details.data[open] summary{margin-bottom:var(--s2)}
+
+  @media (prefers-reduced-motion:no-preference){a,summary{transition:color var(--motion-chrome) var(--ease)}}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
   @media print{
-    body{background:#fff;color:#000}
-    header.hero{background:none;border:0}
-    .kpi,.card,figure,table,ol.opt li,.decision{break-inside:avoid;border-color:#bbb}
+    :root{--bg:#fff;--surface:#fff;--surface-hero:#fff;--line:#DAD3C7;--line-strong:#8F8371;--ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;--action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;--fig-bg:#fff}
+    body{font-size:11pt;line-height:1.4}
+    .hero{padding:12pt 0;--fig-bg:#fff}
+    .hero .grid{grid-template-columns:1fr}
     details{display:block}details>summary{display:none}details>*{display:block}
-    a::after{content:" (" attr(href) ")";font-size:11px;color:#555}
+    table,figure,blockquote,.timeline li,.compare>div{break-inside:avoid}
+    thead{display:table-header-group}
+    a[href^="http"]::after{content:" (" attr(href) ")";font-size:8pt}
+    .scroll{overflow:visible}
+    table.ledger td,table.ledger th{font-size:9pt;line-height:12pt;padding:3pt 5pt}
+    .multiples{grid-template-columns:repeat(2,1fr)}
+    ol.dots .band{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   }
 </style>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
+
 <header class="hero">
   <div class="wrap">
-    <div class="eyebrow">Cassy factory · decision brief · 2026-09-06</div>
-    <h1>Model lane rubric: routed by reputation, not by measurement</h1>
-    <p class="verdict">In the one window with hard numbers, the lane that carried the work is absent from the risk-bearing lane, the model with the only recorded stall is being promoted into it, and both judgment lanes now fall back silently to the model they replaced. <strong>Three numbers would fix that, and one already ships in 3.17.2.</strong></p>
-    <div class="meta">Evidence window 2026-09-05 16:20Z → 2026-09-06 00:10Z (cas-80b6 rescue; releases 3.17.1 and 3.17.2). Author: supervisor session golden-panda-80. Registry at epic 736bb1fe plus directive cas-255e.</div>
-    <div class="kpis" aria-label="Key numbers">
-      <div class="kpi ok"><div class="n">19</div><div class="l">deliveries merged from the standard lane (Luna / xhigh)</div></div>
-      <div class="kpi warn"><div class="n">5</div><div class="l">send-backs on those 19 (26%)</div></div>
-      <div class="kpi bad"><div class="n">1 / 1</div><div class="l">heavy-lane (Sol / high) deliveries sent back</div></div>
-      <div class="kpi bad"><div class="n">9 h</div><div class="l">supervisor actionable-idle on 2026-09-05 (attributed to Astra)</div></div>
-      <div class="kpi info"><div class="n">0</div><div class="l">deliveries from Astra, Haiku, or Fable as workers in the window</div></div>
+    <p class="eyebrow">Decision brief · Operator · 2026-09-06</p>
+    <div class="grid">
+      <div>
+        <h1 class="verdict">Heavy goes to Astra at high, placed <em>by hand</em>; every other lane keeps its model, and no lane runs at medium.</h1>
+        <hr class="rule">
+        <p class="src">$ per delivery at 2026-09-06 list · send-back rate · host rollouts and transcripts 2026-08-20 → 2026-09-06 (B, B.2)</p>
+      </div>
+      <figure aria-labelledby="hero-claim">
+        <p class="caption" id="hero-claim" style="margin:0 0 var(--s2)">Every placement sits inside the band; the two medium runs on record sit far outside it. Hollow = under five deliveries.</p>
+        <ol class="dots hero-dots">
+          <li><span class="who">Luna / xhigh<span class="tag">standard</span><span class="meta">$0.49 · n=212</span></span><span class="track"><span class="band" style="width:11.43%"></span><span class="stem" style="width:8.57%"></span><span class="dot" style="left:8.57%"></span></span><span class="val">12%</span></li>
+          <li><span class="who">Haiku 4.5 / low<span class="tag">light</span><span class="meta">$1.46 · n=22 · B.2</span></span><span class="track"><span class="band" style="width:11.43%"></span><span class="dot" style="left:0%"></span></span><span class="val">0%</span></li>
+          <li><span class="who">Terra / high<span class="tag">suspended</span><span class="meta">$2.28 · n=42</span></span><span class="track"><span class="band" style="width:11.43%"></span><span class="stem" style="width:1.43%"></span><span class="dot" style="left:1.43%"></span></span><span class="val">2%</span></li>
+          <li><span class="who">Sol / high<span class="tag">heavy fallback</span><span class="meta">$6.81 · n=51</span></span><span class="track"><span class="band" style="width:11.43%"></span><span class="stem" style="width:11.43%"></span><span class="dot" style="left:11.43%"></span></span><span class="val">16%</span></li>
+          <li><span class="who">Astra / high<span class="tag v">heavy · by hand</span><span class="meta">$12.54 · n=2</span></span><span class="track"><span class="band" style="width:11.43%"></span><span class="dot v hollow" style="left:0%"></span></span><span class="val">0%</span></li>
+          <li><span class="who">Astra / medium<span class="tag">refused</span><span class="meta">$12.68 · n=1</span></span><span class="track"><span class="band" style="width:11.43%"></span><span class="stem" style="width:71.43%"></span><span class="dot hollow" style="left:71.43%"></span></span><span class="val">100%</span></li>
+          <li><span class="who">Opus 5 / high<span class="tag">taste fallback</span><span class="meta">$25.47 · n=52</span></span><span class="track"><span class="band" style="width:11.43%"></span><span class="stem" style="width:2.86%"></span><span class="dot" style="left:2.86%"></span></span><span class="val">4%</span></li>
+          <li><span class="who">Fable 5.1 / medium<span class="tag">refused</span><span class="meta">$103.02 · n=3 · B.2</span></span><span class="track"><span class="band" style="width:11.43%"></span><span class="stem" style="width:95%"></span><span class="dot hollow" style="left:95%"></span></span><span class="val">133%</span></li>
+          <li><span class="who">Fable 5.1 / high<span class="tag">taste</span><span class="meta">$130.00 · n=2 · B.2</span></span><span class="track"><span class="band" style="width:11.43%"></span><span class="dot hollow" style="left:0%"></span></span><span class="val">0%</span></li>
+          <li class="axis"><span class="axis-name">send-back rate →</span><span class="track"><span class="tick first" style="left:0">0%</span><span class="tick" style="left:35.71%">50%</span><span class="tick" style="left:71.43%">100%</span><span class="tick last" style="left:100%">140%</span></span></li>
+        </ol>
+        <figcaption class="caption">Rows sorted by cost per delivery at list, cheapest first; $ and n are printed beside each row, B.2 marks the all-project basis. B counts one <code>request_changes</code> decision per task in cas-src; B.2 counts every mention in notes across all projects, so its rate can exceed 100%. The full tables sit under Part B and B.2 below.</figcaption>
+      </figure>
     </div>
   </div>
 </header>
 
-<main class="wrap">
+<main id="main">
+  <div class="wrap">
 
-<section id="rubric">
-  <h2>The rubric as directed</h2>
-  <p>Effective once task cas-255e lands. Source: <code>crates/cas-factory/policy/lane-registry.toml</code> at epic 736bb1fe, amended by the 2026-09-06 00:10Z directive.</p>
-  <table>
-    <thead><tr><th>Lane</th><th>Primary</th><th>Effort</th><th>Fallback</th><th>Intended use</th><th>Evidence in window</th></tr></thead>
-    <tbody>
-      <tr><td>light</td><td>Claude Haiku 4.5</td><td>low</td><td>Codex Luna / xhigh</td><td>mechanical chores</td><td><span class="tag warn">unused</span></td></tr>
-      <tr><td>standard</td><td>Codex GPT-5.6 Luna</td><td>xhigh</td><td>Claude Opus 5 / high</td><td>ordinary implementation</td><td><span class="tag ok">19 merged · 5 send-backs</span></td></tr>
-      <tr><td>taste</td><td>Claude Fable 5.1</td><td>medium</td><td>Claude Opus 5 / high</td><td>public surfaces, prompts, docs, judgment</td><td><span class="tag info">supervisor only</span></td></tr>
-      <tr><td>supervisor</td><td>Claude Fable 5.1</td><td>medium</td><td>Claude Opus 5 / high</td><td>factory coordinator</td><td><span class="tag ok">this session · 0 stalls</span></td></tr>
-      <tr><td>heavy</td><td>Codex GPT-6 Astra</td><td>high</td><td>Codex GPT-5.6 Sol / high</td><td>implementation with safety risk</td><td><span class="tag bad">Astra: 0 deliveries, 1 stall · Sol: 1 / 1 sent back</span></td></tr>
-    </tbody>
-  </table>
-  <p class="meta">Explicit-only recipes: Sol (former heavy), Terra (suspended 2026-08-27), Qwen 3.8 Max via OpenCode (receipt-gated).</p>
-</section>
 
-<section id="evidence">
-  <h2>What the evidence window shows</h2>
-  <div class="grid2">
-    <figure aria-labelledby="fig1cap">
-      <svg viewBox="0 0 520 230" width="100%" role="img" aria-describedby="fig1desc">
-        <desc id="fig1desc">Deliveries and send-backs per lane. Standard: 19 deliveries, 5 send-backs. Heavy: 1 delivery, 1 send-back. Taste, light, Astra: 0.</desc>
-        <g font-family="system-ui,sans-serif" font-size="12" fill="currentColor">
-          <line x1="120" y1="20" x2="120" y2="200" stroke="#5b6478" stroke-width="1"/>
-          <!-- standard -->
-          <text x="110" y="52" text-anchor="end">standard (Luna)</text>
-          <rect x="122" y="38" width="380" height="14" rx="4" fill="#5fd39a"/>
-          <rect x="122" y="54" width="100" height="10" rx="4" fill="#f5c04a"/>
-          <text x="508" y="50" text-anchor="end" fill="#0b1020" font-weight="700">19</text>
-          <text x="226" y="63" fill="currentColor">5 send-backs</text>
-          <!-- heavy -->
-          <text x="110" y="100" text-anchor="end">heavy (Sol)</text>
-          <rect x="122" y="86" width="20" height="14" rx="4" fill="#5fd39a"/>
-          <rect x="122" y="102" width="20" height="10" rx="4" fill="#f5c04a"/>
-          <text x="148" y="98">1 delivery</text>
-          <text x="148" y="111">1 send-back</text>
-          <!-- astra -->
-          <text x="110" y="142" text-anchor="end">Astra (any lane)</text>
-          <rect x="122" y="128" width="2" height="14" fill="#5fd39a"/>
-          <text x="130" y="140" fill="#ff6b7a">0 deliveries · 1 supervisor stall (9 h)</text>
-          <!-- light -->
-          <text x="110" y="176" text-anchor="end">light (Haiku)</text>
-          <rect x="122" y="162" width="2" height="14" fill="#5fd39a"/>
-          <text x="130" y="174">0 — never spawned</text>
-          <!-- legend -->
-          <rect x="122" y="208" width="12" height="10" fill="#5fd39a"/><text x="138" y="217">merged deliveries</text>
-          <rect x="260" y="208" width="12" height="10" fill="#f5c04a"/><text x="276" y="217">send-backs before merge</text>
-        </g>
-      </svg>
-      <figcaption id="fig1cap">Figure 1. Merged deliveries and send-backs per lane, 2026-09-05 16:20Z–2026-09-06 00:10Z. Source: supervisor review and merge notes on epic cas-80b6. Data table below.</figcaption>
-    </figure>
-    <div>
-      <table>
-        <thead><tr><th>Lane (model / effort)</th><th class="num">Workers</th><th class="num">Deliveries</th><th class="num">Send-backs</th><th class="num">CI reds</th><th class="num">Merged</th></tr></thead>
-        <tbody>
-          <tr><td>standard (Luna / xhigh)</td><td class="num">8</td><td class="num">19</td><td class="num">5</td><td class="num">1</td><td class="num"><b>19</b></td></tr>
-          <tr><td>heavy (Sol / high)</td><td class="num">1</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num"><b>1</b>*</td></tr>
-          <tr><td>taste (Fable / medium)</td><td class="num">0†</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
-          <tr><td>light (Haiku / low)</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td></tr>
-          <tr><td>Astra (any)</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td></tr>
-        </tbody>
-      </table>
-      <p class="meta">* finished by a Luna worker after the Sol delivery deleted the supervisor skill's Operating flow section and conflicted with the epic. † Fable ran only as the supervisor (this session).</p>
-      <details><summary>Send-back detail</summary>
-        <p>Standard: cas-62ca ×2 (doctor snapshot row missed; managed-block line budget), cas-d05f ×2 (fixture escaped the checkout; then a helper-contract change that generalised the same defect), cas-1e85 ×1 (release-note "Was" wording). Heavy: cas-c674 ×1 (see note). Both merge-queue failures on 3.17.1 came from a test written by an earlier lane (cas-bfd6), not from work in this window.</p>
+    <section aria-labelledby="h-verdict" class="lede-block">
+      <h2 id="h-verdict" class="sr">Verdict</h2>
+      <p>The figure that carries this is one dot per model × effort the host has actually run, at its cost per delivery (list price, log axis) against its send-back rate. The four placements sit on the floor of the plot, one per price tier — Luna at $0.49, Haiku at $1.46, Astra at $12.54, Fable — and the only two medium runs on record, Astra/medium at 100% and Fable 5.1/medium at 133%, are the only dots above the band. Samples smaller than five deliveries are drawn hollow with their n printed: Astra/high is two deliveries, not a rate.</p>
+<p>The rubric routes by reputation, not by measurement. In the one window where we have hard numbers, the lane that carried the work (Codex Luna at xhigh, "standard") is absent from the risk-bearing lane ("heavy"), the model with the only recorded stall (Codex Astra) is being promoted into that lane, and the two judgment lanes now fall back silently to the model they replaced. Nothing in the rubric names an effort rationale, a cost ceiling, or a promotion rule. Three numbers would fix that, and one of them already ships in 3.17.2.</p>
+    </section>
+
+    <section aria-labelledby="h-placement">
+      <h2 id="h-placement">The placement</h2>
+      <p>One row per lane: the model and effort it gets, its fallback, and the measured number that puts it there. Every figure is from Part B, B.2 or C below; nothing here is re-derived.</p>
+      <div class="scroll">
+      <table class="ledger ">
+<caption>The placement: one row per lane, the model and effort it gets, its fallback, and the measured number that puts it there</caption>
+<thead><tr><th scope="col">Lane</th><th scope="col">Model / effort</th><th scope="col">Fallback</th><th scope="col">The number that places it</th><th scope="col">Sample</th></tr></thead>
+<tbody>
+<tr><th scope="row">standard</th><td>Codex GPT-5.6 Luna / xhigh</td><td>— (Luna is itself the rescue lane for heavy)</td><td>$0.49 per merged delivery and 12% send-backs in cas-src; $0.69 and 272 deliveries across nine projects, the lowest send-back rates outside cas-src</td><td>n=212 (B), 272 (B.2)</td></tr>
+<tr><th scope="row">light</th><td>Claude Haiku 4.5, with a <code>thinking_budget</code> instead of <code>low</code></td><td>Luna / xhigh for anything that touches code</td><td>22 deliveries, 0 send-backs, $1.46 per delivered task — Slack/release-note and posting chores</td><td>n=22 (B.2)</td></tr>
+<tr><th scope="row">taste</th><td>Claude Fable 5.1 / high</td><td>Claude Opus 5 / high where it has a record (gabber-studio, pulse-card), not for Woodworking-style long jobs</td><td>5 of 5 skill, design and document rewrites clean, none sent back</td><td>n=5 tasks, 2 delivered (B.2)</td></tr>
+<tr><th scope="row">supervisor</th><td>Claude Fable 5.1 / high; the registry should say <code>high</code> until a medium day is measured</td><td>fail closed plus an operator alert, never a silent model change</td><td>0 stalls in 17 sessions; $142 per live session-day against $10.5 for the 24 Luna deliveries it reviewed</td><td>17 sessions</td></tr>
+<tr class="decisive"><th scope="row">heavy</th><td>Codex GPT-6 Astra / high, placed by hand; <code>effort=high</code> pinned, medium refused</td><td>Codex GPT-5.6 Sol / high</td><td>two clean deliveries at $12.54, 27–36K output tokens, 69–78 tool calls, first push in 18–20 minutes; the only routed model with a published intelligence gain (TB 4.0 57.9 vs Sol 37.3)</td><td>n=2 (B) — a sample, not a rate</td></tr>
+<tr><th scope="row">refused</th><td>Astra / medium (the <code>~/.codex/config.toml</code> default); Fable 5.1 / medium as a lane default</td><td>—</td><td>the 352-minute supervisor stall of 2026-09-05 and 1 of 1 worker delivery sent back; Fable/medium 133% mentions on 3 delivered</td><td>n=1; n=3</td></tr>
+</tbody></table>
+      </div>
+      <details class="data" open>
+        <summary>Data behind the hero figure</summary>
+        <div class="scroll">
+        <table class="ledger ">
+<caption>Hero figure data: cost per delivery at 2026-09-06 list price and send-back rate, one row per model × effort the host has run</caption>
+<thead><tr><th scope="col">Model / effort</th><th scope="col" class="n">Cost / delivery @ list</th><th scope="col" class="n">Send-back rate</th><th scope="col" class="n">n</th><th scope="col">Basis</th><th scope="col">Placement</th></tr></thead>
+<tbody>
+<tr><th scope="row">Codex GPT-5.6 Luna / xhigh</th><td class="n">$0.49</td><td class="n">12%</td><td class="n">212</td><td>B</td><td>standard</td></tr>
+<tr><th scope="row">Claude Haiku 4.5 / low</th><td class="n">$1.46</td><td class="n">0%</td><td class="n">22</td><td>B.2</td><td>light</td></tr>
+<tr><th scope="row">Codex GPT-5.6 Terra / high</th><td class="n">$2.28</td><td class="n">2%</td><td class="n">42</td><td>B</td><td>suspended 2026-08-27</td></tr>
+<tr><th scope="row">Codex GPT-5.6 Sol / high</th><td class="n">$6.81</td><td class="n">16%</td><td class="n">51</td><td>B</td><td>heavy fallback</td></tr>
+<tr class="decisive"><th scope="row">Codex GPT-6 Astra / high</th><td class="n">$12.54</td><td class="n">0%</td><td class="n">2</td><td>B</td><td>heavy, placed by hand</td></tr>
+<tr><th scope="row">Codex GPT-6 Astra / medium</th><td class="n">$12.68</td><td class="n">100%</td><td class="n">1</td><td>B</td><td>refused</td></tr>
+<tr><th scope="row">Claude Opus 5 / high</th><td class="n">$25.47</td><td class="n">4%</td><td class="n">52</td><td>B</td><td>taste fallback</td></tr>
+<tr><th scope="row">Claude Fable 5.1 / medium (worker)</th><td class="n">$103.02</td><td class="n">133% mentions</td><td class="n">3 delivered</td><td>B.2</td><td>refused</td></tr>
+<tr><th scope="row">Claude Fable 5.1 / high (worker)</th><td>$130.00 per delivered task (3 of 5 open; $22–$52 per delivery)</td><td class="n">0%</td><td class="n">2 delivered of 5</td><td>B.2</td><td>taste</td></tr>
+</tbody></table>
+        </div>
+        <p class="src">Basis B = cas-src per-delivery extraction (send-back = one <code>request_changes</code> decision per task); basis B.2 = cas-e208 extractor, all projects (send-back = every mention in notes, so a rate can exceed 100%).</p>
       </details>
-    </div>
-  </div>
-  <h3>Release latency in the window</h3>
-  <table>
-    <thead><tr><th>Release</th><th>From</th><th>To</th><th class="num">Elapsed</th><th>Gates</th><th>Queue runs</th></tr></thead>
-    <tbody>
-      <tr><td>3.17.1</td><td>rescue start 16:20Z</td><td>published 21:17Z</td><td class="num">4 h 57 m</td><td>3</td><td>3 (2 failed on a fixture from cas-bfd6)</td></tr>
-      <tr><td>3.17.2</td><td>"cut it now" 22:06Z</td><td>published 23:23Z</td><td class="num"><b>1 h 17 m</b></td><td>1</td><td>1</td></tr>
-    </tbody>
-  </table>
-</section>
+      <p><b>Where to place Astra/high (Option A).</b> The evidence supports placing it, by hand, on tasks where the published intelligence gap matters and the run is short: safety-relevant implementation with a bounded brief (its two deliveries were 27–36K output tokens, 69–78 tool calls, first push in 18–20 minutes). It does not support Astra on anything long-context or coordinating: cached input is 86% of its cost and its only medium session is the stall. Concretely:</p>
+<ol class="list"><li><span class="idx">1.</span><span><b>Heavy = Astra/high with Sol/high as fallback, as directed; pin <code>effort=high</code> in the recipe and refuse medium for heavy.</b> Every unpinned <code>codex</code> spawn inherits <code>~/.codex/config.toml</code>'s <code>gpt-6-astra</code> / <code>medium</code>; the registry must not let heavy degrade to that.</span></li>
+<li><span class="idx">2.</span><span><b>Measure the first five Astra/high heavy deliveries against Sol/high pairs</b> (same brief, both lanes) on send-backs, output tokens, tool calls and minutes to first push from the rollouts. Two deliveries is a sample; five paired is a decision.</span></li>
+<li><span class="idx">3.</span><span><b>Luna/xhigh stays standard everywhere and is the rescue lane for heavy</b> — 272 deliveries across nine projects at $0.69, the lowest send-back rates outside cas-src, and it finished cas-c674 after Sol.</span></li>
+<li><span class="idx">4.</span><span><b>Light = Haiku 4.5 for Slack/release-note and posting chores</b> — 22 deliveries, 0 send-backs, $1.46 — and give the recipe a <code>thinking_budget</code> instead of <code>low</code>. Route anything that touches code to Luna.</span></li>
+<li><span class="idx">5.</span><span><b>Taste = Fable 5.1/high for skill, design and document rewrites</b> (5 of 5 clean); keep Opus 5/high as the taste fallback where it has a record (gabber-studio, pulse-card), not for Woodworking-style long jobs. Supervisor stays Fable 5.1 and the registry should say <code>high</code> until a medium day is measured.</span></li>
+<li><span class="idx">6.</span><span><b>Fix attribution before the next scorecard</b>: 56% of horizon sessions have no model because the spawn row lacks <code>worker_spec</code>; the extractor should read the rollout's <code>turn_context</code> for those, and it should count shell tool calls and read all six harness homes in one run.</span></li></ol>
+<p>What the data cannot answer: Astra/high vs Sol/high on identical tasks (item 2); Fable medium vs high on identical work (one medium worker session, zero medium supervisor sessions); whether Sol's 93% in gabber-studio and the Astra night's 19% are the reviewer or the tasks; and whether Opus 5's 179K-token deliveries are thoroughness or verbosity — the send-back rate says the former in gabber-studio and the latter in Woodworking.</p>
+    </section>
 
-<section id="models">
-  <h2>Model intelligence, cost and efficiency</h2>
-  <p>Added 2026-09-06 (task cas-3372, worker vivid-kestrel-88). Part A is what vendors and third parties publish per model and effort; Part B is what this host measured per delivery over the whole retained horizon 2026-08-20 → 2026-09-06, cas-src only, across all three Codex and three Claude homes (rows in <code>2026-09-06-model-lane-history.csv</code>); Part C is the synthesis. All external figures retrieved 2026-09-06. <span class="tag">V</span> vendor-published · <span class="tag">3P</span> third party (Artificial Analysis, Epoch, goml.io, vellum.ai, jessemoraga.com). "unknown" = not found at the URLs checked, never zero.</p>
+    <section aria-labelledby="h-rubric">
+      <h2 id="h-rubric">The rubric as directed</h2>
+      <p>As of 2026-09-06 00:10Z, task cas-255e in flight. Each lane is drawn as its primary (filled) joined to its fallback (hollow); a segment that crosses the dashed line is a fallback into the other harness — different hooks, skill mirror, and account mid-epic.</p>
+      <figure class="fig">
+        <p class="claim">Three of five lanes fall back across the harness line, and both judgment lanes fall back to the model they replaced.</p>
+        <ol class="dots wide" aria-label="Lane route map: primary and fallback recipe per lane">
+          <li class="head"><span class="who"></span><span class="track"><span class="harness" style="left:0">Claude</span><span class="harness" style="left:50%;padding-left:8px">Codex</span><span class="col" style="left:8.33%">Haiku</span><span class="col" style="left:25%">Fable</span><span class="col" style="left:41.67%">Opus</span><span class="col" style="left:58.33%">Luna</span><span class="col" style="left:75%">Sol</span><span class="col" style="left:91.67%">Astra</span></span><span class="val"></span></li>
+          <li><span class="who">light<span class="tag">crosses harness</span><span class="meta">Haiku 4.5 / low → Luna / xhigh · mechanical chores</span></span><span class="track"><span class="divider"></span><span class="seg" style="left:8.33%;width:50%"></span><span class="dot" style="left:8.33%"></span><span class="dot hollow" style="left:58.33%"></span></span><span class="val"></span></li>
+          <li><span class="who">standard<span class="tag">crosses harness</span><span class="meta">Luna / xhigh → Opus 5 / high · ordinary implementation</span></span><span class="track"><span class="divider"></span><span class="seg" style="left:41.67%;width:16.66%"></span><span class="dot" style="left:58.33%"></span><span class="dot hollow" style="left:41.67%"></span></span><span class="val"></span></li>
+          <li><span class="who">taste<span class="meta">Fable 5.1 / medium → Opus 5 / high · public surfaces, prompts, docs, judgment</span></span><span class="track"><span class="divider"></span><span class="seg" style="left:25%;width:16.67%"></span><span class="dot" style="left:25%"></span><span class="dot hollow" style="left:41.67%"></span></span><span class="val"></span></li>
+          <li><span class="who">supervisor<span class="meta">Fable 5.1 / medium → Opus 5 / high · factory coordinator</span></span><span class="track"><span class="divider"></span><span class="seg" style="left:25%;width:16.67%"></span><span class="dot" style="left:25%"></span><span class="dot hollow" style="left:41.67%"></span></span><span class="val"></span></li>
+          <li><span class="who">heavy<span class="tag v">directed</span><span class="meta">Astra / high → Sol / high · implementation with safety risk</span></span><span class="track"><span class="divider"></span><span class="seg" style="left:75%;width:16.67%"></span><span class="dot v" style="left:91.67%"></span><span class="dot hollow" style="left:75%"></span></span><span class="val"></span></li>
+        </ol>
+        <figcaption class="caption">Filled = primary recipe, hollow = fallback. Source: <code>crates/cas-factory/policy/lane-registry.toml</code> at epic tip 736bb1fe plus the cas-255e directive.</figcaption>
+      </figure>
+      <div class="scroll">
+      <table class="ledger ">
+<caption>The rubric as directed at 2026-09-06 00:10Z, task cas-255e in flight</caption>
+<thead><tr><th scope="col">Lane</th><th scope="col">Primary</th><th scope="col">Effort</th><th scope="col">Fallback</th><th scope="col">Intended use</th></tr></thead>
+<tbody>
+<tr><th scope="row">light</th><td>Claude Haiku 4.5</td><td>low</td><td>Codex Luna / xhigh</td><td>mechanical chores</td></tr>
+<tr><th scope="row">standard</th><td>Codex GPT-5.6 Luna</td><td>xhigh</td><td>Claude Opus 5 / high</td><td>ordinary implementation</td></tr>
+<tr><th scope="row">taste</th><td>Claude Fable 5.1</td><td>medium</td><td>Claude Opus 5 / high</td><td>public surfaces, prompts, docs, judgment</td></tr>
+<tr><th scope="row">supervisor</th><td>Claude Fable 5.1</td><td>medium</td><td>Claude Opus 5 / high</td><td>factory coordinator</td></tr>
+<tr><th scope="row">heavy</th><td>Codex GPT-6 Astra</td><td>high</td><td>Codex GPT-5.6 Sol / high</td><td>implementation with safety risk</td></tr>
+</tbody></table>
+      </div>
+      <p>Explicit-only recipes: Codex Sol (former heavy), Codex Terra (suspended 2026-08-27), Qwen 3.8 Max via OpenCode (receipt-gated). Source: <code>crates/cas-factory/policy/lane-registry.toml</code> at epic tip 736bb1fe plus the cas-255e directive.</p>
+    </section>
 
-  <h3>A · Effort vocabulary by provider</h3>
-  <table>
-    <thead><tr><th>Provider / model</th><th>Exposed levels</th><th>Default</th><th>Our minimal</th><th>Our xhigh</th><th>Source</th></tr></thead>
-    <tbody>
-      <tr><td>OpenAI GPT-5.6 Luna / Sol / Terra</td><td>none, low, medium, high, xhigh, max (+ reasoning.mode standard/pro; Codex adds <code>ultra</code> on Sol)</td><td>medium</td><td>none (closest: <code>none</code>)</td><td>xhigh</td><td><a href="https://developers.openai.com/api/docs/guides/reasoning">reasoning guide</a>, <a href="https://github.com/openai/codex/issues/33233">codex#33233</a></td></tr>
-      <tr><td>OpenAI GPT-6 Astra</td><td>low, medium, high, xhigh, max</td><td>medium</td><td>none</td><td>xhigh</td><td><a href="https://developers.openai.com/api/docs/models/gpt-6-astra">model page</a></td></tr>
-      <tr><td>Anthropic Fable 5.1 / Opus 5 / Sonnet 5</td><td>low, medium, high, xhigh, max (<code>output_config.effort</code>; Claude Code <code>--effort</code>)</td><td><b>high</b> (Claude Code and API)</td><td>none (lowest is low)</td><td>xhigh</td><td><a href="https://docs.anthropic.com/en/docs/build-with-claude/effort">effort docs</a></td></tr>
-      <tr><td>Anthropic Haiku 4.5</td><td>no effort parameter; manual <code>thinking.budget_tokens</code></td><td>—</td><td>thinking off</td><td>128K budget</td><td><a href="https://platform.claude.com/docs/en/models/haiku-4-5/overview">model page</a></td></tr>
-      <tr><td>xAI Grok 4.5</td><td>low, medium, high (reasoning cannot be disabled)</td><td>high</td><td>none</td><td>none</td><td><a href="https://docs.x.ai/developers/model-capabilities/text/reasoning">reasoning docs</a></td></tr>
-      <tr><td>Alibaba Qwen 3.8 Max</td><td><code>enable_thinking</code> + numeric <code>thinking_budget</code> ≤ 262,144</td><td>thinking on</td><td>thinking off</td><td>budget = max</td><td><a href="https://docs.modelstudio.console.alibabacloud.com/en/model-studio/deep-thinking">deep-thinking docs</a></td></tr>
-    </tbody>
-  </table>
-  <p class="meta">Codex's <code>model_context_window</code> 258,400 on this host is the Codex 272K profile minus headroom; the API window for every GPT-5.6 model and Astra is 1,050,000 and Codex can be raised to 872,000 (<a href="https://github.com/openai/codex/issues/39144">codex#39144</a>).</p>
+    <section aria-labelledby="h-window">
+      <h2 id="h-window">What the evidence window shows</h2>
+      <p>Deliveries reviewed by the supervisor between 16:20Z and 00:10Z, by the lane that produced them. "Send-back" means a review rejection or CI red that required a corrective commit before merge.</p>
+      <div class="scroll">
+      <table class="ledger ">
+<caption>Deliveries reviewed by the supervisor between 16:20Z and 00:10Z, by the lane that produced them</caption>
+<thead><tr><th scope="col">Lane (model / effort)</th><th scope="col">Workers</th><th scope="col">Deliveries</th><th scope="col">Send-backs</th><th scope="col">CI reds</th><th scope="col">Merged</th></tr></thead>
+<tbody>
+<tr class="decisive"><th scope="row">standard (Luna / xhigh)</th><td class="n">8</td><td class="n">19</td><td class="n">5</td><td class="n">1</td><td class="n">19</td></tr>
+<tr><th scope="row">heavy (Sol / high)</th><td class="n">1</td><td class="n">1</td><td class="n">1</td><td class="n">0</td><td class="n">1 (after continuation on Luna)</td></tr>
+<tr><th scope="row">taste (Fable / medium)</th><td>0 as worker; 1 as supervisor</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><th scope="row">light (Haiku / low)</th><td class="n">0</td><td class="n">0</td><td class="n">0</td><td class="n">0</td><td class="n">0</td></tr>
+<tr><th scope="row">Astra (any)</th><td>0 as worker</td><td class="n">0</td><td class="n">0</td><td class="n">0</td><td class="n">0</td></tr>
+</tbody></table>
+      </div>
+      <p>Send-back detail (standard): cas-62ca ×2 (doctor snapshot row missed; managed-block line budget), cas-d05f ×2 (fixture escaped the checkout; then a helper contract change that generalised the same defect), cas-1e85 ×1 (release-note "Was" wording). Send-back detail (heavy): cas-c674 deleted the supervisor skill's Operating flow section and conflicted with the epic; a Luna worker finished it.</p>
+<p>Supervisor stall on record: the previous supervisor held finished workers with green proofs from about 06:00Z to 15:10Z on 2026-09-05 (nine hours of actionable idle) — the operator attributes this behaviour to Astra. Source: cas-20a3 note 15:10Z; operator statement 17:27Z.</p>
+<p>Release latency in the same window: 3.17.1 from rescue start to published 4 h 57 min, including two merge-queue failures caused by a test from an earlier lane; 3.17.2 from "cut it now" to published 77 min with one gate and one queue run.</p>
+    </section>
 
-  <h3>A · Price, context and headline scores per model</h3>
-  <p>USD per 1M tokens, Standard tier (OpenAI ≤272K prompt). No vendor publishes τ²-bench / BFCL / ToolBench for any of these models; the only published tool-use signals are Qwen's Toolathlon and AA's τ³-Banking. Per-effort rows exist only where someone published them.</p>
-  <table>
-    <thead><tr><th>Model (role)</th><th class="num">In / cached / out</th><th class="num">Context</th><th>Effort row</th><th>Coding</th><th>Tool calling</th><th>Long-horizon</th><th>Token efficiency</th><th>Source</th></tr></thead>
-    <tbody>
-      <tr><td rowspan="2"><b>GPT-5.6 Luna</b> (standard)</td><td class="num" rowspan="2">$0.20 / $0.02 / $1.20</td><td class="num" rowspan="2">1.05M / 128K</td><td>max <span class="tag">3P</span></td><td>SWE-Bench Pro 62.7% · TB 2.1 84.7% · DeepSWE 67.2%</td><td>unknown</td><td>OSWorld 2.0 45.6% · BrowseComp 83.3%</td><td>AA II 51 at $0.21/task; 130M output tokens for the index</td><td><a href="https://www.goml.io/blog/gpt-5-6-benchmarks">goml</a>, <a href="https://artificialanalysis.ai/articles/gpt-5-6-has-landed">AA</a>, <a href="https://artificialanalysis.ai/models/gpt-5-6-luna">AA model</a></td></tr>
-      <tr><td>xhigh (ours)</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td><a href="https://openai.com/index/gpt-5-6/">openai.com</a> (no per-effort text)</td></tr>
-      <tr><td rowspan="3"><b>GPT-5.6 Sol</b> (heavy)</td><td class="num" rowspan="3">$4 / $0.40 / $20 (promo to 2026-11-21)</td><td class="num" rowspan="3">1.05M / 128K</td><td>max <span class="tag">V</span>/<span class="tag">3P</span></td><td>AA CAI 80 (V) · TB 2.1 88.8% (91.9% ultra) · SWE-Bench Pro 64.6% · TB 4.0 37.3% (V)</td><td>unknown</td><td>OSWorld 2.0 62.6% · BrowseComp 92.2% (V)</td><td>AA II 59 at $1.04/task, ~15K output tokens/task</td><td><a href="https://openai.com/index/gpt-5-6/">openai.com</a>, <a href="https://openai.com/index/gpt-6-astra/">Astra post</a>, <a href="https://artificialanalysis.ai/articles/gpt-5-6-has-landed">AA</a></td></tr>
-      <tr><td>high (ours)</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>—</td></tr>
-      <tr><td>medium <span class="tag">3P</span></td><td>AA II 46</td><td>unknown</td><td>unknown</td><td>$3.08/M blended · 72 tok/s</td><td><a href="https://artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium">AA</a></td></tr>
-      <tr><td><b>GPT-5.6 Terra</b> (suspended)</td><td class="num">$2 / $0.20 / $12</td><td class="num">1.05M / 128K</td><td>max <span class="tag">3P</span></td><td>SWE-Bench Pro 63.4% · TB 2.1 87.4%</td><td>unknown</td><td>OSWorld 2.0 50.2%</td><td>AA II 55 at $0.55/task; "a Luna or Sol effort is more intelligent at no extra cost"</td><td><a href="https://www.goml.io/blog/gpt-5-6-benchmarks">goml</a>, <a href="https://artificialanalysis.ai/articles/gpt-5-6-intelligence-vs-cost-across-sol-terra-luna">AA</a></td></tr>
-      <tr><td rowspan="3"><b>GPT-6 Astra</b> (directed heavy)</td><td class="num" rowspan="3">$10 / $1 / $50</td><td class="num" rowspan="3">1.05M / 128K</td><td>unstated <span class="tag">V</span></td><td>TB 4.0 57.9% (Sol 37.3, Fable 5.1 55.8) · DeepSWE 74.1% · AA CAI 67.0</td><td>unknown</td><td>TB-Science 64.6% · ExploitBench 100%</td><td>"~9% and 63% lower cost per task" than Sol / Fable 5.1 on TB 4.0</td><td><a href="https://openai.com/index/gpt-6-astra/">openai.com</a></td></tr>
-      <tr><td>max <span class="tag">3P</span></td><td>AA II 61 (= Sol max); Epoch ECI 169 rank 1</td><td>unknown</td><td>unknown</td><td>~10% fewer tokens than Sol max but 75% more $/task; ~1/3 Sol's and ~1/5 Opus 5's tokens on CAI</td><td><a href="https://artificialanalysis.ai/articles/benchmarking-gpt-6-astra">AA</a>, <a href="https://epoch.ai/models/gpt-6-astra">Epoch</a></td></tr>
-      <tr><td>high (ours) / medium</td><td>unknown / AA II 52</td><td>unknown</td><td>unknown</td><td>medium: 61 tok/s, TTFT 9.65 s</td><td><a href="https://artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium">AA</a></td></tr>
-      <tr><td rowspan="4"><b>Claude Fable 5.1</b> (taste, supervisor)</td><td class="num" rowspan="4">$10 / $0.25 read · $20 write-1h / $50</td><td class="num" rowspan="4">1M / 128K</td><td>unstated <span class="tag">V</span></td><td>TB 4.0 55.8% · CursorBench 73.4%</td><td>"+9 pts over Fable 5 on τ³-Banking" (AA, no absolute)</td><td>OSWorld 2.0 77.9% / 41.7% strict · TB-Science 52.6%</td><td>"25% less than Fable 5, up to ~45% agentic" (cache-read cut)</td><td><a href="https://www.anthropic.com/claude-fable-and-mythos-5-1">anthropic.com</a></td></tr>
-      <tr><td>max / xhigh <span class="tag">3P</span></td><td>AA II 66 ($3.76/task, 143.7M tokens) / 65 ($2.72)</td><td>unknown</td><td>TB 2.1 91.4% · HLE 59.1%</td><td>five levels span <b>11×</b> output tokens</td><td><a href="https://artificialanalysis.ai/articles/claude-fable-5-1">AA</a></td></tr>
-      <tr><td>high (what runs)</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>—</td></tr>
-      <tr><td>medium (registry) / low</td><td>V prose: "at Low or Medium … similar to or better than Fable 5 at a much lower cost" / AA II 58</td><td>unknown</td><td>unknown</td><td>low: 13.1M tokens on the index</td><td><a href="https://www.anthropic.com/claude-fable-and-mythos-5-1">anthropic.com</a>, <a href="https://artificialanalysis.ai/articles/claude-fable-5-1">AA</a></td></tr>
-      <tr><td rowspan="2"><b>Claude Opus 5</b> (fallback)</td><td class="num" rowspan="2">$5 / $0.50 read · $10 write-1h / $25</td><td class="num" rowspan="2">1M / 128K</td><td>unstated <span class="tag">V</span>/<span class="tag">3P</span></td><td>TB 4.0 52.3% · CursorBench 70.0% (V) · SWE-bench Verified 96.0, Pro 79.2 (3P card reading)</td><td>unknown</td><td>OSWorld 2.0 75.4% / 39.6%</td><td>"26% fewer tokens than Opus 4.8 at max" (customer quote)</td><td><a href="https://www.anthropic.com/news/claude-opus-5">anthropic.com</a>, <a href="https://jessemoraga.com/2026/07/25/claude-opus-5-benchmarks/">3P</a></td></tr>
-      <tr><td>max / xhigh / high (ours)</td><td>AA II 61 ($2.03/task at launch) / AA CAI joint first / unknown</td><td>unknown</td><td>TB 2.1 89%</td><td>output tokens span ~8× low→max</td><td><a href="https://artificialanalysis.ai/articles/opus-5">AA</a></td></tr>
-      <tr><td><b>Claude Haiku 4.5</b> (light)</td><td class="num">$1 / $0.10 read · $2 write-1h / $5</td><td class="num">200K / 64K</td><td>no effort; thinking budget <span class="tag">V</span></td><td>SWE-bench Verified 73.3% (128K budget) · TB Terminus-2 40.2% no-think, 41.8% 32K</td><td>τ²-bench reported, value in an image (unknown)</td><td>OSWorld-Verified: method published, value unknown</td><td>AA II 22 at $0.20/task</td><td><a href="https://www.anthropic.com/news/claude-haiku-4-5">anthropic.com</a>, <a href="https://artificialanalysis.ai/models/claude-4-5-haiku-reasoning">AA</a></td></tr>
-      <tr><td><b>Claude Sonnet 5</b> (reference)</td><td class="num">$2 / $0.20 / $10</td><td class="num">1M / 128K</td><td>unstated <span class="tag">3P</span></td><td>SWE-bench Verified 85.2 · TB 2.1 80.4</td><td>unknown</td><td>unknown</td><td>medium "comparable to Sonnet 4.6 at high"</td><td><a href="https://docs.anthropic.com/en/docs/build-with-claude/effort">docs</a></td></tr>
-      <tr><td><b>Grok 4.5</b> (Grok default)</td><td class="num">$2 / $0.30 / $6</td><td class="num">500K</td><td>high (default) <span class="tag">V</span>/<span class="tag">3P</span></td><td>DeepSWE 1.0 62.0% (AA-run); SWE-Bench Pro / TB 2.1 in model-card PDF, not extracted</td><td>τ³-Banking in model card, unknown</td><td>SWE-Marathon listed, unknown</td><td>15,954 output tokens per SWE-Bench Pro task vs Opus 4.8 67,020 (V); AA 64M tokens/index, $0.31/task, CAI 76 at $2.49/task</td><td><a href="https://x.ai/news/grok-4-5">x.ai</a>, <a href="https://artificialanalysis.ai/models/grok-4-5">AA</a></td></tr>
-      <tr><td><b>Qwen 3.8 Max</b> (OpenCode, gated)</td><td class="num">$2 / $0.25 / $6</td><td class="num">1M / 131K</td><td>thinking on <span class="tag">V</span>/<span class="tag">3P</span></td><td>SWE-bench Pro 67.7 · TB 2.1 86.6</td><td>Toolathlon 72.5 (V) · AA τ³-Banking 51.3%</td><td>OSWorld-Verified 86.1</td><td>AA II 47 but 150M tokens/index ("very verbose"); OpenCode dropped enable_thinking on the wire (1.18.25)</td><td><a href="https://go.tabbit.ai/model/qwen3-8-max/reviews/qwen-official-release-notes-and-complete-performance-results">mirror</a>, <a href="https://artificialanalysis.ai/models/qwen3-8-max">AA</a>, <a href="https://github.com/anomalyco/opencode/issues/46647">opencode#46647</a></td></tr>
-    </tbody>
-  </table>
+    <section aria-labelledby="h-fails">
+      <h2 id="h-fails">Where the rubric fails</h2>
+      <ol class="list"><li><span class="idx">1.</span><span><b>Heavy is routed on reputation against the data.</b> Astra has zero worker deliveries in the window and one recorded coordination stall. Sol has one delivery and one send-back. Luna has nineteen merged deliveries and is not in heavy at all.</span></li>
+<li><span class="idx">2.</span><span><b>Silent fallback to the replaced default.</b> Opus 5/high was the built-in supervisor default until 2026-09-05 22:00Z. It is now the automatic backup for both judgment lanes. A bad auth hour changes the coordinator's behaviour with nobody deciding it. cas-255e adds a loud receipt; loud is not approved.</span></li>
+<li><span class="idx">3.</span><span><b>Effort has no stated rationale.</b> Luna xhigh only; Fable medium; Astra medium by recipe but high in heavy; Sol high; Haiku low. A reader cannot tell cost decisions from quality decisions.</span></li>
+<li><span class="idx">4.</span><span><b>Nothing is measured.</b> Every routing change this week (Astra→Fable taste, Fable supervisor, Opus fallbacks, Astra heavy) came from anecdote. The actionable-idle metric that shipped in 3.17.2 is the first number the rubric has ever had.</span></li>
+<li><span class="idx">5.</span><span><b>The light lane is decorative.</b> Zero uses in the window. Every mechanical chore went to Luna because Haiku is not trusted with builtin marker tests.</span></li>
+<li><span class="idx">6.</span><span><b>Cross-harness fallback inside a lane.</b> Standard falls back from Codex to Claude: different hooks, skill mirror, and account mid-epic.</span></li>
+<li><span class="idx">7.</span><span><b>Fallback edges are declared but disabled.</b> Until cas-255e lands, taste and supervisor carry a fallback that never fires; the comment says "fail closed". A registry that documents one policy and executes another is a review hazard.</span></li></ol>
+    </section>
 
-  <h3>B · What this host measured, 2026-08-20 → 2026-09-06 (cas-src, all Codex and Claude homes)</h3>
-  <div class="grid2">
-    <figure aria-labelledby="fig2cap">
-      <svg viewBox="0 0 520 250" width="100%" role="img" aria-describedby="fig2desc">
-        <desc id="fig2desc">Cost per merged delivery at 2026-09-06 list price, log-scaled bars: Luna xhigh $0.49 (n=212), Terra high $2.28 (n=42), Sol high $6.81 (n=51), Astra high $12.54 (n=2), Opus 5 high $25.47 (n=52).</desc>
-        <g font-family="system-ui,sans-serif" font-size="12" fill="currentColor">
-          <line x1="130" y1="16" x2="130" y2="196" stroke="#5b6478" stroke-width="1"/>
-          <!-- bar width = 100 * log10(cost * 10): 0.49→69, 2.28→136, 6.81→183, 12.54→210, 25.47→241 -->
-          <text x="122" y="38" text-anchor="end">Luna / xhigh · n=212</text>
-          <rect x="132" y="26" width="69" height="16" rx="4" fill="#5fd39a"/><text x="206" y="38" font-weight="700">$0.49</text>
-          <text x="122" y="74" text-anchor="end">Terra / high · n=42</text>
-          <rect x="132" y="62" width="136" height="16" rx="4" fill="#8fd3ff"/><text x="273" y="74" font-weight="700">$2.28</text>
-          <text x="122" y="110" text-anchor="end">Sol / high · n=51</text>
-          <rect x="132" y="98" width="183" height="16" rx="4" fill="#f5c04a"/><text x="320" y="110" font-weight="700">$6.81</text>
-          <text x="122" y="146" text-anchor="end">Astra / high · n=2</text>
-          <rect x="132" y="134" width="210" height="16" rx="4" fill="#f5c04a" fill-opacity="0.55" stroke="#ff6b7a"/><text x="347" y="146" font-weight="700">$12.54 (n=2)</text>
-          <text x="122" y="182" text-anchor="end">Opus 5 / high · n=52</text>
-          <rect x="132" y="170" width="241" height="16" rx="4" fill="#ff6b7a"/><text x="378" y="182" font-weight="700">$25.47</text>
-          <text x="132" y="215" fill="#9aa5bb">log scale · measured from rollouts and transcripts · outlined bar = sample of two</text>
-          <text x="132" y="232" fill="#9aa5bb">shadow price: every harness runs on a subscription</text>
-        </g>
-      </svg>
-      <figcaption id="fig2cap">Figure 2. Cost per merged delivery per lane at 2026-09-06 Standard list prices (Claude cache writes at the 1-hour rate — every cache write in the transcripts). Source: per-turn token counts in the three Codex homes and per-message usage in the three Claude homes, joined to task notes; rows in <code>2026-09-06-model-lane-history.csv</code>. Data table at right.</figcaption>
-    </figure>
-    <div>
-      <table>
-        <thead><tr><th>Lane as run</th><th class="num">Deliveries</th><th class="num">Send-backs</th><th class="num">Urgent stops</th><th class="num">Output tok / delivery</th><th class="num">Tool calls / delivery</th><th class="num">Median min to first push</th><th class="num">Cost / delivery</th></tr></thead>
+
+    <section aria-labelledby="h-model">
+      <h2 id="h-model">Model intelligence, cost and efficiency</h2>
+      <p>Added 2026-09-06 by worker vivid-kestrel-88 (task cas-3372) at the operator's request: "it is a dance between token efficiency, token cost, and intelligence, and even tool calling". Three parts: what the vendors and third parties publish per model and effort (A), what this host's own sessions measured per delivery over the whole retained horizon 2026-08-20 → 2026-09-06 (B, full table in <code>2026-09-06-model-lane-history.md</code> + <code>.csv</code>; cas-src only, all three Codex homes and all three Claude homes on the host), and the synthesis (C). Every external number carries its URL; all were retrieved 2026-09-06. "V" = vendor-published, "3P" = third party (Artificial Analysis = AA, Epoch, goml.io, vellum.ai, jessemoraga.com). Unknown means not found at the URLs checked, not zero.</p>
+
+      <h3 id="h-B">B. What this host measured</h3>
+      <p>Method and definitions are in <code>2026-09-06-model-lane-history.md</code>; rows in the <code>.csv</code>. Sources: Codex rollouts in all three Codex homes (<code>~/.codex</code>, <code>~/.codex-support@gabber.studio</code>, <code>~/.codex-pippenz@gmail.com</code>; per-turn token counts and every tool call), Claude transcripts in all three Claude homes (per-message usage), <code>cas.db</code> task notes (<code>request_changes</code> decisions), <code>spawn_queue.worker_spec</code>, and factory-session logs (urgent stops). Cost is a shadow price at 2026-09-06 list; both harnesses actually run on subscriptions.</p>
+      <div class="scroll">
+      <table class="ledger tight">
+<caption>What this host measured per delivery, cas-src, 2026-08-20 → 2026-09-06, all three Codex homes and all three Claude homes</caption>
+<thead><tr><th scope="col">Lane as run (model / effort)</th><th scope="col" class="n">Deliveries</th><th scope="col" class="n">Workers</th><th scope="col" class="n">Send-backs</th><th scope="col" class="n">Send-back rate</th><th scope="col" class="n">Urgent stops</th><th scope="col" class="n">Uncached in / delivery</th><th scope="col" class="n">Cached in / delivery</th><th scope="col" class="n">Output / delivery</th><th scope="col" class="n">Tool calls / delivery</th><th scope="col" class="n">Median min to first push</th><th scope="col" class="n">Cost / merged delivery @ list</th></tr></thead>
+<tbody>
+<tr><th scope="row">standard: Luna / xhigh</th><td class="n">212</td><td class="n">133</td><td class="n">26</td><td class="n">12%</td><td class="n">25</td><td class="n">401,318</td><td class="n">17,757,010</td><td class="n">46,395</td><td class="n">139</td><td class="n">17.0</td><td class="n"><b>$0.49</b></td></tr>
+<tr><th scope="row">heavy: Sol / high</th><td class="n">51</td><td class="n">23</td><td class="n">8</td><td class="n">16%</td><td class="n">20</td><td class="n">254,657</td><td class="n">12,649,266</td><td class="n">36,353</td><td class="n">103</td><td class="n">12.1</td><td class="n"><b>$6.81</b></td></tr>
+<tr class="decisive"><th scope="row">heavy as directed: Astra / high</th><td class="n">2</td><td class="n">1</td><td class="n">0</td><td class="n">0%</td><td class="n">0</td><td class="n">172,321</td><td class="n">9,160,512</td><td class="n">33,220</td><td class="n">74</td><td class="n">19.1</td><td class="n"><b>$12.54</b></td></tr>
+<tr><th scope="row">Astra / medium</th><td class="n">1</td><td class="n">1</td><td class="n">1</td><td class="n">100%</td><td class="n">1</td><td class="n">147,945</td><td class="n">9,859,456</td><td class="n">26,733</td><td class="n">95</td><td class="n">11.8</td><td class="n"><b>$12.68</b></td></tr>
+<tr><th scope="row">former standard: Terra / high (08-20 only)</th><td class="n">42</td><td class="n">34</td><td class="n">1</td><td class="n">2%</td><td class="n">0</td><td class="n">199,407</td><td class="n">8,134,254</td><td class="n">21,041</td><td class="n">69</td><td class="n">6.2</td><td class="n"><b>$2.28</b></td></tr>
+<tr><th scope="row">former taste / fallback: Opus 5 / high</th><td class="n">52</td><td class="n">26</td><td class="n">2</td><td class="n">4%</td><td class="n">13</td><td class="n">283</td><td class="n">40,020,008</td><td class="n">93,633</td><td class="n">73</td><td class="n">16.4</td><td class="n"><b>$25.47</b></td></tr>
+<tr><th scope="row">subset 09-05 16:20Z→ (Fable-supervised): Luna / xhigh</th><td class="n">24</td><td class="n">13</td><td class="n">3</td><td class="n">12%</td><td class="n">2</td><td class="n">360,590</td><td class="n">15,875,541</td><td class="n">39,639</td><td class="n">122</td><td class="n">18.9</td><td class="n">$0.44</td></tr>
+<tr><th scope="row">subset 09-05 16:20Z→: Sol / high</th><td class="n">1</td><td class="n">1</td><td class="n">1</td><td class="n">100%</td><td class="n">0</td><td class="n">472,340</td><td class="n">33,266,432</td><td class="n">59,648</td><td class="n">224</td><td class="n">51.3</td><td class="n">$16.39</td></tr>
+<tr><th scope="row">subset 09-04 22:22Z→09-05 16:20Z (Astra-supervised): Sol / high</th><td class="n">36</td><td class="n">11</td><td class="n">7</td><td class="n">19%</td><td class="n">18</td><td class="n">226,459</td><td class="n">12,003,428</td><td class="n">37,631</td><td class="n">101</td><td class="n">13.9</td><td class="n">$6.46</td></tr>
+<tr><th scope="row">light: Haiku / low; taste: Fable as worker</th><td class="n">0</td><td class="n">0</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td></tr>
+</tbody></table>
+      </div>
+      <p class="src">Cost is a shadow price at 2026-09-06 list; both harnesses actually run on subscriptions. Rows in <code>2026-09-06-model-lane-history.csv</code>; method in the <code>.md</code> beside it.</p>
+
+      <p style="margin-top:var(--s6)">Two findings the first pass missed because it read only one Codex home and one Claude home:</p>
+      <figure class="fig">
+        <p class="claim">A supervisor at the Codex default effort held finished workers for 352 minutes; the live Fable supervisor has held none in 17 sessions.</p>
+        <ol class="timeline">
+          <li><span class="t">09-04 22:22Z</span><span class="spine"><span class="dot"></span></span><span class="ev"><b>Supervisor session starts</b> — agent loyal-crane-48, factory log <code>cas-src-daring-badger-54</code>, rollout in <code>~/.codex-support@gabber.studio</code>; Sol/high.</span></li>
+          <li class="gap"><span class="elapsed">+17 min</span></li>
+          <li><span class="t">22:39Z</span><span class="spine"><span class="dot"></span></span><span class="ev"><b>Switches to Astra/high.</b></span></li>
+          <li class="gap"><span class="elapsed">+2 h 15 min</span></li>
+          <li><span class="t">09-05 00:54Z</span><span class="spine"><span class="dot"></span></span><span class="ev"><b>Drops to Astra/medium</b> — the <code>~/.codex/config.toml</code> default; every unpinned <code>codex</code> spawn inherits it.</span></li>
+          <li class="gap"><span class="elapsed">+5 h 02 min</span></li>
+          <li class="decisive"><span class="t">~05:56Z</span><span class="spine"><span class="dot"></span></span><span class="ev"><b>Last event before the gap</b> — finished workers with green proofs are held from about 06:00Z.
+            <span class="annot">The rollout has no events between 05:56Z and 11:48Z. The night costs $315.31 at Astra list (86% of it cached input at $1/M; 1,345 tool calls; 197K output) — 2.2× the live Fable supervisor day.</span></span></li>
+          <li class="gap"><span class="elapsed v">+352 min — nothing happens</span></li>
+          <li class="bad"><span class="t">11:48Z</span><span class="spine"><span class="dot"></span></span><span class="ev"><b>Next event in the rollout</b><span class="tag bad">stall</span></span></li>
+          <li class="gap"><span class="elapsed">+1 h 28 min</span></li>
+          <li><span class="t">13:16Z</span><span class="spine"><span class="dot"></span></span><span class="ev"><b>Continuation session</b> (13:16–16:16Z) — Astra/high then medium, with 34- and 65-minute gaps before the operator stepped in.</span></li>
+          <li class="gap"><span class="elapsed">+1 h 54 min</span></li>
+          <li class="bad"><span class="t">15:10Z</span><span class="spine"><span class="dot"></span></span><span class="ev"><b>Operator steps in</b><span class="tag bad">9 h idle</span> — cas-20a3 note 15:10Z: nine hours of actionable idle; the operator attributes it to Astra (statement 17:27Z).</span></li>
+          <li class="gap"><span class="elapsed">+1 h 10 min</span></li>
+          <li class="good"><span class="t">16:20Z</span><span class="spine"><span class="dot"></span></span><span class="ev"><b>Live Fable 5.1 / high supervisor takes over</b><span class="tag good">0 stalls</span> — none in 17 Claude supervisor sessions since 2026-08-20; $142 per session-day at list.</span></li>
+        </ol>
+        <figcaption class="caption">Times UTC. Source: rollout <code>rollout-2026-09-04T18-22-16-01a06e83…</code> (<code>turn_context</code> model/effort; timestamp gap 05:56Z→11:48Z) and its continuation <code>rollout-2026-09-05T09-16-26-01a071b6…</code>; cas-20a3 note 15:10Z; operator message 2026-09-05 17:27Z.</figcaption>
+      </figure>
+      <p><b>The 2026-09-05 stall was Codex GPT-6 Astra at medium.</b> The supervisor that held finished workers from ~05:56Z to 15:10Z (agent loyal-crane-48, cas-20a3 note 15:10Z) is rollout <code>~/.codex-support@gabber.studio/sessions/2026/09/04/rollout-2026-09-04T18-22-16-01a06e83…</code>: Sol/high for 17 minutes, Astra/high from 22:39Z, Astra/medium from 00:54Z (the <code>~/.codex/config.toml</code> default). The rollout has no events between 05:56Z and 11:48Z (352 minutes), and its continuation session (13:16–16:16Z, Astra/high then medium) has 34- and 65-minute gaps before the operator stepped in. The night cost $315.31 at Astra list (86% of it cached input at $1/M; 1,345 tool calls; 197K output) — 2.2× the live Fable supervisor day. The deliveries it reviewed carry the horizon's worst outcomes: Sol 7 send-backs and 18 urgent stops on 36 deliveries (19%), Luna 3 of 4 sent back, 11 urgent stops on one Opus worker. Whether that is the reviewer or the tasks, the rows cannot say; Sol's whole-horizon 16% send-back rate is mostly that night (P2 Sol: 0 send-backs on 10).</p>
+
+      <p><b>Every supervisor session ran Fable at effort=high, never medium.</b> All 17 Claude supervisor sessions since 2026-08-20 (three homes, Fable 5 then Fable 5.1) carry <code>effort: high</code> on every record; the registry's <code>supervisor</code> and <code>taste</code> lanes say <code>medium</code> and 3.17.2 shipped that default. Claude Code defaults to high and the spawn path never sets <code>effortLevel</code>, so the lane default in 3.17.2 differs from what produced every result in this brief. The transcripts cannot price the difference — no medium session exists; AA's ladder puts Fable 5.1 low→max at 11× output tokens. The live supervisor day costs $142 at list (50% 1-hour cache writes at $20/M, 39% cache reads, 11% output) against $10.5 for the 24 Luna deliveries it reviewed.</p>
+<p>Astra as a worker: three deliveries on the Astra night (fair-swan-9 high ×2, 0 send-backs; fierce-dragon-53 medium ×1, 1 send-back) at $12.5 each — 74–95 tool calls and 27–36K output tokens per delivery, in Sol's range, at 1.9× Sol's list cost per delivery. A sample, not a rate.</p>
+    </section>
+
+
+    <section aria-labelledby="h-B2">
+      <h2 id="h-B2">B.2 Every project, 2026-08-20 → 2026-09-06</h2>
+      <p>Source: <code>scripts/factory-model-history.py</code> (task cas-e208) run three times — once per Codex/Claude home pair, because it accepts one root of each — and unioned by <code>scripts/factory-model-history-union.py</code> into <code>docs/factory/data/factory-model-history-2026-09-06-allhomes-horizon.csv</code> (1,498 session×task rows in the horizon) and <code>…-scorecard-2026-09-06-allhomes-horizon.csv</code>. Prices come from <code>docs/factory/data/model-prices.json</code>, filled from PART A; the extractor's <code>apply_costs</code> was corrected to bill Codex cached tokens once (Codex reports <code>cached_input_tokens</code> as a subset of <code>input_tokens</code>).</p>
+<p><b>Extractor definitions differ from B above, and the columns say so.</b> Unit = one worker × one task from the project database (<code>spawn_queue</code> + leases), joined to a transcript by worker name; a session working two tasks appears twice with the same tokens, so cost per delivered task divides each session's cost once. Send-backs = every <code>request_changes</code> / <code>changes requested</code> mention in the task's notes (worker progress notes quoting the decision count too, so rates can exceed 100%). Tool calls = Codex <code>function_call</code> (MCP) only — shell <code>custom_tool_call</code>s are not counted, which is why the medians are ~4× lower than in B. Minutes to first push = factory-log "pushed" marker, present for a minority of rows. Urgent stops = note text, not log events (hence 0). <b>Miss rate</b> = sessions with no transcript tokens; the 837 DB-only rows (56% of the horizon) carry no model at all because the spawn row has no <code>worker_spec</code> — they are shown, not dropped.</p>
+      <div class="scroll">
+      <table class="ledger tight">
+<caption>Every project, 2026-08-20 → 2026-09-06, cas-e208 extractor, all six harness homes; unit = one worker × one task</caption>
+<thead><tr><th scope="col">Model / effort (all projects)</th><th scope="col" class="n">Sessions</th><th scope="col" class="n">With tokens</th><th scope="col" class="n">Miss rate</th><th scope="col" class="n">Tasks delivered</th><th scope="col" class="n">Send-back mentions</th><th scope="col" class="n">Rate</th><th scope="col" class="n">Median min to first push</th><th scope="col" class="n">Median output / delivered task</th><th scope="col" class="n">Median MCP calls</th><th scope="col" class="n">Cost / delivered task @ list</th></tr></thead>
+<tbody>
+<tr><th scope="row">gpt-5.6-luna / xhigh</th><td class="n">349</td><td class="n">332</td><td class="n">5%</td><td class="n">272</td><td class="n">78</td><td class="n">29%</td><td class="n">25.6</td><td class="n">54,109</td><td class="n">32</td><td class="n"><b>$0.69</b></td></tr>
+<tr><th scope="row">gpt-5.6-terra / high</th><td class="n">68</td><td class="n">66</td><td class="n">3%</td><td class="n">44</td><td class="n">14</td><td class="n">32%</td><td class="n">11.9</td><td class="n">23,520</td><td class="n">22</td><td class="n"><b>$3.53</b></td></tr>
+<tr><th scope="row">gpt-5.6-sol / high</th><td class="n">66</td><td class="n">63</td><td class="n">5%</td><td class="n">57</td><td class="n">38</td><td class="n">67%</td><td class="n">18.3</td><td class="n">33,102</td><td class="n">28</td><td class="n"><b>$7.10</b></td></tr>
+<tr class="decisive"><th scope="row">gpt-6-astra / high</th><td class="n">1</td><td class="n">1</td><td class="n">0%</td><td class="n">1</td><td class="n">0</td><td class="n">0%</td><td class="n">—</td><td class="n">30,577</td><td class="n">28</td><td class="n">$12.27 (see B for the 3-delivery sample)</td></tr>
+<tr><th scope="row">claude-haiku-4-5 / low</th><td class="n">22</td><td class="n">15</td><td class="n">32%</td><td class="n">22</td><td class="n">0</td><td class="n">0%</td><td class="n">19.6</td><td class="n">36,302</td><td class="n">32</td><td class="n"><b>$1.46</b></td></tr>
+<tr><th scope="row">claude-opus-5 / high</th><td class="n">118</td><td class="n">86</td><td class="n">27%</td><td class="n">111</td><td class="n">25</td><td class="n">23%</td><td class="n">66.2</td><td class="n">178,640</td><td class="n">171</td><td class="n"><b>$43.93</b></td></tr>
+<tr><th scope="row">claude-fable-5-1 / high (worker)</th><td class="n">6</td><td class="n">5</td><td class="n">17%</td><td class="n">2</td><td class="n">0</td><td class="n">0%</td><td class="n">20.6</td><td class="n">214,691</td><td class="n">74</td><td class="n">$130.00</td></tr>
+<tr><th scope="row">claude-fable-5-1 / medium (worker)</th><td class="n">4</td><td class="n">4</td><td class="n">0%</td><td class="n">3</td><td class="n">4</td><td class="n">133%</td><td class="n">57.7</td><td class="n">691,080</td><td class="n">288</td><td class="n">$103.02</td></tr>
+<tr><th scope="row">claude-fable-5 / high</th><td class="n">14</td><td class="n">14</td><td class="n">0%</td><td class="n">7</td><td class="n">11</td><td class="n">157%</td><td class="n">35.4</td><td class="n">5,456</td><td class="n">9</td><td class="n">unpriced</td></tr>
+<tr><th scope="row">(no model — DB row without worker_spec)</th><td class="n">837</td><td class="n">0</td><td class="n">100%</td><td class="n">703</td><td class="n">120</td><td class="n">17%</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td></tr>
+</tbody></table>
+      </div>
+
+      <figure class="fig">
+        <p class="claim">Across nine projects Luna delivers at $0.69 with the second-lowest send-back rate of any model that has run more than once; every Claude worker row costs 20–190× more per delivered task.</p>
+        <div class="multiples">
+          <figure class="decisive">
+            <figcaption>Cost / delivered task, $ at list · log scale</figcaption>
+            <ol class="dots">
+              <li><span class="who">Luna / xhigh</span><span class="track"><span class="stem" style="width:5.6%"></span><span class="dot" style="left:5.6%"></span></span><span class="val">$0.69</span></li>
+              <li><span class="who">Haiku / low</span><span class="track"><span class="stem" style="width:18.8%"></span><span class="dot" style="left:18.8%"></span></span><span class="val">$1.46</span></li>
+              <li><span class="who">Terra / high</span><span class="track"><span class="stem" style="width:34.3%"></span><span class="dot" style="left:34.3%"></span></span><span class="val">$3.53</span></li>
+              <li><span class="who">Sol / high</span><span class="track"><span class="stem" style="width:46.5%"></span><span class="dot" style="left:46.5%"></span></span><span class="val">$7.10</span></li>
+              <li><span class="who">Astra / high <span class="tag">n=1</span></span><span class="track"><span class="stem" style="width:56.1%"></span><span class="dot v hollow" style="left:56.1%"></span></span><span class="val">$12.27</span></li>
+              <li><span class="who">Opus 5 / high</span><span class="track"><span class="stem" style="width:78.5%"></span><span class="dot" style="left:78.5%"></span></span><span class="val">$43.93</span></li>
+              <li><span class="who">Fable 5.1 / medium <span class="tag">n=3</span></span><span class="track"><span class="stem" style="width:93.4%"></span><span class="dot hollow" style="left:93.4%"></span></span><span class="val">$103.02</span></li>
+              <li><span class="who">Fable 5.1 / high <span class="tag">n=2</span></span><span class="track"><span class="stem" style="width:97.5%"></span><span class="dot hollow" style="left:97.5%"></span></span><span class="val">$130.00</span></li>
+              <li><span class="who">Fable 5 / high</span><span class="track"></span><span class="val">unpriced</span></li>
+              <li class="axis"><span class="axis-name">$ / task</span><span class="track"><span class="tick first" style="left:0">0.5</span><span class="tick" style="left:40.4%">5</span><span class="tick" style="left:80.8%">50</span><span class="tick last" style="left:100%">150</span></span></li>
+            </ol>
+          </figure>
+          <figure>
+            <figcaption>Send-back mentions / delivered task</figcaption>
+            <ol class="dots">
+              <li><span class="who">Luna / xhigh</span><span class="track"><span class="stem" style="width:18.1%"></span><span class="dot" style="left:18.1%"></span></span><span class="val">29%</span></li>
+              <li><span class="who">Haiku / low</span><span class="track"><span class="dot" style="left:0"></span></span><span class="val">0%</span></li>
+              <li><span class="who">Terra / high</span><span class="track"><span class="stem" style="width:20%"></span><span class="dot" style="left:20%"></span></span><span class="val">32%</span></li>
+              <li><span class="who">Sol / high</span><span class="track"><span class="stem" style="width:41.9%"></span><span class="dot" style="left:41.9%"></span></span><span class="val">67%</span></li>
+              <li><span class="who">Astra / high <span class="tag">n=1</span></span><span class="track"><span class="dot hollow" style="left:0"></span></span><span class="val">0%</span></li>
+              <li><span class="who">Opus 5 / high</span><span class="track"><span class="stem" style="width:14.4%"></span><span class="dot" style="left:14.4%"></span></span><span class="val">23%</span></li>
+              <li><span class="who">Fable 5.1 / medium <span class="tag">n=3</span></span><span class="track"><span class="stem" style="width:83.1%"></span><span class="dot hollow" style="left:83.1%"></span></span><span class="val">133%</span></li>
+              <li><span class="who">Fable 5.1 / high <span class="tag">n=2</span></span><span class="track"><span class="dot hollow" style="left:0"></span></span><span class="val">0%</span></li>
+              <li><span class="who">Fable 5 / high</span><span class="track"><span class="stem" style="width:98.1%"></span><span class="dot" style="left:98.1%"></span></span><span class="val">157%</span></li>
+              <li class="axis"><span class="axis-name">mentions</span><span class="track"><span class="tick first" style="left:0">0%</span><span class="tick" style="left:31.25%">50%</span><span class="tick" style="left:62.5%">100%</span><span class="tick last" style="left:100%">160%</span></span></li>
+            </ol>
+          </figure>
+          <figure>
+            <figcaption>Median minutes to first push</figcaption>
+            <ol class="dots">
+              <li><span class="who">Luna / xhigh</span><span class="track"><span class="stem" style="width:36.6%"></span><span class="dot" style="left:36.6%"></span></span><span class="val">25.6</span></li>
+              <li><span class="who">Haiku / low</span><span class="track"><span class="stem" style="width:28%"></span><span class="dot" style="left:28%"></span></span><span class="val">19.6</span></li>
+              <li><span class="who">Terra / high</span><span class="track"><span class="stem" style="width:17%"></span><span class="dot" style="left:17%"></span></span><span class="val">11.9</span></li>
+              <li><span class="who">Sol / high</span><span class="track"><span class="stem" style="width:26.1%"></span><span class="dot" style="left:26.1%"></span></span><span class="val">18.3</span></li>
+              <li><span class="who">Astra / high <span class="tag">n=1</span></span><span class="track"></span><span class="val">no marker</span></li>
+              <li><span class="who">Opus 5 / high</span><span class="track"><span class="stem" style="width:94.6%"></span><span class="dot" style="left:94.6%"></span></span><span class="val">66.2</span></li>
+              <li><span class="who">Fable 5.1 / medium <span class="tag">n=3</span></span><span class="track"><span class="stem" style="width:82.4%"></span><span class="dot hollow" style="left:82.4%"></span></span><span class="val">57.7</span></li>
+              <li><span class="who">Fable 5.1 / high <span class="tag">n=2</span></span><span class="track"><span class="stem" style="width:29.4%"></span><span class="dot hollow" style="left:29.4%"></span></span><span class="val">20.6</span></li>
+              <li><span class="who">Fable 5 / high</span><span class="track"><span class="stem" style="width:50.6%"></span><span class="dot" style="left:50.6%"></span></span><span class="val">35.4</span></li>
+              <li class="axis"><span class="axis-name">minutes</span><span class="track"><span class="tick first" style="left:0">0</span><span class="tick" style="left:28.6%">20</span><span class="tick" style="left:57.1%">40</span><span class="tick last" style="left:100%">70</span></span></li>
+            </ol>
+          </figure>
+          <figure>
+            <figcaption>Median output tokens / delivered task · log scale</figcaption>
+            <ol class="dots">
+              <li><span class="who">Luna / xhigh</span><span class="track"><span class="stem" style="width:44.9%"></span><span class="dot" style="left:44.9%"></span></span><span class="val">54,109</span></li>
+              <li><span class="who">Haiku / low</span><span class="track"><span class="stem" style="width:37.4%"></span><span class="dot" style="left:37.4%"></span></span><span class="val">36,302</span></li>
+              <li><span class="who">Terra / high</span><span class="track"><span class="stem" style="width:29.2%"></span><span class="dot" style="left:29.2%"></span></span><span class="val">23,520</span></li>
+              <li><span class="who">Sol / high</span><span class="track"><span class="stem" style="width:35.7%"></span><span class="dot" style="left:35.7%"></span></span><span class="val">33,102</span></li>
+              <li><span class="who">Astra / high <span class="tag">n=1</span></span><span class="track"><span class="stem" style="width:34.2%"></span><span class="dot hollow" style="left:34.2%"></span></span><span class="val">30,577</span></li>
+              <li><span class="who">Opus 5 / high</span><span class="track"><span class="stem" style="width:67.5%"></span><span class="dot" style="left:67.5%"></span></span><span class="val">178,640</span></li>
+              <li><span class="who">Fable 5.1 / medium <span class="tag">n=3</span></span><span class="track"><span class="stem" style="width:93%"></span><span class="dot hollow" style="left:93%"></span></span><span class="val">691,080</span></li>
+              <li><span class="who">Fable 5.1 / high <span class="tag">n=2</span></span><span class="track"><span class="stem" style="width:71%"></span><span class="dot hollow" style="left:71%"></span></span><span class="val">214,691</span></li>
+              <li><span class="who">Fable 5 / high</span><span class="track"><span class="stem" style="width:1.6%"></span><span class="dot" style="left:1.6%"></span></span><span class="val">5,456</span></li>
+              <li class="axis"><span class="axis-name">tokens</span><span class="track"><span class="tick first" style="left:0">5K</span><span class="tick" style="left:43.5%">50K</span><span class="tick" style="left:86.9%">500K</span><span class="tick last" style="left:100%">1M</span></span></li>
+            </ol>
+          </figure>
+        </div>
+        <figcaption class="caption">Same nine rows in every panel, sorted by cost; hollow marks are samples under five delivered tasks. Astra has no factory-log push marker (B puts it at 19.1 min); Fable 5 is unpriced. Values are the B.2 table above. Source: <code>docs/factory/data/factory-model-scorecard-2026-09-06-allhomes-horizon.csv</code>.</figcaption>
+      </figure>
+
+      <details class="data" open>
+        <summary>Per project, 2026-08-20 → 2026-09-06</summary>
+        <div class="scroll">
+        <table class="ledger tight">
+<caption>Per project and model × effort; rows with fewer than three sessions omitted (full set in the scorecard CSV)</caption>
+<thead><tr><th scope="col">Project</th><th scope="col">Model / effort</th><th scope="col" class="n">Sessions</th><th scope="col" class="n">Miss</th><th scope="col" class="n">Delivered</th><th scope="col" class="n">Send-back mentions</th><th scope="col" class="n">Rate</th><th scope="col" class="n">Median min to push</th><th scope="col" class="n">Median output</th><th scope="col" class="n">Median MCP calls</th><th scope="col" class="n">Cost / delivered</th></tr></thead>
+<tbody>
+<tr><td>cas-src</td><td>gpt-5.6-luna / xhigh</td><td class="n">159</td><td class="n">1%</td><td class="n">124</td><td class="n">39</td><td class="n">31%</td><td class="n">25.9</td><td class="n">62,116</td><td class="n">35</td><td class="n">$0.83</td></tr>
+<tr><td>cas-src</td><td>gpt-5.6-sol / high</td><td class="n">31</td><td class="n">0%</td><td class="n">28</td><td class="n">16</td><td class="n">57%</td><td class="n">27.3</td><td class="n">31,926</td><td class="n">28</td><td class="n">$7.99</td></tr>
+<tr><td>cas-src</td><td>gpt-5.6-terra / high</td><td class="n">34</td><td class="n">0%</td><td class="n">22</td><td class="n">1</td><td class="n">5%</td><td class="n">11.9</td><td class="n">23,788</td><td class="n">20</td><td class="n">$4.42</td></tr>
+<tr><td>cas-src</td><td>claude-opus-5 / high</td><td class="n">35</td><td class="n">0%</td><td class="n">34</td><td class="n">7</td><td class="n">21%</td><td class="n">42.2</td><td class="n">213,544</td><td class="n">185</td><td class="n">$55.77</td></tr>
+<tr><td>cas-src</td><td>claude-fable-5-1 / high</td><td class="n">5</td><td class="n">0%</td><td class="n">1</td><td class="n">0</td><td class="n">0%</td><td class="n">24.0</td><td class="n">214,691</td><td class="n">74</td><td class="n">$130.00</td></tr>
+<tr><td>cas-src</td><td>claude-fable-5-1 / medium</td><td class="n">4</td><td class="n">0%</td><td class="n">3</td><td class="n">4</td><td class="n">133%</td><td class="n">57.7</td><td class="n">691,080</td><td class="n">288</td><td class="n">$103.02</td></tr>
+<tr><td>cas-src</td><td>(no model)</td><td class="n">385</td><td class="n">100%</td><td class="n">322</td><td class="n">58</td><td class="n">18%</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>gabber-studio</td><td>gpt-5.6-luna / xhigh</td><td class="n">52</td><td class="n">0%</td><td class="n">45</td><td class="n">13</td><td class="n">29%</td><td class="n">18.2</td><td class="n">36,281</td><td class="n">28</td><td class="n">$0.30</td></tr>
+<tr><td>gabber-studio</td><td>gpt-5.6-sol / high</td><td class="n">15</td><td class="n">0%</td><td class="n">15</td><td class="n">14</td><td class="n">93%</td><td class="n">—</td><td class="n">71,454</td><td class="n">48</td><td class="n">$3.85</td></tr>
+<tr><td>gabber-studio</td><td>claude-opus-5 / high</td><td class="n">57</td><td class="n">42%</td><td class="n">51</td><td class="n">10</td><td class="n">20%</td><td class="n">31.8</td><td class="n">120,261</td><td class="n">122</td><td class="n">$35.49</td></tr>
+<tr><td>gabber-studio</td><td>claude-haiku-4-5 / low</td><td class="n">16</td><td class="n">6%</td><td class="n">16</td><td class="n">0</td><td class="n">0%</td><td class="n">19.6</td><td class="n">36,302</td><td class="n">32</td><td class="n">$1.46</td></tr>
+<tr><td>gabber-studio</td><td>(no model)</td><td class="n">187</td><td class="n">100%</td><td class="n">166</td><td class="n">21</td><td class="n">13%</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>ozer</td><td>gpt-5.6-terra / high</td><td class="n">8</td><td class="n">0%</td><td class="n">4</td><td class="n">2</td><td class="n">50%</td><td class="n">10.9</td><td class="n">23,945</td><td class="n">20</td><td class="n">$2.85</td></tr>
+<tr><td>abundant-mines</td><td>gpt-5.6-luna / xhigh</td><td class="n">26</td><td class="n">0%</td><td class="n">22</td><td class="n">2</td><td class="n">9%</td><td class="n">23.5</td><td class="n">70,842</td><td class="n">42</td><td class="n">$0.93</td></tr>
+<tr><td>abundant-mines</td><td>claude-opus-5 / high</td><td class="n">4</td><td class="n">0%</td><td class="n">4</td><td class="n">1</td><td class="n">25%</td><td class="n">—</td><td class="n">46,068</td><td class="n">50</td><td class="n">$7.36</td></tr>
+<tr><td>abundant-mines</td><td>claude-haiku-4-5 / low</td><td class="n">4</td><td class="n">100%</td><td class="n">4</td><td class="n">0</td><td class="n">0%</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>abundant-mines</td><td>(no model)</td><td class="n">51</td><td class="n">100%</td><td class="n">44</td><td class="n">2</td><td class="n">5%</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>rocketship-template</td><td>any</td><td>0 in horizon (its 155 spawns predate 2026-08-20)</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>Penguinz</td><td>gpt-5.6-luna / xhigh</td><td class="n">19</td><td class="n">11%</td><td class="n">9</td><td class="n">0</td><td class="n">0%</td><td class="n">47.7</td><td class="n">52,063</td><td class="n">35</td><td class="n">$0.75</td></tr>
+<tr><td>Penguinz</td><td>gpt-5.6-terra / high</td><td class="n">20</td><td class="n">10%</td><td class="n">13</td><td class="n">3</td><td class="n">23%</td><td class="n">9.1</td><td class="n">17,946</td><td class="n">22</td><td class="n">$2.50</td></tr>
+<tr><td>Penguinz</td><td>(no model)</td><td class="n">43</td><td class="n">100%</td><td class="n">26</td><td class="n">4</td><td class="n">15%</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>Woodworking</td><td>claude-opus-5 / high</td><td class="n">10</td><td class="n">60%</td><td class="n">10</td><td class="n">6</td><td class="n">60%</td><td class="n">216.9</td><td class="n">421,602</td><td class="n">174</td><td class="n">$39.22</td></tr>
+<tr><td>Woodworking</td><td>gpt-5.6-luna / xhigh</td><td class="n">5</td><td class="n">0%</td><td class="n">3</td><td class="n">7</td><td class="n">233%</td><td class="n">27.9</td><td class="n">46,358</td><td class="n">18</td><td class="n">$0.68</td></tr>
+<tr><td>Woodworking</td><td>gpt-5.6-sol / high</td><td class="n">4</td><td class="n">0%</td><td class="n">2</td><td class="n">8</td><td class="n">400%</td><td class="n">7.1</td><td class="n">14,392</td><td class="n">10</td><td class="n">$3.36</td></tr>
+<tr><td>Woodworking</td><td>gpt-5.6-terra / high</td><td class="n">4</td><td class="n">0%</td><td class="n">4</td><td class="n">8</td><td class="n">200%</td><td class="n">20.9</td><td class="n">27,960</td><td class="n">26</td><td class="n">$2.86</td></tr>
+<tr><td>Woodworking</td><td>(no model)</td><td class="n">21</td><td class="n">100%</td><td class="n">13</td><td class="n">17</td><td class="n">131%</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>pulse-card</td><td>gpt-5.6-luna / xhigh</td><td class="n">31</td><td class="n">6%</td><td class="n">25</td><td class="n">6</td><td class="n">24%</td><td class="n">24.2</td><td class="n">48,249</td><td class="n">30</td><td class="n">$0.60</td></tr>
+<tr><td>pulse-card</td><td>claude-opus-5 / high</td><td class="n">5</td><td class="n">0%</td><td class="n">5</td><td class="n">0</td><td class="n">0%</td><td class="n">—</td><td class="n">164,259</td><td class="n">212</td><td class="n">$20.07</td></tr>
+<tr><td>pulse-card</td><td>(no model)</td><td class="n">51</td><td class="n">100%</td><td class="n">46</td><td class="n">5</td><td class="n">11%</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>petra-stella-cloud</td><td>gpt-5.6-luna / xhigh</td><td class="n">36</td><td class="n">3%</td><td class="n">30</td><td class="n">10</td><td class="n">33%</td><td class="n">30.5</td><td class="n">57,731</td><td class="n">37</td><td class="n">$0.63</td></tr>
+<tr><td>petra-stella-cloud</td><td>gpt-5.6-sol / high</td><td class="n">10</td><td class="n">20%</td><td class="n">7</td><td class="n">0</td><td class="n">0%</td><td class="n">17.8</td><td class="n">25,480</td><td class="n">26</td><td class="n">$6.13</td></tr>
+<tr><td>petra-stella-cloud</td><td>claude-opus-5 / high</td><td class="n">5</td><td class="n">0%</td><td class="n">5</td><td class="n">1</td><td class="n">20%</td><td class="n">91.6</td><td class="n">417,503</td><td class="n">234</td><td class="n">$65.91</td></tr>
+<tr><td>mecha_cassy</td><td>gpt-5.6-luna / xhigh</td><td class="n">19</td><td class="n">53%</td><td class="n">14</td><td class="n">1</td><td class="n">7%</td><td class="n">26.4</td><td class="n">71,381</td><td class="n">48</td><td class="n">$0.54</td></tr>
+</tbody></table>
+        </div>
+      </details>
+      <p>Rows with fewer than three sessions are omitted; the full set is in the scorecard CSV. Horizon totals at list (unique sessions): Opus 5 $3,470 for 111 delivered tasks; Sol $398 for 57; Luna $184 for 272; Terra $156 for 44; Fable 5.1 workers $439 for 5; Haiku $22 for 22.</p>
+<p><b>Reconciliation with B (cas-src).</b> Same sessions, different units, and the differences are all definitional:</p>
+      <div class="scroll">
+      <table class="ledger tight">
+<caption>Reconciliation of B with B.2 for cas-src: same sessions, different units</caption>
+<thead><tr><th scope="col">Metric, cas-src</th><th scope="col" class="n">B (this task's extraction)</th><th scope="col" class="n">B.2 (cas-e208 extractor)</th><th scope="col">Why</th></tr></thead>
+<tbody>
+<tr><th scope="row">Luna/xhigh deliveries</th><td class="n">212 task segments</td><td>124 delivered tasks (159 sessions)</td><td>B splits a session at each <code>task start</code> and counts continuations; B.2 counts distinct closed task ids joined by worker name, and 11 Luna sessions never matched a transcript</td></tr>
+<tr><th scope="row">Luna send-backs</th><td class="n">26 (12%)</td><td class="n">39 mentions (31%)</td><td>B counts the <code>Decision: changes requested</code> line once per task; B.2 counts every mention, including worker notes that quote it</td></tr>
+<tr><th scope="row">Sol/high send-backs</th><td class="n">8 of 51 (16%)</td><td class="n">16 of 28 (57%)</td><td>same; Sol's rows carry more quoted decisions per task</td></tr>
+<tr><th scope="row">Luna tool calls / delivery</th><td class="n">139</td><td class="n">35</td><td>B counts shell + MCP calls; B.2 counts <code>function_call</code> (MCP) only</td></tr>
+<tr><th scope="row">Luna minutes to first push</th><td class="n">17.0 median</td><td class="n">25.9 median</td><td>B: first <code>git push</code> tool call after task start; B.2: factory-log "pushed" marker per worker</td></tr>
+<tr><th scope="row">Luna cost / delivery</th><td class="n">$0.49</td><td class="n">$0.83</td><td>same token totals, divided by segments (212) vs delivered tasks (124); Luna cas-src total $104 (B) vs $128 (B.2, 159 sessions incl. 2026-08-25 sessions B filtered as <code>(none)</code>)</td></tr>
+<tr><th scope="row">Opus 5 cost / delivery</th><td class="n">$25.47</td><td class="n">$55.77</td><td>52 segments vs 34 delivered tasks; totals $1,325 vs $1,932 (B.2 includes 09-02/09-04 sessions B attributed to no task)</td></tr>
+<tr><th scope="row">Terra cost / delivery</th><td class="n">$2.28</td><td class="n">$4.42</td><td>totals agree ($95.68 vs $97.16); 42 segments vs 22 delivered tasks</td></tr>
+<tr><th scope="row">Astra deliveries</th><td class="n">3 (fair-swan-9 ×2, fierce-dragon-53)</td><td class="n">1 (fair-swan-9, cas-1939)</td><td>B.2 joins one task per spawn row; fair-swan-9's second task and fierce-dragon-53's transcript did not join</td></tr>
+<tr><th scope="row">Astra/medium supervisor stall</th><td class="n">named (B)</td><td class="n">absent</td><td>the extractor joins worktree cwds only; main-checkout supervisor sessions are outside its unit</td></tr>
+</tbody></table>
+      </div>
+      <p>Totals agree to within the sessions each side attributes; per-delivery figures differ by the denominator. Use B for per-delivery token/tool economics and stall evidence, B.2 for cross-project breadth.</p>
+    </section>
+
+
+    <section aria-labelledby="h-C">
+      <h2 id="h-C">C. Where each model shines</h2>
+      <p class="caption">Re-cut for the operator's Option A: heavy = Astra/high, placed by hand.</p>
+      <p>One row per model × effort with the five measures the operator asked for, each with its source and sample size. No single ranking: the columns disagree, and that is the finding.</p>
+      <div class="scroll">
+      <table class="ledger tight prose">
+<caption>Where each model shines: one row per model × effort, the five measures the operator asked for, each with its source and sample size</caption>
+<thead><tr><th scope="col">Model / effort</th><th scope="col" class="n">Send-back rate</th><th scope="col" class="n">Cost / delivery @ list</th><th scope="col" class="n">Minutes to first push</th><th scope="col">Stall / urgent-stop incidents</th><th scope="col" class="n">Tool calls / delivery</th><th scope="col">Where it shines</th><th scope="col">Where it does not</th></tr></thead>
+<tbody>
+<tr><th scope="row">Luna / xhigh</th><td class="n">12% (B, n=212); 29% mentions (B.2, n=272)</td><td class="n">$0.49 (B) / $0.69 (B.2)</td><td class="n">17.0 (B) / 25.6 (B.2)</td><td>25 urgent stops on 133 cas-src workers; 0 stalls</td><td>139 shell+MCP (B) / 32 MCP (B.2)</td><td><b>volume implementation in every project</b>: cheapest by 5–60×, 272 deliveries across 9 projects, 0–9% send-backs in Penguinz, abundant-mines, mecha_cassy</td><td>cas-src and petra-stella-cloud, where it carries the most send-backs in absolute terms (39, 10); slowest first push of the Codex models</td></tr>
+<tr><th scope="row">Sol / high</th><td>16% (B); 67% mentions (B.2) — 0% in cas-src P2 and petra-stella-cloud, 19% on the Astra night, 93% in gabber-studio</td><td class="n">$6.81 (B) / $7.10 (B.2)</td><td class="n">12.1 (B) / 18.3 (B.2)</td><td>20 urgent stops (18 on the Astra night)</td><td class="n">103 (B) / 28 MCP</td><td><b>fast first push and clean deliveries under a Claude supervisor</b> (0 of 10 in P2, 0 of 7 in petra-stella-cloud)</td><td>reviewed by Astra or on gabber-studio it collects more send-back mentions than any model; 14× Luna's cost</td></tr>
+<tr><th scope="row">Terra / high (suspended)</th><td class="n">2% (B, n=42); 32% mentions (B.2, n=44)</td><td class="n">$2.28 / $3.53</td><td class="n">6.2 (B) / 11.9 (B.2)</td><td class="n">0</td><td class="n">69 / 22 MCP</td><td>fastest first push on the host; cleanest cas-src record (1 send-back in 42); AA: dominated by a Luna or Sol effort on intelligence per dollar</td><td>suspended 2026-08-27 by operator decision; Woodworking and ozer rows are 200% / 50% mentions</td></tr>
+<tr class="decisive"><th scope="row"><b>Astra / high</b> (Option A heavy)</th><td class="n">0% (B, n=2)</td><td class="n">$12.54 (B) / $12.27 (B.2)</td><td class="n">19.1 (B)</td><td>0 as worker</td><td class="n">74 (B) / 28 MCP</td><td>the only routed model with a <b>published</b> intelligence gain (TB 4.0 57.9 vs Sol 37.3, AA CAI 67.0) and AA's "Pareto frontier of token efficiency"; two clean cas-src deliveries at 27–36K output tokens</td><td>n=2; 1.8× Sol and 25× Luna per delivery; its cached-input price ($1/M) makes long-context roles 4× a Fable seat</td></tr>
+<tr><th scope="row"><b>Astra / medium</b></th><td>100% (n=1 worker); as supervisor: reviewed lanes at 19–75%</td><td>$12.68 (worker) / $315 per supervisor night</td><td class="n">11.8</td><td><b>352-minute stall</b> as supervisor (09-05); 1 urgent stop as worker</td><td class="n">95 / 1,345 per night</td><td>nothing measured</td><td><b>never as a driver</b>: the only medium session on record is the stall; as the Codex default effort it is what an unpinned <code>codex</code> spawn gets</td></tr>
+<tr><th scope="row">Opus 5 / high</th><td class="n">4% (B, n=52); 23% mentions (B.2, n=111)</td><td class="n">$25.47 (B) / $43.93 (B.2)</td><td class="n">16.4 (B) / 66.2 (B.2)</td><td>13 urgent stops (11 on one worker)</td><td class="n">73 (B) / 171 MCP</td><td><b>judgment and design work in gabber-studio and pulse-card</b> (20% / 0% mentions, 122–212 MCP calls per task — it talks to Cassy, not the shell); abundant-mines 25% at $7.36</td><td>Woodworking (217 min to push, $39, 60%) and petra-stella-cloud ($65.91); 52–64× Luna per delivery; highest output tokens of any worker model (179K median)</td></tr>
+<tr><th scope="row">Fable 5.1 / high (worker)</th><td class="n">0% (n=5 taste tasks: skill rewrites, design language)</td><td>$22–$52 per delivery (B.2 rows)</td><td class="n">20.6</td><td class="n">0</td><td class="n">67–93 MCP</td><td><b>taste tasks that end in one delivery</b>: five cas-src skill/design rewrites, none sent back</td><td>$130 per <em>delivered</em> task because 3 of 5 are still open; 1-hour cache writes dominate</td></tr>
+<tr><th scope="row">Fable 5.1 / medium (worker)</th><td>2 tasks with 3 mentions (tender-panda-58: hub visual overhaul, Slack bridge fix)</td><td>$103 per delivered (one 993K-output, 462-call session)</td><td class="n">57.7</td><td class="n">0</td><td class="n">462</td><td>the one measured medium session delivered a full UI overhaul</td><td>3.3× the tokens of the median Fable/high worker; cannot be separated from the task's size</td></tr>
+<tr><th scope="row">Fable 5.1 / high (supervisor)</th><td class="n">reviewed Luna at 12%</td><td class="n">$142–$284 per session-day</td><td class="n">—</td><td>0 stalls in 17 sessions</td><td class="n">70–150 per day</td><td><b>coordination without stalls</b>, cache reads at $0.25/M</td><td>the most expensive seat after the Astra night; the registry's <code>medium</code> has never run</td></tr>
+<tr><th scope="row">Haiku 4.5 / low</th><td class="n">0% (B.2, n=22; 15 with tokens)</td><td class="n"><b>$1.46</b></td><td class="n">19.6</td><td class="n">0</td><td class="n">32 MCP</td><td><b>the light lane exists after all</b>: 15 gabber-studio Slack release-note postings at $0.51–$4.26 each, none sent back</td><td>never used outside gabber-studio + abundant-mines; <code>low</code> sets nothing on Haiku</td></tr>
+</tbody></table>
+      </div>
+      <p class="src">The banded row is the one placement the reader could disagree with. Sources per cell: B = <code>2026-09-06-model-lane-history.csv</code>; B.2 = the cas-e208 scorecard.</p>
+    </section>
+
+    <section aria-labelledby="h-A">
+      <h2 id="h-A">A. What is published</h2>
+      <figure class="fig">
+        <p class="claim">Nobody publishes a score for the effort levels we actually run: the only per-effort ladders are Artificial Analysis's, and they stop at low, medium and max.</p>
+        <ol class="dots wide" aria-label="AA Intelligence Index by model and published effort level">
+          <li><span class="who">Fable 5.1 <span class="tag">low → xhigh → max</span><span class="meta">the five levels span 11× in output tokens</span></span><span class="track"><span class="seg" style="left:76%;width:16%"></span><span class="dot lo" style="left:76%"></span><span class="dot lo" style="left:90%"></span><span class="dot" style="left:92%"></span></span><span class="val">58·65·66</span></li>
+          <li><span class="who">Opus 5 <span class="tag">max</span><span class="meta">$2.03 per task at launch; 54 at $4.21 on index v4.2</span></span><span class="track"><span class="stem" style="width:82%"></span><span class="dot" style="left:82%"></span></span><span class="val">61</span></li>
+          <li><span class="who">Astra <span class="tag">medium → max</span><span class="meta">~10% fewer output tokens than Sol max, 75% more $ per task</span></span><span class="track"><span class="seg" style="left:64%;width:18%"></span><span class="dot lo" style="left:64%"></span><span class="dot" style="left:82%"></span></span><span class="val">52·61</span></li>
+          <li><span class="who">Sol <span class="tag">medium → max</span><span class="meta">$1.04 per task at max, ~15K output tokens</span></span><span class="track"><span class="seg" style="left:52%;width:26%"></span><span class="dot lo" style="left:52%"></span><span class="dot" style="left:78%"></span></span><span class="val">46·59</span></li>
+          <li><span class="who">Terra <span class="tag">max</span><span class="meta">$0.55 per task; suspended 2026-08-27</span></span><span class="track"><span class="stem" style="width:70%"></span><span class="dot" style="left:70%"></span></span><span class="val">55</span></li>
+          <li><span class="who">Luna <span class="tag">max</span><span class="meta">$0.21 per task; 130M output tokens for the index</span></span><span class="track"><span class="stem" style="width:62%"></span><span class="dot" style="left:62%"></span></span><span class="val">51</span></li>
+          <li><span class="who">Qwen 3.8 Max <span class="tag">thinking on</span><span class="meta">150M output tokens on the index — "very verbose"</span></span><span class="track"><span class="stem" style="width:54%"></span><span class="dot" style="left:54%"></span></span><span class="val">47</span></li>
+          <li><span class="who">Haiku 4.5 <span class="tag">reasoning</span><span class="meta">$0.20 per task</span></span><span class="track"><span class="stem" style="width:4%"></span><span class="dot" style="left:4%"></span></span><span class="val">22</span></li>
+          <li class="axis"><span class="axis-name">AA Intelligence Index</span><span class="track"><span class="tick first" style="left:0">20</span><span class="tick" style="left:40%">40</span><span class="tick" style="left:80%">60</span><span class="tick last" style="left:100%">70</span></span></li>
+        </ol>
+        <figcaption class="caption">Small dot = the lower published effort level, large dot = max. Every value is in the per-model tables below with its URL; retrieved 2026-09-06. Sonnet 5 and Grok 4.5 have no AA Intelligence Index figure in this set.</figcaption>
+      </figure>
+
+      <p><b>Effort vocabulary.</b> No two providers expose the same dial, and none exposes <code>minimal</code> on the models we route. Mapping to Cassy's minimal/low/medium/high/xhigh:</p>
+      <div class="scroll">
+      <table class="ledger tight">
+<caption>Effort vocabulary by provider, mapped to Cassy's minimal / low / medium / high / xhigh</caption>
+<thead><tr><th scope="col">Provider / model</th><th scope="col">Exposed levels</th><th scope="col">Default</th><th scope="col">Our <code>minimal</code></th><th scope="col">Our <code>xhigh</code></th><th scope="col">Source</th></tr></thead>
+<tbody>
+<tr><th scope="row">OpenAI GPT-5.6 Luna / Sol / Terra (API <code>reasoning.effort</code>)</th><td>none, low, medium, high, xhigh, max (+ <code>reasoning.mode</code> standard/pro; Codex runtime adds <code>ultra</code> for Sol)</td><td>medium</td><td>no equivalent (<code>none</code> is closest)</td><td>xhigh</td><td><a href="https://developers.openai.com/api/docs/guides/reasoning">developers.openai.com/api/docs/guides/reasoning</a> ; <a href="https://github.com/openai/codex/issues/33233">github.com/openai/codex/issues/33233</a></td></tr>
+<tr><th scope="row">OpenAI GPT-6 Astra</th><td>low, medium, high, xhigh, max (no <code>none</code>)</td><td>medium</td><td>none</td><td>xhigh</td><td><a href="https://developers.openai.com/api/docs/models/gpt-6-astra">developers.openai.com/api/docs/models/gpt-6-astra</a></td></tr>
+<tr><th scope="row">Anthropic Fable 5.1 / Opus 5 / Sonnet 5 (<code>output_config.effort</code>; Claude Code <code>--effort</code>)</th><td>low, medium, high, xhigh, max</td><td>high (Claude Code and API); medium in Claude.ai/Cowork</td><td>none (lowest is low)</td><td>xhigh</td><td><a href="https://docs.anthropic.com/en/docs/build-with-claude/effort">docs.anthropic.com/en/docs/build-with-claude/effort</a> ; <a href="https://www.anthropic.com/claude-fable-and-mythos-5-1">anthropic.com/claude-fable-and-mythos-5-1</a></td></tr>
+<tr><th scope="row">Anthropic Haiku 4.5</th><td>no effort parameter; manual <code>thinking.budget_tokens</code> only</td><td>—</td><td>thinking off</td><td>128K budget</td><td><a href="https://platform.claude.com/docs/en/models/haiku-4-5/overview">platform.claude.com/docs/en/models/haiku-4-5/overview</a></td></tr>
+<tr><th scope="row">xAI Grok 4.5 (<code>reasoning_effort</code>)</th><td>low, medium, high; reasoning cannot be disabled</td><td>high</td><td>none</td><td>none (xhigh exists only on grok-4.20-multi-agent)</td><td><a href="https://docs.x.ai/developers/model-capabilities/text/reasoning">docs.x.ai/developers/model-capabilities/text/reasoning</a></td></tr>
+<tr><th scope="row">Alibaba Qwen 3.8 Max</th><td><code>enable_thinking</code> on/off + numeric <code>thinking_budget</code> (≤262,144); no named levels</td><td>thinking on</td><td>thinking off</td><td>budget = max</td><td><a href="https://docs.modelstudio.console.alibabacloud.com/en/model-studio/deep-thinking">docs.modelstudio.console.alibabacloud.com/en/model-studio/deep-thinking</a></td></tr>
+</tbody></table>
+      </div>
+      <p>Codex's <code>model_context_window</code> of 258,400 on this host is the Codex default 272K profile minus headroom, not the API window: the API window for all GPT-5.6 models and Astra is 1,050,000 and Codex can be raised to 872,000 (<a href="https://github.com/openai/codex/issues/39144,">github.com/openai/codex/issues/39144,</a> <a href="https://github.com/openai/codex/pull/39102">github.com/openai/codex/pull/39102</a>).</p>
+<p><b>Per model.</b> Prices are USD per 1M tokens, Standard tier, ≤272K prompt (OpenAI) or base (others). Benchmarks are the vendor's headline coding score, a tool-calling score where one exists, and one long-horizon agentic score. No vendor publishes τ²-bench/BFCL/ToolBench for any of these models; the closest published tool-use signals are AA's τ³-Banking and Toolathlon.</p>
+
+      <p><em>OpenAI GPT-5.6 Luna (<code>gpt-5.6-luna</code>) — standard lane, light fallback.</em> Price $0.20 in / $0.02 cached / $1.20 out (cut 80% on 2026-07-30; <a href="https://developers.openai.com/api/docs/pricing">developers.openai.com/api/docs/pricing</a>). Context 1,050,000 / 128K out.</p>
+      <div class="scroll"><table class="ledger tight">
+<thead><tr><th scope="col">Effort</th><th scope="col">Coding</th><th scope="col">Tool calling</th><th scope="col">Long-horizon</th><th scope="col">Token efficiency</th><th scope="col">Source</th></tr></thead>
+<tbody>
+<tr><th scope="row">max</th><td>SWE-Bench Pro 62.7% (3P); Terminal-Bench 2.1 84.7% (3P); DeepSWE 1.1 67.2% (3P)</td><td>unknown</td><td>OSWorld 2.0 45.6%, BrowseComp 83.3% (3P)</td><td>AA Intelligence Index 51 at $0.21/task; 130M output tokens for the whole AA index run ($213.83)</td><td><a href="https://www.goml.io/blog/gpt-5-6-benchmarks">goml.io/blog/gpt-5-6-benchmarks</a> ; <a href="https://artificialanalysis.ai/articles/gpt-5-6-has-landed">artificialanalysis.ai/articles/gpt-5-6-has-landed</a> ; <a href="https://artificialanalysis.ai/models/gpt-5-6-luna">artificialanalysis.ai/models/gpt-5-6-luna</a></td></tr>
+<tr><th scope="row">xhigh (ours)</th><td>unknown per-effort</td><td>unknown</td><td>unknown</td><td>unknown</td><td>not found at <a href="https://openai.com/index/gpt-5-6/">openai.com/index/gpt-5-6/</a> or the model page</td></tr>
+<tr><th scope="row">low / medium / high</th><td>unknown per-effort</td><td>unknown</td><td>unknown</td><td>unknown</td><td>same</td></tr>
+</tbody></table></div>
+      <p><em>OpenAI GPT-5.6 Sol (<code>gpt-5.6-sol</code>) — heavy lane today.</em> Price $4 / $0.40 / $20 (promotional "at least through 2026-11-21"; launch was $5/$30; <a href="https://developers.openai.com/api/docs/models/gpt-5.6-sol">developers.openai.com/api/docs/models/gpt-5.6-sol</a>). Context 1,050,000 / 128K.</p>
+      <div class="scroll"><table class="ledger tight">
+<thead><tr><th scope="col">Effort</th><th scope="col">Coding</th><th scope="col">Tool calling</th><th scope="col">Long-horizon</th><th scope="col">Token efficiency</th><th scope="col">Source</th></tr></thead>
+<tbody>
+<tr><th scope="row">max</th><td>AA Coding Agent Index 80 (V, "less than half the output tokens" of Fable 5); Terminal-Bench 2.1 88.8% (3P; 91.9% at <code>ultra</code>); SWE-Bench Pro 64.6% (3P); Terminal-Bench 4.0 37.3% (V)</td><td>unknown</td><td>OSWorld 2.0 62.6%, BrowseComp 92.2% (V)</td><td>AA II 59 at $1.04/task, ~15K output tokens per task (3P)</td><td><a href="https://openai.com/index/gpt-5-6/">openai.com/index/gpt-5-6/</a> ; <a href="https://openai.com/index/gpt-6-astra/">openai.com/index/gpt-6-astra/</a> ; <a href="https://artificialanalysis.ai/articles/gpt-5-6-has-landed">artificialanalysis.ai/articles/gpt-5-6-has-landed</a></td></tr>
+<tr><th scope="row">high (ours)</th><td>unknown per-effort</td><td>unknown</td><td>unknown</td><td>unknown</td><td>—</td></tr>
+<tr><th scope="row">medium</th><td>AA II 46 (3P)</td><td>unknown</td><td>unknown</td><td>blended $3.08/M, 72 tok/s</td><td><a href="https://artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium">artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium</a></td></tr>
+</tbody></table></div>
+      <p><em>OpenAI GPT-5.6 Terra (<code>gpt-5.6-terra</code>) — suspended.</em> Price $2 / $0.20 / $12. SWE-Bench Pro 63.4%, Terminal-Bench 2.1 87.4%, OSWorld 50.2% (3P, <a href="https://www.goml.io/blog/gpt-5-6-benchmarks">goml.io/blog/gpt-5-6-benchmarks</a>). AA II 55 at $0.55/task; AA's verdict: "for any Terra effort level, there is a Luna or Sol effort level that is more intelligent at no extra cost" (<a href="https://artificialanalysis.ai/articles/gpt-5-6-intelligence-vs-cost-across-sol-terra-luna">artificialanalysis.ai/articles/gpt-5-6-intelligence-vs-cost-across-sol-terra-luna</a>). No per-effort numbers published.</p>
+      <p><em>OpenAI GPT-6 Astra (<code>gpt-6-astra</code>) — directed heavy primary.</em> Price $10 / $1 / $50 (Fast mode 2×; <a href="https://developers.openai.com/api/docs/pricing">developers.openai.com/api/docs/pricing</a>). Context 1,050,000 / 128K.</p>
+      <div class="scroll"><table class="ledger tight">
+<thead><tr><th scope="col">Effort</th><th scope="col">Coding</th><th scope="col">Tool calling</th><th scope="col">Long-horizon</th><th scope="col">Token efficiency</th><th scope="col">Source</th></tr></thead>
+<tbody>
+<tr><th scope="row">unstated (vendor table)</th><td>Terminal-Bench 4.0 57.9% (Sol 37.3%, Fable 5.1 55.8%); DeepSWE 1.1 74.1%; FrontierCode 1.1 64.5%; AA CAI 67.0 (Opus 5 68.1, Fable 5 67.2)</td><td>unknown (SOTA claimed on Agents' Last Exam, no number retrieved)</td><td>Terminal-Bench Science 64.6%; ExploitBench 100%</td><td>"~9% and 63% lower estimated API cost per task" than Sol and Fable 5.1 on TB 4.0</td><td><a href="https://openai.com/index/gpt-6-astra/">openai.com/index/gpt-6-astra/</a></td></tr>
+<tr><th scope="row">max</th><td>AA II 61 (= Sol max), ~10% fewer output tokens than Sol, but 75% more expensive per task; uses ~1/3 the tokens of Sol max and ~1/5 of Opus 5 xhigh on the AA CAI</td><td>unknown</td><td>Epoch ECI 169, rank 1</td><td>"various effort levels occupy the Pareto frontier of token efficiency"</td><td><a href="https://artificialanalysis.ai/articles/benchmarking-gpt-6-astra">artificialanalysis.ai/articles/benchmarking-gpt-6-astra</a> ; <a href="https://epoch.ai/models/gpt-6-astra">epoch.ai/models/gpt-6-astra</a></td></tr>
+<tr><th scope="row">high (ours)</th><td>unknown per-effort</td><td>unknown</td><td>unknown</td><td>unknown</td><td>—</td></tr>
+<tr><th scope="row">medium</th><td>AA II 52; 61 tok/s; TTFT 9.65 s</td><td>unknown</td><td>unknown</td><td>unknown</td><td><a href="https://artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium">artificialanalysis.ai/models/comparisons/gpt-6-astra-medium-vs-gpt-5-6-sol-medium</a></td></tr>
+</tbody></table></div>
+      <p><em>Anthropic Claude Fable 5.1 (<code>claude-fable-5-1</code>) — taste and supervisor.</em> Price $10 in / $50 out; cache read $0.25 (0.025× — the one model with a deep cache-read discount); cache write $12.50 (5 min) / $20 (1 h) (<a href="https://docs.anthropic.com/en/docs/about-claude/pricing">docs.anthropic.com/en/docs/about-claude/pricing</a>). Context 1M / 128K out. Adaptive thinking; effort is the only depth control. Default effort in Claude Code is <b>high</b>.</p>
+      <div class="scroll"><table class="ledger tight">
+<thead><tr><th scope="col">Effort</th><th scope="col">Coding</th><th scope="col">Tool calling</th><th scope="col">Long-horizon</th><th scope="col">Token efficiency</th><th scope="col">Source</th></tr></thead>
+<tbody>
+<tr><th scope="row">unstated (vendor table)</th><td>Terminal-Bench 4.0 55.8%; CursorBench 73.4%</td><td>unknown (AA: "+9 points over Fable 5 on τ³-Banking", no absolute)</td><td>OSWorld 2.0 77.9% partial / 41.7% strict; Terminal-Bench-Science 52.6%</td><td>"25% less than Fable 5 for typical workloads, up to ~45% for agentic work" (cache-read cut)</td><td><a href="https://www.anthropic.com/claude-fable-and-mythos-5-1">anthropic.com/claude-fable-and-mythos-5-1</a> ; <a href="https://artificialanalysis.ai/articles/claude-fable-5-1">artificialanalysis.ai/articles/claude-fable-5-1</a></td></tr>
+<tr><th scope="row">max</th><td>AA II 66 at $3.76/task; 143.7M output tokens on the index; Terminal-Bench 2.1 91.4%</td><td>unknown</td><td>HLE 59.1%</td><td>~1.7× the output tokens of Fable 5 max</td><td><a href="https://artificialanalysis.ai/articles/claude-fable-5-1">artificialanalysis.ai/articles/claude-fable-5-1</a></td></tr>
+<tr><th scope="row">xhigh</th><td>AA II 65 at $2.72/task</td><td>unknown</td><td>unknown</td><td>—</td><td>same</td></tr>
+<tr><th scope="row">high (what actually runs)</th><td>unknown per-effort</td><td>unknown</td><td>unknown</td><td>unknown</td><td>—</td></tr>
+<tr><th scope="row">medium (registry)</th><td>vendor prose only: "at Low or Medium effort, Fable 5.1 achieves results similar to or better than Fable 5's at a much lower cost"</td><td>unknown</td><td>unknown</td><td>—</td><td><a href="https://www.anthropic.com/claude-fable-and-mythos-5-1">anthropic.com/claude-fable-and-mythos-5-1</a></td></tr>
+<tr><th scope="row">low</th><td>AA II 58; 13.1M output tokens on the index (the five levels span <b>11×</b> in output tokens)</td><td>unknown</td><td>unknown</td><td>—</td><td><a href="https://artificialanalysis.ai/articles/claude-fable-5-1">artificialanalysis.ai/articles/claude-fable-5-1</a></td></tr>
+</tbody></table></div>
+      <p><em>Anthropic Claude Opus 5 (<code>claude-opus-5</code>) — fallback for taste/supervisor/standard.</em> Price $5 / $25; cache read $0.50; cache write $6.25 / $10 (1 h). Context 1M / 128K. Thinking can be disabled only at effort ≤ high.</p>
+      <div class="scroll"><table class="ledger tight">
+<thead><tr><th scope="col">Effort</th><th scope="col">Coding</th><th scope="col">Tool calling</th><th scope="col">Long-horizon</th><th scope="col">Token efficiency</th><th scope="col">Source</th></tr></thead>
+<tbody>
+<tr><th scope="row">unstated (vendor)</th><td>Terminal-Bench 4.0 52.3%; CursorBench 70.0%; SWE-bench Verified 96.0 and SWE-bench Pro 79.2 (3P reading of the system card)</td><td>unknown</td><td>OSWorld 2.0 75.4% / 39.6%</td><td>customer quotes: "26% fewer tokens than Opus 4.8 at max"</td><td><a href="https://www.anthropic.com/claude-fable-and-mythos-5-1">anthropic.com/claude-fable-and-mythos-5-1</a> ; <a href="https://www.anthropic.com/news/claude-opus-5">anthropic.com/news/claude-opus-5</a> ; <a href="https://jessemoraga.com/2026/07/25/claude-opus-5-benchmarks/">jessemoraga.com/2026/07/25/claude-opus-5-benchmarks/</a></td></tr>
+<tr><th scope="row">max</th><td>AA II 61 at $2.03/task at launch (54 at $4.21 on index v4.2); Terminal-Bench 2.1 89%</td><td>unknown</td><td>HLE 53%</td><td>output tokens span ~8× low→max</td><td><a href="https://artificialanalysis.ai/articles/opus-5">artificialanalysis.ai/articles/opus-5</a> ; <a href="https://artificialanalysis.ai/models/claude-opus-5">artificialanalysis.ai/models/claude-opus-5</a></td></tr>
+<tr><th scope="row">xhigh</th><td>AA CAI joint first place with Claude Code</td><td>unknown</td><td>unknown</td><td>—</td><td><a href="https://artificialanalysis.ai/articles/opus-5">artificialanalysis.ai/articles/opus-5</a></td></tr>
+<tr><th scope="row">high (ours)</th><td>unknown per-effort</td><td>unknown</td><td>unknown</td><td>unknown</td><td>—</td></tr>
+<tr><th scope="row">low</th><td>"even at its lowest effort setting, Opus 5 passes more tasks than any other model" on AutomationBench (V prose)</td><td>unknown</td><td>unknown</td><td>—</td><td><a href="https://www.anthropic.com/news/claude-opus-5">anthropic.com/news/claude-opus-5</a></td></tr>
+</tbody></table></div>
+      <p><em>Anthropic Claude Haiku 4.5 (<code>claude-haiku-4-5-20251001</code>) — light lane.</em> Price $1 / $5; cache read $0.10; write $1.25 / $2. Context 200K / 64K. <b>No effort parameter</b>; the registry's <code>low</code> has no vendor meaning for this model. SWE-bench Verified 73.3% with a 128K thinking budget (V); Terminal-Bench (Terminus 2) 40.21% without thinking, 41.75% with 32K (V); τ²-bench reported but the number is in an image (unknown); AA II 22 at $0.20/task (<a href="https://www.anthropic.com/news/claude-haiku-4-5">anthropic.com/news/claude-haiku-4-5</a> ; <a href="https://artificialanalysis.ai/models/claude-4-5-haiku-reasoning">artificialanalysis.ai/models/claude-4-5-haiku-reasoning</a>).</p>
+<p><em>Anthropic Claude Sonnet 5 (reference, not routed).</em> $2 / $10, cache read $0.20; SWE-bench Verified 85.2, Terminal-Bench 2.1 80.4 (3P); effort low…max, medium "comparable to Sonnet 4.6 at high" (<a href="https://docs.anthropic.com/en/docs/about-claude/pricing">docs.anthropic.com/en/docs/about-claude/pricing</a> ; <a href="https://docs.anthropic.com/en/docs/build-with-claude/effort">docs.anthropic.com/en/docs/build-with-claude/effort</a>).</p>
+<p><em>xAI Grok 4.5 (<code>grok-4.5</code>) — Grok default.</em> Price $2 / $0.30 cached / $6 (≥200K prompt: $4 / $0.60 / $12); context 500K (<a href="https://docs.x.ai/developers/models/grok-4.5">docs.x.ai/developers/models/grok-4.5</a>). Only <code>high</code> is benchmarked: DeepSWE 1.0 62.0% (AA-run, in the vendor post); SWE-Bench Pro, Terminal-Bench 2.1 and τ³-Banking exist in the model card PDF but did not extract (unknown). Token efficiency is the vendor's headline: 15,954 output tokens per SWE-Bench Pro task vs Opus 4.8's 67,020 (<a href="https://x.ai/news/grok-4-5">x.ai/news/grok-4-5</a>); AA: 64M output tokens for the index (median model 79M), $0.31/task, AA CAI 76 at $2.49/task and 1.9M tokens/task vs Fable 5 in Claude Code 7.2M/$11.80 (<a href="https://artificialanalysis.ai/models/grok-4-5">artificialanalysis.ai/models/grok-4-5</a>). OpenCode exposed no low/medium/high variants for grok-4.5 at retrieval (<a href="https://github.com/anomalyco/opencode/issues/39448">github.com/anomalyco/opencode/issues/39448</a>).</p>
+<p><em>Alibaba Qwen 3.8 Max (<code>qwen3.8-max</code>, OpenCode) — receipt-gated.</em> Price $2 / $6, implicit cache $0.25 (international; $1.65/$4.95 in some regions; <a href="https://github.com/AlibabaCloud-Official/Qwen3.8-max">github.com/AlibabaCloud-Official/Qwen3.8-max</a> ; <a href="https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max">alibabacloud.com/help/en/model-studio/qwen3-8-max</a>). Context 1M / 131K out. Thinking-on only: SWE-bench Pro 67.7 (Claude Code harness), Terminal-Bench 2.1 86.6, Toolathlon Verified 72.5 (the one vendor tool-calling number in this set), OSWorld-Verified 86.1 (V via mirrors: <a href="https://go.tabbit.ai/model/qwen3-8-max/reviews/qwen-official-release-notes-and-complete-performance-results">go.tabbit.ai/model/qwen3-8-max/reviews/qwen-official-release-notes-and-complete-performance-results</a>); AA τ³-Banking 51.3% (2nd), AA II 47 but 150M output tokens on the index — "very verbose" (<a href="https://artificialanalysis.ai/models/qwen3-8-max">artificialanalysis.ai/models/qwen3-8-max</a>). OpenCode's built-in <code>alibaba</code> provider dropped <code>enable_thinking</code>/<code>thinking_budget</code> from the wire in 1.18.25 (<a href="https://github.com/anomalyco/opencode/issues/46647">github.com/anomalyco/opencode/issues/46647</a>), so OpenCode "effort" for this model was a no-op at retrieval.</p>
+      <p><b>What the published data cannot tell us.</b> (1) Nobody publishes per-effort scores for <code>high</code> or <code>xhigh</code> on the models we run at those levels; the only per-effort ladders are AA's (Fable 5.1 low→max: 58→66 for 11× tokens; Opus 5 ~8× tokens; Sol/Astra medium vs max). (2) Tool-calling benchmarks are absent from every vendor page except Qwen's Toolathlon and AA's τ³-Banking. (3) Astra's per-effort behaviour is a vendor chart without numbers.</p>
+    </section>
+
+
+    <section aria-labelledby="h-opt">
+      <h2 id="h-opt">Optimizations, in order of leverage</h2>
+      <ol class="list"><li><span class="idx">1.</span><span><b>Measure three numbers per lane, per week</b>, from data CAS already records: send-backs per delivery (task notes carry request_changes), actionable-idle minutes (3.17.2 metric), and assignment-to-first-push minutes (lease start vs first pushed tip). Print them in the generated route table so every reader sees the rubric and its scorecard together.</span></li>
+<li><span class="idx">2.</span><span><b>Promote by trial, not by directive.</b> Keep Sol as heavy primary; make Astra/high the heavy fallback for two weeks; promote only if its send-back rate is at or below Sol's on at least five deliveries.</span></li>
+<li><span class="idx">3.</span><span><b>Make fallbacks explicit decisions.</b> A lane fallback fires only after the supervisor is told the primary is unavailable and the receipt names both recipes. For the supervisor lane, prefer fail-closed plus an operator alert over a silent model change.</span></li>
+<li><span class="idx">4.</span><span><b>Add an effort column with a reason.</b> One sentence per lane: why this effort, what it costs relative to the lane below, and what evidence would change it.</span></li>
+<li><span class="idx">5.</span><span><b>Retire or re-scope light.</b> Either route it at Luna/xhigh for tiny chores (which is what happens today) or give Haiku a bounded class of work with its own marker tests.</span></li>
+<li><span class="idx">6.</span><span><b>Keep fallbacks inside a harness.</b> Standard should fall back to another Codex recipe or fail closed; cross-harness fallbacks belong to the operator, not the registry.</span></li>
+<li><span class="idx">7.</span><span><b>Give Luna a seat in heavy.</b> On this window's evidence it is the safest implementation lane we have; at minimum it should be the heavy fallback ahead of Sol.</span></li></ol>
+    </section>
+
+    <section aria-labelledby="h-decision">
+      <h2 id="h-decision">Decision requested</h2>
+      <p>Keep cas-255e as directed (it is implementing the rubric above), and choose one of:</p>
+      <div class="compare">
+        <div>
+          <p class="eyebrow">Option A · chosen by the operator</p>
+          <h4>Ship it as directed and start the three-number scorecard now; revisit in two weeks.</h4>
+          <p class="caption">Heavy = Astra/high with Sol/high as fallback; Part C above and the Verdict carry this option, with items 1–6 as its conditions.</p>
+        </div>
+        <div class="rec">
+          <p class="eyebrow">Option B · the author's recommendation</p>
+          <h4>Amend cas-255e so heavy stays on Sol with Astra/high as fallback, and add the scorecard.</h4>
+          <p class="caption">Promote only if Astra's send-back rate is at or below Sol's on at least five deliveries.</p>
+        </div>
+      </div>
+      <p>The author recommends B.</p>
+<p>The operator chose A; Part C above is re-cut for it, and the Verdict and The placement sections carry Option A with items 1–6 as its conditions.</p>
+    </section>
+
+    <section aria-labelledby="h-critique">
+      <h2 id="h-critique">Critique</h2>
+      <p>Scored against the cas-ui-craft rubric after rendering at 1280×800 and 390×844 in light and dark, print preview, and a JavaScript-disabled reload; <code>node scripts/visual-qa.mjs --strict</code> receipt beside this file in <code>2026-09-06-model-lane-rubric-review.visual-qa.md</code>. The public-surface floor (distinctiveness, fit, hierarchy ≥ 4; no dimension at 0) holds.</p>
+      <table class="score">
+        <caption class="caption">Rubric scores, 1–5, with the evidence that earned each</caption>
+        <thead><tr><th scope="col">Dimension</th><th scope="col">Score</th><th scope="col">Evidence</th></tr></thead>
         <tbody>
-          <tr><td>standard · Luna / xhigh</td><td class="num">212</td><td class="num">26 (12%)</td><td class="num">25</td><td class="num">46,395</td><td class="num">139</td><td class="num">17.0</td><td class="num"><b>$0.49</b></td></tr>
-          <tr><td>heavy · Sol / high</td><td class="num">51</td><td class="num">8 (16%)</td><td class="num">20</td><td class="num">36,353</td><td class="num">103</td><td class="num">12.1</td><td class="num"><b>$6.81</b></td></tr>
-          <tr><td>directed heavy · Astra / high</td><td class="num">2</td><td class="num">0</td><td class="num">0</td><td class="num">33,220</td><td class="num">74</td><td class="num">19.1</td><td class="num"><b>$12.54</b></td></tr>
-          <tr><td>Astra / medium</td><td class="num">1</td><td class="num">1</td><td class="num">1</td><td class="num">26,733</td><td class="num">95</td><td class="num">11.8</td><td class="num">$12.68</td></tr>
-          <tr><td>former standard · Terra / high</td><td class="num">42</td><td class="num">1 (2%)</td><td class="num">0</td><td class="num">21,041</td><td class="num">69</td><td class="num">6.2</td><td class="num"><b>$2.28</b></td></tr>
-          <tr><td>former taste / fallback · Opus 5 / high</td><td class="num">52</td><td class="num">2 (4%)</td><td class="num">13</td><td class="num">93,633</td><td class="num">73</td><td class="num">16.4</td><td class="num"><b>$25.47</b></td></tr>
-          <tr><td>subset 09-05 16:20Z→ (Fable-supervised) · Luna</td><td class="num">24</td><td class="num">3 (12%)</td><td class="num">2</td><td class="num">39,639</td><td class="num">122</td><td class="num">18.9</td><td class="num">$0.44</td></tr>
-          <tr><td>subset 09-05 16:20Z→ · Sol</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num">59,648</td><td class="num">224</td><td class="num">51.3</td><td class="num">$16.39</td></tr>
-          <tr><td>subset 09-04 22:22Z→09-05 16:20Z (Astra-supervised) · Sol</td><td class="num">36</td><td class="num">7 (19%)</td><td class="num">18</td><td class="num">37,631</td><td class="num">101</td><td class="num">13.9</td><td class="num">$6.46</td></tr>
-          <tr><td>light · Haiku; taste · Fable as worker</td><td class="num">0</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+          <tr><th scope="row">Distinctiveness</th><td class="n v">4</td><td>Serif verdict on sandstone with one indigo phrase; every sample under five deliveries drawn hollow with its n, in the hero and in all three figures below; the rubric drawn as a route map whose segments cross a dashed harness line. Not 5: the hollow-with-n move is quiet enough that a reader may register it only on the second figure.</td></tr>
+          <tr><th scope="row">Fit to argument</th><td class="n v">5</td><td>The hero's shape is the sentence: seven placements inside the 0–16% band, the two medium runs alone at 100% and 133%, and the one hollow indigo dot at $12.54 · n=2 is the hand placement the reader could disagree with.</td></tr>
+          <tr><th scope="row">Hierarchy</th><td class="n v">4</td><td>Eyebrow, verdict, figure, 3px rule, provenance, then everything at a step down; nothing above the verdict. At 390×844 the figure's last row ends at 823px — inside the fold, but with no room to spare, and its caption falls below it.</td></tr>
+          <tr><th scope="row">Craft</th><td class="n">4</td><td><code>visual-qa.mjs --strict</code> PASS: light and dark, 1280 and 390, 0 findings, 0 informational, 0 allowlisted. Tokens only, tabular mono numbers, ruled ledgers with the decisive row banded. Seam: the B, B.2 and C ledgers (11–12 columns) scroll inside their column even at 1280.</td></tr>
+          <tr><th scope="row">Accessibility</th><td class="n">5</td><td>Every text pair is a sanctioned token pair (minimum 5.22:1 ink-muted on surface-hero, light); no script on the page, so the JS-off text is byte-identical; print keeps every figure and expands every details; every figure is a semantic list or a real table with caption and scope, and each dot plot has a table twin; status colour marks only timeline events, each with a text tag.</td></tr>
         </tbody>
       </table>
-      <p class="meta">Send-back = a <code>request_changes</code> decision note, counted once per task (the 09-05 brief above counted CI reds and message rejections too: 5 on 19 vs 3 on 24 here). Uncached input per delivery: Luna 401K, Sol 255K, Astra 172K, Terra 199K, Opus 0.3K; cached input: Luna 17.8M, Sol 12.6M, Astra 9.2M, Terra 8.1M, Opus 40.0M.</p>
-    </div>
+      <p class="src">Scored by the authoring worker (vivid-pelican-81) on 2026-09-06; second reader: the supervisor's independent render. Floor holds.</p>
+    </section>
+
   </div>
-
-  <div class="grid2" style="margin-top:18px">
-    <div class="card"><h4>Finding · the 2026-09-05 stall was Codex GPT-6 Astra at medium</h4><p>The supervisor that held finished workers from ~05:56Z to 15:10Z (loyal-crane-48, cas-20a3 note 15:10Z) is rollout <code>~/.codex-support@gabber.studio/sessions/2026/09/04/rollout-2026-09-04T18-22-16-01a06e83…</code>: Sol/high for 17 min, Astra/high from 22:39Z, Astra/medium from 00:54Z (the <code>~/.codex/config.toml</code> default). No events between 05:56Z and 11:48Z — <b>352 minutes</b> — then 34- and 65-minute gaps in the continuation session before the operator stepped in.</p><div class="why">$315.31 at Astra list for the night (86% cached input at $1/M; 1,345 tool calls; 197K output) — 2.2× the live Fable supervisor day. Lanes it reviewed: Sol 19% send-backs and 18 urgent stops on 36 deliveries; Luna 3 of 4 sent back; 11 urgent stops on one Opus worker. Sol's P2 record under Fable supervision: 0 send-backs on 10. The first pass of this task missed it by reading one Codex home.</div></div>
-    <div class="card"><h4>Finding · every supervisor session ran Fable at high, never medium</h4><p>All 17 Claude supervisor sessions since 2026-08-20 (three homes, Fable 5 then Fable 5.1) carry <code>effort: high</code>; the registry's supervisor and taste lanes say <code>medium</code> and 3.17.2 shipped that default. Claude Code defaults to high and the spawn path never sets <code>effortLevel</code>, so the lane default in 3.17.2 differs from what produced every result in this brief.</p><div class="why">The transcripts cannot price medium vs high — no medium session exists; AA's ladder puts Fable 5.1 low→max at 11× output tokens. Live supervisor day: $142 at list (50% 1-hour cache writes at $20/M, 39% cache reads, 11% output) against $10.5 for the 24 Luna deliveries it reviewed.</div></div>
-  </div>
-
-  <h3>Supervisor sessions (all homes; full table in the history file)</h3>
-  <table>
-    <thead><tr><th>Session start</th><th>Harness / home</th><th>Model / effort</th><th class="num">Active min</th><th class="num">Cached / cache-read in</th><th class="num">Output</th><th class="num">Tool calls</th><th class="num">Cost @ list</th></tr></thead>
-    <tbody>
-      <tr><td>2026-08-20 → 09-01 (11 sessions)</td><td>claude · daniel + pippenz@gmail</td><td>Fable 5 / high</td><td class="num">4,468</td><td class="num">1.80 B</td><td class="num">2,538K</td><td class="num">1,004</td><td class="num">unknown (Fable 5 price not researched)</td></tr>
-      <tr><td>2026-08-30 17:50Z · 09-03 14:08Z</td><td>codex · pippenz@gmail</td><td>Sol / high</td><td class="num">488</td><td class="num">90.2 M</td><td class="num">154K</td><td class="num">634</td><td class="num">$48.61</td></tr>
-      <tr><td>2026-09-02 → 09-04 (5 sessions)</td><td>claude · daniel + pippenz@gmail</td><td>Fable 5.1 / high</td><td class="num">2,764</td><td class="num">1.20 B</td><td class="num">1,938K</td><td class="num">363</td><td class="num">$639.23</td></tr>
-      <tr><td><b>2026-09-04 22:22Z</b></td><td>codex · support@gabber</td><td><b>Astra / medium</b> (high until 00:54Z)</td><td class="num">891</td><td class="num">273.0 M</td><td class="num">197K</td><td class="num">1,345</td><td class="num"><b>$315.31</b></td></tr>
-      <tr><td>2026-09-05 13:16Z</td><td>codex · support@gabber</td><td>Astra / high → medium</td><td class="num">180</td><td class="num">26.0 M</td><td class="num">34K</td><td class="num">182</td><td class="num">$34.65</td></tr>
-      <tr><td>2026-09-05 16:20Z → (live)</td><td>claude · daniel</td><td>Fable 5.1 / <b>high</b></td><td class="num">1,484</td><td class="num">222.6 M</td><td class="num">322K</td><td class="num">94</td><td class="num"><b>$142.42</b></td></tr>
-    </tbody>
-  </table>
-
-  <h3>B.2 · Every project, 2026-08-20 → 2026-09-06 (cas-e208 extractor, all six harness homes)</h3>
-  <p>Source: <code>scripts/factory-model-history.py</code> run once per Codex/Claude home pair and unioned by <code>scripts/factory-model-history-union.py</code> into <code>docs/factory/data/factory-model-history-2026-09-06-allhomes-horizon.csv</code> (1,498 session×task rows) and its scorecard CSV; prices from <code>docs/factory/data/model-prices.json</code> (PART A), with the extractor's cost formula corrected to bill Codex cached tokens once. Definitions differ from B: unit = worker × task from the project DB joined to a transcript by worker name; send-backs = every <code>request_changes</code> / "changes requested" mention in notes (can exceed 100%); tool calls = Codex <code>function_call</code> (MCP) only; first push = factory-log marker; urgent stops = note text. 837 of 1,498 horizon rows (56%) carry no model because the spawn row has no <code>worker_spec</code> — shown, not dropped.</p>
-  <figure aria-labelledby="fig3cap">
-    <div class="grid2" style="gap:12px">
-      <svg viewBox="0 0 260 94" width="100%" role="img" aria-label="Cost / delivered task ($, log scale)">
-        <g font-family="system-ui,sans-serif" font-size="9" fill="currentColor">
-          <text x="4" y="11" font-weight="700" font-size="10">Cost / delivered task ($, log scale)</text>
-          <text x="52" y="32" text-anchor="end">Luna</text><rect x="56" y="24" width="38" height="9" rx="2" fill="#5fd39a"/><text x="98" y="32">0.69</text>
-          <text x="52" y="44" text-anchor="end">Haiku</text><rect x="56" y="36" width="52" height="9" rx="2" fill="#5fd39a"/><text x="112" y="44">1.46</text>
-          <text x="52" y="56" text-anchor="end">Terra</text><rect x="56" y="48" width="70" height="9" rx="2" fill="#8fd3ff"/><text x="130" y="56">3.53</text>
-          <text x="52" y="68" text-anchor="end">Sol</text><rect x="56" y="60" width="83" height="9" rx="2" fill="#f5c04a"/><text x="143" y="68">7.10</text>
-          <text x="52" y="80" text-anchor="end">Astra</text><rect x="56" y="72" width="94" height="9" rx="2" fill="#f5c04a" fill-opacity="0.55" stroke="#ff6b7a"/><text x="154" y="80">12.27 (n=1)</text>
-          <text x="52" y="92" text-anchor="end">Opus 5</text><rect x="56" y="84" width="119" height="9" rx="2" fill="#ff6b7a"/><text x="179" y="92">43.93</text>
-        </g>
-      </svg>
-      <svg viewBox="0 0 260 94" width="100%" role="img" aria-label="Send-back mentions / delivered task">
-        <g font-family="system-ui,sans-serif" font-size="9" fill="currentColor">
-          <text x="4" y="11" font-weight="700" font-size="10">Send-back mentions / delivered task</text>
-          <text x="52" y="32" text-anchor="end">Haiku</text><rect x="56" y="24" width="1" height="9" rx="2" fill="#5fd39a"/><text x="61" y="32">0%</text>
-          <text x="52" y="44" text-anchor="end">Opus 5</text><rect x="56" y="36" width="41" height="9" rx="2" fill="#5fd39a"/><text x="101" y="44">23%</text>
-          <text x="52" y="56" text-anchor="end">Luna</text><rect x="56" y="48" width="52" height="9" rx="2" fill="#8fd3ff"/><text x="112" y="56">29%</text>
-          <text x="52" y="68" text-anchor="end">Terra</text><rect x="56" y="60" width="58" height="9" rx="2" fill="#8fd3ff"/><text x="118" y="68">32%</text>
-          <text x="52" y="80" text-anchor="end">Sol</text><rect x="56" y="72" width="121" height="9" rx="2" fill="#ff6b7a"/><text x="181" y="80">67%</text>
-          <text x="52" y="92" text-anchor="end">Astra</text><rect x="56" y="84" width="1" height="9" rx="2" fill="#5fd39a"/><text x="61" y="92">0% (n=1)</text>
-        </g>
-      </svg>
-      <svg viewBox="0 0 260 106" width="100%" role="img" aria-label="Median minutes to first push">
-        <g font-family="system-ui,sans-serif" font-size="9" fill="currentColor">
-          <text x="4" y="11" font-weight="700" font-size="10">Median minutes to first push</text>
-          <text x="52" y="32" text-anchor="end">Terra</text><rect x="56" y="24" width="21" height="9" rx="2" fill="#5fd39a"/><text x="81" y="32">11.9</text>
-          <text x="52" y="44" text-anchor="end">Sol</text><rect x="56" y="36" width="33" height="9" rx="2" fill="#5fd39a"/><text x="93" y="44">18.3</text>
-          <text x="52" y="56" text-anchor="end">Haiku</text><rect x="56" y="48" width="35" height="9" rx="2" fill="#8fd3ff"/><text x="95" y="56">19.6</text>
-          <text x="52" y="68" text-anchor="end">Luna</text><rect x="56" y="60" width="46" height="9" rx="2" fill="#8fd3ff"/><text x="106" y="68">25.6</text>
-          <text x="52" y="80" text-anchor="end">Opus 5</text><rect x="56" y="72" width="119" height="9" rx="2" fill="#ff6b7a"/><text x="179" y="80">66.2</text>
-          <text x="52" y="92" text-anchor="end">Astra</text><text x="56" y="92" fill="#9aa5bb">no log marker (B: 19.1 min)</text>
-          <text x="4" y="102" fill="#9aa5bb" font-size="8">Opus 5: from the minority of tasks with a log marker.</text>
-        </g>
-      </svg>
-      <svg viewBox="0 0 260 116" width="100%" role="img" aria-label="Median output tokens / delivered task">
-        <g font-family="system-ui,sans-serif" font-size="9" fill="currentColor">
-          <text x="4" y="11" font-weight="700" font-size="10">Median output tokens / delivered task</text>
-          <text x="52" y="32" text-anchor="end">Terra</text><rect x="56" y="24" width="16" height="9" rx="2" fill="#5fd39a"/><text x="76" y="32">23.5K</text>
-          <text x="52" y="44" text-anchor="end">Astra</text><rect x="56" y="36" width="20" height="9" rx="2" fill="#5fd39a"/><text x="80" y="44">30.6K</text>
-          <text x="52" y="56" text-anchor="end">Sol</text><rect x="56" y="48" width="22" height="9" rx="2" fill="#8fd3ff"/><text x="82" y="56">33.1K</text>
-          <text x="52" y="68" text-anchor="end">Haiku</text><rect x="56" y="60" width="24" height="9" rx="2" fill="#8fd3ff"/><text x="84" y="68">36.3K</text>
-          <text x="52" y="80" text-anchor="end">Luna</text><rect x="56" y="72" width="36" height="9" rx="2" fill="#f5c04a"/><text x="96" y="80">54.1K</text>
-          <text x="52" y="92" text-anchor="end">Opus 5</text><rect x="56" y="84" width="119" height="9" rx="2" fill="#ff6b7a"/><text x="179" y="92">178.6K</text>
-          <text x="4" y="102" fill="#9aa5bb" font-size="8">MCP calls / task (median): Sol 28 · Terra 22 · Luna 32</text><text x="4" y="112" fill="#9aa5bb" font-size="8">Haiku 32 · Astra 28 · Opus 5 171</text>
-        </g>
-      </svg>
-    </div>
-    <figcaption id="fig3cap">Figure 3. Small multiples, one panel per metric, all projects, 2026-08-20 → 2026-09-06, from <code>docs/factory/data/factory-model-scorecard-2026-09-06-allhomes-horizon.csv</code> (overall rows; list prices; sample sizes in the table below). Astra = one joined delivery in the extractor (three in B). Panels reflow to one column on narrow screens. Data table below.</figcaption>
-  </figure>
-  <table>
-        <thead><tr><th>Model / effort (all projects)</th><th class="num">Sessions</th><th class="num">Miss</th><th class="num">Delivered</th><th class="num">Send-back mentions</th><th class="num">Min to push</th><th class="num">Output / task</th><th class="num">MCP calls</th><th class="num">Cost / task</th></tr></thead>
-        <tbody>
-          <tr><td>gpt-5.6-luna / xhigh</td><td class="num">349</td><td class="num">5%</td><td class="num">272</td><td class="num">78 (29%)</td><td class="num">25.6</td><td class="num">54,109</td><td class="num">32</td><td class="num"><b>$0.69</b></td></tr>
-          <tr><td>gpt-5.6-terra / high</td><td class="num">68</td><td class="num">3%</td><td class="num">44</td><td class="num">14 (32%)</td><td class="num">11.9</td><td class="num">23,520</td><td class="num">22</td><td class="num"><b>$3.53</b></td></tr>
-          <tr><td>gpt-5.6-sol / high</td><td class="num">66</td><td class="num">5%</td><td class="num">57</td><td class="num">38 (67%)</td><td class="num">18.3</td><td class="num">33,102</td><td class="num">28</td><td class="num"><b>$7.10</b></td></tr>
-          <tr><td>gpt-6-astra / high</td><td class="num">1</td><td class="num">0%</td><td class="num">1</td><td class="num">0</td><td class="num">—</td><td class="num">30,577</td><td class="num">28</td><td class="num">$12.27</td></tr>
-          <tr><td>claude-haiku-4-5 / low</td><td class="num">22</td><td class="num">32%</td><td class="num">22</td><td class="num">0 (0%)</td><td class="num">19.6</td><td class="num">36,302</td><td class="num">32</td><td class="num"><b>$1.46</b></td></tr>
-          <tr><td>claude-opus-5 / high</td><td class="num">118</td><td class="num">27%</td><td class="num">111</td><td class="num">25 (23%)</td><td class="num">66.2</td><td class="num">178,640</td><td class="num">171</td><td class="num"><b>$43.93</b></td></tr>
-          <tr><td>claude-fable-5-1 / high (worker)</td><td class="num">6</td><td class="num">17%</td><td class="num">2</td><td class="num">0</td><td class="num">20.6</td><td class="num">214,691</td><td class="num">74</td><td class="num">$130.00</td></tr>
-          <tr><td>claude-fable-5-1 / medium (worker)</td><td class="num">4</td><td class="num">0%</td><td class="num">3</td><td class="num">4 (133%)</td><td class="num">57.7</td><td class="num">691,080</td><td class="num">288</td><td class="num">$103.02</td></tr>
-          <tr><td>(no model — DB row without worker_spec)</td><td class="num">837</td><td class="num">100%</td><td class="num">703</td><td class="num">120 (17%)</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
-        </tbody>
-      </table>
-      <p class="meta">Horizon totals at list (unique sessions): Opus 5 $3,470 for 111 delivered; Sol $398 for 57; Luna $184 for 272; Terra $156 for 44; Fable 5.1 workers $439 for 5; Haiku $22 for 22.</p>
-  <details><summary>Per project × model × effort (rows with ≥ 3 sessions; full set in the scorecard CSV)</summary>
-  <table>
-    <thead><tr><th>Project</th><th>Model / effort</th><th class="num">Sessions</th><th class="num">Miss</th><th class="num">Delivered</th><th class="num">Send-back mentions</th><th class="num">Min to push</th><th class="num">Output</th><th class="num">MCP calls</th><th class="num">Cost / delivered</th></tr></thead>
-    <tbody>
-      <tr><td>cas-src</td><td>Luna / xhigh</td><td class="num">159</td><td class="num">1%</td><td class="num">124</td><td class="num">39 (31%)</td><td class="num">25.9</td><td class="num">62,116</td><td class="num">35</td><td class="num">$0.83</td></tr>
-      <tr><td>cas-src</td><td>Sol / high</td><td class="num">31</td><td class="num">0%</td><td class="num">28</td><td class="num">16 (57%)</td><td class="num">27.3</td><td class="num">31,926</td><td class="num">28</td><td class="num">$7.99</td></tr>
-      <tr><td>cas-src</td><td>Terra / high</td><td class="num">34</td><td class="num">0%</td><td class="num">22</td><td class="num">1 (5%)</td><td class="num">11.9</td><td class="num">23,788</td><td class="num">20</td><td class="num">$4.42</td></tr>
-      <tr><td>cas-src</td><td>Opus 5 / high</td><td class="num">35</td><td class="num">0%</td><td class="num">34</td><td class="num">7 (21%)</td><td class="num">42.2</td><td class="num">213,544</td><td class="num">185</td><td class="num">$55.77</td></tr>
-      <tr><td>cas-src</td><td>Fable 5.1 / high</td><td class="num">5</td><td class="num">0%</td><td class="num">1</td><td class="num">0</td><td class="num">24.0</td><td class="num">214,691</td><td class="num">74</td><td class="num">$130.00</td></tr>
-      <tr><td>cas-src</td><td>Fable 5.1 / medium</td><td class="num">4</td><td class="num">0%</td><td class="num">3</td><td class="num">4 (133%)</td><td class="num">57.7</td><td class="num">691,080</td><td class="num">288</td><td class="num">$103.02</td></tr>
-      <tr><td>cas-src</td><td>(no model)</td><td class="num">385</td><td class="num">100%</td><td class="num">322</td><td class="num">58 (18%)</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
-      <tr><td>gabber-studio</td><td>Luna / xhigh</td><td class="num">52</td><td class="num">0%</td><td class="num">45</td><td class="num">13 (29%)</td><td class="num">18.2</td><td class="num">36,281</td><td class="num">28</td><td class="num">$0.30</td></tr>
-      <tr><td>gabber-studio</td><td>Sol / high</td><td class="num">15</td><td class="num">0%</td><td class="num">15</td><td class="num">14 (93%)</td><td class="num">—</td><td class="num">71,454</td><td class="num">48</td><td class="num">$3.85</td></tr>
-      <tr><td>gabber-studio</td><td>Opus 5 / high</td><td class="num">57</td><td class="num">42%</td><td class="num">51</td><td class="num">10 (20%)</td><td class="num">31.8</td><td class="num">120,261</td><td class="num">122</td><td class="num">$35.49</td></tr>
-      <tr><td>gabber-studio</td><td>Haiku 4.5 / low</td><td class="num">16</td><td class="num">6%</td><td class="num">16</td><td class="num">0 (0%)</td><td class="num">19.6</td><td class="num">36,302</td><td class="num">32</td><td class="num">$1.46</td></tr>
-      <tr><td>gabber-studio</td><td>(no model)</td><td class="num">187</td><td class="num">100%</td><td class="num">166</td><td class="num">21 (13%)</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
-      <tr><td>ozer</td><td>Terra / high</td><td class="num">8</td><td class="num">0%</td><td class="num">4</td><td class="num">2 (50%)</td><td class="num">10.9</td><td class="num">23,945</td><td class="num">20</td><td class="num">$2.85</td></tr>
-      <tr><td>abundant-mines</td><td>Luna / xhigh</td><td class="num">26</td><td class="num">0%</td><td class="num">22</td><td class="num">2 (9%)</td><td class="num">23.5</td><td class="num">70,842</td><td class="num">42</td><td class="num">$0.93</td></tr>
-      <tr><td>abundant-mines</td><td>Opus 5 / high</td><td class="num">4</td><td class="num">0%</td><td class="num">4</td><td class="num">1 (25%)</td><td class="num">—</td><td class="num">46,068</td><td class="num">50</td><td class="num">$7.36</td></tr>
-      <tr><td>abundant-mines</td><td>(no model)</td><td class="num">51</td><td class="num">100%</td><td class="num">44</td><td class="num">2 (5%)</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
-      <tr><td>rocketship-template</td><td>any</td><td class="num">0</td><td colspan="7">its 155 spawns predate 2026-08-20</td></tr>
-      <tr><td>Penguinz</td><td>Luna / xhigh</td><td class="num">19</td><td class="num">11%</td><td class="num">9</td><td class="num">0 (0%)</td><td class="num">47.7</td><td class="num">52,063</td><td class="num">35</td><td class="num">$0.75</td></tr>
-      <tr><td>Penguinz</td><td>Terra / high</td><td class="num">20</td><td class="num">10%</td><td class="num">13</td><td class="num">3 (23%)</td><td class="num">9.1</td><td class="num">17,946</td><td class="num">22</td><td class="num">$2.50</td></tr>
-      <tr><td>Woodworking</td><td>Opus 5 / high</td><td class="num">10</td><td class="num">60%</td><td class="num">10</td><td class="num">6 (60%)</td><td class="num">216.9</td><td class="num">421,602</td><td class="num">174</td><td class="num">$39.22</td></tr>
-      <tr><td>Woodworking</td><td>Luna / Sol / Terra</td><td class="num">5 / 4 / 4</td><td class="num">0%</td><td class="num">3 / 2 / 4</td><td class="num">7 / 8 / 8</td><td class="num">27.9 / 7.1 / 20.9</td><td class="num">46K / 14K / 28K</td><td class="num">18 / 10 / 26</td><td class="num">$0.68 / $3.36 / $2.86</td></tr>
-      <tr><td>pulse-card</td><td>Luna / xhigh</td><td class="num">31</td><td class="num">6%</td><td class="num">25</td><td class="num">6 (24%)</td><td class="num">24.2</td><td class="num">48,249</td><td class="num">30</td><td class="num">$0.60</td></tr>
-      <tr><td>pulse-card</td><td>Opus 5 / high</td><td class="num">5</td><td class="num">0%</td><td class="num">5</td><td class="num">0 (0%)</td><td class="num">—</td><td class="num">164,259</td><td class="num">212</td><td class="num">$20.07</td></tr>
-      <tr><td>petra-stella-cloud</td><td>Luna / xhigh</td><td class="num">36</td><td class="num">3%</td><td class="num">30</td><td class="num">10 (33%)</td><td class="num">30.5</td><td class="num">57,731</td><td class="num">37</td><td class="num">$0.63</td></tr>
-      <tr><td>petra-stella-cloud</td><td>Sol / high</td><td class="num">10</td><td class="num">20%</td><td class="num">7</td><td class="num">0 (0%)</td><td class="num">17.8</td><td class="num">25,480</td><td class="num">26</td><td class="num">$6.13</td></tr>
-      <tr><td>petra-stella-cloud</td><td>Opus 5 / high</td><td class="num">5</td><td class="num">0%</td><td class="num">5</td><td class="num">1 (20%)</td><td class="num">91.6</td><td class="num">417,503</td><td class="num">234</td><td class="num">$65.91</td></tr>
-      <tr><td>mecha_cassy</td><td>Luna / xhigh</td><td class="num">19</td><td class="num">53%</td><td class="num">14</td><td class="num">1 (7%)</td><td class="num">26.4</td><td class="num">71,381</td><td class="num">48</td><td class="num">$0.54</td></tr>
-    </tbody>
-  </table>
-  </details>
-  <h3>Reconciliation with B (cas-src)</h3>
-  <table>
-    <thead><tr><th>Metric, cas-src</th><th class="num">B (this task)</th><th class="num">B.2 (extractor)</th><th>Why</th></tr></thead>
-    <tbody>
-      <tr><td>Luna deliveries</td><td class="num">212 task segments</td><td class="num">124 delivered tasks / 159 sessions</td><td>B splits a session at each <code>task start</code>; B.2 counts distinct closed task ids joined by worker name (11 Luna sessions never matched a transcript)</td></tr>
-      <tr><td>Luna / Sol send-backs</td><td class="num">26 (12%) / 8 (16%)</td><td class="num">39 (31%) / 16 (57%)</td><td>B counts the decision line once per task; B.2 counts every mention, including worker notes quoting it</td></tr>
-      <tr><td>Luna tool calls / delivery</td><td class="num">139</td><td class="num">35</td><td>B counts shell + MCP; B.2 counts <code>function_call</code> (MCP) only</td></tr>
-      <tr><td>Luna minutes to first push</td><td class="num">17.0</td><td class="num">25.9</td><td>B: first <code>git push</code> tool call; B.2: factory-log "pushed" marker</td></tr>
-      <tr><td>Luna / Opus / Terra cost per delivery</td><td class="num">$0.49 / $25.47 / $2.28</td><td class="num">$0.83 / $55.77 / $4.42</td><td>same token totals over a smaller denominator (delivered tasks, not segments); totals $104 / $1,325 / $96 (B) vs $128 / $1,932 / $97 (B.2 — includes sessions B left unattributed)</td></tr>
-      <tr><td>Astra deliveries · Astra/medium stall</td><td class="num">3 · named</td><td class="num">1 · absent</td><td>one task per spawn row joins; main-checkout supervisor sessions are outside the extractor's unit</td></tr>
-    </tbody>
-  </table>
-  <p class="meta">Totals agree to within the sessions each side attributes; per-delivery figures differ by the denominator. Use B for per-delivery token/tool economics and stall evidence, B.2 for cross-project breadth.</p>
-
-  <h3>C · Where each model shines (Option A: heavy = Astra/high, placed by hand)</h3>
-  <table>
-    <thead><tr><th>Model / effort</th><th class="num">Send-back rate</th><th class="num">Cost / delivery</th><th class="num">Min to first push</th><th>Stall / urgent stops</th><th class="num">Tool calls</th><th>Shines</th><th>Does not</th></tr></thead>
-    <tbody>
-      <tr><td>Luna / xhigh</td><td class="num">12% (B, n=212) · 29% mentions (B.2, n=272)</td><td class="num">$0.49 / $0.69</td><td class="num">17.0 / 25.6</td><td>25 urgent stops; 0 stalls</td><td class="num">139 shell+MCP / 32 MCP</td><td><b>Volume implementation everywhere</b>: 272 deliveries in 9 projects, 0–9% in Penguinz, abundant-mines, mecha_cassy; cheapest by 5–60×</td><td>cas-src and petra-stella-cloud carry its most send-backs (39, 10); slowest Codex first push</td></tr>
-      <tr><td>Sol / high</td><td class="num">16% (B) · 67% mentions (B.2): 0% in cas-src P2 and petra-stella-cloud, 19% on the Astra night, 93% in gabber-studio</td><td class="num">$6.81 / $7.10</td><td class="num">12.1 / 18.3</td><td>20 urgent stops (18 on the Astra night)</td><td class="num">103 / 28 MCP</td><td><b>Fast, clean deliveries under a Claude supervisor</b> (0/10 in P2, 0/7 in petra-stella-cloud)</td><td>under Astra review or in gabber-studio it collects the most send-back mentions of any model; 14× Luna</td></tr>
-      <tr><td>Terra / high (suspended)</td><td class="num">2% (B, n=42) · 32% mentions (B.2)</td><td class="num">$2.28 / $3.53</td><td class="num">6.2 / 11.9</td><td>0</td><td class="num">69 / 22 MCP</td><td>fastest first push on the host; cleanest cas-src record (1 in 42)</td><td>suspended 2026-08-27; AA: a Luna or Sol effort dominates it on intelligence per dollar; Woodworking 200%</td></tr>
-      <tr><td><b>Astra / high</b> (Option A heavy)</td><td class="num">0% (B, n=2)</td><td class="num">$12.54 / $12.27</td><td class="num">19.1</td><td>0 as worker</td><td class="num">74 / 28 MCP</td><td>the only routed model with a <b>published</b> intelligence gain (TB 4.0 57.9 vs Sol 37.3; AA CAI 67.0; "Pareto frontier of token efficiency"); two clean cas-src deliveries at 27–36K output tokens</td><td>n=2; 1.8× Sol and 25× Luna per delivery; $1/M cached input makes long-context roles 4× a Fable seat</td></tr>
-      <tr><td><b>Astra / medium</b></td><td class="num">100% (n=1 worker); as supervisor, reviewed lanes at 19–75%</td><td class="num">$12.68 worker · $315 per supervisor night</td><td class="num">11.8</td><td><b>352-minute stall</b> as supervisor; 1 urgent stop as worker</td><td class="num">95 · 1,345 per night</td><td>nothing measured</td><td><b>never as a driver</b>: the only medium session on record is the stall, and it is what an unpinned <code>codex</code> spawn inherits from <code>~/.codex/config.toml</code></td></tr>
-      <tr><td>Opus 5 / high</td><td class="num">4% (B, n=52) · 23% mentions (B.2, n=111)</td><td class="num">$25.47 / $43.93</td><td class="num">16.4 / 66.2</td><td>13 urgent stops (11 on one worker)</td><td class="num">73 / 171 MCP</td><td><b>Judgment and design work</b> in gabber-studio (20%) and pulse-card (0%); 122–212 MCP calls per task — it talks to Cassy, not the shell</td><td>Woodworking (217 min to push, 60%, $39) and petra-stella-cloud ($65.91); 52–64× Luna; 179K median output tokens</td></tr>
-      <tr><td>Fable 5.1 / high (worker)</td><td class="num">0% (n=5 taste tasks)</td><td class="num">$22–$52 per delivery</td><td class="num">20.6</td><td>0</td><td class="num">67–93 MCP</td><td><b>Taste tasks that end in one delivery</b>: five cas-src skill/design rewrites, none sent back</td><td>$130 per <i>delivered</i> task because 3 of 5 are still open; 1-hour cache writes dominate</td></tr>
-      <tr><td>Fable 5.1 / medium (worker)</td><td class="num">2 tasks, 3 mentions (tender-panda-58)</td><td class="num">$103 per delivered</td><td class="num">57.7</td><td>0</td><td class="num">462</td><td>one measured medium session delivered a full hub UI overhaul (993K output tokens)</td><td>3.3× the tokens of the median Fable/high worker; inseparable from task size</td></tr>
-      <tr><td>Fable 5.1 / high (supervisor)</td><td class="num">reviewed Luna at 12%</td><td class="num">$142–$284 per day</td><td class="num">—</td><td>0 stalls in 17 sessions</td><td class="num">70–150 per day</td><td><b>Coordination without stalls</b>; cache reads at $0.25/M</td><td>most expensive seat after the Astra night; the registry's <code>medium</code> has never run</td></tr>
-      <tr><td>Haiku 4.5 / low</td><td class="num">0% (B.2, n=22)</td><td class="num"><b>$1.46</b></td><td class="num">19.6</td><td>0</td><td class="num">32 MCP</td><td><b>The light lane exists</b>: 15 gabber-studio Slack release-note postings at $0.51–$4.26, none sent back</td><td>only gabber-studio and abundant-mines; <code>low</code> sets nothing on Haiku</td></tr>
-    </tbody>
-  </table>
-  <h3>Where to place Astra/high</h3>
-  <ol class="opt">
-    <li><b>Heavy = Astra/high with Sol/high fallback, as directed; pin <code>effort=high</code> in the recipe and refuse medium for heavy.</b> Every unpinned <code>codex</code> spawn inherits <code>~/.codex/config.toml</code>'s <code>gpt-6-astra</code> / <code>medium</code>; the registry must not let heavy degrade to that. Place it by hand on bounded, safety-relevant implementation — its two deliveries were 27–36K output tokens, 69–78 tool calls, first push in 18–20 minutes — never on long-context or coordinating roles (cached input is 86% of its cost; its only medium session is the stall).</li>
-    <li><b>Measure the first five Astra/high heavy deliveries against Sol/high pairs</b> (same brief, both lanes) on send-backs, output tokens, tool calls and minutes to first push from the rollouts. Two deliveries is a sample; five paired is a decision.</li>
-    <li><b>Luna/xhigh stays standard everywhere and is the rescue lane for heavy</b>: 272 deliveries across nine projects at $0.69, the lowest send-back rates outside cas-src, and it finished cas-c674 after Sol.</li>
-    <li><b>Light = Haiku 4.5 for Slack/release-note and posting chores</b> (22 deliveries, 0 send-backs, $1.46), with a <code>thinking_budget</code> in the recipe instead of <code>low</code>; anything touching code goes to Luna.</li>
-    <li><b>Taste = Fable 5.1/high for skill, design and document rewrites</b> (5 of 5 clean); Opus 5/high as taste fallback where it has a record (gabber-studio, pulse-card), not for Woodworking-style long jobs. Supervisor stays Fable 5.1; the registry should say <code>high</code> until a medium day is measured.</li>
-    <li><b>Fix attribution before the next scorecard</b>: 56% of horizon sessions have no model because the spawn row lacks <code>worker_spec</code>; read the rollout's <code>turn_context</code> for those, count shell tool calls, and read all six harness homes in one run.</li>
-  </ol>
-  <p class="meta">What the data cannot answer: Astra/high vs Sol/high on identical tasks (item 2); Fable medium vs high on identical work (one medium worker session, zero medium supervisor sessions); whether Sol's 93% in gabber-studio and the Astra night's 19% belong to the reviewer or the tasks; whether Opus 5's 179K-token deliveries are thoroughness or verbosity — gabber-studio says the former, Woodworking the latter.</p>
-</section>
-
-<section id="fails">
-  <h2>Where the rubric fails</h2>
-  <div class="grid2">
-    <div class="card"><h4>1 · Heavy is routed on reputation against the data</h4><p>Astra has zero worker deliveries in the window and one recorded coordination stall. Sol has one delivery and one send-back. Luna has nineteen merged deliveries and is not in heavy at all.</p><div class="why">Heavy is the lane for safety-critical implementation, where "quietly stops" is the worst failure mode.</div></div>
-    <div class="card"><h4>2 · Silent fallback to the replaced default</h4><p>Opus 5/high was the built-in supervisor default until 22:00Z on 2026-09-05. It is now the automatic backup for both judgment lanes. A bad auth hour changes the coordinator's behaviour with nobody deciding it.</p><div class="why">cas-255e adds a loud receipt. Loud is not approved.</div></div>
-    <div class="card"><h4>3 · Effort has no stated rationale</h4><p>Luna xhigh only; Fable medium; Astra medium by recipe but high in heavy; Sol high; Haiku low. A reader cannot tell cost decisions from quality decisions.</p></div>
-    <div class="card"><h4>4 · Nothing is measured</h4><p>Every routing change this week came from anecdote: Astra→Fable taste, Fable supervisor, Opus fallbacks, Astra heavy. The actionable-idle metric in 3.17.2 is the first number the rubric has ever had.</p></div>
-    <div class="card"><h4>5 · The light lane is decorative</h4><p>Zero uses in the window. Every mechanical chore went to Luna because Haiku is not trusted with builtin marker tests.</p></div>
-    <div class="card"><h4>6 · Cross-harness fallback inside a lane</h4><p>Standard falls back from Codex to Claude: different hooks, skill mirror, and account, mid-epic.</p></div>
-    <div class="card"><h4>7 · Fallback edges declared but disabled</h4><p>Until cas-255e lands, taste and supervisor carry a fallback that never fires while the comment says "fail closed". A registry that documents one policy and executes another is a review hazard.</p></div>
-  </div>
-</section>
-
-<section id="opts">
-  <h2>Optimizations, in order of leverage</h2>
-  <ol class="opt">
-    <li><b>Measure three numbers per lane, per week</b> from data CAS already records: send-backs per delivery (request_changes notes), actionable-idle minutes (3.17.2 metric), assignment-to-first-push minutes (lease start vs first pushed tip). Print them in the generated route table so the rubric and its scorecard are read together.</li>
-    <li><b>Promote by trial, not by directive.</b> Keep Sol as heavy primary; make Astra/high the heavy fallback for two weeks; promote only if its send-back rate is at or below Sol's on at least five deliveries.</li>
-    <li><b>Make fallbacks explicit decisions.</b> A lane fallback fires only after the supervisor is told the primary is unavailable and the receipt names both recipes. For the supervisor lane, prefer fail-closed plus an operator alert over a silent model change.</li>
-    <li><b>Add an effort column with a reason.</b> One sentence per lane: why this effort, what it costs relative to the lane below, and what evidence would change it.</li>
-    <li><b>Retire or re-scope light.</b> Route it at Luna/xhigh for tiny chores (what happens today anyway) or give Haiku a bounded class of work with its own marker tests.</li>
-    <li><b>Keep fallbacks inside a harness.</b> Standard should fall back to another Codex recipe or fail closed; cross-harness fallbacks belong to the operator, not the registry.</li>
-    <li><b>Give Luna a seat in heavy.</b> On this window's evidence it is the safest implementation lane we have; at minimum it should be the heavy fallback ahead of Sol.</li>
-  </ol>
-</section>
-
-<section id="decision">
-  <div class="decision">
-    <h2 style="border:0;padding:0;margin-bottom:4px">Decision requested</h2>
-    <p>cas-255e is implementing the rubric as directed. Choose one:</p>
-    <div class="opts">
-      <div class="card"><h4>A · Ship as directed</h4><p>Heavy on Astra/high now; start the three-number scorecard; revisit in two weeks with data.</p></div>
-      <div class="card opt-b"><h4>B · Amend cas-255e (recommended)</h4><p>Heavy stays on Sol with Astra/high as the fallback; keep the Opus fallbacks but loud; add the scorecard. Promote Astra only on evidence.</p></div>
-    </div>
-  </div>
-</section>
-
 </main>
 
-<footer>
+<footer class="prov">
   <div class="wrap">
-    <p><b>Provenance.</b> Registry: <code>crates/cas-factory/policy/lane-registry.toml</code> at epic 736bb1fe64176204b77e46b960ad23fba7d8cbba. Delivery and send-back counts: supervisor merge and review notes on epic cas-80b6 and task notes on cas-4626, c650, 62ca, bd04, bddf, a49c, 41ae, d05f, 47ea, e159, c674, 9eae1, 72f7, 16ee, a65d, 6e24, 1e85, 826a. Stall: cas-20a3 note 2026-09-05 15:10Z; operator message 17:27Z. Release timings: <code>~/.cas/artifacts/release/v3.17.1-epic-80b6-merge/FINAL-HANDOFF.md</code> and <code>…/v3.17.2-epic-80b6-merge/FINAL-HANDOFF.md</code>. Directive: operator message 2026-09-06 00:10Z; task cas-255e. Model section (cas-3372): external figures retrieved 2026-09-06 via exa-search from the URLs linked inline; internal figures from Codex rollouts in <code>~/.codex</code>, <code>~/.codex-support@gabber.studio</code> and <code>~/.codex-pippenz@gmail.com</code> (per-turn <code>token_count</code>, <code>turn_context</code>, tool calls) and Claude transcripts in <code>~/.claude-daniel@petrastella.io</code>, <code>~/.claude-alt</code> and <code>~/.claude-pippenz@gmail.com</code> (per-message usage, 1-h cache writes); stalled-supervisor identity from <code>~/.codex-support@gabber.studio/sessions/2026/09/04/rollout-2026-09-04T18-22-16-01a06e83-f206-7f60-8a41-1c70f3fd1132.jsonl</code> (<code>turn_context</code>; 05:56Z→11:48Z gap) and factory log <code>cas-src-daring-badger-54</code>, <code>.cas/cas.db</code> task notes and <code>spawn_queue</code>, and <code>.cas/logs/factory-session-*.log</code>; row-level data in <code>docs/factory/2026-09-06-model-lane-history.csv</code>, method in the <code>.md</code> beside it. Cross-project (cas-de0b): <code>scripts/factory-model-history.py</code> (cas-e208) run per home pair and unioned by <code>scripts/factory-model-history-union.py</code>; <code>docs/factory/data/model-prices.json</code>; <code>docs/factory/data/factory-model-history-2026-09-06.csv</code>, <code>…-allhomes-horizon.csv</code> and <code>…-scorecard-2026-09-06-allhomes-horizon.csv</code>; extractor receipt <code>~/.cas/artifacts/cas-e208/real-run-v2.log</code>.</p>
-    <p>Markdown source of truth: <code>docs/factory/2026-09-06-model-lane-rubric-review.md</code>. This file renders with no network, no scripts, and no external assets.</p>
+    <p class="eyebrow">Provenance</p>
+    <p>Audience: operator (Daniel). Type: decision brief. Author: supervisor session golden-panda-80; model section by worker vivid-kestrel-88 (cas-3372) and the cas-de0b scorecard; reordered verdict-first on 2026-09-06 (cas-5d3c). Evidence window: 2026-09-05 16:20Z – 2026-09-06 00:10Z (the cas-80b6 rescue, releases 3.17.1 and 3.17.2); host measurements over the retained horizon 2026-08-20 → 2026-09-06.</p>
+    <p>Markdown source: <a href="2026-09-06-model-lane-rubric-review.md"><code>docs/factory/2026-09-06-model-lane-rubric-review.md</code></a> (this HTML is rendered from it, same commit); concept brief <code>2026-09-06-model-lane-rubric-review.brief.md</code>; previous render <code>2026-09-06-model-lane-rubric-review.before.html</code>.</p>
+    <ul class="list"><li>Registry: <code>crates/cas-factory/policy/lane-registry.toml</code> at epic 736bb1fe64176204b77e46b960ad23fba7d8cbba.</li>
+<li>Delivery and send-back counts: supervisor merge and review notes on epic cas-80b6, 2026-09-05 16:20Z–2026-09-06 00:10Z; task notes on cas-4626, c650, 62ca, bd04, bddf, a49c, 41ae, d05f, 47ea, e159, c674, 9eae1, 72f7, 16ee, a65d, 6e24, 1e85, 826a.</li>
+<li>Stall: cas-20a3 note 15:10Z; operator message 2026-09-05 17:27Z.</li>
+<li>Release timings: <code>/home/pippenz/.cas/artifacts/release/v3.17.1-epic-80b6-merge/FINAL-HANDOFF.md</code> and <code>.../v3.17.2-epic-80b6-merge/FINAL-HANDOFF.md</code>.</li>
+<li>Directive: operator message 2026-09-06 00:10Z; task cas-255e.</li>
+<li>Model section (cas-3372): external figures retrieved 2026-09-06 via exa-search from the URLs cited inline; internal figures from Codex rollouts in <code>~/.codex</code>, <code>~/.codex-support@gabber.studio</code> and <code>~/.codex-pippenz@gmail.com</code> (<code>sessions/2026/08/20…09/06</code>) (<code>token_count</code>, <code>turn_context</code>, tool calls), Claude transcripts in <code>~/.claude-daniel@petrastella.io</code>, <code>~/.claude-alt</code>, <code>~/.claude-pippenz@gmail.com</code> (<code>projects/…cas-src*</code>; per-message usage; all cache writes 1-hour TTL), <code>.cas/cas.db</code> task notes and <code>spawn_queue</code>, <code>.cas/logs/factory-session-*.log</code>; row-level data in <code>docs/factory/2026-09-06-model-lane-history.csv</code>, method in the <code>.md</code> beside it.</li>
+<li>Cross-project (cas-de0b): <code>scripts/factory-model-history.py</code> (cas-e208) run per home pair, unioned by <code>scripts/factory-model-history-union.py</code>; <code>docs/factory/data/model-prices.json</code>; <code>docs/factory/data/factory-model-history-2026-09-06.csv</code> (default homes, 9,259 rows), <code>…-allhomes-horizon.csv</code> (1,498 rows) and <code>…-scorecard-2026-09-06-allhomes-horizon.csv</code>; extractor receipt <code>~/.cas/artifacts/cas-e208/real-run-v2.log</code>.</li>
+<li>Stalled supervisor identity: <code>~/.codex-support@gabber.studio/sessions/2026/09/04/rollout-2026-09-04T18-22-16-01a06e83-f206-7f60-8a41-1c70f3fd1132.jsonl</code> (<code>turn_context</code> model/effort; timestamp gap 05:56Z→11:48Z) and its continuation <code>…/2026/09/05/rollout-2026-09-05T09-16-26-01a071b6-94d5-7061-b3b5-d6f136504a51.jsonl</code>; factory log <code>cas-src-daring-badger-54</code>, agent loyal-crane-48.</li>
+<li>Reorder (cas-5d3c): verdict-first restructure of this file on 2026-09-06; numbers unchanged (numeric-token diff against the 926518fb version shows no loss); concept brief <code>2026-09-06-model-lane-rubric-review.brief.md</code>; previous render <code>2026-09-06-model-lane-rubric-review.before.html</code>; visual-QA receipt <code>…rubric-review.visual-qa.md</code>.</li></ul>
   </div>
 </footer>
 </body>

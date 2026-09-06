@@ -34,6 +34,24 @@ cargo build --release
 
 See the [README](README.md) for full build instructions.
 
+## Visual QA for user-visible HTML
+
+Run the headless visual gate before merging an HTML report, Commander surface, or other user-visible
+HTML artifact. It renders light and dark schemes at desktop and phone widths, writes JSON/Markdown
+findings and full-page screenshots to `docs/factory/data/visual-qa/`, and exits non-zero with
+`--strict` when a finding remains:
+
+```bash
+node scripts/visual-qa.mjs \
+  --strict --artifact-dir docs/factory/data/visual-qa \
+  docs/factory/2026-09-06-model-lane-rubric-review.html \
+  hub-web/dist/index.html
+```
+
+Use `scripts/visual-qa-allowlist.json` only for intentional exceptions. Every entry must include a
+finding `type`, an element `selector`, and a specific `reason`; the generated Markdown receipt keeps
+the allowlisted count visible for review.
+
 ## Viktor distribution
 
 Viktor changes must keep the Claude, Codex, and Grok builtin skill mirrors in sync, preserve the

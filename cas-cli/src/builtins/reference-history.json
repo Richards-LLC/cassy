@@ -81,6 +81,7 @@
       "9960262f6266130e391f3356dc36395163bcdacb89b439b4cf19836e28a75f2a"
     ],
     "skills/cas-html-reports/references/examples/benchmark-small-multiples.html": [
+      "84ef58dd5a39bb44fd3d58a45e5470d0279a784f82a25eeacc726c6057151ddb",
       "8598c6075b560ddc1e18070c96ca3d02fe5194eaafec7bf959977d974b61f5aa",
       "bc476b9bd0312dbde1ac0d96af5625e7755e0f194a6eb47630abe57af6ce8163",
       "c2bc1d442026439ecedcc70a7f8adfee19d1247beea5947ceb29aac1783f33d1"
@@ -564,6 +565,7 @@
       "c8c50345f94536ca1f9780d45218f6bdfb17d9dceff90a12c06d8ca51f92f645"
     ],
     "skills/cas-ui-craft/references/exemplars/dashboard.html": [
+      "5df4d082d4ce624b1e0734f18665a5e0c548d200943201af458e9d4e4601ae70",
       "d6aa2747130e8898acf8bcd1949cbb9b4aff610f870e10279644726120280308"
     ],
     "skills/cas-ui-craft/references/exemplars/product-page.html": [
@@ -765,9 +767,11 @@
     ],
     "skills/design-spec/references/design-tokens.json": [
       "11672f6a1d451344c9ccfbcff1f7230282587d9901337e44f37678293eeb28d9",
+      "3f58b3d57ce12a1129457714fba66553ad4d67399ed35e3fbd01d9cd4ececd26",
       "5b939b73e5dfae3de49e5b488f030b2e927828d38643c04d225d810400851cee"
     ],
     "skills/design-spec/references/petrastella-design-language.md": [
+      "997b4bf17927193b81bbf807750a8f6dd7d9160c79d5aa234337386a089fbd12",
       "d328055725ea9e7808971a2d9ac0850e02ff05a3773b53541befa5eb932aa483",
       "f2ec54d015b063af278f8bf69a34b0f96eb65c442bdc3380019d75e55c802316"
     ],

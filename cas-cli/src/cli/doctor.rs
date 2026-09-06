@@ -3,6 +3,7 @@
 use clap::Args;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,8 @@ use crate::migration::{
     run_migrations,
 };
 use crate::store::{
-    StoreType, detect_store_type, open_agent_store, open_rule_store, open_store, open_task_store,
+    StoreType, detect_store_type, open_agent_store, open_rule_store, open_store,
+    open_task_store,
 };
 use crate::types::RuleStatus;
 use crate::ui::components::Formatter;
@@ -24,9 +26,13 @@ use crate::cli::Cli;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
-    /// Attempt safe automatic fixes (initialize Cassy and apply pending schema migrations)
+    /// Apply safe automatic fixes; consent and human-review findings are unchanged.
     #[arg(long)]
     pub fix: bool,
+
+    /// Show host-scoped checks only.
+    #[arg(long)]
+    pub host: bool,
 
     /// Report cross-project ("foreign") task rows in this project's database
     /// in full detail, instead of running the other diagnostics (cas-fc6fa /
@@ -184,6 +190,7 @@ impl PhaseRecorder {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckGroup {
+    Host,
     Store,
     Indexes,
     Cloud,
@@ -194,6 +201,7 @@ enum CheckGroup {
 impl CheckGroup {
     fn label(self) -> &'static str {
         match self {
+            Self::Host => "Host",
             Self::Store => "Store",
             Self::Indexes => "Indexes",
             Self::Cloud => "Cloud",
@@ -204,6 +212,7 @@ impl CheckGroup {
 
     fn json_name(self) -> &'static str {
         match self {
+            Self::Host => "host",
             Self::Store => "store",
             Self::Indexes => "indexes",
             Self::Cloud => "cloud",
@@ -214,6 +223,9 @@ impl CheckGroup {
 
     fn for_name(name: &str) -> Self {
         match name.to_ascii_lowercase().as_str() {
+            "host" | "user-level store" | "known repos" | "host proxy" | "hub service"
+            | "registered project roots" | "host user skills" => Self::Host,
+            "user skills" => Self::Config,
             "legacy search index"
             | "pre-versioned search index"
             | "search index"
@@ -224,7 +236,6 @@ impl CheckGroup {
             "canonical id"
             | "canonical id collision"
             | "cloud identity metadata"
-            | "registered project roots"
             | "project aliases"
             | "cloud sync queue"
             | "cross-project rows"
@@ -236,7 +247,6 @@ impl CheckGroup {
             }
             "issue repositories" => Self::Config,
             "integrations" | "mecha-cassy" => Self::Integrations,
-            "user skills" => Self::Config,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -500,6 +510,132 @@ fn stray_user_skills_check(strays: &[StrayUserSkill]) -> Check {
     )
 }
 
+fn host_checks(current: Option<&Path>) -> Vec<Check> {
+    let root = crate::store::known_repos::host_cas_dir();
+    let mut checks = vec![
+        Check::new("user-level store", CheckStatus::Ok, format!("host root {}", root.display())),
+        host_known_repos_check(),
+        Check::new("hub service", CheckStatus::Ok, "inspect with `cas hub service status`"),
+    ];
+    #[cfg(feature = "mcp-proxy")]
+    checks.push(host_proxy_check());
+    #[cfg(not(feature = "mcp-proxy"))]
+    checks.push(Check::new("host proxy", CheckStatus::Ok, "proxy integration unavailable in this build"));
+    checks.extend(registered_project_root_checks(current.unwrap_or_else(|| Path::new(""))));
+    let mut skills = stray_user_skills_check(&scan_user_skill_dirs(&user_skill_scan_targets()));
+    skills.name = "host user skills".into();
+    checks.push(skills);
+    checks
+}
+
+fn host_known_repos_check() -> Check {
+    let db = crate::store::known_repos::host_cas_dir().join("cas.db");
+    if !db.is_file() { return Check::new("known repos", CheckStatus::Ok, "host registry is not initialized"); }
+    match crate::worktree::discovery::list_tracked_repos() {
+        Ok(repos) => {
+            let missing = repos.iter().filter(|repo| !repo.healthy).count();
+            if missing == 0 { Check::new("known repos", CheckStatus::Ok, format!("{} known repo(s); all roots exist", repos.len())) }
+            else { Check::new("known repos", CheckStatus::Warning, format!("{missing} missing root(s); run `cas doctor --fix` to prune them")) }
+        }
+        Err(error) => Check::new("known repos", CheckStatus::Warning, format!("cannot inspect host registry: {error}")),
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn host_proxy_check() -> Check {
+    match crate::cli::integrate::mecha_cassy::doctor_row_from_env(None) {
+        Some(row) => Check::new("host proxy", match row.severity {
+            crate::cli::integrate::mecha_cassy::DoctorSeverity::Ok => CheckStatus::Ok,
+            crate::cli::integrate::mecha_cassy::DoctorSeverity::Warning => CheckStatus::Warning,
+            crate::cli::integrate::mecha_cassy::DoctorSeverity::Error => CheckStatus::Error,
+        }, row.message),
+        None => Check::new("host proxy", CheckStatus::Ok, "not configured on this host"),
+    }
+}
+
+fn host_summary(checks: &[Check]) -> Check {
+    let findings = checks.iter().filter(|c| !matches!(c.status, CheckStatus::Ok)).count();
+    Check::new("host", if findings == 0 { CheckStatus::Ok } else { CheckStatus::Warning }, format!("host: {findings} finding{} — see `cas doctor --host`", if findings == 1 { "" } else { "s" }))
+}
+
+fn host_autofix() -> Option<Check> {
+    if !crate::store::known_repos::host_cas_dir().join("cas.db").is_file() { return None; }
+    match crate::cli::known_repos::prune_missing(false) {
+        Ok(report) if report.removed > 0 => Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: known repos — pruned {} missing root(s)", report.removed))),
+        Ok(_) => None,
+        Err(error) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("known-repos prune failed: {error}"))),
+    }
+}
+
+fn root_projection_check(root: &Path) -> Check {
+    let mut stale = 0;
+    for (harness, dir) in [(cas_mux::SupervisorCli::Claude, ".claude"), (cas_mux::SupervisorCli::Codex, ".codex"), (cas_mux::SupervisorCli::Grok, ".grok")] {
+        if !root.join(dir).is_dir() { continue; }
+        match crate::builtins::preview_all_builtins_for_project(harness, root) { Ok(changes) => stale += changes.len(), Err(error) => return Check::new("root projections", CheckStatus::Warning, format!("cannot inspect {dir}: {error}")) }
+    }
+    if stale == 0 { Check::new("root projections", CheckStatus::Ok, "managed projections are current") }
+    else { Check::new("root projections", CheckStatus::Warning, format!("{stale} stale projection file(s); run `cas doctor --fix`")) }
+}
+
+fn root_projection_autofix(root: &Path) -> Option<Check> {
+    if !matches!(root_projection_check(root).status, CheckStatus::Warning) { return None; }
+    let mut updated = 0;
+    for (harness, dir) in [(cas_mux::SupervisorCli::Claude, ".claude"), (cas_mux::SupervisorCli::Codex, ".codex"), (cas_mux::SupervisorCli::Grok, ".grok")] {
+        if root.join(dir).is_dir() { if let Ok(result) = crate::builtins::sync_all_builtins_for_project(harness, root) { updated += result.total_updated(); } }
+    }
+    Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: root projections — regenerated {updated} file(s)")))
+}
+
+fn code_index_autofix(root: &Path) -> Option<Check> {
+    let state = gather_symbol_index_state(root);
+    if !matches!(symbol_index_check(state, chrono::Utc::now()).status, CheckStatus::Warning) { return None; }
+    let project = root.parent().unwrap_or(root).to_path_buf();
+    let cfg = Config::load(root).unwrap_or_default().code();
+    let roots = vec![project];
+    let mut files = crate::daemon::indexing::collect_source_files(&roots, &cfg.extensions, &cfg.exclude_patterns);
+    files.sort();
+    match crate::daemon::indexing::reconcile_code_tree(&files, &roots, root, false) {
+        Ok(result) if result.errors.is_empty() => Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: symbol index — indexed {} file(s), {} symbol(s), reconciled vector queue", result.files_indexed, result.symbols_indexed))),
+        Ok(result) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation had {} error(s)", result.errors.len()))),
+        Err(error) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation failed: {error}"))),
+    }
+}
+
+fn search_index_autofix(root: &Path) -> Option<Check> {
+    let current = crate::hybrid_search::tantivy_index_dir(root);
+    let legacy = crate::hybrid_search::legacy_tantivy_index_dir(root);
+    if !legacy.join("meta.json").is_file() && current.is_dir() && SearchIndex::open(&current).is_ok() { return None; }
+    if legacy.is_dir() && !legacy.join("meta.json").is_file() && fs::read_dir(&legacy).map(|mut d| d.next().is_none()).unwrap_or(false) { let _ = fs::remove_dir_all(&legacy); }
+    match SearchIndex::rebuild(&current) {
+        Ok(search) => {
+            let mut count = 0;
+            if let Ok(store) = open_store(root) { if let Ok(entries) = store.list() { for e in entries { if search.index_entry(&e).is_ok() { count += 1; } } } }
+            Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: search index — created/migrated versioned path and indexed {count} document(s)")))
+        }
+        Err(error) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("versioned search index rebuild failed: {error}"))),
+    }
+}
+
+fn extended_autofixes(root: &Path) -> Vec<Check> { [host_autofix(), code_index_autofix(root), search_index_autofix(root), root_projection_autofix(root.parent().unwrap_or(root))].into_iter().flatten().collect() }
+
+fn offer_tty_autofix(root: &Path) -> bool {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() { return false; }
+    let state = gather_symbol_index_state(root);
+    let candidate = matches!(symbol_index_check(state, chrono::Utc::now()).status, CheckStatus::Warning)
+        || !crate::hybrid_search::tantivy_index_dir(root).is_dir()
+        || matches!(root_projection_check(root.parent().unwrap_or(root)).status, CheckStatus::Warning);
+    if !candidate { return false; }
+    print!("doctor found safe automatic fixes; apply now? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let raw = crossterm::terminal::enable_raw_mode().is_ok();
+    let yes = if raw {
+        let event = crossterm::event::read().ok();
+        let _ = crossterm::terminal::disable_raw_mode();
+        matches!(event, Some(crossterm::event::Event::Key(key)) if matches!(key.code, crossterm::event::KeyCode::Char('y' | 'Y')))
+    } else { let mut b = [0]; std::io::stdin().read_exact(&mut b).is_ok() && matches!(b[0], b'y' | b'Y') };
+    println!(); yes
+}
+
 /// Pure schema verdict so the missing-table path is exercised directly in
 /// tests rather than inferred from a source-code string.
 fn schema_tables_check(summary: &SchemaSummary) -> Check {
@@ -623,6 +759,14 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     let mut recorder = PhaseRecorder::new();
     let mut resolved_cas_root = cas_root.map(Path::to_path_buf);
 
+    if args.host {
+        let host_root = crate::store::known_repos::host_cas_dir();
+        if args.fix { if let Some(check) = host_autofix() { checks.push(check); } }
+        checks.extend(host_checks(None));
+        recorder.mark("host checks", &checks);
+        return output_checks_timed(&checks, recorder.per_check(), recorder.phases(), cli, started.elapsed(), Some(&host_root));
+    }
+
     if args.fix && cli.json && resolved_cas_root.is_none() {
         anyhow::bail!(
             "`cas doctor --fix --json` is not supported before initialization. Run `cas init --yes` first or omit `--json`."
@@ -705,8 +849,13 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             if let Some(check) = dangling_dependency_autofix(path) {
                 checks.push(check);
             }
+            checks.extend(extended_autofixes(path));
         }
     }
+
+    if !args.fix && !args.foreign_rows && !args.fix_cloud_rows && !args.release_cloud_rows
+        && !cli.json && let Some(path) = resolved_cas_root.as_deref() && offer_tty_autofix(path)
+    { checks.extend(extended_autofixes(path)); }
 
     recorder.mark("startup", &checks);
     // Check 1: .cas directory exists
@@ -736,6 +885,10 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     };
 
     recorder.mark("cas directory", &checks);
+    let project_root = cas_root.parent().unwrap_or(Path::new("."));
+    let host = host_checks(Some(project_root));
+    if cli.full { checks.extend(host); } else { checks.push(host_summary(&host)); }
+    recorder.mark("host checks", &checks);
     // Check 2: Store type and database
     let store_type = detect_store_type(&cas_root);
     match store_type {
@@ -1304,40 +1457,12 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // blocks). Unlike the platform rows this one *can* be an Error: a missing
     // variable, a rejected bearer, or a drifted tool contract each mean the
     // next release post will fail, and each has an exact remedy.
-    #[cfg(feature = "mcp-proxy")]
-    {
-        let project_proxy = cas_root.join("proxy.toml");
-        if let Some(row) = crate::cli::integrate::mecha_cassy::doctor_row_from_env(
-            project_proxy.is_file().then_some(project_proxy.as_path()),
-        ) {
-            checks.push(Check {
-                name: "mecha-cassy".to_string(),
-                status: match row.severity {
-                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Ok => CheckStatus::Ok,
-                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Warning => {
-                        CheckStatus::Warning
-                    }
-                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Error => CheckStatus::Error,
-                },
-                message: row.message,
-            });
-        }
-    }
-
     recorder.mark("mechacassy hub", &checks);
 
     // Check 13c: stale user-level skills (cas-332f). `cas update` only prunes
     // `cas-*` directories, so a hand-installed skill without that prefix is
     // never refreshed and never removed — it just keeps giving an agent stale
     // instructions that no test in this repo can reach.
-    checks.push(stray_user_skills_check(&scan_user_skill_dirs(
-        &user_skill_scan_targets(),
-    )));
-
-    // Its own phase: this check walks user-level skill directories on disk,
-    // which is a different cost from the hub probe before it and from the
-    // canonical-id queries after it. Folding it into either would misattribute
-    // whichever one later shows up as slow.
     recorder.mark("user skills", &checks);
 
     // Check 14: cloud canonical id — which bucket this project syncs into,
@@ -1349,8 +1474,6 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     ));
     checks.extend(canonical_alias_checks(&cas_root));
     checks.extend(cloud_identity_metadata_checks(&cas_root));
-    let current_project_root = cas_root.parent().unwrap_or(Path::new("."));
-    checks.extend(registered_project_root_checks(current_project_root));
 
     recorder.mark("canonical id", &checks);
     // Check 15: residual cross-project contamination from the cas-ed15 pull
@@ -3042,21 +3165,11 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
         };
     }
 
-    if state.files == 0 || !state.searchable {
+    if state.files == 0 && state.eligible_files == 0 && state.indexed_files == 0 {
         return Check {
             name,
-            status: CheckStatus::Warning,
-            message: format!(
-                "nothing indexed for this project ({} symbol(s) in the store across all \
-                 repositories){}. The daemon only indexes while idle — run `cas index code` to \
-                 catch up now.",
-                state.symbols,
-                if state.searchable {
-                    ""
-                } else {
-                    "; the code search index is missing"
-                }
-            ),
+            status: CheckStatus::Ok,
+            message: format!("no eligible source files for this project ({} symbol(s) in the store across all repositories)", state.symbols),
         };
     }
 
@@ -6235,7 +6348,7 @@ mod tests {
 
     /// Empty index and missing BM25 directory are the "never ran" case, not a silent pass.
     #[test]
-    fn symbol_index_check_warns_when_never_indexed() {
+    fn symbol_index_check_reports_no_eligible_files() {
         let now = chrono::Utc::now();
         let state = SymbolIndexState {
             files: 0,
@@ -6245,22 +6358,21 @@ mod tests {
         };
 
         let check = symbol_index_check(state, now);
-        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(matches!(check.status, CheckStatus::Ok));
         assert!(
-            check.message.contains("nothing indexed for this project"),
+            check.message.contains("no eligible source files"),
             "message: {}",
             check.message
         );
-        assert!(
-            check.message.contains("code search index is missing"),
-            "message: {}",
-            check.message
-        );
-        assert!(
-            check.message.contains("cas index code"),
-            "message: {}",
-            check.message
-        );
+    }
+
+    #[test]
+    fn symbol_index_check_demotes_zero_eligible_files_to_info() {
+        let state = SymbolIndexState { files: 0, eligible_files: 0, indexed_files: 0, searchable: false, ..healthy_state() };
+        let check = symbol_index_check(state, chrono::Utc::now());
+        assert!(matches!(check.status, CheckStatus::Ok));
+        assert!(check.message.contains("no eligible source files"));
+        assert!(!check.message.contains("run `cas index code`"));
     }
 
     /// An explicit opt-out must be reported honestly rather than as a healthy index.
@@ -7531,6 +7643,7 @@ fn render_report(
     fmt.newline()?;
 
     let groups = [
+        CheckGroup::Host,
         CheckGroup::Store,
         CheckGroup::Indexes,
         CheckGroup::Cloud,

@@ -114,7 +114,7 @@
   <h2>What the evidence window shows</h2>
   <div class="grid2">
     <figure aria-labelledby="fig1cap">
-      <svg viewBox="0 0 520 230" width="100%" height="auto" role="img" aria-describedby="fig1desc">
+      <svg viewBox="0 0 520 230" width="100%" role="img" aria-describedby="fig1desc">
         <desc id="fig1desc">Deliveries and send-backs per lane. Standard: 19 deliveries, 5 send-backs. Heavy: 1 delivery, 1 send-back. Taste, light, Astra: 0.</desc>
         <g font-family="system-ui,sans-serif" font-size="12" fill="currentColor">
           <line x1="120" y1="20" x2="120" y2="200" stroke="#5b6478" stroke-width="1"/>
@@ -220,7 +220,7 @@
   <h3>B · What this host measured, 2026-08-20 → 2026-09-06 (cas-src, all Codex and Claude homes)</h3>
   <div class="grid2">
     <figure aria-labelledby="fig2cap">
-      <svg viewBox="0 0 520 250" width="100%" height="auto" role="img" aria-describedby="fig2desc">
+      <svg viewBox="0 0 520 250" width="100%" role="img" aria-describedby="fig2desc">
         <desc id="fig2desc">Cost per merged delivery at 2026-09-06 list price, log-scaled bars: Luna xhigh $0.49 (n=212), Terra high $2.28 (n=42), Sol high $6.81 (n=51), Astra high $12.54 (n=2), Opus 5 high $25.47 (n=52).</desc>
         <g font-family="system-ui,sans-serif" font-size="12" fill="currentColor">
           <line x1="130" y1="16" x2="130" y2="196" stroke="#5b6478" stroke-width="1"/>
@@ -281,48 +281,58 @@
 
   <h3>B.2 · Every project, 2026-08-20 → 2026-09-06 (cas-e208 extractor, all six harness homes)</h3>
   <p>Source: <code>scripts/factory-model-history.py</code> run once per Codex/Claude home pair and unioned by <code>scripts/factory-model-history-union.py</code> into <code>docs/factory/data/factory-model-history-2026-09-06-allhomes-horizon.csv</code> (1,498 session×task rows) and its scorecard CSV; prices from <code>docs/factory/data/model-prices.json</code> (PART A), with the extractor's cost formula corrected to bill Codex cached tokens once. Definitions differ from B: unit = worker × task from the project DB joined to a transcript by worker name; send-backs = every <code>request_changes</code> / "changes requested" mention in notes (can exceed 100%); tool calls = Codex <code>function_call</code> (MCP) only; first push = factory-log marker; urgent stops = note text. 837 of 1,498 horizon rows (56%) carry no model because the spawn row has no <code>worker_spec</code> — shown, not dropped.</p>
-  <div class="grid2">
-    <figure aria-labelledby="fig3cap">
-      <svg viewBox="0 0 520 300" width="100%" height="auto" role="img" aria-describedby="fig3desc">
-        <desc id="fig3desc">Small multiples, one panel per metric, all projects 2026-08-20 to 2026-09-06: cost per delivered task (Luna $0.69, Haiku $1.46, Terra $3.53, Sol $7.10, Astra $12.27, Opus 5 $43.93); send-back mention rate (Haiku 0%, Opus 23%, Luna 29%, Terra 32%, Sol 67%); median minutes to first push (Terra 11.9, Sol 18.3, Haiku 19.6, Luna 25.6, Opus 66.2); median output tokens per delivered task (Terra 23.5K, Astra 30.6K, Sol 33.1K, Haiku 36.3K, Luna 54.1K, Opus 178.6K).</desc>
-        <g font-family="system-ui,sans-serif" font-size="10" fill="currentColor">
-          <text x="10" y="14" font-weight="700" font-size="11">Cost / delivered task ($, log)</text>
-          <text x="58" y="30" text-anchor="end">Luna</text><rect x="62" y="22" width="38" height="9" rx="2" fill="#5fd39a"/><text x="104" y="30">0.69</text>
-          <text x="58" y="42" text-anchor="end">Haiku</text><rect x="62" y="34" width="52" height="9" rx="2" fill="#5fd39a"/><text x="118" y="42">1.46</text>
-          <text x="58" y="54" text-anchor="end">Terra</text><rect x="62" y="46" width="70" height="9" rx="2" fill="#8fd3ff"/><text x="136" y="54">3.53</text>
-          <text x="58" y="66" text-anchor="end">Sol</text><rect x="62" y="58" width="83" height="9" rx="2" fill="#f5c04a"/><text x="149" y="66">7.10</text>
-          <text x="58" y="78" text-anchor="end">Astra</text><rect x="62" y="70" width="94" height="9" rx="2" fill="#f5c04a" fill-opacity="0.55" stroke="#ff6b7a"/><text x="160" y="78">12.27 (n=1)</text>
-          <text x="58" y="90" text-anchor="end">Opus 5</text><rect x="62" y="82" width="119" height="9" rx="2" fill="#ff6b7a"/><text x="185" y="90">43.93</text>
-          <text x="270" y="14" font-weight="700" font-size="11">Send-back mentions / delivered</text>
-          <text x="318" y="30" text-anchor="end">Haiku</text><rect x="322" y="22" width="1" height="9" fill="#5fd39a"/><text x="327" y="30">0%</text>
-          <text x="318" y="42" text-anchor="end">Opus 5</text><rect x="322" y="34" width="41" height="9" rx="2" fill="#5fd39a"/><text x="367" y="42">23%</text>
-          <text x="318" y="54" text-anchor="end">Luna</text><rect x="322" y="46" width="52" height="9" rx="2" fill="#8fd3ff"/><text x="378" y="54">29%</text>
-          <text x="318" y="66" text-anchor="end">Terra</text><rect x="322" y="58" width="58" height="9" rx="2" fill="#8fd3ff"/><text x="384" y="66">32%</text>
-          <text x="318" y="78" text-anchor="end">Sol</text><rect x="322" y="70" width="121" height="9" rx="2" fill="#ff6b7a"/><text x="447" y="78">67%</text>
-          <text x="318" y="90" text-anchor="end">Astra</text><rect x="322" y="82" width="1" height="9" fill="#5fd39a"/><text x="327" y="90">0% (n=1)</text>
-          <text x="10" y="126" font-weight="700" font-size="11">Median minutes to first push</text>
-          <text x="58" y="142" text-anchor="end">Terra</text><rect x="62" y="134" width="21" height="9" rx="2" fill="#5fd39a"/><text x="87" y="142">11.9</text>
-          <text x="58" y="154" text-anchor="end">Sol</text><rect x="62" y="146" width="33" height="9" rx="2" fill="#5fd39a"/><text x="99" y="154">18.3</text>
-          <text x="58" y="166" text-anchor="end">Haiku</text><rect x="62" y="158" width="35" height="9" rx="2" fill="#8fd3ff"/><text x="101" y="166">19.6</text>
-          <text x="58" y="178" text-anchor="end">Luna</text><rect x="62" y="170" width="46" height="9" rx="2" fill="#8fd3ff"/><text x="112" y="178">25.6</text>
-          <text x="58" y="190" text-anchor="end">Opus 5</text><rect x="62" y="182" width="119" height="9" rx="2" fill="#ff6b7a"/><text x="185" y="190">66.2</text>
-          <text x="58" y="202" text-anchor="end">Astra</text><text x="62" y="202" fill="#9aa5bb">no log marker (B: 19.1)</text>
-          <text x="270" y="126" font-weight="700" font-size="11">Median output tokens / delivered task</text>
-          <text x="318" y="142" text-anchor="end">Terra</text><rect x="322" y="134" width="16" height="9" rx="2" fill="#5fd39a"/><text x="342" y="142">23.5K</text>
-          <text x="318" y="154" text-anchor="end">Astra</text><rect x="322" y="146" width="20" height="9" rx="2" fill="#5fd39a"/><text x="346" y="154">30.6K</text>
-          <text x="318" y="166" text-anchor="end">Sol</text><rect x="322" y="158" width="22" height="9" rx="2" fill="#8fd3ff"/><text x="348" y="166">33.1K</text>
-          <text x="318" y="178" text-anchor="end">Haiku</text><rect x="322" y="170" width="24" height="9" rx="2" fill="#8fd3ff"/><text x="350" y="178">36.3K</text>
-          <text x="318" y="190" text-anchor="end">Luna</text><rect x="322" y="182" width="36" height="9" rx="2" fill="#f5c04a"/><text x="362" y="190">54.1K</text>
-          <text x="318" y="202" text-anchor="end">Opus 5</text><rect x="322" y="194" width="119" height="9" rx="2" fill="#ff6b7a"/><text x="445" y="202">178.6K</text>
-          <text x="10" y="236" fill="#9aa5bb">All projects, 2026-08-20 → 09-06; list prices; cost and send-back rates per delivered task; sample sizes in the table.</text>
-          <text x="10" y="250" fill="#9aa5bb">Astra = one joined delivery in the extractor (three in B). Opus 5 push median comes from the minority of tasks with a log marker.</text>
-          <text x="10" y="264" fill="#9aa5bb">Tool calls (MCP only, median): Sol 28 · Terra 22 · Luna 32 · Haiku 32 · Astra 28 · Opus 5 171.</text>
+  <figure aria-labelledby="fig3cap">
+    <div class="grid2" style="gap:12px">
+      <svg viewBox="0 0 260 94" width="100%" role="img" aria-label="Cost / delivered task ($, log scale)">
+        <g font-family="system-ui,sans-serif" font-size="9" fill="currentColor">
+          <text x="4" y="11" font-weight="700" font-size="10">Cost / delivered task ($, log scale)</text>
+          <text x="52" y="32" text-anchor="end">Luna</text><rect x="56" y="24" width="38" height="9" rx="2" fill="#5fd39a"/><text x="98" y="32">0.69</text>
+          <text x="52" y="44" text-anchor="end">Haiku</text><rect x="56" y="36" width="52" height="9" rx="2" fill="#5fd39a"/><text x="112" y="44">1.46</text>
+          <text x="52" y="56" text-anchor="end">Terra</text><rect x="56" y="48" width="70" height="9" rx="2" fill="#8fd3ff"/><text x="130" y="56">3.53</text>
+          <text x="52" y="68" text-anchor="end">Sol</text><rect x="56" y="60" width="83" height="9" rx="2" fill="#f5c04a"/><text x="143" y="68">7.10</text>
+          <text x="52" y="80" text-anchor="end">Astra</text><rect x="56" y="72" width="94" height="9" rx="2" fill="#f5c04a" fill-opacity="0.55" stroke="#ff6b7a"/><text x="154" y="80">12.27 (n=1)</text>
+          <text x="52" y="92" text-anchor="end">Opus 5</text><rect x="56" y="84" width="119" height="9" rx="2" fill="#ff6b7a"/><text x="179" y="92">43.93</text>
         </g>
       </svg>
-      <figcaption id="fig3cap">Figure 3. Small multiples per metric, all projects, 2026-08-20 → 2026-09-06, from <code>docs/factory/data/factory-model-scorecard-2026-09-06-allhomes-horizon.csv</code> (overall rows). Data table at right.</figcaption>
-    </figure>
-    <div>
-      <table>
+      <svg viewBox="0 0 260 94" width="100%" role="img" aria-label="Send-back mentions / delivered task">
+        <g font-family="system-ui,sans-serif" font-size="9" fill="currentColor">
+          <text x="4" y="11" font-weight="700" font-size="10">Send-back mentions / delivered task</text>
+          <text x="52" y="32" text-anchor="end">Haiku</text><rect x="56" y="24" width="1" height="9" rx="2" fill="#5fd39a"/><text x="61" y="32">0%</text>
+          <text x="52" y="44" text-anchor="end">Opus 5</text><rect x="56" y="36" width="41" height="9" rx="2" fill="#5fd39a"/><text x="101" y="44">23%</text>
+          <text x="52" y="56" text-anchor="end">Luna</text><rect x="56" y="48" width="52" height="9" rx="2" fill="#8fd3ff"/><text x="112" y="56">29%</text>
+          <text x="52" y="68" text-anchor="end">Terra</text><rect x="56" y="60" width="58" height="9" rx="2" fill="#8fd3ff"/><text x="118" y="68">32%</text>
+          <text x="52" y="80" text-anchor="end">Sol</text><rect x="56" y="72" width="121" height="9" rx="2" fill="#ff6b7a"/><text x="181" y="80">67%</text>
+          <text x="52" y="92" text-anchor="end">Astra</text><rect x="56" y="84" width="1" height="9" rx="2" fill="#5fd39a"/><text x="61" y="92">0% (n=1)</text>
+        </g>
+      </svg>
+      <svg viewBox="0 0 260 106" width="100%" role="img" aria-label="Median minutes to first push">
+        <g font-family="system-ui,sans-serif" font-size="9" fill="currentColor">
+          <text x="4" y="11" font-weight="700" font-size="10">Median minutes to first push</text>
+          <text x="52" y="32" text-anchor="end">Terra</text><rect x="56" y="24" width="21" height="9" rx="2" fill="#5fd39a"/><text x="81" y="32">11.9</text>
+          <text x="52" y="44" text-anchor="end">Sol</text><rect x="56" y="36" width="33" height="9" rx="2" fill="#5fd39a"/><text x="93" y="44">18.3</text>
+          <text x="52" y="56" text-anchor="end">Haiku</text><rect x="56" y="48" width="35" height="9" rx="2" fill="#8fd3ff"/><text x="95" y="56">19.6</text>
+          <text x="52" y="68" text-anchor="end">Luna</text><rect x="56" y="60" width="46" height="9" rx="2" fill="#8fd3ff"/><text x="106" y="68">25.6</text>
+          <text x="52" y="80" text-anchor="end">Opus 5</text><rect x="56" y="72" width="119" height="9" rx="2" fill="#ff6b7a"/><text x="179" y="80">66.2</text>
+          <text x="52" y="92" text-anchor="end">Astra</text><text x="56" y="92" fill="#9aa5bb">no log marker (B: 19.1 min)</text>
+          <text x="4" y="102" fill="#9aa5bb" font-size="8">Opus 5: from the minority of tasks with a log marker.</text>
+        </g>
+      </svg>
+      <svg viewBox="0 0 260 106" width="100%" role="img" aria-label="Median output tokens / delivered task">
+        <g font-family="system-ui,sans-serif" font-size="9" fill="currentColor">
+          <text x="4" y="11" font-weight="700" font-size="10">Median output tokens / delivered task</text>
+          <text x="52" y="32" text-anchor="end">Terra</text><rect x="56" y="24" width="16" height="9" rx="2" fill="#5fd39a"/><text x="76" y="32">23.5K</text>
+          <text x="52" y="44" text-anchor="end">Astra</text><rect x="56" y="36" width="20" height="9" rx="2" fill="#5fd39a"/><text x="80" y="44">30.6K</text>
+          <text x="52" y="56" text-anchor="end">Sol</text><rect x="56" y="48" width="22" height="9" rx="2" fill="#8fd3ff"/><text x="82" y="56">33.1K</text>
+          <text x="52" y="68" text-anchor="end">Haiku</text><rect x="56" y="60" width="24" height="9" rx="2" fill="#8fd3ff"/><text x="84" y="68">36.3K</text>
+          <text x="52" y="80" text-anchor="end">Luna</text><rect x="56" y="72" width="36" height="9" rx="2" fill="#f5c04a"/><text x="96" y="80">54.1K</text>
+          <text x="52" y="92" text-anchor="end">Opus 5</text><rect x="56" y="84" width="119" height="9" rx="2" fill="#ff6b7a"/><text x="179" y="92">178.6K</text>
+          <text x="4" y="102" fill="#9aa5bb" font-size="8">MCP tool calls (median): Sol 28 · Terra 22 · Luna 32 · Haiku 32 · Astra 28 · Opus 5 171.</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption id="fig3cap">Figure 3. Small multiples, one panel per metric, all projects, 2026-08-20 → 2026-09-06, from <code>docs/factory/data/factory-model-scorecard-2026-09-06-allhomes-horizon.csv</code> (overall rows; list prices; sample sizes in the table below). Astra = one joined delivery in the extractor (three in B). Panels reflow to one column on narrow screens. Data table below.</figcaption>
+  </figure>
+  <table>
         <thead><tr><th>Model / effort (all projects)</th><th class="num">Sessions</th><th class="num">Miss</th><th class="num">Delivered</th><th class="num">Send-back mentions</th><th class="num">Min to push</th><th class="num">Output / task</th><th class="num">MCP calls</th><th class="num">Cost / task</th></tr></thead>
         <tbody>
           <tr><td>gpt-5.6-luna / xhigh</td><td class="num">349</td><td class="num">5%</td><td class="num">272</td><td class="num">78 (29%)</td><td class="num">25.6</td><td class="num">54,109</td><td class="num">32</td><td class="num"><b>$0.69</b></td></tr>
@@ -337,8 +347,6 @@
         </tbody>
       </table>
       <p class="meta">Horizon totals at list (unique sessions): Opus 5 $3,470 for 111 delivered; Sol $398 for 57; Luna $184 for 272; Terra $156 for 44; Fable 5.1 workers $439 for 5; Haiku $22 for 22.</p>
-    </div>
-  </div>
   <details><summary>Per project × model × effort (rows with ≥ 3 sessions; full set in the scorecard CSV)</summary>
   <table>
     <thead><tr><th>Project</th><th>Model / effort</th><th class="num">Sessions</th><th class="num">Miss</th><th class="num">Delivered</th><th class="num">Send-back mentions</th><th class="num">Min to push</th><th class="num">Output</th><th class="num">MCP calls</th><th class="num">Cost / delivered</th></tr></thead>

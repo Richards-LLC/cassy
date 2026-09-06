@@ -27,16 +27,19 @@
       "4b3d7350ce5c9a702f2d5dd23cf1a7e3fa288b9e54fa67410aa035c54d052a51"
     ],
     "skills/cas-cli-craft/references/exemplars/before-after.md": [
+      "4e888df31ddf1e621ad7ab9ede7d76621f4a6f925ebf7291de5428581b32a108",
       "58bbd62ad6e7e04b6a7812a6f31c66f48b41567ab4cd34cf652ca65ec77e7f63"
     ],
     "skills/cas-cli-craft/references/exemplars/doctor-report.md": [
-      "850d787e8a912e952ef345f0dace75ac45864dbb587c3dd55674dbcb39a2bf1b"
+      "850d787e8a912e952ef345f0dace75ac45864dbb587c3dd55674dbcb39a2bf1b",
+      "aea2d0e9ff44c41d01d7365c8299dca9fa5383bcaedc2b8850ac664c28c529fc"
     ],
     "skills/cas-cli-craft/references/exemplars/long-running.md": [
       "0e35739065a653e3a343e756b8687a42a57df2dc05ff5a8ef6a540343b8d228b"
     ],
     "skills/cas-cli-craft/references/exemplars/status-screen.md": [
-      "c0b7ec3ee374661e1077f4c1d949337a45d45bc3c7a5a1f95484b97c62eec47d"
+      "c0b7ec3ee374661e1077f4c1d949337a45d45bc3c7a5a1f95484b97c62eec47d",
+      "f7ca47f68001afd342d70fa2748976f11e66dcbdfd02578abe487b36ec1f945f"
     ],
     "skills/cas-cli-craft/references/output-contract.md": [
       "ae67d8190695dd9160c5881db11be8d0f2db4a36ec9b2dfc4fc5d0f3281010dd"
@@ -543,6 +546,7 @@
       "c8c50345f94536ca1f9780d45218f6bdfb17d9dceff90a12c06d8ca51f92f645"
     ],
     "skills/cas-ui-craft/references/exemplars/dashboard.html": [
+      "5df4d082d4ce624b1e0734f18665a5e0c548d200943201af458e9d4e4601ae70",
       "d6aa2747130e8898acf8bcd1949cbb9b4aff610f870e10279644726120280308"
     ],
     "skills/cas-ui-craft/references/exemplars/product-page.html": [
@@ -744,9 +748,11 @@
     ],
     "skills/design-spec/references/design-tokens.json": [
       "11672f6a1d451344c9ccfbcff1f7230282587d9901337e44f37678293eeb28d9",
+      "3f58b3d57ce12a1129457714fba66553ad4d67399ed35e3fbd01d9cd4ececd26",
       "5b939b73e5dfae3de49e5b488f030b2e927828d38643c04d225d810400851cee"
     ],
     "skills/design-spec/references/petrastella-design-language.md": [
+      "997b4bf17927193b81bbf807750a8f6dd7d9160c79d5aa234337386a089fbd12",
       "d328055725ea9e7808971a2d9ac0850e02ff05a3773b53541befa5eb932aa483",
       "f2ec54d015b063af278f8bf69a34b0f96eb65c442bdc3380019d75e55c802316"
     ],

@@ -3,6 +3,7 @@
 use clap::Args;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,8 @@ use crate::migration::{
     run_migrations,
 };
 use crate::store::{
-    StoreType, detect_store_type, open_agent_store, open_rule_store, open_store, open_task_store,
+    StoreType, detect_store_type, open_agent_store, open_rule_store, open_store,
+    open_task_store,
 };
 use crate::types::RuleStatus;
 use crate::ui::components::Formatter;
@@ -24,9 +26,17 @@ use crate::cli::Cli;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
-    /// Attempt safe automatic fixes (initialize Cassy and apply pending schema migrations)
+    /// Apply safe fixes and run consent-fix dry runs (config repair, cloud
+    /// purge/quarantine, index repair). Destructive fixes require `--yes` in
+    /// non-interactive mode; plain `--fix` previews them. In a terminal,
+    /// doctor may offer safe automatic repairs once; consent and human-review
+    /// findings remain unchanged unless explicitly confirmed.
     #[arg(long)]
     pub fix: bool,
+
+    /// Show host-scoped checks only.
+    #[arg(long)]
+    pub host: bool,
 
     /// Report cross-project ("foreign") task rows in this project's database
     /// in full detail, instead of running the other diagnostics (cas-fc6fa /
@@ -51,8 +61,8 @@ pub struct DoctorArgs {
     #[arg(long)]
     pub release_cloud_rows: bool,
 
-    /// Apply the reported `--fix-cloud-rows` / `--release-cloud-rows` plan
-    /// instead of only printing it.
+    /// Apply the reported consent-fix plan instead of only printing it. In a
+    /// TTY, doctor asks once when this is omitted.
     #[arg(long)]
     pub yes: bool,
 }
@@ -184,6 +194,7 @@ impl PhaseRecorder {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckGroup {
+    Host,
     Store,
     Indexes,
     Cloud,
@@ -194,6 +205,7 @@ enum CheckGroup {
 impl CheckGroup {
     fn label(self) -> &'static str {
         match self {
+            Self::Host => "Host",
             Self::Store => "Store",
             Self::Indexes => "Indexes",
             Self::Cloud => "Cloud",
@@ -204,6 +216,7 @@ impl CheckGroup {
 
     fn json_name(self) -> &'static str {
         match self {
+            Self::Host => "host",
             Self::Store => "store",
             Self::Indexes => "indexes",
             Self::Cloud => "cloud",
@@ -214,6 +227,9 @@ impl CheckGroup {
 
     fn for_name(name: &str) -> Self {
         match name.to_ascii_lowercase().as_str() {
+            "host" | "user-level store" | "known repos" | "host proxy" | "hub service"
+            | "registered project roots" | "host user skills" => Self::Host,
+            "user skills" => Self::Config,
             "legacy search index"
             | "pre-versioned search index"
             | "search index"
@@ -224,19 +240,23 @@ impl CheckGroup {
             "canonical id"
             | "canonical id collision"
             | "cloud identity metadata"
-            | "registered project roots"
             | "project aliases"
             | "cloud sync queue"
             | "cross-project rows"
             | "foreign knowledge pages"
             | "supervisor relay"
             | "delivery retries" => Self::Cloud,
-            "configuration" | "mcp config" | "mcp stdio upstreams" | "sync target" | "models" => {
+            "configuration"
+            | "config repair"
+            | "mcp config"
+            | "mcp stdio upstreams"
+            | "sync target"
+            | "models" =>
+            {
                 Self::Config
             }
             "issue repositories" => Self::Config,
             "integrations" | "mecha-cassy" => Self::Integrations,
-            "user skills" => Self::Config,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -288,6 +308,7 @@ impl Check {
 
 enum CheckStatus {
     Ok,
+    Info,
     Warning,
     Error,
 }
@@ -500,6 +521,132 @@ fn stray_user_skills_check(strays: &[StrayUserSkill]) -> Check {
     )
 }
 
+fn host_checks(current: Option<&Path>) -> Vec<Check> {
+    let root = crate::store::known_repos::host_cas_dir();
+    let mut checks = vec![
+        Check::new("user-level store", CheckStatus::Ok, format!("host root {}", root.display())),
+        host_known_repos_check(),
+        Check::new("hub service", CheckStatus::Ok, "inspect with `cas hub service status`"),
+    ];
+    #[cfg(feature = "mcp-proxy")]
+    checks.push(host_proxy_check());
+    #[cfg(not(feature = "mcp-proxy"))]
+    checks.push(Check::new("host proxy", CheckStatus::Ok, "proxy integration unavailable in this build"));
+    checks.extend(registered_project_root_checks(current.unwrap_or_else(|| Path::new(""))));
+    let mut skills = stray_user_skills_check(&scan_user_skill_dirs(&user_skill_scan_targets()));
+    skills.name = "host user skills".into();
+    checks.push(skills);
+    checks
+}
+
+fn host_known_repos_check() -> Check {
+    let db = crate::store::known_repos::host_cas_dir().join("cas.db");
+    if !db.is_file() { return Check::new("known repos", CheckStatus::Ok, "host registry is not initialized"); }
+    match crate::worktree::discovery::list_tracked_repos() {
+        Ok(repos) => {
+            let missing = repos.iter().filter(|repo| !repo.healthy).count();
+            if missing == 0 { Check::new("known repos", CheckStatus::Ok, format!("{} known repo(s); all roots exist", repos.len())) }
+            else { Check::new("known repos", CheckStatus::Warning, format!("{missing} missing root(s); run `cas doctor --fix` to prune them")) }
+        }
+        Err(error) => Check::new("known repos", CheckStatus::Warning, format!("cannot inspect host registry: {error}")),
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn host_proxy_check() -> Check {
+    match crate::cli::integrate::mecha_cassy::doctor_row_from_env(None) {
+        Some(row) => Check::new("host proxy", match row.severity {
+            crate::cli::integrate::mecha_cassy::DoctorSeverity::Ok => CheckStatus::Ok,
+            crate::cli::integrate::mecha_cassy::DoctorSeverity::Warning => CheckStatus::Warning,
+            crate::cli::integrate::mecha_cassy::DoctorSeverity::Error => CheckStatus::Error,
+        }, row.message),
+        None => Check::new("host proxy", CheckStatus::Ok, "not configured on this host"),
+    }
+}
+
+fn host_summary(checks: &[Check]) -> Check {
+    let findings = checks.iter().filter(|c| !matches!(c.status, CheckStatus::Ok)).count();
+    Check::new("host", if findings == 0 { CheckStatus::Ok } else { CheckStatus::Warning }, format!("host: {findings} finding{} — see `cas doctor --host`", if findings == 1 { "" } else { "s" }))
+}
+
+fn host_autofix() -> Option<Check> {
+    if !crate::store::known_repos::host_cas_dir().join("cas.db").is_file() { return None; }
+    match crate::cli::known_repos::prune_missing(false) {
+        Ok(report) if report.removed > 0 => Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: known repos — pruned {} missing root(s)", report.removed))),
+        Ok(_) => None,
+        Err(error) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("known-repos prune failed: {error}"))),
+    }
+}
+
+fn root_projection_check(root: &Path) -> Check {
+    let mut stale = 0;
+    for (harness, dir) in [(cas_mux::SupervisorCli::Claude, ".claude"), (cas_mux::SupervisorCli::Codex, ".codex"), (cas_mux::SupervisorCli::Grok, ".grok")] {
+        if !root.join(dir).is_dir() { continue; }
+        match crate::builtins::preview_all_builtins_for_project(harness, root) { Ok(changes) => stale += changes.len(), Err(error) => return Check::new("root projections", CheckStatus::Warning, format!("cannot inspect {dir}: {error}")) }
+    }
+    if stale == 0 { Check::new("root projections", CheckStatus::Ok, "managed projections are current") }
+    else { Check::new("root projections", CheckStatus::Warning, format!("{stale} stale projection file(s); run `cas doctor --fix`")) }
+}
+
+fn root_projection_autofix(root: &Path) -> Option<Check> {
+    if !matches!(root_projection_check(root).status, CheckStatus::Warning) { return None; }
+    let mut updated = 0;
+    for (harness, dir) in [(cas_mux::SupervisorCli::Claude, ".claude"), (cas_mux::SupervisorCli::Codex, ".codex"), (cas_mux::SupervisorCli::Grok, ".grok")] {
+        if root.join(dir).is_dir() { if let Ok(result) = crate::builtins::sync_all_builtins_for_project(harness, root) { updated += result.total_updated(); } }
+    }
+    Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: root projections — regenerated {updated} file(s)")))
+}
+
+fn code_index_autofix(root: &Path) -> Option<Check> {
+    let state = gather_symbol_index_state(root);
+    if !matches!(symbol_index_check(state, chrono::Utc::now()).status, CheckStatus::Warning) { return None; }
+    let project = root.parent().unwrap_or(root).to_path_buf();
+    let cfg = Config::load(root).unwrap_or_default().code();
+    let roots = vec![project];
+    let mut files = crate::daemon::indexing::collect_source_files(&roots, &cfg.extensions, &cfg.exclude_patterns);
+    files.sort();
+    match crate::daemon::indexing::reconcile_code_tree(&files, &roots, root, false) {
+        Ok(result) if result.errors.is_empty() => Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: symbol index — indexed {} file(s), {} symbol(s), reconciled vector queue", result.files_indexed, result.symbols_indexed))),
+        Ok(result) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation had {} error(s)", result.errors.len()))),
+        Err(error) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation failed: {error}"))),
+    }
+}
+
+fn search_index_autofix(root: &Path) -> Option<Check> {
+    let current = crate::hybrid_search::tantivy_index_dir(root);
+    let legacy = crate::hybrid_search::legacy_tantivy_index_dir(root);
+    if !legacy.join("meta.json").is_file() && current.is_dir() && SearchIndex::open(&current).is_ok() { return None; }
+    if legacy.is_dir() && !legacy.join("meta.json").is_file() && fs::read_dir(&legacy).map(|mut d| d.next().is_none()).unwrap_or(false) { let _ = fs::remove_dir_all(&legacy); }
+    match SearchIndex::rebuild(&current) {
+        Ok(search) => {
+            let mut count = 0;
+            if let Ok(store) = open_store(root) { if let Ok(entries) = store.list() { for e in entries { if search.index_entry(&e).is_ok() { count += 1; } } } }
+            Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: search index — created/migrated versioned path and indexed {count} document(s)")))
+        }
+        Err(error) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("versioned search index rebuild failed: {error}"))),
+    }
+}
+
+fn extended_autofixes(root: &Path) -> Vec<Check> { [host_autofix(), code_index_autofix(root), search_index_autofix(root), root_projection_autofix(root.parent().unwrap_or(root))].into_iter().flatten().collect() }
+
+fn offer_tty_autofix(root: &Path) -> bool {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() { return false; }
+    let state = gather_symbol_index_state(root);
+    let candidate = matches!(symbol_index_check(state, chrono::Utc::now()).status, CheckStatus::Warning)
+        || !crate::hybrid_search::tantivy_index_dir(root).is_dir()
+        || matches!(root_projection_check(root.parent().unwrap_or(root)).status, CheckStatus::Warning);
+    if !candidate { return false; }
+    print!("doctor found safe automatic fixes; apply now? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let raw = crossterm::terminal::enable_raw_mode().is_ok();
+    let yes = if raw {
+        let event = crossterm::event::read().ok();
+        let _ = crossterm::terminal::disable_raw_mode();
+        matches!(event, Some(crossterm::event::Event::Key(key)) if matches!(key.code, crossterm::event::KeyCode::Char('y' | 'Y')))
+    } else { let mut b = [0]; std::io::stdin().read_exact(&mut b).is_ok() && matches!(b[0], b'y' | b'Y') };
+    println!(); yes
+}
+
 /// Pure schema verdict so the missing-table path is exercised directly in
 /// tests rather than inferred from a source-code string.
 fn schema_tables_check(summary: &SchemaSummary) -> Check {
@@ -566,6 +713,286 @@ fn issue_repositories_check(config: &Config) -> Check {
     )
 }
 
+/// The result of a malformed project-config repair. The proposed output is
+/// kept in the report so a non-interactive `--fix` can show the exact dry-run
+/// without touching either the config or its preserved corrupt copy.
+#[derive(Debug, Clone)]
+struct ConfigRepairReport {
+    corrupt_copy: PathBuf,
+    preview: String,
+    repaired_lines: Vec<usize>,
+    restored_backup: Option<PathBuf>,
+    applied: bool,
+}
+
+fn config_corrupt_copy_path(path: &Path) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let mut candidate = parent.join(format!("config.toml.corrupt-{stamp}"));
+    let mut suffix = 1;
+    while candidate.exists() {
+        candidate = parent.join(format!("config.toml.corrupt-{stamp}-{suffix}"));
+        suffix += 1;
+    }
+    candidate
+}
+
+fn newest_config_backup(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    let name = path.file_name()?.to_str()?;
+    let mut candidates = fs::read_dir(parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|candidate| candidate.starts_with(&format!("{name}.bak")))
+        })
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    candidates
+        .into_iter()
+        .rev()
+        .map(|(_, path)| path)
+        .find(|candidate| {
+            fs::read_to_string(candidate)
+                .ok()
+                .is_some_and(|content| toml::from_str::<Config>(&content).is_ok())
+        })
+}
+
+/// Parse one independent TOML fragment, removing only a line identified by
+/// the parser as malformed. Returning the absolute lines makes the doctor
+/// report precise instead of saying merely "config repaired".
+fn parse_config_fragment(
+    lines: &[&str],
+    first_line: usize,
+) -> anyhow::Result<(toml::Value, Vec<usize>)> {
+    let mut remaining = lines.to_vec();
+    let mut repaired_lines = Vec::new();
+    loop {
+        let content = remaining.join("\n");
+        match toml::from_str::<toml::Value>(&content) {
+            Ok(value) => return Ok((value, repaired_lines)),
+            Err(error) => {
+                let Some(span) = error.span() else {
+                    return Err(anyhow::anyhow!("cannot locate malformed config line: {error}"));
+                };
+                let line = content[..span.start]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count();
+                if line >= remaining.len() {
+                    return Err(anyhow::anyhow!("cannot isolate malformed config fragment: {error}"));
+                }
+                repaired_lines.push(first_line + line);
+                remaining.remove(line);
+                if remaining.is_empty() {
+                    return Ok((toml::Value::Table(toml::map::Map::new()), repaired_lines));
+                }
+            }
+        }
+    }
+}
+
+fn merge_config_values(destination: &mut toml::Value, source: toml::Value) {
+    match (destination, source) {
+        (toml::Value::Table(destination), toml::Value::Table(source)) => {
+            for (key, value) in source {
+                if let Some(existing) = destination.get_mut(&key) {
+                    merge_config_values(existing, value);
+                } else {
+                    destination.insert(key, value);
+                }
+            }
+        }
+        (destination, source) => *destination = source,
+    }
+}
+
+/// Re-serialize the parseable TOML sections of a malformed config. Duplicate
+/// table headers are merged rather than deleting the later block (which would
+/// silently lose `[project].canonical_id` in the corruption shape seen in
+/// cas-826a). A valid newest `config.toml.bak*` wins when no section can be
+/// recovered.
+fn repaired_config_preview(
+    content: &str,
+) -> anyhow::Result<(String, Vec<usize>, Option<PathBuf>)> {
+    let lines = content.lines().collect::<Vec<_>>();
+    let header_indices = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let trimmed = line.trim();
+            (trimmed.starts_with('[') && trimmed.ends_with(']')).then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    let mut root = toml::Value::Table(toml::map::Map::new());
+    let mut repaired_lines = Vec::new();
+    let root_end = header_indices.first().copied().unwrap_or(lines.len());
+    let (root_value, mut root_repairs) = parse_config_fragment(&lines[..root_end], 1)?;
+    merge_config_values(&mut root, root_value);
+    repaired_lines.append(&mut root_repairs);
+
+    let mut seen_headers = std::collections::HashSet::new();
+    for (position, header_index) in header_indices.iter().copied().enumerate() {
+        let end = header_indices
+            .get(position + 1)
+            .copied()
+            .unwrap_or(lines.len());
+        let header = lines[header_index].trim().to_string();
+        let duplicate = !seen_headers.insert(header.clone());
+        if duplicate {
+            // The output contains one canonical header; retain the later
+            // block's values but report the discarded duplicate header line.
+            repaired_lines.push(header_index + 1);
+        }
+        let (value, mut section_repairs) =
+            parse_config_fragment(&lines[header_index..end], header_index + 1)?;
+        merge_config_values(&mut root, value);
+        repaired_lines.append(&mut section_repairs);
+    }
+
+    let preview = toml::to_string_pretty(&root)
+        .map_err(|error| anyhow::anyhow!("cannot serialize repaired config: {error}"))?;
+    toml::from_str::<Config>(&preview)
+        .map_err(|error| anyhow::anyhow!("repaired config does not match Config: {error}"))?;
+    repaired_lines.sort_unstable();
+    repaired_lines.dedup();
+    Ok((preview, repaired_lines, None))
+}
+
+fn repair_config_toml(path: &Path, apply: bool) -> anyhow::Result<Option<ConfigRepairReport>> {
+    let content = fs::read_to_string(path)?;
+    if toml::from_str::<Config>(&content).is_ok() {
+        return Ok(None);
+    }
+
+    let (preview, repaired_lines, restored_backup) = match repaired_config_preview(&content) {
+        Ok((preview, repaired_lines, _)) => (preview, repaired_lines, None),
+        Err(section_error) => {
+            let Some(backup) = newest_config_backup(path) else {
+                return Err(section_error);
+            };
+            let backup_content = fs::read_to_string(&backup)?;
+            (backup_content, Vec::new(), Some(backup))
+        }
+    };
+
+    let corrupt_copy = config_corrupt_copy_path(path);
+    let mut report = ConfigRepairReport {
+        corrupt_copy,
+        preview,
+        repaired_lines,
+        restored_backup,
+        applied: false,
+    };
+    if apply {
+        fs::copy(path, &report.corrupt_copy)?;
+        let cas_dir = path.parent().unwrap_or(Path::new("."));
+        let _lock = crate::config::lock_project_config(cas_dir)?;
+        crate::config::atomic_replace_project_config(path, &report.preview)?;
+        report.applied = true;
+    }
+    Ok(Some(report))
+}
+
+fn confirm_doctor_consent(cli: &Cli, yes: bool, summary: &str) -> bool {
+    if yes || cli.json || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return yes;
+    }
+    eprint!("{summary} Apply? [y/N] ");
+    let _ = io::stdout().flush();
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+fn config_repair_fix(path: &Path, args: &DoctorArgs, cli: &Cli) -> Option<Check> {
+    let report = match repair_config_toml(path, false) {
+        Ok(report) => report?,
+        Err(error) => {
+            return Some(Check::new(
+                "config repair",
+                CheckStatus::Warning,
+                format!("cannot prepare config.toml repair: {error}"),
+            ));
+        }
+    };
+    let lines = if report.repaired_lines.is_empty() {
+        "a valid backup will be restored".to_string()
+    } else {
+        format!(
+            "line(s) {} will be repaired",
+            report
+                .repaired_lines
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let summary = format!(
+        "Malformed .cas/config.toml: {lines}; preserve a copy at {}.",
+        report.corrupt_copy.display()
+    );
+    if !confirm_doctor_consent(cli, args.yes, &summary) {
+        return Some(Check::new(
+            "config repair",
+            CheckStatus::Info,
+            format!(
+                "{summary} Dry run only; re-run `cas doctor --fix --yes` to apply."
+            ),
+        ));
+    }
+
+    match repair_config_toml(path, true) {
+        Ok(Some(applied)) => {
+            let recovery = applied
+                .repaired_lines
+                .first()
+                .map(|line| format!("; repaired line {line}"))
+                .or_else(|| {
+                    applied
+                        .restored_backup
+                        .as_ref()
+                        .map(|backup| format!("; restored valid backup {}", backup.display()))
+                })
+                .unwrap_or_else(|| "; repaired parseable sections".to_string());
+            Some(Check::new(
+                "config repair",
+                CheckStatus::Ok,
+                format!(
+                    "repaired config.toml; preserved corrupt copy at {}{recovery}",
+                    applied.corrupt_copy.display(),
+                ),
+            ))
+        }
+        Ok(None) => Some(Check::new(
+            "config repair",
+            CheckStatus::Ok,
+            "config.toml was already valid after the dry run",
+        )),
+        Err(error) => Some(Check::new(
+            "config repair",
+            CheckStatus::Warning,
+            format!("config.toml repair failed: {error}"),
+        )),
+    }
+}
+
 /// Report the routable supervisor population for every factory session that
 /// still has at least one live registered agent. Stale historical supervisor
 /// rows do not make an active session ambiguous.
@@ -622,6 +1049,14 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // `--json` can name the cost instead of leaving the operator to guess.
     let mut recorder = PhaseRecorder::new();
     let mut resolved_cas_root = cas_root.map(Path::to_path_buf);
+
+    if args.host {
+        let host_root = crate::store::known_repos::host_cas_dir();
+        if args.fix { if let Some(check) = host_autofix() { checks.push(check); } }
+        checks.extend(host_checks(None));
+        recorder.mark("host checks", &checks);
+        return output_checks_timed(&checks, recorder.per_check(), recorder.phases(), cli, started.elapsed(), Some(&host_root));
+    }
 
     if args.fix && cli.json && resolved_cas_root.is_none() {
         anyhow::bail!(
@@ -705,8 +1140,13 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             if let Some(check) = dangling_dependency_autofix(path) {
                 checks.push(check);
             }
+            checks.extend(extended_autofixes(path));
         }
     }
+
+    if !args.fix && !args.foreign_rows && !args.fix_cloud_rows && !args.release_cloud_rows
+        && !cli.json && let Some(path) = resolved_cas_root.as_deref() && offer_tty_autofix(path)
+    { checks.extend(extended_autofixes(path)); }
 
     recorder.mark("startup", &checks);
     // Check 1: .cas directory exists
@@ -736,6 +1176,10 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     };
 
     recorder.mark("cas directory", &checks);
+    let project_root = cas_root.parent().unwrap_or(Path::new("."));
+    let host = host_checks(Some(project_root));
+    if cli.full { checks.extend(host); } else { checks.push(host_summary(&host)); }
+    recorder.mark("host checks", &checks);
     // Check 2: Store type and database
     let store_type = detect_store_type(&cas_root);
     match store_type {
@@ -1045,6 +1489,14 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     recorder.mark("history index", &checks);
     // Check 5: Config
+    if args.fix {
+        let config_path = cas_root.join("config.toml");
+        if config_path.is_file() {
+            if let Some(check) = config_repair_fix(&config_path, args, cli) {
+                checks.push(check);
+            }
+        }
+    }
     match Config::load(&cas_root) {
         Ok(config) => {
             checks.push(Check {
@@ -1066,7 +1518,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 name: "configuration".to_string(),
                 status: CheckStatus::Warning,
                 message: format!(
-                    "{error}; restore a known-good config.toml backup, then rerun `cas doctor`"
+                    "{error}; run `cas doctor --fix --yes` to preserve and repair config.toml, or restore a known-good backup"
                 ),
             });
             checks.push(issue_repositories_check(&Config::default()));
@@ -1304,40 +1756,12 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // blocks). Unlike the platform rows this one *can* be an Error: a missing
     // variable, a rejected bearer, or a drifted tool contract each mean the
     // next release post will fail, and each has an exact remedy.
-    #[cfg(feature = "mcp-proxy")]
-    {
-        let project_proxy = cas_root.join("proxy.toml");
-        if let Some(row) = crate::cli::integrate::mecha_cassy::doctor_row_from_env(
-            project_proxy.is_file().then_some(project_proxy.as_path()),
-        ) {
-            checks.push(Check {
-                name: "mecha-cassy".to_string(),
-                status: match row.severity {
-                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Ok => CheckStatus::Ok,
-                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Warning => {
-                        CheckStatus::Warning
-                    }
-                    crate::cli::integrate::mecha_cassy::DoctorSeverity::Error => CheckStatus::Error,
-                },
-                message: row.message,
-            });
-        }
-    }
-
     recorder.mark("mechacassy hub", &checks);
 
     // Check 13c: stale user-level skills (cas-332f). `cas update` only prunes
     // `cas-*` directories, so a hand-installed skill without that prefix is
     // never refreshed and never removed — it just keeps giving an agent stale
     // instructions that no test in this repo can reach.
-    checks.push(stray_user_skills_check(&scan_user_skill_dirs(
-        &user_skill_scan_targets(),
-    )));
-
-    // Its own phase: this check walks user-level skill directories on disk,
-    // which is a different cost from the hub probe before it and from the
-    // canonical-id queries after it. Folding it into either would misattribute
-    // whichever one later shows up as slow.
     recorder.mark("user skills", &checks);
 
     // Check 14: cloud canonical id — which bucket this project syncs into,
@@ -1348,7 +1772,43 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         collect_local_root_identities(),
     ));
     checks.extend(canonical_alias_checks(&cas_root));
+    let cloud_identity_start = checks.len();
     checks.extend(cloud_identity_metadata_checks(&cas_root));
+    let cloud_identity_end = checks.len();
+    if args.fix
+        && checks[cloud_identity_start..cloud_identity_end]
+            .iter()
+            .any(|check| matches!(check.status, CheckStatus::Warning))
+    {
+        let apply = confirm_doctor_consent(
+            cli,
+            args.yes,
+            "Doctor found foreign cloud scopes; a purge dry-run will run before any apply.",
+        );
+        match crate::cli::cloud::doctor_purge_foreign(cli, &cas_root, apply) {
+            Ok(true) => {
+                checks.splice(
+                    cloud_identity_start..cloud_identity_end,
+                    cloud_identity_metadata_checks(&cas_root),
+                );
+                checks.push(Check::new(
+                    "cloud purge",
+                    CheckStatus::Ok,
+                    "foreign cloud scopes purged and the current project was synced",
+                ));
+            }
+            Ok(false) => checks.push(Check::new(
+                "cloud purge",
+                CheckStatus::Info,
+                "foreign cloud purge dry-run completed; no changes applied",
+            )),
+            Err(error) => checks.push(Check::new(
+                "cloud purge",
+                CheckStatus::Warning,
+                format!("foreign cloud purge could not run: {error}"),
+            )),
+        }
+    }
     let current_project_root = cas_root.parent().unwrap_or(Path::new("."));
     checks.extend(registered_project_root_checks(current_project_root));
 
@@ -1358,9 +1818,9 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // rows against every other known project database on the host, keyed on
     // `(id, title)`.
     if cas_root.join("cas.db").is_file() {
-        let (report, sync_warnings) =
+        let (mut report, sync_warnings) =
             crate::cloud::collect_sync_warnings(|| crate::cli::foreign_rows::scan(&cas_root));
-        let (purge_analysis, purge_analysis_error) = match (
+        let (mut purge_analysis, mut purge_analysis_error) = match (
             report.as_ref(),
             crate::cloud::resolve_canonical_id(&cas_root),
         ) {
@@ -1382,6 +1842,45 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         };
         if args.fix_cloud_rows || args.release_cloud_rows {
             return run_cloud_row_quarantine(&cas_root, report, args, cli);
+        }
+        if args.fix
+            && !args.fix_cloud_rows
+            && !args.release_cloud_rows
+            && !cli.json
+            && report
+                .as_ref()
+                .is_ok_and(|report| !quarantine_candidates(report).is_empty())
+        {
+            let mut row_args = args.clone();
+            row_args.fix_cloud_rows = true;
+            let report_for_quarantine = report
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(|error| anyhow::anyhow!(error.to_string()));
+            run_cloud_row_quarantine(&cas_root, report_for_quarantine, &row_args, cli)?;
+            (report, _) = crate::cloud::collect_sync_warnings(|| {
+                crate::cli::foreign_rows::scan(&cas_root)
+            });
+            (purge_analysis, purge_analysis_error) = match (
+                report.as_ref(),
+                crate::cloud::resolve_canonical_id(&cas_root),
+            ) {
+                (Ok(report), Some(current_project)) => {
+                    match crate::cli::cloud::purge_analysis_for_report(
+                        &cas_root,
+                        &current_project,
+                        report,
+                    ) {
+                        Ok(analysis) => (Some(analysis), None),
+                        Err(error) => (None, Some(error.to_string())),
+                    }
+                }
+                (Ok(_), None) => (
+                    None,
+                    Some("current project canonical id could not be resolved".to_string()),
+                ),
+                (Err(_), _) => (None, None),
+            };
         }
         if args.foreign_rows {
             return output_foreign_rows_detail(
@@ -2035,7 +2534,7 @@ pub(crate) fn cloud_row_remediation_summary(
     let mut message = String::new();
     if !report.unattributed.is_empty() || quarantined > 0 {
         message.push_str(&format!(
-            ". unattributed: {} row(s) ({} open), {quarantined} quarantined locally — quarantined rows are hidden from the board and never pushed, and the row itself is untouched (`cas doctor --fix-cloud-rows --yes` to quarantine the open ones, `--release-cloud-rows --yes` to reverse)",
+            ". unattributed: {} row(s) ({} open), {quarantined} quarantined locally — quarantined rows are hidden from the board and never pushed, and the row itself is untouched; run `cas doctor --fix --yes` to quarantine open rows (the focused form is `cas doctor --fix-cloud-rows --yes`, and reverse it with `cas doctor --release-cloud-rows --yes`; use `cas cloud purge-foreign --dry-run` only to inspect foreign cloud rows)",
             report.unattributed.len(),
             report.unattributed_open(),
         ));
@@ -2721,7 +3220,7 @@ fn cloud_identity_metadata_checks(cas_root: &Path) -> Vec<Check> {
         "cloud identity metadata",
         CheckStatus::Warning,
         format!(
-            "foreign cloud scope(s) for project `{current_project}`: {}; run `cas cloud purge-foreign --dry-run`, then `cas cloud purge-foreign`; only after the purge, run `cas cloud sync` to re-register the current project",
+            "foreign cloud scope(s) for project `{current_project}`: {}; run `cas doctor --fix --yes` to preview, purge with consent, and sync the current project (the underlying preview is `cas cloud purge-foreign --dry-run`, followed by `cas cloud sync`)",
             foreign.join(", ")
         ),
     )]
@@ -3042,21 +3541,11 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
         };
     }
 
-    if state.files == 0 || !state.searchable {
+    if state.files == 0 && state.eligible_files == 0 && state.indexed_files == 0 {
         return Check {
             name,
-            status: CheckStatus::Warning,
-            message: format!(
-                "nothing indexed for this project ({} symbol(s) in the store across all \
-                 repositories){}. The daemon only indexes while idle — run `cas index code` to \
-                 catch up now.",
-                state.symbols,
-                if state.searchable {
-                    ""
-                } else {
-                    "; the code search index is missing"
-                }
-            ),
+            status: CheckStatus::Ok,
+            message: format!("no eligible source files for this project ({} symbol(s) in the store across all repositories)", state.symbols),
         };
     }
 
@@ -3411,6 +3900,31 @@ fn gather_history_index_state_at(
     }
 }
 
+fn is_missing_changelog_error(source: &str, error: &str) -> bool {
+    source.eq_ignore_ascii_case("changelog")
+        && error.to_ascii_lowercase().contains("changelog")
+        && (error.to_ascii_lowercase().contains("no ")
+            || error.to_ascii_lowercase().contains("missing")
+            || error.to_ascii_lowercase().contains("absent"))
+}
+
+fn format_history_source_error(source: &str, error: &str) -> String {
+    if source.eq_ignore_ascii_case("github") {
+        let lower = error.to_ascii_lowercase();
+        if lower.contains("issues.repo") || lower.contains("repo is not configured") {
+            return format!(
+                "github: {}. Run `cas config set issues.repo <owner/repo>`",
+                truncate(error, 100)
+            );
+        }
+        return format!(
+            "github: {}. Run `gh auth login`",
+            truncate(error, 100)
+        );
+    }
+    format!("{source}: {}", truncate(error, 100))
+}
+
 /// The §10.1 verdict. Pure, so staleness is seeded rather than waited for.
 fn history_index_check(state: HistoryIndexHealth) -> Check {
     let name = "code history index".to_string();
@@ -3467,18 +3981,34 @@ fn history_index_check(state: HistoryIndexHealth) -> Check {
     // A named failure outranks staleness: it is usually the *reason* for the
     // staleness, and summarising it as lag would bury the cause.
     if !state.failing_sources.is_empty() {
-        let worst = state
+        let changelog_missing = state
             .failing_sources
             .iter()
+            .any(|(source, error)| is_missing_changelog_error(source, error));
+        let actionable = state
+            .failing_sources
+            .iter()
+            .filter(|(source, error)| !is_missing_changelog_error(source, error))
             .take(3)
-            .map(|(source, err)| format!("{source}: {}", truncate(err, 80)))
-            .collect::<Vec<_>>()
-            .join("; ");
+            .map(|(source, error)| format_history_source_error(source, error))
+            .collect::<Vec<_>>();
+        let mut details = actionable.join("; ");
+        if changelog_missing {
+            if !details.is_empty() {
+                details.push_str("; ");
+            }
+            details.push_str("changelog: CHANGELOG.md is absent (info; no action needed)");
+        }
+        let status = if actionable.is_empty() {
+            CheckStatus::Info
+        } else {
+            CheckStatus::Warning
+        };
         return Check {
             name,
-            status: CheckStatus::Warning,
+            status,
             message: format!(
-                "{} source(s) reporting errors — {worst}{provenance}",
+                "{} source(s) reporting status — {details}{provenance}",
                 state.failing_sources.len()
             ),
         };
@@ -4163,6 +4693,72 @@ mod tests {
             "a shared phase duration must be labelled as shared: {}",
             json[0]
         );
+    }
+
+    #[test]
+    fn missing_changelog_is_info_and_github_auth_has_one_command() {
+        let check = history_index_check(HistoryIndexHealth {
+            failing_sources: vec![
+                (
+                    "github".to_string(),
+                    "gh api graphql failed: gh: not authenticated".to_string(),
+                ),
+                ("changelog".to_string(), "no CHANGELOG.md".to_string()),
+            ],
+            ..healthy_history()
+        });
+
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check.message.contains("Run `gh auth login`"),
+            "{}",
+            check.message
+        );
+        assert!(!check.message.contains("cas history backfill"), "{}", check.message);
+        assert!(check.message.contains("CHANGELOG.md is absent"), "{}", check.message);
+
+        let changelog_only = history_index_check(HistoryIndexHealth {
+            failing_sources: vec![("changelog".to_string(), "no CHANGELOG.md".to_string())],
+            ..healthy_history()
+        });
+        assert!(matches!(changelog_only.status, CheckStatus::Info));
+    }
+
+    #[test]
+    fn config_repair_preserves_corrupt_copy_and_reserializes_valid_sections() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        let original =
+            "[hooks]\nai_context = false\nlse\n\n[project]\ncanonical_id = \"github.com/acme/repo\"\n";
+        fs::write(&path, original).unwrap();
+
+        let report = repair_config_toml(&path, true).unwrap().expect("repair");
+        assert!(report.applied);
+        assert_eq!(report.repaired_lines, vec![3]);
+        assert!(report.corrupt_copy.exists());
+        assert_eq!(fs::read_to_string(&report.corrupt_copy).unwrap(), original);
+        let repaired = fs::read_to_string(&path).unwrap();
+        assert!(repaired.contains("ai_context = false"));
+        assert!(repaired.contains("canonical_id = \"github.com/acme/repo\""));
+        toml::from_str::<toml::Value>(&repaired).expect("repaired config is valid TOML");
+    }
+
+    #[test]
+    fn config_repair_merges_duplicate_sections_without_losing_later_keys() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            "[project]\naliases = [\"legacy\"]\n\n[hooks]\nai_context = false\n\n[project]\ncanonical_id = \"repo\"\n",
+        )
+        .unwrap();
+
+        let report = repair_config_toml(&path, false).unwrap().expect("repair");
+        assert!(!report.applied);
+        assert_eq!(report.repaired_lines, vec![7]);
+        assert!(!report.corrupt_copy.exists(), "dry-run must not copy or write");
+        assert!(report.preview.contains("canonical_id = \"repo\""));
+        assert!(report.preview.contains("aliases = [\"legacy\"]"));
     }
 
     /// cas-25a9 AC1, behaviourally: `cas doctor --fix` against a held lock must
@@ -6235,7 +6831,7 @@ mod tests {
 
     /// Empty index and missing BM25 directory are the "never ran" case, not a silent pass.
     #[test]
-    fn symbol_index_check_warns_when_never_indexed() {
+    fn symbol_index_check_reports_no_eligible_files() {
         let now = chrono::Utc::now();
         let state = SymbolIndexState {
             files: 0,
@@ -6245,22 +6841,21 @@ mod tests {
         };
 
         let check = symbol_index_check(state, now);
-        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(matches!(check.status, CheckStatus::Ok));
         assert!(
-            check.message.contains("nothing indexed for this project"),
+            check.message.contains("no eligible source files"),
             "message: {}",
             check.message
         );
-        assert!(
-            check.message.contains("code search index is missing"),
-            "message: {}",
-            check.message
-        );
-        assert!(
-            check.message.contains("cas index code"),
-            "message: {}",
-            check.message
-        );
+    }
+
+    #[test]
+    fn symbol_index_check_demotes_zero_eligible_files_to_info() {
+        let state = SymbolIndexState { files: 0, eligible_files: 0, indexed_files: 0, searchable: false, ..healthy_state() };
+        let check = symbol_index_check(state, chrono::Utc::now());
+        assert!(matches!(check.status, CheckStatus::Ok));
+        assert!(check.message.contains("no eligible source files"));
+        assert!(!check.message.contains("run `cas index code`"));
     }
 
     /// An explicit opt-out must be reported honestly rather than as a healthy index.
@@ -7356,12 +7951,14 @@ fn status_label(status: &CheckStatus, styled: bool) -> &'static str {
     if styled {
         match status {
             CheckStatus::Ok => Icons::CHECK,
+            CheckStatus::Info => Icons::INFO,
             CheckStatus::Warning => Icons::WARNING,
             CheckStatus::Error => Icons::CROSS,
         }
     } else {
         match status {
             CheckStatus::Ok => "[OK]",
+            CheckStatus::Info => "[INFO]",
             CheckStatus::Warning => "[WARN]",
             CheckStatus::Error => "[ERROR]",
         }
@@ -7371,6 +7968,7 @@ fn status_label(status: &CheckStatus, styled: bool) -> &'static str {
 fn status_name(status: &CheckStatus) -> &'static str {
     match status {
         CheckStatus::Ok => "ok",
+        CheckStatus::Info => "info",
         CheckStatus::Warning => "warning",
         CheckStatus::Error => "error",
     }
@@ -7467,6 +8065,7 @@ fn write_report_line(
     if fmt.is_styled() {
         let color = status.map(|status| match status {
             CheckStatus::Ok => fmt.theme().palette.status_success,
+            CheckStatus::Info => fmt.theme().palette.status_info,
             CheckStatus::Warning => fmt.theme().palette.status_warning,
             CheckStatus::Error => fmt.theme().palette.status_error,
         });
@@ -7531,6 +8130,7 @@ fn render_report(
     fmt.newline()?;
 
     let groups = [
+        CheckGroup::Host,
         CheckGroup::Store,
         CheckGroup::Indexes,
         CheckGroup::Cloud,
@@ -7659,19 +8259,24 @@ fn render_report(
         .iter()
         .filter(|check| matches!(check.status, CheckStatus::Warning))
         .count();
+    let infos = checks
+        .iter()
+        .filter(|check| matches!(check.status, CheckStatus::Info))
+        .count();
     let errors = checks
         .iter()
         .filter(|check| matches!(check.status, CheckStatus::Error))
         .count();
-    fmt.newline()?;
-    write_report_line(
-        fmt,
-        None,
-        &format!(
-            "{ok} ok · {warnings} warnings · {errors} errors · {}",
+    let summary = if infos == 0 {
+        format!("{ok} ok · {warnings} warnings · {errors} errors · {}", duration_label(elapsed))
+    } else {
+        format!(
+            "{ok} ok · {infos} info · {warnings} warnings · {errors} errors · {}",
             duration_label(elapsed)
-        ),
-    )
+        )
+    };
+    fmt.newline()?;
+    write_report_line(fmt, None, &summary)
 }
 
 #[cfg(test)]

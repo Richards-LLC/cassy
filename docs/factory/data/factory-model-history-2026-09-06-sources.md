@@ -3,9 +3,23 @@
 ## Source coverage and join evidence
 
 - Database → transcript key: `project + worker_name`; worker name comes from `spawn_queue.spawn_worker` / `agents.name` and transcript `cwd` segment `.cas/worktrees/<worker>`. This is a bounded name join, not an inferred task join.
-- Transcript files parsed: 1705; joined to DB worker rows: 1339; transcript-only sessions: 366; transcript→DB miss rate: 21.47%.
-- DB session rows without a transcript match: 7590 (81.97% of emitted rows).
+- Transcript JSONL files scanned: 5802; factory transcript files parsed: 2909; joined to DB worker rows: 2512; transcript-only sessions: 397; transcript→DB miss rate: 13.65%.
+- DB session rows without a transcript match: 6948 (74.77% of emitted rows).
 - Prices JSON: `loaded`. Blank `cost_usd` means the model has no supplied price entry; no price was inferred.
+
+### Transcript homes
+
+- `/home/pippenz/.claude-alt/projects` (claude): 1125 JSONL files, 704 factory files, 675 DB joins, 29 transcript-only; home miss rate 4.12% of factory files.
+- `/home/pippenz/.claude-daniel@petrastella.io/projects` (claude): 735 JSONL files, 185 factory files, 185 DB joins, 0 transcript-only; home miss rate 0.00% of factory files.
+- `/home/pippenz/.claude-grok/projects` (claude): 1 JSONL files, 0 factory files, 0 DB joins, 0 transcript-only; home miss rate 0.00% of factory files.
+- `/home/pippenz/.claude-pippenz@gmail.com/projects` (claude): 353 JSONL files, 23 factory files, 23 DB joins, 0 transcript-only; home miss rate 0.00% of factory files.
+- `/home/pippenz/.claude-support@gabber.studio/projects` (claude): 269 JSONL files, 165 factory files, 165 DB joins, 0 transcript-only; home miss rate 0.00% of factory files.
+- `/home/pippenz/.claude-support@gabber.stufio/projects` (claude): 2 JSONL files, 0 factory files, 0 DB joins, 0 transcript-only; home miss rate 0.00% of factory files.
+- `/home/pippenz/.claude-support@petrastella.io/projects` (claude): 4 JSONL files, 0 factory files, 0 DB joins, 0 transcript-only; home miss rate 0.00% of factory files.
+- `/home/pippenz/.claude/projects` (claude): 559 JSONL files, 102 factory files, 101 DB joins, 1 transcript-only; home miss rate 0.98% of factory files.
+- `/home/pippenz/.codex-pippenz@gmail.com/sessions` (codex): 116 JSONL files, 100 factory files, 98 DB joins, 2 transcript-only; home miss rate 2.00% of factory files.
+- `/home/pippenz/.codex-support@gabber.studio/sessions` (codex): 116 JSONL files, 108 factory files, 108 DB joins, 0 transcript-only; home miss rate 0.00% of factory files.
+- `/home/pippenz/.codex/sessions` (codex): 2522 JSONL files, 1522 factory files, 1157 DB joins, 365 transcript-only; home miss rate 23.98% of factory files.
 
 - `pippenz` DB `/home/pippenz/.cas/cas.db`: 0 spawn rows (0 without a resolvable worker name skipped), 0 lease events, 0 tasks; task notes source `tasks.notes`; factory logs `9` files/0 JSON lines.
 - `Apps` DB `/home/pippenz/Apps/.cas/cas.db`: 0 spawn rows (0 without a resolvable worker name skipped), 2 lease events, 698 tasks; task notes source `tasks.notes`; factory logs `2` files/0 JSON lines.
@@ -15,7 +29,7 @@
 - `2022` DB `/home/pippenz/Petra Stella/Accounting/Roark Realty/2022/.cas/cas.db`: 0 spawn rows (0 without a resolvable worker name skipped), 0 lease events, 0 tasks; task notes source `tasks.notes`; factory logs `3` files/0 JSON lines.
 - `Petrastella` DB `/home/pippenz/Petrastella/.cas/cas.db`: 0 spawn rows (0 without a resolvable worker name skipped), 0 lease events, 693 tasks; task notes source `tasks.notes`; factory logs `2` files/0 JSON lines.
 - `abundant-mines` DB `/home/pippenz/Petrastella/abundant-mines/.cas/cas.db`: 232 spawn rows (58 without a resolvable worker name skipped), 739 lease events, 1335 tasks; task notes source `tasks.notes`; factory logs `17` files/4104 JSON lines.
-- `cas-src` DB `/home/pippenz/Petrastella/cas-src/.cas/cas.db`: 1009 spawn rows (179 without a resolvable worker name skipped), 4448 lease events, 2716 tasks; task notes source `tasks.notes`; factory logs `62` files/22756 JSON lines.
+- `cas-src` DB `/home/pippenz/Petrastella/cas-src/.cas/cas.db`: 1011 spawn rows (179 without a resolvable worker name skipped), 4455 lease events, 2719 tasks; task notes source `tasks.notes`; factory logs `62` files/22837 JSON lines.
 - `closure-club` DB `/home/pippenz/Petrastella/closure-club/.cas/cas.db`: 10 spawn rows (10 without a resolvable worker name skipped), 18 lease events, 13 tasks; task notes source `tasks.notes`; factory logs `3` files/0 JSON lines.
 - `country-liberty` DB `/home/pippenz/Petrastella/country-liberty/.cas/cas.db`: 0 spawn rows (0 without a resolvable worker name skipped), 0 lease events, 0 tasks; task notes source `tasks.notes`; factory logs `3` files/0 JSON lines.
 - `domdms` DB `/home/pippenz/Petrastella/domdms/.cas/cas.db`: 37 spawn rows (27 without a resolvable worker name skipped), 108 lease events, 258 tasks; task notes source `tasks.notes`; factory logs `4` files/0 JSON lines.
@@ -54,3 +68,66 @@
 - Exact first-push time is populated only when a JSON factory log record names the worker (and task when available) and contains a positive `pushed` marker. Missing markers remain blank; commit time is not substituted.
 - Codex usage sums modern `token_usage_record.payload.usage` records or legacy `event_msg.payload.info.last_token_usage` records (modern records win if both exist); Claude usage sums assistant `message.usage`. Cache-read and cache-creation are retained separately, and reasoning comes only from an explicit usage field.
 - Transcript task IDs are unavailable in the transcript sources, so task attribution comes only from DB spawn/lease rows. Transcript-only rows intentionally have a blank task ID.
+
+### CSV columns
+
+Session CSV (`factory-model-history-YYYY-MM-DD.csv`):
+
+- `project`: basename of the project containing the CAS DB.
+- `project_path`: absolute project root.
+- `worker_name`: factory worker name from the DB or transcript worktree path.
+- `session_id`: Codex/Claude session ID, or an explicit DB fallback key.
+- `harness`: codex, claude, or db when no transcript matched.
+- `source_db`: read-only CAS database path.
+- `source_transcript`: Codex/Claude JSONL path, blank when unavailable.
+- `source_factory_logs`: sibling .cas/logs directory scanned.
+- `factory_session`: CAS factory session identifier.
+- `spawn_id`: spawn_queue row ID.
+- `spawn_at`: spawn or registered-at timestamp.
+- `cli`: spawned CLI.
+- `model`: model from rollout turn_context, then spawn metadata.
+- `effort`: effort from rollout turn_context, then spawn metadata.
+- `transcript_join_key`: bounded project + worker-name join key.
+- `transcript_joined`: yes when a transcript matched the DB worker row.
+- `session_first_at`: first timestamp observed in the transcript.
+- `session_last_at`: last timestamp observed in the transcript.
+- `task_id`: DB task ID; blank for transcript-only or taskless rows.
+- `task_title`: DB task title.
+- `task_status`: DB task status.
+- `task_closed`: yes only when task status is closed.
+- `task_created_at`: DB task creation timestamp.
+- `task_closed_at`: DB task close timestamp.
+- `lease_acquired_at`: first claimed lease timestamp.
+- `lease_released_at`: last released/revoked/expired lease timestamp.
+- `lease_terminal_event`: last lease terminal event.
+- `send_back_count`: request_changes / Changes requested occurrences in task notes.
+- `urgent_stop_count`: urgent-stop / halt marker occurrences in task notes.
+- `merge_required_count`: MERGE REQUIRED occurrences in task notes.
+- `close_reason`: DB task close reason.
+- `first_push_at`: first positive pushed marker in a matching factory log.
+- `minutes_to_first_push`: minutes from transcript first timestamp to first push.
+- `input_tokens`: summed explicit input tokens.
+- `cached_input_tokens`: summed cached/cache-read input tokens.
+- `cache_creation_input_tokens`: summed Claude cache-creation input tokens.
+- `output_tokens`: summed explicit output tokens.
+- `reasoning_tokens`: summed explicit reasoning/thinking tokens.
+- `tool_calls`: Codex function_call/custom_tool_call records or Claude tool_use blocks.
+- `cost_usd`: price-file-derived usage cost; blank without a verified price.
+
+Scorecard CSV (`factory-model-scorecard-YYYY-MM-DD.csv`):
+
+- `scope`: project or overall model/effort aggregation.
+- `project`: project name; blank for overall rows.
+- `model`: model grouping.
+- `effort`: effort grouping.
+- `sessions`: distinct worker sessions.
+- `tasks_delivered`: distinct closed task IDs.
+- `send_backs`: deduplicated send-back occurrences.
+- `send_back_rate`: send-backs divided by delivered tasks.
+- `urgent_stops`: deduplicated urgent-stop occurrences.
+- `median_minutes_to_first_push`: median delivered-task minutes to first push.
+- `median_input_tokens_per_delivered_task`: median session input tokens divided by delivered tasks in that session.
+- `median_cached_input_tokens_per_delivered_task`: median cached tokens divided by delivered tasks in that session.
+- `median_output_tokens_per_delivered_task`: median output tokens divided by delivered tasks in that session.
+- `median_tool_calls_per_delivered_task`: median tool calls divided by delivered tasks in that session.
+- `cost_usd`: sum of price-file-derived session costs.

@@ -395,6 +395,51 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/SKILL.md",
         content: include_str!("builtins/skills/design-spec/SKILL.md"),
     },
+    // cas-d967: the Petrastella design language every project inherits through
+    // design-spec and overrides in DESIGN.md; tokens are the machine-readable twin.
+    BuiltinFile {
+        path: "skills/design-spec/references/petrastella-design-language.md",
+        content: include_str!("builtins/skills/design-spec/references/petrastella-design-language.md"),
+    },
+    BuiltinFile {
+        path: "skills/design-spec/references/design-tokens.json",
+        content: include_str!("builtins/skills/design-spec/references/design-tokens.json"),
+    },
+    // cas-ui-craft skill (cas-d967) : concept brief before any render,
+    // first-three-seconds rule, form vocabulary, scored critique rubric with a
+    // merge floor, and four annotated exemplars.
+    BuiltinFile {
+        path: "skills/cas-ui-craft/SKILL.md",
+        content: include_str!("builtins/skills/cas-ui-craft/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/concept-brief.md",
+        content: include_str!("builtins/skills/cas-ui-craft/references/concept-brief.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/form-vocabulary.md",
+        content: include_str!("builtins/skills/cas-ui-craft/references/form-vocabulary.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/critique-rubric.md",
+        content: include_str!("builtins/skills/cas-ui-craft/references/critique-rubric.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/report.html",
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/report.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/dashboard.html",
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/dashboard.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/product-page.html",
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/product-page.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/before-after.html",
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
     // release-notes skill (GH #65): drafts/posts the user + dev Slack threads
     // for every staging/main merge and installs the canonical rubric template
     // at docs/release-notes/RUBRIC.md when a project has none.
@@ -443,6 +488,13 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!(
             "builtins/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
+    },
+    // cas-frontend-engineering skill: project-agnostic implementation craft
+    // for component boundaries, state, accessibility, performance, tokens,
+    // motion, and Playwright acceptance.
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/SKILL.md",
+        content: include_str!("builtins/skills/cas-frontend-engineering/SKILL.md"),
     },
     // fallow skill: vendored from https://github.com/fallow-rs/fallow-skills
     // (MIT, Bart Waardenburg). Codebase intelligence for JS/TS — dead code,
@@ -799,6 +851,51 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/SKILL.md",
         content: include_str!("builtins/codex/skills/design-spec/SKILL.md"),
     },
+    // cas-d967: the Petrastella design language every project inherits through
+    // design-spec and overrides in DESIGN.md; tokens are the machine-readable twin.
+    BuiltinFile {
+        path: "skills/design-spec/references/petrastella-design-language.md",
+        content: include_str!("builtins/codex/skills/design-spec/references/petrastella-design-language.md"),
+    },
+    BuiltinFile {
+        path: "skills/design-spec/references/design-tokens.json",
+        content: include_str!("builtins/codex/skills/design-spec/references/design-tokens.json"),
+    },
+    // cas-ui-craft skill (cas-d967) — codex mirror: concept brief before any render,
+    // first-three-seconds rule, form vocabulary, scored critique rubric with a
+    // merge floor, and four annotated exemplars.
+    BuiltinFile {
+        path: "skills/cas-ui-craft/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-ui-craft/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/concept-brief.md",
+        content: include_str!("builtins/codex/skills/cas-ui-craft/references/concept-brief.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/form-vocabulary.md",
+        content: include_str!("builtins/codex/skills/cas-ui-craft/references/form-vocabulary.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/critique-rubric.md",
+        content: include_str!("builtins/codex/skills/cas-ui-craft/references/critique-rubric.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/report.html",
+        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/report.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/dashboard.html",
+        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/dashboard.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/product-page.html",
+        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/product-page.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/before-after.html",
+        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
     // release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
         path: "skills/release-notes/SKILL.md",
@@ -833,6 +930,13 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-nuxt-playwright/references/auth-fixture-template.md",
         content: include_str!(
             "builtins/codex/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
+        ),
+    },
+    // cas-frontend-engineering skill — codex mirror.
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/SKILL.md",
+        content: include_str!(
+            "builtins/codex/skills/cas-frontend-engineering/SKILL.md"
         ),
     },
     // fallow skill — codex mirror. See the claude-side entry above for the
@@ -1215,6 +1319,51 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/SKILL.md",
         content: include_str!("builtins/grok/skills/design-spec/SKILL.md"),
     },
+    // cas-d967: the Petrastella design language every project inherits through
+    // design-spec and overrides in DESIGN.md; tokens are the machine-readable twin.
+    BuiltinFile {
+        path: "skills/design-spec/references/petrastella-design-language.md",
+        content: include_str!("builtins/grok/skills/design-spec/references/petrastella-design-language.md"),
+    },
+    BuiltinFile {
+        path: "skills/design-spec/references/design-tokens.json",
+        content: include_str!("builtins/grok/skills/design-spec/references/design-tokens.json"),
+    },
+    // cas-ui-craft skill (cas-d967) — grok twin: concept brief before any render,
+    // first-three-seconds rule, form vocabulary, scored critique rubric with a
+    // merge floor, and four annotated exemplars.
+    BuiltinFile {
+        path: "skills/cas-ui-craft/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-ui-craft/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/concept-brief.md",
+        content: include_str!("builtins/grok/skills/cas-ui-craft/references/concept-brief.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/form-vocabulary.md",
+        content: include_str!("builtins/grok/skills/cas-ui-craft/references/form-vocabulary.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/critique-rubric.md",
+        content: include_str!("builtins/grok/skills/cas-ui-craft/references/critique-rubric.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/report.html",
+        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/report.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/dashboard.html",
+        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/dashboard.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/product-page.html",
+        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/product-page.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/references/exemplars/before-after.html",
+        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
     // release-notes skill (GH #65) — grok twin.
     BuiltinFile {
         path: "skills/release-notes/SKILL.md",
@@ -1263,6 +1412,13 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-nuxt-playwright/references/auth-fixture-template.md",
         content: include_str!(
             "builtins/grok/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
+        ),
+    },
+    // cas-frontend-engineering skill — grok mirror.
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/SKILL.md",
+        content: include_str!(
+            "builtins/grok/skills/cas-frontend-engineering/SKILL.md"
         ),
     },
     BuiltinFile {
@@ -1489,6 +1645,15 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         note: "",
     },
     RequiredCapability {
+        // cas-57dc: API/DX taste and the public-surface critique rubric are
+        // project-agnostic guidance shared by every harness.
+        id: "cas-codebase-design",
+        claude: Some("skills/cas-codebase-design"),
+        codex: Some("skills/cas-codebase-design"),
+        grok: Some("skills/cas-codebase-design"),
+        note: "",
+    },
+    RequiredCapability {
         // GH #65: release-notes rubric + Slack announcement workflow.
         id: "release-notes",
         claude: Some("skills/release-notes"),
@@ -1543,10 +1708,28 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         note: "",
     },
     RequiredCapability {
+        // cas-d967: the UI/UX craft gate (concept brief, critique rubric) applies
+        // to every human-facing surface regardless of which harness renders it.
+        id: "cas-ui-craft",
+        claude: Some("skills/cas-ui-craft"),
+        codex: Some("skills/cas-ui-craft"),
+        grok: Some("skills/cas-ui-craft"),
+        note: "",
+    },
+    RequiredCapability {
         id: "cas-nuxt-playwright",
         claude: Some("skills/cas-nuxt-playwright"),
         codex: Some("skills/cas-nuxt-playwright"),
         grok: Some("skills/cas-nuxt-playwright"),
+        note: "",
+    },
+    RequiredCapability {
+        // Project-agnostic implementation guidance belongs in every harness;
+        // the skill has no harness-specific tool syntax.
+        id: "cas-frontend-engineering",
+        claude: Some("skills/cas-frontend-engineering"),
+        codex: Some("skills/cas-frontend-engineering"),
+        grok: Some("skills/cas-frontend-engineering"),
         note: "",
     },
     RequiredCapability {
@@ -3103,7 +3286,8 @@ This is the body content."#;
             "Claude/Haiku 4.5/low",
             "Codex/GPT-5.6 Luna/xhigh",
             "Claude/Fable 5.1/medium",
-            "Codex/GPT-5.6 Sol/high",
+            "Codex/GPT-6 Astra/high",
+            "Opus 5/high fallback",
             "standing suspension",
             "generated route table and recipes",
         ] {
@@ -3150,11 +3334,11 @@ This is the body content."#;
         );
 
         // The shared body must retain explicit complete-call controls and the
-        // registry's heavy route on every twin without duplicating workflow.
+        // registry's Astra heavy route on every twin without duplicating workflow.
         for (label, body) in [("claude", claude), ("codex", codex), ("grok", grok)] {
             assert!(
-                body.contains("Codex/GPT-5.6 Sol/high"),
-                "{label} cas-supervisor.md must retain the heavy registry route"
+                body.contains("Codex/GPT-6 Astra/high"),
+                "{label} cas-supervisor.md must retain the Astra heavy registry route"
             );
             assert!(
                 body.contains("pass complete `cli=`, `model=`, and `effort=` controls"),
@@ -4179,6 +4363,181 @@ This is the body content."#;
                     assert_eq!(get(path), *claude, "{label} {path} must match the Claude mirror");
                 }
             }
+        }
+    }
+
+    /// cas-d967: the cas-ui-craft skill and the Petrastella design language it
+    /// leans on must ship for every harness, byte-identical (neither makes a CAS
+    /// tool call). The load-bearing content is the concept brief, the
+    /// first-three-seconds rule, the form vocabulary, the scored rubric with its
+    /// merge floor, and the four annotated exemplars; the design language must
+    /// carry the named intents and its tokens must be the same values the prose
+    /// states. The docs/design copies are pinned to the shipped builtin so the
+    /// repo-level document cannot drift from what projects actually inherit.
+    #[test]
+    fn test_builtin_skills_contains_cas_ui_craft_and_design_language() {
+        const FILES: &[&str] = &[
+            "skills/cas-ui-craft/SKILL.md",
+            "skills/cas-ui-craft/references/concept-brief.md",
+            "skills/cas-ui-craft/references/form-vocabulary.md",
+            "skills/cas-ui-craft/references/critique-rubric.md",
+            "skills/cas-ui-craft/references/exemplars/report.html",
+            "skills/cas-ui-craft/references/exemplars/dashboard.html",
+            "skills/cas-ui-craft/references/exemplars/product-page.html",
+            "skills/cas-ui-craft/references/exemplars/before-after.html",
+            "skills/design-spec/references/petrastella-design-language.md",
+            "skills/design-spec/references/design-tokens.json",
+        ];
+        let mut claude_bodies: Vec<(&str, &str)> = Vec::new();
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let get = |path: &str| -> &'static str {
+                catalog
+                    .iter()
+                    .find(|b| b.path == path)
+                    .unwrap_or_else(|| panic!("{path} missing from {label} catalog"))
+                    .content
+            };
+            let skill = get(FILES[0]);
+            assert!(
+                is_managed_by_cas(skill),
+                "{label} cas-ui-craft SKILL.md must be managed_by: cas"
+            );
+            for marker in [
+                "name: cas-ui-craft",
+                "concept brief",
+                ".brief.md",
+                "first three seconds",
+                "1280×800",
+                "390×844",
+                "form-vocabulary.md",
+                "critique-rubric.md",
+                "each ≥ 4",
+                "petrastella-design-language.md",
+                "exemplars/report.html",
+                "exemplars/dashboard.html",
+                "exemplars/product-page.html",
+                "exemplars/before-after.html",
+                "cas-html-reports",
+                "cas-dataviz",
+            ] {
+                assert!(skill.contains(marker), "{label} cas-ui-craft missing {marker:?}");
+            }
+            let brief = get(FILES[1]);
+            for marker in [
+                "## Single idea",
+                "## Hero form",
+                "## Emotional register",
+                "## Distinctive move",
+                "## Deliberately omitted",
+                "## Critique",
+            ] {
+                assert!(brief.contains(marker), "{label} concept brief missing {marker:?}");
+            }
+            let forms = get(FILES[2]);
+            for marker in [
+                "Slope chart",
+                "Small multiples",
+                "Dot plot",
+                "Waffle plot",
+                "Annotated timeline",
+                "Evidence ledger",
+                "Pull-quote",
+                "Marginal note",
+                "Anti-defaults",
+            ] {
+                assert!(forms.contains(marker), "{label} form vocabulary missing {marker:?}");
+            }
+            let rubric = get(FILES[3]);
+            for marker in [
+                "Distinctiveness",
+                "Fit to argument",
+                "Hierarchy",
+                "Craft",
+                "Accessibility",
+                "each ≥ 4",
+                "1–5",
+            ] {
+                assert!(rubric.contains(marker), "{label} critique rubric missing {marker:?}");
+            }
+            for path in &FILES[4..8] {
+                let html = get(path);
+                for marker in [
+                    "<!DOCTYPE html>",
+                    "lang=\"en\"",
+                    "@media print",
+                    "prefers-reduced-motion",
+                    "prefers-color-scheme: dark",
+                    "role=\"img\"",
+                    "<caption>",
+                    "class=\"note\"",
+                    "Design note",
+                    "--verdict",
+                    "--surface-hero",
+                ] {
+                    assert!(html.contains(marker), "{label} {path} missing {marker:?}");
+                }
+                for forbidden in ["<script src", "<link rel=\"stylesheet\"", "@import", "fonts.googleapis"] {
+                    assert!(!html.contains(forbidden), "{label} {path} loads an external asset: {forbidden:?}");
+                }
+                assert!(
+                    html.matches("class=\"note\"").count() >= 8,
+                    "{label} {path} needs at least eight design notes to count as annotated"
+                );
+            }
+            let language = get(FILES[8]);
+            let tokens: serde_json::Value = serde_json::from_str(get(FILES[9]))
+                .unwrap_or_else(|err| panic!("{label} design-tokens.json is not valid JSON: {err}"));
+            for role in ["verdict", "evidence", "warning", "action", "good", "danger", "surface-hero"] {
+                for mode in ["light", "dark"] {
+                    let value = tokens["color"][mode][role]["$value"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{label} tokens lack color.{mode}.{role}"));
+                    assert!(
+                        language.contains(value),
+                        "{label} design language does not state the {mode} {role} token {value}"
+                    );
+                }
+            }
+            for marker in [
+                "## 1. Type",
+                "## 3. Color",
+                "## 4. Chart grammar",
+                "## 5. Motion",
+                "**Verdict hero.**",
+                "**Evidence ledger.**",
+                "**Annotated timeline.**",
+                "never the default",
+            ] {
+                assert!(language.contains(marker), "{label} design language missing {marker:?}");
+            }
+            if label == "claude" {
+                claude_bodies = FILES.iter().map(|path| (*path, get(path))).collect();
+            } else {
+                for (path, claude) in &claude_bodies {
+                    assert_eq!(get(path), *claude, "{label} {path} must match the Claude mirror");
+                }
+            }
+        }
+
+        // docs/design/ is the repo-level statement of the language; it is the same
+        // bytes projects receive, never a second edition.
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        for (builtin, doc) in [
+            (FILES[8], "docs/design/petrastella-design-language.md"),
+            (FILES[9], "docs/design/design-tokens.json"),
+        ] {
+            let on_disk = std::fs::read_to_string(repo_root.join(doc))
+                .unwrap_or_else(|err| panic!("{doc} must exist beside the builtin copy: {err}"));
+            let shipped = claude_bodies
+                .iter()
+                .find(|(path, _)| *path == builtin)
+                .map(|(_, body)| *body)
+                .expect("claude body collected");
+            assert_eq!(on_disk, shipped, "{doc} drifted from {builtin}");
         }
     }
 
@@ -5454,7 +5813,6 @@ This is the body content."#;
             {
                 for stale in [
                     "Claude/Opus 5/high",
-                    "Claude Opus 5/high",
                     "Claude Opus 5 at high",
                     "Opus is the normal taste",
                     "Opus is a normal taste",
@@ -5476,7 +5834,7 @@ This is the body content."#;
                         builtin.path
                     );
                     assert!(recipes.contains(&format!(
-                        "# taste — recipe claude_fable\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium"
+                        "# taste — recipe claude_fable (fallback: claude_opus)\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium"
                     )));
                 }
             }
@@ -6464,7 +6822,7 @@ This is the body content."#;
             "Claude/Haiku 4.5/low",
             "Codex/GPT-5.6 Luna/xhigh",
             "Claude/Fable 5.1/medium",
-            "Codex/GPT-5.6 Sol/high",
+            "Codex/GPT-6 Astra/high",
             "standing suspension",
             "generated route table and recipes",
         ] {

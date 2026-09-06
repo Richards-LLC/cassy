@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Before / after — first-response time by queue, week 35 → 36 (cas-ui-craft exemplar)</title>
+<style>
+  /* Petrastella tokens — names match design-tokens.json */
+  :root{
+    --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;
+    --ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;
+    --action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;--focus:#2E3A9F;
+    --display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
+    --body:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --chrome:120ms;--ease:cubic-bezier(.2,0,0,1);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{--bg:#12141A;--surface:#191C24;--surface-hero:#241E1E;--line:#2B3040;--line-strong:#6B7390;
+      --ink:#E9E6E0;--ink-muted:#A3A7B4;--verdict:#A9B3FF;--verdict-soft:rgba(169,179,255,.16);--evidence:#A3A7B4;
+      --action:#A9B3FF;--good:#5FC492;--warning:#E2B14D;--danger:#EF7B72;--focus:#A9B3FF}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:400 17px/26px var(--body)}
+  a{color:var(--action)}
+  a:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+  .eyebrow{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}
+  h1{font:400 34px/38px var(--display);margin:48px 0 8px;letter-spacing:-.01em}
+  h2{font:600 27px/32px var(--body);letter-spacing:-.01em;margin:64px 0 16px}
+  h3{font:600 17px/26px var(--body);margin:32px 0 8px}
+  p{max-width:68ch;margin:0 0 16px}
+  .lede{font-size:21px;line-height:30px;color:var(--ink);max-width:60ch}
+
+  /* Layout with the marginal-note rail */
+  .row{display:grid;grid-template-columns:minmax(0,1fr);gap:0 24px}
+  .note{font-size:14px;line-height:20px;color:var(--evidence);border-left:1px solid var(--line);padding:0 0 0 12px;margin:12px 0 24px}
+  .note .eyebrow{display:block;color:var(--verdict);margin-bottom:4px}
+  @media (min-width:1080px){
+    .row{grid-template-columns:minmax(0,1fr) 240px}
+    .notes{padding-top:110px}
+    .note{margin:0 0 24px}
+  }
+
+  /* ---------- BEFORE: a faithful copy of the old default, scoped ---------- */
+  .before{--b-bg:#0f1117;--b-panel:#161a24;--b-panel2:#1c2130;--b-line:#2a3142;--b-text:#e8ecf4;--b-muted:#9aa5bb;
+    --b-accent:#7aa2ff;--b-ok:#5fd39a;--b-warn:#f5c04a;--b-bad:#ff6b7a;
+    background:var(--b-bg);color:var(--b-text);border:1px solid var(--line);border-radius:8px;overflow:hidden;
+    font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  .before .hero{padding:40px 24px 24px;background:
+    radial-gradient(900px 300px at 10% -10%, rgba(122,162,255,.18), transparent 60%),
+    radial-gradient(700px 240px at 90% 0%, rgba(255,107,122,.14), transparent 60%);border-bottom:1px solid var(--b-line)}
+  .before .b-eyebrow{font:600 12px/1 ui-monospace,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--b-muted)}
+  .before .b-title{font-size:clamp(26px,3.6vw,38px);line-height:1.1;margin:12px 0 8px;letter-spacing:-.02em;font-weight:700}
+  .before .b-verdict{font-size:18px;max-width:760px;margin:0}
+  .before .b-verdict strong{color:var(--b-warn)}
+  .before .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin:22px 0 0}
+  .before .kpi{background:var(--b-panel);border:1px solid var(--b-line);border-radius:14px;padding:16px 18px}
+  .before .kpi .n{font:700 32px/1 system-ui,sans-serif;letter-spacing:-.02em}
+  .before .kpi .l{color:var(--b-muted);font-size:13px;margin-top:6px}
+  .before .kpi.ok .n{color:var(--b-ok)}.before .kpi.bad .n{color:var(--b-bad)}.before .kpi.info .n{color:var(--b-accent)}
+  .before .body{padding:24px}
+  .before h3{font-size:15px;margin:0 0 10px;color:var(--b-muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600}
+  .before table{border-collapse:collapse;width:100%;background:var(--b-panel);border:1px solid var(--b-line);border-radius:12px;overflow:hidden;font-size:15px}
+  .before th,.before td{padding:10px 12px;border-bottom:1px solid var(--b-line);text-align:left}
+  .before th{background:var(--b-panel2);font-size:12px;color:var(--b-muted);text-transform:uppercase;letter-spacing:.06em}
+  .before td.num,.before th.num{text-align:right;font-variant-numeric:tabular-nums}
+  .before tr:last-child td{border-bottom:0}
+  .before caption{text-align:left;color:var(--b-muted);font-size:13px;padding:0 0 8px}
+  .before .tag{display:inline-block;font:600 11px/1 ui-monospace,monospace;padding:4px 7px;border-radius:6px;border:1px solid var(--b-line);color:var(--b-ok)}
+
+  /* ---------- AFTER: the design language ---------- */
+  .after{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
+  .after .hero{background:var(--surface-hero);padding:48px 32px 24px;display:grid;grid-template-columns:minmax(0,1fr);gap:24px}
+  @media (min-width:820px){.after .hero{grid-template-columns:minmax(0,1fr) minmax(360px,1.15fr);align-items:end}}
+  .after .verdict{font:400 clamp(30px,3.8vw,44px)/1.08 var(--display);letter-spacing:-.015em;max-width:22ch;margin:12px 0 16px}
+  .after .verdict em{font-style:italic;color:var(--verdict)}
+  .after .rule{height:3px;background:var(--verdict);width:96px;margin:0 0 12px}
+  .after .prov{font:400 13px/18px var(--mono);color:var(--ink-muted);margin:0}
+  .after figure{margin:0}
+  .after figcaption{font-size:14px;line-height:20px;color:var(--ink-muted);margin-top:8px}
+  .after svg{width:100%;height:auto;display:block}
+  .after .body{padding:24px 32px 32px}
+
+  /* Evidence ledger */
+  table.ledger{border-collapse:collapse;width:100%;font:400 15px/22px var(--mono);font-variant-numeric:tabular-nums}
+  table.ledger caption{text-align:left;font:400 17px/26px var(--body);color:var(--ink);padding:0 0 12px}
+  table.ledger th{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);text-align:left;padding:0 12px 8px 0;border-bottom:1px solid var(--line)}
+  table.ledger td{padding:8px 12px 8px 0;border-bottom:1px solid var(--line);vertical-align:top}
+  table.ledger th.num,table.ledger td.num{text-align:right}
+  table.ledger td.src{font-size:13px;color:var(--evidence)}
+  table.ledger tr.decisive td{background:var(--verdict-soft)}
+  table.ledger tr.decisive td:first-child{box-shadow:inset 3px 0 0 var(--verdict)}
+  table.ledger tr.sum td{font-weight:600;border-top:1px solid var(--line-strong);border-bottom:0}
+  .delta-good{color:var(--good)}.delta-bad{color:var(--danger)}
+
+  /* Rubric scores */
+  table.score{border-collapse:collapse;width:100%;font-size:15px;line-height:22px;margin:8px 0 0}
+  table.score th,table.score td{text-align:left;padding:6px 12px 6px 0;border-bottom:1px solid var(--line);vertical-align:top}
+  table.score th{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}
+  table.score td.n{font:500 15px/22px var(--mono);text-align:right;width:3ch}
+  table.score td.fail{color:var(--danger)}
+  table.score caption{text-align:left;padding:0 0 8px;font-weight:600}
+  .floor{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;margin-top:8px}
+  .floor.fail{color:var(--danger)}.floor.pass{color:var(--good)}
+
+  details{margin:24px 0}
+  summary{cursor:pointer;color:var(--action);font-weight:600}
+  details .brief dt{font:600 12px/16px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);margin-top:12px}
+  details .brief dd{margin:4px 0 0;max-width:68ch}
+  .scroll{overflow-x:auto}
+  .sr{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
+  footer{border-top:1px solid var(--line);margin-top:64px;padding:24px 0 48px;font:400 13px/18px var(--mono);color:var(--ink-muted)}
+  @media (prefers-reduced-motion: reduce){*{transition:none !important;animation:none !important}}
+  @media print{
+    :root{--bg:#fff;--surface:#fff;--surface-hero:#fff;--ink:#000;--ink-muted:#444;--line:#bbb;--line-strong:#666;--verdict:#2E3A9F;--verdict-soft:#e8eaf6}
+    body{font-size:13px;line-height:19px}
+    .page{display:block}
+    .note{border-left-color:#999;margin:8px 0 16px}
+    details{display:block}details>summary{display:none}
+    .before,.after,table,figure{break-inside:avoid}
+    .before{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    a[href^="http"]::after{content:" (" attr(href) ")";font-size:11px}
+    thead{display:table-header-group}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="main">
+  <p class="eyebrow">cas-ui-craft exemplar · before / after pair · 2026-09-06</p>
+  <h1>The same numbers, rendered our old way and our way</h1>
+  <p class="lede">Support first-response time by queue, week 35 against week 36, after a triage bot started routing tickets. The data is identical in both renders; only the design changed. Each render is scored on the critique rubric.</p>
+</header>
+
+<!-- ================================ BEFORE ================================ -->
+<div class="row">
+<section class="main" aria-labelledby="before-h">
+  <h2 id="before-h">Before — the default we used to ship</h2>
+  <p>Dark gradient hero, bold sans title, four KPI cards, then a table. This is a faithful copy of the house template as of August 2026, not a straw man.</p>
+  <div class="before" aria-label="Before render">
+    <div class="hero">
+      <div class="b-eyebrow">Support · Weekly review · Week 36</div>
+      <div class="b-title">First-response time review — week 36</div>
+      <p class="b-verdict">Median first response improved across most queues after the triage bot launched; <strong>Enterprise regressed</strong> and needs follow-up.</p>
+      <div class="kpis">
+        <div class="kpi ok"><div class="n">−58%</div><div class="l">Median first response, all queues</div></div>
+        <div class="kpi info"><div class="n">1,412</div><div class="l">Tickets, week 36</div></div>
+        <div class="kpi ok"><div class="n">4 / 5</div><div class="l">Queues improved</div></div>
+        <div class="kpi bad"><div class="n">+41%</div><div class="l">Enterprise queue</div></div>
+      </div>
+    </div>
+    <div class="body">
+      <h3>By queue</h3>
+      <div class="scroll"><table>
+        <caption>Median first-response time (minutes), week 35 vs week 36</caption>
+        <thead><tr><th scope="col">Queue</th><th scope="col" class="num">Wk 35</th><th scope="col" class="num">Wk 36</th><th scope="col" class="num">Change</th><th scope="col">Status</th></tr></thead>
+        <tbody>
+          <tr><td>Billing</td><td class="num">38</td><td class="num">14</td><td class="num">−63%</td><td><span class="tag">OK</span></td></tr>
+          <tr><td>Onboarding</td><td class="num">52</td><td class="num">19</td><td class="num">−63%</td><td><span class="tag">OK</span></td></tr>
+          <tr><td>Bugs</td><td class="num">71</td><td class="num">33</td><td class="num">−54%</td><td><span class="tag">OK</span></td></tr>
+          <tr><td>Enterprise</td><td class="num">17</td><td class="num">24</td><td class="num">+41%</td><td><span class="tag" style="color:#ff6b7a">Regressed</span></td></tr>
+          <tr><td>General</td><td class="num">44</td><td class="num">16</td><td class="num">−64%</td><td><span class="tag">OK</span></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+
+  <table class="score">
+    <caption>Rubric — before</caption>
+    <thead><tr><th scope="col">Dimension</th><th scope="col">Score</th><th scope="col">Evidence</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">Distinctiveness</th><td class="n fail">1</td><td>Dark gradient, rounded cards, bold sans: indistinguishable from any dashboard template.</td></tr>
+      <tr><th scope="row">Fit to argument</th><td class="n fail">2</td><td>The hero shows four numbers in boxes; the reader must read the sentence to learn that one queue moved the other way.</td></tr>
+      <tr><th scope="row">Hierarchy</th><td class="n fail">2</td><td>Title, verdict, and four equal-weight cards compete; the regression is one card among four.</td></tr>
+      <tr><th scope="row">Craft</th><td class="n">3</td><td>Consistent tokens and tabular numbers, but boxes inside boxes and a status column that repeats the sign.</td></tr>
+      <tr><th scope="row">Accessibility</th><td class="n">4</td><td>Contrast and semantics pass; the regressed tag colour is set inline rather than by role.</td></tr>
+    </tbody>
+  </table>
+  <p class="floor fail">Floor fails: distinctiveness 1, fit 2, hierarchy 2 — not mergeable on a public surface.</p>
+</section>
+<div class="notes">
+<aside class="note"><span class="eyebrow">Design note · Fit to argument</span>Four KPI cards are four separate claims of equal weight. The single idea — <em>one queue moved the other way</em> — is buried in the fourth box and in the sentence above it.</aside>
+<aside class="note"><span class="eyebrow">Design note · Distinctiveness</span>Everything in this render is a default: the gradient, the 14px radius, the bold 38px title, the uppercase muted labels. Nothing here would tell a reader whose page it is.</aside>
+<aside class="note"><span class="eyebrow">Design note · Hierarchy</span>Title, verdict sentence, and four cards all sit above the fold at the same visual weight. The reader has to decide which one is the point.</aside>
+</div>
+</div>
+
+<!-- ================================ AFTER ================================ -->
+<div class="row">
+<section class="main" aria-labelledby="after-h">
+  <h2 id="after-h">After — the design language</h2>
+  <p>The verdict sentence in the serif, the one figure whose shape is the claim, a ledger for the audit. Nothing above the fold but the argument.</p>
+  <div class="after" aria-label="After render">
+    <div class="hero">
+      <div>
+        <p class="eyebrow">Support · week 36 · operator</p>
+        <p class="verdict">The triage bot halved first response in every queue <em>except Enterprise</em>, which it made slower.</p>
+        <div class="rule" aria-hidden="true"></div>
+        <p class="prov">1,412 tickets wk 36 · 1,377 wk 35 · median minutes to first agent reply · source: helpdesk export 2026-09-06</p>
+      </div>
+      <figure>
+        <svg viewBox="0 0 400 280" role="img" aria-labelledby="slope-t slope-d">
+          <title id="slope-t">Median first-response minutes by queue, week 35 to week 36</title>
+          <desc id="slope-d">A slope chart. Four queues fall from between 38 and 71 minutes to between 14 and 33 minutes. Enterprise alone rises, from 17 to 24 minutes, and is drawn in the verdict colour.</desc>
+          <!-- axes -->
+          <line x1="120" y1="12" x2="120" y2="250" stroke="var(--line)" stroke-width="1"/>
+          <line x1="280" y1="12" x2="280" y2="250" stroke="var(--line)" stroke-width="1"/>
+          <text x="120" y="270" text-anchor="middle" font-family="var(--mono)" font-size="13" fill="var(--ink-muted)">wk 35</text>
+          <text x="280" y="270" text-anchor="middle" font-family="var(--mono)" font-size="13" fill="var(--ink-muted)">wk 36</text>
+          <!-- scale: y = 220 - minutes * 2.7 (0..74) -->
+          <!-- Bugs 71 -> 33 -->
+          <line x1="120" y1="22.8" x2="280" y2="144.4" stroke="var(--ink-muted)" stroke-width="1.5"/>
+          <circle cx="120" cy="22.8" r="3" fill="var(--ink-muted)"/><circle cx="280" cy="144.4" r="3" fill="var(--ink-muted)"/>
+          <text x="110" y="26.8" text-anchor="end" font-family="var(--body)" font-size="14" fill="var(--ink)">Bugs <tspan font-family="var(--mono)" fill="var(--ink-muted)">71</tspan></text>
+          <text x="290" y="148" font-family="var(--body)" font-size="14" fill="var(--ink)"><tspan font-family="var(--mono)" fill="var(--ink-muted)">33</tspan> Bugs</text>
+          <!-- Onboarding 52 -> 19 -->
+          <line x1="120" y1="83.6" x2="280" y2="189.2" stroke="var(--ink-muted)" stroke-width="1.5"/>
+          <circle cx="120" cy="83.6" r="3" fill="var(--ink-muted)"/><circle cx="280" cy="189.2" r="3" fill="var(--ink-muted)"/>
+          <text x="110" y="87.6" text-anchor="end" font-family="var(--body)" font-size="14" fill="var(--ink)">Onboarding <tspan font-family="var(--mono)" fill="var(--ink-muted)">52</tspan></text>
+          <text x="290" y="190" font-family="var(--body)" font-size="14" fill="var(--ink)"><tspan font-family="var(--mono)" fill="var(--ink-muted)">19</tspan> Onboarding</text>
+          <!-- General 44 -> 16 -->
+          <line x1="120" y1="109.2" x2="280" y2="198.8" stroke="var(--ink-muted)" stroke-width="1.5"/>
+          <circle cx="120" cy="109.2" r="3" fill="var(--ink-muted)"/><circle cx="280" cy="198.8" r="3" fill="var(--ink-muted)"/>
+          <text x="110" y="113.2" text-anchor="end" font-family="var(--body)" font-size="14" fill="var(--ink)">General <tspan font-family="var(--mono)" fill="var(--ink-muted)">44</tspan></text>
+          <text x="290" y="207" font-family="var(--body)" font-size="14" fill="var(--ink)"><tspan font-family="var(--mono)" fill="var(--ink-muted)">16</tspan> General</text>
+          <!-- Billing 38 -> 14 -->
+          <line x1="120" y1="128.4" x2="280" y2="205.2" stroke="var(--ink-muted)" stroke-width="1.5"/>
+          <circle cx="120" cy="128.4" r="3" fill="var(--ink-muted)"/><circle cx="280" cy="205.2" r="3" fill="var(--ink-muted)"/>
+          <text x="110" y="132.4" text-anchor="end" font-family="var(--body)" font-size="14" fill="var(--ink)">Billing <tspan font-family="var(--mono)" fill="var(--ink-muted)">38</tspan></text>
+          <text x="290" y="224" font-family="var(--body)" font-size="14" fill="var(--ink)"><tspan font-family="var(--mono)" fill="var(--ink-muted)">14</tspan> Billing</text>
+          <!-- Enterprise 17 -> 24 : the decisive mark -->
+          <line x1="120" y1="195.6" x2="280" y2="173.2" stroke="var(--verdict)" stroke-width="2.5"/>
+          <circle cx="120" cy="195.6" r="4" fill="var(--verdict)"/><circle cx="280" cy="173.2" r="4" fill="var(--verdict)"/>
+          <text x="110" y="199.6" text-anchor="end" font-family="var(--body)" font-size="14" font-weight="600" fill="var(--verdict)">Enterprise <tspan font-family="var(--mono)">17</tspan></text>
+          <text x="290" y="171" font-family="var(--body)" font-size="14" font-weight="600" fill="var(--verdict)"><tspan font-family="var(--mono)">24</tspan> Enterprise ↑</text>
+        </svg>
+        <figcaption>Median minutes to first agent reply, by queue. Enterprise is the only rising line. Helpdesk export, 2026-09-06.</figcaption>
+      </figure>
+    </div>
+    <div class="body">
+      <div class="scroll"><table class="ledger">
+        <caption>Evidence — median minutes to first reply per queue, with where each row comes from</caption>
+        <thead><tr><th scope="col">Queue</th><th scope="col" class="num">Wk 35</th><th scope="col" class="num">Wk 36</th><th scope="col" class="num">Δ</th><th scope="col" class="num">Tickets</th><th scope="col">Source</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Billing</th><td class="num">38</td><td class="num">14</td><td class="num delta-good">−24</td><td class="num">412</td><td class="src">helpdesk export, queue=billing</td></tr>
+          <tr><th scope="row">Onboarding</th><td class="num">52</td><td class="num">19</td><td class="num delta-good">−33</td><td class="num">301</td><td class="src">helpdesk export, queue=onboarding</td></tr>
+          <tr><th scope="row">Bugs</th><td class="num">71</td><td class="num">33</td><td class="num delta-good">−38</td><td class="num">288</td><td class="src">helpdesk export, queue=bugs</td></tr>
+          <tr class="decisive"><th scope="row">Enterprise</th><td class="num">17</td><td class="num">24</td><td class="num delta-bad">+7</td><td class="num">96</td><td class="src">helpdesk export, queue=enterprise; routing rule #14 sends to bot first</td></tr>
+          <tr><th scope="row">General</th><td class="num">44</td><td class="num">16</td><td class="num delta-good">−28</td><td class="num">315</td><td class="src">helpdesk export, queue=general</td></tr>
+          <tr class="sum"><th scope="row">All queues (weighted)</th><td class="num">47</td><td class="num">20</td><td class="num delta-good">−27</td><td class="num">1,412</td><td class="src">weighted by wk-36 tickets</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+
+  <details open>
+    <summary>Concept brief for the after render</summary>
+    <dl class="brief">
+      <dt>Single idea</dt><dd>The bot helped every queue except the one where humans were already fast.</dd>
+      <dt>Hero form</dt><dd>Slope chart: four lines fall and one rises; the rising line in the verdict colour <em>is</em> the sentence.</dd>
+      <dt>Emotional register</dt><dd>Calm, certain — sandstone hero, serif verdict, no status colour above the fold, the exception named in italic.</dd>
+      <dt>Distinctive move</dt><dd>The exception is the only coloured mark on the page, and the only italic word in the verdict.</dd>
+      <dt>Deliberately omitted</dt><dd>The KPI card row (four numbers in boxes show no argument), the status column (the sign already says it), the dark gradient.</dd>
+    </dl>
+  </details>
+
+  <table class="score">
+    <caption>Rubric — after</caption>
+    <thead><tr><th scope="col">Dimension</th><th scope="col">Score</th><th scope="col">Evidence</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">Distinctiveness</th><td class="n">4</td><td>Serif verdict over sandstone; one indigo exception; a ledger instead of a boxed table.</td></tr>
+      <tr><th scope="row">Fit to argument</th><td class="n">5</td><td>The rising line is the claim; the prose only names it.</td></tr>
+      <tr><th scope="row">Hierarchy</th><td class="n">4</td><td>Verdict, figure, rule, then the ledger a clear step down; at 390px the ledger's source column competes slightly.</td></tr>
+      <tr><th scope="row">Craft</th><td class="n">4</td><td>End labels instead of a legend; tabular mono numbers; the General and Billing labels sit close at wk 36.</td></tr>
+      <tr><th scope="row">Accessibility</th><td class="n">5</td><td>Minimum pair 5.8:1; SVG has title, description, and its table; nothing depends on JS; prints in one colour.</td></tr>
+    </tbody>
+  </table>
+  <p class="floor pass">Floor holds: distinctiveness 4, fit 5, hierarchy 4 — mergeable.</p>
+</section>
+<div class="notes">
+<aside class="note"><span class="eyebrow">Design note · Fit to argument</span>A slope chart has exactly the geometry of the claim: everything falls, one thing rises. No caption is needed to see it.</aside>
+<aside class="note"><span class="eyebrow">Design note · Hierarchy</span>The verdict rule is 3px of indigo under a serif sentence. The next thing down is a ledger in 15px mono. There is no third element competing for the first screen.</aside>
+<aside class="note"><span class="eyebrow">Design note · Craft</span>Labels sit at both ends of each line, so there is no legend to look up. Status colour appears only in the Δ column, where a sign is also printed.</aside>
+<aside class="note"><span class="eyebrow">Design note · Distinctiveness</span>The "before" and "after" share every number and the same 1,120px container. Everything that differs is a decision the brief names.</aside>
+<aside class="note"><span class="eyebrow">Design note · Accessibility</span>The SVG carries a title, a description that states the claim in words, and its numbers live in the ledger below it. Dark mode swaps tokens, not markup.</aside>
+</div>
+
+<footer class="main">
+  Exemplar for the cas-ui-craft skill. Data is fictional; the "before" CSS is copied from the August 2026 house template. Tokens: design-spec/references/design-tokens.json. Rendered and checked at 1280×800, 390×844, print, and with JavaScript unavailable.
+</footer>
+</div>
+</body>
+</html>

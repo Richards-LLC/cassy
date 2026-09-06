@@ -1,8 +1,9 @@
 # Before / after — the 2026-09-06 model lane rubric review
 
 Same markdown source, same numbers, same author. `rubric-review-before.html` is the render that
-shipped first; `rubric-review-after.html` is the same brief rendered under this skill's contract with
-a committed concept brief. Type: decision brief. Audience: operator.
+shipped first (including the model intelligence, cost and efficiency section added the same day);
+`rubric-review-after.html` is the same brief rendered under this skill's contract with a committed
+concept brief (`rubric-review.brief.md`). Type: decision brief. Audience: operator.
 
 ## What the before version did
 

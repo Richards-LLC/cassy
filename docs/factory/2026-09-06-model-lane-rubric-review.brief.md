@@ -30,8 +30,11 @@ stamp is text, every send-back is a ring, every scenario is a fill.
 ## Evidence and closing figure
 Small multiples on one shared 0–20 scale (workers, deliveries, send-backs, merged per lane) so the
 standard lane towers over the rest by construction; release latency as two panels on a shared 0–5 h
-scale. The closing figure is the decision: options A and B drawn as the heavy lane's primary →
-fallback edge, B stamped RECOMMENDED with the promotion rule as its annotation.
+scale. The model intelligence, cost and efficiency section (cas-3372, cas-de0b) is rendered as ruled
+ledgers with a log-scale cost-per-delivery figure (Astra dashed as a sample of two) and four
+small-multiple scorecard panels; its two findings are cards, its placement rules a second ladder.
+The closing figure is the decision: options A and B drawn as the heavy lane's primary → fallback
+edge, B stamped RECOMMENDED with the promotion rule as its annotation.
 
 ## Critique
 Scored by wise-falcon-12, 2026-09-06, on the four headless renders (1280 and 390, light and dark)

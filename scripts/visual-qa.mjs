@@ -6,6 +6,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { inflateSync } from 'node:zlib';
 
 const DEFAULT_VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
@@ -82,7 +83,18 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       for (let current = element; current; current = current.parentElement) result.unshift(current);
       return result;
     };
+    const hasHorizontalScroller = (element) => ancestors(element).some((current) => {
+      const overflow = getComputedStyle(current).overflowX;
+      return overflow === 'auto' || overflow === 'scroll';
+    });
     const ariaHidden = (element) => ancestors(element).some((current) => current.getAttribute('aria-hidden') === 'true');
+    const nonVisualReason = (element) => {
+      if (!element) return null;
+      if (ariaHidden(element)) return 'aria-hidden';
+      if (element.closest('svg title, svg desc')) return 'svg-accessibility-text';
+      if (element.closest('.skip, .sr, .sr-only, .visually-hidden, .visuallyHidden, [data-visual-qa-hidden]')) return 'accessibility-helper';
+      return null;
+    };
     const visibility = (element) => {
       let opacity = 1;
       let hidden = false;
@@ -120,6 +132,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const fg = cssColor(style.color);
       const background = backgroundFor(element);
       const state = visibility(element);
+      const ignoredReason = nonVisualReason(element);
       const item = {
         elementPath: selectorFor(element),
         selector: element.id ? '#' + CSS.escape(element.id) : selectorFor(element),
@@ -134,34 +147,45 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         fontSize: Number.parseFloat(style.fontSize) || 16,
         fontWeight: Number.parseInt(style.fontWeight, 10) || 400,
         colorAlpha: fg ? round(fg[3]) : 0,
+        ignored: Boolean(ignoredReason),
+        ignoredReason,
+        statusLike: Boolean(element.closest('.tag, .status, [role="status"]')),
         node,
       };
       textNodes.push(item);
     }
 
     const findings = [];
+    const infos = [];
     const add = (type, item, details = {}) => findings.push({ type, selector: item?.selector || item?.elementPath || 'document', elementPath: item?.elementPath || item?.selector || 'document', textSample: item?.text, ...details });
-    const visibleText = textNodes.filter((item) => !item.hidden && !item.ariaHidden && item.box.width > 0 && item.box.height > 0);
+    const addInfo = (type, item, details = {}) => infos.push({ type, selector: item?.selector || item?.elementPath || 'document', elementPath: item?.elementPath || item?.selector || 'document', textSample: item?.text, ...details });
+    const visibleText = textNodes.filter((item) => !item.ignored && !item.hidden && !item.ariaHidden && item.box.width > 0 && item.box.height > 0);
     for (const item of textNodes) {
-      if ((item.hidden || item.opacity <= 0 || item.colorAlpha <= 0 || item.box.width <= 0 || item.box.height <= 0) && !item.ariaHidden) {
+      if (item.ignored || item.ariaHidden || item.box.width <= 0 || item.box.height <= 0) continue;
+      if (item.hidden || item.opacity <= 0 || item.colorAlpha <= 0) {
         add('invisible-text', item, { reason: item.opacity <= 0 ? 'opacity-0' : item.box.width <= 0 || item.box.height <= 0 ? 'zero-size' : 'visibility-hidden' });
         continue;
       }
-      if (item.ariaHidden || item.hidden || item.box.width <= 0 || item.box.height <= 0) continue;
       if (!item.foreground || item.hasUnverifiableImage) {
-        add('unverifiable-contrast', item, { reason: item.hasUnverifiableImage ? 'background-image' : 'unsupported-color' });
+        addInfo('unverifiable-contrast', item, { reason: item.hasUnverifiableImage ? 'background-image' : 'unsupported-color' });
         continue;
       }
       const foreground = over([item.foreground[0], item.foreground[1], item.foreground[2], item.colorAlpha], [item.background[0], item.background[1], item.background[2], 1]);
       const contrast = ratio(foreground, [item.background[0], item.background[1], item.background[2], 1]);
       const large = item.fontSize >= 24 || (item.fontSize >= 18.66 && item.fontWeight >= 700);
       const threshold = large ? largeTextLimit : contrastLimit;
-      if (contrast < threshold) add('contrast', item, { foreground: foreground.slice(0, 3).map(Math.round), background: item.background, ratio: round(contrast), threshold, largeText: large });
+      if (contrast < threshold) {
+        const details = { foreground: foreground.slice(0, 3).map(Math.round), background: item.background, ratio: round(contrast), threshold, largeText: large };
+        if (item.statusLike) addInfo('off-token-contrast', item, { ...details, reason: 'status-label-pair-is-not-a-sanctioned-token' });
+        else add('contrast', item, details);
+      }
     }
 
     const elements = [...document.querySelectorAll('*')];
     const viewport = { width: window.innerWidth, height: window.innerHeight };
+    const documentWidth = Math.max(document.documentElement.clientWidth, document.documentElement.scrollWidth, document.body?.scrollWidth || 0);
     for (const element of elements) {
+      if (nonVisualReason(element)) continue;
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
       const path = selectorFor(element);
@@ -169,12 +193,13 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const overflowX = style.overflowX === 'hidden' || style.overflowX === 'clip';
       const overflowY = style.overflowY === 'hidden' || style.overflowY === 'clip';
       const contentExceedsBorder = element !== document.documentElement && element !== document.body && (element.scrollWidth > element.clientWidth + boxTolerance || element.scrollHeight > element.clientHeight + boxTolerance);
-      if (contentExceedsBorder && !overflowX && !overflowY) add('content-overflow', item, { reason: 'content-exceeds-border-box', scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
-      if ((overflowX && element.scrollWidth > element.clientWidth + boxTolerance) || (overflowY && element.scrollHeight > element.clientHeight + boxTolerance)) {
+      const clipped = (overflowX && element.scrollWidth > element.clientWidth + boxTolerance) || (overflowY && element.scrollHeight > element.clientHeight + boxTolerance);
+      if (clipped) {
+        add('content-overflow', item, { reason: 'content-exceeds-clipped-border-box', scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
         add('clipped-content', item, { reason: 'scroll-size-exceeds-client-size', scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
         if (style.textOverflow !== 'ellipsis' && (element.scrollWidth > element.clientWidth + boxTolerance || element.scrollHeight > element.clientHeight + boxTolerance)) add('truncated-container', item, { reason: 'overflow-without-ellipsis', textOverflow: style.textOverflow, scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight, clientWidth: element.clientWidth, clientHeight: element.clientHeight });
       }
-      if (rect.right < -boxTolerance || rect.left > viewport.width + boxTolerance) add('outside-viewport', item, { reason: 'horizontal-position', box: box(rect), viewport });
+      if (!hasHorizontalScroller(element) && (rect.left < -boxTolerance || rect.right > documentWidth + boxTolerance)) add('outside-viewport', item, { reason: 'horizontal-escape-beyond-document', box: box(rect), documentWidth, viewport });
       if ((style.position === 'fixed' || style.position === 'absolute') && (rect.right > viewport.width + boxTolerance || rect.bottom > document.documentElement.scrollHeight + boxTolerance)) {
         const container = element.parentElement;
         if (container && (getComputedStyle(container).overflowX === 'hidden' || getComputedStyle(container).overflowY === 'hidden')) add('clipped-content', item, { reason: 'positioned-child-exceeds-container', box: box(rect) });
@@ -182,9 +207,12 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     }
 
     for (const item of textNodes) {
-      if (item.ariaHidden) continue;
+      if (item.ignored || item.ariaHidden || item.box.width <= 0 || item.box.height <= 0) continue;
+      const svgBoundary = item.node.parentElement?.closest('svg');
       let ancestor = item.node.parentElement;
       while (ancestor) {
+        if (ancestor === svgBoundary) break;
+        if (ancestor !== item.node.parentElement && ['auto', 'scroll'].includes(getComputedStyle(ancestor).overflowX)) break;
         const style = getComputedStyle(ancestor);
         if (style.overflowX === 'hidden' || style.overflowX === 'clip' || style.overflowY === 'hidden' || style.overflowY === 'clip') {
           const ancestorBox = ancestor.getBoundingClientRect();
@@ -201,12 +229,48 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         const aElement = visibleText[left].node.parentElement;
         const bElement = visibleText[right].node.parentElement;
         if (aElement === bElement || aElement.contains(bElement) || bElement.contains(aElement)) continue;
+        const aStyle = getComputedStyle(aElement);
+        const bStyle = getComputedStyle(bElement);
+        const aPositioned = ['absolute', 'fixed', 'sticky'].includes(aStyle.position) || aStyle.transform !== 'none';
+        const bPositioned = ['absolute', 'fixed', 'sticky'].includes(bStyle.position) || bStyle.transform !== 'none';
+        if (!aPositioned && !bPositioned) continue;
+        const aAncestors = ancestors(aElement);
+        const bAncestors = ancestors(bElement);
+        let commonIndex = -1;
+        for (let index = aAncestors.length - 1; index >= 0; index -= 1) {
+          if (bAncestors.includes(aAncestors[index])) {
+            commonIndex = index;
+            break;
+          }
+        }
+        const commonAncestor = commonIndex < 0 ? null : aAncestors[commonIndex];
+        const bCommonIndex = commonAncestor ? bAncestors.indexOf(commonAncestor) : -1;
+        const aDistance = commonIndex < 0 ? Number.POSITIVE_INFINITY : aAncestors.length - commonIndex - 1;
+        const bDistance = bCommonIndex < 0 ? Number.POSITIVE_INFINITY : bAncestors.length - bCommonIndex - 1;
+        if (!commonAncestor || commonAncestor === document.body || commonAncestor === document.documentElement || aDistance > 3 || bDistance > 3 || hasHorizontalScroller(aElement) || hasHorizontalScroller(bElement)) continue;
         const intersection = Math.max(0, Math.min(a.right, b.right) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.y, b.y));
-        if (intersection > 2) add('overlapping-text', visibleText[left], { otherElementPath: visibleText[right].elementPath, otherTextSample: visibleText[right].text, intersectionArea: round(intersection) });
+        const smallerArea = Math.max(1, Math.min(a.width * a.height, b.width * b.height));
+        if (intersection > 2 && intersection / smallerArea >= 0.2) add('overlapping-text', visibleText[left], { otherElementPath: visibleText[right].elementPath, otherTextSample: visibleText[right].text, intersectionArea: round(intersection), overlapRatio: round(intersection / smallerArea) });
       }
     }
 
-    return { findings, textNodes: textNodes.map(({ node: _node, ...item }) => item), viewport };
+    for (const figure of document.querySelectorAll('figure')) {
+      if (nonVisualReason(figure)) continue;
+      const caption = figure.querySelector(':scope > figcaption');
+      if (!caption || nonVisualReason(caption)) continue;
+      const figureBox = figure.getBoundingClientRect();
+      const captionBox = caption.getBoundingClientRect();
+      const previous = caption.previousElementSibling;
+      const contentBottom = previous ? previous.getBoundingClientRect().bottom : figureBox.top;
+      const captionOverlapsContent = captionBox.top < contentBottom - boxTolerance;
+      const captionEscapesFigure = captionBox.bottom > figureBox.bottom + boxTolerance;
+      if (captionOverlapsContent || captionEscapesFigure) {
+        const captionItem = { selector: caption.id ? `#${CSS.escape(caption.id)}` : selectorFor(caption), elementPath: selectorFor(caption), text: sample(caption.textContent || ''), box: box(captionBox) };
+        add(captionOverlapsContent ? 'overlapping-text' : 'clipped-content', captionItem, { reason: captionOverlapsContent ? 'figure-caption-layout-overlap' : 'figure-caption-overflow', otherElementPath: selectorFor(figure), otherTextSample: '', intersectionArea: round(Math.max(0, Math.min(captionBox.right, figureBox.right) - Math.max(captionBox.left, figureBox.left)) * Math.max(0, Math.min(captionBox.bottom, contentBottom) - Math.max(captionBox.top, figureBox.top))) });
+      }
+    }
+
+    return { findings, infos, textNodes: textNodes.map(({ node: _node, ...item }) => item), viewport };
 };
 
 async function resolvePlaywright() {
@@ -281,11 +345,101 @@ function systemChromium() {
   return undefined;
 }
 
+function decodePng(png) {
+  const bytes = Buffer.isBuffer(png) ? png : Buffer.from(png);
+  if (bytes.toString('ascii', 1, 4) !== 'PNG') throw new Error('Visual QA screenshot is not a PNG.');
+  let offset = 8;
+  let width;
+  let height;
+  let bitDepth;
+  let colorType;
+  const idat = [];
+  while (offset < bytes.length) {
+    const length = bytes.readUInt32BE(offset);
+    const type = bytes.toString('ascii', offset + 4, offset + 8);
+    const data = bytes.subarray(offset + 8, offset + 8 + length);
+    offset += 12 + length;
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      bitDepth = data[8];
+      colorType = data[9];
+    } else if (type === 'IDAT') {
+      idat.push(data);
+    } else if (type === 'IEND') {
+      break;
+    }
+  }
+  if (bitDepth !== 8 || ![2, 6].includes(colorType)) throw new Error('Visual QA only supports 8-bit RGB/RGBA screenshots.');
+  const channels = colorType === 6 ? 4 : 3;
+  const stride = width * channels;
+  const raw = inflateSync(Buffer.concat(idat));
+  const pixels = Buffer.alloc(height * stride);
+  let rawOffset = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[rawOffset++];
+    const rowStart = y * stride;
+    for (let x = 0; x < stride; x += 1) {
+      const left = x >= channels ? pixels[rowStart + x - channels] : 0;
+      const above = y ? pixels[rowStart - stride + x] : 0;
+      const upperLeft = y && x >= channels ? pixels[rowStart - stride + x - channels] : 0;
+      const value = raw[rawOffset++];
+      if (filter === 0) pixels[rowStart + x] = value;
+      else if (filter === 1) pixels[rowStart + x] = (value + left) & 255;
+      else if (filter === 2) pixels[rowStart + x] = (value + above) & 255;
+      else if (filter === 3) pixels[rowStart + x] = (value + Math.floor((left + above) / 2)) & 255;
+      else if (filter === 4) {
+        const p = left + above - upperLeft;
+        const pa = Math.abs(p - left);
+        const pb = Math.abs(p - above);
+        const pc = Math.abs(p - upperLeft);
+        pixels[rowStart + x] = (value + (pa <= pb && pa <= pc ? left : pb <= pc ? above : upperLeft)) & 255;
+      } else throw new Error(`Unsupported PNG filter ${filter}.`);
+    }
+  }
+  return { width, height, channels, pixels };
+}
+
+function sampleScreenshotBackground(png, itemBox) {
+  if (!itemBox?.width || !itemBox?.height) return null;
+  const image = decodePng(png);
+  const x0 = Math.max(0, Math.floor(itemBox.x));
+  const x1 = Math.min(image.width - 1, Math.ceil(itemBox.right));
+  const y0 = Math.max(0, Math.floor(itemBox.y));
+  const y1 = Math.min(image.height - 1, Math.ceil(itemBox.bottom));
+  const points = [];
+  for (let x = x0; x <= x1; x += Math.max(1, Math.ceil((x1 - x0) / 8))) {
+    points.push([x, y0 - 2], [x, y1 + 2]);
+  }
+  for (let y = y0; y <= y1; y += Math.max(1, Math.ceil((y1 - y0) / 8))) {
+    points.push([x0 - 2, y], [x1 + 2, y]);
+  }
+  const samples = points.filter(([x, y]) => x >= 0 && y >= 0 && x < image.width && y < image.height).map(([x, y]) => {
+    const offset = (y * image.width + x) * image.channels;
+    return [image.pixels[offset], image.pixels[offset + 1], image.pixels[offset + 2]];
+  });
+  if (!samples.length) return null;
+  return samples[0].map((_, channel) => Math.round(samples.reduce((sum, pixel) => sum + pixel[channel], 0) / samples.length));
+}
+
+function rgbLuminance(color) {
+  return color.map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  }).reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+}
+
+function rgbContrast(first, second) {
+  const light = Math.max(rgbLuminance(first), rgbLuminance(second));
+  const dark = Math.min(rgbLuminance(first), rgbLuminance(second));
+  return Math.round(((light + 0.05) / (dark + 0.05)) * 100) / 100;
+}
+
 function markdownReport(result) {
   const lines = [
     `# Visual QA — ${result.status}`,
     '',
-    `**Summary:** ${result.status} · ${result.findings.length} finding(s) · ${result.suppressed.length} allowlisted · ${result.screenshots.length} screenshot(s)`,
+    `**Summary:** ${result.status} · ${result.findings.length} finding(s) · ${result.infoFindings.length} informational · ${result.suppressed.length} allowlisted · ${result.screenshots.length} screenshot(s)`,
     '',
     `Schemes: ${result.schemes.join(', ')}  `,
     `Viewports: ${result.viewports.map((viewport) => `${viewport.name} (${viewport.width}×${viewport.height})`).join(', ')}`,
@@ -298,6 +452,13 @@ function markdownReport(result) {
     const location = `${finding.url} · ${finding.scheme} · ${finding.viewport.name}`;
     lines.push(`- **${finding.type}** — \`${finding.elementPath}\` — ${finding.textSample ? JSON.stringify(finding.textSample) : finding.reason || 'see JSON'} (${location})`);
     if (finding.ratio !== undefined) lines.push(`  - Contrast: ${finding.ratio}:1 (required ${finding.threshold}:1); foreground ${finding.foreground?.join(', ')}; background ${finding.background?.join(', ')}`);
+  }
+  lines.push('', '## Informational checks', '');
+  if (!result.infoFindings.length) lines.push('None.');
+  for (const finding of result.infoFindings) {
+    const location = `${finding.url} · ${finding.scheme} · ${finding.viewport.name}`;
+    lines.push(`- **${finding.type}** — \`${finding.elementPath}\` — ${finding.reason || 'see JSON'} (${location})`);
+    if (finding.sampledBackground) lines.push(`  - Screenshot sample: background ${finding.sampledBackground.join(', ')}${finding.sampledRatio === undefined ? '' : `; ratio ${finding.sampledRatio}:1`}`);
   }
   lines.push('', '## Screenshots', '');
   for (const screenshot of result.screenshots) lines.push(`- [${screenshot.path}](${screenshot.path}) — ${screenshot.url} · ${screenshot.scheme} · ${screenshot.viewport.name}`);
@@ -321,8 +482,10 @@ export async function runVisualQa(options) {
   const playwright = await resolvePlaywright();
   const browser = await playwright.chromium.launch({ headless: true, executablePath: systemChromium() });
   const findings = [];
+  const infoFindings = [];
   const suppressed = [];
   const screenshots = [];
+  const seen = new Set();
   try {
     for (const [urlIndex, url] of urls.entries()) {
       const source = inputUrls[urlIndex];
@@ -333,10 +496,14 @@ export async function runVisualQa(options) {
           try {
             await page.goto(url, { waitUntil: 'load' });
             await page.waitForTimeout(50);
-            const recordFinding = (finding) => {
+            const recordFinding = (finding, informational = false) => {
               const enriched = { ...finding, url: source, scheme, viewport };
+              const key = [informational ? 'info' : 'finding', enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
+              if (seen.has(key)) return;
+              seen.add(key);
               const exception = allowlisted(enriched, allowlist);
               if (exception) suppressed.push({ ...enriched, reason: exception.reason });
+              else if (informational) infoFindings.push(enriched);
               else findings.push(enriched);
             };
             const inspection = await page.evaluate(PAGE_INSPECTION, { colorScheme: scheme, contrastLimit: CONTRAST_LIMIT, largeTextLimit: LARGE_TEXT_LIMIT, boxTolerance: BOX_TOLERANCE });
@@ -349,6 +516,13 @@ export async function runVisualQa(options) {
               recordFinding({ type: 'print-loss', selector: 'body', elementPath: 'body', textSample: printText.trim().slice(0, 96), reason: 'print-media-hides-content', screenCharacters: screenText.trim().length, printCharacters: printText.trim().length });
             }
             await page.emulateMedia({ media: 'screen' });
+
+            const screenshotBuffer = await page.screenshot({ path: join(artifactDir, `${slug(source)}-${scheme}-${viewport.name}.png`), fullPage: true });
+            for (const info of inspection.infos) {
+              const sampledBackground = sampleScreenshotBackground(screenshotBuffer, info.box);
+              const sampledRatio = sampledBackground && info.foreground ? rgbContrast(info.foreground, sampledBackground) : undefined;
+              recordFinding({ ...info, sampledBackground, sampledRatio }, true);
+            }
 
             const noScriptContext = await browser.newContext({ colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height }, javaScriptEnabled: false });
             const noScriptPage = await noScriptContext.newPage();
@@ -363,7 +537,6 @@ export async function runVisualQa(options) {
             }
 
             const filename = `${slug(source)}-${scheme}-${viewport.name}.png`;
-            await page.screenshot({ path: join(artifactDir, filename), fullPage: true });
             screenshots.push({ path: filename, url: source, scheme, viewport });
           } finally {
             await context.close();
@@ -382,9 +555,11 @@ export async function runVisualQa(options) {
     viewports,
     urls: inputUrls,
     findings,
+    infoFindings,
     suppressed,
     screenshots,
     counts: findings.reduce((counts, finding) => ({ ...counts, [finding.type]: (counts[finding.type] || 0) + 1 }), {}),
+    infoCounts: infoFindings.reduce((counts, finding) => ({ ...counts, [finding.type]: (counts[finding.type] || 0) + 1 }), {}),
   };
   result.markdown = markdownReport(result);
   const { markdown: _markdown, ...jsonResult } = result;

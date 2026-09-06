@@ -60,12 +60,6 @@
       "80f2925c1ed46aa9f7680355684ca7813d1ad16d3123fea2432781ac9cd905e0",
       "b88751483ecc8b3e2e0cf8cfbd232905b275f2638653f21b2ef632f3d81e0fd9"
     ],
-    "skills/cas-html-reports/references/examples/engineering-investigation.html": [
-      "8c6de382c7df7c65cd71b20b7335028e9eeee12df074536e8f497a4db82b873a"
-    ],
-    "skills/cas-html-reports/references/examples/financial-quarterly-brief.html": [
-      "405df1f3d355b796078d5ec941a2a86a567a94975fe9949931d418aafefa01e1"
-    ],
     "skills/cas-html-reports/references/presentation-rules.md": [
       "116f918bdc85e7a3922664b8f2416e145d69955ce54e9d187700fd80ef928c94",
       "fc82f138ab0e22de22db3429134f1ac32a094829795ed5a17728fb1ec4bb0186"
@@ -510,6 +504,16 @@
       "f6c478e955349bd838e01d8dd8d6d8cb80e2017e3b58c0d22ae6602d586b21e9",
       "f86bae7c3c1cd3fcb9320d2837ddf9ab1d77622b12ea47a47141e6c19192f360",
       "ff4e8fb59dd7dcbcdc46a7aae58a2995726f27fa981d15e3dc4b03c4d9222510"
+    ],
+    "skills/cas-technical-drawing/references/drafting-conventions.md": [
+      "339e0bd53bfee106b484b8bd6901387ebe31cf6362965ef9e3fb16a0f03a4016",
+      "4b3e5b186190070d5a61fdf39db1efaf07937a9acd3f1ca7b0564c49969bdba8"
+    ],
+    "skills/cas-technical-drawing/references/likeness-critique.md": [
+      "07137fc37aab082c1ff8520a022ed0c7c3df49483316686d6ffee895aa590d5f"
+    ],
+    "skills/cas-technical-drawing/references/model-schema.md": [
+      "d8d0e9114e8cb1e6f6f6a5b40742716a5b571f6dcafea869aee060457c1988b0"
     ],
     "skills/cas-viktor/references/gateway.md": [
       "65083b61b372954719adb237624e7b5f32315ef20541f93cd8ef30c76b3767e8",

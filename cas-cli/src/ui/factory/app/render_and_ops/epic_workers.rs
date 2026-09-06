@@ -97,15 +97,13 @@ pub(crate) struct TaskEpicBase {
     pub task_id: String,
     /// The epic that owns that task (or the task itself when it *is* an epic).
     pub epic_id: String,
-    /// Branch recorded on that epic (or, for a legacy epic, derived from its
-    /// title only as a last-resort fallback).
+    /// Branch recorded on that epic. An empty value means the epic has no
+    /// recorded branch authority; callers must not derive one from its title.
     pub branch: String,
     /// Whether `branch` currently resolves to a commit in the repository.
     pub branch_exists: bool,
-    /// `true` only when `branch` was synthesized from the title because the
-    /// legacy `epic.branch` field is absent. A declared epic WorkTarget must
-    /// outrank this cosmetic fallback; it must not be mistaken for a live
-    /// coordination branch.
+    /// Retained for receipt compatibility with older task snapshots. Fresh
+    /// resolution never synthesizes a title slug, so this is always false.
     pub branch_is_title_slug_fallback: bool,
     /// The WorkTarget explicitly declared by the task or its owning epic.
     /// It is delivery authority for both worker spawn and worktree merge.
@@ -224,15 +222,13 @@ pub(crate) enum SpawnBaseSource {
 ///   1. the task's declared WorkTarget;
 ///   2. the task epic's recorded live branch;
 ///   3. the task epic's declared WorkTarget;
-///   4. a legacy title-derived epic branch, only when no declared target
-///      exists and that branch resolves in the repo;
-///   5. trunk, when the spawn names a task that provably belongs to no epic
+///   4. trunk, when the spawn names a task that provably belongs to no epic
 ///      (cas-d897 / GH #146);
-///   6. the pinned epic focus (taskless spawns, tasks the store could not
+///   5. the pinned epic focus (taskless spawns, tasks the store could not
 ///      resolve, and tasks whose epic has no branch yet — falling back to
 ///      focus there preserves pre-fix behavior rather than silently dropping
 ///      a worker onto trunk);
-///   7. configured trunk / detected default branch.
+///   6. configured trunk / detected default branch.
 ///
 /// Pure so the precedence itself is unit-testable without a factory app.
 pub(crate) fn resolve_spawn_base(
@@ -273,21 +269,6 @@ pub(crate) fn resolve_spawn_base(
             SpawnBaseSource::WorkTarget {
                 task_id: target.task_id.clone(),
                 owner: target.owner.clone(),
-            },
-        );
-    }
-    // Preserve legacy behaviour only after all declared delivery authority
-    // has been exhausted. A title slug is merely a guessed old branch name;
-    // it must never override a WorkTarget that MCP can actually maintain.
-    if let Some(task_epic) = task_base
-        .epic()
-        .filter(|t| t.branch_exists && t.branch_is_title_slug_fallback)
-    {
-        return (
-            task_epic.branch.clone(),
-            SpawnBaseSource::TaskEpic {
-                task_id: task_epic.task_id.clone(),
-                epic_id: task_epic.epic_id.clone(),
             },
         );
     }
@@ -378,10 +359,8 @@ pub(crate) fn spawn_base_provenance_notice(
     }
 }
 
-/// Surface the one hazardous legacy shape: an epic with no persisted branch
-/// has both a title-derived branch and a different declared WorkTarget. The
-/// declared target wins, but the old branch is visible evidence that an
-/// operator may otherwise mistake it for the integration lane.
+/// Surface the one hazardous legacy shape when it is explicitly represented
+/// by a caller. Fresh epic records no longer synthesize a title-derived lane.
 fn stale_legacy_slug_notice(
     task_epic: Option<&TaskEpicBase>,
     base: &str,
@@ -498,8 +477,8 @@ pub(crate) fn spawn_provision_receipt(prep: &crate::ui::factory::app::WorkerSpaw
 /// cas-7587: resolve `task_id` → its epic → that epic's branch.
 ///
 /// A task that *is* an epic resolves to itself. The branch is the one persisted
-/// on the epic task, falling back to the title-derived name only for legacy
-/// epics. `branch_exists` records
+/// on the epic task; missing branches are never reconstructed from the title.
+/// `branch_exists` records
 /// whether that branch is actually present in `repo_root` — the caller uses it
 /// to decide whether the task epic may outrank the pinned focus.
 ///
@@ -576,11 +555,13 @@ pub(crate) fn task_epic_base(
         }
     };
 
-    let recorded_branch = epic.branch.clone().filter(|b| !b.trim().is_empty());
-    let branch_is_title_slug_fallback = recorded_branch.is_none();
-    let branch =
-        recorded_branch.unwrap_or_else(|| crate::ui::factory::app::epic_branch_name(&epic.title));
-    let branch_exists = ref_exists(repo_root, &branch);
+    let branch = epic
+        .branch
+        .clone()
+        .filter(|b| !b.trim().is_empty())
+        .unwrap_or_default();
+    let branch_is_title_slug_fallback = false;
+    let branch_exists = !branch.is_empty() && ref_exists(repo_root, &branch);
     if !branch_exists {
         tracing::warn!(
             task_id,
@@ -977,6 +958,36 @@ fn fast_forward_epic_base_from_parent(
         ));
     }
 
+    // A ref update is invisible to any checkout that has this branch out:
+    // inventory and guard those checkouts before moving the ref, then refresh
+    // them after the compare-and-swap so spawn cannot strand a stale index.
+    let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
+    let branch = epic_branch
+        .strip_prefix("refs/heads/")
+        .unwrap_or(epic_branch);
+    let checkouts = git.list_worktrees().map_err(|error| {
+        format!("could not inventory checkouts for epic base '{epic_branch}': {error}")
+    })?;
+    let checkouts: Vec<_> = checkouts
+        .into_iter()
+        .filter(|checkout| checkout.branch.as_deref() == Some(branch))
+        .collect();
+    for checkout in &checkouts {
+        let dirty = git.classify_dirty_status(&checkout.path).map_err(|error| {
+            format!(
+                "could not inspect checkout {} before advancing epic base '{epic_branch}': {error}",
+                checkout.path.display()
+            )
+        })?;
+        if dirty.is_blocked() {
+            return Err(format!(
+                "epic base '{epic_branch}' is checked out with tracked changes at {} ({})",
+                checkout.path.display(),
+                dirty.describe_blocking()
+            ));
+        }
+    }
+
     let refname = if epic_branch.starts_with("refs/heads/") {
         epic_branch.to_string()
     } else if epic_branch.starts_with("refs/") || epic_branch.starts_with("origin/") {
@@ -996,6 +1007,17 @@ fn fast_forward_epic_base_from_parent(
             "could not fast-forward epic base '{epic_branch}' from recorded parent '{parent_ref}': {}",
             String::from_utf8_lossy(&update.stderr).trim()
         ));
+    }
+
+    for checkout in checkouts {
+        if let crate::worktree::git::CheckoutRefresh::LeftStale { reason } =
+            git.refresh_linked_checkout(&checkout.path, branch, &epic_sha, &parent_sha)
+        {
+            return Err(format!(
+                "epic base '{epic_branch}' advanced but checkout {} could not be refreshed: {reason}",
+                checkout.path.display()
+            ));
+        }
     }
 
     // Publishing is best-effort. The local fast-forward is already the safe
@@ -1107,8 +1129,7 @@ fn recorded_epic_parent_branch(
     let epic = store.get(epic_id).ok()?;
     let epic_branch = epic
         .branch
-        .filter(|branch| !branch.trim().is_empty())
-        .unwrap_or_else(|| crate::ui::factory::app::epic_branch_name(&epic.title));
+        .filter(|branch| !branch.trim().is_empty())?;
     let parent_branch = epic
         .deliverables
         .work_target
@@ -1779,6 +1800,16 @@ impl FactoryApp {
                 let task_base = task_id
                     .map(|tid| task_epic_base(&self.cas_dir, &session_repo_root, tid))
                     .unwrap_or(TaskBase::Unresolved);
+                if let Some(epic) = task_base.epic()
+                    && epic.work_target.is_none()
+                    && (epic.branch.is_empty() || !epic.branch_exists)
+                {
+                    anyhow::bail!(
+                        "spawn refused: task {} belongs to epic {} but the epic has no recorded WorkTarget or resolvable branch; refusing to recompute a title-derived base",
+                        epic.task_id,
+                        epic.epic_id,
+                    );
+                }
                 let repo_root = resolve_spawn_worktree_repo(
                     &self.cas_dir,
                     &session_repo_root,
@@ -2599,6 +2630,7 @@ impl FactoryApp {
 mod spawn_base_tests {
     use super::*;
     use crate::test_support::TestEnvGuard;
+    use rmcp::handler::server::wrapper::Parameters;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -2684,6 +2716,108 @@ mod spawn_base_tests {
                 created_by: None,
             })
             .unwrap();
+    }
+
+    /// cas-3228: exercise the actual create and child-inheritance path before
+    /// resolving the worker spawn base. The title is deliberately long so a
+    /// title-only branch recomputation cannot accidentally pass this check.
+    #[tokio::test]
+    async fn epic_create_child_target_and_spawn_base_round_trip_cas_3228() {
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("initialize host registry");
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let cas_dir = repo.join(".cas");
+        std::fs::create_dir(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-3228-roundtrip\"\n",
+        )
+        .unwrap();
+        init_repo(&repo);
+
+        let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+        let request = |title: &str, task_type: &str, epic: Option<String>| {
+            crate::mcp::tools::TaskCreateRequest {
+                title: title.to_string(),
+                description: Some("round-trip spawn authority".to_string()),
+                priority: 2,
+                task_type: task_type.to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic,
+                depth: None,
+            }
+        };
+        core.cas_task_create(Parameters(request(
+            "A deliberately long epic title whose slug must be truncated before the id suffix",
+            "epic",
+            None,
+        )))
+        .await
+        .expect("create long-title epic");
+
+        let store = core.open_task_store().unwrap();
+        let epic = store
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|task| task.task_type == cas_types::TaskType::Epic)
+            .expect("created epic");
+        let branch = epic.branch.clone().expect("created branch");
+        assert_eq!(
+            branch,
+            crate::mcp::tools::epic_branch_name(&epic.title, &epic.id)
+        );
+        assert!(branch.ends_with(&format!("-{}", epic.id)));
+        assert_eq!(
+            epic.deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.as_str()),
+            Some(branch.as_str()),
+            "epic create must persist the canonical branch as WorkTarget"
+        );
+
+        core.cas_task_create(Parameters(request(
+            "child inherits canonical epic lane",
+            "task",
+            Some(epic.id.clone()),
+        )))
+        .await
+        .expect("create child under epic");
+        let child = store
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|task| task.title == "child inherits canonical epic lane")
+            .expect("created child");
+        assert_eq!(
+            child
+                .deliverables
+                .work_target
+                .as_ref()
+                .expect("child WorkTarget")
+                .target_branch,
+            branch
+        );
+
+        let task_base = task_epic_base(&cas_dir, &repo, &child.id);
+        let (spawn_base, source) =
+            resolve_spawn_base(&task_base, Some("epic/stale-focus"), "main");
+        assert_eq!(spawn_base, branch);
+        assert!(matches!(
+            source,
+            SpawnBaseSource::TaskEpic { .. } | SpawnBaseSource::WorkTarget { .. }
+        ));
     }
 
     /// GH #670: a task's durable WorkTarget selector may resolve to a sibling
@@ -3121,9 +3255,9 @@ mod spawn_base_tests {
 
     /// GH #433: an older title-derived branch may still exist even though the
     /// epic was subsequently given the authoritative WorkTarget that MCP can
-    /// maintain. The slug must be a fallback, never a competing live lane.
+    /// maintain. An unrecorded slug is not a spawn authority.
     #[test]
-    fn epic_work_target_beats_an_existing_legacy_title_slug_cas_0f97() {
+    fn epic_work_target_ignores_an_unrecorded_legacy_title_slug_cas_0f97() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
@@ -3149,9 +3283,9 @@ mod spawn_base_tests {
 
         let task_base = task_epic_base(&cas_dir, &repo, "cas-shockwave-child");
         let task_epic = task_base.epic().unwrap();
-        assert_eq!(task_epic.branch, legacy_slug);
-        assert!(task_epic.branch_exists);
-        assert!(task_epic.branch_is_title_slug_fallback);
+        assert!(task_epic.branch.is_empty());
+        assert!(!task_epic.branch_exists);
+        assert!(!task_epic.branch_is_title_slug_fallback);
 
         let (base, source) = resolve_spawn_base(&task_base, Some("epic/unrelated"), "main");
         assert_eq!(base, declared_target, "the declared WorkTarget must win");
@@ -3162,10 +3296,7 @@ mod spawn_base_tests {
                 ..
             }
         ));
-        let warning = stale_legacy_slug_notice(task_base.epic(), &base, &source)
-            .expect("the stale legacy slug must be surfaced");
-        assert!(warning.contains(legacy_slug), "{warning}");
-        assert!(warning.contains(declared_target), "{warning}");
+        assert!(stale_legacy_slug_notice(task_base.epic(), &base, &source).is_none());
     }
 
     #[test]
@@ -3187,7 +3318,7 @@ mod spawn_base_tests {
     }
 
     #[test]
-    fn task_epic_without_a_branch_on_disk_falls_back_to_focus_cas_7587() {
+    fn task_epic_without_a_resolvable_branch_keeps_focus_for_pure_resolution_cas_7587() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
@@ -3213,7 +3344,7 @@ mod spawn_base_tests {
         assert_eq!(
             resolve_spawn_base(&task_base, Some("epic/alpha"), "main"),
             ("epic/alpha".to_string(), SpawnBaseSource::PinnedFocus),
-            "an unresolvable task epic branch keeps the focus base rather than failing the spawn"
+            "pure base resolution retains focus; prepare_worker_spawn rejects this missing authority"
         );
     }
 
@@ -3240,7 +3371,7 @@ mod spawn_base_tests {
     }
 
     #[test]
-    fn legacy_epic_without_persisted_branch_falls_back_to_title_slug_cas_7587() {
+    fn legacy_epic_without_persisted_branch_does_not_reconstruct_title_slug_cas_7587() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
@@ -3253,11 +3384,13 @@ mod spawn_base_tests {
 
         let task_base = task_epic_base(&cas_dir, &repo, "cas-legacy-child");
         let task_epic = task_base.epic().unwrap();
+        assert!(task_epic.branch.is_empty());
+        assert!(!task_epic.branch_exists);
         assert_eq!(
-            task_epic.branch, "epic/legacy-burn-down",
-            "legacy epics without a persisted branch keep the title-derived name"
+            resolve_spawn_base(&task_base, Some("epic/focus"), "main"),
+            ("epic/focus".to_string(), SpawnBaseSource::PinnedFocus),
+            "a legacy title slug must not become a synthetic spawn authority"
         );
-        assert!(task_epic.branch_exists);
     }
 
     #[test]
@@ -4219,6 +4352,50 @@ mod spawn_base_tests {
             worker_path.join("parent-advance.txt").exists(),
             "the worker must be cut from the refreshed local tip, not the stale base"
         );
+    }
+
+    #[test]
+    fn epic_base_refresh_realigns_a_linked_checkout_before_spawn() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        branch_at(&repo, "epic/behind", "main");
+
+        let sibling = tmp.path().join("supervisor-merge");
+        let added = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                sibling.to_str().unwrap(),
+                "epic/behind",
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+
+        commit(&repo, "parent-advance.txt", "parent advanced locally");
+        let parent_tip = head_sha(&repo, "main");
+        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+            .unwrap()
+            .unwrap();
+
+        assert!(notice.contains("LOCAL-ONLY"), "{notice}");
+        assert_eq!(head_sha(&sibling, "HEAD"), parent_tip);
+        assert!(sibling.join("parent-advance.txt").is_file());
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&sibling)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty(), "linked checkout was left dirty");
     }
 
     #[test]

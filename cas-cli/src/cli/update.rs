@@ -35,8 +35,8 @@ use crate::migration::{check_migrations, run_migrations};
 use crate::store::{open_rule_store, open_skill_store, open_store};
 use crate::sync::{SkillSyncer, Syncer};
 use crate::ui::components::table::Column as TableColumn;
-use crate::ui::components::{Border, Formatter, OutputMode, Renderable, Table, Width};
-use crate::ui::theme::ActiveTheme;
+use crate::ui::components::{Border, Formatter, OutputMode, Renderable, Table, Verdict, Width};
+use crate::ui::theme::{ActiveTheme, Icons};
 
 mod preview;
 
@@ -805,11 +805,30 @@ fn update_banner_text(report: &RefreshReport) -> String {
     )
 }
 
+/// The receipt of a refresh as a verdict line: the mark and word say whether
+/// anything needs a hand, the detail keeps the counts scripts grep for.
 fn print_update_banner_with_formatter(
     fmt: &mut Formatter<'_>,
     report: &RefreshReport,
 ) -> io::Result<()> {
-    fmt.success(&update_banner_text(report))
+    let (verdict, word) = if report.failed_count > 0 {
+        (
+            Verdict::Error,
+            format!(
+                "{} {} failed",
+                report.failed_count,
+                if report.failed_count == 1 { "project" } else { "projects" }
+            ),
+        )
+    } else if report.skipped_unregistered > 0 {
+        (
+            Verdict::Warning,
+            format!("{} not refreshed", report.skipped_unregistered),
+        )
+    } else {
+        (Verdict::Ok, "complete".to_string())
+    };
+    fmt.verdict(verdict, &word, &update_banner_text(report))
 }
 
 fn capture_phase<T>(enabled: bool, operation: impl FnOnce() -> T) -> (T, String) {
@@ -2445,68 +2464,115 @@ fn check_for_updates(
     }
 
     let mut out = io::stdout();
-    let theme = ActiveTheme::default();
-    let mut fmt = Formatter::stdout(&mut out, theme);
+    let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+    render_check_report(
+        &mut fmt,
+        &CheckView {
+            current_version,
+            latest_version,
+            binary_update_available,
+            schema: schema_status
+                .as_ref()
+                .map(|status| (status.current_version, status.latest_version, pending_migrations)),
+        },
+    )?;
+    fmt.flush()?;
+    Ok(())
+}
 
-    fmt.subheading("Binary")?;
-    fmt.write_raw("  Current version: ")?;
-    fmt.write_accent(current_version)?;
-    fmt.newline()?;
-    fmt.write_raw("  Latest version:  ")?;
-    fmt.write_accent(latest_version)?;
-    fmt.newline()?;
+/// What `cas update --check` learned, gathered so the render is a pure
+/// function of data and can be pinned at a fixed width (cas-cli-craft).
+struct CheckView<'a> {
+    current_version: &'a str,
+    latest_version: &'a str,
+    binary_update_available: bool,
+    /// `(applied, latest, pending)` schema versions; `None` when this
+    /// directory has no Cassy store.
+    schema: Option<(u32, u32, usize)>,
+}
 
-    if binary_update_available {
-        fmt.newline()?;
-        let success_color = fmt.theme().palette.status_success;
-        fmt.write_colored("  \u{2192} ", success_color)?;
-        fmt.write_raw("A new version is available!")?;
-        fmt.newline()?;
-        fmt.write_raw("    Run ")?;
-        fmt.write_accent("cas update")?;
-        fmt.write_raw(" to update")?;
-        fmt.newline()?;
-    } else {
-        fmt.newline()?;
-        fmt.write_raw("  ")?;
-        fmt.success("Binary up to date")?;
-    }
-
-    fmt.newline()?;
-    fmt.subheading("Schema")?;
-
-    if let Some(status) = schema_status {
-        fmt.write_raw("  Current version: ")?;
-        fmt.write_accent(&format!("v{}", status.current_version))?;
-        fmt.newline()?;
-        fmt.write_raw("  Latest version:  ")?;
-        fmt.write_accent(&format!("v{}", status.latest_version))?;
-        fmt.newline()?;
-
-        if pending_migrations > 0 {
-            let warning_color = fmt.theme().palette.status_warning;
-            fmt.newline()?;
-            fmt.write_colored("  \u{2192} ", warning_color)?;
-            fmt.write_raw(&format!("{pending_migrations} migration(s) pending"))?;
-            fmt.newline()?;
-            fmt.write_raw("    Run ")?;
-            fmt.write_accent("cas update --dry-run")?;
-            fmt.write_raw(" to preview")?;
-            fmt.newline()?;
-            fmt.write_raw("    Run ")?;
-            fmt.write_accent("cas update --schema-only")?;
-            fmt.write_raw(" to apply")?;
-            fmt.newline()?;
-        } else {
-            fmt.newline()?;
-            fmt.write_raw("  ")?;
-            fmt.success("Schema up to date")?;
+/// Verdict → two rows → one remedy. `cas update --check` is read in one
+/// glance: line one says whether anything is pending, the rows say what.
+fn render_check_report(fmt: &mut Formatter<'_>, view: &CheckView<'_>) -> io::Result<()> {
+    let dot = Icons::separator_dot(fmt.unicode());
+    let arrow = Icons::arrow_right(fmt.unicode());
+    let pending = view.schema.map(|(_, _, pending)| pending).unwrap_or(0);
+    let (verdict, word, detail) = match (view.binary_update_available, pending, view.schema) {
+        (true, pending, _) => {
+            let schema = if pending > 0 {
+                format!(" {dot} {pending} migrations pending")
+            } else {
+                String::new()
+            };
+            (
+                Verdict::Warning,
+                "update available".to_string(),
+                format!(
+                    "{} {arrow} {}{schema}",
+                    view.current_version, view.latest_version
+                ),
+            )
         }
-    } else {
-        fmt.write_raw("  ")?;
-        fmt.warning("Cassy not initialized in this directory")?;
-    }
+        (false, pending, Some((applied, latest, _))) if pending > 0 => (
+            Verdict::Warning,
+            format!(
+                "{pending} {} pending",
+                if pending == 1 { "migration" } else { "migrations" }
+            ),
+            format!(
+                "Cassy {} {dot} schema v{applied} {arrow} v{latest}",
+                view.current_version
+            ),
+        ),
+        (false, _, Some((applied, _, _))) => (
+            Verdict::Ok,
+            "up to date".to_string(),
+            format!("Cassy {} {dot} schema v{applied}", view.current_version),
+        ),
+        (false, _, None) => (
+            Verdict::Ok,
+            "up to date".to_string(),
+            format!(
+                "Cassy {} {dot} no Cassy store in this directory",
+                view.current_version
+            ),
+        ),
+    };
+    fmt.verdict(verdict, &word, &detail)?;
+    fmt.rule()?;
 
+    fmt.write_bold_plain(&format!("{:<10}", "Binary"))?;
+    fmt.write_raw(&format!(
+        "{} installed {dot} {} latest",
+        view.current_version, view.latest_version
+    ))?;
+    fmt.newline()?;
+    fmt.write_bold_plain(&format!("{:<10}", "Schema"))?;
+    match view.schema {
+        Some((applied, latest, pending)) if pending > 0 => {
+            fmt.write_raw(&format!(
+                "v{applied} applied {dot} v{latest} latest {dot} {pending} pending"
+            ))?;
+        }
+        Some((applied, latest, _)) => {
+            fmt.write_raw(&format!("v{applied} applied {dot} v{latest} latest"))?;
+        }
+        None => fmt.write_raw("not initialized in this directory (cas init)")?,
+    }
+    fmt.newline()?;
+
+    if view.binary_update_available {
+        fmt.newline()?;
+        fmt.remedy(2, "cas update")?;
+    } else if pending > 0 {
+        fmt.newline()?;
+        fmt.remedy(2, "cas update --schema-only")?;
+    }
+    if pending > 0 {
+        fmt.receipt(&format!(
+            "  cas update --dry-run previews the {pending} pending"
+        ))?;
+    }
     Ok(())
 }
 

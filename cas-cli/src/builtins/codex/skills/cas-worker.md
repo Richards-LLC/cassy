@@ -109,6 +109,9 @@ This is a requirement, not a suggestion; bare assertions are not evidence.
   (`cas-2327`/`cas-bc13`).
 - **State transition:** cover reverse states too (hold/release, pause/resume,
   remember/archive, snooze/unsnooze).
+- **CLI/TUI surface** (anything a terminal prints for a person): apply the
+  `cas-cli-craft` skill and paste the `terminal-qa: PASS …` receipt line from
+  `node scripts/terminal-qa.mjs --label <command> -- <command …>`.
 - **User-visible change:** assess release-notes impact.
 
 ## Blockers

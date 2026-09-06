@@ -25,7 +25,9 @@ this brief covers the render only.
 
 ## Critique
 
-Filled from `captures/after/cas-doctor/report.md` — see the receipt line there.
+Before (build `eda3dfd1`): `terminal-qa: FAIL cas-doctor · 12 runs · 841 fail · 24 warn` — 788 contrast, 28 word-split, 24 overflow, 1 unicode-without-fallback.
+
+After: `terminal-qa: PASS cas-doctor · 12 runs · 0 fail · 0 warn · 0 allowed · docs/design/cli/captures/after/cas-doctor/report.json`
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

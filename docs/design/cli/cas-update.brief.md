@@ -19,6 +19,10 @@
 
 ## Critique
 
+Before (build `eda3dfd1`): `terminal-qa: FAIL cas-update-check · 12 runs · 33 fail · 0 warn` — 32 contrast, 1 unicode-without-fallback.
+
+After: `terminal-qa: PASS cas-update-check · 12 runs · 0 fail · 0 warn · 0 allowed · docs/design/cli/captures/after/cas-update-check/report.json`
+
 | Dimension | Score | Evidence |
 | --- | --- | --- |
 | Hierarchy | 5 | verdict first; the remedy is the only line after the rows |

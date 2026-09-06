@@ -30,8 +30,7 @@ Cloud         ✓ supervisor relay  ✓ delivery retries  ✓ canonical id
       only after the purge, run `cas cloud sync` to re-register the project
   ⚠ registered project roots ×14 Registered root `/tmp/.tmpdInYXx` is excluded
                                  from `cas update` discovery: a disposable temp
-                                 root at /tmp. Remove the stale registration
-                                 with `cas known-repos forget /tmp/.tmpdInYXx`.
+                                 root at /tmp. Remove the stale registration w…
 Config        ✓ config file  ✓ hooks  ✓ skills
 Integrations  ✓ claude  ✓ codex
 
@@ -48,7 +47,8 @@ Integrations  ✓ claude  ✓ codex
    hanging-indent column. A token wider than the column (the 90-character scope id) is cut
    with `…`; the receipt names `--verbose` as the escape.
 4. **Repeats collapse** — fourteen identical `registered project roots` findings became one row
-   with `×14`. Before, they were fourteen seven-line paragraphs: 98 lines for one fact.
+   with `×14`. Before, they were fourteen seven-line paragraphs: 98 lines for one fact. A cause
+   or remedy stops at three lines with `…`; `--verbose` prints it whole.
 5. **Remedies** are commands on their own line under `→`, wrapped at word boundaries with a
    hanging indent; the old render printed the 170-character remedy unwrapped.
 6. **Receipt** keeps the exact `N ok · N warnings · N errors · time` grammar scripts already

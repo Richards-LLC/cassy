@@ -1,0 +1,237 @@
+{
+  "label": "cas-doctor",
+  "verdict": "PASS",
+  "command": [
+    "/tmp/cas-after",
+    "doctor"
+  ],
+  "widths": [
+    80,
+    120
+  ],
+  "palettes": [
+    "dark",
+    "light",
+    "solarized-dark",
+    "solarized-light"
+  ],
+  "strict": false,
+  "escape_flag": "--verbose",
+  "json_flag": "--json",
+  "runs": [
+    {
+      "name": "piped",
+      "width": null,
+      "palette": null,
+      "env": {},
+      "kind": "piped",
+      "exit_code": 0,
+      "lines": 41,
+      "max_width": 80,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.piped.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.piped.txt"
+      }
+    },
+    {
+      "name": "80.dark",
+      "width": 80,
+      "palette": "dark",
+      "env": {
+        "COLORFGBG": "15;0",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 40,
+      "max_width": 80,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.80.dark.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.80.dark.txt"
+      }
+    },
+    {
+      "name": "80.light",
+      "width": 80,
+      "palette": "light",
+      "env": {
+        "COLORFGBG": "0;15",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 40,
+      "max_width": 80,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.80.light.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.80.light.txt"
+      }
+    },
+    {
+      "name": "80.solarized-dark",
+      "width": 80,
+      "palette": "solarized-dark",
+      "env": {
+        "COLORFGBG": "15;0",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 40,
+      "max_width": 80,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.80.solarized-dark.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.80.solarized-dark.txt"
+      }
+    },
+    {
+      "name": "80.solarized-light",
+      "width": 80,
+      "palette": "solarized-light",
+      "env": {
+        "COLORFGBG": "0;15",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 40,
+      "max_width": 80,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.80.solarized-light.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.80.solarized-light.txt"
+      }
+    },
+    {
+      "name": "120.dark",
+      "width": 120,
+      "palette": "dark",
+      "env": {
+        "COLORFGBG": "15;0",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 33,
+      "max_width": 120,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.120.dark.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.120.dark.txt"
+      }
+    },
+    {
+      "name": "120.light",
+      "width": 120,
+      "palette": "light",
+      "env": {
+        "COLORFGBG": "0;15",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 33,
+      "max_width": 120,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.120.light.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.120.light.txt"
+      }
+    },
+    {
+      "name": "120.solarized-dark",
+      "width": 120,
+      "palette": "solarized-dark",
+      "env": {
+        "COLORFGBG": "15;0",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 33,
+      "max_width": 120,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.120.solarized-dark.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.120.solarized-dark.txt"
+      }
+    },
+    {
+      "name": "120.solarized-light",
+      "width": 120,
+      "palette": "solarized-light",
+      "env": {
+        "COLORFGBG": "0;15",
+        "TERM": "xterm-256color"
+      },
+      "kind": "pty",
+      "exit_code": 0,
+      "lines": 33,
+      "max_width": 120,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.120.solarized-light.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.120.solarized-light.txt"
+      }
+    },
+    {
+      "name": "c-locale",
+      "width": 80,
+      "palette": null,
+      "env": {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "LANGUAGE": "C"
+      },
+      "kind": "c-locale",
+      "exit_code": 0,
+      "lines": 41,
+      "max_width": 81,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.c-locale.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.c-locale.txt"
+      }
+    },
+    {
+      "name": "no-color",
+      "width": 80,
+      "palette": null,
+      "env": {
+        "NO_COLOR": "1"
+      },
+      "kind": "no-color",
+      "exit_code": 0,
+      "lines": 41,
+      "max_width": 80,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.no-color.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.no-color.txt"
+      }
+    },
+    {
+      "name": "json",
+      "width": null,
+      "palette": null,
+      "env": {},
+      "kind": "json",
+      "flag": "--json",
+      "exit_code": 0,
+      "lines": 1,
+      "max_width": 23495,
+      "files": {
+        "ansi": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.json.ansi",
+        "txt": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.json.txt"
+      }
+    }
+  ],
+  "findings": [],
+  "allowed": [],
+  "counts": {
+    "fail": 0,
+    "warn": 0,
+    "allowed": 0
+  },
+  "html": {
+    "80": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.80.html",
+    "120": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/cas-doctor.120.html"
+  },
+  "report_json": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/report.json",
+  "report_md": ".cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/report.md",
+  "generated_at": "2026-09-06T18:11:29.127Z",
+  "receipt": "terminal-qa: PASS cas-doctor · 12 runs · 0 fail · 0 warn · 0 allowed · .cas/worktrees/golden-koala-58/docs/design/cli/captures/after/cas-doctor/report.json"
+}

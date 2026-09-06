@@ -20,6 +20,10 @@
 
 ## Critique
 
+Before (build `eda3dfd1`): `terminal-qa: FAIL cas-factory-status · 12 runs · 53 fail · 0 warn` — 52 contrast, 1 unicode-without-fallback.
+
+After: `terminal-qa: PASS cas-factory-status · 12 runs · 0 fail · 0 warn · 0 allowed · docs/design/cli/captures/after/cas-factory-status/report.json`
+
 | Dimension | Score | Evidence |
 | --- | --- | --- |
 | Hierarchy | 5 | verdict line carries state, session, and counts |

@@ -1,0 +1,11 @@
+]11;?[38;2;30;150;75m[1m✓[0m [1mactive[0m · cas-src-lively-panther-31 · 1 agent · 101 ready · 6 in progress
+[38;2;80;82;92m────────────────────────────────────────────────────────────────────────────────[0m
+[1mProject   [0m/home/pippenz/Petrastella/cas-src
+[1mQueue     [0m0 pending prompts
+[1mTasks     [0m101 ready · 6 in progress · 229 epics open
+[1mAgents    [0m1 active · 0 other · 0 actionable-idle min
+
+[1magent            status  task  last seen[0m
+golden-panda-80  active  -       28s ago
+
+[38;2;80;82;92m--json for the queue peek and activity · --full for untruncated values[0m

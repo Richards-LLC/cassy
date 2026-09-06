@@ -1,0 +1,3546 @@
+{
+  "schema_version": 1,
+  "session": {
+    "name": "cas-src-lively-panther-31",
+    "created_at": "2026-09-05T12:20:32.578494740-04:00",
+    "daemon_pid": 2152770,
+    "socket_path": "/home/pippenz/.cas/factory-cas-src-lively-panther-31.sock",
+    "ws_port": 42201,
+    "project_dir": "/home/pippenz/Petrastella/cas-src",
+    "epic_id": null,
+    "supervisor": "golden-panda-80",
+    "workers": [
+      "warm-octopus-54",
+      "fierce-leopard-10",
+      "sharp-robin-87",
+      "golden-koala-58",
+      "solid-parrot-53",
+      "wise-falcon-12",
+      "swift-koala-43",
+      "vivid-kestrel-88"
+    ],
+    "worker_count": 8,
+    "is_running": true,
+    "socket_exists": true,
+    "can_attach": true,
+    "actionable_idle_minutes": 0
+  },
+  "prompt_queue_pending": 0,
+  "prompt_queue_peek": [],
+  "tasks_ready": [
+    {
+      "id": "cas-ebe4",
+      "title": "Deploy published 3.17.0 Commander to hosted Hub with byte and rollback receipts",
+      "status": "blocked",
+      "priority": 0,
+      "assignee": "cosmic-marten-96",
+      "task_type": "task",
+      "epic": "cas-80b6",
+      "branch": null
+    },
+    {
+      "id": "cas-5d3c",
+      "title": "Redo the model lane rubric review under the finished design skills: concept brief, hero-as-figure, cas-ui-craft critique floor, visual-QA clean in light and dark",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "task",
+      "epic": "cas-a083",
+      "branch": "epic/epic-design-elevation-project-agnostic-ui-ux-craft-cas-a083"
+    },
+    {
+      "id": "cas-1262",
+      "title": "Doctor self-heal A–C: check matrix (auto-fix / consent-fix / human / info), host-scope findings reported once, and the auto-fixes (prune missing registry roots, run/enqueue code index, migrate legacy Tantivy + create versioned search index, regenerate stale projections)",
+      "status": "open",
+      "priority": 1,
+      "assignee": "warm-octopus-54",
+      "task_type": "feature",
+      "epic": "cas-66918",
+      "branch": "epic/epic-cas-doctor-self-heals-every-warning-either-au-cas-66918"
+    },
+    {
+      "id": "cas-f868",
+      "title": "Automated visual-QA gate: headless render in light+dark, per-text-node WCAG contrast, clipped/overflowing/invisible/overlapping element detection; wired into report review, cas-ui-craft critique, and worker close for user-visible surfaces",
+      "status": "open",
+      "priority": 1,
+      "assignee": "solid-parrot-53",
+      "task_type": "feature",
+      "epic": "cas-a083",
+      "branch": "epic/epic-design-elevation-project-agnostic-ui-ux-craft-cas-a083"
+    },
+    {
+      "id": "cas-db82",
+      "title": "Rewrite cas-html-reports and cas-dataviz around the concept brief and cas-ui-craft; replace reference examples with ambitious annotated ones; re-render the 2026-09-06 rubric review as the first before/after",
+      "status": "open",
+      "priority": 1,
+      "assignee": "wise-falcon-12",
+      "task_type": "feature",
+      "epic": "cas-a083",
+      "branch": "epic/epic-design-elevation-project-agnostic-ui-ux-craft-cas-a083"
+    },
+    {
+      "id": "cas-fdcd",
+      "title": "Diagnose and fix the broken image in the pairing email",
+      "status": "blocked",
+      "priority": 1,
+      "assignee": "fair-viper-75",
+      "task_type": "bug",
+      "epic": "cas-80b6",
+      "branch": null
+    },
+    {
+      "id": "cas-59d9",
+      "title": "Fleet cleanup after the fix ships: purge foreign rows and watermarks in every Linux + Mac project, re-home mis-scoped cloud rows, and verify `cas doctor` clean everywhere",
+      "status": "blocked",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": "cas-80b6",
+      "branch": "epic/session-observed-memory-reliability-relevance-curr-cas-80b6"
+    },
+    {
+      "id": "cas-013c",
+      "title": "Re-subscribe after a failed renewal: checkout cancels the old sub (wiping paid credits) and re-applies the $7 intro price to a returning customer (Kristen Hinman, 2026-08-25/27)",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "staging"
+    },
+    {
+      "id": "cas-d7a7",
+      "title": "Checkout with ORANGE creates a $0 trialing sub but records no redemption/credits and leaves the UI stuck on card setup (Alok Chaurasia, 2026-08-31)",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "staging"
+    },
+    {
+      "id": "cas-7f62",
+      "title": "Unit 1: Create and install the MechaCassy Slack app (human-run)",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": "epic/epic-mechacassy-mecha-hub-mcp-on-vercel-for-tenant-cas-8a8c"
+    },
+    {
+      "id": "cas-ed6d8",
+      "title": "Support pass 2026-09-02: Daniel-gated one-at-a-time decisions (inbox + 4 new disputes)",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-ac73",
+      "title": "P1: Provider freshness mitigation — cursor-walk pagination, union+dedupe+local sort before the import window, shortcode fallback, miss metrics",
+      "status": "open",
+      "priority": 1,
+      "assignee": "eager-spider-81",
+      "task_type": "feature",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-2be3",
+      "title": "Plan-change tier validation follow-ups (cas-a07c review residuals): country-change lockout, per-visitor override path, legacy cross-tier test, module wiring test, create/update policy dedup",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "staging"
+    },
+    {
+      "id": "cas-6a17",
+      "title": "Nathan Klug: comped Pro month ends 2026-09-19 with NO card on file — contact him BEFORE that date (promised in writing)",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": "epic/epic-issue-burn-down-2026-08-19-gh-2021-ig-caption-cas-0f32"
+    },
+    {
+      "id": "cas-bf32",
+      "title": "Staging verification round — Viktor (external) + Playwright AI pass over the wave-1/2 deploy",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": "epic/wp-retirement"
+    },
+    {
+      "id": "cas-7fa7",
+      "title": "Server: allow the same sync entity ID in personal and team scopes",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-8984",
+      "title": "Multi-project cloud reconciliation program: align Mac↔Linux canonical pins and run per-project parity audits (24 unpinned Mac projects)",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-8003",
+      "title": "Fix 3 pre-existing failing frontend test suites (make vitest fully green)",
+      "status": "open",
+      "priority": 1,
+      "assignee": "plaid-fe-tests",
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-79bb",
+      "title": "Pixel Hive: fix random 403s on pixel-hive-public-frames (Object Ownership)",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-8418",
+      "title": "Phase 4.2 - Send Ben the updated package + summary, await explicit ack",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "task",
+      "epic": "cas-7604",
+      "branch": null
+    },
+    {
+      "id": "cas-90d6",
+      "title": "Cloud-side debt: delete the junk team scopes `control`, `project`, `apps` (minted by artifact/container stores) once the cloud offers a knowledge tombstone or scope-delete route",
+      "status": "blocked",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-fa97",
+      "title": "spawn_workers silently ignores `prompt`: a supervisor's spawn brief never reaches the worker — deliver it with the assignment row or reject the parameter",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-75f1",
+      "title": "Review MechaCassy Slack transport decision brief",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-eaa2",
+      "title": "Files upload: 100 MB cap is enforced only at registration, after the S3 upload completes, and surfaces as a bare 400 (Shoshana Tal, 2026-08-30)",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "staging"
+    },
+    {
+      "id": "cas-49c0",
+      "title": "Worker isolation breach: a factory worker edited the supervisor's main checkout (include_foreign plumbing written to /cas-src at 12:24Z during cas-6cc7) — guard worker writes to their own worktree",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-3e6e",
+      "title": "remind_event=tag_exists fires on a local-only tag — release.sh tags before building, so the reminder fires ~10 minutes before the tag is real",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-e85e",
+      "title": "cas-worker skill: forbid tight merge-poll loops after awaiting_merge handoff — supervisor owns the landing signal",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-74e3",
+      "title": "Release tag push is structurally impossible for factory workers — make the tag step an explicit supervisor/operator duty in the release rubric + task template, or add a narrow authorized tag path",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-9d8a",
+      "title": "Prompt-queue and agent-record retention: auto-prune terminal rows on a rolling window",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "feature",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-c2f2",
+      "title": "Explorer pairing should cascade into machine pairing when the machine isn't paired — one flow, not a dead end",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "feature",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-20a2",
+      "title": "GH #1984 tracking: dispute gates — reconcile and close when Marta/Danny/Zach verdicts land; Briana needs Daniel decision",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": "epic/epic-issue-burn-down-2026-08-19-gh-2021-ig-caption-cas-0f32"
+    },
+    {
+      "id": "cas-c2b2",
+      "title": "cas-update process turnover silently no-ops on macOS: /proc-based primitives report \"verified current\" without checking anything",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-b03c",
+      "title": "Issue #830: cold-load subscription middleware paywalls an active member — fresh-session auth/store race",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "staging"
+    },
+    {
+      "id": "cas-dfa3",
+      "title": "Flaky test: test_vt_parser fixed 100ms sleep races PTY output on loaded runners",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-b8b1",
+      "title": "Run the real v2.71 epoch-seed verdict report after cas serve adopts v2.72.0",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-dae6",
+      "title": "Prowl hub daemon lost launchd persistence — restore auto-start compatible with macOS Tailscale GUI CLI",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-4c89",
+      "title": "v15 review deferrals: test-hardening, worker_status perf, stall classification, planning-guard atomicity, startup-migration edges",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-d20f",
+      "title": "macOS-deterministic full-suite failure: retrieval_parity_test::excluded_rows_do_not_shift_the_ranks_of_real_rows fails on prowl at 69c3a1c6 while Linux CI passes the same commit",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-4f8d",
+      "title": "Migrate prowl to open-source tailscaled (brew) for inbound Tailscale SSH + document the macOS variant requirement in the fleet runbook",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": "epic/cas-fleet-control-plane-v1-option-b-per-machine-ca-cas-bec9"
+    },
+    {
+      "id": "cas-fa64",
+      "title": "Multi-account test-coverage batch from cas-1a4e review: picker TTY branches, worker env propagation, set_profile_env isolation, badge render, strengthened assertions",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-9886",
+      "title": "Commander follow-up: structured fleet operations beyond terminal input",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "feature",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-467a",
+      "title": "Commit permissions-only .claude/settings.json (drop tracked hooks block) once hook distribution is config-dir-aware",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-0101",
+      "title": "Bind delivery verification projection to the exact dispatch transaction",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-48e4",
+      "title": "Ship release-notes RUBRIC.md as a CAS-managed framework artifact + CLAUDE.md breadcrumb in the CAS block",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "feature",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-c8a6",
+      "title": "design-spec skill: generate/maintain DESIGN.md (UI/UX source of truth) with live-token extraction, freshness gate, keep-blocks",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "feature",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-ce30",
+      "title": "Deploy-validate cas-bbc2: live Codex worker in gabber-studio shows mcp__cs__* tools + makes an edit",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-7a30",
+      "title": "Plaid v1 UX polish from live testing: card header truncation, explore add-event, post-add scroll",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-c835",
+      "title": "Vercel cron 404s: google-drive/scheduler/run + wealth/benchmarks/sp500/refresh are @Post (Vercel sends GET)",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-7265",
+      "title": "Triage 2 findings from cas-6a84 live cas-code-review run (supervisor_guidance ceiling + AskUserQuestion reachability)",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-844b",
+      "title": "Supervisor code-review pass on cas-219d (memchr fast-path) before merge to main",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-63b9",
+      "title": "test(cas-b51a P2): supervisor-mode close with has_reviewable_changes=false should reach Closed not PSR",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-1b12",
+      "title": "test(cas-b51a P2): assert close_reason persists across PendingSupervisorReview transition",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-6c28",
+      "title": "Pre-existing CasService::new arity drift breaks default-feature build on EPIC branch",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-5bc14",
+      "title": "Outbound: request 90-day archive_events pruning + investigate verification_added accumulation",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-e4aa",
+      "title": "Code index thrash across git worktrees of one repository: indexing from an epic/tag worktree retires files that exist only there, the main checkout's daemon re-retires them back, and concurrent daemons hit Tantivy LockBusy — doctor then reports hundreds of \"failed to retire deleted source file\" file failures",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-8121",
+      "title": "mecha-cassy drift probe always hits the machine hub URL (MECHA_CASSY_MCP_URL constant) even when a project `.cas/proxy.toml` overrides the hub url — doctor and `cas integrate mecha-cassy` measure drift against the wrong hub for staging-hub projects",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-7427",
+      "title": "Commit the 2026-09-02 support-pass docs to staging: gabber-support SKILL.md learnings (5 entries) + release-note POSTED receipt + the untracked 2026-09-01 drafts",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": "staging"
+    },
+    {
+      "id": "cas-b9b3",
+      "title": "Unit 5: claude.ai and ChatGPT custom connectors to /mcp/slack (human-assisted)",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": "epic/epic-mechacassy-mecha-hub-mcp-on-vercel-for-tenant-cas-8a8c"
+    },
+    {
+      "id": "cas-8030",
+      "title": "cas update table: skipped phases (not cloud-linked) should not print a details block; only warned/failed phases do",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-248c",
+      "title": "Slack posting runbook/rubric name a stale canonical route: ~/.claude-alt is logged in as support@gabber.studio, and releases since 2026-09-01 were posted from the supervisor session's own daniel@petrastella.io connector",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-a957",
+      "title": "Stale guidance in error.rs: \"Run 'cas reindex --bm25'\" names a CLI subcommand that does not exist",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-e7ae",
+      "title": "HybridSearch::search reads raw `bm25_score`, discarding the calibrated/boosted `score` SearchIndex::search just computed — any BM25-side ranking adjustment is structurally inert on the only production path",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-f591",
+      "title": "Drop redundant tag-push CI: ci.yml runs full Fast Validation on v* tags whose commit already carries queue + main-push receipts",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-8090",
+      "title": "ghostty_vt_sys zig build fetches `uucode` from deps.files.ghostty.org at compile time — CI lanes fail on DNS hiccups (TemporaryNameServerFailure, run 32422539517); vendor or pre-fetch the dep so builds are network-independent",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-9fe6",
+      "title": "CLAUDE.md CI-load policy paragraph is stale since cas-7f87: Clippy + Test Compile Guard DO run on protected PRs as per-tree validation lanes feeding the main-push tree receipt — rewrite the paragraph to match ci.yml + test-ci-test-tiers.sh",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-0906",
+      "title": "find-release-prebuild.sh: default GITHUB_REPOSITORY from the git remote / gh repo view instead of returning a clean-looking found=false",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-236d",
+      "title": "docs/commander-fleet-runbook.md lacks the hub promotion procedure it is cited for — point to the real runbook and fix the stale memory/brief references",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-f163",
+      "title": "Thin Rust `cas sweep` wrapper over docs/analysis/scripts/operational_sweep.py (follow-up ruled at cas-93de)",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "feature",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-746a",
+      "title": "cas-install.sh exits nonzero after successful install: \"tmp_dir: unbound variable\" in the cleanup trap",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-3f65",
+      "title": "Agent registry ghosts: one live worker shown as 3 concurrent sessions; shutdown workers re-register as awaiting-first-task",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-ec70",
+      "title": "Guard worktree-isolated workers against editing the shared main checkout (worker-skill rule + mechanical check)",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-84b3",
+      "title": "Sweep for self-referential tests: expected values computed by re-running the implementation's own command (vacuous by construction)",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-326e",
+      "title": "Prompt attribution capture was dead in production (same seam as GH #165): file issue, verify post-fix capture, document the historical gap",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-3843",
+      "title": "cas-worker skill body is chronically at its 12KB ceiling — move the Vercel prod-scripts paragraph to a reference and document the bytes-not-chars gotcha",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-2929",
+      "title": "Measure knowledge-search RANK quality (not just findability) — follow-up to the cas-461a disjunction fix",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-5eb9",
+      "title": "Diagnose why cas serve occasionally never answers a tools/call — now observable via the bounded MCP test harness",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-3316",
+      "title": "Reconcile the repo-wide global-store path split: config::global_cas_dir (~/.config/cas) vs host_cas_dir (~/.cas)",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-d6b9",
+      "title": "cas doctor is read-only: Check 3a must not lazily create prompt-queue tables in the DB it diagnoses",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-de46",
+      "title": "Dead-code removal follow-ups from cas-b129 M6 survey §4 #7–#10 (search vestiges, cas-core search duplicate, startup vector janitor, no-op MCP embedding params)",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-7391",
+      "title": "H6 (stretch) per-worker resource telemetry: vendor the MIT Rust resource-monitor, stream via hub SSE, render in the client sidebar",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "feature",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-6419",
+      "title": "Post-cas-adae review residue: editor-dependent git-merge tests + minor cleanups",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-74c8",
+      "title": "Verify v2.39.0 fixes the two 2026-08-02 Woodworking reports, then retire the docs/requests drops per new GitHub-Issues intake",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-4cec",
+      "title": "Decompose large retrieval, verification, delivery, and proxy-health projections",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-269ab",
+      "title": "cas-c6ef review residue (deferred P2/P3): shared git-evidence module, coordination action registry, trait ergonomics, naming",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-9040",
+      "title": "Load-sensitive test family: real-PTY and concurrency tests fail under full-workspace parallelism on a loaded host",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-1a95",
+      "title": "Director relay for AskUserQuestion: render supervisor's structured question to the human, inject the answer back",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "feature",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-74b9",
+      "title": "Grok review nits (P3): cas-task-tracking twin provenance + long-cwd fallback string",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": "cas-8888",
+      "branch": null
+    },
+    {
+      "id": "cas-96ab",
+      "title": "Review nits (P3, non-blocking): codex drift-guard equivalence + dep_add extracted coercion",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": "cas-3417",
+      "branch": null
+    },
+    {
+      "id": "cas-d4a0",
+      "title": "Per-spawn base_branch override for spawn_workers (follow-on to cas-b082)",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "feature",
+      "epic": "cas-3417",
+      "branch": null
+    },
+    {
+      "id": "cas-7062",
+      "title": "flaky: parallel tests race on process-global cwd (spawn_prep_cwd_is_worktree_for_four_workers + set_current_dir tests)",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-c5a0",
+      "title": "[DEFERRED Phase 3] Backend: daily Plaid balance sync cron + vercel.json entry",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-b352",
+      "title": "R3 (backlog): Non-blocking hardening follow-ups from cas-073f review",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": "cas-073f",
+      "branch": null
+    },
+    {
+      "id": "cas-24d0",
+      "title": "Apply the Workflow-hybrid pattern to cas-ideate / deep-research / session-learn / duplicate-detector",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "feature",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-046c",
+      "title": "polish(cas-mux): cas-5570 residuals — effective_command brittle args.get(2) + duplication",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-a5c0",
+      "title": "polish(factory): cas-2992 residuals — security gate, macOS daemonize spec drop, testing gaps",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-939a",
+      "title": "polish(verification): code_review_gate UX (Check B finding identity, payload bound, evaluate_gate cleanup, live-path test parity)",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-1c31",
+      "title": "tests(flake): cross_repo_iteration_continues_on_failure + send_message_missing_target — state pollution under workspace test",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-5f61",
+      "title": "Bug: surface Codex-mode exemption in operator-facing verification.add error",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-563a",
+      "title": "Refactor: promote ASSIGNEE_STALE_SECS to shared const + reference in verification.add error message",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "chore",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-5cb8",
+      "title": "Spike: evaluate Fallow on Petra Stella TS/JS codebases (cas-src is Rust, won't apply)",
+      "status": "open",
+      "priority": 3,
+      "assignee": null,
+      "task_type": "task",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-0f22",
+      "title": "find_cas_root: require store marker file, not just .cas dir existence",
+      "status": "open",
+      "priority": 4,
+      "assignee": null,
+      "task_type": "bug",
+      "epic": null,
+      "branch": null
+    }
+  ],
+  "tasks_in_progress": [
+    {
+      "id": "cas-6027a",
+      "title": "Factory worker Bash `rm -rf` escalates to team-leader approval and hangs the worker despite PreToolUse auto-approve and --dangerously-skip-permissions",
+      "status": "inprogress",
+      "priority": 1,
+      "assignee": "fierce-leopard-10",
+      "task_type": "bug",
+      "epic": "cas-80b6",
+      "branch": "epic/session-observed-memory-reliability-relevance-curr-cas-80b6"
+    },
+    {
+      "id": "cas-f0f0",
+      "title": "Technical drawings in the design toolkit: cas-technical-drawing builtin skill + a parametric SVG drafting renderer (orthographic/isometric/section/exploded views, hidden lines, line weights, dimensioning, title block) with mechanical checks and a likeness critique; before/after on the Woodworking dartboard cabinet",
+      "status": "inprogress",
+      "priority": 1,
+      "assignee": "sharp-robin-87",
+      "task_type": "feature",
+      "epic": "cas-a083",
+      "branch": "epic/epic-design-elevation-project-agnostic-ui-ux-craft-cas-a083"
+    },
+    {
+      "id": "cas-4df0",
+      "title": "Terminal and text design craft: cas-cli-craft builtin skill (hierarchy, color and theme safety, tables, progress, errors, receipts, width and Unicode fallbacks, --json vs human), a terminal visual-QA gate, and a re-render of cas doctor / cas update / cas factory status as the before/after",
+      "status": "inprogress",
+      "priority": 1,
+      "assignee": "golden-koala-58",
+      "task_type": "feature",
+      "epic": "cas-a083",
+      "branch": "epic/epic-design-elevation-project-agnostic-ui-ux-craft-cas-a083"
+    },
+    {
+      "id": "cas-493c",
+      "title": "Doctor self-heal D–F: consent-fixes with dry-run and --yes (purge-foreign, cloud row quarantine/release, config.toml repair), one-command human rows, and the 8-project zero-fixable-warnings proof",
+      "status": "inprogress",
+      "priority": 1,
+      "assignee": "warm-octopus-54",
+      "task_type": "feature",
+      "epic": "cas-66918",
+      "branch": "epic/epic-cas-doctor-self-heals-every-warning-either-au-cas-66918"
+    },
+    {
+      "id": "cas-fd80",
+      "title": "Retune design-tokens color.series so both schemes pass cas-dataviz validate_palette.js without weakening the bands",
+      "status": "awaitingmerge",
+      "priority": 2,
+      "assignee": "vivid-kestrel-88",
+      "task_type": "bug",
+      "epic": "cas-a083",
+      "branch": "epic/epic-design-elevation-project-agnostic-ui-ux-craft-cas-a083"
+    },
+    {
+      "id": "cas-3228",
+      "title": "Epic create prints a branch with the -<epic-id> suffix but records no WorkTarget, and spawn_workers resolves the epic branch without the suffix → \"SPAWN BASE FALLBACK\" to the pinned epic",
+      "status": "awaitingmerge",
+      "priority": 2,
+      "assignee": "swift-koala-43",
+      "task_type": "bug",
+      "epic": "cas-80b6",
+      "branch": "epic/session-observed-memory-reliability-relevance-curr-cas-80b6"
+    }
+  ],
+  "epics": [
+    {
+      "id": "cas-80b6",
+      "title": "EPIC: September 4 CAS burndown — CI storage, release recovery, audit, model routing, and memory reliability",
+      "status": "open",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/session-observed-memory-reliability-relevance-curr-cas-80b6"
+    },
+    {
+      "id": "cas-5985",
+      "title": "EPIC: cross-project contamination — `cas update` refreshes all 14 projects in one process under the launch directory's cloud identity; every local DB and the cloud carry foreign task rows",
+      "status": "open",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-9cea",
+      "title": "EPIC: Promote staging to main — 2026-09-03 workspace navigation fix",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "staging"
+    },
+    {
+      "id": "cas-153f",
+      "title": "EPIC: Commander UI modernization — implement the operator's guide end to end",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-2b66",
+      "title": "EPIC: cas-d6f1 integrated-review P1 remediation — merge gate fail-open + prompt-queue data loss",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-cas-d6f1-integrated-review-p1-remediation-mer-cas-2b66"
+    },
+    {
+      "id": "cas-ad79",
+      "title": "EPIC: 2026-07-27 log sweep wave 2 — Codex worker coordination is broken (interrupt regression + blind activity clock)",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-2026-07-27-log-sweep-wave-2-codex-worker-coor-cas-ad79"
+    },
+    {
+      "id": "cas-7c8a",
+      "title": "EPIC: ozer factory bug sweep wave 2 — fleet-wide wedge, merge-conflict cleanup, awaiting_merge dead end, pane scroll",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-ozer-factory-bug-sweep-wave-2-fleet-wide-wedg-cas-7c8a"
+    },
+    {
+      "id": "cas-b89f",
+      "title": "EPIC: ozer factory bug sweep — close-gate parent_branch unification, idle-worker delivery, alert freshness",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-ozer-factory-bug-sweep-close-gate-parent-bran-cas-b89f"
+    },
+    {
+      "id": "cas-873a",
+      "title": "Real-time cross-harness supervisor↔worker communication remediation",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/real-time-cross-harness-supervisor-worker-communic-cas-873a"
+    },
+    {
+      "id": "cas-887b",
+      "title": "Factory reliability: open docs/requests bugs → main (2026-07-21)",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/factory-reliability-open-docs-requests-bugs-main-2-cas-887b"
+    },
+    {
+      "id": "cas-0e22",
+      "title": "EPIC: Triage and fix Jul 9–11 docs/requests factory bug reports",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-triage-and-fix-jul-9-11-docs-requests-factory-cas-0e22"
+    },
+    {
+      "id": "cas-7604",
+      "title": "EPIC - Roark FINAL corrections cascade - all 4 envelopes ready to mail (no more iterations)",
+      "status": "cancelled",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-roark-final-corrections-cascade-all-4-envelop-cas-7604"
+    },
+    {
+      "id": "cas-b59d",
+      "title": "Update 2022/2023/2024/2025 Filing Package docs for §731 distribution cascade",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/update-2022-2023-2024-2025-filing-package-docs-for-cas-b59d"
+    },
+    {
+      "id": "cas-1962",
+      "title": "Fix distributions cascade 2022→2023→2024→2025 (§731 allocation + 2023 amount bug)",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/fix-distributions-cascade-2022-2023-2024-2025-731--cas-1962"
+    },
+    {
+      "id": "cas-72d3",
+      "title": "Option C: amend 2022/2023/2024 envelopes with corrected Harding basis",
+      "status": "open",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/option-c-amend-2022-2023-2024-envelopes-with-corre-cas-72d3"
+    },
+    {
+      "id": "cas-3648",
+      "title": "Roark Realty — Tennessee tax compliance cleanup (FAE + Business Tax)",
+      "status": "cancelled",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/roark-realty-tennessee-tax-compliance-cleanup-fae--cas-3648"
+    },
+    {
+      "id": "cas-c351",
+      "title": "EPIC: cas serve must survive handler failures",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-cas-serve-must-survive-handler-failures-cas-c351"
+    },
+    {
+      "id": "cas-2eb3",
+      "title": "Fix cross-project contamination: unscoped /api/sync/pull + payload strips project_id (H4+H5)",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/fix-cross-project-contamination-task-close-flow-cas-2eb3"
+    },
+    {
+      "id": "cas-2bf7",
+      "title": "Auth & DB System Hardening — Post-Infrastructure Upgrade",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/auth-db-system-hardening-post-infrastructure-upgra-cas-2bf7"
+    },
+    {
+      "id": "cas-07c2",
+      "title": "Performance Optimization — Neon Round-Trip Reduction",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/performance-optimization-neon-round-trip-reduction-cas-07c2"
+    },
+    {
+      "id": "cas-1b7a",
+      "title": "Security Hardening — Audit Findings",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/security-hardening-audit-findings-cas-1b7a"
+    },
+    {
+      "id": "cas-4c2d",
+      "title": "2024 Form 1040 Original Filing — Richards Individual Return",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/2024-form-1040-original-filing-richards-individual-cas-4c2d"
+    },
+    {
+      "id": "cas-41d1",
+      "title": "Test Suite: P0 Infrastructure + P1 New Endpoints",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/test-suite-p0-infrastructure-p1-new-endpoints-cas-41d1"
+    },
+    {
+      "id": "cas-3c60",
+      "title": "Device Management API",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/device-management-api-cas-3c60"
+    },
+    {
+      "id": "cas-1a29",
+      "title": "2023 Form 1040-X Amendment — Richards Individual Return",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/2023-form-1040-x-amendment-richards-individual-ret-cas-1a29"
+    },
+    {
+      "id": "cas-137d",
+      "title": "Petra Stella Cloud Post-Launch Improvements",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/petra-stella-cloud-post-launch-improvements-cas-137d"
+    },
+    {
+      "id": "cas-6cfe",
+      "title": "Factory agent reliability: fix MCP worktrees, verification deadlocks, and boot efficiency",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/factory-agent-reliability-fix-mcp-worktrees-verifi-cas-6cfe"
+    },
+    {
+      "id": "cas-5f71",
+      "title": "EPIC: 2022-2023 Final Review, HTML Updates, Filing Packages",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-2022-2023-final-review-html-updates-filing-pa-cas-5f71"
+    },
+    {
+      "id": "cas-30cf",
+      "title": "EPIC: 2023 Roark Realty Form 1065 Filing Package",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-2023-roark-realty-form-1065-filing-package-cas-30cf"
+    },
+    {
+      "id": "cas-f774",
+      "title": "Fix 2022 Filled PDF Issues — 1065-X line mapping, explanations, 8825 interest verify",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/fix-2022-filled-pdf-issues-1065-x-line-mapping-exp-cas-f774"
+    },
+    {
+      "id": "cas-7f6d",
+      "title": "2023 QBO Cleanup & Filing Guide Update — Roark Realty 1065-X",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/2023-qbo-cleanup-filing-guide-update-roark-realty--cas-7f6d"
+    },
+    {
+      "id": "cas-4ff9",
+      "title": "SPIKE: Full telehealth flow audit — end-to-end health check",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/spike-full-telehealth-flow-audit-end-to-end-health-cas-4ff9"
+    },
+    {
+      "id": "cas-8bdd",
+      "title": "Telehealth Transcript Pipeline — Robustness & Verification Layer",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/telehealth-transcript-pipeline-robustness-verifica-cas-8bdd"
+    },
+    {
+      "id": "cas-178e",
+      "title": "Factory Worker Reliability — MCP in Worktrees, Verification Jail, Notification Noise",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/factory-worker-reliability-mcp-in-worktrees-verifi-cas-178e"
+    },
+    {
+      "id": "cas-5e66",
+      "title": "QBO JE Corrections — CSL Moultrie 1098 + Harding #67836 + Renovo 814 Origination",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/qbo-je-corrections-csl-moultrie-1098-harding-67836-cas-5e66"
+    },
+    {
+      "id": "cas-8172",
+      "title": "Fix GhlWebhookService prisma undefined DI bug + Vercel staging deployment",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/fix-ghlwebhookservice-prisma-undefined-di-bug-verc-cas-8172"
+    },
+    {
+      "id": "cas-d577",
+      "title": "SEO remediation — make ozerhealth.com visible to search engines",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/seo-remediation-make-ozerhealth-com-visible-to-sea-cas-d577"
+    },
+    {
+      "id": "cas-41b3",
+      "title": "IRS Transcript Analysis Report for Bossman",
+      "status": "closed",
+      "priority": 0,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/irs-transcript-analysis-report-for-bossman-cas-41b3"
+    },
+    {
+      "id": "cas-66918",
+      "title": "EPIC: cas doctor self-heals — every warning either auto-fixes, offers a one-key fix, or is demoted to info; host-level findings reported once, not per project",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-cas-doctor-self-heals-every-warning-either-au-cas-66918"
+    },
+    {
+      "id": "cas-a083",
+      "title": "EPIC: Design elevation — project-agnostic UI/UX craft skill, Petrastella design language, report/dataviz skill rewrite with concept briefs and critique gate, frontend engineering skill, backend taste section",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/session-observed-memory-reliability-relevance-curr-cas-80b6"
+    },
+    {
+      "id": "cas-2296",
+      "title": "EPIC: v3.15.6 hotfix — `cas update` reports a false failure after a correct post-install refresh (version guard misparses `cas --version`)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-v3-15-6-hotfix-cas-update-reports-a-false-fai-cas-2296"
+    },
+    {
+      "id": "cas-4f6f",
+      "title": "EPIC: v3.15.2 migration ledger integrity and refresh coverage — renamed/renumbered migrations wedge the ledger (gabber-studio stuck at 252), unregistered projects and the user-level store are never refreshed, gate flake, BOM read sites, release-gate scratch default",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-v3-15-2-migration-ledger-integrity-and-refres-cas-4f6f"
+    },
+    {
+      "id": "cas-8094",
+      "title": "EPIC: cas doctor warnings the operator cannot clear — every remediation line must name a command that actually clears it (orphaned-dependency count vs quarantine, code-vector queue reconcile, mecha-cassy allowlist shadowed by project proxy.toml, artifact scratch roots as peer projects)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-cas-doctor-warnings-the-operator-cannot-clear-cas-8094"
+    },
+    {
+      "id": "cas-f88c",
+      "title": "EPIC: GitHub issue burn-down v25 — cloud-sync convergence client halves (GH #640, #668, #669, #701), factory hygiene (GH #690, #699), MechaCassy as a first-class machine/team setup (skill contract + `cas integrate mecha-cassy`), doctor batch (GH #695–#698, #700)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-github-issue-burn-down-v25-cloud-sync-converg-cas-f88c"
+    },
+    {
+      "id": "cas-6564",
+      "title": "EPIC: Commander on mobile — pair an Android emulator to the hub, capture screenshot evidence of the streaming-text and bottom-nav defects, and produce a bold mobile redesign brief",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-commander-on-mobile-pair-an-android-emulator--cas-6564"
+    },
+    {
+      "id": "cas-d129",
+      "title": "EPIC: GitHub issue burn-down v24 — factory registry identity across supervisor restarts (GH #677, #678), task-create similarity gate (GH #679), worktree_merge CI diagnostics (GH #680), director stale re-delivery (GH #682), MechaCassy Slack release-notes skill (GH #687)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-github-issue-burn-down-v24-factory-registry-i-cas-d129"
+    },
+    {
+      "id": "cas-6938",
+      "title": "EPIC: Built-in skills hygiene wave — act on the 2026-09-02 Fable 5.1 review (retired review-layer residue, verifier correctness, stale statuses and flags, live-API rewrites, budgeted worker guidance, description rewrites, de-operator-ised builtins)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-9e69",
+      "title": "EPIC: cas update and cas doctor read like reports, not debug logs — grouped doctor rows, one-line-per-project update, quiet cloud sync summaries",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-71ad",
+      "title": "EPIC: purge-foreign and doctor tell one story — archived-entry pull collisions, origin_project-blind purge classifier, doctor names the real MCP config file",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-3c99",
+      "title": "EPIC: Retire the multi-persona code-review layer — workers keep their self-verification, the supervisor reviews the actual diff at merge time",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-retire-the-multi-persona-code-review-layer-wo-cas-3c99"
+    },
+    {
+      "id": "cas-3c72",
+      "title": "EPIC: v3.9.1 fixes — cross-project move re-creates old cloud key (live), hub dies with its launching worker, local-merge delivery mode for workers",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-v3-9-1-fixes-cross-project-move-re-creates-ol-cas-3c72"
+    },
+    {
+      "id": "cas-3eb4",
+      "title": "EPIC: GitHub issue burn-down v23 — dependency-edge sync + self-heal (GH #639, #640), push honesty & version-gate requeue (GH #668), canonical project identity (GH #669), wedged gabber queue (GH #652), cross-repo spawn_workers (GH #670)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-github-issue-burn-down-v23-dependency-edge-sy-cas-3eb4"
+    },
+    {
+      "id": "cas-f726",
+      "title": "EPIC: Cross-project task identity — one task, one owner in cloud (push honors origin_project, DELETE contract, real \"move task to project\", replica pull guard, purge-foreign classifier, project-scoped board)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-cross-project-task-identity-one-task-one-owne-cas-f726"
+    },
+    {
+      "id": "cas-8fac",
+      "title": "EPIC: Memory system effectiveness program — close the learning loop (telemeter the real injection channel, honest outcomes, rule flywheel, tier truth, dead controls, eval harness)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-d541",
+      "title": "EPIC: Codemap refreshes finish promptly and never wait unboundedly",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-5697",
+      "title": "EPIC: cas update comes green — repair 98 corrupted cloud task rows, Woodworking unlink, builtin drift, Cassy-managed gitignore",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-c845",
+      "title": "EPIC: WikiSkill-informed knowledge-loop hardening + team-sync field fixes (2026-08-29)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-wikiskill-informed-knowledge-loop-hardening-t-cas-c845"
+    },
+    {
+      "id": "cas-3395",
+      "title": "EPIC: Provider & Lane Registry — capability-aware model routing (typed registry, shared enforcement seam, generated route table, lane= with warned fallback)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-c6e4",
+      "title": "EPIC: GitHub issue burn-down v22 — bug-filing path, factory delivery/ordering, close-gate ancestry, doctor honesty, workspace-contract hook, stale no-code bases, Slack transport restoration (GH #584, #586–#590, #571, #579)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-d558",
+      "title": "EPIC: OpenCode harness support (cli=opencode) targeting locally-served Qwen 3.8",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-abfc",
+      "title": "EPIC: 2026-08-25 harness diary sweep (Claude/Codex/Grok) + OpenCode harness assessment",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-5e29",
+      "title": "EPIC: GitHub issue burn-down v21 — Aug-18 codex alt-account spawn wave, gate honesty, Viktor upstream absence, ops + onboarding backlog (GH #450, #453–#454, #456, #469–#471, #473, #491–#496, #499, #506–#508, #238)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-github-issue-burn-down-v21-aug-18-codex-alt-a-cas-5e29"
+    },
+    {
+      "id": "cas-7a67",
+      "title": "EPIC: Two-way Viktor — finish the delegation gateway into a usable bidirectional surface and distribute it to every project",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-4f0f",
+      "title": "EPIC: Cassy rebrand — user-facing surfaces say Cassy, all code-level names stay cas",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-ca7d",
+      "title": "EPIC — WordPress retirement & content migration SOW (gabber-studio#2019, $2,500): articles, icons, standing content, quiz, decommission — PostHog-flagged cutover, staging first",
+      "status": "open",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/wp-retirement"
+    },
+    {
+      "id": "cas-951b",
+      "title": "EPIC: Multi-account launcher pickers — bare `cas claude` must stop and ask which account; same capability for ChatGPT Codex",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-multi-account-launcher-pickers-bare-cas-claud-cas-951b"
+    },
+    {
+      "id": "cas-e0d9",
+      "title": "EPIC: Ben's macOS clean-install field report — cloud sync silently never registers the project, device login dead, auth scope + setup-guide fixes",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-ben-s-macos-clean-install-field-report-cloud--cas-e0d9"
+    },
+    {
+      "id": "cas-338f",
+      "title": "EPIC: Sub-5-minute path to main — kill CI duplication, shard/self-host the suites, merge queue, fast release publication (GH #449)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-sub-5-minute-path-to-main-kill-ci-duplication-cas-338f"
+    },
+    {
+      "id": "cas-9186",
+      "title": "EPIC: GitHub issue burn-down v20 — v19 landing follow-ups: unrun cas-store suite, base-refresh rollback (GH #442, #443)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-github-issue-burn-down-v20-v19-landing-follow-cas-9186"
+    },
+    {
+      "id": "cas-69e7",
+      "title": "EPIC: Commander is for seeing what is going on at a glance — fix the surfaces that currently make you stop and squint",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-aab4",
+      "title": "EPIC: GitHub issue burn-down v19 — the standing four (GH #164, #226, #238, #316)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-f135",
+      "title": "EPIC: GitHub issue burn-down v18 — close-gate deadlocks, lifecycle-notification truth, target_branch-aware bases, Grok SessionStart parity, and the 2026-08-14 field wave (GH #282, #286, #294, #296–#307, #324–#342)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-1276",
+      "title": "EPIC: GitHub issue burn-down v17 — ambient recall launch-shape gap, search parser/artifact blind spots, stale spawn base refs (GH #290–#293)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-f699b",
+      "title": "EPIC: Code health v1 — workspace lint enforcement, store unwrap remediation, Backend trait, typed lifecycle errors",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-d425",
+      "title": "EPIC: GitHub issue burn-down v16 — overnight P1 field bugs + harness diary catch-up (GH #274, #276, #277)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-github-issue-burn-down-v16-overnight-p1-field-cas-d425"
+    },
+    {
+      "id": "cas-329f",
+      "title": "EPIC: GitHub issue burn-down v15 — factory reliability signals (#266–#272)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-7020",
+      "title": "GitHub issue burn-down v14: decision-time signals — recall at write moments, honest terminal states, fresh relays (GH #255, #257–#261)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v14-decision-time-signals-r-cas-7020"
+    },
+    {
+      "id": "cas-5f1e",
+      "title": "GitHub issue burn-down v13: honest-outcome gates + status signal hygiene (GH #243–#244)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v13-honest-outcome-gates-st-cas-5f1e"
+    },
+    {
+      "id": "cas-f9a3",
+      "title": "GitHub issue burn-down v12: memory signal-vs-noise — outcome stats drive recall, context-bloat audit (GH #221)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v12-memory-signal-vs-noise--cas-f9a3"
+    },
+    {
+      "id": "cas-6302",
+      "title": "GitHub issue burn-down v11: cross-team handoff backlog, workflow-args defect, cross-project task creation, branch protection (GH #142, #171, #208, #215)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v11-cross-team-handoff-back-cas-6302"
+    },
+    {
+      "id": "cas-f2157",
+      "title": "GitHub issue burn-down v10: ambient-recall precision, CI-relay staleness, flake + cloud-adoption backlog (GH #180, #210, #212–#215)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v10-ambient-recall-precisio-cas-f2157"
+    },
+    {
+      "id": "cas-1a4e",
+      "title": "Multi-account Claude profile UX: restore launch selection, isolate /login per profile, surface active account in bottom bar",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/multi-account-claude-profile-ux-restore-launch-sel-cas-1a4e"
+    },
+    {
+      "id": "cas-c9e8",
+      "title": "GitHub issue burn-down v9: coordination destructive-action safety + operator truth (GH #197, #185)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v9-coordination-destructive-cas-c9e8"
+    },
+    {
+      "id": "cas-0cda",
+      "title": "Operational intelligence v2: continuous log/transcript mining cross-referenced with memory, code, and change vectors",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-6212",
+      "title": "Code-history search v1 (full M1–M9): git/PR/issue indexing, symbol index on-by-default, provenance repair, automagic embeddings — spec docs/specs/2026-08-07-code-history-search.md",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/code-history-search-v1-full-m1-m9-git-pr-issue-ind-cas-6212"
+    },
+    {
+      "id": "cas-2627",
+      "title": "GitHub issue burn-down v8: delivery state machine — messages get acked, retried, or loudly dead (GH #165–#169)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v8-delivery-state-machine-m-cas-2627"
+    },
+    {
+      "id": "cas-bec9",
+      "title": "CAS fleet control plane v1 (Option B): per-machine cas hub + web client — observe/control factory sessions across machines, zero added model calls",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/cas-fleet-control-plane-v1-option-b-per-machine-ca-cas-bec9"
+    },
+    {
+      "id": "cas-a6fa",
+      "title": "GitHub issue burn-down v6: cloud contamination hygiene — purge safety, foreign-row detection, canonical_id truth (GH #132–#135)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v6-cloud-contamination-hygi-cas-a6fa"
+    },
+    {
+      "id": "cas-b129",
+      "title": "Memory → knowledge migration: carry the legacy memory store into the distilled-knowledge system with zero loss",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/memory-knowledge-migration-carry-the-legacy-memory-cas-b129"
+    },
+    {
+      "id": "cas-b0c7",
+      "title": "GitHub issue burn-down v5: shared-checkout state safety (GH #120–)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v5-shared-checkout-state-sa-cas-b0c7"
+    },
+    {
+      "id": "cas-4a985",
+      "title": "Builtin factory skills/agents refresh: fix codex drift, sync docs to code, add drift guard",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/builtin-factory-skills-agents-refresh-fix-codex-dr-cas-4a985"
+    },
+    {
+      "id": "cas-2dd1",
+      "title": "GitHub issue burn-down v4: multi-config-dir hooks, load-race test hardening, recovery docs (GH #113–#115)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v4-multi-config-dir-hooks-l-cas-2dd1"
+    },
+    {
+      "id": "cas-7d31",
+      "title": "Project knowledge distillation: LLM-distilled repo wiki + index-inject/pull retrieval",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/project-knowledge-distillation-llm-distilled-repo--cas-7d31"
+    },
+    {
+      "id": "cas-0290",
+      "title": "GitHub issue burn-down v3: supervisor push-signals, messaging semantics, sync safety, status truth, build OOM (GH #101–#107)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v3-supervisor-push-signals--cas-0290"
+    },
+    {
+      "id": "cas-2365",
+      "title": "GitHub issue burn-down v2: post-2.41.0 factory defects + sweep skill (GH #94–#100)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v2-post-2-41-0-factory-defe-cas-2365"
+    },
+    {
+      "id": "cas-7e66",
+      "title": "GitHub issue burn-down → main: close-path, factory, messaging, worktrees, skills",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/p1-github-issues-close-path-lifecycle-factory-spaw-cas-7e66"
+    },
+    {
+      "id": "cas-adae",
+      "title": "EPIC: per-spawn Claude account control — spawn_workers config_dir + account visibility in spawn logs",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-per-spawn-claude-account-control-spawn-worker-cas-adae"
+    },
+    {
+      "id": "cas-845f",
+      "title": "EPIC: retier default worker — gpt-5.6-terra/high replaces gpt-5.6-sol/medium as stock/standard lane",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-retier-default-worker-gpt-5-6-terra-high-repl-cas-845f"
+    },
+    {
+      "id": "cas-d09d",
+      "title": "EPIC: 2026-08-01 factory lifecycle integrity — spawn verification, dependency gate, sync scoping, delivery observability",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-2026-08-01-factory-lifecycle-integrity-spawn--cas-d09d"
+    },
+    {
+      "id": "cas-8c9c",
+      "title": "EPIC: 2026-07-31 factory signal fidelity — supervisor identity unresolvable + spawn-window false idles",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "main"
+    },
+    {
+      "id": "cas-3b7c",
+      "title": "CAS compounding reliability: proof scope, hermetic state, repo identity, delivery, health, retrieval",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/cas-compounding-reliability-proof-scope-hermetic-s-cas-3b7c"
+    },
+    {
+      "id": "cas-5fde",
+      "title": "EPIC: docs/requests inbound sweep 2026-07-29 — message ack/redelivery, orphaned processes, awaiting_merge exit, worktree_merge cleanup, stock defaults, 2 v2.33.0 verifications",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-docs-requests-inbound-sweep-2026-07-29-messag-cas-5fde"
+    },
+    {
+      "id": "cas-d6f1",
+      "title": "EPIC: Codex activity-clock blindness + folded-in backlog (close-guard, lease-history, flaky lock test)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-codex-worker-status-activity-clock-is-still-b-cas-d6f1"
+    },
+    {
+      "id": "cas-802d",
+      "title": "EPIC: Codex fully usable — close the idle-worker interrupt gap and the missing-binary spawn path",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-codex-fully-usable-close-the-idle-worker-inte-cas-802d"
+    },
+    {
+      "id": "cas-82a5",
+      "title": "EPIC: 2026-07-27 cross-project log sweep — defects we missed",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-2026-07-27-cross-project-log-sweep-defects-we-cas-82a5"
+    },
+    {
+      "id": "cas-5d8d",
+      "title": "EPIC: task-lease correctness — renewal gap + lease_history reason column",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-task-lease-correctness-renewal-gap-lease-hist-cas-5d8d"
+    },
+    {
+      "id": "cas-142d",
+      "title": "Ship macOS tmpfs compile fix + residual additive-only post-merge false positive",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/ship-macos-tmpfs-compile-fix-residual-additive-onl-cas-142d"
+    },
+    {
+      "id": "cas-2b80",
+      "title": "Bug sweep: review-merge dropped findings + factory ergonomics (5 bugs from 2026-07-22 session)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/bug-sweep-review-merge-dropped-findings-factory-er-cas-2b80"
+    },
+    {
+      "id": "cas-1326",
+      "title": "EPIC: tmpfs staging guardrail + host-scoped constraints (17GB /tmp incident)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-tmpfs-staging-guardrail-host-scoped-constrain-cas-1326"
+    },
+    {
+      "id": "cas-ae92e",
+      "title": "EPIC: Block AskUserQuestion for factory agents (self-directed permission trap)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-block-askuserquestion-for-factory-agents-self-cas-ae92e"
+    },
+    {
+      "id": "cas-04a6",
+      "title": "Cross-harness real-time supervisor↔worker communication conformance spike",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/cross-harness-real-time-supervisor-worker-communic-cas-04a6"
+    },
+    {
+      "id": "cas-b015",
+      "title": "EPIC: Triage and fix Jul 14 Ozer docs/requests factory bugs",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-triage-and-fix-jul-14-ozer-docs-requests-fact-cas-b015"
+    },
+    {
+      "id": "cas-29f9",
+      "title": "Restore cas-update after latest pushed fixes",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/restore-cas-update-after-latest-pushed-fixes-cas-29f9"
+    },
+    {
+      "id": "cas-d9e7",
+      "title": "GPT-5.6 Sol-first supervisor routing with no GPT-5.5 or routine Sonnet",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/codex-first-supervisor-model-routing-with-claude-m-cas-d9e7"
+    },
+    {
+      "id": "cas-3f60",
+      "title": "Audit new model research against CAS worker-spawning guidance",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/audit-new-model-research-against-cas-worker-spawni-cas-3f60"
+    },
+    {
+      "id": "cas-a7c8",
+      "title": "Grok factory run went rogue: workers reopened/re-worked/re-closed already-merged tickets (thrash loop)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/grok-factory-run-went-rogue-workers-reopened-re-wo-cas-a7c8"
+    },
+    {
+      "id": "cas-2a820",
+      "title": "Supervisor model matrix: Grok 4.5 + Composer light floor",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/supervisor-model-matrix-grok-4-5-composer-light-fl-cas-2a820"
+    },
+    {
+      "id": "cas-8888",
+      "title": "First-class Grok Build harness — cli=grok spawn type + cas grok supervisor",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/first-class-grok-build-harness-cli-grok-spawn-type-cas-8888"
+    },
+    {
+      "id": "cas-3417",
+      "title": "Factory reliability & supervisor discipline — Jul 8 backlog",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/factory-reliability-supervisor-discipline-jul-8-ba-cas-3417"
+    },
+    {
+      "id": "cas-1e0a",
+      "title": "EPIC: Factory TUI contrast & readability pass",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-factory-tui-contrast-readability-pass-cas-1e0a"
+    },
+    {
+      "id": "cas-27ff",
+      "title": "EPIC: cas-code-review large-diff scalability — size-gated sharded review",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-cas-code-review-large-diff-scalability-size-g-cas-27ff"
+    },
+    {
+      "id": "cas-b646",
+      "title": "EPIC: Factory operator-truth fixes — completion notifications, spawn model defaults, active-task visibility",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-factory-operator-truth-fixes-completion-notif-cas-b646"
+    },
+    {
+      "id": "cas-0598",
+      "title": "EPIC: Factory epic/task focus pinning — session-scoped default + supervisor pin",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-factory-epic-task-focus-pinning-session-scope-cas-0598"
+    },
+    {
+      "id": "cas-1ce4",
+      "title": "Team-scoping ergonomics: use cached identity instead of raw UUIDs",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/team-scoping-ergonomics-use-cached-identity-instea-cas-1ce4"
+    },
+    {
+      "id": "cas-fff9",
+      "title": "EPIC: Triage + fix the docs/requests bug backlog (verify-still-unfixed first, else move to completed/)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-triage-fix-the-docs-requests-bug-backlog-veri-cas-fff9"
+    },
+    {
+      "id": "cas-604d",
+      "title": "EPIC: Isolate concurrent factory sessions — same-project supervisors cross-spawn into each other's tmux/panes",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-isolate-concurrent-factory-sessions-same-proj-cas-604d"
+    },
+    {
+      "id": "cas-ca04",
+      "title": "EPIC: Cross-harness factory communication — claude↔codex, either role, recipient-aware routing",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-cross-harness-factory-communication-claude-co-cas-ca04"
+    },
+    {
+      "id": "cas-71f7",
+      "title": "EPIC: Team ticket explorer — client half (comment mirror + web-close reconcile + canonical-ID adoption)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-team-ticket-explorer-client-half-comment-mirr-cas-71f7"
+    },
+    {
+      "id": "cas-1255",
+      "title": "EPIC: Per-task depth flag (speed mode for feel-driven iteration)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-per-task-depth-flag-speed-mode-for-feel-drive-cas-1255"
+    },
+    {
+      "id": "cas-321da",
+      "title": "EPIC: Mid-turn interrupt-and-redirect for factory workers",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-mid-turn-interrupt-and-redirect-for-factory-w-cas-321da"
+    },
+    {
+      "id": "cas-f75f",
+      "title": "Cloud sync reliability: slug fragmentation, queue poison-head stall, duplicate-enqueue, silent re-homing (P1)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/cloud-sync-reliability-slug-fragmentation-queue-po-cas-f75f"
+    },
+    {
+      "id": "cas-073f",
+      "title": "Isolated-worker commit leak + supervisor worker-state blindness",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/isolated-worker-commit-leak-supervisor-worker-stat-cas-073f"
+    },
+    {
+      "id": "cas-2f29",
+      "title": "EPIC: Exploit Claude Code 2.1.152–160 hook/skill surface in CAS",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-exploit-claude-code-2-1-152-160-hook-skill-su-cas-2f29"
+    },
+    {
+      "id": "cas-b518",
+      "title": "Supervisor SessionStart 2KB truncation: ensure hard rules survive to the model",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/supervisor-sessionstart-2kb-truncation-ensure-hard-cas-b518"
+    },
+    {
+      "id": "cas-9aea",
+      "title": "EPIC: Claude Code 2.1.145–150 harness compatibility",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-claude-code-2-1-145-150-harness-compatibility-cas-9aea"
+    },
+    {
+      "id": "cas-d12f",
+      "title": "EPIC: 2025 IRS Filing — Roark 1065 + Personal 1040 + Petra Stella",
+      "status": "cancelled",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-2025-irs-filing-roark-1065-personal-1040-petr-cas-d12f"
+    },
+    {
+      "id": "cas-ab2b",
+      "title": "EPIC: Round 3 — mouse-wheel scroll, cloud entity_matches, observability followups",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-round-3-mouse-wheel-scroll-cloud-entity-match-cas-ab2b"
+    },
+    {
+      "id": "cas-c4b8",
+      "title": "EPIC: Ozer 2026-05-18 session friction — CLAUDE.md dedup, MCP bootstrap, ripple-check FP, codemap signal drift",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-ozer-2026-05-18-session-friction-claude-md-de-cas-c4b8"
+    },
+    {
+      "id": "cas-6c55",
+      "title": "EPIC: Factory session friction — round 2 (cas-3933 capture, 2026-05-15)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-factory-session-friction-round-2-cas-3933-cap-cas-6c55"
+    },
+    {
+      "id": "cas-ab88",
+      "title": "User-identity-driven team scope (kill manual `cas cloud team set` requirement)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/user-identity-driven-team-scope-kill-manual-cas-cl-cas-ab88"
+    },
+    {
+      "id": "cas-9fdb",
+      "title": "Fix `cas doctor --fix` failing with `no such table: skills` on bootstrap-pending DBs",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/fix-cas-doctor-fix-failing-with-no-such-table-skil-cas-9fdb"
+    },
+    {
+      "id": "cas-ffc4",
+      "title": "Fix `cas cloud sync` pull returning 0 for new team members (P1 from cloud team)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/fix-cas-cloud-sync-pull-returning-0-for-new-team-m-cas-ffc4"
+    },
+    {
+      "id": "cas-9938",
+      "title": "EPIC: .mcp.json portability fixes — playwright hardcoded path + neon API key passing",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-mcp-json-portability-fixes-playwright-hardcod-cas-9938"
+    },
+    {
+      "id": "cas-2be0",
+      "title": "EPIC: Pull-side scoping hardening (cloud response to BUG-pull-side-scoping)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-pull-side-scoping-hardening-cloud-response-to-cas-2be0"
+    },
+    {
+      "id": "cas-cac3",
+      "title": "Move multi-persona code review off the worker hot path",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/move-multi-persona-code-review-off-the-worker-hot--cas-cac3"
+    },
+    {
+      "id": "cas-b3db",
+      "title": "Per-worker CLI/model/effort: enable Claude supervisor to spawn Codex workers",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/per-worker-cli-model-effort-enable-claude-supervis-cas-b3db"
+    },
+    {
+      "id": "cas-e9e9",
+      "title": "EPIC: Per-worker backend, model, and effort with global + project defaults",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-per-worker-backend-model-and-effort-with-glob-cas-e9e9"
+    },
+    {
+      "id": "cas-754b",
+      "title": "Factory close-merge gap: hard-block stranded factory commits + epic_status pre-close gate",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/factory-close-merge-gap-hard-block-stranded-factor-cas-754b"
+    },
+    {
+      "id": "cas-b65f",
+      "title": "Vercel/Neon/GitHub auto-integration into cas init",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/vercel-neon-github-auto-integration-into-cas-init-cas-b65f"
+    },
+    {
+      "id": "cas-9508",
+      "title": "EPIC: Factory session friction — spawn race, jail cost, hygiene, director dupes, close gate",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-factory-session-friction-spawn-race-jail-cost-cas-9508"
+    },
+    {
+      "id": "cas-7c88",
+      "title": "EPIC: Worktree leak reclaim + supervisor Agent-path discipline (portable, cross-repo, salvage-safe)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-worktree-leak-reclaim-supervisor-agent-path-d-cas-7c88"
+    },
+    {
+      "id": "cas-cf44",
+      "title": "EPIC: Team memories never populate from normal CLI usage",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-team-memories-never-populate-from-normal-cli--cas-cf44"
+    },
+    {
+      "id": "cas-37b0",
+      "title": "EPIC: Harden hook output schema — type-safe + regression-tested",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-harden-hook-output-schema-type-safe-regressio-cas-37b0"
+    },
+    {
+      "id": "cas-90e9",
+      "title": "CAS Performance & Database Optimization",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/cas-performance-database-optimization-cas-90e9"
+    },
+    {
+      "id": "cas-d94a",
+      "title": "Codemap auto-maintenance — fix detection, improve triggers, add CLI command",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/codemap-auto-maintenance-fix-detection-improve-tri-cas-d94a"
+    },
+    {
+      "id": "cas-a3a2",
+      "title": "Versioning & Release Infrastructure",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/versioning-release-infrastructure-cas-a3a2"
+    },
+    {
+      "id": "cas-036f",
+      "title": "Skill hardening — supervisor and worker gap fixes from spike analysis",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/skill-hardening-supervisor-and-worker-gap-fixes-fr-cas-036f"
+    },
+    {
+      "id": "cas-a626",
+      "title": "Cloud sync queue never drains — fix push timing",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/cloud-sync-queue-never-drains-fix-push-timing-cas-a626"
+    },
+    {
+      "id": "cas-28d4",
+      "title": "Petrastella → Hetzner migration — 27 projects, local DBs, docker volumes, secrets",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/petrastella-hetzner-migration-27-projects-local-db-cas-28d4"
+    },
+    {
+      "id": "cas-84a9",
+      "title": "CAS Remote Deployment & Slack Bridge — Vultr server, portable installer, boss onboarding",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/cas-remote-deployment-slack-bridge-vultr-server-po-cas-84a9"
+    },
+    {
+      "id": "cas-0750",
+      "title": "Phase 1 Subsystem A: Multi-persona code review + review-to-task + cas-worker integration",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/phase-1-subsystem-a-multi-persona-code-review-revi-cas-0750"
+    },
+    {
+      "id": "cas-b4d1",
+      "title": "Phase 1 Subsystem B: Structured memory schema + Rust overlap detection",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/phase-1-subsystem-b-structured-memory-schema-rust--cas-b4d1"
+    },
+    {
+      "id": "cas-3444",
+      "title": "Phase 1 Subsystem F: cas-worker execution methodology extensions",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/phase-1-subsystem-f-cas-worker-execution-methodolo-cas-3444"
+    },
+    {
+      "id": "cas-ada0",
+      "title": "Phase 0: Move compound engineering into CAS distribution",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/phase-0-move-compound-engineering-into-cas-distrib-cas-ada0"
+    },
+    {
+      "id": "cas-db8f",
+      "title": "EPIC: OpenClaw on vultr stops after one step — diagnose and fix",
+      "status": "cancelled",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-ffcd",
+      "title": "Enable Byte webchat session to proactively send Slack DMs",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-cd8b",
+      "title": "Fix verifier dispatch, close-reason filter, and supervisor prompt gaps (2026-04-08 regression)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/fix-verifier-dispatch-close-reason-filter-and-supe-cas-cd8b"
+    },
+    {
+      "id": "cas-0f91",
+      "title": "EPIC: Vultr OpenClaw upgrade 2026.4.5 → 2026.4.8",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-6103",
+      "title": "Compound Engineering Ideas: Adopt Best Patterns into CAS",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/compound-engineering-ideas-adopt-best-patterns-int-cas-6103"
+    },
+    {
+      "id": "cas-0136",
+      "title": "CODEMAP system — auto-maintained codebase navigation map",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/codemap-system-auto-maintained-codebase-navigation-cas-0136"
+    },
+    {
+      "id": "cas-d57c",
+      "title": "DRY Refactor — Major Frontend Stores",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/dry-refactor-major-frontend-stores-cas-d57c"
+    },
+    {
+      "id": "cas-015f",
+      "title": "Fix core store performance issues",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/fix-core-store-performance-issues-cas-015f"
+    },
+    {
+      "id": "cas-a62a",
+      "title": "Team Project Memories",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/team-project-memories-cas-a62a"
+    },
+    {
+      "id": "cas-9ba3",
+      "title": "Team Project Memories",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/team-project-memories-cas-9ba3"
+    },
+    {
+      "id": "cas-f001",
+      "title": "Infrastructure Upgrade — Gabber-Studio (from DomDMs playbook)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/infrastructure-upgrade-gabber-studio-from-domdms-p-cas-f001"
+    },
+    {
+      "id": "cas-31b9",
+      "title": "Payment Reminders Feature Review & Redesign",
+      "status": "cancelled",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/payment-reminders-feature-review-redesign-cas-31b9"
+    },
+    {
+      "id": "cas-d6ea",
+      "title": "2022 Form 1065 Fill Scripts — Roark Realty",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/2022-form-1065-fill-scripts-roark-realty-cas-d6ea"
+    },
+    {
+      "id": "cas-0826",
+      "title": "Performance & Design Audit Fixes",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/performance-design-audit-fixes-cas-0826"
+    },
+    {
+      "id": "cas-232b",
+      "title": "Jill Pepper feedback — Mar 27 issue triage",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/jill-pepper-feedback-mar-27-issue-triage-cas-232b"
+    },
+    {
+      "id": "cas-3f72",
+      "title": "Performance spike round 2 — hooks, search, code analysis, core logic",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/performance-spike-round-2-hooks-search-code-analys-cas-3f72"
+    },
+    {
+      "id": "cas-81aa",
+      "title": "Codebase audit — optimization and bugfix spikes across CAS",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/codebase-audit-optimization-and-bugfix-spikes-acro-cas-81aa"
+    },
+    {
+      "id": "cas-41da",
+      "title": "Implement cas-mcp-proxy crate (open-source replacement for code-mode-mcp)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/implement-cas-mcp-proxy-crate-open-source-replacem-cas-41da"
+    },
+    {
+      "id": "cas-6c62",
+      "title": "Post-launch feedback — product catalog UX, notifications, telehealth polish",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/post-launch-feedback-product-catalog-ux-notificati-cas-6c62"
+    },
+    {
+      "id": "cas-c99c",
+      "title": "Merge dashboard-update-lead-quality into develop",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/merge-dashboard-update-lead-quality-into-develop-cas-c99c"
+    },
+    {
+      "id": "cas-06dd",
+      "title": "cas-update improvements: skip rebuild, set tokyo night theme, auto cloud login",
+      "status": "closed",
+      "priority": 1,
+      "assignee": "74ffb323-fbf1-490f-b0c2-7cc0888389b8",
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/cas-update-improvements-skip-rebuild-set-tokyo-nig-cas-06dd"
+    },
+    {
+      "id": "cas-c40a",
+      "title": "Playwright Full-Site Screenshot Catalog (Staging)",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/playwright-full-site-screenshot-catalog-staging-cas-c40a"
+    },
+    {
+      "id": "cas-d9e5",
+      "title": "TUI Usability: Copy-to-clipboard and file drop input focus",
+      "status": "closed",
+      "priority": 1,
+      "assignee": "cdb50d92-acfb-4909-a612-7568e7cd65f0",
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/tui-usability-copy-to-clipboard-and-file-drop-inpu-cas-d9e5"
+    },
+    {
+      "id": "cas-a81f",
+      "title": "EPIC: Webhook Processing & Upstash Migration",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-webhook-processing-upstash-migration-cas-a81f"
+    },
+    {
+      "id": "cas-7b72",
+      "title": "Petra Stella Cloud — Self-hosted CAS Cloud replacement",
+      "status": "closed",
+      "priority": 1,
+      "assignee": "91685a18-a9c3-494d-897c-f18ce2a2e053",
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/petra-stella-cloud-self-hosted-cas-cloud-replaceme-cas-7b72"
+    },
+    {
+      "id": "cas-3dc7",
+      "title": "Upgrade global agent lineup with best-of-breed specialists",
+      "status": "closed",
+      "priority": 1,
+      "assignee": "ab8b5b74-20ef-4bdc-9269-9063b178bd77",
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/upgrade-global-agent-lineup-with-best-of-breed-spe-cas-3dc7"
+    },
+    {
+      "id": "cas-2b91",
+      "title": "Build CAS, distribute to all projects, enable minions theme",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/build-cas-distribute-to-all-projects-enable-minion-cas-2b91"
+    },
+    {
+      "id": "cas-4bdc",
+      "title": "Improve supervisor-worker communication and prompting",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/improve-supervisor-worker-communication-and-prompt-cas-4bdc"
+    },
+    {
+      "id": "cas-0181",
+      "title": "TUI UX upgrades: copy, image-paste focus, minions theme",
+      "status": "closed",
+      "priority": 1,
+      "assignee": "8863bc33-532c-481e-9c69-cc61fac3ea44",
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/tui-ux-upgrades-copy-image-paste-focus-minions-the-cas-0181"
+    },
+    {
+      "id": "cas-e5b6",
+      "title": "Complete numeric string-coercion deserialization for all MCP types",
+      "status": "closed",
+      "priority": 1,
+      "assignee": "8863bc33-532c-481e-9c69-cc61fac3ea44",
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/complete-numeric-string-coercion-deserialization-f-cas-e5b6"
+    },
+    {
+      "id": "cas-b961",
+      "title": "System Optimization — Post Hard-Lock Audit",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-7fa8",
+      "title": "QBO Cleanup & Corrections — Roark Realty 2022",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/qbo-cleanup-corrections-roark-realty-2022-cas-7fa8"
+    },
+    {
+      "id": "cas-8253",
+      "title": "Debug Billing Resume & Period Persistence - Abundant Mines",
+      "status": "closed",
+      "priority": 1,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-d2f5",
+      "title": "Curate, review, and optimize Petrastella agents from AI-Resources",
+      "status": "closed",
+      "priority": 1,
+      "assignee": "854c3d73-0dc3-48df-b3c3-aa02c3685f65",
+      "task_type": "epic",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-69b8",
+      "title": "EPIC: v3.15.7 — CAS-emitted blocker and verification-dispatch envelopes so those wake an idle supervisor (cas-8725)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-v3-15-7-cas-emitted-blocker-and-verification--cas-69b8"
+    },
+    {
+      "id": "cas-55aa",
+      "title": "EPIC: v3.15.5 coordination follow-ups — duplicate message delivery (cas-cdf9), release-train publish subcommand (cas-c1cd), worker-traffic wake gate policy (cas-d9a8)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-v3-15-5-coordination-follow-ups-duplicate-mes-cas-55aa"
+    },
+    {
+      "id": "cas-cfd3",
+      "title": "EPIC: v3.15.4 update and factory-coordination follow-ups — refresh with the newly installed binary (cas-91ba), cross-session supervisor messaging (cas-15f2), `cas init` watchdog under load (cas-c0411), version-keyed release artifact collision (cas-5212), hub lock-owner flake (cas-bf90)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-v3-15-4-update-and-factory-coordination-follo-cas-cfd3"
+    },
+    {
+      "id": "cas-2a89",
+      "title": "EPIC: v3.15.1 factory tooling hardening — hermetic proxy tests (cas-4ccc), dispatch wedge on branch moves (cas-5c33), shutdown_workers target resolution (cas-2c05), verification write busy-retry parity (cas-759f)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-v3-15-1-factory-tooling-hardening-hermetic-pr-cas-2a89"
+    },
+    {
+      "id": "cas-b389",
+      "title": "Viktor delegation gateway v1: supervisor-owned, fail-closed external evidence gate (GH #316)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/viktor-delegation-gateway-v1-supervisor-owned-fail-cas-b389"
+    },
+    {
+      "id": "cas-e000",
+      "title": "Cloud sync correctness: scoped queue-driven push, contamination-safe pull, knowledge-page parity (ACTIVE — covers BOTH knowledge pages and permanent legacy entries)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/cloud-sync-correctness-scoped-queue-driven-push-co-cas-e000"
+    },
+    {
+      "id": "cas-7535",
+      "title": "GitHub issue burn-down v7: factory ergonomics + gate honesty (GH #144–#147, #149)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/github-issue-burn-down-v7-factory-ergonomics-gate--cas-7535"
+    },
+    {
+      "id": "cas-b08c",
+      "title": "Harness changelog diaries: catch up Claude, Codex, and Grok through 2026-07-30",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/harness-changelog-diaries-catch-up-claude-codex-an-cas-b08c"
+    },
+    {
+      "id": "cas-c6ef",
+      "title": "EPIC: 2026-07-29 post-reboot sweep — director awaiting_merge dispatch correctness, worker inbox poll, Codex turn-tracking, review-persona transport",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-2026-07-29-post-reboot-sweep-director-awaitin-cas-c6ef"
+    },
+    {
+      "id": "cas-460f",
+      "title": "EPIC: 2026-07-29 cross-project log sweep — midnight log rotation, FTS5 dedup fail-open, epic-gate stale SHA dead end, reminder busy-retry",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-2026-07-29-cross-project-log-sweep-midnight-l-cas-460f"
+    },
+    {
+      "id": "cas-6b2f",
+      "title": "EPIC: cas-d6f1 integrated-review residue — 12 P2/P3 findings + 4 dropped, incl. a dropped P1 (Grok resolution divergence)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-cas-d6f1-integrated-review-residue-12-p2-p3-f-cas-6b2f"
+    },
+    {
+      "id": "cas-d767",
+      "title": "Factory supervisor session UX batch (lifecycle echo + memory recent handoffs)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/factory-supervisor-session-ux-batch-lifecycle-echo-cas-d767"
+    },
+    {
+      "id": "cas-64fb",
+      "title": "EPIC: close-gate false positives — gates must judge session/task deltas, not branch baseline",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-close-gate-false-positives-gates-must-judge-s-cas-64fb"
+    },
+    {
+      "id": "cas-eec8",
+      "title": "Harness changelog diaries: catch up Claude, Codex, and Grok through 2026-07-22",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/harness-changelog-diaries-catch-up-claude-codex-an-cas-eec8"
+    },
+    {
+      "id": "cas-6f7a",
+      "title": "EPIC: Comms observability fixes from 2026-07-21 Ozer audit (message_status hydration, lease reasons, stall-monitor task notes)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-comms-observability-fixes-from-2026-07-21-oze-cas-6f7a"
+    },
+    {
+      "id": "cas-fb6c",
+      "title": "Harness changelog diaries: catch up Claude+Codex, seed Grok",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/harness-changelog-diaries-catch-up-claude-codex-se-cas-fb6c"
+    },
+    {
+      "id": "cas-ebc1",
+      "title": "EPIC: Factory TUI visual & information overhaul (OSC 8 links, branch visibility, sidecar density)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-factory-tui-visual-information-overhaul-osc-8-cas-ebc1"
+    },
+    {
+      "id": "cas-6d83",
+      "title": "Model-steering upgrades: codex-exec shell-outs, taste axis + judgment escalation, gpt-5.5 review persona",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/model-steering-upgrades-codex-exec-shell-outs-tast-cas-6d83"
+    },
+    {
+      "id": "cas-3cb7",
+      "title": "EPIC: Factory smoke-test follow-ups — heterogeneous worker lifecycle, director guidance, verification UX",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-factory-smoke-test-follow-ups-heterogeneous-w-cas-3cb7"
+    },
+    {
+      "id": "cas-a8af",
+      "title": "EPIC: cas-b51a PSR state-machine follow-ons (start/release/lease guards)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-cas-b51a-psr-state-machine-follow-ons-start-r-cas-a8af"
+    },
+    {
+      "id": "cas-b667",
+      "title": "EPIC: Migrate cas-code-review to the Workflow engine (hybrid: Workflow dispatch+merge, skill wrapper)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-migrate-cas-code-review-to-the-workflow-engin-cas-b667"
+    },
+    {
+      "id": "cas-ebea",
+      "title": "EPIC: third-brain-v5-skills borrows — agent-discipline skills + context budgeting",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-third-brain-v5-skills-borrows-agent-disciplin-cas-ebea"
+    },
+    {
+      "id": "cas-871f",
+      "title": "EPIC: Claude Code 2.1.122–2.1.139 changelog integration",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-claude-code-2-1-122-2-1-139-changelog-integra-cas-871f"
+    },
+    {
+      "id": "cas-19a2b",
+      "title": "EPIC: project-overview skill + freshness automation",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-project-overview-skill-freshness-automation-cas-19a2b"
+    },
+    {
+      "id": "cas-2c1c",
+      "title": "Phase 1 Subsystem E: Implementation Unit Template for EPIC specs",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/phase-1-subsystem-e-implementation-unit-template-f-cas-2c1c"
+    },
+    {
+      "id": "cas-3d29",
+      "title": "EPIC: Wire daniel@petrastella.io into gog (Google Workspace via --client petra)",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": null
+    },
+    {
+      "id": "cas-64f4",
+      "title": "EPIC: Upgrade Prisma 6.x → 7.x",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/epic-upgrade-prisma-6-x-7-x-cas-64f4"
+    },
+    {
+      "id": "cas-79e9",
+      "title": "DRY Review — Major Frontend Stores",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/dry-review-major-frontend-stores-cas-79e9"
+    },
+    {
+      "id": "cas-6d72",
+      "title": "Core stores performance audit",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/core-stores-performance-audit-cas-6d72"
+    },
+    {
+      "id": "cas-7f49",
+      "title": "Team Pattern Suggestions API",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/team-pattern-suggestions-api-cas-7f49"
+    },
+    {
+      "id": "cas-3860",
+      "title": "Telehealth polish — remaining spike findings",
+      "status": "closed",
+      "priority": 2,
+      "assignee": null,
+      "task_type": "epic",
+      "epic": null,
+      "branch": "epic/telehealth-polish-remaining-spike-findings-cas-3860"
+    }
+  ],
+  "agents": [
+    {
+      "id": "92534566-139a-48cd-ba3e-568f1e38b013",
+      "name": "golden-panda-80",
+      "status": "active",
+      "current_task": null,
+      "latest_activity": {
+        "summary": "Task note added (decision): Supervisor (18:12Z): cas-db82's final tip 3ba6c92c re-renders docs/factory/2026-09-06-model-lane-rubric-review.html unde...",
+        "created_at_rfc3339": "2026-09-06T18:10:59.141540330+00:00"
+      },
+      "last_heartbeat_rfc3339": "2026-09-06T18:11:02.323275725+00:00"
+    }
+  ],
+  "activity": [
+    {
+      "id": 1020327,
+      "event_type": "supervisor_injected",
+      "entity_type": "agent",
+      "entity_id": "golden-panda-80",
+      "summary": "Injected queued prompt 26905 to golden-panda-80 (ok)",
+      "metadata": {
+        "actual_target": "golden-panda-80",
+        "prompt_id": 26905,
+        "queue_source": "wise-falcon-12",
+        "queue_target": "golden-panda-80",
+        "status": "ok"
+      },
+      "created_at": "2026-09-06T18:11:29.002393066Z"
+    },
+    {
+      "id": 1020324,
+      "event_type": "supervisor_injected",
+      "entity_type": "agent",
+      "entity_id": "golden-panda-80",
+      "summary": "Injected queued prompt 26903 to golden-panda-80 (ok)",
+      "metadata": {
+        "actual_target": "golden-panda-80",
+        "prompt_id": 26903,
+        "queue_source": "wise-falcon-12",
+        "queue_target": "golden-panda-80",
+        "status": "ok"
+      },
+      "created_at": "2026-09-06T18:11:06.561228368Z"
+    },
+    {
+      "id": 1020321,
+      "event_type": "supervisor_injected",
+      "entity_type": "agent",
+      "entity_id": "golden-panda-80",
+      "summary": "Injected queued prompt 26900 to golden-panda-80 (ok)",
+      "metadata": {
+        "actual_target": "golden-panda-80",
+        "prompt_id": 26900,
+        "queue_source": "92534566-139a-48cd-ba3e-568f1e38b013",
+        "queue_target": "golden-panda-80",
+        "status": "ok"
+      },
+      "created_at": "2026-09-06T18:10:31.838225690Z"
+    },
+    {
+      "id": 1020319,
+      "event_type": "supervisor_injected",
+      "entity_type": "agent",
+      "entity_id": "golden-panda-80",
+      "summary": "Injected queued prompt 26899 to golden-panda-80 (ok)",
+      "metadata": {
+        "actual_target": "golden-panda-80",
+        "prompt_id": 26899,
+        "queue_source": "wise-falcon-12",
+        "queue_target": "golden-panda-80",
+        "status": "ok"
+      },
+      "created_at": "2026-09-06T18:10:25.198913181Z"
+    },
+    {
+      "id": 1020316,
+      "event_type": "supervisor_injected",
+      "entity_type": "agent",
+      "entity_id": "golden-panda-80",
+      "summary": "Injected queued prompt 26897 to golden-panda-80 (ok)",
+      "metadata": {
+        "actual_target": "golden-panda-80",
+        "prompt_id": 26897,
+        "queue_source": "fierce-leopard-10",
+        "queue_target": "golden-panda-80",
+        "status": "ok"
+      },
+      "created_at": "2026-09-06T18:09:27.569306543Z"
+    },
+    {
+      "id": 1020312,
+      "event_type": "supervisor_injected",
+      "entity_type": "agent",
+      "entity_id": "golden-panda-80",
+      "summary": "Injected queued prompt 26888 to golden-panda-80 (ok)",
+      "metadata": {
+        "actual_target": "golden-panda-80",
+        "prompt_id": 26888,
+        "queue_source": "vivid-kestrel-88",
+        "queue_target": "golden-panda-80",
+        "status": "ok"
+      },
+      "created_at": "2026-09-06T18:02:43.073871647Z"
+    },
+    {
+      "id": 1020311,
+      "event_type": "supervisor_injected",
+      "entity_type": "agent",
+      "entity_id": "golden-panda-80",
+      "summary": "Injected queued prompt 26887 to golden-panda-80 (ok)",
+      "metadata": {
+        "actual_target": "golden-panda-80",
+        "prompt_id": 26887,
+        "queue_source": "warm-octopus-54",
+        "queue_target": "golden-panda-80",
+        "status": "ok"
+      },
+      "created_at": "2026-09-06T18:02:40.880542475Z"
+    },
+    {
+      "id": 1020309,
+      "event_type": "supervisor_injected",
+      "entity_type": "agent",
+      "entity_id": "golden-panda-80",
+      "summary": "Injected queued prompt 26886 to golden-panda-80 (ok)",
+      "metadata": {
+        "actual_target": "golden-panda-80",
+        "prompt_id": 26886,
+        "queue_source": "lifecycle-wake:9222",
+        "queue_target": "supervisor",
+        "status": "ok"
+      },
+      "created_at": "2026-09-06T18:02:29.104249232Z"
+    },
+    {
+      "id": 1020308,
+      "event_type": "supervisor_injected",
+      "entity_type": "agent",
+      "entity_id": "golden-panda-80",
+      "summary": "Injected queued prompt 26885 to golden-panda-80 (ok)",
+      "metadata": {
+        "actual_target": "golden-panda-80",
+        "prompt_id": 26885,
+        "queue_source": "lifecycle-wake:9221",
+        "queue_target": "supervisor",
+        "status": "ok"
+      },
+      "created_at": "2026-09-06T18:02:29.092783281Z"
+    }
+  ]
+}

@@ -27,13 +27,14 @@ agent              status  task      last seen
 lively-panther-31  active  -            12s ago
 golden-koala-58    active  cas-4df0      3s ago
 
-cas factory status --json for the queue peek and activity · --full for untruncated values
+--json for the queue peek and activity · --full for untruncated values
 ```
 
 ## Annotations
 
 1. **Verdict** — `✓` is the only coloured cell on the screen; `active` is bold in the default
-   foreground. On a light terminal the mark is `#187838` (5.5:1), on a dark one `#50c878` (8:1).
+   foreground. On a light terminal the mark is `#1e964b` (3.8:1 on white, above the 3:1 mark floor and
+   inside the band the TUI's chip contrast guard allows), on a dark one `#50c878` (8:1).
    The alternative verdicts are `⚠ idle 14 min` and `⚠ no agents`, each with a remedy line.
 2. **Rows** — labels are bold words in a fixed column, values start at cell 11. Compare the
    old right-aligned `        Pending prompts: 0`, which makes the eye hunt for the colon.

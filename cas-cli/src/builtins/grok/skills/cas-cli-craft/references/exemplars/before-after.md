@@ -61,8 +61,7 @@ Cloud         ✓ supervisor relay  ✓ delivery retries  ✓ canonical id
       only after the purge, run `cas cloud sync` to re-register the project
   ⚠ registered project roots ×14 Registered root `/tmp/.tmpdInYXx` is excluded
                                  from `cas update` discovery: a disposable temp
-                                 root at /tmp. Remove the stale registration
-                                 with `cas known-repos forget /tmp/.tmpdInYXx`.
+                                 root at /tmp. Remove the stale registration w…
 Config        ✓ config file  ✓ hooks  ✓ skills
 Integrations  ✓ claude  ✓ codex
 

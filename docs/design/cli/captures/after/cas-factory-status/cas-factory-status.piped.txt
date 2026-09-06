@@ -1,0 +1,11 @@
+[OK] active · cas-src-lively-panther-31 · 1 agent · 101 ready · 6 in progress
+────────────────────────────────────────────────────────────────────────────────
+Project   /home/pippenz/Petrastella/cas-src
+Queue     0 pending prompts
+Tasks     101 ready · 6 in progress · 229 epics open
+Agents    1 active · 0 other · 0 actionable-idle min
+
+agent            status  task  last seen
+golden-panda-80  active  -       26s ago
+
+--json for the queue peek and activity · --full for untruncated values

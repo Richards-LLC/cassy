@@ -17,7 +17,7 @@ use crate::store::{
     StoreType, detect_store_type, open_agent_store, open_rule_store, open_store, open_task_store,
 };
 use crate::types::RuleStatus;
-use crate::ui::components::Formatter;
+use crate::ui::components::{Formatter, Verdict};
 use crate::ui::theme::{ActiveTheme, Icons};
 
 use crate::cli::Cli;
@@ -3853,12 +3853,16 @@ mod tests {
             80,
         );
 
-        assert!(report.contains("cas doctor · example/project · 3.10.1"));
+        // Line one is the verdict (cas-cli-craft): mark, count, project, version.
+        assert!(
+            report.starts_with("[WARN] 1 warning · 2 ok · example/project · 3.10.1\n"),
+            "verdict line first:\n{report}"
+        );
         assert!(report.contains("Store"));
         assert!(report.contains("[OK] database"));
         assert!(report.contains("[OK] entries"));
         assert!(report.contains("[WARN] search index"));
-        assert!(report.contains("  → Run `cas index`"));
+        assert!(report.contains("    → Run `cas index`"), "{report}");
         // GH #697 (cas-a869): counts render verbatim. The digit-grouping
         // pass that produced `1,234,567` here also produced `cas-7,791` and
         // comma-riddled UUIDs on real reports, so it is gone rather than
@@ -3904,7 +3908,7 @@ mod tests {
     }
 
     #[test]
-    fn non_ok_messages_wrap_without_truncation() {
+    fn non_ok_messages_cap_at_three_lines_and_verbose_prints_them_whole() {
         let message = "573 foreign task row(s) from 9 other project(s) (Accounting, Penguinz, Woodworking, abundant details that operators need)";
         let checks = vec![Check::new(
             "cross-project rows",
@@ -3912,7 +3916,7 @@ mod tests {
             message,
         )];
 
-        let report = render_report_plain(
+        let grouped = render_report_plain(
             &checks,
             &[],
             &[],
@@ -3922,14 +3926,100 @@ mod tests {
             false,
             60,
         );
-        let compact_report: String = report.split_whitespace().collect();
-        let compact_message: String = message.split_whitespace().collect();
+        let finding_lines: Vec<&str> = grouped
+            .lines()
+            .skip_while(|line| !line.starts_with("  [WARN] cross-project rows"))
+            .take_while(|line| !line.is_empty())
+            .collect();
+        assert_eq!(
+            finding_lines.len(),
+            FINDING_MAX_LINES,
+            "a finding is name → cause → remedy, not a paragraph:\n{grouped}"
+        );
+        assert!(
+            finding_lines.last().unwrap().ends_with('\u{2026}'),
+            "the cut is marked:\n{grouped}"
+        );
+        assert!(
+            grouped.contains("cas doctor --verbose for timings and full messages"),
+            "the receipt names the escape:\n{grouped}"
+        );
+        for line in grouped.lines() {
+            assert!(
+                line.chars().count() <= 60,
+                "line wider than the terminal: {line:?}"
+            );
+        }
 
+        let verbose = render_report_plain(
+            &checks,
+            &[],
+            &[],
+            "example/project",
+            "3.10.1",
+            Duration::from_millis(1),
+            true,
+            60,
+        );
+        let compact_report: String = verbose.split_whitespace().collect();
+        let compact_message: String = message.split_whitespace().collect();
         assert!(
             compact_report.contains(&compact_message),
-            "full diagnostic should survive wrapping:\n{report}"
+            "--verbose carries the whole diagnostic:\n{verbose}"
         );
-        assert!(!report.contains('…'), "diagnostic was truncated:\n{report}");
+    }
+
+    #[test]
+    fn long_tokens_are_cut_not_split_and_repeats_fold_into_one_row() {
+        let scope = "team_project_registered_2a57bec9-5dfa-4a8f-b711-31f9aeb8d6cb_gabber-studio=2026-08-31T18:04:22";
+        let mut checks = vec![Check::new(
+            "cloud identity metadata",
+            CheckStatus::Warning,
+            &format!("foreign cloud scope(s): {scope}"),
+        )];
+        for root in ["/tmp/.tmpA", "/tmp/.tmpB", "/tmp/.tmpC"] {
+            checks.push(Check::new(
+                "registered project roots",
+                CheckStatus::Warning,
+                &format!("Registered root `{root}` is excluded from discovery"),
+            ));
+        }
+
+        let report = render_report_plain(
+            &checks,
+            &[],
+            &[],
+            "example/project",
+            "3.10.1",
+            Duration::from_millis(1),
+            false,
+            80,
+        );
+        assert!(
+            report.starts_with("[WARN] 4 warnings · 0 ok · example/project · 3.10.1\n"),
+            "{report}"
+        );
+        // The scope id is wider than the message column: it ends in an
+        // ellipsis on one line instead of continuing on the next.
+        let scope_line = report
+            .lines()
+            .find(|line| line.contains("team_project_registered"))
+            .expect("scope line");
+        assert!(scope_line.ends_with('\u{2026}'), "{scope_line:?}");
+        assert!(
+            !report.contains("9aeb8d6cb_gabber"),
+            "a token must not be split across lines:\n{report}"
+        );
+        // Three identical findings become one row with a count.
+        assert_eq!(
+            report.matches("registered project roots").count(),
+            1,
+            "{report}"
+        );
+        assert!(report.contains("registered project roots \u{00d7}3"), "{report}");
+        for line in report.lines() {
+            assert!(line.chars().count() <= 80, "overflow: {line:?}");
+        }
     }
 
     #[test]
@@ -7352,20 +7442,16 @@ fn check_claude_code_mcp(project_root: &Path) -> Check {
 /// gone and counts render as plain integers. Do not reintroduce a
 /// post-processing pass over rendered lines — any future grouping must happen
 /// where the number is still a number, before it becomes prose.
-fn status_label(status: &CheckStatus, styled: bool) -> &'static str {
-    if styled {
-        match status {
-            CheckStatus::Ok => Icons::CHECK,
-            CheckStatus::Warning => Icons::WARNING,
-            CheckStatus::Error => Icons::CROSS,
-        }
-    } else {
-        match status {
-            CheckStatus::Ok => "[OK]",
-            CheckStatus::Warning => "[WARN]",
-            CheckStatus::Error => "[ERROR]",
-        }
+fn status_verdict(status: &CheckStatus) -> Verdict {
+    match status {
+        CheckStatus::Ok => Verdict::Ok,
+        CheckStatus::Warning => Verdict::Warning,
+        CheckStatus::Error => Verdict::Error,
     }
+}
+
+fn status_label(status: &CheckStatus, glyphs: bool) -> &'static str {
+    status_verdict(status).label(glyphs)
 }
 
 fn status_name(status: &CheckStatus) -> &'static str {
@@ -7423,7 +7509,10 @@ fn duration_label(duration: Duration) -> String {
     }
 }
 
-fn wrap_report_text(text: &str, width: usize) -> Vec<String> {
+/// Wrap at word boundaries. A single token wider than the line (a scope id, a
+/// URL) is cut with an ellipsis rather than split across lines: a split token
+/// reads as two tokens, and `--verbose` prints every message whole.
+fn wrap_report_text(text: &str, width: usize, glyphs: bool) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
     }
@@ -7433,20 +7522,19 @@ fn wrap_report_text(text: &str, width: usize) -> Vec<String> {
     let mut current = String::new();
 
     for word in text.split_whitespace() {
+        let word = if word.chars().count() > width {
+            cut_with_ellipsis(word, width, glyphs)
+        } else {
+            word.to_string()
+        };
         let word_len = word.chars().count();
-        if !current.is_empty() && current.chars().count() + 1 + word_len <= width {
+        if current.is_empty() {
+            current = word;
+        } else if current.chars().count() + 1 + word_len <= width {
             current.push(' ');
-            current.push_str(word);
-            continue;
-        }
-        if !current.is_empty() {
-            lines.push(std::mem::take(&mut current));
-        }
-        for ch in word.chars() {
-            if current.chars().count() >= width {
-                lines.push(std::mem::take(&mut current));
-            }
-            current.push(ch);
+            current.push_str(&word);
+        } else {
+            lines.push(std::mem::replace(&mut current, word));
         }
     }
 
@@ -7459,26 +7547,104 @@ fn wrap_report_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn write_report_line(
-    fmt: &mut Formatter<'_>,
-    status: Option<&CheckStatus>,
-    text: &str,
-) -> std::io::Result<()> {
-    if fmt.is_styled() {
-        let color = status.map(|status| match status {
-            CheckStatus::Ok => fmt.theme().palette.status_success,
-            CheckStatus::Warning => fmt.theme().palette.status_warning,
-            CheckStatus::Error => fmt.theme().palette.status_error,
-        });
-        if let Some(color) = color {
-            fmt.write_colored(text, color)?;
-        } else {
-            fmt.write_primary(text)?;
-        }
-    } else {
-        fmt.write_raw(text)?;
-    }
+/// Body text is written in the terminal's own foreground: only marks carry
+/// colour, so a line reads on a light or a dark screen alike (cas-4df0).
+fn write_report_line(fmt: &mut Formatter<'_>, text: &str) -> std::io::Result<()> {
+    fmt.write_text(text)?;
     fmt.newline()
+}
+
+/// One finding row: coloured mark, name (with a repeat count when identical
+/// findings were collapsed), then the message wrapped under a hanging indent.
+/// Lines a finding's cause or remedy may take in the grouped view before it
+/// is cut with an ellipsis; `--verbose` prints every message whole. Three
+/// lines is name → cause → remedy territory; a longer message is a paragraph
+/// the reader asked not to be given (cas-cli-craft).
+const FINDING_MAX_LINES: usize = 3;
+
+/// Keep the first `max_lines` of a wrapped message, ending the last kept line
+/// with an ellipsis when anything was dropped.
+fn cap_lines(mut lines: Vec<String>, max_lines: usize, width: usize, glyphs: bool) -> Vec<String> {
+    if lines.len() <= max_lines {
+        return lines;
+    }
+    lines.truncate(max_lines.max(1));
+    if let Some(last) = lines.last_mut() {
+        *last = cut_with_ellipsis(&format!("{last} "), width, glyphs);
+    }
+    lines
+}
+
+/// `text` cut to at most `width` cells, ending in `…` (or `...` on a locale
+/// that cannot show it) so the cut is visible.
+fn cut_with_ellipsis(text: &str, width: usize, glyphs: bool) -> String {
+    let ellipsis = if glyphs { "\u{2026}" } else { "..." };
+    let keep = width.saturating_sub(ellipsis.chars().count()).max(1);
+    let mut cut: String = text.chars().take(keep).collect();
+    cut.push_str(ellipsis);
+    cut
+}
+
+fn write_finding(
+    fmt: &mut Formatter<'_>,
+    check: &Check,
+    repeats: usize,
+    name_width: usize,
+    width: usize,
+    verbose: bool,
+) -> std::io::Result<()> {
+    let max_lines = if verbose { usize::MAX } else { FINDING_MAX_LINES };
+    let times = if fmt.unicode() { "\u{00d7}" } else { "x" };
+    let name = if repeats > 1 {
+        format!("{} {times}{repeats}", check.name)
+    } else {
+        check.name.clone()
+    };
+    let mark = status_label(&check.status, fmt.glyphs());
+    let prefix_width = 2 + mark.chars().count() + 1 + name_width + 2;
+    let available = width.saturating_sub(prefix_width).max(1);
+    let (message, remediation) = check.parts();
+    let glyphs = fmt.unicode();
+    let message_lines = cap_lines(
+        wrap_report_text(&message, available, glyphs),
+        max_lines,
+        available,
+        glyphs,
+    );
+    let hanging_indent = " ".repeat(prefix_width);
+    for (line_index, message_line) in message_lines.iter().enumerate() {
+        if line_index == 0 {
+            fmt.write_raw("  ")?;
+            fmt.mark(status_verdict(&check.status))?;
+            fmt.write_raw(" ")?;
+            fmt.write_bold_plain(&format!("{name:<name_width$}"))?;
+            fmt.write_raw("  ")?;
+            fmt.write_text(message_line)?;
+            fmt.newline()?;
+        } else {
+            write_report_line(fmt, &format!("{hanging_indent}{message_line}"))?;
+        }
+    }
+    if let Some(remediation) = remediation {
+        let indent = 4;
+        let arrow_width = Icons::arrow_right(fmt.unicode()).chars().count() + 1;
+        let remedy_width = width.saturating_sub(indent + arrow_width).max(1);
+        let remedy_lines = cap_lines(
+            wrap_report_text(&remediation, remedy_width, glyphs),
+            max_lines,
+            remedy_width,
+            glyphs,
+        );
+        let mut remedy_lines = remedy_lines.into_iter();
+        if let Some(first) = remedy_lines.next() {
+            fmt.remedy(indent, &first)?;
+        }
+        let continuation = " ".repeat(indent + arrow_width);
+        for line in remedy_lines {
+            write_report_line(fmt, &format!("{continuation}{line}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn write_ok_section_line(
@@ -7488,23 +7654,31 @@ fn write_ok_section_line(
     width: usize,
 ) -> std::io::Result<()> {
     let label = format!("{:<14}", group.label());
-    let marker = status_label(&CheckStatus::Ok, fmt.is_styled());
-    let mut line = label.clone();
     let indent = " ".repeat(14);
+    let mark_width = status_label(&CheckStatus::Ok, fmt.glyphs()).chars().count();
+    let mut used = label.chars().count();
+    let mut first_on_line = true;
+    fmt.write_raw(&label)?;
     for check in checks {
-        let pair = format!("{marker} {}", check.name);
-        let prefix = if line == label { "" } else { "  " };
-        if line.chars().count() + prefix.chars().count() + pair.chars().count() > width
-            && line != label
-        {
-            write_report_line(fmt, Some(&CheckStatus::Ok), &line)?;
-            line = format!("{indent}{pair}");
-        } else {
-            line.push_str(prefix);
-            line.push_str(&pair);
+        let pair_width = mark_width + 1 + check.name.chars().count();
+        let gap = if first_on_line { 0 } else { 2 };
+        if !first_on_line && used + gap + pair_width > width {
+            fmt.newline()?;
+            fmt.write_raw(&indent)?;
+            used = indent.len();
+            first_on_line = true;
         }
+        if !first_on_line {
+            fmt.write_raw("  ")?;
+            used += 2;
+        }
+        fmt.mark(Verdict::Ok)?;
+        fmt.write_raw(" ")?;
+        fmt.write_text(&check.name)?;
+        used += pair_width;
+        first_on_line = false;
     }
-    write_report_line(fmt, Some(&CheckStatus::Ok), &line)
+    fmt.newline()
 }
 
 /// Phases faster than this are noise in the slowest-phase table; the table
@@ -7521,14 +7695,43 @@ fn render_report(
     elapsed: Duration,
     verbose: bool,
 ) -> std::io::Result<()> {
-    fmt.write_bold(&format!("cas doctor · {canonical_id} · {version}"))?;
-    fmt.newline()?;
     let width = match fmt.width() as usize {
         width if width < 40 => 80,
         width => width,
     };
-    fmt.write_muted(&Icons::SEPARATOR.repeat(width.min(80)))?;
-    fmt.newline()?;
+    let ok = checks
+        .iter()
+        .filter(|check| matches!(check.status, CheckStatus::Ok))
+        .count();
+    let warnings = checks
+        .iter()
+        .filter(|check| matches!(check.status, CheckStatus::Warning))
+        .count();
+    let errors = checks
+        .iter()
+        .filter(|check| matches!(check.status, CheckStatus::Error))
+        .count();
+
+    // Line one is the verdict: mark, one repeatable word, the justifying
+    // count; then where and which version. A reader who stops here has the
+    // answer (cas-cli-craft).
+    let (verdict, word) = if errors > 0 {
+        (Verdict::Error, format!("{errors} {}", plural(errors, "error")))
+    } else if warnings > 0 {
+        (
+            Verdict::Warning,
+            format!("{warnings} {}", plural(warnings, "warning")),
+        )
+    } else {
+        (Verdict::Ok, "healthy".to_string())
+    };
+    let dot = Icons::separator_dot(fmt.unicode());
+    fmt.verdict(
+        verdict,
+        &word,
+        &format!("{ok} ok {dot} {canonical_id} {dot} {version}"),
+    )?;
+    fmt.rule()?;
 
     let groups = [
         CheckGroup::Store,
@@ -7545,75 +7748,57 @@ fn render_report(
         if section.is_empty() {
             continue;
         }
-        let all_ok = section
-            .iter()
-            .all(|check| matches!(check.status, CheckStatus::Ok));
         let ok_checks: Vec<&Check> = section
             .iter()
             .copied()
             .filter(|check| matches!(check.status, CheckStatus::Ok))
             .collect();
-        if all_ok {
+        if ok_checks.len() == section.len() {
             write_ok_section_line(fmt, group, &ok_checks, width)?;
             continue;
         }
 
         if ok_checks.is_empty() {
-            fmt.write_bold(group.label())?;
+            fmt.write_bold_plain(group.label())?;
             fmt.newline()?;
         } else {
             write_ok_section_line(fmt, group, &ok_checks, width)?;
         }
-        let name_width = section
+
+        // Identical findings (the same check reporting once per instance)
+        // collapse to one row with a count; `--verbose` lists every instance.
+        let findings = collapse_findings(&section);
+        let name_width = findings
             .iter()
-            .map(|check| check.name.chars().count())
+            .map(|(check, repeats)| {
+                check.name.chars().count()
+                    + if *repeats > 1 {
+                        2 + repeats.to_string().len()
+                    } else {
+                        0
+                    }
+            })
             .max()
             .unwrap_or(0);
-        for check in section {
-            if matches!(check.status, CheckStatus::Ok) {
-                continue;
-            }
-            let prefix = format!(
-                "  {} {:<name_width$} ",
-                status_label(&check.status, fmt.is_styled()),
-                check.name,
-                name_width = name_width
-            );
-            let available = width.saturating_sub(prefix.chars().count()).max(1);
-            let (message, remediation) = check.parts();
-            let message_lines = wrap_report_text(&message, available);
-            let hanging_indent = " ".repeat(prefix.chars().count());
-            for (line_index, message_line) in message_lines.iter().enumerate() {
-                let line = if line_index == 0 {
-                    format!("{prefix}{message_line}")
-                } else {
-                    format!("{hanging_indent}{message_line}")
-                };
-                write_report_line(fmt, Some(&check.status), &line)?;
-            }
-            if let Some(remediation) = remediation {
-                fmt.write_muted(&format!("  {} {}", Icons::ARROW_RIGHT, remediation))?;
-                fmt.newline()?;
-            }
+        for (check, repeats) in findings {
+            write_finding(fmt, check, repeats, name_width, width, verbose)?;
         }
     }
 
     if verbose {
         fmt.newline()?;
-        fmt.write_bold("verbose")?;
+        fmt.write_bold_plain("verbose")?;
         fmt.newline()?;
         for (index, check) in checks.iter().enumerate() {
             let timing = timings
                 .get(index)
                 .map(|timing| format!(" {}", timing.label()))
                 .unwrap_or_default();
-            let line = format!(
-                "{} {}: {}{timing}",
-                status_label(&check.status, fmt.is_styled()),
-                check.name,
-                full_message(check)
-            );
-            write_report_line(fmt, Some(&check.status), &line)?;
+            fmt.mark(status_verdict(&check.status))?;
+            write_report_line(
+                fmt,
+                &format!(" {}: {}{timing}", check.name, full_message(check)),
+            )?;
         }
 
         // The per-check line answers "how long did this take"; the table
@@ -7628,7 +7813,7 @@ fn render_report(
         slowest.truncate(10);
         if !slowest.is_empty() {
             fmt.newline()?;
-            fmt.write_bold("slowest phases")?;
+            fmt.write_bold_plain("slowest phases")?;
             fmt.newline()?;
             let label_width = slowest
                 .iter()
@@ -7638,9 +7823,8 @@ fn render_report(
             for phase in slowest {
                 write_report_line(
                     fmt,
-                    None,
                     &format!(
-                        "  {:<label_width$}  {:>8}  {} check(s)",
+                        "  {:<label_width$}  {:>8}  {:>3} check(s)",
                         phase.label,
                         duration_label(phase.duration),
                         phase.checks,
@@ -7651,27 +7835,55 @@ fn render_report(
         }
     }
 
-    let ok = checks
-        .iter()
-        .filter(|check| matches!(check.status, CheckStatus::Ok))
-        .count();
-    let warnings = checks
-        .iter()
-        .filter(|check| matches!(check.status, CheckStatus::Warning))
-        .count();
-    let errors = checks
-        .iter()
-        .filter(|check| matches!(check.status, CheckStatus::Error))
-        .count();
     fmt.newline()?;
-    write_report_line(
-        fmt,
-        None,
-        &format!(
-            "{ok} ok · {warnings} warnings · {errors} errors · {}",
-            duration_label(elapsed)
-        ),
-    )
+    let summary = format!(
+        "{ok} ok {dot} {warnings} warnings {dot} {errors} errors {dot} {}",
+        duration_label(elapsed)
+    );
+    if verbose {
+        return fmt.receipt(&summary);
+    }
+    // The escape hint joins the summary when the line has room for it and
+    // takes its own receipt line when it does not — a receipt never wraps.
+    let hint = "cas doctor --verbose for timings and full messages";
+    let joined = format!("{summary} {dot} {hint}");
+    if joined.chars().count() <= width {
+        fmt.receipt(&joined)
+    } else {
+        fmt.receipt(&summary)?;
+        fmt.receipt(hint)
+    }
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        noun.to_string()
+    } else {
+        format!("{noun}s")
+    }
+}
+
+/// Non-OK checks in section order, with consecutive checks that share a name
+/// and status folded into one entry carrying its repeat count.
+fn collapse_findings<'a>(section: &[&'a Check]) -> Vec<(&'a Check, usize)> {
+    let mut findings: Vec<(&'a Check, usize)> = Vec::new();
+    for check in section
+        .iter()
+        .copied()
+        .filter(|check| !matches!(check.status, CheckStatus::Ok))
+    {
+        match findings.last_mut() {
+            Some((last, repeats))
+                if last.name == check.name
+                    && std::mem::discriminant(&last.status)
+                        == std::mem::discriminant(&check.status) =>
+            {
+                *repeats += 1;
+            }
+            _ => findings.push((check, 1)),
+        }
+    }
+    findings
 }
 
 #[cfg(test)]

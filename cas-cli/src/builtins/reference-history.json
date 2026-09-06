@@ -20,6 +20,30 @@
       "9f8a2cb857bc9f4b61e67a510e9790ee54e206bd4c9e882c0f4364ea2e1a3d47",
       "ca5c28eac7c8e646d1fec67d1fb5cd0f8fcc183d0a23d2a288abea80b579de73"
     ],
+    "skills/cas-cli-craft/references/concept-brief.md": [
+      "8932b0f274451768c1357eff5bc7aa3a15038df327e19048c59dd9d3b5b9b0bc"
+    ],
+    "skills/cas-cli-craft/references/critique-rubric.md": [
+      "4b3d7350ce5c9a702f2d5dd23cf1a7e3fa288b9e54fa67410aa035c54d052a51"
+    ],
+    "skills/cas-cli-craft/references/exemplars/before-after.md": [
+      "4e888df31ddf1e621ad7ab9ede7d76621f4a6f925ebf7291de5428581b32a108",
+      "58bbd62ad6e7e04b6a7812a6f31c66f48b41567ab4cd34cf652ca65ec77e7f63"
+    ],
+    "skills/cas-cli-craft/references/exemplars/doctor-report.md": [
+      "850d787e8a912e952ef345f0dace75ac45864dbb587c3dd55674dbcb39a2bf1b",
+      "aea2d0e9ff44c41d01d7365c8299dca9fa5383bcaedc2b8850ac664c28c529fc"
+    ],
+    "skills/cas-cli-craft/references/exemplars/long-running.md": [
+      "0e35739065a653e3a343e756b8687a42a57df2dc05ff5a8ef6a540343b8d228b"
+    ],
+    "skills/cas-cli-craft/references/exemplars/status-screen.md": [
+      "c0b7ec3ee374661e1077f4c1d949337a45d45bc3c7a5a1f95484b97c62eec47d",
+      "f7ca47f68001afd342d70fa2748976f11e66dcbdfd02578abe487b36ec1f945f"
+    ],
+    "skills/cas-cli-craft/references/output-contract.md": [
+      "ae67d8190695dd9160c5881db11be8d0f2db4a36ec9b2dfc4fc5d0f3281010dd"
+    ],
     "skills/cas-cut-release/references/failure-log.md": [
       "01adf107e100b731d03129bc04627138d46cb1bcd80714d23b6d94c121d70926",
       "11c45dae553a929aa30499764890fce418d6ad272b39af1b33ff500ed0f8209e",
@@ -114,6 +138,8 @@
       "f51e1e11829bf361483971145f8e6428cd73304405b5212d32e2148c988a57c2"
     ],
     "skills/cas-html-reports/references/review-checklist.md": [
+      "814f8403a04fc50a8936a5b64e64b645fda253fc9592e4833ff3444a2cb68a6a",
+      "c799bdf314d49fb4b9b0791725857f59bef7e6ce91b1059144b01ddffc275cbe",
       "de19d31ff57b81a717bac14dcf3c43b0235c4775d74f745c7ee8db44651b14ff",
       "de85d4d0af9db1225e14381464db5cdfa4798e35041167a04120064f64fafcce",
       "e16f440a723f3b43be28f1eb9aaf0ed3fb14f18343ab0c755a7d14fab01efd21",
@@ -558,8 +584,10 @@
       "c7b79d99cf1af124281e13790d6ab2654aa5c1f9e717e6fafc93783811ed4b07"
     ],
     "skills/cas-ui-craft/references/critique-rubric.md": [
+      "05d099d2646a867c0cf1bf41d3759f7ea743573a143c02f76f00565b53fe7655",
       "e297a9ce3f79a2187c1b598731fd6b3918aa002139d7b069fffc183f49a25e16",
-      "e39773b8cd65b342e6c2ef187efef130f0da358ca003db8412d181972ac909f3"
+      "e39773b8cd65b342e6c2ef187efef130f0da358ca003db8412d181972ac909f3",
+      "f25affdc4412ea1d5ee40e3cd1708e7ac937ea00112d4f24e87687d4d42ad5e8"
     ],
     "skills/cas-ui-craft/references/exemplars/before-after.html": [
       "c8c50345f94536ca1f9780d45218f6bdfb17d9dceff90a12c06d8ca51f92f645"

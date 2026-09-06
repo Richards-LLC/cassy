@@ -111,6 +111,8 @@ This is a requirement, not a suggestion; bare assertions fail.
 - **Public surface:** run `node scripts/visual-qa.mjs --strict`; record `docs/factory/data/visual-qa/visual-qa.md`
   PASS, allowlist reasons, and the critique rubric score.
   (floor 4/5 on distinctiveness, fit, hierarchy).
+- **CLI/TUI surface:** apply `cas-cli-craft`; paste the `terminal-qa: PASS …`
+  receipt from `node scripts/terminal-qa.mjs --label <cmd> -- <cmd …>`.
 - **User-visible change:** assess release-notes impact.
 
 ## Blockers

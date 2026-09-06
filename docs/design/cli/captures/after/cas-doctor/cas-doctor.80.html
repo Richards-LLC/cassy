@@ -1,0 +1,159 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>terminal-qa · cas-doctor · 80 columns</title>
+<body style="margin:24px;background:#f3f1ec;color:#222;font:14px system-ui">
+<h1 style="font:600 18px system-ui;margin:0 0 16px 0">terminal-qa · cas-doctor · 80 columns</h1>
+<p style="margin:0 0 16px 0;max-width:80ch">Each block is the same capture rendered on one palette's background with that palette's ANSI table. Anything you cannot read here, a user cannot read either.</p>
+<h2 style="font:600 14px system-ui;margin:0 0 6px 0">dark · 80 columns · exit 0</h2>
+<pre style="background:#1e1e1e;color:#cccccc;width:80ch;padding:12px;margin:0 0 24px 0;overflow-x:auto;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:1px solid #8884">doctor found safe automatic fixes; apply now? [y/N] 
+<span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">32 warnings</span> · 25 ok · cas-src · 3.17.2
+<span style="color:#90939f">────────────────────────────────────────────────────────────────────────────────</span>
+<span style="color:#cccccc;font-weight:bold">Host</span>
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">host                        </span>  host: 30 findings — see `cas doctor --host`
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">registered project roots ×28</span>  Registered root `/tmp/.tmpbZhpwo` is excluded
+                                  from `cas update` discovery: a disposable temp
+                                  root at /tmp. Remove the stale registration …
+Store         <span style="color:#50c878;font-weight:bold">✓</span> cas directory  <span style="color:#50c878;font-weight:bold">✓</span> database  <span style="color:#50c878;font-weight:bold">✓</span> schema
+              <span style="color:#50c878;font-weight:bold">✓</span> factory session cas-src-lively-panther-31  <span style="color:#50c878;font-weight:bold">✓</span> tables
+              <span style="color:#50c878;font-weight:bold">✓</span> entry store  <span style="color:#50c878;font-weight:bold">✓</span> memory stats  <span style="color:#50c878;font-weight:bold">✓</span> memory decay  <span style="color:#50c878;font-weight:bold">✓</span> rules  <span style="color:#50c878;font-weight:bold">✓</span> tasks
+Indexes       <span style="color:#50c878;font-weight:bold">✓</span> legacy search index  <span style="color:#50c878;font-weight:bold">✓</span> search index  <span style="color:#50c878;font-weight:bold">✓</span> symbol index
+              <span style="color:#50c878;font-weight:bold">✓</span> embedding drain  <span style="color:#50c878;font-weight:bold">✓</span> code history index  <span style="color:#50c878;font-weight:bold">✓</span> embeddings
+Cloud         <span style="color:#50c878;font-weight:bold">✓</span> supervisor relay  <span style="color:#50c878;font-weight:bold">✓</span> delivery retries  <span style="color:#50c878;font-weight:bold">✓</span> canonical id
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">cloud identity metadata</span>  foreign cloud scope(s) for project `cas-src`:
+                             team_project_registered_2a57bec9-5dfa-4a8f-b711-31…
+                             team_project_registered_2a57bec9-5dfa-4a8f-b711-31…
+    <span style="color:#90939f">→</span> run `cas doctor --fix --yes` to preview, purge with consent, and sync the
+      current project (the underlying preview is `cas cloud purge-foreign
+      --dry-run`, followed by `cas cloud sync`)
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">cloud sync queue       </span>  80 queued content change(s) block purge-foreign
+                             (task: 80)
+    <span style="color:#90939f">→</span> Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud
+      purge-foreign --dry-run`; repeat the push until this count reaches 0. The
+      cloud refused 175 parked row(s): project_mismatch ×175 — another project …
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">cross-project rows     </span>  10 foreign task row(s) from 6 other project(s)
+                             (/home/pippenz/Richards LLC/Accounting,
+                             gabber-studio, ozer, pantheon, petra-stella-cloud,…
+    <span style="color:#90939f">→</span> run `cas doctor --fix --yes` to quarantine open rows (the focused form is
+      `cas doctor --fix-cloud-rows --yes`, and reverse it with `cas doctor
+      --release-cloud-rows --yes`; use `cas cloud purge-foreign --dry-run` only…
+Config        <span style="color:#50c878;font-weight:bold">✓</span> configuration  <span style="color:#50c878;font-weight:bold">✓</span> issue repositories  <span style="color:#50c878;font-weight:bold">✓</span> MCP stdio upstreams
+              <span style="color:#50c878;font-weight:bold">✓</span> sync target  <span style="color:#50c878;font-weight:bold">✓</span> mcp config
+Integrations  <span style="color:#50c878;font-weight:bold">✓</span> integrations
+
+<span style="color:#90939f">25 ok · 32 warnings · 0 errors · 1.1s</span>
+<span style="color:#90939f">cas doctor --verbose for timings and full messages</span></pre>
+<h2 style="font:600 14px system-ui;margin:0 0 6px 0">light · 80 columns · exit 0</h2>
+<pre style="background:#ffffff;color:#333333;width:80ch;padding:12px;margin:0 0 24px 0;overflow-x:auto;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:1px solid #8884">doctor found safe automatic fixes; apply now? [y/N] 
+<span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">32 warnings</span> · 25 ok · cas-src · 3.17.2
+<span style="color:#50525c">────────────────────────────────────────────────────────────────────────────────</span>
+<span style="color:#333333;font-weight:bold">Host</span>
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">host                        </span>  host: 30 findings — see `cas doctor --host`
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">registered project roots ×28</span>  Registered root `/tmp/.tmpbZhpwo` is excluded
+                                  from `cas update` discovery: a disposable temp
+                                  root at /tmp. Remove the stale registration …
+Store         <span style="color:#1e964b;font-weight:bold">✓</span> cas directory  <span style="color:#1e964b;font-weight:bold">✓</span> database  <span style="color:#1e964b;font-weight:bold">✓</span> schema
+              <span style="color:#1e964b;font-weight:bold">✓</span> factory session cas-src-lively-panther-31  <span style="color:#1e964b;font-weight:bold">✓</span> tables
+              <span style="color:#1e964b;font-weight:bold">✓</span> entry store  <span style="color:#1e964b;font-weight:bold">✓</span> memory stats  <span style="color:#1e964b;font-weight:bold">✓</span> memory decay  <span style="color:#1e964b;font-weight:bold">✓</span> rules  <span style="color:#1e964b;font-weight:bold">✓</span> tasks
+Indexes       <span style="color:#1e964b;font-weight:bold">✓</span> legacy search index  <span style="color:#1e964b;font-weight:bold">✓</span> search index  <span style="color:#1e964b;font-weight:bold">✓</span> symbol index
+              <span style="color:#1e964b;font-weight:bold">✓</span> embedding drain  <span style="color:#1e964b;font-weight:bold">✓</span> code history index  <span style="color:#1e964b;font-weight:bold">✓</span> embeddings
+Cloud         <span style="color:#1e964b;font-weight:bold">✓</span> supervisor relay  <span style="color:#1e964b;font-weight:bold">✓</span> delivery retries  <span style="color:#1e964b;font-weight:bold">✓</span> canonical id
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">cloud identity metadata</span>  foreign cloud scope(s) for project `cas-src`:
+                             team_project_registered_2a57bec9-5dfa-4a8f-b711-31…
+                             team_project_registered_2a57bec9-5dfa-4a8f-b711-31…
+    <span style="color:#50525c">→</span> run `cas doctor --fix --yes` to preview, purge with consent, and sync the
+      current project (the underlying preview is `cas cloud purge-foreign
+      --dry-run`, followed by `cas cloud sync`)
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">cloud sync queue       </span>  80 queued content change(s) block purge-foreign
+                             (task: 80)
+    <span style="color:#50525c">→</span> Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud
+      purge-foreign --dry-run`; repeat the push until this count reaches 0. The
+      cloud refused 175 parked row(s): project_mismatch ×175 — another project …
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">cross-project rows     </span>  10 foreign task row(s) from 6 other project(s)
+                             (/home/pippenz/Richards LLC/Accounting,
+                             gabber-studio, ozer, pantheon, petra-stella-cloud,…
+    <span style="color:#50525c">→</span> run `cas doctor --fix --yes` to quarantine open rows (the focused form is
+      `cas doctor --fix-cloud-rows --yes`, and reverse it with `cas doctor
+      --release-cloud-rows --yes`; use `cas cloud purge-foreign --dry-run` only…
+Config        <span style="color:#1e964b;font-weight:bold">✓</span> configuration  <span style="color:#1e964b;font-weight:bold">✓</span> issue repositories  <span style="color:#1e964b;font-weight:bold">✓</span> MCP stdio upstreams
+              <span style="color:#1e964b;font-weight:bold">✓</span> sync target  <span style="color:#1e964b;font-weight:bold">✓</span> mcp config
+Integrations  <span style="color:#1e964b;font-weight:bold">✓</span> integrations
+
+<span style="color:#50525c">25 ok · 32 warnings · 0 errors · 943ms</span>
+<span style="color:#50525c">cas doctor --verbose for timings and full messages</span></pre>
+<h2 style="font:600 14px system-ui;margin:0 0 6px 0">solarized-dark · 80 columns · exit 0</h2>
+<pre style="background:#002b36;color:#839496;width:80ch;padding:12px;margin:0 0 24px 0;overflow-x:auto;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:1px solid #8884">doctor found safe automatic fixes; apply now? [y/N] 
+<span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">32 warnings</span> · 25 ok · cas-src · 3.17.2
+<span style="color:#90939f">────────────────────────────────────────────────────────────────────────────────</span>
+<span style="color:#839496;font-weight:bold">Host</span>
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">host                        </span>  host: 30 findings — see `cas doctor --host`
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">registered project roots ×28</span>  Registered root `/tmp/.tmpbZhpwo` is excluded
+                                  from `cas update` discovery: a disposable temp
+                                  root at /tmp. Remove the stale registration …
+Store         <span style="color:#50c878;font-weight:bold">✓</span> cas directory  <span style="color:#50c878;font-weight:bold">✓</span> database  <span style="color:#50c878;font-weight:bold">✓</span> schema
+              <span style="color:#50c878;font-weight:bold">✓</span> factory session cas-src-lively-panther-31  <span style="color:#50c878;font-weight:bold">✓</span> tables
+              <span style="color:#50c878;font-weight:bold">✓</span> entry store  <span style="color:#50c878;font-weight:bold">✓</span> memory stats  <span style="color:#50c878;font-weight:bold">✓</span> memory decay  <span style="color:#50c878;font-weight:bold">✓</span> rules  <span style="color:#50c878;font-weight:bold">✓</span> tasks
+Indexes       <span style="color:#50c878;font-weight:bold">✓</span> legacy search index  <span style="color:#50c878;font-weight:bold">✓</span> search index  <span style="color:#50c878;font-weight:bold">✓</span> symbol index
+              <span style="color:#50c878;font-weight:bold">✓</span> embedding drain  <span style="color:#50c878;font-weight:bold">✓</span> code history index  <span style="color:#50c878;font-weight:bold">✓</span> embeddings
+Cloud         <span style="color:#50c878;font-weight:bold">✓</span> supervisor relay  <span style="color:#50c878;font-weight:bold">✓</span> delivery retries  <span style="color:#50c878;font-weight:bold">✓</span> canonical id
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">cloud identity metadata</span>  foreign cloud scope(s) for project `cas-src`:
+                             team_project_registered_2a57bec9-5dfa-4a8f-b711-31…
+                             team_project_registered_2a57bec9-5dfa-4a8f-b711-31…
+    <span style="color:#90939f">→</span> run `cas doctor --fix --yes` to preview, purge with consent, and sync the
+      current project (the underlying preview is `cas cloud purge-foreign
+      --dry-run`, followed by `cas cloud sync`)
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">cloud sync queue       </span>  80 queued content change(s) block purge-foreign
+                             (task: 80)
+    <span style="color:#90939f">→</span> Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud
+      purge-foreign --dry-run`; repeat the push until this count reaches 0. The
+      cloud refused 175 parked row(s): project_mismatch ×175 — another project …
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">cross-project rows     </span>  10 foreign task row(s) from 6 other project(s)
+                             (/home/pippenz/Richards LLC/Accounting,
+                             gabber-studio, ozer, pantheon, petra-stella-cloud,…
+    <span style="color:#90939f">→</span> run `cas doctor --fix --yes` to quarantine open rows (the focused form is
+      `cas doctor --fix-cloud-rows --yes`, and reverse it with `cas doctor
+      --release-cloud-rows --yes`; use `cas cloud purge-foreign --dry-run` only…
+Config        <span style="color:#50c878;font-weight:bold">✓</span> configuration  <span style="color:#50c878;font-weight:bold">✓</span> issue repositories  <span style="color:#50c878;font-weight:bold">✓</span> MCP stdio upstreams
+              <span style="color:#50c878;font-weight:bold">✓</span> sync target  <span style="color:#50c878;font-weight:bold">✓</span> mcp config
+Integrations  <span style="color:#50c878;font-weight:bold">✓</span> integrations
+
+<span style="color:#90939f">25 ok · 32 warnings · 0 errors · 913ms</span>
+<span style="color:#90939f">cas doctor --verbose for timings and full messages</span></pre>
+<h2 style="font:600 14px system-ui;margin:0 0 6px 0">solarized-light · 80 columns · exit 0</h2>
+<pre style="background:#fdf6e3;color:#657b83;width:80ch;padding:12px;margin:0 0 24px 0;overflow-x:auto;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:1px solid #8884">doctor found safe automatic fixes; apply now? [y/N] 
+<span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">32 warnings</span> · 25 ok · cas-src · 3.17.2
+<span style="color:#50525c">────────────────────────────────────────────────────────────────────────────────</span>
+<span style="color:#657b83;font-weight:bold">Host</span>
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">host                        </span>  host: 30 findings — see `cas doctor --host`
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">registered project roots ×28</span>  Registered root `/tmp/.tmpbZhpwo` is excluded
+                                  from `cas update` discovery: a disposable temp
+                                  root at /tmp. Remove the stale registration …
+Store         <span style="color:#1e964b;font-weight:bold">✓</span> cas directory  <span style="color:#1e964b;font-weight:bold">✓</span> database  <span style="color:#1e964b;font-weight:bold">✓</span> schema
+              <span style="color:#1e964b;font-weight:bold">✓</span> factory session cas-src-lively-panther-31  <span style="color:#1e964b;font-weight:bold">✓</span> tables
+              <span style="color:#1e964b;font-weight:bold">✓</span> entry store  <span style="color:#1e964b;font-weight:bold">✓</span> memory stats  <span style="color:#1e964b;font-weight:bold">✓</span> memory decay  <span style="color:#1e964b;font-weight:bold">✓</span> rules  <span style="color:#1e964b;font-weight:bold">✓</span> tasks
+Indexes       <span style="color:#1e964b;font-weight:bold">✓</span> legacy search index  <span style="color:#1e964b;font-weight:bold">✓</span> search index  <span style="color:#1e964b;font-weight:bold">✓</span> symbol index
+              <span style="color:#1e964b;font-weight:bold">✓</span> embedding drain  <span style="color:#1e964b;font-weight:bold">✓</span> code history index  <span style="color:#1e964b;font-weight:bold">✓</span> embeddings
+Cloud         <span style="color:#1e964b;font-weight:bold">✓</span> supervisor relay  <span style="color:#1e964b;font-weight:bold">✓</span> delivery retries  <span style="color:#1e964b;font-weight:bold">✓</span> canonical id
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">cloud identity metadata</span>  foreign cloud scope(s) for project `cas-src`:
+                             team_project_registered_2a57bec9-5dfa-4a8f-b711-31…
+                             team_project_registered_2a57bec9-5dfa-4a8f-b711-31…
+    <span style="color:#50525c">→</span> run `cas doctor --fix --yes` to preview, purge with consent, and sync the
+      current project (the underlying preview is `cas cloud purge-foreign
+      --dry-run`, followed by `cas cloud sync`)
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">cloud sync queue       </span>  80 queued content change(s) block purge-foreign
+                             (task: 80)
+    <span style="color:#50525c">→</span> Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud
+      purge-foreign --dry-run`; repeat the push until this count reaches 0. The
+      cloud refused 175 parked row(s): project_mismatch ×175 — another project …
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">cross-project rows     </span>  10 foreign task row(s) from 6 other project(s)
+                             (/home/pippenz/Richards LLC/Accounting,
+                             gabber-studio, ozer, pantheon, petra-stella-cloud,…
+    <span style="color:#50525c">→</span> run `cas doctor --fix --yes` to quarantine open rows (the focused form is
+      `cas doctor --fix-cloud-rows --yes`, and reverse it with `cas doctor
+      --release-cloud-rows --yes`; use `cas cloud purge-foreign --dry-run` only…
+Config        <span style="color:#1e964b;font-weight:bold">✓</span> configuration  <span style="color:#1e964b;font-weight:bold">✓</span> issue repositories  <span style="color:#1e964b;font-weight:bold">✓</span> MCP stdio upstreams
+              <span style="color:#1e964b;font-weight:bold">✓</span> sync target  <span style="color:#1e964b;font-weight:bold">✓</span> mcp config
+Integrations  <span style="color:#1e964b;font-weight:bold">✓</span> integrations
+
+<span style="color:#50525c">25 ok · 32 warnings · 0 errors · 958ms</span>
+<span style="color:#50525c">cas doctor --verbose for timings and full messages</span></pre>
+</body>

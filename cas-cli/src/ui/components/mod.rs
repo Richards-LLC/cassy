@@ -27,7 +27,10 @@ pub mod test_helpers;
 pub mod traits;
 pub mod tree;
 
-pub use formatter::{Formatter, OutputMode, terminal_width, to_crossterm_color};
+pub use formatter::{
+    Formatter, OutputMode, Verdict, ascii_fallback, locale_is_utf8, terminal_width,
+    to_crossterm_color,
+};
 pub use header::{Header, Level};
 pub use key_value::KeyValue;
 pub use layout::{Column, Divider, DividerStyle, Row};

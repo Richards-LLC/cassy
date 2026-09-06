@@ -92,6 +92,23 @@ Integration tests are in `cas-cli/tests/`. Key test files:
 - `memory_share_test.rs` — `cas memory share|unshare` CLI behavior
 - `team_memories_e2e_test.rs` — end-to-end team-memories flow (share → push → pull)
 
+### Terminal output gate
+
+Anything a command prints for a person (`cas doctor`, `cas update`, `cas factory status`, a
+table, a progress line, an error) is designed under the `cas-cli-craft` builtin skill and gated by
+`scripts/terminal-qa.mjs`: it runs the command in a pty at 80 and 120 columns on the dark, light
+and both Solarized palettes plus piped, `NO_COLOR` and `LC_ALL=C` runs, and fails on wrapped rows,
+split tokens, colour under 3:1 (marks) or 4.5:1 (text), truncation with no escape flag, glyphs on a
+C locale, SGR under `NO_COLOR`, redraws in a pipe, and a `--json` stream that is not one document.
+
+```bash
+node scripts/terminal-qa.mjs --label cas-doctor --escape-flag --verbose --json-flag --json -- cas doctor
+node --test scripts/terminal-qa.test.mjs   # the gate's own suite (planted-defect fixtures)
+```
+
+Paste the `terminal-qa: PASS …` receipt line into the pre-close note; briefs and captures for the
+shipped commands live in `docs/design/cli/`.
+
 Dev dependencies include: `insta` (snapshot testing), `wiremock` (HTTP mocking), `rstest` (parametrized tests), `proptest` (property-based), `criterion` (benchmarks), `cas-tui-test` (TUI testing).
 
 ## Skill & Rule Sync

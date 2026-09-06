@@ -2,11 +2,21 @@
 mod tests {
     use super::super::{
         check_worktree_staleness, ready_blocked_sort_options, resolve_staleness_sync_ref,
-        slugify_for_branch, sort_order_label, truncate_str, truncated_list_footer,
+        epic_branch_name, slugify_for_branch, sort_order_label, truncate_str, truncated_list_footer,
         truncated_list_header,
     };
     use std::process::Command;
     use tempfile::TempDir;
+
+    #[test]
+    fn epic_branch_name_keeps_id_after_long_title_slug() {
+        let title = "A deliberately long epic title whose slug must be truncated before the id suffix";
+
+        assert_eq!(
+            epic_branch_name(title, "cas-3228"),
+            "epic/a-deliberately-long-epic-title-whose-slug-must-be-truncated-before-cas-3228"
+        );
+    }
 
     // ========================================================================
     // cas-06f9 (GH #104): honest truncation + priority-first default

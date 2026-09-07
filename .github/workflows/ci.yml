@@ -383,11 +383,15 @@ jobs:
       - name: Build and test Commander web assets
         if: steps.classify-diff.outputs.web-check-needed == 'true'
         working-directory: hub-web
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
         run: |
           npm ci
           npm run typecheck
           npm test
           npm run build
+          npm exec --yes --package=playwright -- playwright install --with-deps chromium
+          npm run visual-qa
           git diff --exit-code -- dist
 
       - name: Check

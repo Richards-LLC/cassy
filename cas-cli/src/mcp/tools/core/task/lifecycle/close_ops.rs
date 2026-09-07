@@ -12678,6 +12678,117 @@ fn target_only_receipt_lint_parent(
     })
 }
 
+/// Return whether `tip` carries a non-empty change attributable to `task`.
+///
+/// A parked anchor is durable task identity even after a supervisor-directed
+/// rebase rewrites its object id. Prefer the task id in the current commit
+/// message, then fall back to patch equivalence with the parked anchor when
+/// that historical object is still available. The first-parent diff must be
+/// non-empty in either case; target ancestry alone is not delivery evidence.
+fn task_tip_has_non_empty_attributed_diff(
+    repo_path: &std::path::Path,
+    task: &cas_types::Task,
+    tip: &str,
+    parked_anchor: Option<&str>,
+) -> bool {
+    use std::process::Command;
+
+    if !git_ref_exists(repo_path, tip) {
+        return false;
+    }
+    let tip_parent = format!("{tip}^1");
+    let diff = Command::new("git")
+        .args(["diff", "--name-only", &tip_parent, tip, "--"])
+        .current_dir(repo_path)
+        .output();
+    let has_non_empty_diff = matches!(
+        diff,
+        Ok(output) if output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| !line.trim().is_empty())
+    );
+    if !has_non_empty_diff {
+        return false;
+    }
+
+    let identity = task_commit_identity(task, None);
+    commit_is_task_attributable(repo_path, tip, &identity)
+        || parked_anchor.is_some_and(|anchor| commits_have_equivalent_patch(repo_path, anchor, tip))
+}
+
+/// Compare the first-parent patches of two commits. Rebase changes commit
+/// ids and can change context, while the stable patch id preserves the task's
+/// delivery identity when the original anchor remains as a dangling object.
+fn commits_have_equivalent_patch(repo_path: &std::path::Path, left: &str, right: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    if left.is_empty()
+        || right.is_empty()
+        || left.starts_with('-')
+        || right.starts_with('-')
+        || !git_ref_exists(repo_path, left)
+        || !git_ref_exists(repo_path, right)
+    {
+        return false;
+    }
+
+    let patch_id = |commit: &str| {
+        let parent = format!("{commit}^1");
+        let diff = Command::new("git")
+            .args(["diff", &parent, commit, "--"])
+            .current_dir(repo_path)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        if diff.stdout.is_empty() {
+            return None;
+        }
+        let mut patch_id = Command::new("git")
+            .args(["patch-id", "--stable"])
+            .current_dir(repo_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        patch_id.stdin.as_mut()?.write_all(&diff.stdout).ok()?;
+        let output = patch_id.wait_with_output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .map(str::to_string)
+    };
+
+    patch_id(left) == patch_id(right)
+}
+
+fn stale_rebased_anchor_rejection(
+    task_id: &str,
+    parked_anchor: &str,
+    current_tip: Option<&str>,
+    parent_branch: &str,
+) -> String {
+    let retry = current_tip
+        .map(|tip| {
+            format!(
+                " The current worker branch tip is `{tip}`. If that commit carries this task's work, first merge it into `{parent_branch}`, then retry close with `mcp__cas__task action=close id={task_id} commit_receipt={tip}`."
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                " Resolve the current worker branch tip, merge it into `{parent_branch}`, and retry close with `mcp__cas__task action=close id={task_id} commit_receipt=<current tip>`."
+            )
+        });
+    format!(
+        "PRE-CLOSE HOOK CONTEXT REJECTED: recorded task anchor `{parked_anchor}` is no longer reachable from the validated task worktree branch after a history rewrite. No close-time executable gate was run. {retry}\n\nIf the current tip cannot be merged or its task attribution is unclear, ask the supervisor to verify the delivery and re-anchor/reconcile task `{task_id}` before retrying close."
+    )
+}
+
 pub(crate) fn run_declared_pre_close_hook(
     task: &cas_types::Task,
     repo_context: &crate::mcp::tools::core::task::repo_context::RepoContext,
@@ -12703,16 +12814,54 @@ pub(crate) fn run_declared_pre_close_hook(
                 "PRE-CLOSE HOOK CONTEXT REJECTED: task worktree has detached or unreadable HEAD"
                     .to_string()
             })?;
+            let parked_anchor = task.deliverables.factory_branch_anchor.as_deref();
+            let mut reanchored = false;
             let tip = normalized_receipt
-                .as_deref()
-                .or(task.deliverables.factory_branch_anchor.as_deref())
-                .map(str::to_string)
+                .clone()
+                .or_else(|| {
+                    let anchor = parked_anchor?;
+                    let current_tip = resolve_branch_sha(path, "HEAD");
+                    let anchor_reachable = git_ref_exists(path, anchor)
+                        && git_commit_is_ancestor(path, anchor, "HEAD");
+                    if anchor_reachable {
+                        return Some(anchor.to_string());
+                    }
+
+                    // The parked anchor may have been rewritten out of every
+                    // branch by a supervisor-directed rebase. Refresh the
+                    // target before deciding whether the current tip is the
+                    // task's integrated replacement.
+                    fetch_parent_branch_best_effort(path, &repo_context.target_branch);
+                    let current_tip = current_tip?;
+                    if commit_is_merged_into_parent(path, &current_tip, &repo_context.target_branch)
+                        && task_tip_has_non_empty_attributed_diff(
+                            path,
+                            task,
+                            &current_tip,
+                            parked_anchor,
+                        )
+                    {
+                        reanchored = true;
+                        return Some(current_tip);
+                    }
+                    Some(anchor.to_string())
+                })
                 .or_else(|| resolve_branch_sha(path, "HEAD"))
                 .ok_or_else(|| {
                     "PRE-CLOSE HOOK CONTEXT REJECTED: cannot resolve task-owned commit tip"
                         .to_string()
                 })?;
             if !git_ref_exists(path, &tip) {
+                if normalized_receipt.is_none()
+                    && let Some(anchor) = parked_anchor
+                {
+                    return Err(stale_rebased_anchor_rejection(
+                        &task.id,
+                        anchor,
+                        resolve_branch_sha(path, "HEAD").as_deref(),
+                        &repo_context.target_branch,
+                    ));
+                }
                 return Err(
                     "PRE-CLOSE HOOK CONTEXT REJECTED: task commit evidence does not resolve in \
                      its validated worktree repository."
@@ -12725,13 +12874,28 @@ pub(crate) fn run_declared_pre_close_hook(
                     commit_is_merged_into_parent(path, receipt, &repo_context.target_branch)
                 });
             if !reachable_from_worktree && !receipt_reachable_from_target {
+                if normalized_receipt.is_none()
+                    && let Some(anchor) = parked_anchor
+                {
+                    return Err(stale_rebased_anchor_rejection(
+                        &task.id,
+                        anchor,
+                        resolve_branch_sha(path, "HEAD").as_deref(),
+                        &repo_context.target_branch,
+                    ));
+                }
                 return Err(
                     "PRE-CLOSE HOOK CONTEXT REJECTED: task commit evidence is not reachable from \
                      the validated task worktree branch. No close-time executable gate was run."
                         .to_string(),
                 );
             }
-            let lint_parent = if !reachable_from_worktree && receipt_reachable_from_target {
+            let lint_parent = if reanchored {
+                // The target already contains the replacement tip, so diffing
+                // target..tip would be empty. Its first parent is the narrow,
+                // task-attributed delivery range used by the lint instead.
+                target_only_receipt_lint_parent(path, &tip)?
+            } else if !reachable_from_worktree && receipt_reachable_from_target {
                 // A squash/cherry-pick receipt that exists only on the target
                 // is itself the merge-base with that target. Diffing target
                 // vs receipt is therefore empty and silently disables lint.
@@ -21801,6 +21965,104 @@ mod zero_change_close_tests {
                 "task commit evidence is not reachable from the validated task worktree branch"
             ),
             "the existing refusal must be preserved: {error}"
+        );
+    }
+
+    /// cas-06ff: a supervisor-directed rebase rewrites the parked anchor out
+    /// of the worker branch. Once the rebased tip is merged, the hook must
+    /// use that task-attributed tip as the close scope instead of rejecting
+    /// the historical anchor.
+    #[test]
+    fn cas06ff_rebased_integrated_tip_reanchors_pre_close_scope() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        std::fs::write(p.join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: deliver worker change"]);
+        let parked_anchor = head_sha(p);
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("base.rs"), "pub fn base_change() {}\n").unwrap();
+        git(p, &["add", "base.rs"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "chore: advance integration base"],
+        );
+        git(p, &["checkout", "-q", "factory/test-worker"]);
+        git(p, &["rebase", "-q", "main"]);
+        let rebased_tip = head_sha(p);
+        assert_ne!(
+            parked_anchor, rebased_tip,
+            "fixture must rewrite the parked SHA"
+        );
+
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/test-worker",
+                "-m",
+                "merge rebased worker delivery",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/test-worker"]);
+
+        let mut task = Task::new("cas-06ff".to_string(), "rebase close scope".to_string());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(parked_anchor.clone());
+        let evidence = run_declared_pre_close_hook(&task, &declared_main_context(p), Some(p), None)
+            .expect("a merged rebased task tip must re-anchor the close hook scope");
+
+        assert_eq!(evidence.task_tip.as_deref(), Some(rebased_tip.as_str()));
+        assert!(!git_commit_is_ancestor(p, &parked_anchor, "HEAD"));
+        assert!(git_commit_is_ancestor(p, &rebased_tip, "main"));
+    }
+
+    /// cas-06ff: if the rebased tip is not integrated, retain the fail-closed
+    /// rejection but tell the worker the exact commit_receipt retry and the
+    /// supervisor handoff when that retry cannot be completed locally.
+    #[test]
+    fn cas06ff_rebased_unmerged_tip_names_receipt_retry_and_supervisor_path() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        std::fs::write(p.join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: deliver worker change"]);
+        let parked_anchor = head_sha(p);
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("base.rs"), "pub fn base_change() {}\n").unwrap();
+        git(p, &["add", "base.rs"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "chore: advance integration base"],
+        );
+        git(p, &["checkout", "-q", "factory/test-worker"]);
+        git(p, &["rebase", "-q", "main"]);
+        let rebased_tip = head_sha(p);
+
+        let mut task = Task::new("cas-06ff".to_string(), "rebase close scope".to_string());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(parked_anchor);
+        let error = run_declared_pre_close_hook(&task, &declared_main_context(p), Some(p), None)
+            .expect_err("an unmerged rebased tip must remain fail-closed");
+
+        assert!(
+            error.contains(&rebased_tip),
+            "current tip must be named: {error}"
+        );
+        assert!(
+            error.contains(&format!(
+                "task action=close id=cas-06ff commit_receipt={rebased_tip}"
+            )),
+            "rejection must name the exact receipt retry: {error}"
+        );
+        assert!(
+            error.contains("supervisor"),
+            "rejection must name the supervisor handoff: {error}"
         );
     }
 

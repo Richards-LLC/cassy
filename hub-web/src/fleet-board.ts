@@ -180,11 +180,16 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
   const table = document.createElement("table");
   table.className = "fleet-plot";
   const head = table.createTHead().insertRow();
-  for (const label of ["Session", ...TRACK.map((state) => STATE_LABEL[state])]) {
+  for (const [index, label] of ["Session", ...TRACK.map((state) => STATE_LABEL[state])].entries()) {
     const cell = document.createElement("th");
     cell.scope = "col";
-    if (label === "Unreachable") cell.append("Unreach", document.createElement("wbr"), "able");
-    else cell.textContent = label;
+    cell.setAttribute("aria-label", label);
+    cell.append(textNode("span", "fleet-track-label", label));
+    if (index > 0) {
+      const key = textNode("span", "fleet-track-key", String(index));
+      key.setAttribute("aria-hidden", "true");
+      cell.append(key);
+    }
     head.append(cell);
   }
   const body = table.createTBody();
@@ -198,7 +203,7 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
     name.scope = "row";
     name.title = entry.session;
     name.setAttribute("aria-label", `${entry.session} on ${entry.machineLabel}`);
-    name.textContent = entry.session.split("-").slice(-3).join("-");
+    name.append(textNode("span", "fleet-plot-name", entry.session.split("-").slice(-3).join("-")));
     row.append(name);
     for (const position of TRACK) {
       const cell = row.insertCell();
@@ -207,8 +212,10 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
       cell.setAttribute("aria-label", `${STATE_LABEL[state]}${state === "working" ? `: ${entry.phase}` : ""}`);
       const dot = textNode("span", "fleet-dot", "");
       dot.setAttribute("aria-hidden", "true");
-      cell.append(dot);
-      if (state === "working") cell.append(textNode("span", "fleet-dot-phase", entry.phase ?? ""));
+      const mark = textNode("span", "fleet-plot-mark", "");
+      mark.append(dot);
+      if (state === "working") mark.append(textNode("span", "fleet-dot-phase", entry.phase ?? ""));
+      cell.append(mark);
       cell.append(textNode("span", "sr-only", STATE_LABEL[state]));
     }
   }
@@ -218,7 +225,10 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
   scroll.setAttribute("role", "region");
   scroll.setAttribute("aria-label", "Fleet state plot; scroll for more sessions");
   scroll.append(table);
-  figure.append(scroll, textNode("figcaption", "fleet-figure-caption", "One dot per session. Ringed: needs you. Shaded: working."));
+  const legend = textNode("div", "fleet-track-legend", "");
+  legend.setAttribute("aria-hidden", "true");
+  TRACK.forEach((state, index) => legend.append(textNode("span", "", `${index + 1} ${STATE_LABEL[state]}`)));
+  figure.append(scroll, legend, textNode("figcaption", "fleet-figure-caption", "One dot per session. Ringed: needs you. Shaded: working."));
   return figure;
 }
 

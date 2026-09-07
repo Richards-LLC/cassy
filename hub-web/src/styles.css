@@ -437,22 +437,36 @@ pre { font-family: var(--font-mono); }
 .fleet-catalog-time { color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
 .fleet-board-summary { margin: 0; color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
 .fleet-verdict { flex-basis: 100%; margin: var(--space-2) 0 0; max-width: 22ch; font: var(--weight-regular) var(--fs-verdict)/1.1 var(--font-display); letter-spacing: -.015em; text-wrap: pretty; }
-.fleet-figure { min-width: 0; margin: 0; }
+.fleet-figure { min-width: 0; margin: 0; container: fleet-figure / inline-size; }
 .fleet-plot-scroll { max-height: calc(8 * var(--button-compact-height) + var(--space-12)); overflow: auto; }
 .fleet-plot { width: 100%; border-collapse: collapse; table-layout: fixed; font: var(--fs-xs)/1.16 var(--font-mono); }
-.fleet-plot th { padding: var(--space-1); font-weight: var(--weight-regular); overflow-wrap: anywhere; text-align: center; }
-.fleet-plot thead th { padding: 0; height: var(--space-12); color: var(--text-mid); vertical-align: bottom; }
+.fleet-plot th { padding: var(--space-1); font-weight: var(--weight-regular); white-space: nowrap; text-align: center; }
+.fleet-plot thead th { padding: var(--space-1) 0; height: var(--space-12); color: var(--text-mid); vertical-align: bottom; }
 .fleet-plot th:first-child { width: 25%; text-align: left; }
-.fleet-plot th:nth-child(3) { width: 21%; }
+.fleet-plot th:nth-child(3) { width: calc(10ch + var(--space-6)); }
 .fleet-plot th:last-child { width: 19%; }
-.fleet-plot tbody th { padding: 0 var(--space-1); color: var(--text-mid); }
-.fleet-track-cell { height: var(--button-compact-height); padding: 0; position: relative; text-align: center; vertical-align: middle; }
-.fleet-track-cell::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: var(--line-width); background: var(--line-subtle); }
+.fleet-plot tbody th, .fleet-track-cell { height: var(--button-compact-height); padding: 0; vertical-align: middle; }
+.fleet-plot tbody th { color: var(--text-mid); }
+.fleet-plot-name { display: block; padding: 0 var(--space-1); line-height: var(--button-compact-height); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fleet-track-cell { position: relative; text-align: center; }
+.fleet-track-cell::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: var(--line-width); background: var(--line-subtle); }
+.fleet-plot-mark { position: relative; display: inline-flex; align-items: center; gap: var(--space-1); vertical-align: middle; white-space: nowrap; }
+.track-working .fleet-plot-mark { display: flex; padding: 0 var(--space-1); }
 .fleet-plot th:nth-child(3), .track-working { background: var(--bg-active); color: var(--text-hi); }
 .fleet-dot { position: relative; display: inline-block; width: var(--space-2); height: var(--space-2); background: var(--text-mid); border-radius: var(--radius-pill); vertical-align: middle; }
 .needs-you .fleet-dot { background: var(--state-crit); outline: var(--rule-verdict) solid var(--color-verdict); outline-offset: var(--line-width); }
 .unreachable .fleet-dot { background: var(--state-warn); }
-.fleet-dot-phase { position: relative; display: block; color: var(--text-hi); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.fleet-dot-phase { color: var(--text-hi); font: var(--fs-meta)/1.38 var(--font-mono); white-space: nowrap; }
+.fleet-track-key, .fleet-track-legend { display: none; }
+/* Narrow figures use a numbered key so state words never split across rows. */
+@container fleet-figure (max-width: 34rem) {
+  .fleet-plot th:first-child { width: 36%; }
+  .fleet-plot th:last-child { width: auto; }
+  .fleet-plot thead th:not(:first-child) .fleet-track-label { display: none; }
+  .fleet-track-key { display: inline; }
+  .fleet-track-legend { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); margin-top: var(--space-2); color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
+  .fleet-track-legend > span { white-space: nowrap; }
+}
 .fleet-figure-caption { margin-top: var(--space-3); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); }
 .fleet-provenance { margin: 0; padding-top: var(--space-3); border-top: var(--rule-hero) solid var(--color-verdict); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); overflow-wrap: anywhere; }
 .fleet-provenance:empty { display: none; }
@@ -2192,8 +2206,6 @@ dialog form > *,
   .fleet-board { padding: var(--space-3) var(--space-1) var(--space-6); gap: var(--space-4); }
   .fleet-hero { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
   .fleet-verdict { max-width: none; }
-  .fleet-plot th:first-child { width: 24%; }
-  .fleet-plot th:nth-child(3) { width: 23%; }
   /* == End Unit 3: phone fleet == */
 
   .talk-supervisor {

@@ -2,6 +2,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FleetBoardRenderer, fleetBoardSignature, type FleetBoardModel } from "./fleet-board";
 import type { SessionPickerEntry } from "./session-selection";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
 
 function entry(overrides: Partial<SessionPickerEntry> = {}): SessionPickerEntry {
   return {
@@ -130,6 +135,38 @@ describe("fleet board region lifecycle", () => {
 
 describe("fleet verdict and state track", () => {
   beforeEach(() => { document.body.innerHTML = ""; });
+
+  it.each([3, 8])("keeps %i session names and inline marks in the same fixed table rows", (count) => {
+    const board = freshBoard();
+    new FleetBoardRenderer().render(board, model({ sessions: Array.from({ length: count }, (_, i) =>
+      entry({ session: `cas-src-extraordinarily-long-falcon-${i}`, phase: "reviewing" })) }), { open: vi.fn() });
+    const rows = [...board.querySelectorAll<HTMLTableRowElement>(".fleet-plot-row")];
+    expect(rows).toHaveLength(count);
+    for (const [index, row] of rows.entries()) {
+      expect(row.cells).toHaveLength(6);
+      expect(row.cells[0].title).toBe(row.dataset.fleetSession);
+      expect(row.querySelector(".fleet-plot-name")?.textContent).toBe(`long-falcon-${index}`);
+      expect(row.querySelector(".fleet-plot-mark > .fleet-dot + .fleet-dot-phase")?.textContent).toBe("reviewing");
+    }
+    // jsdom has no layout engine: pin the shared geometry here; the browser
+    // receipt measures actual centers, all eight row heights and text bounds.
+    expect(css).toMatch(/\.fleet-plot tbody th, \.fleet-track-cell\s*\{[^}]*height: var\(--button-compact-height\);[^}]*padding: 0;[^}]*vertical-align: middle;/);
+    expect(css).toMatch(/\.fleet-plot-name\s*\{[^}]*line-height: var\(--button-compact-height\);[^}]*white-space: nowrap;[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;/);
+    expect(css).toMatch(/\.fleet-plot-mark\s*\{[^}]*display: inline-flex;[^}]*align-items: center;/);
+    expect(css).toMatch(/\.fleet-track-cell::before\s*\{[^}]*bottom: 0;/);
+  });
+
+  it("keeps full state names accessible and supplies a nonbreaking narrow-figure legend", () => {
+    const board = freshBoard();
+    new FleetBoardRenderer().render(board, model(), { open: vi.fn() });
+    expect(board.querySelector("wbr")).toBeNull();
+    const labels = [...board.querySelectorAll("thead th")].slice(1).map(node => node.getAttribute("aria-label"));
+    expect(labels).toEqual(["Needs you", "Working", "Idle", "Stale", "Unreachable"]);
+    expect([...board.querySelectorAll(".fleet-track-key")].map(node => node.textContent)).toEqual(["1", "2", "3", "4", "5"]);
+    expect([...board.querySelectorAll(".fleet-track-legend > span")].map(node => node.textContent)).toEqual(labels.map((label, i) => `${i + 1} ${label}`));
+    expect(css).toMatch(/\.fleet-plot th\s*\{[^}]*white-space: nowrap;/);
+    expect(css).toMatch(/\.fleet-track-legend > span\s*\{[^}]*white-space: nowrap;/);
+  });
 
   it("puts the critical session first on Needs you with a matching verdict and ledger", () => {
     const board = freshBoard();

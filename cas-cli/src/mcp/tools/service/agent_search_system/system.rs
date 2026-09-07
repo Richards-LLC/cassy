@@ -248,10 +248,10 @@ fn filing_failure_reason(error: &str, task_identity_warning: Option<&str>) -> St
         return reason;
     }
     let mut reason = format!(
-        "GitHub filing failed: {}\nMissing GitHub credential or authorization. Required GitHub credential: `GH_TOKEN` or `GITHUB_TOKEN` \
+        "GitHub filing failed: {}\nGitHub credential missing, rejected, or unauthorized. Required GitHub credential: `GH_TOKEN` or `GITHUB_TOKEN` \
          (or a valid authenticated `gh` account). Factory spawn does not forward either \
          environment variable explicitly, so a worker must fail closed when its inherited \
-         credential is absent or rejected.",
+         credential is absent, rejected, or unauthorized.",
         safe_error
     );
     if let Some(warning) = task_identity_warning {
@@ -1006,7 +1006,7 @@ mod tests {
         assert!(path.starts_with(temp.path().join("cas-a178")));
         let report = std::fs::read_to_string(&path).expect("staged report");
         assert!(report.contains("worker cannot file bug"));
-        assert!(report.contains("Missing GitHub credential"));
+        assert!(report.contains("GitHub credential missing, rejected, or unauthorized"));
         assert!(report.contains("Required GitHub credential: `GH_TOKEN` or `GITHUB_TOKEN`"));
         assert!(!report.contains("ghp_private-token-value"));
         assert!(!report.contains("private-token-value"));

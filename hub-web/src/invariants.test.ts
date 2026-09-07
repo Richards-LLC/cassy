@@ -124,8 +124,9 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).toContain('window.matchMedia(query).addEventListener("change", () => render());');
     expect(css).toContain("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {");
     expect(css).toContain("@media (max-height: 30rem) and (pointer: coarse) {");
-    // The desktop hover-drawer rule must not reach a landscape phone either.
-    expect(css).toContain("@media (hover: hover) and (min-width: 53.0625rem) {");
+    // Closed drawers remain inert on every input modality; only the control opens them.
+    expect(css).not.toContain(".machine-navigation:hover .machine-drawer");
+    expect(main).toContain('aria-hidden="${!machineDrawerOpen}"${machineDrawerOpen ? "" : " inert"}');
     expect(design).toContain("(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)");
     expect(design).toContain("landscape");
   });

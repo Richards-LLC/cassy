@@ -11,6 +11,17 @@ This is the per-machine operating procedure for the Commander hub. Repeat it on 
 - The default controller origin is a paired hub. The hosted static origin is `https://hub.petrastella.io`, an optional explicit trust grant: before using it, verify the pinned `hub-web/dist` commit/digest and WASM hashes, then create new invitations with `cas hub pair --origin https://hub.petrastella.io` on every target. Revoke old-origin devices and re-pair; never copy browser storage or credentials between origins.
 - Do not expose port 4173 on a LAN interface. The Cassy hub remains on `127.0.0.1`; Tailscale Serve is the TLS terminator.
 
+## Hosted Commander bundle pin (3.18.0)
+
+The hosted static origin must serve the byte-identical `hub-web/dist` rebuilt
+from the assembled 3.18.0 source. Verify this pin before creating invitations:
+
+- Dist source commit: `dcd381a9` (the assembled epic tip used for this rebuild).
+- Dist digest: `2058683fe868dd1cfef06b7f9acf4c62c9c6ad58ed4617bfc9203507598645cd`.
+  Compute it as `(cd hub-web && find dist -type f -print0 | sort -z | xargs -0 sha256sum) | sha256sum`.
+- `ghostty-vt.wasm`: `6b1df1a96d59adc26360c312924898dbc122f980c17a32eb1624e48795b83f7e`.
+- `ghostty-write-pty.wasm`: `75cb147e98ede3f85f3cd6236a30f6d12565b0b237e1d8db941f5f3e8ad3d903`.
+
 ## Start and verify one machine
 
 Run these commands in order:

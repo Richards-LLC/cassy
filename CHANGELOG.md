@@ -7,6 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.18.0] - 2026-09-07
+
+### Added
+- A light and dark Commander that follows the Petrastella design language,
+  with an Appearance choice in the command palette.
+- A fleet view drawn as a verdict and dot plot, a readable attention timeline,
+  a ledger-style transcript, and clearer pairing and connection surfaces.
+
+### Changed
+- Generated design tokens now have a drift test, the hub-web visual-QA gate
+  runs in CI and the release gate, and shared CSS allowlist semantics keep
+  intentional visual exceptions explicit.
+
+### Fixed
+- A flaky `hub::attention` test, workspace-guard handling of heredoc bodies,
+  fail-closed `report_cas_bug` staging for unfiled reports, and pre-close
+  recovery of rebased anchors with a named commit receipt.
+
 ## [3.17.3] - 2026-09-06
 
 ### Added

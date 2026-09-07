@@ -154,12 +154,15 @@ Weights stay 400 / 500 / 600; nothing heavier, including ANSI bold in the render
 Appended by Unit 7 (cas-b296) after the render, using `critique-rubric.md`; the baseline
 scored here for the delta:
 
-| Dimension | Before (3.17.3) | Evidence |
-| --- | --- | --- |
-| Distinctiveness | 2 | dark graphite, all-sans, rounded cards, count badges — house tokens absent |
-| Fit to argument | 1 | the fleet board is three cards; no figure, no sentence |
-| Hierarchy | 2 | "Fleet overview", the `4`/`75` badges and the cards share weight above the fold |
-| Craft | 0 | attention `time` eyebrows and `.pane-role` under 4.5:1; attention prose clipped by a fixed height; transcript lines escape the viewport at 390 (`captures/before/baseline-visual-qa.json`) |
-| Accessibility | 0 | contrast pairs below 4.5:1 in dark; no light scheme; content lost with JS disabled (expected, allowlisted per class in `visual-qa-plan.md`) |
+| Dimension | Before (3.17.3) | After (epic tip `698dbaba`) | Evidence (before) |
+| --- | --- | --- | --- |
+| Distinctiveness | 2 | **4** | dark graphite, all-sans, rounded cards, count badges — house tokens absent |
+| Fit to argument | 1 | **5** | the fleet board is three cards; no figure, no sentence |
+| Hierarchy | 2 | **4** | "Fleet overview", the `4`/`75` badges and the cards share weight above the fold |
+| Craft | 0 | **4** | attention `time` eyebrows and `.pane-role` under 4.5:1; attention prose clipped by a fixed height; transcript lines escape the viewport at 390 (`captures/before/baseline-visual-qa.json`) |
+| Accessibility | 0 | **4** | contrast pairs below 4.5:1 in dark; no light scheme; content lost with JS disabled (expected, allowlisted per class in `visual-qa-plan.md`) |
 
 Scored by agile-octopus-74 on 2026-09-07 from the before captures; floor fails on four rows.
+After column scored by watchful-jaguar-3 on 2026-09-07 from the strict run on the integrated tip;
+floor holds (4 / 5 / 4, no 0) — evidence, receipts, the before/after figure and four non-blocking
+send-backs are in [critique.md](critique.md).

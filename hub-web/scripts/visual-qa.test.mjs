@@ -25,10 +25,9 @@ describe("hub-web fixture visual QA", () => {
     expect(fixtureSource).toContain('setAttribute("aria-hidden", "true")');
     expect(fixtureSource).toContain('setAttribute("inert", "")');
     expect(fixtureSource).toContain('toast.id = "toast"');
+    expect(fixtureSource).toContain('toast.setAttribute("aria-hidden", "true")');
     expect(fixtureSource).toContain('renderTerminalPlaceholder("agile-octopus", "worker", true)');
     expect(allowlist.entries.map(({ selector }) => selector)).toEqual(expect.arrayContaining([
-      '.machine-drawer[aria-hidden="true"] *',
-      "#toast:not(.visible)",
       ".terminal-mount",
       ".session-picker-toggle > .session-picker-name",
       ".pane.collapsed",

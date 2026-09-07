@@ -21804,6 +21804,102 @@ mod zero_change_close_tests {
         );
     }
 
+    /// cas-06ff: a supervisor-directed rebase rewrites the parked anchor out
+    /// of the worker branch. Once the rebased tip is merged, the hook must
+    /// use that task-attributed tip as the close scope instead of rejecting
+    /// the historical anchor.
+    #[test]
+    fn cas06ff_rebased_integrated_tip_reanchors_pre_close_scope() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        std::fs::write(p.join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-06ff): deliver worker change"]);
+        let parked_anchor = head_sha(p);
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("base.rs"), "pub fn base_change() {}\n").unwrap();
+        git(p, &["add", "base.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: advance integration base"]);
+        git(p, &["checkout", "-q", "factory/test-worker"]);
+        git(p, &["rebase", "-q", "main"]);
+        let rebased_tip = head_sha(p);
+        assert_ne!(parked_anchor, rebased_tip, "fixture must rewrite the parked SHA");
+
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/test-worker",
+                "-m",
+                "merge rebased worker delivery",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/test-worker"]);
+
+        let mut task = Task::new("cas-06ff".to_string(), "rebase close scope".to_string());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(parked_anchor.clone());
+        let evidence = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(p),
+            Some(p),
+            None,
+        )
+        .expect("a merged rebased task tip must re-anchor the close hook scope");
+
+        assert_eq!(evidence.task_tip.as_deref(), Some(rebased_tip.as_str()));
+        assert!(!git_commit_is_ancestor(p, &parked_anchor, "HEAD"));
+        assert!(git_commit_is_ancestor(p, &rebased_tip, "main"));
+    }
+
+    /// cas-06ff: if the rebased tip is not integrated, retain the fail-closed
+    /// rejection but tell the worker the exact commit_receipt retry and the
+    /// supervisor handoff when that retry cannot be completed locally.
+    #[test]
+    fn cas06ff_rebased_unmerged_tip_names_receipt_retry_and_supervisor_path() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        std::fs::write(p.join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-06ff): deliver worker change"]);
+        let parked_anchor = head_sha(p);
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("base.rs"), "pub fn base_change() {}\n").unwrap();
+        git(p, &["add", "base.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: advance integration base"]);
+        git(p, &["checkout", "-q", "factory/test-worker"]);
+        git(p, &["rebase", "-q", "main"]);
+        let rebased_tip = head_sha(p);
+
+        let mut task = Task::new("cas-06ff".to_string(), "rebase close scope".to_string());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(parked_anchor);
+        let error = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(p),
+            Some(p),
+            None,
+        )
+        .expect_err("an unmerged rebased tip must remain fail-closed");
+
+        assert!(error.contains(&rebased_tip), "current tip must be named: {error}");
+        assert!(
+            error.contains(&format!(
+                "task action=close id=cas-06ff commit_receipt={rebased_tip}"
+            )),
+            "rejection must name the exact receipt retry: {error}"
+        );
+        assert!(
+            error.contains("supervisor"),
+            "rejection must name the supervisor handoff: {error}"
+        );
+    }
+
     // ── has_worker_committed_reviewable_changes ──────────────────────────────
 
     /// Reproduces the cas-cabc scenario: researcher closes spike with zero

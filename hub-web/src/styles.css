@@ -110,7 +110,7 @@ pre { font-family: var(--font-mono); }
 }
 
 .shell.fleet-empty .session-header {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 /* An open desktop drawer owns a grid track instead of floating above panes. */
@@ -130,6 +130,7 @@ pre { font-family: var(--font-mono); }
   background: var(--bg-panel);
 }
 
+/* == Unit 3: machine rail and drawer == */
 .machine-rail {
   position: relative;
   z-index: 2;
@@ -311,7 +312,10 @@ pre { font-family: var(--font-mono); }
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2);
-  background: var(--bg-raised);
+  color: var(--text-hi);
+  background: var(--color-transparent);
+  border-radius: 0;
+  border-bottom: var(--line-width) solid var(--line-subtle);
   text-align: left;
 }
 
@@ -358,6 +362,7 @@ pre { font-family: var(--font-mono); }
   font-size: var(--fs-xs);
 }
 
+/* == End Unit 3: machine rail and drawer == */
 .primary {
   width: 100%;
   color: var(--text-hi);
@@ -414,121 +419,56 @@ pre { font-family: var(--font-mono); }
 
 .session-summary-description.stale { color: var(--text-mid); }
 
-/* Fleet board — the canvas with machines paired and no session open. */
+/* == Unit 3: fleet verdict, state plot and evidence ledger == */
 .fleet-board {
   align-self: start;
   justify-self: center;
   display: grid;
   width: min(100%, var(--fleet-board-max-width));
-  gap: var(--space-4);
-  padding: var(--space-2) var(--space-2) var(--space-4);
-}
-
-.fleet-board-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--space-3);
-  min-height: var(--space-8);
-}
-
-.fleet-board-header h2 {
-  margin: 0;
-  font-size: var(--fs-md);
-  font-weight: var(--weight-semibold);
-}
-
-.fleet-board-summary {
-  margin: 0;
-  color: var(--text-mid);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-}
-
-.fleet-machine { display: grid; gap: var(--space-2); }
-
-.fleet-machine-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: var(--space-6);
-  padding: 0 var(--space-1);
+  min-width: 0;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-4) var(--space-12);
   color: var(--text-hi);
-  font-size: var(--fs-meta);
-  font-weight: var(--weight-medium);
 }
-
-.fleet-machine-phase {
-  color: var(--text-mid);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-}
-
-.fleet-machine-phase.live { color: var(--state-ok); }
-.fleet-machine-phase.degraded,
-.fleet-machine-phase.backoff { color: var(--state-warn); }
-.fleet-machine-phase.failed { color: var(--state-crit); }
-.fleet-machine-phase.resolving,
-.fleet-machine-phase.dialing,
-.fleet-machine-phase.auth,
-.fleet-machine-phase.attaching { color: var(--state-ok); }
-
-.fleet-sessions {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(var(--mobile-pane-min-width), 1fr));
-  gap: var(--space-2);
-}
-
-.fleet-session {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-1) var(--space-2);
-  min-height: var(--button-height);
-  padding: var(--space-3);
-  background: var(--bg-raised);
-  border-radius: var(--radius-pane);
-  text-align: left;
-}
-
-.fleet-session .session-name {
-  grid-column: 1;
-  overflow: hidden;
-  color: var(--text-hi);
-  font-size: var(--fs-base);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fleet-session .phase-chip { grid-column: 2; grid-row: 1; }
-
-.fleet-session .session-summary-title {
-  display: -webkit-box;
-  grid-column: 1 / -1;
-  color: var(--text-mid);
-  font-size: var(--fs-meta);
-  font-weight: var(--weight-regular);
-  white-space: normal;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.fleet-session .session-meta {
-  grid-column: 1 / -1;
-  color: var(--text-mid);
-  font-size: var(--fs-xs);
-}
-
-.fleet-empty-sessions {
-  margin: 0;
-  padding: var(--space-3);
-  color: var(--text-mid);
-  background: var(--bg-panel);
-  border-radius: var(--radius-card);
-  font-size: var(--fs-meta);
-}
+.fleet-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: var(--space-6); align-items: start; }
+.fleet-board-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); }
+.fleet-eyebrow { margin: 0; color: var(--text-mid); font: var(--weight-semibold) var(--fs-xs)/1.33 var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.fleet-catalog-time::before, .fleet-board-summary::before { content: "· "; }
+.fleet-catalog-time { color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
+.fleet-board-summary { margin: 0; color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
+.fleet-verdict { flex-basis: 100%; margin: var(--space-2) 0 0; max-width: 22ch; font: var(--weight-regular) var(--fs-verdict)/1.1 var(--font-display); letter-spacing: -.015em; text-wrap: pretty; }
+.fleet-figure { min-width: 0; margin: 0; }
+.fleet-plot-scroll { max-height: calc(8 * var(--button-compact-height) + var(--space-12)); overflow: auto; }
+.fleet-plot { width: 100%; border-collapse: collapse; table-layout: fixed; font: var(--fs-xs)/1.16 var(--font-mono); }
+.fleet-plot th { padding: var(--space-1); font-weight: var(--weight-regular); overflow-wrap: anywhere; text-align: center; }
+.fleet-plot thead th { padding: 0; height: var(--space-12); color: var(--text-mid); vertical-align: bottom; }
+.fleet-plot th:first-child { width: 25%; text-align: left; }
+.fleet-plot th:nth-child(3) { width: 21%; }
+.fleet-plot th:last-child { width: 19%; }
+.fleet-plot tbody th { padding: 0 var(--space-1); color: var(--text-mid); }
+.fleet-track-cell { height: var(--button-compact-height); padding: 0; position: relative; text-align: center; vertical-align: middle; }
+.fleet-track-cell::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: var(--line-width); background: var(--line-subtle); }
+.fleet-plot th:nth-child(3), .track-working { background: var(--bg-active); color: var(--text-hi); }
+.fleet-dot { position: relative; display: inline-block; width: var(--space-2); height: var(--space-2); background: var(--text-mid); border-radius: var(--radius-pill); vertical-align: middle; }
+.needs-you .fleet-dot { background: var(--state-crit); outline: var(--rule-verdict) solid var(--color-verdict); outline-offset: var(--line-width); }
+.unreachable .fleet-dot { background: var(--state-warn); }
+.fleet-dot-phase { position: relative; display: block; color: var(--text-hi); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.fleet-figure-caption { margin-top: var(--space-3); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); }
+.fleet-provenance { margin: 0; padding-top: var(--space-3); border-top: var(--rule-hero) solid var(--color-verdict); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); overflow-wrap: anywhere; }
+.fleet-provenance:empty { display: none; }
+.fleet-evidence { display: grid; gap: var(--space-4); }
+.fleet-machine { display: grid; gap: var(--space-2); min-width: 0; }
+.fleet-machine-header { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: var(--space-6); color: var(--text-hi); font-size: var(--fs-meta); }
+.fleet-machine-phase { color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
+.fleet-ledger { display: grid; }
+.fleet-session { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: var(--space-1) var(--space-3); min-height: var(--button-height); padding: var(--space-3) 0; border-top: var(--line-width) solid var(--line-subtle); border-radius: 0; color: var(--text-hi); background: var(--color-transparent); text-align: left; }
+.fleet-session.needs-you { border-top-color: var(--color-verdict); }
+.fleet-session .session-name { grid-column: 1; color: var(--text-hi); font: var(--fs-md)/1.47 var(--font-mono); white-space: normal; overflow-wrap: anywhere; }
+.fleet-session .phase-chip { grid-column: 2; grid-row: 1; border-radius: var(--radius-card); }
+.fleet-session .session-summary-title { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-base); font-weight: var(--weight-regular); white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+.fleet-session .session-meta { grid-column: 1 / -1; color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); overflow-wrap: anywhere; }
+.fleet-empty-sessions { margin: 0; padding: var(--space-3) 0; color: var(--text-mid); font-size: var(--fs-base); }
+/* == End Unit 3: fleet == */
 
 .phase-chip {
   align-self: center;
@@ -577,6 +517,7 @@ main {
   background: var(--bg-root);
 }
 
+/* == Unit 3: header == */
 .session-header {
   display: grid;
   grid-template-columns: minmax(var(--mobile-header-chip-width), auto) auto auto auto minmax(0, 1fr);
@@ -704,7 +645,7 @@ main {
   padding: var(--space-1) var(--space-2);
   color: var(--text-mid);
   background: var(--bg-raised);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-card);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   white-space: nowrap;
@@ -744,6 +685,7 @@ main {
 
 .danger { color: var(--state-crit); }
 
+/* == End Unit 3: header == */
 /* == Unit 4: Session panes == */
 .pane-grid {
   position: relative;
@@ -1015,6 +957,7 @@ main {
 .t3-ghostty-scrollbar { display: none; }
 .empty { place-self: center; color: var(--text-mid); }
 
+/* == Unit 3: empty state == */
 /* D13: a dashed rectangle the size of the viewport reads as a broken region.
    The same words in a sized card read as a screen waiting for one decision. */
 .empty-pane-slot {
@@ -1027,8 +970,9 @@ main {
   margin: var(--space-4);
   padding: var(--space-6);
   color: var(--text-mid);
-  background: var(--bg-raised);
-  border-radius: var(--radius-pane);
+  background: var(--color-transparent);
+  border-top: var(--rule-hero) solid var(--color-verdict);
+  border-radius: 0;
   font-size: var(--fs-meta);
   text-align: center;
 }
@@ -1038,6 +982,7 @@ main {
 .empty-hint { max-width: var(--terminal-state-width); color: var(--text-mid); }
 .empty-pane-slot .primary { width: auto; padding: 0 var(--space-4); }
 
+/* == End Unit 3: empty state == */
 /* Connecting, failed and retry share the empty slot's card: one centred shape
    for every "no terminal yet" state, instead of a spinner and a rising counter
    pinned to the top-left corner of an otherwise blank canvas. */
@@ -1817,6 +1762,7 @@ dialog[open] {
 
 dialog::backdrop { background: var(--overlay-backdrop); }
 
+/* == Unit 3: command palette == */
 .command-palette {
   width: min(620px, calc(100vw - var(--space-6)));
   max-height: min(76dvh, 680px);
@@ -1828,12 +1774,13 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .command-palette > section { display: flex; flex-direction: column; gap: var(--space-2); min-height: 0; padding: var(--space-3); }
 .command-palette header { display: flex; min-height: var(--space-8); align-items: center; justify-content: space-between; }
 .command-palette header button { width: var(--space-8); min-height: var(--space-8); padding: 0; }
-.command-palette input { min-height: var(--button-height); padding: var(--space-2) var(--space-3); color: var(--text-hi); background: var(--bg-terminal); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
+.command-palette input { min-height: var(--button-height); padding: var(--space-2) var(--space-3); color: var(--text-hi); background: var(--bg-panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
 .palette-commands { display: grid; gap: var(--space-1); overflow: auto; }
 .palette-command { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); min-height: 44px; padding: var(--space-2) var(--space-3); background: var(--bg-raised); text-align: left; }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
 .palette-command small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* == End Unit 3: command palette == */
 
 /* The flow is focused only so the dialog opens on its title instead of a text
    field. It is not tab-reachable, so it must not draw the keyboard focus ring
@@ -2064,13 +2011,7 @@ dialog form > *,
 
 #toast.visible { opacity: 1; transform: translate(-50%, 0); }
 
-@media (hover: hover) and (min-width: 53.0625rem) {
-  .machine-navigation:hover .machine-drawer {
-    opacity: 1;
-    pointer-events: auto;
-    transform: translateX(0);
-  }
-}
+/* == Unit 3: drawer visibility follows its explicit open control == */
 
 /* The phone rule, kept identical to PHONE_MEDIA_QUERY in viewport.ts. A
    width-only breakpoint is a narrow-window test, not a phone test: a rotated
@@ -2247,7 +2188,13 @@ dialog form > *,
   .remove-machine { min-height: var(--button-height); }
 
   .terminal-state { width: calc(100% - var(--space-4)); }
-  .fleet-board { padding: var(--space-1) var(--space-1) var(--space-3); gap: var(--space-3); }
+  /* == Unit 3: phone fleet figure == */
+  .fleet-board { padding: var(--space-3) var(--space-1) var(--space-6); gap: var(--space-4); }
+  .fleet-hero { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
+  .fleet-verdict { max-width: none; }
+  .fleet-plot th:first-child { width: 24%; }
+  .fleet-plot th:nth-child(3) { width: 23%; }
+  /* == End Unit 3: phone fleet == */
 
   .talk-supervisor {
     min-height: 48px;
@@ -2585,7 +2532,8 @@ dialog form > *,
      and its width belongs to the two controls a thumb actually uses. Without
      this the actions overflowed under the attention rail and Interrupt was
      sliced in half. */
-  .command-palette-trigger { display: none; }
+  /* == Unit 3: Appearance stays reachable by touch == */
+  .command-palette-trigger { display: inline-flex; }
   .session-header .actions { gap: var(--space-1); }
   .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
 
@@ -2608,7 +2556,30 @@ dialog form > *,
   .machine-chip, .mode-badge, .connection-summary { display: none; }
   /* The ⌘K chord has no phone equivalent; its width belongs to the two controls
      a thumb actually uses, which stay wide enough to hit. */
-  .command-palette-trigger { display: none; }
+  /* == Unit 3: Appearance stays reachable by touch == */
+  .command-palette-trigger { display: inline-flex; }
   .session-header .actions { gap: var(--space-1); }
   .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
 }
+
+/* == Unit 3: single labelled rail figure == */
+.attention-rail-counts .attention-summary { display: grid; justify-items: center; gap: var(--space-1); }
+.attention-rail-counts { height: auto; }
+.attention-rail-counts .attention-summary-label { white-space: normal; overflow-wrap: anywhere; text-align: center; }
+/* == End Unit 3: single labelled rail figure == */
+
+/* == Unit 3: print every text region; terminal canvases become labelled wells == */
+@media print {
+  html, body, #app { height: auto; overflow: visible; }
+  .shell, .shell.drawer-open, .shell.attention-collapsed, .shell.attention-expanded { display: block; height: auto; overflow: visible; }
+  .shell main, .pane-grid, .pane, .pane-body, .context-body, .context-tab, .transcript, .transcript-line, .attention-detail, .connection-log, .connection-log pre, .pair-details, .fleet-board, .fleet-plot-scroll { height: auto; max-height: none; overflow: visible; }
+  .context-panel, .context-panel.collapsed { position: static; display: block; width: auto; height: auto; max-height: none; overflow: visible; }
+  .context-panel.collapsed .context-body { display: block; }
+  .transcript-line, .connection-log pre, .attention-payload pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .machine-navigation, .attention-rail, #toast { display: none; }
+  .terminal-mount { min-height: var(--space-12); height: auto; overflow: visible; border: var(--line-width) solid var(--text-mid); }
+  .terminal-mount::before { content: "Terminal output — interactive canvas; open Transcript to print text."; display: block; padding: var(--space-3); color: var(--text-hi); background: var(--bg-terminal); font: var(--fs-meta)/1.38 var(--font-mono); }
+  .terminal-mount canvas, .terminal-mount textarea { display: none; }
+  dialog[open] { position: static; max-height: none; overflow: visible; }
+}
+/* == End Unit 3: print == */

@@ -123,7 +123,77 @@ describe("fleet board region lifecycle", () => {
     const renderer = new FleetBoardRenderer();
     const board = freshBoard();
     renderer.render(board, model({ sessions: [] }), { open: vi.fn() });
-    const notes = [...board.querySelectorAll(".fleet-empty-sessions")].map((node) => node.textContent);
+    const notes = [...board.querySelectorAll(".fleet-machine .fleet-empty-sessions")].map((node) => node.textContent);
     expect(notes).toEqual(["No live sessions.", "Sessions appear once the machine is reachable."]);
+  });
+});
+
+describe("fleet verdict and state track", () => {
+  beforeEach(() => { document.body.innerHTML = ""; });
+
+  it("puts the critical session first on Needs you with a matching verdict and ledger", () => {
+    const board = freshBoard();
+    new FleetBoardRenderer().render(board, model({ sessions: [
+      entry({ session: "working-fox-12", phase: "building" }),
+      { ...entry({ machineId: "m-attic", session: "blocked-owl-34" }), attentionSeverity: "critical" },
+      entry({ session: "idle-bear-56", phase: "idle" }),
+    ] }), { open: vi.fn() });
+    expect(board.querySelector(".fleet-verdict")?.textContent).toBe("1 of 3 sessions needs you; 1 working, 1 idle.");
+    const first = board.querySelector(".fleet-plot-row")!;
+    expect(first.getAttribute("data-fleet-session")).toBe("blocked-owl-34");
+    expect(first.classList.contains("needs-you")).toBe(true);
+    expect(first.querySelector(".track-needs-you .fleet-dot")).not.toBeNull();
+    expect(board.querySelector(".track-working .fleet-dot-phase")?.textContent).toBe("building");
+    expect(board.querySelector(".fleet-session.needs-you")?.getAttribute("data-fleet-session")).toBe("blocked-owl-34");
+    expect(board.querySelectorAll(".fleet-dot")).toHaveLength(3);
+    expect(board.querySelector("table")?.querySelectorAll('th[scope="col"]')).toHaveLength(6);
+  });
+
+  it("states all-working without alarming status colour or a needs-you ring", () => {
+    const board = freshBoard();
+    new FleetBoardRenderer().render(board, model({ sessions: [entry({ phase: "planning" }), entry({ session: "reviewing-fox-12", phase: "reviewing" })] }), { open: vi.fn() });
+    expect(board.querySelector(".fleet-verdict")?.textContent).toBe("All 2 sessions are working.");
+    expect(board.querySelectorAll(".working .track-working .fleet-dot")).toHaveLength(2);
+    expect(board.querySelector(".needs-you")).toBeNull();
+  });
+
+  it("maps liveness and unknown states to a visible fallback without throwing", () => {
+    const board = freshBoard();
+    expect(() => new FleetBoardRenderer().render(board, model({ sessions: [
+      entry({ session: "stale-fox-12", status: "stale_metadata", phase: "editing" }),
+      entry({ session: "missing-fox-12", status: "missing_endpoint" }),
+      entry({ session: "unknown-fox-12", status: "future_state" }),
+      entry({ session: "blocked-fox-12", phase: "blocked" }),
+    ] }), { open: vi.fn() })).not.toThrow();
+    expect(board.querySelectorAll(".track-stale .fleet-dot")).toHaveLength(2);
+    expect(board.querySelectorAll(".track-unreachable .fleet-dot")).toHaveLength(1);
+    expect(board.querySelectorAll(".track-needs-you .fleet-dot")).toHaveLength(1);
+  });
+
+  it("renders a designed zero-machine state and a short verdict for every mix", () => {
+    const board = freshBoard();
+    new FleetBoardRenderer().render(board, model({ machines: [], sessions: [] }), { open: vi.fn() });
+    expect(board.querySelector("h2")?.textContent).toBe("Your fleet starts with one machine.");
+    expect(board.querySelector(".fleet-empty-sessions")?.textContent).toContain("Pair the machine");
+    expect(board.querySelector(".fleet-verdict")!.textContent!.split(/\s+/).length).toBeLessThanOrEqual(22);
+  });
+
+  it("updates critical arrival and dismissal, but retains focus for catalog receipt changes", () => {
+    const renderer = new FleetBoardRenderer();
+    const board = freshBoard();
+    const initial = model({ sessions: [entry({ phase: "editing" })] });
+    renderer.render(board, initial, { open: vi.fn() });
+    const critical = model({ sessions: [{ ...initial.sessions[0], attentionSeverity: "critical" }] });
+    expect(renderer.render(board, critical, { open: vi.fn() })).toBe(true);
+    expect(board.querySelector(".needs-you .fleet-dot")).not.toBeNull();
+    expect(renderer.render(board, initial, { open: vi.fn() })).toBe(true);
+    expect(board.querySelector(".needs-you")).toBeNull();
+    const button = board.querySelector<HTMLButtonElement>(".fleet-session")!;
+    button.focus();
+    const refreshed = { ...initial, machines: initial.machines.map((machine) => ({ ...machine, catalogUpdatedAt: "2026-09-07T13:00:00Z" })) };
+    expect(renderer.render(board, refreshed, { open: vi.fn() })).toBe(false);
+    expect(board.querySelector(".fleet-session")).toBe(button);
+    expect(document.activeElement).toBe(button);
+    expect(board.querySelector(".fleet-provenance")?.textContent).not.toContain("catalog not reported");
   });
 });

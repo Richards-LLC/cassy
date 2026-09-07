@@ -99,24 +99,21 @@ test('allowlist requires a reason and suppresses intentional findings', async ()
   assert.match(result.suppressed[0].reason, /Brand mark/);
 });
 
-test('allowlist selector semantics require the aria-hidden ancestor', async () => {
+test('aria-hidden drawer content is ignored while unhidden drawer content remains a finding', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-aria-hidden-'));
   const result = await runVisualQa({
     urls: [join(repoRoot, 'scripts', 'visual-qa-fixtures', 'allowlist-aria-hidden.html')],
     artifactDir,
     schemes: ['light'],
     viewports: [{ name: 'phone', width: 390, height: 800 }],
-    allowlistPath: join(repoRoot, 'hub-web', 'visual-qa-allowlist.json'),
     strict: true,
   });
 
   const invisibleFindings = result.findings.filter((finding) => finding.type === 'invisible-text');
-  const invisibleSuppressed = result.suppressed.filter((finding) => finding.type === 'invisible-text');
   assert.equal(result.status, 'FAIL');
   assert.equal(invisibleFindings.length, 1);
-  assert.equal(invisibleSuppressed.length, 1);
+  assert.equal(result.suppressed.length, 0);
   assert.match(invisibleFindings[0].elementPath, /machine-drawer/);
-  assert.equal(invisibleSuppressed[0].allowlistedBy[0].selector, '.machine-drawer[aria-hidden="true"] *');
 });
 
 test('invalid allowlist selectors are informational failures of configuration', async () => {

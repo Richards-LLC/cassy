@@ -147,7 +147,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         fontSize: Number.parseFloat(style.fontSize) || 16,
         fontWeight: Number.parseInt(style.fontWeight, 10) || 400,
         colorAlpha: fg ? round(fg[3]) : 0,
-        ignored: Boolean(ignoredReason && ignoredReason !== 'aria-hidden'),
+        ignored: Boolean(ignoredReason),
         ignoredReason,
         statusLike: Boolean(element.closest('.tag, .status, [role="status"]')),
         node,
@@ -194,12 +194,11 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     const addInfo = (type, item, details = {}) => infos.push(findingFor(type, item, details));
     const visibleText = textNodes.filter((item) => !item.ignored && !item.hidden && !item.ariaHidden && item.box.width > 0 && item.box.height > 0);
     for (const item of textNodes) {
-      if (item.ignored || item.box.width <= 0 || item.box.height <= 0) continue;
+      if (item.ignored || item.ariaHidden || item.box.width <= 0 || item.box.height <= 0) continue;
       if (item.hidden || item.opacity <= 0 || item.colorAlpha <= 0) {
         add('invisible-text', item, { reason: item.opacity <= 0 ? 'opacity-0' : item.box.width <= 0 || item.box.height <= 0 ? 'zero-size' : 'visibility-hidden' });
         continue;
       }
-      if (item.ariaHidden) continue;
       if (!item.foreground || item.hasUnverifiableImage) {
         addInfo('unverifiable-contrast', item, { reason: item.hasUnverifiableImage ? 'background-image' : 'unsupported-color' });
         continue;

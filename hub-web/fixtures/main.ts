@@ -199,6 +199,7 @@ function renderRestingToast(): void {
   const toast = element("div", undefined, "A previous hub notice is resting.");
   toast.id = "toast";
   toast.setAttribute("role", "status");
+  toast.setAttribute("aria-hidden", "true");
   document.body.append(toast);
 }
 

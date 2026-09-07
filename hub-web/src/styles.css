@@ -2544,7 +2544,9 @@ dialog form > *,
   .context-panel, .context-panel.collapsed { position: static; display: block; width: auto; height: auto; max-height: none; overflow: visible; }
   .context-panel.collapsed .context-body { display: block; }
   .transcript-line, .connection-log pre, .attention-payload pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .machine-navigation, .attention-rail, #toast { display: none; }
+  .machine-navigation, .attention-rail { position: static; width: auto; height: auto; overflow: visible; }
+  .machine-rail { flex-direction: row; width: auto; height: auto; }
+  #toast.visible { position: static; transform: none; }
   .terminal-mount { min-height: var(--space-12); height: auto; overflow: visible; border: var(--line-width) solid var(--text-mid); }
   .terminal-mount::before { content: "Terminal output — interactive canvas; open Transcript to print text."; display: block; padding: var(--space-3); color: var(--text-hi); background: var(--bg-terminal); font: var(--fs-meta)/1.38 var(--font-mono); }
   .terminal-mount canvas, .terminal-mount textarea { display: none; }

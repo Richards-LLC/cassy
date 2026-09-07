@@ -144,12 +144,6 @@ function renderAttention(count: number): HTMLElement {
   const panel = element("section", "context-tab");
   panel.id = "attention-panel";
   renderAttentionPanel(panel, attentionItems(count), { dismiss: () => {}, act: () => {}, copy: () => {} });
-  // These are intentionally tertiary production chrome (timestamps, dismiss
-  // glyphs, and the clear-state count). Keep the real nodes in the screenshot,
-  // but exclude them from the contrast target so the fixture gate reports
-  // defects in content rather than the documented low-emphasis treatment.
-  panel.querySelectorAll(".attention-count--clear, .attention-last-event, .attention-eyebrow time, .attention-dismiss, .attention-explicit-dismiss")
-    .forEach((node) => node.setAttribute("data-visual-qa-hidden", "true"));
   return panel;
 }
 

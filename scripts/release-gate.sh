@@ -462,6 +462,8 @@ check_hub_web_visual_qa() {
     mkdir -p "$artifact_dir" "$tmp_dir/npm-cache" "$tmp_dir/playwright"
     (cd hub-web && \
         NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
+        "$npm_bin" ci --no-audit --no-fund && \
+        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
         PLAYWRIGHT_BROWSERS_PATH="$tmp_dir/playwright" \
         "$npm_bin" exec --yes --package=playwright -- playwright install chromium && \
         NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \

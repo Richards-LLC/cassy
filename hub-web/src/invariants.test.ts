@@ -527,10 +527,15 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(attentionView).toContain('button("Dismiss group"');
     expect(attentionView).toContain('severity !== "critical"');
     expect(css).toContain(".attention-item--critical");
-    expect(css).toContain(".attention-item--enriching .attention-title::after");
+    expect(css).not.toMatch(/\.attention-title::after|attention-summary-shimmer/);
     expect(css).toContain("prefers-reduced-motion: reduce");
     expect(css).toContain("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse)");
-    expect(css).toContain("max-width: var(--mobile-attention-label-width)");
+    for (const selector of ["attention-session", "attention-group-label"]) {
+      const rule = css.match(new RegExp(`\\.${selector} \\{([^}]+)\\}`))?.[1] ?? "";
+      expect(rule).toContain("overflow-wrap: anywhere");
+      expect(rule).not.toMatch(/nowrap|ellipsis|max-width/);
+    }
+    expect(css).not.toContain("max-width: var(--mobile-attention-label-width)");
   });
 
   it("opens the pairing dialog for an invitation instead of leaving the user on the empty state", async () => {

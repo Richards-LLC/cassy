@@ -76,11 +76,22 @@ export class TranscriptView {
       if (existing && this.keys[index] === key) continue;
       const node = existing ?? document.createElement("p");
       node.className = line.blank ? "transcript-line blank" : "transcript-line";
+      // Box drawing encodes spatial relationships. Preserve those rows in a
+      // local scroll well; ordinary output keeps the reading column's wrap.
+      const diagram = /[\u2500-\u257f]/u.test(line.text);
+      node.classList.toggle("transcript-line--diagram", diagram);
+      if (diagram) {
+        node.tabIndex = 0;
+        node.setAttribute("aria-label", "Terminal diagram; scroll horizontally to read");
+      } else {
+        node.removeAttribute("tabindex");
+        node.removeAttribute("aria-label");
+      }
       // The hanging indent is the whole point of the reflow: a wrapped
       // continuation stays inside its own gutter instead of restarting at
       // column 0 the way the squeezed grid did.
-      node.style.paddingLeft = line.indent > 0 ? `${line.indent}ch` : "";
-      node.style.textIndent = line.indent > 0 ? `-${line.indent}ch` : "";
+      node.style.paddingLeft = !diagram && line.indent > 0 ? `${line.indent}ch` : "";
+      node.style.textIndent = !diagram && line.indent > 0 ? `-${line.indent}ch` : "";
       node.replaceChildren(...line.segments.map((segment) => {
         const span = document.createElement("span");
         span.textContent = segment.text;

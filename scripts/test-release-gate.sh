@@ -245,6 +245,56 @@ run_scenario projection-run GATE_FIXTURE_DRIFT_FAIL builtin-projections
 run_scenario fixture-paths-run GATE_FIXTURE_FIXTURE_PATHS_FAIL fixture-paths
 run_scenario visual-qa-run GATE_FIXTURE_HUB_WEB_VISUAL_QA_FAIL hub-web-visual-qa
 
+# The normal visual-QA scenarios above inject a runner stub so the self-test
+# stays fast. Keep one real-row fixture as well: its npm stub records `ci` and
+# refuses to run the visual-QA command unless dependency installation happened
+# first. This catches a missing npm ci that the runner stub would conceal.
+repo="$(new_fixture visual-qa-dependency-install)"
+printf '%s\n' '{"name":"hub-web-fixture","private":true}' >"$repo/hub-web/package.json"
+printf '%s\n' 'export {}' >"$repo/hub-web/scripts/visual-qa.mjs"
+cat >"$repo/scripts/npm-stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${GATE_FIXTURE_NPM_LOG:?}"
+if [[ "$1" == ci ]]; then
+  : >"${GATE_FIXTURE_NPM_CI_MARKER:?}"
+  exit 0
+fi
+if [[ "$1" == exec && "$*" == *'playwright install chromium'* ]]; then
+  exit 0
+fi
+if [[ "$1" == exec && "$*" == *'node scripts/visual-qa.mjs'* ]]; then
+  [[ -f "${GATE_FIXTURE_NPM_CI_MARKER:?}" ]] || {
+    printf 'visual-QA runner started before npm ci\n' >&2
+    exit 1
+  }
+  printf '%s\n' "${1:-missing-artifact-dir}" >>"${GATE_FIXTURE_NPM_RUNNER_LOG:?}"
+  exit 0
+fi
+printf 'unexpected npm invocation: %s\n' "$*" >&2
+exit 1
+EOF
+chmod +x "$repo/scripts/npm-stub"
+output="$(
+    cd "$repo" && \
+    env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH -u RELEASE_GATE_HUB_WEB_VISUAL_QA \
+      CARGO="$repo/scripts/cargo-stub" \
+      NPM="$repo/scripts/npm-stub" \
+      GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+      GATE_FIXTURE_NPM_LOG="$tmp/npm.log" \
+      GATE_FIXTURE_NPM_CI_MARKER="$tmp/npm-ci.marker" \
+      GATE_FIXTURE_NPM_RUNNER_LOG="$tmp/npm-runner.log" \
+      "$repo/scripts/release-gate.sh" 9.99.7 --only hub-web-visual-qa
+)"
+if grep -qF 'PASS hub-web-visual-qa' <<<"$output" && \
+   grep -qF 'ci --no-audit --no-fund' "$tmp/npm.log" && \
+   grep -qF 'exec --yes --package=playwright -- node scripts/visual-qa.mjs' "$tmp/npm.log" && \
+   [[ -f "$tmp/npm-ci.marker" ]]; then
+    ok 'hub-web-visual-qa installs dependencies before invoking the runner'
+else
+    bad "hub-web-visual-qa dependency install contract failed (output: $output; npm log: $(cat "$tmp/npm.log" 2>/dev/null || true))"
+fi
+
 # cas-1f6e. A src-side test module that reads the producer checkout at runtime
 # through CARGO_MANIFEST_DIR passes on the build host and fails on the
 # merge-queue shard runner; the fixture-paths row must name the file and line.

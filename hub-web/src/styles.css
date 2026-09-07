@@ -744,6 +744,7 @@ main {
 
 .danger { color: var(--state-crit); }
 
+/* == Unit 4: Session panes == */
 .pane-grid {
   position: relative;
   flex: 1;
@@ -786,12 +787,14 @@ main {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--bg-terminal);
-  border: var(--line-width) solid var(--color-transparent);
+  color: var(--text-hi);
+  background: var(--bg-panel);
+  border: var(--line-width) solid var(--line-subtle);
   border-radius: var(--radius-pane);
 }
 
 .pane.selected { border-color: var(--line-strong); }
+.pane:focus-within { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
 .pane.selected .pane-title { color: var(--text-hi); }
 
 .pane > header {
@@ -885,6 +888,7 @@ main {
   background: var(--bg-terminal);
 }
 
+/* == Unit 4: Transcript reading column == */
 /* The reading view of a pane: the emulator's logical lines reflowed at UI text
    size. It covers the grid rather than replacing it, so "Show terminal" is a
    class toggle and never a remount. */
@@ -902,11 +906,21 @@ main {
   /* One step above the terminal's own clamp: the reading view exists to be
      read at UI size, not to fit more columns. */
   font-size: var(--fs-md);
-  line-height: 1.5;
+  line-height: calc(22 / 15);
+  font-variant-numeric: tabular-nums;
   -webkit-text-size-adjust: none;
 }
 
+.transcript-lines {
+  width: 100%;
+  max-width: 68ch;
+  min-width: 0;
+  margin-inline: auto;
+}
+
 .transcript-line {
+  max-width: 100%;
+  min-width: 0;
   margin: 0;
   /* pre-wrap keeps the leading whitespace a TUI uses for structure; the
      per-line hanging indent is set inline from the line's own gutter. */
@@ -917,6 +931,18 @@ main {
 
 .transcript-line.blank { min-height: .6em; }
 
+.transcript-line--diagram {
+  overflow-x: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+  scrollbar-width: thin;
+}
+
+.transcript-line--diagram:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus);
+  outline-offset: calc(-1 * var(--focus-ring-width));
+}
+
 .transcript-jump {
   position: sticky;
   bottom: 0;
@@ -926,8 +952,9 @@ main {
   padding: 0 var(--space-4);
   color: var(--text-hi);
   background: var(--bg-raised);
-  border: var(--line-width) solid var(--line-strong);
-  border-radius: var(--radius-card);
+  border: 0;
+  border-left: var(--rule-verdict) solid var(--color-verdict);
+  border-radius: 0;
   font-size: var(--fs-meta);
 }
 
@@ -1071,6 +1098,7 @@ main {
 }
 
 
+/* == Unit 4: Session disconnection outcome == */
 .terminal-disconnected-banner {
   position: absolute;
   z-index: 4;
@@ -1082,7 +1110,8 @@ main {
   color: var(--state-warn);
   background: var(--bg-raised);
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-meta);
+  border-left: var(--rule-verdict) solid var(--state-warn);
 }
 
 .terminal-disconnected .terminal-mount { opacity: .4; }
@@ -1176,6 +1205,7 @@ main {
 .context-tab[hidden] { display: none; }
 .status-context { display: flex; flex-direction: column; gap: var(--space-4); }
 
+/* == Unit 4: Attention timeline == */
 .attention-panel-header {
   display: flex;
   flex-wrap: wrap;
@@ -1255,6 +1285,7 @@ main {
    with them for surface. */
 .attention-group-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   margin: var(--space-2) 0 var(--space-1);
@@ -1264,7 +1295,7 @@ main {
 
 .attention-group-toggle {
   display: flex;
-  flex: 1;
+  flex: 1 0 100%;
   min-width: 0;
   min-height: var(--button-compact-height);
   align-items: center;
@@ -1280,12 +1311,10 @@ main {
 
 .attention-group-label {
   min-width: 0;
-  overflow: hidden;
   color: var(--text-hi);
   font-family: var(--font-mono);
   font-size: var(--fs-meta);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .attention-dismiss-group {
@@ -1304,38 +1333,57 @@ main {
 .attention-group-count,
 .attention-repeat {
   flex: none;
-  padding: var(--space-1) var(--space-2);
   color: var(--text-mid);
-  background: var(--bg-active);
-  border-radius: var(--radius-pill);
+  background: var(--color-transparent);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }
 
-.attention-group-body { display: grid; gap: var(--space-2); }
+.attention-group-body {
+  display: grid;
+  margin-left: var(--space-1);
+  border-left: var(--line-width) solid var(--line-strong);
+}
+.attention-group-body[hidden] { display: none; }
+
+.attention-panel-summary {
+  margin: 0 0 var(--space-3);
+  color: var(--text-mid);
+  font: var(--fs-meta)/var(--line-ui) var(--font-mono);
+}
 
 .attention-item {
   position: relative;
   display: grid;
+  min-width: 0;
   gap: var(--space-2);
-  padding: var(--space-3);
+  padding: var(--space-3) 0 var(--space-3) var(--space-3);
   color: var(--text-hi);
-  background: var(--bg-raised);
-  border-radius: var(--radius-card);
+  background: var(--color-transparent);
+  border-bottom: var(--line-width) solid var(--line-subtle);
   font-size: var(--fs-meta);
   line-height: var(--line-ui);
+  overflow-wrap: anywhere;
 }
 
-.attention-item--critical {
-  padding-left: calc(var(--space-3) - var(--state-rule-width));
-  background: var(--tint-crit);
-  border-left: var(--state-rule-width) solid var(--state-crit);
+.attention-item::before {
+  position: absolute;
+  top: var(--space-4);
+  left: calc(-1 * var(--space-1));
+  width: var(--space-2);
+  height: var(--space-2);
+  background: var(--line-strong);
+  border-radius: var(--radius-pill);
+  content: "";
 }
 
-.attention-item--warning { background: var(--tint-warn); }
+.attention-item--critical { border-left: var(--rule-verdict) solid var(--color-verdict); }
+.attention-item--critical::before { background: var(--color-verdict); }
+.attention-item:hover { background: var(--color-transparent); }
 
 .attention-eyebrow {
   display: flex;
+  flex-wrap: wrap;
   min-width: 0;
   align-items: center;
   gap: var(--space-2);
@@ -1346,6 +1394,7 @@ main {
 
 .attention-identity {
   display: flex;
+  flex-wrap: wrap;
   min-width: 0;
   flex: 1;
   align-items: center;
@@ -1353,11 +1402,14 @@ main {
 }
 
 .attention-session {
-  overflow: hidden;
+  flex-basis: 100%;
   color: var(--text-mid);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: var(--fs-meta);
+  overflow-wrap: anywhere;
 }
+
+.attention-time { flex: 1 0 100%; }
+.attention-identity > .attention-dot { display: none; }
 
 .attention-dot {
   width: var(--space-2);
@@ -1381,52 +1433,22 @@ main {
   text-wrap: pretty;
 }
 
-.attention-item--enriching .attention-title {
-  position: relative;
-}
+.attention-item--enriching .attention-title { font-weight: var(--weight-regular); }
 
-.attention-item--enriching .attention-title::after {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(100deg, transparent 20%, color-mix(in srgb, var(--text-mid) 12%, transparent) 50%, transparent 80%);
-  content: "";
-  pointer-events: none;
-  transform: translateX(-100%);
-  animation: attention-summary-shimmer 1.2s ease-in-out infinite;
-}
-
-@keyframes attention-summary-shimmer {
-  to { transform: translateX(100%); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .attention-item--enriching .attention-title::after { animation: none; }
-}
-
-/* The cause line is the part worth reading, so it wraps to two lines instead of
-   ending in an ellipsis after four words in a 320px column. */
 .attention-detail {
-  display: -webkit-box;
   margin: 0;
-  overflow: hidden;
   color: var(--text-mid);
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  font-size: var(--fs-meta);
   overflow-wrap: anywhere;
 }
 
 .attention-dismiss {
   min-height: var(--button-compact-height);
-  padding: var(--space-1);
+  padding: var(--space-1) var(--space-2);
   color: var(--text-mid);
   background: var(--color-transparent);
-  opacity: 0;
 }
-
-.attention-item:hover .attention-dismiss,
-.attention-dismiss:focus-visible { opacity: 1; }
 
 .attention-actions {
   display: flex;
@@ -1440,12 +1462,16 @@ main {
 .attention-explicit-dismiss {
   min-height: var(--button-compact-height);
   padding: var(--space-1) var(--space-2);
-  color: var(--text-hi);
-  background: var(--bg-active);
-  font-size: var(--fs-xs);
+  color: var(--color-action);
+  background: var(--color-transparent);
+  font-size: var(--fs-meta);
+  text-align: left;
+  white-space: normal;
+  text-decoration: underline;
+  text-underline-offset: .2em;
 }
 
-.attention-explicit-dismiss { color: var(--state-crit); }
+.attention-explicit-dismiss { color: var(--text-mid); }
 
 .attention-payload {
   margin-left: auto;
@@ -1664,7 +1690,10 @@ main {
   font-size: var(--fs-xs);
 }
 
+/* == Unit 4: Supervisor composer == */
 .message {
+  padding-top: var(--space-3);
+  border-top: var(--line-width) solid var(--line-strong);
   display: grid;
   gap: var(--space-2);
   margin-top: auto;
@@ -1676,9 +1705,9 @@ main {
   width: 100%;
   min-height: calc(var(--toolbar-height) + var(--space-6));
   padding: var(--space-3);
-  color: inherit;
-  background: var(--bg-raised);
-  border: 0;
+  color: var(--text-hi);
+  background: var(--bg-panel);
+  border: var(--line-width) solid var(--line-strong);
   border-radius: var(--radius-card);
   resize: vertical;
 }
@@ -2327,7 +2356,8 @@ dialog form > *,
   /* Toasts clear the bottom rail and the gesture bar instead of landing under them. */
   #toast { bottom: calc(var(--machine-rail-width) + var(--space-3) + env(safe-area-inset-bottom)); }
   .context-body { min-height: 0; }
-  .attention-group-label { max-width: var(--mobile-attention-label-width); }
+  /* == Unit 4: Phone attention and composer == */
+  .attention-group-label { max-width: 100%; }
 
   .message { padding-bottom: env(safe-area-inset-bottom); }
 
@@ -2344,30 +2374,32 @@ dialog form > *,
   #message-keyboard { display: block; }
 
 
-  /* Phone composition keeps the supervisor readable and workers horizontally reachable.
-     Workers cannot mount a terminal here, so the strip is sized by its collapsed
-     rows instead of reserving a third of the screen for empty terminal wells. */
+  /* == Unit 4: Phone panes form a stacked ruled worker list == */
   main .pane-grid.pane-layout { grid-template-rows: minmax(0, 1fr) auto; }
 
   .pane-grid.pane-layout .secondary-pane-strip {
+    flex-direction: column;
     max-height: 40dvh;
-    gap: var(--space-1);
+    gap: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
 
-  .pane-grid.pane-layout .secondary-pane-strip .pane {
-    flex-basis: calc(100vw - var(--space-6));
-    min-width: var(--mobile-pane-min-width);
-  }
-
+  .pane-grid.pane-layout .secondary-pane-strip .pane,
   .pane-grid.pane-layout .secondary-pane-strip .pane.collapsed {
-    flex-basis: min(var(--worker-collapsed-width), calc(100vw - var(--space-6)));
-    min-width: min(var(--worker-collapsed-width), calc(100vw - var(--space-6)));
-    height: var(--button-height);
-    min-height: var(--button-height);
+    flex: 0 0 auto;
+    width: 100%;
+    min-width: 0;
+    height: var(--space-8);
+    min-height: var(--space-8);
+    border-radius: 0;
+    border-bottom: var(--line-width) solid var(--line-subtle);
   }
 
   .pane-grid.pane-layout .secondary-pane-strip .pane.collapsed .pane-header {
-    min-height: var(--button-height);
+    min-height: 0;
+    flex-basis: auto;
+    padding-block: 0;
   }
 
   /* Phone pane controls are icon-only, so every one of them needs a glyph and a

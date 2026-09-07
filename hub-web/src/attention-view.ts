@@ -165,16 +165,18 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
     ticket.textContent = card.content.ticketId;
     identity.append(ticket);
   }
+  if (card.content.enrichmentPending) {
+    const pending = document.createElement("span");
+    pending.className = "attention-enriching";
+    pending.textContent = "Enriching…";
+    identity.append(pending);
+  }
   const time = document.createElement("time");
   time.dateTime = card.latest.createdAt;
   time.textContent = relativeTime(card.latest.createdAt, options.now);
   time.title = absoluteTimestamp(card.latest.createdAt);
-  eyebrow.append(identity, time);
-  if (severity !== "critical") {
-    const dismiss = button("×", "attention-dismiss", () => void callbacks.dismiss(card.items));
-    dismiss.setAttribute("aria-label", `Dismiss ${severity} event`);
-    eyebrow.append(dismiss);
-  }
+  time.className = "attention-time";
+  eyebrow.append(time, identity);
 
   const headline = document.createElement("p");
   headline.className = "attention-title";
@@ -200,9 +202,10 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
       });
     }));
   }
-  if (severity === "critical") {
-    actions.append(button("Dismiss", "attention-explicit-dismiss", () => void callbacks.dismiss(card.items)));
-  }
+  const dismiss = button("Dismiss", severity !== "critical" ? "attention-dismiss" : "attention-explicit-dismiss", () => void callbacks.dismiss(card.items));
+  dismiss.setAttribute("aria-label", `Dismiss ${severity} event`);
+  if (card.content.action === "none") dismiss.classList.add("attention-action");
+  actions.append(dismiss);
   actions.append(renderPayload(card, callbacks));
   article.append(actions);
   return article;
@@ -251,13 +254,15 @@ export function renderAttentionPanel(
   header.className = "attention-panel-header";
   const heading = document.createElement("h2");
   heading.textContent = "Attention";
-  heading.append(renderAttentionCounts(counts));
+  const summary = document.createElement("p");
+  summary.className = "attention-panel-summary";
+  summary.textContent = attentionSummary(counts).label;
   header.append(heading);
   const infoItems = items.filter((item) => !item.acknowledgedAt && attentionCounts([item]).info === 1);
   if (infoItems.length > 0) {
     header.append(button("Dismiss all info", "attention-dismiss-info", () => void callbacks.dismiss(infoItems)));
   }
-  container.append(header);
+  container.append(header, summary);
 
   const groups = groupAttention(items);
   if (groups.length === 0) {

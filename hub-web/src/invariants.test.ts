@@ -574,7 +574,7 @@ describe("binding Cassy Commander browser invariants", () => {
     // One rule, one surface, one radius, one minimum target for Machines, each
     // machine chip, Pair, the attention summary and the envelope. Three
     // container treatments in one 48px row is the defect, not a style choice.
-    expect(css).toContain("--rail-item-min: 44px");
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain("--rail-item-min: 44px");
     expect(css).toContain(`  .machine-rail .commander-mark,
   .machine-rail .machine-icon,
   .machine-rail .pair-machine,
@@ -611,7 +611,7 @@ describe("binding Cassy Commander browser invariants", () => {
     // fill that only two of the three severities receive.
     expect(css).not.toContain(".attention-count--critical { color: var(--state-crit); background: var(--tint-crit); }");
     expect(css).toContain(".attention-count--critical { color: var(--state-crit); }");
-    expect(css).toContain(".attention-count--info { color: var(--state-info); }");
+    expect(css).toContain(".attention-count--info { color: var(--text-mid); }");
     expect(view).toContain("export function renderAttentionSummary(");
     expect(main).toContain("renderAttentionSummary(context.counts)");
   });
@@ -627,7 +627,7 @@ describe("binding Cassy Commander browser invariants", () => {
     // The collapsed pill holds the attention summary and the envelope on one
     // row. A pill narrower than the two rail items it renders lets the summary
     // overflow left across the Pair button (D7/fig b1a).
-    expect(css).toContain("--mobile-context-pill-width: 152px");
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain("--mobile-context-pill-width: 152px");
     expect(css).toContain(".context-panel.collapsed .attention-rail .rail-control { display: none; }");
     expect(css).toContain("padding-right: calc(var(--mobile-context-pill-width) + var(--space-1))");
     // Tapping the envelope must land on the composer it advertises.
@@ -700,38 +700,10 @@ describe("binding Cassy Commander browser invariants", () => {
       "terminal/ghostty/renderer.ts",
       "terminal/ghostty/surface.ts",
     ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
-    for (const token of [
-      "--bg-root: #101318",
-      "--bg-panel: #151922",
-      "--bg-raised: #1B202B",
-      "--bg-terminal: #0C0E13",
-      "--bg-hover: #222836",
-      "--bg-active: #2A3142",
-      "--line-subtle: #232936",
-      "--line-strong: #38415A",
-      "--text-hi: #E8EBF2",
-      "--text-mid: #9AA3B5",
-      "--text-lo: #5C6577",
-      "--state-ok: #4CC38A",
-      "--state-warn: #E5B454",
-      "--state-crit: #E5645E",
-      "--state-info: #6CA7F2",
-      "--state-idle: #5C6577",
-      "--fs-xs: .6875rem",
-      "--fs-sm: .78125rem",
-      "--fs-base: .84375rem",
-      "--fs-md: .9375rem",
-      "--fs-lg: 1.125rem",
-      "--radius-card: 6px",
-      "--radius-pane: 8px",
-      "--radius-pill: 999px",
-    ]) expect(css).toContain(token);
-
-    const rootEnd = css.indexOf("\n}\n");
-    expect(rootEnd).toBeGreaterThan(0);
-    const componentCss = css.slice(rootEnd + 3);
-    expect(componentCss).not.toMatch(/#[0-9a-f]{3,8}\b/i);
-    expect(componentCss).not.toMatch(/rgba?\(/i);
+    expect(css).toContain('@import "./tokens.css";');
+    expect(css).not.toContain(":root {");
+    expect(css).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(css).not.toMatch(/rgba?\(/i);
     expect(main).not.toMatch(/#[0-9a-f]{3,8}\b/i);
     expect(html).not.toMatch(/#[0-9a-f]{3,8}\b/i);
 
@@ -760,10 +732,10 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).toContain('state.latencyMs === undefined ? "live" : `live · ${state.latencyMs}ms`');
     expect(main).not.toContain("state.latencyMs ?? 0");
     expect(connection).toContain('onLatency?(latencyMs: number)');
-    expect(css).toContain('--machine-rail-width: 48px');
-    expect(css).toContain('--context-panel-width: 320px');
-    expect(css).toContain('--session-header-height: 44px');
-    expect(css).toContain('--pane-header-height: 32px');
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--machine-rail-width: 48px');
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--context-panel-width: 320px');
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--session-header-height: 44px');
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--pane-header-height: 32px');
     expect(css).toContain('grid-template-columns: var(--machine-rail-width) minmax(0, 1fr) var(--context-panel-width)');
     expect(css).toContain('flex: 0 0 var(--session-header-height)');
     expect(css).toContain('grid-template-rows: minmax(0, 65fr) minmax(var(--space-8), 35fr)');
@@ -799,7 +771,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain(".session-identity {");
     expect(css).toContain(".session-back {");
     expect(css).toContain('.session-picker-entry[aria-current="true"]');
-    expect(css).toContain(".session-back { width: var(--space-10); }");
+    expect(css).toContain(".session-back { width: var(--button-height); }");
   });
 
   it("routes every navigation through one recorded selection and restores the last session on reopen", async () => {

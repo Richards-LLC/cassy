@@ -1,109 +1,4 @@
-:root {
-  color-scheme: dark;
-
-  /* Surfaces — cool graphite ramp, deeper means further back. */
-  --bg-root: #101318;
-  --bg-panel: #151922;
-  --bg-raised: #1B202B;
-  --bg-terminal: #0C0E13;
-  --bg-hover: #222836;
-  --bg-active: #2A3142;
-
-  /* Lines */
-  --line-subtle: #232936;
-  --line-strong: #38415A;
-
-  /* Text */
-  --text-hi: #E8EBF2;
-  --text-mid: #9AA3B5;
-  --text-lo: #5C6577;
-
-  /* State — the only saturated application colours. */
-  --state-ok: #4CC38A;
-  --state-warn: #E5B454;
-  --state-crit: #E5645E;
-  --state-info: #6CA7F2;
-  --state-idle: #5C6577;
-  --tint-warn: rgba(229, 180, 84, .09);
-  --tint-crit: rgba(229, 100, 94, .10);
-
-  /* Overlay colours derive from the surface ramp, never the ANSI palette. */
-  --overlay-backdrop: color-mix(in srgb, var(--bg-terminal) 72%, transparent);
-  --overlay-shadow-color: color-mix(in srgb, var(--bg-terminal) 72%, transparent);
-  --color-transparent: transparent;
-
-  /* Two-face type system. */
-  --font-ui: Inter, ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", "IBM Plex Mono", monospace;
-  --fs-xs: .6875rem;       /* 11px */
-  --fs-sm: .78125rem;      /* 12.5px */
-  --fs-base: .84375rem;    /* 13.5px */
-  --fs-terminal: .8125rem; /* 13px */
-  --fs-md: .9375rem;       /* 15px */
-  --fs-lg: 1.125rem;       /* 18px */
-  --weight-regular: 400;
-  --weight-medium: 500;
-  --weight-semibold: 600;
-  --tracking-label: .06em;
-  --line-ui: 1.4;
-  --line-terminal: 1.35;
-  --root-font-size: 16px;
-
-  /* Four-pixel spatial rhythm. */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 20px;
-  --space-6: 24px;
-  --space-8: 32px;
-  --space-10: 40px;
-
-  /* Shape is deliberately constrained. */
-  --radius-card: 6px;
-  --radius-pane: 8px;
-  --radius-pill: 999px;
-  --line-width: 1px;
-  --state-rule-width: 2px;
-  --focus-ring-width: 2px;
-  --shadow-overlay: 0 24px 80px var(--overlay-shadow-color);
-
-  /* App geometry — fixed chrome and pane sizes stay on the four-pixel grid. */
-  --machine-rail-width: 48px;
-  --machine-drawer-width: 280px;
-  --context-panel-width: 320px;
-  --session-header-height: 44px;
-  --pane-secondary-min-width: 280px;
-  --pane-header-height: 32px;
-  --worker-collapsed-width: 240px;
-  --toolbar-height: 72px;
-  --button-height: 40px;
-  --button-compact-height: 28px;
-  --dialog-width: 520px;
-  --terminal-state-width: 360px;
-  --pair-detail-label-width: 140px;
-  --mobile-drawer-max-height: 520px;
-  --mobile-pane-min-width: 260px;
-  --mobile-attention-label-width: 200px;
-  /* Fleet board session cards: one column on a phone, three across a desktop canvas. */
-  --fleet-card-min-width: 260px;
-  --fleet-board-max-width: 1120px;
-  --mobile-header-chip-width: 72px;
-  /* Collapsed phone context pill: the attention summary plus one message cell. */
-  --mobile-context-pill-width: 152px;
-  /* Every control in the phone rail is at least this tall and wide. */
-  --rail-item-min: 44px;
-  /* A landscape phone reads its attention count down the right edge, so that
-     column is sized by the labelled figure it has to hold, not by the 48px
-     square a portrait rail can use. */
-  --landscape-attention-rail-width: 80px;
-  --browser-notice-height: 32px;
-  --attention-payload-max-height: 180px;
-  --attention-motion-duration: 150ms;
-  --chrome-motion-duration: 120ms;
-  --connection-spin-duration: 800ms;
-  --connection-log-max-height: 60dvh;
-}
+@import "./tokens.css";
 
 * { box-sizing: border-box; }
 
@@ -165,7 +60,7 @@ button[aria-disabled="true"] { opacity: .42; cursor: not-allowed; }
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible {
-  outline: var(--focus-ring-width) solid var(--state-info);
+  outline: var(--focus-ring-width) solid var(--color-focus);
   outline-offset: var(--focus-ring-width);
 }
 
@@ -192,7 +87,7 @@ pre { font-family: var(--font-mono); }
   padding: var(--space-1) var(--space-3);
   color: var(--state-warn);
   background: var(--tint-warn);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   text-align: center;
 }
 
@@ -252,9 +147,9 @@ pre { font-family: var(--font-mono); }
 .machine-icon {
   display: grid;
   place-items: center;
-  flex: 0 0 var(--space-10);
-  width: var(--space-10);
-  min-height: var(--space-10);
+  flex: 0 0 var(--button-height);
+  width: var(--button-height);
+  min-height: var(--button-height);
   padding: 0;
   background: var(--color-transparent);
 }
@@ -266,8 +161,8 @@ pre { font-family: var(--font-mono); }
 .commander-mark-label { display: none; }
 
 .commander-mark-icon {
-  width: var(--space-5);
-  height: var(--space-5);
+  width: var(--space-6);
+  height: var(--space-6);
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
@@ -280,7 +175,7 @@ pre { font-family: var(--font-mono); }
   flex: 1;
   flex-direction: column;
   gap: var(--space-2);
-  width: var(--space-10);
+  width: var(--button-height);
   margin: 0;
   overflow-y: auto;
 }
@@ -340,7 +235,7 @@ pre { font-family: var(--font-mono); }
 .resolving .connection-dot,
 .dialing .connection-dot,
 .auth .connection-dot,
-.attaching .connection-dot { background: var(--state-info); }
+.attaching .connection-dot { background: var(--state-ok); }
 
 .machine-state.degraded,
 .machine-state.backoff,
@@ -412,7 +307,7 @@ pre { font-family: var(--font-mono); }
 .machine-row {
   display: grid;
   grid-template-columns: var(--space-2) minmax(12ch, 1fr) minmax(0, 9ch);
-  min-height: var(--space-10);
+  min-height: var(--button-height);
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2);
@@ -423,7 +318,7 @@ pre { font-family: var(--font-mono); }
 .machine-row strong {
   overflow: hidden;
   font-family: var(--font-ui);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   font-weight: var(--weight-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -432,7 +327,7 @@ pre { font-family: var(--font-mono); }
 .machine-row small {
   min-width: 0;
   overflow: hidden;
-  color: var(--text-lo);
+  color: var(--text-mid);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   text-align: right;
@@ -448,8 +343,8 @@ pre { font-family: var(--font-mono); }
 
 .drawer-empty {
   margin: var(--space-1) var(--space-2);
-  color: var(--text-lo);
-  font-size: var(--fs-sm);
+  color: var(--text-mid);
+  font-size: var(--fs-meta);
 }
 
 /* The one destructive action in the drawer sits away from the session list it
@@ -512,12 +407,12 @@ pre { font-family: var(--font-mono); }
   overflow: hidden;
   color: var(--text-mid);
   font-family: var(--font-ui);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
 
-.session-summary-description.stale { color: var(--text-lo); }
+.session-summary-description.stale { color: var(--text-mid); }
 
 /* Fleet board — the canvas with machines paired and no session open. */
 .fleet-board {
@@ -559,7 +454,7 @@ pre { font-family: var(--font-mono); }
   min-height: var(--space-6);
   padding: 0 var(--space-1);
   color: var(--text-hi);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   font-weight: var(--weight-medium);
 }
 
@@ -578,11 +473,11 @@ pre { font-family: var(--font-mono); }
 .fleet-machine-phase.resolving,
 .fleet-machine-phase.dialing,
 .fleet-machine-phase.auth,
-.fleet-machine-phase.attaching { color: var(--state-info); }
+.fleet-machine-phase.attaching { color: var(--state-ok); }
 
 .fleet-sessions {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(var(--fleet-card-min-width), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(var(--mobile-pane-min-width), 1fr));
   gap: var(--space-2);
 }
 
@@ -591,7 +486,7 @@ pre { font-family: var(--font-mono); }
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-1) var(--space-2);
-  min-height: var(--space-10);
+  min-height: var(--button-height);
   padding: var(--space-3);
   background: var(--bg-raised);
   border-radius: var(--radius-pane);
@@ -613,7 +508,7 @@ pre { font-family: var(--font-mono); }
   display: -webkit-box;
   grid-column: 1 / -1;
   color: var(--text-mid);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   font-weight: var(--weight-regular);
   white-space: normal;
   -webkit-box-orient: vertical;
@@ -632,7 +527,7 @@ pre { font-family: var(--font-mono); }
   color: var(--text-mid);
   background: var(--bg-panel);
   border-radius: var(--radius-card);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
 }
 
 .phase-chip {
@@ -649,9 +544,9 @@ pre { font-family: var(--font-mono); }
 }
 
 .phase-testing,
-.phase-building { color: var(--state-info); }
+.phase-building { color: var(--state-ok); }
 .phase-blocked { color: var(--state-warn); background: var(--tint-warn); }
-.phase-idle { color: var(--state-idle); }
+.phase-idle { color: var(--text-mid); }
 
 .session-name,
 .session-meta,
@@ -671,7 +566,7 @@ pre { font-family: var(--font-mono); }
   color: var(--state-warn);
   background: var(--tint-warn);
   border-radius: var(--radius-card);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
 }
 
 main {
@@ -765,14 +660,14 @@ main {
 
 .session-picker-caret {
   flex: 0 0 auto;
-  color: var(--text-lo);
+  color: var(--text-mid);
   font-family: var(--font-ui);
   font-size: var(--fs-xs);
 }
 
 .picker-machine {
   margin: var(--space-2) 0 0;
-  color: var(--text-lo);
+  color: var(--text-mid);
   font-size: var(--fs-xs);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
@@ -785,15 +680,15 @@ main {
 }
 
 .session-picker-entry .session-name { grid-column: 1; font-size: var(--fs-base); }
-.session-picker-entry .session-meta { grid-column: 1 / -1; color: var(--text-lo); font-size: var(--fs-xs); }
-.session-picker-entry .session-summary-title { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-sm); }
+.session-picker-entry .session-meta { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-xs); }
+.session-picker-entry .session-summary-title { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-meta); }
 .session-picker-entry .phase-chip { grid-column: 1; justify-self: start; }
 .session-picker-entry[aria-current="true"] { background: var(--bg-active); }
 
 .session-picker-current {
   grid-column: 2;
   grid-row: 1;
-  color: var(--state-info);
+  color: var(--color-action);
   font-size: var(--fs-xs);
   letter-spacing: var(--tracking-label);
 }
@@ -823,9 +718,9 @@ main {
 }
 
 .mode-badge.control {
-  color: var(--state-info);
-  background: color-mix(in srgb, var(--state-info) 12%, transparent);
-  border-color: color-mix(in srgb, var(--state-info) 32%, transparent);
+  color: var(--state-ok);
+  background: color-mix(in srgb, var(--state-ok) 12%, transparent);
+  border-color: color-mix(in srgb, var(--state-ok) 32%, transparent);
 }
 
 .mode-badge.observer { color: var(--text-mid); }
@@ -843,7 +738,7 @@ main {
 .session-header .actions button {
   min-height: var(--space-8);
   padding: 0 var(--space-2);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   white-space: nowrap;
 }
 
@@ -926,7 +821,7 @@ main {
 }
 
 .pane-role {
-  color: var(--text-lo);
+  color: var(--text-mid);
   font-size: var(--fs-xs);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
@@ -935,7 +830,7 @@ main {
 .pane-last-activity {
   margin-left: auto;
   overflow: hidden;
-  color: var(--text-lo);
+  color: var(--text-mid);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -951,7 +846,7 @@ main {
 .pane-layout-controls button {
   min-height: var(--button-compact-height);
   padding: var(--space-1) var(--space-2);
-  color: var(--text-lo);
+  color: var(--text-mid);
   background: var(--color-transparent);
   font-size: var(--fs-xs);
   white-space: nowrap;
@@ -1033,7 +928,7 @@ main {
   background: var(--bg-raised);
   border: var(--line-width) solid var(--line-strong);
   border-radius: var(--radius-card);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
 }
 
 .transcript-jump[hidden] { display: none; }
@@ -1103,11 +998,11 @@ main {
   justify-items: center;
   gap: var(--space-3);
   margin: var(--space-4);
-  padding: var(--space-5);
+  padding: var(--space-6);
   color: var(--text-mid);
   background: var(--bg-raised);
   border-radius: var(--radius-pane);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   text-align: center;
 }
 
@@ -1125,7 +1020,7 @@ main {
   width: min(var(--terminal-state-width), calc(100% - var(--space-8)));
   justify-items: center;
   gap: var(--space-2);
-  padding: var(--space-5);
+  padding: var(--space-6);
   color: var(--text-hi);
   background: var(--bg-raised);
   border-radius: var(--radius-pane);
@@ -1142,14 +1037,14 @@ main {
 }
 
 .terminal-connecting-elapsed {
-  color: var(--text-lo);
+  color: var(--text-mid);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }
 
 .terminal-connecting-step {
   color: var(--state-warn);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   text-wrap: pretty;
 }
 
@@ -1171,12 +1066,10 @@ main {
   height: var(--space-6);
   margin-bottom: var(--space-1);
   border: var(--state-rule-width) solid var(--line-strong);
-  border-top-color: var(--state-info);
+  border-top-color: var(--text-mid);
   border-radius: var(--radius-pill);
-  animation: connection-spin var(--connection-spin-duration) linear infinite;
 }
 
-@keyframes connection-spin { to { transform: rotate(360deg); } }
 
 .terminal-disconnected-banner {
   position: absolute;
@@ -1218,8 +1111,8 @@ main {
 .attention-rail-counts {
   display: grid;
   place-items: center;
-  width: var(--space-10);
-  min-height: var(--space-10);
+  width: var(--button-height);
+  min-height: var(--button-height);
   padding: var(--space-1);
   background: var(--color-transparent);
 }
@@ -1246,20 +1139,20 @@ main {
 .context-tabs {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  flex: 0 0 var(--space-10);
+  flex: 0 0 var(--button-height);
   padding: 0 var(--space-2);
   background: var(--bg-panel);
 }
 
 .context-tabs button {
-  min-height: var(--space-10);
+  min-height: var(--button-height);
   padding: 0 var(--space-2);
   overflow: hidden;
   color: var(--text-mid);
   background: var(--color-transparent);
   border-bottom: var(--line-width) solid var(--color-transparent);
   border-radius: 0;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1312,7 +1205,7 @@ main {
 }
 
 .attention-count {
-  min-width: var(--space-5);
+  min-width: var(--space-6);
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-pill);
   text-align: center;
@@ -1323,8 +1216,8 @@ main {
 .attention-count { background: var(--bg-active); }
 .attention-count--critical { color: var(--state-crit); }
 .attention-count--warning { color: var(--state-warn); }
-.attention-count--info { color: var(--state-info); }
-.attention-count--clear { color: var(--text-lo); }
+.attention-count--info { color: var(--text-mid); }
+.attention-count--clear { color: var(--text-mid); }
 
 /* The rail's single labelled figure. Desktop keeps the per-severity column. */
 .attention-summary { display: none; }
@@ -1340,7 +1233,7 @@ main {
 .attention-summary--warning .attention-summary-label { color: var(--state-warn); }
 .attention-summary--info .attention-summary-label { color: var(--text-hi); }
 .attention-summary--clear .attention-summary-label { color: var(--text-mid); }
-.attention-dot--info { background: var(--state-info); }
+.attention-dot--info { background: var(--text-mid); }
 .attention-dot--clear { background: var(--state-idle); }
 
 .attention-dismiss-info,
@@ -1382,7 +1275,7 @@ main {
   text-align: left;
 }
 
-.attention-group-toggle::after { content: "▾"; color: var(--text-lo); }
+.attention-group-toggle::after { content: "▾"; color: var(--text-mid); }
 .attention-group-toggle[aria-expanded="false"]::after { content: "▸"; }
 
 .attention-group-label {
@@ -1390,7 +1283,7 @@ main {
   overflow: hidden;
   color: var(--text-hi);
   font-family: var(--font-mono);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1429,7 +1322,7 @@ main {
   color: var(--text-hi);
   background: var(--bg-raised);
   border-radius: var(--radius-card);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   line-height: var(--line-ui);
 }
 
@@ -1446,7 +1339,7 @@ main {
   min-width: 0;
   align-items: center;
   gap: var(--space-2);
-  color: var(--text-lo);
+  color: var(--text-mid);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }
@@ -1470,7 +1363,7 @@ main {
   width: var(--space-2);
   height: var(--space-2);
   flex: none;
-  background: var(--state-info);
+  background: var(--text-mid);
   border-radius: var(--radius-pill);
 }
 
@@ -1603,8 +1496,8 @@ main {
 
 .attention-empty {
   margin: var(--space-2) 0;
-  color: var(--text-lo);
-  font-size: var(--fs-sm);
+  color: var(--text-mid);
+  font-size: var(--fs-meta);
 }
 
 .attention-empty p {
@@ -1624,7 +1517,7 @@ main {
 }
 
 .attention-item--new-critical {
-  animation: attention-critical-arrival var(--attention-motion-duration) ease-out 1;
+  animation: attention-critical-arrival var(--attention-motion-duration) var(--motion-easing) 1;
 }
 
 @keyframes attention-tier-move {
@@ -1633,7 +1526,7 @@ main {
 }
 
 .attention-item--reclassified {
-  animation: attention-tier-move var(--attention-motion-duration) ease-out 1;
+  animation: attention-tier-move var(--attention-motion-duration) var(--motion-easing) 1;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1657,7 +1550,7 @@ main {
   color: var(--text-mid);
   background: var(--bg-raised);
   border-radius: var(--radius-card);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   line-height: var(--line-ui);
 }
 
@@ -1687,7 +1580,7 @@ main {
 
 .status-line .status-identifier {
   overflow: hidden;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1696,7 +1589,7 @@ main {
 
 .status-chip {
   display: inline-flex;
-  min-height: var(--space-5);
+  min-height: var(--space-6);
   align-items: center;
   padding: 0 var(--space-2);
   color: var(--text-mid);
@@ -1710,7 +1603,7 @@ main {
 }
 
 .status-chip--active,
-.status-chip--in-progress { color: var(--state-info); }
+.status-chip--in-progress { color: var(--state-ok); }
 .status-chip--blocked { color: var(--state-warn); background: var(--tint-warn); }
 .status-chip--idle,
 .status-chip--open { color: var(--text-mid); }
@@ -1720,14 +1613,14 @@ main {
   margin: 0;
   color: var(--text-mid);
   font-family: var(--font-ui);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   text-wrap: pretty;
 }
 
 .status-empty {
   margin: var(--space-2) 0;
   color: var(--text-mid);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
 }
 
 /* Stale operations data is still useful, but it must never read as live. */
@@ -1737,7 +1630,7 @@ main {
   color: var(--state-warn);
   background: var(--tint-warn);
   border-radius: var(--radius-card);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
 }
 
 .status-context:has(.status-stale) #status-view { opacity: .62; }
@@ -1818,7 +1711,7 @@ main {
 .message-delivery {
   margin: 0;
   color: var(--text-mid);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
 }
 
 .message-delivery { color: var(--state-ok); }
@@ -1833,7 +1726,7 @@ main {
 .control-disabled-reason {
   margin: 0;
   color: var(--state-warn);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
 }
 
 .sr-only {
@@ -1906,11 +1799,11 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .command-palette > section { display: flex; flex-direction: column; gap: var(--space-2); min-height: 0; padding: var(--space-3); }
 .command-palette header { display: flex; min-height: var(--space-8); align-items: center; justify-content: space-between; }
 .command-palette header button { width: var(--space-8); min-height: var(--space-8); padding: 0; }
-.command-palette input { min-height: var(--space-10); padding: var(--space-2) var(--space-3); color: var(--text-hi); background: var(--bg-terminal); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
+.command-palette input { min-height: var(--button-height); padding: var(--space-2) var(--space-3); color: var(--text-hi); background: var(--bg-terminal); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
 .palette-commands { display: grid; gap: var(--space-1); overflow: auto; }
 .palette-command { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); min-height: 44px; padding: var(--space-2) var(--space-3); background: var(--bg-raised); text-align: left; }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.palette-command small, .palette-empty { color: var(--text-lo); }
+.palette-command small, .palette-empty { color: var(--text-mid); }
 .palette-command small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* The flow is focused only so the dialog opens on its title instead of a text
@@ -1941,12 +1834,12 @@ dialog p { color: var(--text-mid); }
 dialog label {
   display: grid;
   gap: var(--space-1);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
 }
 
 dialog input {
   padding: var(--space-3);
-  color: inherit;
+  color: var(--text-hi);
   background: var(--bg-terminal);
   border: 0;
   border-radius: var(--radius-card);
@@ -1968,7 +1861,7 @@ fieldset {
   min-width: 0;
   gap: var(--space-2);
   font-family: var(--font-mono);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
 }
 
 /* A scope the invitation never granted stays visible and says why it is off. */
@@ -1987,7 +1880,7 @@ fieldset {
 
 .scope-hint {
   margin: var(--space-2) 0 0;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   color: var(--text-mid);
 }
 
@@ -2031,7 +1924,7 @@ fieldset {
   flex: 1 0 100%;
   order: -1;
   margin: 0;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
 }
 
 .dialog-actions .primary { width: auto; }
@@ -2055,7 +1948,7 @@ fieldset {
 .pair-code-actions button {
   min-height: var(--space-8);
   padding: 0 var(--space-3);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
 }
 
 .pair-details {
@@ -2115,7 +2008,7 @@ dialog form > *,
 
 .pair-alternative {
   color: var(--text-mid);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   text-wrap: pretty;
 }
 
@@ -2130,7 +2023,7 @@ dialog form > *,
   left: 50%;
   bottom: var(--space-6);
   z-index: 10;
-  transform: translate(-50%, var(--space-5));
+  transform: translate(-50%, var(--space-6));
   opacity: 0;
   pointer-events: none;
   padding: var(--space-3) var(--space-4);
@@ -2228,7 +2121,7 @@ dialog form > *,
     background: var(--bg-raised);
     border: 0;
     border-radius: var(--radius-card);
-    font-size: var(--fs-sm);
+    font-size: var(--fs-meta);
     font-weight: var(--weight-medium);
   }
 
@@ -2288,7 +2181,7 @@ dialog form > *,
 
   /* Switching session and stepping back are the two phone gestures this header
      exists for, so they get the widest targets in it. */
-  .session-back { width: var(--space-10); }
+  .session-back { width: var(--button-height); }
   .session-picker-toggle { padding-right: var(--space-2); }
 
   .machine-chip { display: none; }
@@ -2318,11 +2211,11 @@ dialog form > *,
   }
 
   .drawer-header button {
-    width: var(--space-10);
-    min-height: var(--space-10);
+    width: var(--button-height);
+    min-height: var(--button-height);
   }
 
-  .remove-machine { min-height: var(--space-10); }
+  .remove-machine { min-height: var(--button-height); }
 
   .terminal-state { width: calc(100% - var(--space-4)); }
   .fleet-board { padding: var(--space-1) var(--space-1) var(--space-3); gap: var(--space-3); }
@@ -2469,12 +2362,12 @@ dialog form > *,
   .pane-grid.pane-layout .secondary-pane-strip .pane.collapsed {
     flex-basis: min(var(--worker-collapsed-width), calc(100vw - var(--space-6)));
     min-width: min(var(--worker-collapsed-width), calc(100vw - var(--space-6)));
-    height: var(--space-10);
-    min-height: var(--space-10);
+    height: var(--button-height);
+    min-height: var(--button-height);
   }
 
   .pane-grid.pane-layout .secondary-pane-strip .pane.collapsed .pane-header {
-    min-height: var(--space-10);
+    min-height: var(--button-height);
   }
 
   /* Phone pane controls are icon-only, so every one of them needs a glyph and a
@@ -2502,7 +2395,7 @@ dialog form > *,
   .pane-grid.pane-layout .pane-view-toggle[data-view="transcript"]::after { content: "▦"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .pane-view-toggle[data-view="terminal"]::after { content: "≡"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .pane-search::after { content: "⌕"; font-size: var(--fs-md); }
-  .pane-grid.pane-layout .make-primary::after { content: "★"; font-size: var(--fs-sm); }
+  .pane-grid.pane-layout .make-primary::after { content: "★"; font-size: var(--fs-meta); }
   .pane-grid.pane-layout .move-earlier::after { content: "←"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .move-later::after { content: "→"; font-size: var(--fs-md); }
   .pane-role { display: none; }
@@ -2677,7 +2570,7 @@ dialog form > *,
 
 @media (max-width: 500px) {
   .session-header { grid-template-columns: minmax(48px, 1fr) auto auto; }
-  .session-header h1 { font-size: var(--fs-sm); }
+  .session-header h1 { font-size: var(--fs-meta); }
   /* Full words or no chip: OBS / Ctrl / Int made a first-time Pixel pass read
      like a debug toolbar. The detailed status remains in the machine drawer. */
   .machine-chip, .mode-badge, .connection-summary { display: none; }

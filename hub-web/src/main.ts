@@ -1,4 +1,5 @@
 import "./styles.css";
+import { applyScheme } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionCounts, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
@@ -34,6 +35,8 @@ import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connecti
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
+applyScheme();
+
 const pendingPairingStore = pendingPairingStoreFor(window);
 const relayOrigin = pairingRelayOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-pairing-relay-origin"]')?.content ?? null);
 const arrivedFragment = readPairingFragment(window.location, window.history, pendingPairingStore);
@@ -56,11 +59,6 @@ const pairingOperations = new PairingOperationCoordinator();
 // Which cancellation, if any, owns the "could not finish cancelling" step.
 const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
-const rootStyles = getComputedStyle(document.documentElement);
-document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute(
-  "content",
-  rootStyles.getPropertyValue("--bg-root").trim(),
-);
 const machines = new Map<string, StoredMachine>();
 let machineCatalogLoaded = false;
 const sessions = new Map<string, HubSession[]>();

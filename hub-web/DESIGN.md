@@ -1,158 +1,141 @@
 ---
-source:
-  - hub-web/src/styles.css
-theme: dark-first
+source: [hub-web/src/tokens.css, docs/design/design-tokens.json]
+inherits: petrastella
+theme: dual
 colors:
-  bg: "--bg-root #101318"
-  surface: "--bg-panel #151922"
-  surface-raised: "--bg-raised #1B202B"
-  surface-hover: "--bg-hover #222836"
-  surface-active: "--bg-active #2A3142"
-  terminal: "--bg-terminal #0C0E13"
-  border: "--line-subtle #232936; focused pane --line-strong #38415A"
-  text: "--text-hi #E8EBF2"
-  text-muted: "--text-mid #9AA3B5; tertiary --text-lo #5C6577"
-  primary: "--state-info #6CA7F2 (running state and keyboard focus only; never a fill)"
-  success: "--state-ok #4CC38A"
-  warning: "--state-warn #E5B454; --tint-warn rgba(229,180,84,.09)"
-  danger: "--state-crit #E5645E; --tint-crit rgba(229,100,94,.10)"
-  idle: "--state-idle #5C6577 (same value as --text-lo, on purpose)"
-  overlay: "--overlay-backdrop and --overlay-shadow-color = color-mix(--bg-terminal 72%, transparent)"
+  bg: "--bg-root #F7F4EE / #12141A"
+  surface: "--bg-panel #FFFFFF / #191C24"
+  surface-raised: "--bg-raised color-mix(in srgb, var(--bg-panel) 96%, var(--text-hi)) / color-mix(in srgb, var(--bg-panel) 96%, var(--text-hi))"
+  border: "--line-subtle #DAD3C7 / #2B3040"
+  border-strong: "--line-strong #8F8371 / #6B7390"
+  text: "--text-hi #1B1D24 / #E9E6E0"
+  text-muted: "--text-mid #5A5F6E / #A3A7B4"
+  primary: "--color-action #2E3A9F / #A9B3FF"
+  accent: "--color-verdict #2E3A9F / #A9B3FF"
+  focus: "--color-focus #2E3A9F / #A9B3FF"
+  success: "--state-ok #226845 / #5FC492"
+  warning: "--state-warn #7F5504 / #E2B14D"
+  danger: "--state-crit #B3261E / #EF7B72"
+  idle-mark: "--color-series-neutral #6B7280 / #9AA1AF"
+  terminal: "--bg-terminal #0C0E13 / #0C0E13"
 typography:
   families:
-    ui: "--font-ui Inter, ui-sans-serif, system-ui, sans-serif"
-    mono: "--font-mono \"JetBrains Mono\", \"IBM Plex Mono\", monospace"
+    display: "--font-display \"Iowan Old Style\", \"Palatino Linotype\", Palatino, \"Book Antiqua\", Georgia, \"Times New Roman\", serif"
+    body: "--font-ui Inter, ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif"
+    mono: "--font-mono \"JetBrains Mono\", \"IBM Plex Mono\", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
   scale:
-    xs: "--fs-xs .6875rem (11px) / eyebrows, chips, pane chrome, metadata"
-    sm: "--fs-sm .78125rem (12.5px) / card prose, secondary controls"
-    base: "--fs-base .84375rem (13.5px) / body, buttons, session names in cards"
-    terminal: "--fs-terminal .8125rem (13px) at --line-terminal 1.35, clamped 12–16px by Ghostty"
-    md: "--fs-md .9375rem (15px) / section titles, transcript reading view"
-    lg: "--fs-lg 1.125rem (18px) / the open session title and the pairing code"
-  weights: "--weight-regular 400, --weight-medium 500, --weight-semibold 600; nothing heavier"
-  line-height: "--line-ui 1.4"
-  tracking: "--tracking-label .06em on uppercase eyebrows"
+    eyebrow: "--fs-xs 12px / 16px / 600"
+    meta: "--fs-meta 13px / 18px / 400"
+    caption: "--fs-base 14px / 20px / 400"
+    ledger: "--fs-md 15px / 22px / 400"
+    lede: "--fs-lg 21px / 30px / 400"
+    verdict: "--fs-verdict clamp(24px, 3vw, 34px) / 1.1 / 400"
+    terminal: "--fs-terminal 13px / 1.35 / 400"
+  weights: "--weight-regular 400, --weight-medium 500, --weight-semibold 600"
+  tracking: "--tracking-label 0.08em"
+  control-line-height: "--line-ui 1.43"
 spacing:
   base: "4px"
-  steps: "--space-1 4, --space-2 8, --space-3 12, --space-4 16, --space-5 20, --space-6 24, --space-8 32, --space-10 40"
+  steps: "--space-1 4px, --space-2 8px, --space-3 12px, --space-4 16px, --space-6 24px, --space-8 32px, --space-12 48px, --space-16 64px"
 radius:
-  card: "--radius-card 6px"
-  pane: "--radius-pane 8px"
-  pill: "--radius-pill 999px"
+  control: "--radius-card 4px"
+  panel: "--radius-pane 8px"
+  dot: "--radius-pill 999px"
 elevation:
-  root: "--bg-root, no shadow"
-  panel: "--bg-panel, no shadow"
-  raised: "--bg-raised, no shadow"
-  overlay: "--shadow-overlay 0 24px 80px var(--overlay-shadow-color); dialog and #toast only"
+  overlay: "--shadow-overlay 0 24px 80px rgba(18,20,26,0.40)"
 geometry:
-  rail: "--machine-rail-width 48px; --rail-item-min 44px per phone-rail control"
+  rail: "--machine-rail-width 48px"
   drawer: "--machine-drawer-width 280px"
-  context: "--context-panel-width 320px; --landscape-attention-rail-width 80px"
-  header: "--session-header-height 44px; --pane-header-height 32px"
-  buttons: "--button-height 40px; --button-compact-height 28px"
-  dialog: "--dialog-width 520px, max-height min(88dvh, 720px)"
-  cards: "--terminal-state-width 360px; --fleet-card-min-width 260px; --fleet-board-max-width 1120px"
-  phone: "--mobile-context-pill-width 152px; --mobile-attention-label-width 200px; --mobile-drawer-max-height 520px"
-  motion: "--chrome-motion-duration 120ms; --attention-motion-duration 150ms; --connection-spin-duration 800ms"
+  context: "--context-panel-width 320px"
+  header: "--session-header-height 44px"
+  pane-header: "--pane-header-height 32px"
+  button: "--button-height 40px"
+  dialog: "--dialog-width 520px"
+  fleet-container: "--fleet-board-max-width 1120px"
+  phone-rail-target: "--rail-item-min 44px"
 breakpoints:
-  phone: "(max-width: 53rem), (max-height: 30rem) and (pointer: coarse) — PHONE_MEDIA_QUERY in hub-web/src/viewport.ts"
-  landscape_phone: "(max-height: 30rem) and (pointer: coarse)"
-  compact: "(max-width: 53rem) — column floor and transcript default only"
-  narrow: "(max-width: 500px) — header chips and ⌘K trigger drop"
+  phone: "(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"
+  landscape-phone: "(max-height: 30rem) and (pointer: coarse)"
+  compact: "(max-width: 53rem)"
+  narrow: "(max-width: 500px)"
 ---
-
 ## Overview
 
-Cassy Commander is a dark-only mission-control console: plain TypeScript, one stylesheet, no framework.
-Every application colour, size and duration is a custom property in the `:root` block of `hub-web/src/styles.css`; component rules consume tokens and an invariant test rejects any hex or `rgb()` below that block.
-Cool graphite surfaces recede so terminal pixels stay the deepest thing on screen; saturated colour appears only where it encodes health, severity, focus or connection state.
-Desktop is three columns (rail · canvas · context panel). A phone in portrait is one column over a 48px bottom bar; a phone on its side puts the rails on the long edges.
-The canvas with machines paired and nothing open is the fleet board — machines and their sessions as cards — not an empty card pointing at a drawer.
-Ghostty's 16-colour ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal content, separate from these tokens.
+Cassy Commander is a plain TypeScript console with a Petrastella light/dark shell around dark terminal wells.
+`hub-web/src/tokens.css` is generated from `docs/design/design-tokens.json` by `hub-web/scripts/generate-tokens.mjs`; `docs/design/hub-web/token-map.md` records each mapping and retained console measurement.
+The scheme follows the OS with light as the fallback; `commander.scheme` stores `system`, `light` or `dark`, and `hub-web/src/scheme.ts` applies `html[data-scheme]`.
+This document records the token foundation. The fleet figure, attention timeline and connection verdict follow `docs/design/hub-web/concept-brief.md` in the subsequent screen units; their current component forms below remain until those units land.
+Ghostty's ANSI palette stays in `hub-web/src/terminal/ghostty-adapter.ts`; it is independent of the application palette.
 
 ## Colors
 
-- `--bg-root` is the page and the 8px gutter between shell regions; regions separate through the surface ramp and that gutter, never through full-height borders.
-- `--bg-panel` is quiet chrome: rail, drawer, header, context panel, phase chips, `.pair-details`. Never behind terminal pixels.
-- `--bg-raised` is every card, row, input and button, and the desktop machine tile. Hover moves to `--bg-hover`; selection, the primary button, the active tab and the active machine tile move to `--bg-active`.
-- `--bg-terminal` is reserved for terminal mounts, the transcript, code wells, dialog inputs and the connection log.
-- `--line-subtle` is a hairline for search and palette inputs only. `--line-strong` is the focused pane border and the selected context tab underline; the phone block contains no `--line-strong` at all (D7 invariant).
-- `--text-hi` is primary copy and every identifier the operator acts on; `--text-mid` (6.4:1 on `--bg-raised`) is labels, prose, eyebrows, session metadata and empty-state guidance — anything the operator is meant to read; `--text-lo` (2.8:1) is only timestamps, disabled metadata and unfocused pane chrome.
-- `--state-ok`, `--state-info` and `--state-idle` show through dots, text and outlines only. `--state-warn` and `--state-crit` may sit on `--tint-warn`/`--tint-crit` behind actionable content: the warning attention card, the blocked phase chip, the stale status notice, the browser-unsupported line; critical cards add a 2px left rule.
-- `.danger` (Interrupt, remove machine, explicit dismiss) is red text on a normal surface, never a red fill.
-- Only two `box-shadow` declarations exist — `dialog` and `#toast` — and the test suite counts them.
+- `--bg-root` inherits house `bg` (warm paper / warm graphite); `--bg-panel` inherits `surface` for the rail, header, drawer and context panel.
+- `--bg-raised` mixes 96% `surface` with `ink`; `--bg-hover` mixes 92%. These are the console's two derived overrides; selection uses house `verdict-soft` through `--bg-active`.
+- `--text-hi` inherits `ink`; `--text-mid` inherits `ink-muted`. There is no tertiary text token; timestamps and pane roles use the readable muted value.
+- `--color-action` is for controls and links; `--color-verdict` is for the decisive figure mark. Both inherit the house accent; neither is a running-status colour.
+- `--color-focus` supplies the sole focus outline. `--state-ok`, `--state-warn` and `--state-crit` inherit `good`, `warning` and `danger`; info text is muted evidence.
+- `--state-idle` and `--color-series-neutral` inherit `color.series-neutral`; idle text uses `--text-mid`, while dots use the neutral mark value.
+- `--tint-warn` and `--tint-crit` inherit the corresponding house tints for actionable warnings and critical events. `.danger` actions remain text on a normal control surface.
+- `--bg-terminal` stays #0C0E13 in both schemes. The generated dark-well scope supplies `color.dark.*` and `color.series-neutral.dark` to transcript, terminal mount, search/dialog inputs, pairing code and log/payload `pre` elements.
+- Dark-well descendants inherit matching dark control surfaces, lines and foregrounds; the generated scope repeats the derived surface expressions so they resolve against its own dark roles.
+- `--overlay-backdrop` derives from page `bg`; `--overlay-shadow-color` is extracted from `elevation.overlay`. Neither borrows an ANSI colour.
 
 ## Typography
 
-- Human sentences, buttons, titles, headlines and explanations use `--font-ui`. Anything a machine minted — session names, agent codenames, task IDs, paths, JSON, timestamps, connection phases, pairing codes, scope names — uses `--font-mono`, even inside UI prose.
-- The one `--fs-lg` title is the open session name in `.session-header h1.toolbar-session-title`; "Fleet overview" is the same slot in the UI face. Panels and dialogs title at `--fs-md` semibold.
-- Eyebrows (`.session-eyebrow`, `.picker-machine`, `.status-section-label`, `.fleet-machine-phase`, `.pair-details dt`, `.pane-role`) are `--fs-xs`, uppercase, `--tracking-label`; those that name something use `--text-mid`, `.pane-role` alone stays `--text-lo`. Codenames are never uppercased.
-- Chips (`.phase-chip`, `.status-chip`, `.mode-badge`) are `--fs-xs` mono uppercase on `--bg-panel` with `--radius-pill`; only blocked/control borrow a state colour.
-- Card prose (`.attention-detail`, `.status-activity`, `.session-summary-description`) is `--fs-sm` and wraps with `text-wrap: pretty` or a two-line clamp; it never ellipsises after four words.
-- Ghostty reads `--font-mono` and `--fs-terminal` at mount and clamps 12–16px. The transcript reads at `--fs-md`/1.5 mono because it exists to be read, and its hanging indent is in `ch`, which only lines up in the mono face.
-- Weight above 600 is prohibited everywhere, including ANSI bold in the renderer.
+- Display (`--font-display`) inherits the Iowan/Palatino/Georgia house serif for the fleet and connection verdict sentences; body (`--font-ui`) inherits Inter/system sans; identifiers (`--font-mono`) inherit JetBrains/IBM Plex/system mono.
+- `--fs-xs` is the house 12px eyebrow, `--fs-base` the 14px caption, `--fs-md` the 15px ledger and `--fs-lg` the 21px lede. Pane/session metadata uses the retained 13px `--fs-meta` console step.
+- `--fs-verdict` clamps the house title to 24px–34px at 3vw; the brief gives that slot 1.1 line-height and −.015em tracking. It is available for the screen units; existing headings still consume `--fs-lg` or `--fs-md`.
+- `--tracking-label` inherits the house .08em eyebrow tracking. Weights are 400/500/600; the 500 hero-number weight is available for pairing code; ordinary copy stays 400 and headings top out at 600.
+- `--line-ui` is caption line-height divided by size (20/14 → 1.43). Ghostty keeps `--fs-terminal` 13px, `--line-terminal` 1.35 and its 12–16px runtime clamp.
+- Codenames, IDs, paths, timestamps, phases, scope names and JSON use mono even inside prose. Session codenames are never uppercased.
 
 ## Layout
 
-- All padding and gaps are `--space-*`: cards and rows 12px, panels 16px, pane and shell gaps 8px, in-card gaps 4–8px.
-- Desktop: `.shell` is `48px · minmax(0,1fr) · 320px`; an open drawer widens the first track by 280px; a collapsed context panel narrows the third to 48px. The `.session-header` is exactly 44px; the supervisor pane takes 65fr and the worker strip 35fr; collapsed worker bars are 32px tall.
-- The fleet board (`.fleet-board`) sits at the top of the canvas, centred at up to 1120px, one `.fleet-machine` section per machine with `.fleet-session` cards on `repeat(auto-fill, minmax(260px, 1fr))`.
-- The phone rule is `PHONE_MEDIA_QUERY`, verbatim in the stylesheet and in every `matchMedia` call, so rotation can never put CSS and pane-mounting logic in different modes. `compact` stays width-only: it decides the 80-column PTY floor and the transcript default, which a landscape phone genuinely has the width to skip.
-- Portrait phone: `main` over a 48px + safe-area bottom bar. The bar holds exactly four labelled controls at `--rail-item-min`: Machines and Pair share the left, the attention summary and the envelope share a 152px pill on the right. Machine chips are hidden here; machines live in the drawer the bar opens and the header names the open one.
-- An expanded phone panel takes a row of `min(45dvh, 520px)` above the bar. Its rail is hidden; the tab row (48px) carries Attention, Workers & Tasks and the close control.
-- Landscape phone: rails on the long edges, 48px machines left (initials) and an 80px labelled attention column right, both honouring safe-area insets; the drawer is a left sheet and the expanded panel a right-hand sheet over the terminal, never a row taken from it. Worker strip capped at 30dvh instead of 40dvh.
-- Below `max-width: 500px` the header drops the machine, mode and latency chips and the ⌘K trigger. Above it, those chips render only while a session is open — on the fleet board they described nothing.
-- On a phone only the primary pane mounts a terminal; every other pane is a 40px tappable row that opens as primary, so the reorder glyphs are hidden and only the view toggle and Find remain in the 32px pane header.
-- `.talk-supervisor` is the selected session's own 48px row above the bar; it hides itself while the composer is already on screen (`:has()` on the open status tab) and returns when the panel or tab changes.
-- `.shell` owns `100dvh`; interior regions scroll independently.
+- Spacing inherits the house 4px grid: 4/8/12/16/24/32/48/64px. Retired 20px gaps move to 24px; retired 40px control dimensions use `--button-height` so touch geometry stays 40px.
+- Desktop `.shell` is 48px · minmax(0,1fr) · 320px; the drawer adds 280px; the collapsed context track is 48px. Pane headers are 32px and the session header is 44px.
+- `.fleet-board` inherits the 1120px house container. Its existing card grid temporarily consumes the retained 260px minimum through `--mobile-pane-min-width`; the fleet screen unit removes the grid.
+- The phone query is `(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)` in both CSS and `hub-web/src/viewport.ts`; landscape uses the short-axis query so rotation keeps the same pane-mount policy.
+- Portrait puts `main` above the 48px safe-area rail. Every rail target uses `--rail-item-min` 44px, and the attention/composer pill retains `--mobile-context-pill-width` 152px.
+- Landscape puts the machine rail left and attention rail right, with sheets over the terminal; compact stays width-only for the 80-column PTY floor and transcript default.
+- Below 500px the header drops ancillary machine/mode/latency chips. Interior regions scroll within the shell's `100dvh`; terminal mounts keep their own horizontal pan.
 
 ## Elevation & Depth
 
-- Depth is the ordered ramp `--bg-root` → `--bg-panel` → `--bg-raised` → (`--bg-hover`, `--bg-active`); terminals deliberately step back to `--bg-terminal`.
-- Pane focus turns the reserved transparent 1px border to `--line-strong` and nothing else: no glow, no shadow, no layout shift.
-- Cards, tiles, buttons, sidebars and panes have no shadow. `dialog` and `#toast` are the only overlays and the only shadows; the modal backdrop derives from `--bg-terminal` through `--overlay-backdrop`.
-- Phone sheets (drawer, expanded landscape panel) are `position: fixed` surfaces on `--bg-panel` with `--radius-pane`, still without shadow; their depth reads from the darker terminal beneath them.
+- Root, panel and raised surfaces separate regions by colour and the 8px shell gutter. The only shadows remain the `dialog` and `#toast` declarations in `hub-web/src/styles.css`.
+- Both shadows consume house `elevation.overlay` through `--shadow-overlay`; the shadow is identical in both schemes. Phone drawer and attention sheets stay shadowless.
+- Pane selection changes the reserved transparent border to `--line-strong`; it does not change geometry or add a glow.
 
 ## Shapes
 
-- `--radius-card` (6px): cards, rows, buttons, inputs, chips that are not pills, code wells, the machine tile, the rail item.
-- `--radius-pane` (8px): terminal panes, dialogs, the empty/connecting card, fleet session cards, phone sheets.
-- `--radius-pill` (999px): status dots, count badges, phase and status chips, the back control, header chips. Never `50%`.
-- Borders: 1px reserved-transparent on panes, 1px `--line-subtle` on search inputs, 1px `--text-mid` on the observer badge, 2px `--state-crit` left rule on critical cards. Focus is the sole 2px outline, `--state-info`, offset 2px.
-- Icons are stroke glyphs at 20px (`.commander-mark-icon`) or single characters; status dots are 8px.
+- `--radius-card` now inherits house chip radius 4px for controls; `--radius-pane` inherits panel radius 8px for panes/dialogs. Current rows still consume these until their screen units introduce ruled ledgers.
+- `--radius-pill` stays 999px for dots and existing count/chip shapes; it is a console exception, not a new house radius.
+- Hairlines use house `chart.hairline` through `--line-width` 1px. Critical rules stay 2px; `--rule-verdict` inherits `chart.mark-decisive` 2.5px and `--rule-hero` is the brief's 3px verdict rule.
+- Focus uses `--focus-ring-width` 2px and `--color-focus`. Motion is house chrome 120ms/reveal 200ms with `--motion-easing`; the retired connection spin duration and animation declaration are gone.
 
 ## Components
 
-- Shell and rail: `.shell`, `.machine-navigation`, `.machine-rail`, `.machine-icon` (raised tile, `--bg-active` when selected), `.rail-control` (transparent glyph, raised on hover) — `render()` in `hub-web/src/main.ts`.
-- Fleet board: `.fleet-board`, `.fleet-machine-header` (dot · name · phase eyebrow), `.fleet-session` (mono name, phase chip, two-line summary, `--text-mid` meta) — `FleetBoardRenderer` in `hub-web/src/fleet-board.ts`, fed by `renderFleetBoard()` in `hub-web/src/main.ts`; keyed on the board element plus a phase-only signature, so a shell rebuild refills the new container and a heartbeat never rebuilds it.
-- Drawer and session rows: `.machine-row`, `.nav-item`, `sessionButton()`; the codename stays mono in `.session-name` and the enriched card puts the title in the UI face with the codename as a mono eyebrow.
-- Header: `.session-header`, `.session-back`, `.session-picker-toggle`, `.machine-chip`, `.mode-badge`, `.connection-summary`; only an open session gets the mono `.toolbar-session-title` and the three chips.
-- Terminal pane: `.pane`, `.pane.selected`, `.pane-header`, `.pane-layout-controls`, `.terminal-mount`, `.transcript`, `.transcript-jump` — `renderSessionState()` in `hub-web/src/main.ts`, `hub-web/src/transcript-view.ts`.
-- Canvas states: `.empty-pane-slot` (no machine / no session / no panes) and `.terminal-state` (connecting, failed, retry) are the same centred 360px raised card with `--radius-pane`; the connecting card stacks spinner, mono title, elapsed, amber step and actions — `renderConnectionSurface()` in `hub-web/src/main.ts`.
-- Attention: `.attention-panel-header`, `.attention-group-header` (session name is the heading, `--text-hi` mono), `.attention-item` with `--critical`/`--warning` modifiers; cards omit `.attention-session` when the group already names it — `hub-web/src/attention-view.ts`.
-- Workers & Tasks: `.status-section-label`, `.status-row.status-agent`/`.status-task`, `.status-line` (mono identifiers + `.status-chip`), `.status-activity`/`.status-task-title` prose — `renderStatus()` in `hub-web/src/main.ts`.
-- Composer: `.message`, `#message-text`, `.composer-actions`, `#message-mic` (full-width primary on phone only when feature detection succeeds), explicit `#message-send` — `openSupervisorComposer()` in `hub-web/src/main.ts`.
-- Pairing dialog: `dialog`, `.pair-flow`, `.pair-details` (uppercase eyebrow terms, mono values, stacked on phone), `.pair-code`, sticky `.dialog-actions` — `pairDialogMarkup()` in `hub-web/src/main.ts`, cancel semantics in `hub-web/src/pairing-dialog.ts`. `.pair-status` is always in the markup and is a live region with the submit/create/close buttons, so a failed exchange re-enables Pair under the focused field; `.pair-cleanup` is the "Could not finish cancelling" step with Retry cleanup. Each step has one `.primary`: Create pairing code with no invitation (no Pair control exists there; `.pair-alternative` names the link path), Pair on the confirmation form an invitation opens directly. `.pair-details` leads with a plain capability line (`scopeSummary()` in `hub-web/src/pairing-scopes.ts`) above the exact origin and exact scopes; the legacy form asks for the machine's hub address with `.field-hint` guidance and never seeds it from the page origin (`#pair-use-page-origin` fills it on request). Success toasts "Access saved — connecting to <machine>…" and only a live connection toasts "<machine> connected".
-- Pickers: `.command-palette`, `.session-picker`, `.palette-command`, `.session-picker-entry[aria-current]`.
-- Toast: `#toast`, body-level overlay above the phone bar.
+- Shell, rail and drawer: `render()` in `hub-web/src/main.ts`; `.machine-icon` uses raised/active surfaces and `.rail-control` gains a raised hover surface. Open/selected states retain their existing DOM contract.
+- Fleet: `FleetBoardRenderer` in `hub-web/src/fleet-board.ts`; current machine sections and session cards consume the new palette. The next unit replaces that form with the brief's dot plot and evidence ledger.
+- Header and pickers: `hub-web/src/main.ts`; `.session-picker-entry[aria-current]` uses verdict-soft, and `.session-picker-current` uses action ink. `setScheme()` is ready for the command-palette Appearance entry.
+- Panes and transcript: `hub-web/src/main.ts` and `hub-web/src/transcript-view.ts`; terminal wells remain dark while pane chrome follows the shell. Transcript/find controls inside a well inherit dark control roles.
+- Connection surface: `hub-web/src/connection-state-view.ts`; existing connecting/failed/retry markup remains. Its log `pre` is a dark well; the screen unit owns the outcome sentence and attempt timeline.
+- Attention: `hub-web/src/attention-view.ts`; critical/warning cards use semantic tints, info uses muted evidence, and payload `pre` remains dark. The timeline conversion follows in the attention unit.
+- Workers/tasks and composer: `hub-web/src/main.ts`; mono identifiers, muted supporting copy and green in-progress status use the new roles; Send stays explicit.
+- Pairing dialog: `pairDialogMarkup()` in `hub-web/src/main.ts` and cancel semantics in `hub-web/src/pairing-dialog.ts`; inputs and code wells get dark foregrounds, while the dialog and detail terms follow the page scheme.
+- Buttons and inputs: `hub-web/src/styles.css`; full controls retain 40px height and compact pane controls 28px. Keyboard focus uses the house focus role; disabled copy uses muted text.
+- Toast: body-level `#toast` in `hub-web/src/main.ts`; raised surface and the house overlay shadow, above the phone rail.
 
 ## Do's & Don'ts
 
-- ✅ Add every colour, size and duration to the `:root` block of `hub-web/src/styles.css` and consume it with `var(...)`.
-- ❌ Never write a hex, `rgb()` or `rgba()` outside `:root`, in TypeScript markup, or in `hub-web/index.html` — the invariant test fails the build.
-- ✅ Keep Ghostty's ANSI data in `hub-web/src/terminal/ghostty-adapter.ts` independent of application tokens.
-- ❌ Never point ANSI entries at `--state-*` or reuse ANSI RGB for buttons and cards.
-- ✅ Wrap every codename, ID, path, timestamp and connection phase in a mono class, even mid-sentence.
-- ❌ Never render a session codename in the UI face or uppercase it in an eyebrow.
-- ✅ Use the 11/12.5/13.5/15/18px scale, weights 400–600, radii 6/8/999 and the 4px spacing steps.
-- ❌ Never add a third shadow, a coloured card fill for ok/info, a gradient, a pulse glow or a decorative coloured border.
-- ✅ Give the phone rail one container treatment (`--rail-item-min`, `--bg-raised`, `--radius-card`) for every control in it.
-- ❌ Never put `--line-strong` inside the phone media block; it is the focused-pane border and the phone has no focusable pane chrome.
-- ✅ Keep state that changes every heartbeat (latency, counts, stale age) out of `shellSignature()` and out of region-updater signatures; the fleet board keys on connection phase, not latency.
-- ❌ Never let a region updater call `innerHTML` into the live shell; it owns and clears its own container and binds its own handlers.
-- ✅ Keep Send explicit, keep the dictated text editable, keep Cancel destroying a pairing invitation.
-- ❌ Never auto-send a transcript, hide the keyboard fallback, or make a cancelled invitation retrievable.
-- ✅ Change `hub-web/src/styles.css` and `hub-web/src/main.ts`, then let the integration owner rebuild `hub-web/dist` once.
+- ✅ Change house values in `docs/design/design-tokens.json`, update the mapping in `hub-web/scripts/generate-tokens.mjs`, and run `npm run tokens`; commit the generated CSS.
+- ❌ Never hand-edit `tokens.css`, add a handwritten `:root` palette to `styles.css`, or restore the retired token aliases; `tokens.test.ts` checks drift and every CSS/TypeScript consumer.
+- ✅ Add a generated dark-well scope when retaining a dark background beneath a light shell; source foregrounds from `color.dark.*`.
+- ❌ Never combine light-scheme ink with `--bg-terminal` or wire Ghostty ANSI entries to application state tokens.
+- ✅ Use `applyScheme()` at boot and `setScheme(system|light|dark)` for Appearance; storage denial still permits a page-local choice.
+- ❌ Never put scheme state in `shellSignature()` or remount terminals merely to change chrome colours.
+- ✅ Keep machine text mono, focus outlines visible and the two overlay shadows as the only shadow consumers.
+- ❌ Never use accent as an info status, add a looping connection animation, or restore a low-contrast tertiary text step.
+- ✅ Let the integration owner rebuild `hub-web/dist` once; validate lane builds with a separate worktree output directory.
 - ❌ Never hand-edit or commit generated `hub-web/dist` output from a factory lane.
 
 ## Behavioural constraints

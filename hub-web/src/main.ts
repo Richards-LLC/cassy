@@ -1,9 +1,10 @@
 import "./styles.css";
+import { applyScheme, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
-import { cycleAttentionGroup, renderAttentionCounts, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
+import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
-import { connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
+import { connectionTimeline, connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -34,6 +35,8 @@ import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connecti
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
+applyScheme();
+
 const pendingPairingStore = pendingPairingStoreFor(window);
 const relayOrigin = pairingRelayOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-pairing-relay-origin"]')?.content ?? null);
 const arrivedFragment = readPairingFragment(window.location, window.history, pendingPairingStore);
@@ -56,14 +59,10 @@ const pairingOperations = new PairingOperationCoordinator();
 // Which cancellation, if any, owns the "could not finish cancelling" step.
 const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
-const rootStyles = getComputedStyle(document.documentElement);
-document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute(
-  "content",
-  rootStyles.getPropertyValue("--bg-root").trim(),
-);
 const machines = new Map<string, StoredMachine>();
 let machineCatalogLoaded = false;
 const sessions = new Map<string, HubSession[]>();
+const fleetCatalogUpdatedAt = new Map<string, string>();
 const connections = new Map<string, HubConnectionSupervisor>();
 const connectionStates = new Map<string, ConnectionState>();
 const lastLiveAt = new Map<string, number>();
@@ -431,7 +430,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onCredentialRefreshed: async (refreshed) => { machines.set(refreshed.id, refreshed); await catalog.put(refreshed); },
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
-    onSessions: (items) => { sessions.set(machine.id, items); restoreLastSession(machine.id, items); render(); },
+    onSessions: (items) => { fleetCatalogUpdatedAt.set(machine.id, new Date().toISOString()); sessions.set(machine.id, items); restoreLastSession(machine.id, items); render(); },
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
       if (["daemon_disconnected", "daemon_error", "pane_exited", "session_removed"].includes(kind) || event.enrichment !== undefined) {
@@ -953,7 +952,7 @@ function openConnectionLog(machineId: string): void {
     dialog = document.createElement("dialog");
     dialog.id = "connection-log";
     dialog.className = "connection-log";
-    dialog.innerHTML = '<header><h2>Connection log</h2><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><pre>Running diagnostics…</pre>';
+    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><pre>Running diagnostics…</pre></section>';
     document.body.append(dialog);
   }
   const output = dialog.querySelector("pre")!;
@@ -982,8 +981,8 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     }
     // A fatal failure is not reconnecting, so the banner must not claim it is.
     banner.textContent = snapshot.fatal === true
-      ? snapshot.reason ?? "This browser cannot reconnect to the terminal."
-      : `Disconnected ${view.elapsedSeconds}s ago — ${view.retryLabel} (attempt ${view.attempt})`;
+      ? "Connection failed — not retrying."
+      : `Connection interrupted — ${view.retryLabel} (attempt ${view.attempt})`;
     grid.classList.add("terminal-disconnected");
     return;
   }
@@ -998,24 +997,36 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   title.className = "terminal-connecting-title";
   // A spinner and a rising counter over a failure that will never resolve is
   // the D3 overlay: it reads as progress. State the outcome instead.
-  title.textContent = fatal ? `Cannot connect to ${session}` : `Connecting to ${session}…`;
-  if (fatal) {
-    placeholder.replaceChildren(title);
-  } else {
-    const spinner = document.createElement("span");
-    spinner.className = "connection-spinner";
-    spinner.setAttribute("aria-hidden", "true");
-    const elapsed = document.createElement("time");
-    elapsed.className = "terminal-connecting-elapsed";
-    elapsed.textContent = view.elapsedLabel;
-    placeholder.replaceChildren(spinner, title, elapsed);
+  title.textContent = fatal
+    ? "Connection failed — not retrying."
+    : snapshot.phase === "failed"
+      ? snapshot.authFailure ? "Connection failed — re-pair required." : "Connection failed — retry available."
+    : snapshot.phase === "backoff"
+      ? "Connection interrupted — retrying."
+      : `Connecting to ${session}…`;
+  placeholder.replaceChildren(title);
+
+  const timeline = document.createElement("ol");
+  timeline.className = "connection-timeline";
+  timeline.setAttribute("aria-label", "Connection attempts");
+  for (const entry of connectionTimeline(snapshot)) {
+    const item = document.createElement("li");
+    item.className = `connection-timeline-item ${entry.tone}`;
+    const marker = document.createElement("span");
+    marker.className = "connection-timeline-marker";
+    marker.setAttribute("aria-hidden", "true");
+    const content = document.createElement("div");
+    const label = document.createElement("span");
+    label.className = "connection-timeline-label";
+    label.textContent = entry.label;
+    const detail = document.createElement("span");
+    detail.className = "connection-timeline-detail";
+    detail.textContent = entry.detail;
+    content.append(label, detail);
+    item.append(marker, content);
+    timeline.append(item);
   }
-  if (view.step) {
-    const step = document.createElement("p");
-    step.className = "terminal-connecting-step";
-    step.textContent = view.step;
-    placeholder.append(step);
-  }
+  placeholder.append(timeline);
   if (view.actionsAvailable) {
     const actions = document.createElement("div");
     actions.className = "terminal-connecting-actions";
@@ -1959,7 +1970,7 @@ function render(captureDraft = true): void {
           <nav id="machine-rail-list" aria-label="Machines"></nav>
           <button id="pair-toggle" class="rail-control pair-machine" type="button" aria-label="Pair a machine" title="Pair a machine"><span aria-hidden="true">+</span><span class="pair-machine-label">Pair</span></button>
         </div>
-        <div class="machine-drawer">
+        <div class="machine-drawer" aria-hidden="${!machineDrawerOpen}"${machineDrawerOpen ? "" : " inert"}>
           <header class="drawer-header"><strong>Machines</strong><button id="machine-drawer-close" type="button" aria-label="Close machines and sessions">×</button></header>
           ${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}
           <nav id="machine-tree" aria-label="Machine sessions"></nav>
@@ -1973,7 +1984,7 @@ function render(captureDraft = true): void {
             <h1 class="${selectedSession ? "toolbar-session-title" : ""}"><button id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="${sessionPickerOpen}" aria-label="${escapeAttr(sessionPickerLabel)}" title="${escapeAttr(sessionPickerLabel)}"><span class="session-picker-name">${escapeHtml(selectedSession ?? "Fleet overview")}</span><span class="session-picker-caret" aria-hidden="true">▾</span></button></h1>
           </div>
           ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
-          <div class="actions">${sessionCommands ? '<button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button>' : ""}${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button>` : ""}</div>
+          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button>` : ""}</div>
         </header>
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}>${selectedSession ? '<div class="empty">Connecting to terminal…</div>' : showFleetBoard ? '<div id="fleet-board" class="fleet-board" aria-label="Fleet"></div>' : `<div class="empty empty-pane-slot">${emptyCanvasMarkup()}</div>`}</section>
         ${supervisor ? `<button id="talk-supervisor" class="talk-supervisor primary" type="button"><span>Talk to supervisor</span><small>${escapeHtml(supervisor)}</small></button>` : ""}
@@ -1991,7 +2002,7 @@ function render(captureDraft = true): void {
             <button id="context-panel-close" class="context-panel-close" type="button" aria-label="Close panel">×</button>
           </div>
           <section id="attention-panel" class="context-tab" data-context-content="attention" ${activeContextTab === "attention" ? "" : "hidden"}></section>
-          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><p class="status-stale" role="status" hidden></p><div id="status-view"></div><div class="message"><h2>Talk to ${escapeHtml(supervisor ?? "supervisor")}</h2><textarea id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-status" class="message-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div></section>
+          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><p class="status-stale" role="status" hidden></p><div id="status-view"></div><div class="message"><h2><label for="message-text">Talk to ${escapeHtml(supervisor ?? "supervisor")}</label></h2><textarea aria-describedby="message-status" id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-status" class="message-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div></section>
         </div>
       </aside>
     </div>
@@ -2000,6 +2011,7 @@ function render(captureDraft = true): void {
         <header><strong>Commands</strong><button id="command-palette-close" type="button" aria-label="Close command palette">×</button></header>
         <input id="command-palette-query" type="search" aria-label="Filter commands" placeholder="Type a command or session">
         <div class="palette-commands">
+          ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small>${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
           <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : "Current session"}</small></button>
           <button type="button" class="palette-command" data-palette-action="dismiss-info" ${infoItems.length === 0 ? "disabled" : ""}><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>
           ${sessionCommands || '<p class="palette-empty">No live sessions available.</p>'}
@@ -2052,10 +2064,12 @@ function renderRegions(context: RegionContext): void {
   renderFleetBoard();
   const railCounts = document.querySelector("#attention-rail-counts");
   if (railCounts) {
-    // Both forms ship; the compact block picks one. The button owns the
-    // accessible name so the visuals can stay aria-hidden.
+    // One labelled figure; the detailed severity split belongs to the panel.
     railCounts.setAttribute("aria-label", `Open attention. ${attentionSummary(context.counts).description}`);
-    railCounts.replaceChildren(renderAttentionSummary(context.counts), renderAttentionCounts(context.counts, true));
+    const summary = renderAttentionSummary(context.counts);
+    const label = summary.querySelector(".attention-summary-label");
+    if (label) label.textContent = attentionSummary(context.counts).total > 0 ? "Needs you" : "Clear";
+    railCounts.replaceChildren(summary);
   }
   renderAttention();
   renderStatus(context.status);
@@ -2152,8 +2166,13 @@ function renderFleetBoard(): void {
       state: connectionClass(connectionStates.get(machine.id)),
       phase: fleetConnectionLabel(connectionStates.get(machine.id)),
       selected: machine.id === selectedMachineId,
+      hubVersion: machineInfo.get(machine.id)?.version,
+      catalogUpdatedAt: fleetCatalogUpdatedAt.get(machine.id),
     })),
-    sessions: entries,
+    sessions: entries.map((entry) => {
+      const counts = attentionCounts(attention.filter((item) => item.machineId === entry.machineId && item.session === entry.session));
+      return { ...entry, attentionSeverity: counts.critical ? "critical" as const : counts.warning ? "warning" as const : counts.info ? "info" as const : undefined };
+    }),
   }, {
     open: (machineId, session) => { machineDrawerOpen = false; void openSession(machineId, session); },
   });
@@ -2413,6 +2432,11 @@ async function toggleControl(selected: StoredMachine | undefined, lease: LeaseSt
 function openCommandPalette(): void {
   commandPaletteOpen = true;
   render();
+  // Closing a dialog does not rebuild the shell. Reopening can therefore have
+  // the same shell signature; open the existing dialog in that case too.
+  const palette = document.querySelector<HTMLDialogElement>("#command-palette");
+  if (palette && !palette.open) palette.showModal();
+  document.querySelector<HTMLInputElement>("#command-palette-query")?.focus();
 }
 
 function focusPaneByNumber(index: number): void {
@@ -2469,7 +2493,11 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const paletteToggle = document.querySelector<HTMLButtonElement>("#command-palette-toggle");
   if (paletteToggle) paletteToggle.onclick = openCommandPalette;
   const palette = document.querySelector<HTMLDialogElement>("#command-palette")!;
-  const closePalette = () => { commandPaletteOpen = false; palette.close(); };
+  const closePalette = () => {
+    commandPaletteOpen = false;
+    palette.close();
+    (paletteToggle ?? document.querySelector<HTMLButtonElement>("#session-picker-toggle"))?.focus();
+  };
   document.querySelector<HTMLButtonElement>("#command-palette-close")!.onclick = closePalette;
   palette.oncancel = () => { commandPaletteOpen = false; };
   const paletteQuery = document.querySelector<HTMLInputElement>("#command-palette-query")!;
@@ -2496,6 +2524,9 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       const session = command.dataset.paletteSession;
       if (machineId && session) void openSession(machineId, session);
     };
+  }
+  for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-scheme]")) {
+    command.onclick = () => { setScheme(command.dataset.paletteScheme as SchemePreference); closePalette(); };
   }
   const paletteControl = palette.querySelector<HTMLButtonElement>("[data-palette-action='control']");
   if (paletteControl) paletteControl.onclick = () => { closePalette(); void toggleControl(selected, lease); };
@@ -2533,7 +2564,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   };
   document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
   document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")!.onclick = () => { machineDrawerOpen = !machineDrawerOpen; render(); };
-  document.querySelector<HTMLButtonElement>("#machine-drawer-close")!.onclick = () => { machineDrawerOpen = false; render(); };
+  document.querySelector<HTMLButtonElement>("#machine-drawer-close")!.onclick = () => { machineDrawerOpen = false; render(); document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")?.focus(); };
   const openMachines = document.querySelector<HTMLButtonElement>("#open-machines");
   if (openMachines) openMachines.onclick = () => { machineDrawerOpen = true; render(); };
   for (const pair of document.querySelectorAll<HTMLButtonElement>("#empty-pair, #drawer-pair")) {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  connectionTimeline,
   connectingView,
   disconnectedView,
   elapsedSeconds,
@@ -24,6 +25,19 @@ function snapshot(overrides: Partial<ConnectionSnapshotView> = {}): ConnectionSn
 }
 
 describe("Commander designed connection states", () => {
+  it("renders an honest attempt timeline without a client-invented history", () => {
+    expect(connectionTimeline(snapshot({ attempt: 3, phase: "backoff", reason: "hub did not answer", retryInMs: 2_400 }))).toEqual([
+      { label: "Earlier attempts", detail: "2 attempts did not reach a live session", tone: "evidence" },
+      { label: "Attempt 3", detail: "Retry scheduled", tone: "retry" },
+      { label: "Diagnostic", detail: "hub did not answer", tone: "evidence" },
+      { label: "Next attempt", detail: "reconnecting in 3s", tone: "retry" },
+    ]);
+    expect(connectionTimeline(snapshot({ phase: "failed", fatal: true, reason: "unsupported browser" }))).toEqual([
+      { label: "Attempt 1", detail: "Connection failed", tone: "failed" },
+      { label: "Outcome", detail: "unsupported browser", tone: "failed" },
+    ]);
+  });
+
   it("derives elapsed text and both disclosure thresholds from the lifecycle clock", () => {
     expect(elapsedSeconds(snapshot(), startedAt + 4_999)).toBe(4);
     expect(connectingView(snapshot(), startedAt + 4_999)).toEqual({

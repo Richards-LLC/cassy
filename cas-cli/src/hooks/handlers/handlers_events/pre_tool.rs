@@ -1461,6 +1461,119 @@ fn expand_factory_shell_word(
     expanded
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct HeredocDelimiter {
+    value: String,
+    strip_leading_tabs: bool,
+}
+
+/// Find heredoc delimiters on one shell command line without interpreting
+/// quoted `<<` text as shell syntax. The returned order matches the shell's
+/// order for multiple heredocs on the same line.
+fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut delimiters = Vec::new();
+    let mut index = 0;
+
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index = (index + 2).min(chars.len()),
+            '\'' | '"' => {
+                let quote = chars[index];
+                index += 1;
+                while index < chars.len() && chars[index] != quote {
+                    if chars[index] == '\\' {
+                        index = (index + 2).min(chars.len());
+                    } else {
+                        index += 1;
+                    }
+                }
+                if index < chars.len() {
+                    index += 1;
+                }
+            }
+            '<' if chars.get(index + 1) == Some(&'<') => {
+                // `<<<` is a Bash here-string, not a heredoc declaration.
+                if chars.get(index + 2) == Some(&'<') {
+                    index += 3;
+                    continue;
+                }
+                index += 2;
+                let strip_leading_tabs = chars.get(index) == Some(&'-');
+                if strip_leading_tabs {
+                    index += 1;
+                }
+                while chars.get(index).is_some_and(|ch| ch.is_whitespace()) {
+                    index += 1;
+                }
+                let Some(&first) = chars.get(index) else {
+                    continue;
+                };
+                let (value, next_index) = if first == '\'' || first == '"' {
+                    index += 1;
+                    let start = index;
+                    while index < chars.len() && chars[index] != first {
+                        index += 1;
+                    }
+                    if index >= chars.len() {
+                        continue;
+                    }
+                    (chars[start..index].iter().collect::<String>(), index + 1)
+                } else {
+                    let start = index;
+                    while index < chars.len()
+                        && !chars[index].is_whitespace()
+                        && !matches!(chars[index], ';' | '|' | '&' | '<' | '>')
+                    {
+                        index += 1;
+                    }
+                    (chars[start..index].iter().collect(), index)
+                };
+                if !value.is_empty() {
+                    delimiters.push(HeredocDelimiter {
+                        value,
+                        strip_leading_tabs,
+                    });
+                }
+                index = next_index;
+            }
+            _ => index += 1,
+        }
+    }
+
+    delimiters
+}
+
+/// Remove heredoc bodies before shell-token extraction. Heredoc contents are
+/// data for the command receiving them, not shell commands or redirect
+/// operands. The declaration line and any shell commands after the delimiter
+/// remain available to the workspace guard.
+fn shell_command_without_heredoc_bodies(command: &str) -> String {
+    let mut pending: std::collections::VecDeque<HeredocDelimiter> =
+        std::collections::VecDeque::new();
+    let mut shell_command = String::new();
+
+    for line in command.split_inclusive('\n') {
+        if let Some(delimiter) = pending.front() {
+            let candidate = line.trim_end_matches('\n').trim_end_matches('\r');
+            let candidate = if delimiter.strip_leading_tabs {
+                candidate.trim_start_matches('\t')
+            } else {
+                candidate
+            };
+            if candidate == delimiter.value {
+                pending.pop_front();
+            }
+            continue;
+        }
+
+        shell_command.push_str(line);
+        pending.extend(heredoc_delimiters(line));
+    }
+
+    shell_command
+}
+
 /// Extract the file argument from the narrow Python heredoc rewrite shape
 /// emitted by factory workers. A heredoc's body is opaque to the shell-token
 /// recognizer above, but `open(path, 'w')` is still a real write target and
@@ -1524,7 +1637,8 @@ fn quoted_string_value(value: &str) -> Option<&str> {
 /// set of write forms guarded by the factory workspace contract; unrecognised
 /// shell syntax is left to the shell rather than guessed at.
 fn bash_write_targets(command: &str) -> Vec<String> {
-    let tokens = factory_shell_tokens(command);
+    let shell_command = shell_command_without_heredoc_bodies(command);
+    let tokens = factory_shell_tokens(&shell_command);
     let variable_values = factory_shell_variable_values(&tokens);
     let mut targets = Vec::new();
 
@@ -2057,6 +2171,43 @@ mod workspace_contract_tests {
                 .any(|target| target == "cas-cli/src/builtins/skills/example.html"),
             "Python heredoc open() target must be guarded: {targets:?}"
         );
+    }
+
+    #[test]
+    fn bash_heredoc_js_regex_literal_is_not_a_write_target() {
+        let targets =
+            bash_write_targets("cat > scripts/x.mjs <<'EOF'\nconst ok = /s/.test(\"s\");\nEOF");
+
+        assert_eq!(targets, vec!["scripts/x.mjs"]);
+    }
+
+    #[test]
+    fn bash_heredoc_body_paths_are_opaque_but_redirect_target_is_guarded() {
+        let cwd = tempfile::tempdir().expect("worktree");
+        std::fs::create_dir(cwd.path().join("scripts")).expect("scripts directory");
+        let body_only = bash_input(
+            "cat > scripts/x.mjs <<'EOF'\nconst output = \"/etc/x\";\ntouch /etc/cas-heredoc-body\nEOF",
+            cwd.path(),
+        );
+        assert_eq!(
+            factory_write_violation(&body_only, &None, None, false, Some(cwd.path())),
+            None,
+            "an absolute path in heredoc content is not a write target"
+        );
+
+        let outside_redirect =
+            bash_input("cat > /etc/x <<'EOF'\nconst ok = true;\nEOF", cwd.path());
+        assert_eq!(
+            factory_write_violation(&outside_redirect, &None, None, false, Some(cwd.path()))
+                .map(|violation| violation.resolved_path),
+            Some(std::path::PathBuf::from("/etc/x")),
+            "an absolute redirect target must remain guarded"
+        );
+    }
+
+    #[test]
+    fn sed_substitution_expression_is_not_a_write_target() {
+        assert!(bash_write_targets("sed 's/a/b/' input.txt").is_empty());
     }
 
     #[test]

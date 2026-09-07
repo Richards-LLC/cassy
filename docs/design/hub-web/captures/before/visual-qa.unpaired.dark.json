@@ -1,0 +1,85 @@
+{
+  "status": "FAIL",
+  "exitCode": 0,
+  "generatedAt": "2026-09-07T12:41:19.903Z",
+  "schemes": [
+    "dark"
+  ],
+  "viewports": [
+    {
+      "name": "desktop",
+      "width": 1280,
+      "height": 800
+    },
+    {
+      "name": "phone",
+      "width": 390,
+      "height": 800
+    }
+  ],
+  "urls": [
+    "http://127.0.0.1:4173/commander/"
+  ],
+  "findings": [
+    {
+      "type": "javascript-disabled-loss",
+      "selector": "body",
+      "elementPath": "body",
+      "textSample": "",
+      "reason": "content-requires-javascript",
+      "screenCharacters": 133,
+      "javascriptDisabledCharacters": 0,
+      "url": "http://127.0.0.1:4173/commander/",
+      "scheme": "dark",
+      "viewport": {
+        "name": "desktop",
+        "width": 1280,
+        "height": 800
+      }
+    },
+    {
+      "type": "javascript-disabled-loss",
+      "selector": "body",
+      "elementPath": "body",
+      "textSample": "",
+      "reason": "content-requires-javascript",
+      "screenCharacters": 133,
+      "javascriptDisabledCharacters": 0,
+      "url": "http://127.0.0.1:4173/commander/",
+      "scheme": "dark",
+      "viewport": {
+        "name": "phone",
+        "width": 390,
+        "height": 800
+      }
+    }
+  ],
+  "infoFindings": [],
+  "suppressed": [],
+  "screenshots": [
+    {
+      "path": "127-0-0-1-4173-commander-dark-desktop.png",
+      "url": "http://127.0.0.1:4173/commander/",
+      "scheme": "dark",
+      "viewport": {
+        "name": "desktop",
+        "width": 1280,
+        "height": 800
+      }
+    },
+    {
+      "path": "127-0-0-1-4173-commander-dark-phone.png",
+      "url": "http://127.0.0.1:4173/commander/",
+      "scheme": "dark",
+      "viewport": {
+        "name": "phone",
+        "width": 390,
+        "height": 800
+      }
+    }
+  ],
+  "counts": {
+    "javascript-disabled-loss": 2
+  },
+  "infoCounts": {}
+}

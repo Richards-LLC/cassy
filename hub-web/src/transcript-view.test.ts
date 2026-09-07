@@ -210,3 +210,28 @@ describe("transcript scrollback", () => {
     expect(host.scrollRows).not.toHaveBeenCalled();
   });
 });
+
+
+describe("transcript reading column", () => {
+  it("preserves heading, code, tool-looking and unfamiliar output as raw ledger text", () => {
+    const text = ["# Build result", "const answer = 42;", "⎿ Tool: exec_command", "<unknown-block>unfamiliar output</unknown-block>"];
+    host.rowsValue = text.map((value) => row(value));
+    view.update();
+    expect([...view.element.querySelectorAll(".transcript-lines > .transcript-line")].map((line) => line.textContent)).toEqual(text);
+    expect(view.element.querySelector("unknown-block")).toBeNull();
+  });
+
+  it("isolates wide box-drawing rows in a keyboard reachable scroll well", () => {
+    const box = `┌${"─".repeat(100)}┐`;
+    host.rowsValue = [row(box), row("ordinary output")];
+    view.update();
+    const diagram = view.element.querySelector<HTMLElement>(".transcript-line--diagram")!;
+    expect(diagram.textContent).toBe(box);
+    expect(diagram.tabIndex).toBe(0);
+    expect(diagram.style.paddingLeft).toBe("");
+    host.rowsValue = [row("ordinary replacement")];
+    view.update();
+    expect(view.element.querySelector(".transcript-line--diagram")).toBeNull();
+    expect(view.element.querySelector(".transcript-line")!.hasAttribute("tabindex")).toBe(false);
+  });
+});

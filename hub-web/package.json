@@ -4,9 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "vite build",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "build": "npm run tokens && vite build",
+    "test": "node scripts/generate-tokens.mjs --check && npm run tokens && vitest run",
+    "typecheck": "tsc --noEmit",
+    "tokens": "node scripts/generate-tokens.mjs",
+    "visual-qa": "npm exec --yes --package=playwright -- node scripts/visual-qa.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.2.1",

@@ -47,7 +47,7 @@ bad() { printf 'FAIL %s\n' "$1"; fail=$((fail + 1)); }
 new_fixture() {
     local name="$1" repo
     repo="$tmp/$name"
-    mkdir -p "$repo/scripts" "$repo/cas-cli/src" "$repo/cas-cli/tests" "$repo/crates" \
+    mkdir -p "$repo/scripts" "$repo/hub-web/scripts" "$repo/cas-cli/src" "$repo/cas-cli/tests" "$repo/crates" \
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
     cat >"$repo/.gitignore" <<'EOF'
@@ -156,6 +156,13 @@ if [[ "$*" == 'nextest run --archive-file '* ]]; then
 fi
 EOF
     chmod +x "$repo/scripts/cargo-stub"
+    cat >"$repo/scripts/hub-web-visual-qa-stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${1:-missing-artifact-dir}" >>"${GATE_FIXTURE_VISUAL_QA_LOG:?}"
+if [[ "${GATE_FIXTURE_HUB_WEB_VISUAL_QA_FAIL:-}" == 1 ]]; then exit 1; fi
+EOF
+    chmod +x "$repo/scripts/hub-web-visual-qa-stub"
     git -C "$repo" init -q
     git -C "$repo" config user.email release-gate@example.test
     git -C "$repo" config user.name release-gate-test
@@ -174,6 +181,8 @@ run_gate() {
           "$failure_variable=1" \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
           CARGO="$repo/scripts/cargo-stub" \
+          GATE_FIXTURE_VISUAL_QA_LOG="$tmp/visual-qa.log" \
+          RELEASE_GATE_HUB_WEB_VISUAL_QA="$repo/scripts/hub-web-visual-qa-stub" \
           RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
           "$@")
     else
@@ -181,6 +190,8 @@ run_gate() {
           env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
           CARGO="$repo/scripts/cargo-stub" \
+          GATE_FIXTURE_VISUAL_QA_LOG="$tmp/visual-qa.log" \
+          RELEASE_GATE_HUB_WEB_VISUAL_QA="$repo/scripts/hub-web-visual-qa-stub" \
           RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
           "$@")
     fi
@@ -199,7 +210,7 @@ assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config \
         version-literals fixture-paths workspace-tests nextest doctests archive-mode snapshot-portability \
-        builtin-projections changelog-and-versions release-script procedure-guardrails working-tree; do
+        builtin-projections changelog-and-versions release-script procedure-guardrails working-tree hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
             return
@@ -232,6 +243,57 @@ run_scenario archive-run GATE_FIXTURE_ARCHIVE_FAIL archive-mode
 run_scenario snapshot-run GATE_FIXTURE_SNAPSHOT_FAIL snapshot-portability
 run_scenario projection-run GATE_FIXTURE_DRIFT_FAIL builtin-projections
 run_scenario fixture-paths-run GATE_FIXTURE_FIXTURE_PATHS_FAIL fixture-paths
+run_scenario visual-qa-run GATE_FIXTURE_HUB_WEB_VISUAL_QA_FAIL hub-web-visual-qa
+
+# The normal visual-QA scenarios above inject a runner stub so the self-test
+# stays fast. Keep one real-row fixture as well: its npm stub records `ci` and
+# refuses to run the visual-QA command unless dependency installation happened
+# first. This catches a missing npm ci that the runner stub would conceal.
+repo="$(new_fixture visual-qa-dependency-install)"
+printf '%s\n' '{"name":"hub-web-fixture","private":true}' >"$repo/hub-web/package.json"
+printf '%s\n' 'export {}' >"$repo/hub-web/scripts/visual-qa.mjs"
+cat >"$repo/scripts/npm-stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${GATE_FIXTURE_NPM_LOG:?}"
+if [[ "$1" == ci ]]; then
+  : >"${GATE_FIXTURE_NPM_CI_MARKER:?}"
+  exit 0
+fi
+if [[ "$1" == exec && "$*" == *'playwright install chromium'* ]]; then
+  exit 0
+fi
+if [[ "$1" == exec && "$*" == *'node scripts/visual-qa.mjs'* ]]; then
+  [[ -f "${GATE_FIXTURE_NPM_CI_MARKER:?}" ]] || {
+    printf 'visual-QA runner started before npm ci\n' >&2
+    exit 1
+  }
+  printf '%s\n' "${1:-missing-artifact-dir}" >>"${GATE_FIXTURE_NPM_RUNNER_LOG:?}"
+  exit 0
+fi
+printf 'unexpected npm invocation: %s\n' "$*" >&2
+exit 1
+EOF
+chmod +x "$repo/scripts/npm-stub"
+output="$(
+    cd "$repo" && \
+    env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH -u RELEASE_GATE_HUB_WEB_VISUAL_QA \
+      CARGO="$repo/scripts/cargo-stub" \
+      NPM="$repo/scripts/npm-stub" \
+      GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+      GATE_FIXTURE_NPM_LOG="$tmp/npm.log" \
+      GATE_FIXTURE_NPM_CI_MARKER="$tmp/npm-ci.marker" \
+      GATE_FIXTURE_NPM_RUNNER_LOG="$tmp/npm-runner.log" \
+      "$repo/scripts/release-gate.sh" 9.99.7 --only hub-web-visual-qa
+)"
+if grep -qF 'PASS hub-web-visual-qa' <<<"$output" && \
+   grep -qF 'ci --no-audit --no-fund' "$tmp/npm.log" && \
+   grep -qF 'exec --yes --package=playwright -- node scripts/visual-qa.mjs' "$tmp/npm.log" && \
+   [[ -f "$tmp/npm-ci.marker" ]]; then
+    ok 'hub-web-visual-qa installs dependencies before invoking the runner'
+else
+    bad "hub-web-visual-qa dependency install contract failed (output: $output; npm log: $(cat "$tmp/npm.log" 2>/dev/null || true))"
+fi
 
 # cas-1f6e. A src-side test module that reads the producer checkout at runtime
 # through CARGO_MANIFEST_DIR passes on the build host and fails on the

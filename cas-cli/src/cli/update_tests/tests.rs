@@ -963,7 +963,7 @@ fn check_report_leads_with_the_verdict_and_names_one_remedy() {
             fmt,
             &CheckView {
                 current_version: "3.17.2",
-                latest_version: "3.18.0",
+                latest_version: "9.99.7",
                 binary_update_available: true,
                 schema: Some((254, 256, 2)),
             },
@@ -971,7 +971,7 @@ fn check_report_leads_with_the_verdict_and_names_one_remedy() {
     });
     assert!(
         pending.starts_with(
-            "[WARN] update available · 3.17.2 → 3.18.0 · 2 migrations pending\n"
+            "[WARN] update available · 3.17.2 → 9.99.7 · 2 migrations pending\n"
         ),
         "{pending}"
     );

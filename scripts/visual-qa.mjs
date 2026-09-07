@@ -17,7 +17,7 @@ const CONTRAST_LIMIT = 4.5;
 const LARGE_TEXT_LIMIT = 3;
 const BOX_TOLERANCE = 1;
 
-const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolerance }) => {
+const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolerance, allowlistEntries = [] }) => {
     const fallback = colorScheme === 'dark' ? [17, 24, 39, 1] : [255, 255, 255, 1];
     const body = document.body;
 
@@ -151,14 +151,47 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         ignoredReason,
         statusLike: Boolean(element.closest('.tag, .status, [role="status"]')),
         node,
+        element,
       };
       textNodes.push(item);
     }
 
     const findings = [];
     const infos = [];
-    const add = (type, item, details = {}) => findings.push({ type, selector: item?.selector || item?.elementPath || 'document', elementPath: item?.elementPath || item?.selector || 'document', textSample: item?.text, ...details });
-    const addInfo = (type, item, details = {}) => infos.push({ type, selector: item?.selector || item?.elementPath || 'document', elementPath: item?.elementPath || item?.selector || 'document', textSample: item?.text, ...details });
+    const invalidAllowlistSelectors = [];
+    for (const entry of allowlistEntries) {
+      if (entry.selector === '*') continue;
+      try {
+        document.querySelector(entry.selector);
+      } catch (error) {
+        invalidAllowlistSelectors.push({
+          type: 'invalid-allowlist-selector',
+          selector: entry.selector,
+          elementPath: 'document',
+          textSample: entry.selector,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    const allowlistedBy = (element, type) => allowlistEntries.filter((entry) => {
+      if (entry.type !== '*' && entry.type !== type) return false;
+      if (entry.selector === '*') return true;
+      try {
+        return element.matches(entry.selector) || Boolean(element.closest(entry.selector));
+      } catch {
+        return false;
+      }
+    }).map(({ type: entryType, selector, reason }) => ({ type: entryType, selector, reason }));
+    const findingFor = (type, item, details = {}) => ({
+      type,
+      selector: item?.selector || item?.elementPath || 'document',
+      elementPath: item?.elementPath || item?.selector || 'document',
+      textSample: item?.text,
+      allowlistedBy: item?.element ? allowlistedBy(item.element, type) : [],
+      ...details,
+    });
+    const add = (type, item, details = {}) => findings.push(findingFor(type, item, details));
+    const addInfo = (type, item, details = {}) => infos.push(findingFor(type, item, details));
     const visibleText = textNodes.filter((item) => !item.ignored && !item.hidden && !item.ariaHidden && item.box.width > 0 && item.box.height > 0);
     for (const item of textNodes) {
       if (item.ignored || item.ariaHidden || item.box.width <= 0 || item.box.height <= 0) continue;
@@ -189,7 +222,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
       const path = selectorFor(element);
-      const item = { selector: element.id ? '#' + CSS.escape(element.id) : path, elementPath: path };
+      const item = { selector: element.id ? '#' + CSS.escape(element.id) : path, elementPath: path, element };
       const overflowX = style.overflowX === 'hidden' || style.overflowX === 'clip';
       const overflowY = style.overflowY === 'hidden' || style.overflowY === 'clip';
       const contentExceedsBorder = element !== document.documentElement && element !== document.body && (element.scrollWidth > element.clientWidth + boxTolerance || element.scrollHeight > element.clientHeight + boxTolerance);
@@ -265,12 +298,12 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const captionOverlapsContent = captionBox.top < contentBottom - boxTolerance;
       const captionEscapesFigure = captionBox.bottom > figureBox.bottom + boxTolerance;
       if (captionOverlapsContent || captionEscapesFigure) {
-        const captionItem = { selector: caption.id ? `#${CSS.escape(caption.id)}` : selectorFor(caption), elementPath: selectorFor(caption), text: sample(caption.textContent || ''), box: box(captionBox) };
+        const captionItem = { selector: caption.id ? `#${CSS.escape(caption.id)}` : selectorFor(caption), elementPath: selectorFor(caption), text: sample(caption.textContent || ''), box: box(captionBox), element: caption };
         add(captionOverlapsContent ? 'overlapping-text' : 'clipped-content', captionItem, { reason: captionOverlapsContent ? 'figure-caption-layout-overlap' : 'figure-caption-overflow', otherElementPath: selectorFor(figure), otherTextSample: '', intersectionArea: round(Math.max(0, Math.min(captionBox.right, figureBox.right) - Math.max(captionBox.left, figureBox.left)) * Math.max(0, Math.min(captionBox.bottom, contentBottom) - Math.max(captionBox.top, figureBox.top))) });
       }
     }
 
-    return { findings, infos, textNodes: textNodes.map(({ node: _node, ...item }) => item), viewport };
+    return { findings, infos, invalidAllowlistSelectors, textNodes: textNodes.map(({ node: _node, element: _element, ...item }) => item), viewport };
 };
 
 async function resolvePlaywright() {
@@ -323,10 +356,6 @@ async function loadAllowlist(allowlistPath) {
     if (!entry || typeof entry !== 'object' || !entry.reason?.trim() || !entry.type || !entry.selector) throw new Error(`Allowlist entry ${index + 1} requires type, selector, and a non-empty reason.`);
     return { ...entry, reason: entry.reason.trim() };
   });
-}
-
-function allowlisted(finding, entries) {
-  return entries.find((entry) => (entry.type === '*' || entry.type === finding.type) && (entry.selector === '*' || entry.selector === finding.selector || entry.selector === finding.elementPath));
 }
 
 function slug(value) {
@@ -501,12 +530,15 @@ export async function runVisualQa(options) {
               const key = [informational ? 'info' : 'finding', enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
               if (seen.has(key)) return;
               seen.add(key);
-              const exception = allowlisted(enriched, allowlist);
+              const exception = enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
+                (entry.type === '*' || entry.type === enriched.type)
+                && (entry.selector === '*' || (entry.selector === enriched.selector && !enriched.allowlistedBy)));
               if (exception) suppressed.push({ ...enriched, reason: exception.reason });
               else if (informational) infoFindings.push(enriched);
               else findings.push(enriched);
             };
-            const inspection = await page.evaluate(PAGE_INSPECTION, { colorScheme: scheme, contrastLimit: CONTRAST_LIMIT, largeTextLimit: LARGE_TEXT_LIMIT, boxTolerance: BOX_TOLERANCE });
+            const inspection = await page.evaluate(PAGE_INSPECTION, { colorScheme: scheme, contrastLimit: CONTRAST_LIMIT, largeTextLimit: LARGE_TEXT_LIMIT, boxTolerance: BOX_TOLERANCE, allowlistEntries: allowlist });
+            for (const invalid of inspection.invalidAllowlistSelectors) recordFinding(invalid, true);
             for (const finding of inspection.findings) recordFinding(finding);
 
             const screenText = await page.locator('body').innerText().catch(() => '');

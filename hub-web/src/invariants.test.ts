@@ -124,8 +124,9 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).toContain('window.matchMedia(query).addEventListener("change", () => render());');
     expect(css).toContain("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {");
     expect(css).toContain("@media (max-height: 30rem) and (pointer: coarse) {");
-    // The desktop hover-drawer rule must not reach a landscape phone either.
-    expect(css).toContain("@media (hover: hover) and (min-width: 53.0625rem) {");
+    // Closed drawers remain inert on every input modality; only the control opens them.
+    expect(css).not.toContain(".machine-navigation:hover .machine-drawer");
+    expect(main).toContain('aria-hidden="${!machineDrawerOpen}"${machineDrawerOpen ? "" : " inert"}');
     expect(design).toContain("(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)");
     expect(design).toContain("landscape");
   });
@@ -527,10 +528,15 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(attentionView).toContain('button("Dismiss group"');
     expect(attentionView).toContain('severity !== "critical"');
     expect(css).toContain(".attention-item--critical");
-    expect(css).toContain(".attention-item--enriching .attention-title::after");
+    expect(css).not.toMatch(/\.attention-title::after|attention-summary-shimmer/);
     expect(css).toContain("prefers-reduced-motion: reduce");
     expect(css).toContain("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse)");
-    expect(css).toContain("max-width: var(--mobile-attention-label-width)");
+    for (const selector of ["attention-session", "attention-group-label"]) {
+      const rule = css.match(new RegExp(`\\.${selector} \\{([^}]+)\\}`))?.[1] ?? "";
+      expect(rule).toContain("overflow-wrap: anywhere");
+      expect(rule).not.toMatch(/nowrap|ellipsis|max-width/);
+    }
+    expect(css).not.toContain("max-width: var(--mobile-attention-label-width)");
   });
 
   it("opens the pairing dialog for an invitation instead of leaving the user on the empty state", async () => {
@@ -574,7 +580,7 @@ describe("binding Cassy Commander browser invariants", () => {
     // One rule, one surface, one radius, one minimum target for Machines, each
     // machine chip, Pair, the attention summary and the envelope. Three
     // container treatments in one 48px row is the defect, not a style choice.
-    expect(css).toContain("--rail-item-min: 44px");
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain("--rail-item-min: 44px");
     expect(css).toContain(`  .machine-rail .commander-mark,
   .machine-rail .machine-icon,
   .machine-rail .pair-machine,
@@ -611,7 +617,7 @@ describe("binding Cassy Commander browser invariants", () => {
     // fill that only two of the three severities receive.
     expect(css).not.toContain(".attention-count--critical { color: var(--state-crit); background: var(--tint-crit); }");
     expect(css).toContain(".attention-count--critical { color: var(--state-crit); }");
-    expect(css).toContain(".attention-count--info { color: var(--state-info); }");
+    expect(css).toContain(".attention-count--info { color: var(--text-mid); }");
     expect(view).toContain("export function renderAttentionSummary(");
     expect(main).toContain("renderAttentionSummary(context.counts)");
   });
@@ -627,7 +633,7 @@ describe("binding Cassy Commander browser invariants", () => {
     // The collapsed pill holds the attention summary and the envelope on one
     // row. A pill narrower than the two rail items it renders lets the summary
     // overflow left across the Pair button (D7/fig b1a).
-    expect(css).toContain("--mobile-context-pill-width: 152px");
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain("--mobile-context-pill-width: 152px");
     expect(css).toContain(".context-panel.collapsed .attention-rail .rail-control { display: none; }");
     expect(css).toContain("padding-right: calc(var(--mobile-context-pill-width) + var(--space-1))");
     // Tapping the envelope must land on the composer it advertises.
@@ -700,38 +706,10 @@ describe("binding Cassy Commander browser invariants", () => {
       "terminal/ghostty/renderer.ts",
       "terminal/ghostty/surface.ts",
     ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
-    for (const token of [
-      "--bg-root: #101318",
-      "--bg-panel: #151922",
-      "--bg-raised: #1B202B",
-      "--bg-terminal: #0C0E13",
-      "--bg-hover: #222836",
-      "--bg-active: #2A3142",
-      "--line-subtle: #232936",
-      "--line-strong: #38415A",
-      "--text-hi: #E8EBF2",
-      "--text-mid: #9AA3B5",
-      "--text-lo: #5C6577",
-      "--state-ok: #4CC38A",
-      "--state-warn: #E5B454",
-      "--state-crit: #E5645E",
-      "--state-info: #6CA7F2",
-      "--state-idle: #5C6577",
-      "--fs-xs: .6875rem",
-      "--fs-sm: .78125rem",
-      "--fs-base: .84375rem",
-      "--fs-md: .9375rem",
-      "--fs-lg: 1.125rem",
-      "--radius-card: 6px",
-      "--radius-pane: 8px",
-      "--radius-pill: 999px",
-    ]) expect(css).toContain(token);
-
-    const rootEnd = css.indexOf("\n}\n");
-    expect(rootEnd).toBeGreaterThan(0);
-    const componentCss = css.slice(rootEnd + 3);
-    expect(componentCss).not.toMatch(/#[0-9a-f]{3,8}\b/i);
-    expect(componentCss).not.toMatch(/rgba?\(/i);
+    expect(css).toContain('@import "./tokens.css";');
+    expect(css).not.toContain(":root {");
+    expect(css).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(css).not.toMatch(/rgba?\(/i);
     expect(main).not.toMatch(/#[0-9a-f]{3,8}\b/i);
     expect(html).not.toMatch(/#[0-9a-f]{3,8}\b/i);
 
@@ -760,10 +738,10 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).toContain('state.latencyMs === undefined ? "live" : `live · ${state.latencyMs}ms`');
     expect(main).not.toContain("state.latencyMs ?? 0");
     expect(connection).toContain('onLatency?(latencyMs: number)');
-    expect(css).toContain('--machine-rail-width: 48px');
-    expect(css).toContain('--context-panel-width: 320px');
-    expect(css).toContain('--session-header-height: 44px');
-    expect(css).toContain('--pane-header-height: 32px');
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--machine-rail-width: 48px');
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--context-panel-width: 320px');
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--session-header-height: 44px');
+    expect(await readFile(new URL("tokens.css", import.meta.url), "utf8")).toContain('--pane-header-height: 32px');
     expect(css).toContain('grid-template-columns: var(--machine-rail-width) minmax(0, 1fr) var(--context-panel-width)');
     expect(css).toContain('flex: 0 0 var(--session-header-height)');
     expect(css).toContain('grid-template-rows: minmax(0, 65fr) minmax(var(--space-8), 35fr)');
@@ -799,7 +777,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain(".session-identity {");
     expect(css).toContain(".session-back {");
     expect(css).toContain('.session-picker-entry[aria-current="true"]');
-    expect(css).toContain(".session-back { width: var(--space-10); }");
+    expect(css).toContain(".session-back { width: var(--button-height); }");
   });
 
   it("routes every navigation through one recorded selection and restores the last session on reopen", async () => {
@@ -956,9 +934,9 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain(".shell.with-browser-notice { height: calc(100dvh - var(--browser-notice-height)); }");
     // No spinner, no rising counter, and no "reconnecting" claim over a
     // failure that will never resolve.
-    expect(main).toContain("title.textContent = fatal ? `Cannot connect to ${session}` : `Connecting to ${session}…`;");
+    expect(main).toContain('? "Connection failed — not retrying."');
     expect(main).toContain("if (snapshot.fatal === true) return;");
-    expect(main).toContain("? snapshot.reason ?? \"This browser cannot reconnect to the terminal.\"");
+    expect(main).toMatch(/import \{ connectionTimeline,[\s\S]*for \(const entry of connectionTimeline\(snapshot\)\)/);
     // One recurring failure is one attention entry, not one per retry.
     expect(main).toContain("const merge = mergeAttentionItem(attention, item);");
     expect(main).toContain("await attentionStore.put(merge.stored);");
@@ -1100,7 +1078,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).toContain('diagnose.textContent = "Diagnose"');
     expect(source).toContain("openConnectionLog(machineId)");
     expect(source).toContain("const view = disconnectedView(snapshot, now)");
-    expect(source).toContain("Disconnected ${view.elapsedSeconds}s ago");
+    expect(source).toContain("Connection interrupted — ${view.retryLabel} (attempt ${view.attempt})");
     expect(styles).toContain(".terminal-state");
     expect(styles).toContain(".terminal-connecting-step");
     expect(styles).toContain(".terminal-disconnected .terminal-mount { opacity: .4; }");

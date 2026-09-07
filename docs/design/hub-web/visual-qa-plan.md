@@ -82,3 +82,17 @@ counts above, and for every remaining allowlisted finding the entry that covers 
 that matters is `contrast` → 0 without an allowlist, the three `.attention-detail` classes → 0,
 `outside-viewport` → 0 at 390, and `invisible-text` reduced to the two scoped drawer/toast
 entries.
+
+## Unit 7 result (2026-09-07, epic tip `698dbaba`)
+
+Reported in full in [critique.md](critique.md). Strict run: PASS 9 fixtures × 2 schemes × 2
+viewports, 0 findings, 8 allowlisted. Against the counts above: `contrast` 864 → 0 with no
+allowlist entry; `invisible-text` 821 → 0 (the two scoped drawer/toast entries this plan
+anticipated were never needed — the fixtures carry no closed drawer or resting toast, and no
+hover-only affordance remains); the three `.attention-detail` classes → 0; `outside-viewport`
+2 → 0; `clipped-content` 2,097 → 0 with two allowlisted `h1` codename ellipses at 390 and
+`content-overflow` 575 → 0 with the same two. Two amendments to this plan: the fixture runner's
+phone viewport is 390×800, not the 390×844 stated here (send-back to Unit 6), and the
+`connection-failed-retry` fixture is a hand-built stand-in rather than the production
+verdict + timeline, so its PASS line covers the fixture markup and the production surface's
+PASS is Unit 5's own receipt (send-back to Unit 6).

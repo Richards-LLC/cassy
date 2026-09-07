@@ -256,7 +256,9 @@ export function renderAttentionPanel(
   heading.textContent = "Attention";
   const summary = document.createElement("p");
   summary.className = "attention-panel-summary";
-  summary.textContent = attentionSummary(counts).label;
+  const total = counts.critical + counts.warning + counts.info;
+  summary.textContent = `${total} event${total === 1 ? " needs" : "s need"} attention`;
+  summary.hidden = total === 0;
   header.append(heading);
   const infoItems = items.filter((item) => !item.acknowledgedAt && attentionCounts([item]).info === 1);
   if (infoItems.length > 0) {

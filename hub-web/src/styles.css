@@ -878,6 +878,7 @@ main {
   min-height: var(--space-8);
   align-self: flex-start;
 }
+.secondary-pane-strip .pane.collapsed > header { flex: 1; min-height: 0; padding-block: 0; }
 .secondary-pane-strip .pane.collapsed .terminal-mount { display: none; }
 
 .terminal-mount {
@@ -896,8 +897,7 @@ main {
   position: absolute;
   inset: 0;
   z-index: 3;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: auto;
   overscroll-behavior: contain;
   padding: var(--space-2);
   color: var(--text-hi);

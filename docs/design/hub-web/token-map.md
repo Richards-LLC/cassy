@@ -25,7 +25,7 @@ one (brief: *Light and dark policy*).
 | 1 | `--bg-root` #101318 | `color.*.bg` | #F7F4EE | #12141A | page and the 8px gutter between shell regions |
 | 2 | `--bg-panel` #151922 | `color.*.surface` | #FFFFFF | #191C24 | quiet chrome: rail, drawer, header, context panel, chips |
 | 3 | `--bg-raised` #1B202B | **keep**, derived: `color-mix(in srgb, surface 96%, ink)` | ≈ #F5F5F5 | ≈ #21242C | the house has two surface steps; the console needs a third for rows, inputs and buttons on `surface`; deriving it from `surface`+`ink` keeps it one scheme-aware expression, not a literal |
-| 4 | `--bg-terminal` #0C0E13 | **keep**, same value in both schemes | #0C0E13 | #0C0E13 | terminal wells, transcript, code wells and the connection log stay dark under a light UI; Ghostty's ANSI palette is unchanged and would not survive a light well (brief: *Not changing*) |
+| 4 | `--bg-terminal` #0C0E13 | **keep**, same value in both schemes | #0C0E13 | #0C0E13 | terminal wells, transcript, code wells and the connection log stay dark under a light UI; Ghostty's ANSI palette is unchanged and would not survive a light well (brief: *Not changing*) — **as shipped (Unit 7):** the dark wells are `.terminal-mount`, `.transcript`, `.terminal-search input`, `.attention-payload pre`, `.connection-log pre` and `dialog input` (styles.css:840/852/937/1497/1806/1897); the command-palette input is `--bg-panel` (`.command-palette input`, :1858, wins on specificity) and `.pair-code` is transparent on the dialog surface — neither is a well |
 | 5 | `--bg-hover` #222836 | **keep**, derived: `color-mix(in srgb, surface 92%, ink)` | ≈ #EBEBEB | ≈ #2A2D36 | hover step above `--bg-raised`; same derivation, one step further |
 | 6 | `--bg-active` #2A3142 | `color.*.verdict-soft` | #DDE1F7 | rgba(169,179,255,.16) | selection, the active tab, the active machine tile and the primary button are "the highlighted row" — the band the house puts behind the decisive interval |
 
@@ -95,7 +95,7 @@ one (brief: *Light and dark policy*).
 | 41 | `--space-5` 20px | **retire** → `space.6` (24px) | — | 7 uses; the house scale has no 20 |
 | 42 | `--space-6` 24px | `space.6` | 24px | |
 | 43 | `--space-8` 32px | `space.8` | 32px | |
-| 44 | `--space-10` 40px | **retire** → `space.12` (48px) for section breathing, `space.8` for in-panel gaps | — | 18 uses; the house scale steps 32 → 48 |
+| 44 | `--space-10` 40px | **retired** (Unit 7 amendment): the 40px control heights moved to `--button-height` (tokens.css:55); every other consumer took `space.8` (32px) for in-panel gaps or `space.12` (48px) for section breathing | — | 0 uses remain in styles.css or tokens.css; the house scale steps 32 → 48 |
 
 ## Shape and rules
 
@@ -131,7 +131,7 @@ None of these has a house counterpart; they are the console's own measurements a
 | 65 | `--mobile-drawer-max-height` 520px | **keep** | phone sheet |
 | 66 | `--mobile-pane-min-width` 260px | **keep** | phone pane floor |
 | 67 | `--mobile-attention-label-width` 200px | **keep** | landscape label column |
-| 68 | `--fleet-card-min-width` 260px | **retire** | the session card grid is replaced by the hero figure and the ledger (brief: *Deliberately omitted*) |
+| 68 | `--fleet-card-min-width` 260px | **retired** with the fleet grid in Unit 3 (Unit 7 amendment: no interim consumer ever existed; 0 uses) | the session card grid is replaced by the hero figure and the ledger (brief: *Deliberately omitted*) |
 | 69 | `--fleet-board-max-width` 1120px | `layout.container` | 1120px | the house container; already equal |
 | 70 | `--mobile-header-chip-width` 72px | **keep** | phone header chips |
 | 71 | `--mobile-context-pill-width` 152px | **keep** | phone bar pill (D7) |
@@ -146,7 +146,7 @@ None of these has a house counterpart; they are the console's own measurements a
 | --- | --- | --- | --- | --- |
 | 76 | `--attention-motion-duration` 150ms | `motion.reveal` | 200ms, easing `motion.easing` | a new event revealing in the timeline is a reveal |
 | 77 | `--chrome-motion-duration` 120ms | `motion.chrome` | 120ms | hover, focus, toggle |
-| 78 | `--connection-spin-duration` 800ms | **retire** | — | the spinner goes with it; the house forbids looping animation and the connecting card states its outcome instead |
+| 78 | `--connection-spin-duration` 800ms | **retired** by Unit 5 together with the spinner and its keyframes (Unit 7 amendment: 0 uses; the connecting card is the serif outcome over the attempt timeline) | — | the house forbids looping animation and the connecting card states its outcome instead |
 | 79 | `--connection-log-max-height` 60dvh | **keep**; its rule declares `overflow: auto` | 60dvh | the connection log ledger scrolls inside the dialog |
 
 ## New hub tokens this pass introduces

@@ -70,8 +70,12 @@ list of decisions and not a mute button:
 2. Every entry carries the reason from this table, verbatim or tighter, and the unit that
    accepted it.
 3. `contrast` is never allowlisted. A pair below 4.5:1 in either scheme is a 0 on the rubric.
-4. An `invisible-text` entry is valid only while the matched node is inside an `aria-hidden`
-   or closed (`[hidden]`, `:not([open])`) ancestor; the entry states that ancestor.
+4. `invisible-text` needs no allowlist entry for a closed overlay: `scripts/visual-qa.mjs`
+   skips any node inside an `aria-hidden="true"` ancestor (visual-qa.mjs:90–93), so the closed
+   drawer (Unit 3 ships `inert` + `aria-hidden="true"`) and the resting toast are never
+   findings. The two scoped drawer/toast entries this table proposed are superseded and were
+   never added. An `invisible-text` finding that survives is a visible-but-transparent node
+   and must be fixed, not allowlisted.
 5. The strict run (`--strict`, light + dark, 1280 + 390) is green on every fixture screen with
    this list; a new finding class is a new row here before it is a new entry there.
 
@@ -80,5 +84,34 @@ list of decisions and not a mute button:
 For each screen at each viewport and scheme: the class counts after, beside the baseline
 counts above, and for every remaining allowlisted finding the entry that covers it. The delta
 that matters is `contrast` → 0 without an allowlist, the three `.attention-detail` classes → 0,
-`outside-viewport` → 0 at 390, and `invisible-text` reduced to the two scoped drawer/toast
-entries.
+`outside-viewport` → 0 at 390, and `invisible-text` → 0 (rule 4).
+
+Measured on epic tip `698dbaba` (strict run, 9 fixtures × light/dark × 1280/390, 36 captures;
+receipt in [critique.md](critique.md)):
+
+| Class | Before (7 live screens, dark, 14 captures) | After (36 captures) | Allowlisted after | Covering entry |
+| --- | ---: | ---: | ---: | --- |
+| `contrast` | 864 | 0 | 0 | — |
+| `invisible-text` | 821 | 0 | 0 | — |
+| `clipped-content` | 2,097 | 0 | 2 | `.session-picker-toggle > .session-picker-name` (`h1` ellipsis, 390, connection-failed-retry) |
+| `content-overflow` | 575 | 0 | 2 | same node |
+| `truncated-container` | 362 | 0 | 0 | — |
+| `outside-viewport` | 2 | 0 | 0 | — |
+| `overlapping-text` | 1 | 0 | 0 | — |
+| `print-loss` | 0 (unpaired only) | 0 | 0 | — |
+| `javascript-disabled-loss` | 2 (unpaired only) | 0 | 4 | `body`, class-wide (fleet-populated) |
+| **total** | **4,722** | **0** | **8** | |
+
+## Unit 7 result (2026-09-07, epic tip `698dbaba`)
+
+Reported in full in [critique.md](critique.md). Strict run: PASS 9 fixtures × 2 schemes × 2
+viewports, 0 findings, 8 allowlisted. Against the counts above: `contrast` 864 → 0 with no
+allowlist entry; `invisible-text` 821 → 0 (the two scoped drawer/toast entries this plan
+anticipated were never needed — the fixtures carry no closed drawer or resting toast, and no
+hover-only affordance remains); the three `.attention-detail` classes → 0; `outside-viewport`
+2 → 0; `clipped-content` 2,097 → 0 with two allowlisted `h1` codename ellipses at 390 and
+`content-overflow` 575 → 0 with the same two. Two amendments to this plan: the fixture runner's
+phone viewport is 390×800, not the 390×844 stated here (send-back to Unit 6), and the
+`connection-failed-retry` fixture is a hand-built stand-in rather than the production
+verdict + timeline, so its PASS line covers the fixture markup and the production surface's
+PASS is Unit 5's own receipt (send-back to Unit 6).

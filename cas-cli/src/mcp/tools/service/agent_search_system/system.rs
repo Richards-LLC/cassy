@@ -81,15 +81,186 @@ impl BugFilingTransport for GhBugFilingTransport {
 fn command_failure_detail(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !stderr.is_empty() {
-        stderr
+        redact_known_credentials(&stderr)
     } else {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !stdout.is_empty() {
-            stdout
+            redact_known_credentials(&stdout)
         } else {
             format!("exit status {}", output.status)
         }
     }
+}
+
+/// Replace credentials inherited by the worker before any command output or
+/// report body is returned. The value is read only long enough to redact it;
+/// it is never included in a log, MCP response, or staged artifact.
+fn redact_known_credentials(input: &str) -> String {
+    let mut redacted = input.to_string();
+    for variable in ["GH_TOKEN", "GITHUB_TOKEN", "GIT_ASKPASS"] {
+        let Ok(secret) = std::env::var(variable) else {
+            continue;
+        };
+        if !secret.is_empty() {
+            redacted = redacted.replace(&secret, "<redacted>");
+        }
+    }
+    redact_token_literals(&redacted)
+}
+
+fn redact_token_literals(input: &str) -> String {
+    let mut redacted = input.to_string();
+    for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"] {
+        let mut search_from = 0;
+        while let Some(offset) = redacted[search_from..].find(prefix) {
+            let start = search_from + offset;
+            let end = redacted[start..]
+                .find(|character: char| {
+                    character.is_whitespace() || matches!(character, '"' | '\'' | '`')
+                })
+                .map(|offset| start + offset)
+                .unwrap_or(redacted.len());
+            redacted.replace_range(start..end, "<redacted>");
+            search_from = start + "<redacted>".len();
+        }
+    }
+    redacted
+}
+
+fn filename_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_dash = false;
+        } else if !slug.is_empty() && !previous_dash {
+            slug.push('-');
+            previous_dash = true;
+        }
+        if slug.len() >= 64 {
+            break;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "report".to_string()
+    } else {
+        slug
+    }
+}
+
+/// Stage a report on the durable factory artifact root before surfacing a
+/// filing failure. `create_new` keeps concurrent failures from overwriting
+/// each other's evidence.
+fn stage_unfiled_bug_report(
+    artifacts_root: &Path,
+    task_id: &str,
+    title: &str,
+    body: &str,
+    failure_reason: &str,
+) -> Result<std::path::PathBuf, String> {
+    let task_dir = artifacts_root
+        .join(filename_slug(task_id))
+        .join("unfiled-issues");
+    std::fs::create_dir_all(&task_dir)
+        .map_err(|error| format!("could not create durable unfiled-issues directory: {error}"))?;
+
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    let stem = format!("BUG-{}-{timestamp}", filename_slug(title));
+    let report = format!(
+        "# {title}\n\n{body}\n\n## Filing status\n\n{failure_reason}\n\n\
+         This report was retained because automatic GitHub filing did not complete.\n"
+    );
+
+    for sequence in 0..100u16 {
+        let suffix = if sequence == 0 {
+            String::new()
+        } else {
+            format!("-{sequence}")
+        };
+        let path = task_dir.join(format!("{stem}{suffix}.md"));
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        else {
+            continue;
+        };
+        std::io::Write::write_all(&mut file, report.as_bytes())
+            .map_err(|error| format!("could not write durable staged report: {error}"))?;
+        return Ok(path);
+    }
+
+    Err("could not allocate a unique durable staged report filename".to_string())
+}
+
+fn current_factory_task_id(core: &crate::mcp::server::CasCore) -> Result<String, String> {
+    let agent_id = core
+        .get_registered_agent_id_read_only()
+        .map_err(|error| format!("registered agent identity unavailable: {}", error.message))?;
+    let agent_store = core
+        .open_agent_store()
+        .map_err(|error| format!("agent store unavailable: {}", error.message))?;
+    let task_store = core
+        .open_task_store()
+        .map_err(|error| format!("task store unavailable: {}", error.message))?;
+    let leases = agent_store
+        .list_agent_leases(&agent_id)
+        .map_err(|error| format!("active task leases unavailable: {error}"))?;
+
+    let mut task_ids = Vec::new();
+    for lease in leases {
+        let task = task_store
+            .get(&lease.task_id)
+            .map_err(|error| format!("task {} unavailable: {error}", lease.task_id))?;
+        if task.status == cas_types::TaskStatus::InProgress {
+            task_ids.push(task.id);
+        }
+    }
+    task_ids.sort();
+    task_ids.dedup();
+    match task_ids.as_slice() {
+        [task_id] => Ok(task_id.clone()),
+        [] => Err("registered agent has no active in-progress task lease".to_string()),
+        _ => Err(format!(
+            "registered agent has {} active in-progress task leases; refusing ambiguous staging target",
+            task_ids.len()
+        )),
+    }
+}
+
+fn filing_failure_reason(error: &str, task_identity_warning: Option<&str>) -> String {
+    let safe_error = redact_known_credentials(error);
+    if safe_error.to_ascii_lowercase().contains("issues.repo") {
+        let mut reason = format!(
+            "GitHub filing failed: {safe_error}\nConfigure the receiving issue target with \
+             `cas config set issues.repo owner/name` before retrying."
+        );
+        if let Some(warning) = task_identity_warning {
+            reason.push_str(&format!(
+                "\nTask identity warning: {}. The report was placed under `unassigned`.",
+                redact_known_credentials(warning)
+            ));
+        }
+        return reason;
+    }
+    let mut reason = format!(
+        "GitHub filing failed: {}\nMissing GitHub credential or authorization. Required GitHub credential: `GH_TOKEN` or `GITHUB_TOKEN` \
+         (or a valid authenticated `gh` account). Factory spawn does not forward either \
+         environment variable explicitly, so a worker must fail closed when its inherited \
+         credential is absent or rejected.",
+        safe_error
+    );
+    if let Some(warning) = task_identity_warning {
+        reason.push_str(&format!(
+            "\nTask identity warning: {}. The report was placed under `unassigned`.",
+            redact_known_credentials(warning)
+        ));
+    }
+    reason
 }
 
 fn resolve_issue_repo(cas_root: &Path) -> Result<String, String> {
@@ -318,10 +489,14 @@ impl CasService {
             }
         };
 
-        let title = anonymize(&title);
-        let description = anonymize(&description);
-        let expected = req.expected.map(|value| anonymize(&value));
-        let actual = req.actual.map(|value| anonymize(&value));
+        let title = redact_known_credentials(&anonymize(&title));
+        let description = redact_known_credentials(&anonymize(&description));
+        let expected = req
+            .expected
+            .map(|value| redact_known_credentials(&anonymize(&value)));
+        let actual = req
+            .actual
+            .map(|value| redact_known_credentials(&anonymize(&value)));
 
         let version = env!("CARGO_PKG_VERSION");
         let os_info = std::env::consts::OS;
@@ -354,10 +529,45 @@ impl CasService {
             arch = arch,
         );
 
-        let repo = resolve_issue_repo(&self.inner.cas_root)
-            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
-        let outcome = file_bug_report(&GhBugFilingTransport, &repo, &title, &body)
-            .map_err(|message| Self::error(ErrorCode::INTERNAL_ERROR, message))?;
+        let (task_id, task_identity_warning) = match current_factory_task_id(&self.inner) {
+            Ok(task_id) => (task_id, None),
+            Err(warning) => ("unassigned".to_string(), Some(warning)),
+        };
+        let filing_result = resolve_issue_repo(&self.inner.cas_root).and_then(|repo| {
+            file_bug_report(&GhBugFilingTransport, &repo, &title, &body)
+                .map_err(|message| message.to_string())
+        });
+        let outcome = match filing_result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let failure_reason =
+                    filing_failure_reason(&error, task_identity_warning.as_deref());
+                let artifacts_root = crate::config::resolved_factory_artifacts_root(
+                    self.inner.load_config().factory().artifacts_root.as_deref(),
+                );
+                let path = stage_unfiled_bug_report(
+                    &artifacts_root,
+                    &task_id,
+                    &title,
+                    &body,
+                    &failure_reason,
+                )
+                .map_err(|stage_error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Bug report was not filed and durable staging failed: {stage_error}. \
+                             Original filing failure: {failure_reason}"
+                        ),
+                    )
+                })?;
+                return Ok(Self::success(format!(
+                    "Bug report was not filed. {failure_reason}\nStaged report: {}\n\n\
+                     File the staged report after GitHub credentials are available.",
+                    path.display()
+                )));
+            }
+        };
         let degradation = outcome
             .degradation
             .map(|message| format!("\n\n{message}"))
@@ -659,7 +869,10 @@ impl CasService {
 
 #[cfg(test)]
 mod tests {
-    use super::{BugFilingTransport, file_bug_report, resolve_issue_repo};
+    use super::{
+        BugFilingTransport, file_bug_report, filing_failure_reason, resolve_issue_repo,
+        stage_unfiled_bug_report,
+    };
 
     #[derive(Debug)]
     struct FakeTransport {
@@ -684,6 +897,24 @@ mod tests {
                 .borrow_mut()
                 .extend(labels.iter().map(|label| (*label).to_string()));
             Ok(self.issue_url.clone())
+        }
+    }
+
+    struct FailingTransport;
+
+    impl BugFilingTransport for FailingTransport {
+        fn ensure_agent_reported_label(&self, _repo: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn create_issue(
+            &self,
+            _repo: &str,
+            _title: &str,
+            _body: &str,
+            _labels: &[&str],
+        ) -> Result<String, String> {
+            Err("HTTP 401: Bearer ghp_private-token-value".to_string())
         }
     }
 
@@ -751,6 +982,34 @@ mod tests {
             resolve_issue_repo(temp.path()).expect("configured repo should resolve"),
             "example/project"
         );
+    }
+
+    #[test]
+    fn failed_filing_stages_an_anonymized_task_scoped_report() {
+        let temp = tempfile::tempdir().expect("temporary artifacts directory");
+        let filing_error = file_bug_report(&FailingTransport, "example/cassy", "title", "body")
+            .expect_err("an unauthorized filing must fail closed");
+        let failure_reason = filing_failure_reason(&filing_error, None);
+        let path = stage_unfiled_bug_report(
+            temp.path(),
+            "cas-a178",
+            "worker cannot file bug",
+            "Description has a private path ~/project and no credential value.",
+            &failure_reason,
+        )
+        .expect("the durable fallback should be writable");
+
+        assert_eq!(
+            path.parent().and_then(|parent| parent.file_name()),
+            Some(std::ffi::OsStr::new("unfiled-issues"))
+        );
+        assert!(path.starts_with(temp.path().join("cas-a178")));
+        let report = std::fs::read_to_string(&path).expect("staged report");
+        assert!(report.contains("worker cannot file bug"));
+        assert!(report.contains("Missing GitHub credential"));
+        assert!(report.contains("Required GitHub credential: `GH_TOKEN` or `GITHUB_TOKEN`"));
+        assert!(!report.contains("ghp_private-token-value"));
+        assert!(!report.contains("private-token-value"));
     }
 
     #[cfg(feature = "mcp-proxy")]

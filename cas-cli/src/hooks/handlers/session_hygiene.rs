@@ -722,7 +722,8 @@ pub(crate) fn render_stale_reference_banner(
 /// Maximum staged-report file names the unfiled-reports banner lists inline.
 const UNFILED_REPORTS_BANNER_MAX_ENTRIES: usize = 10;
 
-/// Staged bug/feature reports sitting unfiled at `docs/requests/` (cas-20f27).
+/// Staged bug/feature reports sitting unfiled at `docs/requests/` or under a
+/// durable factory task's `unfiled-issues/` directory (cas-20f27).
 ///
 /// The write-first filing flow stages a report as `docs/requests/BUG-<slug>.md`
 /// before pushing it to GitHub, and the durable fallback deliberately keeps that
@@ -737,7 +738,11 @@ pub fn build_session_start_unfiled_reports_banner_sized(
     cas_root: &Path,
 ) -> Option<SessionStartBanner> {
     let repo_root = cas_root.parent()?;
-    let staged = staged_request_reports(repo_root);
+    let mut staged: Vec<String> = staged_request_reports(repo_root)
+        .into_iter()
+        .map(|name| format!("docs/requests/{name}"))
+        .collect();
+    staged.extend(staged_factory_request_reports(cas_root));
     if staged.is_empty() {
         return None;
     }
@@ -762,30 +767,95 @@ pub(crate) fn staged_request_reports(repo_root: &Path) -> Vec<String> {
     names
 }
 
+/// Durable factory report paths directly beneath each task's
+/// `<artifacts_root>/<task-id>/unfiled-issues/` directory. Archive and other
+/// artifact directories are deliberately ignored. Absolute paths are shown so
+/// the next session can hand the report to a supervisor without guessing which
+/// checkout owns it.
+pub(crate) fn staged_factory_request_reports(cas_root: &Path) -> Vec<String> {
+    let configured_artifacts_root = crate::config::Config::load(cas_root)
+        .ok()
+        .and_then(|config| config.factory().artifacts_root);
+    let artifacts_root = crate::config::resolved_factory_artifacts_root(
+        configured_artifacts_root.as_deref(),
+    );
+    let Ok(task_entries) = std::fs::read_dir(&artifacts_root) else {
+        return Vec::new();
+    };
+
+    let mut reports = Vec::new();
+    for task_entry in task_entries.flatten() {
+        if !task_entry
+            .file_type()
+            .map(|file_type| file_type.is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let report_dir = task_entry.path().join("unfiled-issues");
+        let Ok(entries) = std::fs::read_dir(&report_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry
+                .file_type()
+                .map(|file_type| file_type.is_file())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("BUG-") || name.starts_with("FEATURE-") {
+                reports.push(entry.path().display().to_string());
+            }
+        }
+    }
+    reports.sort();
+    reports
+}
+
+fn display_staged_report_path(path: &str) -> String {
+    if path.starts_with("docs/requests/")
+        || path.starts_with('/')
+        || path.contains(std::path::MAIN_SEPARATOR)
+    {
+        path.to_string()
+    } else {
+        format!("docs/requests/{path}")
+    }
+}
+
 /// Pure renderer for the unfiled-staged-reports banner — separated from the
 /// directory scan so tests and the SessionStart budget test drive it directly.
 pub(crate) fn render_unfiled_reports_banner(staged: &[String]) -> SessionStartBanner {
     let total = staged.len();
+    let first_path = staged
+        .first()
+        .map(|path| display_staged_report_path(path))
+        .unwrap_or_else(|| "docs/requests/<file>".to_string());
     let remediation = if total == 1 {
-        "File it now: `gh issue create --repo \"$(cas config get issues.repo)\" \
-         --title \"<title>\" --body-file docs/requests/<file>`, then remove the staged file \
-         once the issue URL is known (see the cas-supervisor filing-cas-bugs reference)."
+        format!(
+            "File it now: `gh issue create --repo \"$(cas config get issues.repo)\" \
+             --title \"<title>\" --body-file {first_path}`, then remove the staged file \
+             once the issue URL is known (see the cas-supervisor filing-cas-bugs reference)."
+        )
     } else {
         "Run the cas-github-issues sweep skill to file and reconcile them; each file is \
          removed only after `gh issue create` succeeds and the issue URL is known."
+            .to_string()
     };
     let compact = format!(
-        "⚠ {total} staged bug/feature report(s) in docs/requests/ were never filed to GitHub. \
+        "⚠ {total} staged bug/feature report(s) were never filed to GitHub. \
          {remediation}\n"
     );
 
     let mut full = format!(
-        "⚠ {total} staged bug/feature report(s) sit unfiled in docs/requests/ — written by the \
+        "⚠ {total} staged bug/feature report(s) sit unfiled — written by the \
          write-first flow but never pushed to the issue tracker, so no one outside this \
          checkout can see them:\n"
     );
     for name in staged.iter().take(UNFILED_REPORTS_BANNER_MAX_ENTRIES) {
-        full.push_str(&format!("  ! docs/requests/{name}\n"));
+        full.push_str(&format!("  ! {}\n", display_staged_report_path(name)));
     }
     if total > UNFILED_REPORTS_BANNER_MAX_ENTRIES {
         full.push_str(&format!(
@@ -1615,6 +1685,32 @@ mod tests {
         assert_eq!(rows, UNFILED_REPORTS_BANNER_MAX_ENTRIES);
         assert!(banner.full.contains("and 3 more"), "{}", banner.full);
         assert!(banner.full.contains("cas-github-issues"));
+    }
+
+    #[test]
+    fn unfiled_reports_banner_surfaces_durable_factory_fallbacks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let artifacts_root = tmp.path().join("durable-artifacts");
+        let mut config = crate::config::Config::default();
+        let mut factory = crate::config::FactoryConfig::default();
+        factory.artifacts_root = Some(artifacts_root.display().to_string());
+        config.factory = Some(factory);
+        config.save(&cas_root).unwrap();
+
+        let report_dir = artifacts_root.join("cas-a178").join("unfiled-issues");
+        fs::create_dir_all(&report_dir).unwrap();
+        let report = report_dir.join("BUG-gh-auth.md");
+        fs::write(&report, "required credential: GITHUB_TOKEN").unwrap();
+
+        let staged = staged_factory_request_reports(&cas_root);
+        assert_eq!(staged, vec![report.display().to_string()]);
+        let banner = build_session_start_unfiled_reports_banner_sized(&cas_root)
+            .expect("durable fallback must be visible at session start");
+        assert!(banner.full.contains(&report.display().to_string()));
+        assert!(banner.full.contains("1 staged"));
+        assert!(banner.compact.contains(&report.display().to_string()));
     }
 
     /// cas-20f27 detector 2: an unset `issues.repo` in a project that stages

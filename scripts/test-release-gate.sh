@@ -47,7 +47,7 @@ bad() { printf 'FAIL %s\n' "$1"; fail=$((fail + 1)); }
 new_fixture() {
     local name="$1" repo
     repo="$tmp/$name"
-    mkdir -p "$repo/scripts" "$repo/cas-cli/src" "$repo/cas-cli/tests" "$repo/crates" \
+    mkdir -p "$repo/scripts" "$repo/hub-web/scripts" "$repo/cas-cli/src" "$repo/cas-cli/tests" "$repo/crates" \
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
     cat >"$repo/.gitignore" <<'EOF'
@@ -156,6 +156,13 @@ if [[ "$*" == 'nextest run --archive-file '* ]]; then
 fi
 EOF
     chmod +x "$repo/scripts/cargo-stub"
+    cat >"$repo/scripts/hub-web-visual-qa-stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${1:-missing-artifact-dir}" >>"${GATE_FIXTURE_VISUAL_QA_LOG:?}"
+if [[ "${GATE_FIXTURE_HUB_WEB_VISUAL_QA_FAIL:-}" == 1 ]]; then exit 1; fi
+EOF
+    chmod +x "$repo/scripts/hub-web-visual-qa-stub"
     git -C "$repo" init -q
     git -C "$repo" config user.email release-gate@example.test
     git -C "$repo" config user.name release-gate-test
@@ -174,6 +181,8 @@ run_gate() {
           "$failure_variable=1" \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
           CARGO="$repo/scripts/cargo-stub" \
+          GATE_FIXTURE_VISUAL_QA_LOG="$tmp/visual-qa.log" \
+          RELEASE_GATE_HUB_WEB_VISUAL_QA="$repo/scripts/hub-web-visual-qa-stub" \
           RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
           "$@")
     else
@@ -181,6 +190,8 @@ run_gate() {
           env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
           CARGO="$repo/scripts/cargo-stub" \
+          GATE_FIXTURE_VISUAL_QA_LOG="$tmp/visual-qa.log" \
+          RELEASE_GATE_HUB_WEB_VISUAL_QA="$repo/scripts/hub-web-visual-qa-stub" \
           RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
           "$@")
     fi
@@ -199,7 +210,7 @@ assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config \
         version-literals fixture-paths workspace-tests nextest doctests archive-mode snapshot-portability \
-        builtin-projections changelog-and-versions release-script procedure-guardrails working-tree; do
+        builtin-projections changelog-and-versions release-script procedure-guardrails working-tree hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
             return
@@ -232,6 +243,7 @@ run_scenario archive-run GATE_FIXTURE_ARCHIVE_FAIL archive-mode
 run_scenario snapshot-run GATE_FIXTURE_SNAPSHOT_FAIL snapshot-portability
 run_scenario projection-run GATE_FIXTURE_DRIFT_FAIL builtin-projections
 run_scenario fixture-paths-run GATE_FIXTURE_FIXTURE_PATHS_FAIL fixture-paths
+run_scenario visual-qa-run GATE_FIXTURE_HUB_WEB_VISUAL_QA_FAIL hub-web-visual-qa
 
 # cas-1f6e. A src-side test module that reads the producer checkout at runtime
 # through CARGO_MANIFEST_DIR passes on the build host and fails on the

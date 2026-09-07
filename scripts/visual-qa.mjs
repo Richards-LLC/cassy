@@ -65,7 +65,10 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       return (light + 0.05) / (dark + 0.05);
     };
     const selectorFor = (element) => {
-      if (element.id) return '#' + CSS.escape(element.id);
+      if (element.id) {
+        const id = '#' + CSS.escape(element.id);
+        return element.id === 'toast' && !element.classList.contains('visible') ? `${id}:not(.visible)` : id;
+      }
       const parts = [];
       let current = element;
       while (current && current.nodeType === 1 && current !== document.body) {
@@ -135,7 +138,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const ignoredReason = nonVisualReason(element);
       const item = {
         elementPath: selectorFor(element),
-        selector: element.id ? '#' + CSS.escape(element.id) : selectorFor(element),
+        selector: selectorFor(element),
         text,
         box: box(rect),
         foreground: fg ? fg.slice(0, 3).map(Math.round) : null,
@@ -189,7 +192,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
       const path = selectorFor(element);
-      const item = { selector: element.id ? '#' + CSS.escape(element.id) : path, elementPath: path };
+      const item = { selector: selectorFor(element), elementPath: path };
       const overflowX = style.overflowX === 'hidden' || style.overflowX === 'clip';
       const overflowY = style.overflowY === 'hidden' || style.overflowY === 'clip';
       const contentExceedsBorder = element !== document.documentElement && element !== document.body && (element.scrollWidth > element.clientWidth + boxTolerance || element.scrollHeight > element.clientHeight + boxTolerance);
@@ -326,7 +329,19 @@ async function loadAllowlist(allowlistPath) {
 }
 
 function allowlisted(finding, entries) {
-  return entries.find((entry) => (entry.type === '*' || entry.type === finding.type) && (entry.selector === '*' || entry.selector === finding.selector || entry.selector === finding.elementPath));
+  const selectorMatches = (selector, candidate) => {
+    if (selector === '*' || selector === candidate.selector || selector === candidate.elementPath) return true;
+    const segments = candidate.elementPath.split(' > ');
+    const classes = selector.match(/\.[a-zA-Z_][\w-]*/g)?.map((name) => name.slice(1)) ?? [];
+    if (!classes.length) return false;
+    const required = (segment, names) => names.every((name) => segment.split(/[.#:[]/).includes(name));
+    if (selector.includes(' > ')) {
+      const [parentClass, childClass] = classes;
+      return segments.some((segment, index) => required(segment, [childClass]) && index > 0 && required(segments[index - 1], [parentClass]));
+    }
+    return segments.some((segment) => required(segment, classes));
+  };
+  return entries.find((entry) => (entry.type === '*' || entry.type === finding.type) && selectorMatches(entry.selector, finding));
 }
 
 function slug(value) {

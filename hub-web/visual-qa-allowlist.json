@@ -1,0 +1,54 @@
+{
+  "entries": [
+    {
+      "type": "invisible-text",
+      "selector": ".machine-drawer[aria-hidden=\"true\"] *",
+      "reason": "Unit 6 accepts the closed machine drawer: its rows are off-screen by design and announced only when open; Unit 3 must keep the matched drawer subtree inert and aria-hidden."
+    },
+    {
+      "type": "invisible-text",
+      "selector": "#toast:not(.visible)",
+      "reason": "Unit 6 accepts the resting toast: it is a closed overlay off-screen by design and announced only when visible."
+    },
+    {
+      "type": "clipped-content",
+      "selector": ".terminal-mount",
+      "reason": "Unit 6 accepts the terminal canvas clipping: the emulator is an 80-column pan below compact width and is out of scope; the labelled terminal well remains available."
+    },
+    {
+      "type": "outside-viewport",
+      "selector": ".terminal-mount",
+      "reason": "Unit 6 accepts the terminal canvas leaving the phone document width: the emulator is an intentional 80-column pan below compact width and is out of scope."
+    },
+    {
+      "type": "clipped-content",
+      "selector": ".session-picker-toggle > .session-picker-name",
+      "reason": "Unit 6 accepts the single-line session codename ellipsis: the h1 carries a title and the session picker shows the codename whole."
+    },
+    {
+      "type": "content-overflow",
+      "selector": ".session-picker-toggle > .session-picker-name",
+      "reason": "Unit 6 accepts the shared runner's companion overflow finding for the same single-line session codename ellipsis; the h1 carries a title and the session picker shows the codename whole."
+    },
+    {
+      "type": "clipped-content",
+      "selector": ".pane.collapsed",
+      "reason": "Unit 6 accepts the shared runner's companion clipping finding for the collapsed worker bar: it clips the unmounted terminal placeholder of a pane the operator collapsed; the bar keeps the codename and role."
+    },
+    {
+      "type": "content-overflow",
+      "selector": ".pane.collapsed",
+      "reason": "Unit 6 accepts the collapsed worker bar: it clips the unmounted terminal placeholder of a pane the operator collapsed; the bar keeps the codename and role."
+    },
+    {
+      "type": "truncated-container",
+      "selector": ".pane.collapsed",
+      "reason": "Unit 6 accepts the collapsed worker bar: it truncates the unmounted terminal placeholder of a pane the operator collapsed; the bar keeps the codename and role."
+    },
+    {
+      "type": "javascript-disabled-loss",
+      "selector": "body",
+      "reason": "Unit 6 accepts that Commander is a JavaScript application: index.html has an empty #app and module script, so without JavaScript there is no pairing, terminal, or screen content; Unit 3 adds the noscript explanation."
+    }
+  ]
+}

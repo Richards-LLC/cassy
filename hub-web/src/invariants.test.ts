@@ -934,9 +934,9 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain(".shell.with-browser-notice { height: calc(100dvh - var(--browser-notice-height)); }");
     // No spinner, no rising counter, and no "reconnecting" claim over a
     // failure that will never resolve.
-    expect(main).toContain("title.textContent = fatal ? `Cannot connect to ${session}` : `Connecting to ${session}…`;");
+    expect(main).toContain('? "Connection failed — not retrying."');
     expect(main).toContain("if (snapshot.fatal === true) return;");
-    expect(main).toContain("? snapshot.reason ?? \"This browser cannot reconnect to the terminal.\"");
+    expect(main).toMatch(/import \{ connectionTimeline,[\s\S]*for \(const entry of connectionTimeline\(snapshot\)\)/);
     // One recurring failure is one attention entry, not one per retry.
     expect(main).toContain("const merge = mergeAttentionItem(attention, item);");
     expect(main).toContain("await attentionStore.put(merge.stored);");
@@ -1078,7 +1078,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).toContain('diagnose.textContent = "Diagnose"');
     expect(source).toContain("openConnectionLog(machineId)");
     expect(source).toContain("const view = disconnectedView(snapshot, now)");
-    expect(source).toContain("Disconnected ${view.elapsedSeconds}s ago");
+    expect(source).toContain("Connection interrupted — ${view.retryLabel} (attempt ${view.attempt})");
     expect(styles).toContain(".terminal-state");
     expect(styles).toContain(".terminal-connecting-step");
     expect(styles).toContain(".terminal-disconnected .terminal-mount { opacity: .4; }");

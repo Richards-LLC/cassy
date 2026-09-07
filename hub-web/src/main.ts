@@ -980,8 +980,6 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       grid.prepend(banner);
     }
     // A fatal failure is not reconnecting, so the banner must not claim it is.
-    // Prior contract: Disconnected ${view.elapsedSeconds}s ago — retry owner and attempt.
-    // Prior fatal detail: ? snapshot.reason ?? "This browser cannot reconnect to the terminal."
     banner.textContent = snapshot.fatal === true
       ? "Connection failed — not retrying."
       : `Connection interrupted — ${view.retryLabel} (attempt ${view.attempt})`;
@@ -999,9 +997,6 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   title.className = "terminal-connecting-title";
   // A spinner and a rising counter over a failure that will never resolve is
   // the D3 overlay: it reads as progress. State the outcome instead.
-  // Legacy source contract retained as documentation for the unchanged
-  // invariant test; the amended verdict copy is rendered below.
-  // title.textContent = fatal ? `Cannot connect to ${session}` : `Connecting to ${session}…`;
   title.textContent = fatal
     ? "Connection failed — not retrying."
     : snapshot.phase === "failed"

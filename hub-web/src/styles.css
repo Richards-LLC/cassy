@@ -1991,11 +1991,12 @@ fieldset {
   color: var(--text-hi);
   background: transparent;
   border-bottom: var(--rule-hero) solid var(--color-verdict);
-  font-size: clamp(56px, 8vw, 96px);
+  font-size: clamp(44px, 14vw, 76px);
   font-weight: var(--weight-medium);
   letter-spacing: -0.03em;
   line-height: 1;
   text-align: center;
+  white-space: nowrap;
 }
 
 .pair-code-actions {

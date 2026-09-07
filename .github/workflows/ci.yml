@@ -390,7 +390,11 @@ jobs:
           npm run typecheck
           npm test
           npm run build
-          npm exec --yes --package=playwright -- playwright install --with-deps chromium
+          if sudo -n true 2>/dev/null; then
+            npm exec --yes --package=playwright -- playwright install --with-deps chromium
+          else
+            npm exec --yes --package=playwright -- playwright install chromium
+          fi
           npm run visual-qa
           git diff --exit-code -- dist
 

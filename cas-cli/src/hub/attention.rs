@@ -194,7 +194,6 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::mpsc::{self, Receiver, Sender};
 
     use super::*;
     use crate::ai_enrichment::HttpAiEnrichmentProvider;
@@ -206,21 +205,6 @@ mod tests {
         batch_sizes: Mutex<Vec<usize>>,
     }
 
-    struct SignalingProvider {
-        inner: HttpAiEnrichmentProvider,
-        completed: Mutex<Option<Sender<()>>>,
-    }
-
-    impl AiEnrichmentProvider for SignalingProvider {
-        fn complete_json(&self, request: AiEnrichmentRequest<'_>) -> anyhow::Result<Value> {
-            let result = self.inner.complete_json(request);
-            if let Some(sender) = self.completed.lock().unwrap().take() {
-                let _ = sender.send(());
-            }
-            result
-        }
-    }
-
     async fn advance_until_pending_cleared(events: &MachineEventBus) {
         // With Tokio's paused clock, advancing before the spawned worker has
         // received its first event can move past the deadline it will later
@@ -230,7 +214,11 @@ mod tests {
         for _ in 0..16 {
             tokio::time::advance(BATCH_WINDOW).await;
             for _ in 0..128 {
-                if !events.history().iter().any(|event| event.enrichment_pending) {
+                if !events
+                    .history()
+                    .iter()
+                    .any(|event| event.enrichment_pending)
+                {
                     return;
                 }
                 tokio::task::yield_now().await;
@@ -238,34 +226,54 @@ mod tests {
         }
     }
 
-    async fn advance_until_provider_finished(
-        events: &MachineEventBus,
-        completed: Receiver<()>,
-    ) {
-        // Let the spawned worker receive the queued event before the first
-        // clock jump, otherwise its deadline is registered at the already
-        // advanced instant and this test can spend every window behind it.
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
-        for _ in 0..16 {
-            tokio::time::advance(BATCH_WINDOW).await;
-            for _ in 0..128 {
+    async fn wait_for_enrichment_patch(
+        updates: &mut tokio::sync::broadcast::Receiver<MachineEvent>,
+        sequence: u64,
+    ) -> MachineEvent {
+        // Keep advancing the paused clock until the broadcast emitted after
+        // finish_enrichment observes the pending flag write. The provider is
+        // blocking I/O, so a fixed yield budget can expire before that patch
+        // task gets scheduled under parallel test load.
+        let clock_driver = tokio::spawn(async {
+            for _ in 0..16 {
                 tokio::task::yield_now().await;
             }
-        }
-        let provider_finished = tokio::task::spawn_blocking(move || {
-            completed.recv_timeout(Duration::from_secs(5)).is_ok()
-        })
-        .await
-        .expect("provider wait task");
-        assert!(provider_finished, "HTTP provider never completed");
-        for _ in 0..128 {
-            if !events.history().iter().any(|event| event.enrichment_pending) {
-                return;
+            loop {
+                tokio::time::advance(BATCH_WINDOW).await;
+                for _ in 0..128 {
+                    tokio::task::yield_now().await;
+                }
             }
-            tokio::task::yield_now().await;
-        }
+        });
+        let (timeout_tx, timeout_rx) = std::sync::mpsc::channel();
+        let mut timeout = tokio::task::spawn_blocking(move || {
+            timeout_rx.recv_timeout(Duration::from_secs(5)).is_err()
+        });
+        let patched = loop {
+            tokio::select! {
+                biased;
+                result = updates.recv() => match result {
+                    Ok(event) if event.sequence == sequence && !event.enrichment_pending => {
+                        break event;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        panic!("missed {skipped} machine event updates")
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        panic!("machine event updates closed before enrichment finished")
+                    }
+                },
+                _ = &mut timeout => {
+                    clock_driver.abort();
+                    panic!("machine event enrichment patch did not arrive within 5 seconds")
+                }
+            }
+        };
+        let _ = timeout_tx.send(());
+        let _ = timeout.await;
+        clock_driver.abort();
+        patched
     }
 
     impl AiEnrichmentProvider for RecordingProvider {
@@ -337,24 +345,20 @@ mod tests {
             endpoint,
             ..Default::default()
         });
-        let (completed_sender, completed_receiver) = mpsc::channel();
         let events = MachineEventBus::new(4);
         let receiver = events.enable_enrichment();
-        let task = spawn_attention_enricher(
-            events.clone(),
-            receiver,
-            Arc::new(SignalingProvider {
-                inner: provider,
-                completed: Mutex::new(Some(completed_sender)),
-            }),
-        );
+        let mut updates = events.subscribe();
+        let task = spawn_attention_enricher(events.clone(), receiver, Arc::new(provider));
         events.observe_daemon(
             "factory-a",
             &DaemonMessage::Error {
                 message: "raw error still visible".into(),
             },
         );
-        advance_until_provider_finished(&events, completed_receiver).await;
+        let raw = updates.recv().await.expect("raw event broadcast");
+        let patch = wait_for_enrichment_patch(&mut updates, raw.sequence).await;
+        assert!(!patch.enrichment_pending);
+        assert!(patch.enrichment.is_none());
 
         let event = &events.history()[0];
         assert!(!event.enrichment_pending);

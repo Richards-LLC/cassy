@@ -115,7 +115,7 @@ try {
     + block('html[data-scheme="light"]', light, "light") + "\n"
     + block('html[data-scheme="dark"]', dark, "dark") + "\n"
     + "/* Dark wells: color.dark.* + color.series-neutral.dark; derived surfaces use those roles. */\n"
-    + ".terminal-mount, .transcript, .terminal-search input, .attention-payload pre,\n.connection-log pre, dialog:not(.command-palette) input, .pair-code {\n  color-scheme: dark;\n"
+    + ".terminal-mount, .transcript, .terminal-search input, .attention-payload pre,\n.connection-log pre, dialog:not(.command-palette) input {\n  color-scheme: dark;\n"
     + declarations({ ...derived, ...colors("dark") }) + "\n}\n";
   if (values.check) {
     if (readFileSync(values.output, "utf8") !== output) throw new Error("Generated tokens.css has drifted; run npm run tokens and commit the result.");

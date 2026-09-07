@@ -25,6 +25,12 @@ export interface DisconnectedView {
   readonly retryLabel: string;
 }
 
+export interface ConnectionTimelineEntry {
+  readonly label: string;
+  readonly detail: string;
+  readonly tone: "current" | "retry" | "failed" | "evidence";
+}
+
 const STAGE_COPY: Record<ConnectionSnapshot["stage"], string> = {
   idle: "waiting to start the connection",
   resolving: "resolving the target node",
@@ -33,6 +39,49 @@ const STAGE_COPY: Record<ConnectionSnapshot["stage"], string> = {
   attaching: "waiting for relay handshake",
   live: "waiting for the terminal heartbeat",
 };
+
+/**
+ * The lifecycle keeps the current attempt and its best diagnostic, rather than
+ * a second client-side history. The presentation can still show an honest
+ * annotated timeline: a count of earlier attempts, the current stage, and the
+ * latest outcome without inventing timestamps or causes.
+ */
+export function connectionTimeline(snapshot: ConnectionSnapshotView): ConnectionTimelineEntry[] {
+  const attempt = Math.max(1, snapshot.attempt);
+  const entries: ConnectionTimelineEntry[] = [];
+  if (attempt > 1) {
+    entries.push({
+      label: "Earlier attempts",
+      detail: `${attempt - 1} attempt${attempt === 2 ? "" : "s"} did not reach a live session`,
+      tone: "evidence",
+    });
+  }
+
+  const failed = snapshot.fatal === true || snapshot.phase === "failed";
+  const retrying = snapshot.phase === "backoff";
+  entries.push({
+    label: `Attempt ${attempt}`,
+    detail: failed ? "Connection failed" : retrying ? "Retry scheduled" : STAGE_COPY[snapshot.stage],
+    tone: failed ? "failed" : retrying ? "retry" : "current",
+  });
+
+  if (snapshot.reason) {
+    entries.push({
+      label: failed ? "Outcome" : "Diagnostic",
+      detail: snapshot.reason,
+      tone: failed ? "failed" : "evidence",
+    });
+  }
+  if (retrying && snapshot.retryInMs !== undefined) {
+    const seconds = Math.max(0, Math.ceil(snapshot.retryInMs / 1_000));
+    entries.push({
+      label: "Next attempt",
+      detail: `reconnecting in ${seconds}s`,
+      tone: "retry",
+    });
+  }
+  return entries;
+}
 
 export function elapsedSeconds(snapshot: ConnectionSnapshotView, now = Date.now()): number {
   return "session" in snapshot

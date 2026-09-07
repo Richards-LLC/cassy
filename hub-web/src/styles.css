@@ -997,9 +997,9 @@ main {
 .empty-pane-slot .primary { width: auto; padding: 0 var(--space-4); }
 
 /* == End Unit 3: empty state == */
-/* Connecting, failed and retry share the empty slot's card: one centred shape
-   for every "no terminal yet" state, instead of a spinner and a rising counter
-   pinned to the top-left corner of an otherwise blank canvas. */
+/* == Unit 5: connection-state surfaces == */
+/* Connecting, failed and retry share one centred verdict surface. The
+   lifecycle detail is an annotated timeline, not a spinner or a counter. */
 .terminal-state {
   place-self: center;
   display: grid;
@@ -1008,8 +1008,9 @@ main {
   gap: var(--space-2);
   padding: var(--space-6);
   color: var(--text-hi);
-  background: var(--bg-raised);
-  border-radius: var(--radius-pane);
+  background: var(--bg-panel);
+  border-top: var(--rule-hero) solid var(--color-verdict);
+  border-radius: 0;
   font-size: var(--fs-base);
   text-align: center;
 }
@@ -1018,14 +1019,14 @@ main {
 .terminal-state .retry-terminal { width: auto; justify-self: center; padding: 0 var(--space-4); }
 
 .terminal-connecting-title {
-  font-family: var(--font-mono);
+  max-width: 22ch;
+  color: var(--text-hi);
+  font-family: var(--font-display);
+  font-size: var(--fs-verdict);
+  font-weight: var(--weight-regular);
+  letter-spacing: -0.015em;
+  line-height: 1.1;
   overflow-wrap: anywhere;
-}
-
-.terminal-connecting-elapsed {
-  color: var(--text-mid);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
 }
 
 .terminal-connecting-step {
@@ -1033,6 +1034,56 @@ main {
   font-size: var(--fs-meta);
   text-wrap: pretty;
 }
+
+.connection-timeline {
+  width: 100%;
+  margin: var(--space-2) 0 0;
+  padding: 0 0 0 var(--space-4);
+  color: var(--text-mid);
+  border-left: var(--line-width) solid var(--line-strong);
+  list-style: none;
+  text-align: left;
+}
+
+.connection-timeline-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--space-3) minmax(0, 1fr);
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 0 0 var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+}
+
+.connection-timeline-item:last-child { padding-bottom: 0; }
+
+.connection-timeline-marker {
+  width: var(--space-2);
+  height: var(--space-2);
+  margin-top: var(--space-1);
+  background: var(--line-strong);
+  border-radius: var(--radius-pill);
+}
+
+.connection-timeline-item.current .connection-timeline-marker { background: var(--color-verdict); }
+.connection-timeline-item.retry .connection-timeline-marker { background: var(--state-warn); }
+.connection-timeline-item.failed .connection-timeline-marker { background: var(--state-crit); }
+
+.connection-timeline-label,
+.connection-timeline-detail {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.connection-timeline-label {
+  color: var(--text-hi);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.connection-timeline-detail { color: var(--text-mid); }
 
 .terminal-connecting-actions {
   display: flex;
@@ -1047,16 +1098,6 @@ main {
   padding: 0 var(--space-3);
 }
 
-.connection-spinner {
-  width: var(--space-6);
-  height: var(--space-6);
-  margin-bottom: var(--space-1);
-  border: var(--state-rule-width) solid var(--line-strong);
-  border-top-color: var(--text-mid);
-  border-radius: var(--radius-pill);
-}
-
-
 /* == Unit 4: Session disconnection outcome == */
 .terminal-disconnected-banner {
   position: absolute;
@@ -1066,7 +1107,7 @@ main {
   left: var(--space-2);
   min-height: var(--button-compact-height);
   padding: var(--space-2) var(--space-3);
-  color: var(--state-warn);
+  color: var(--text-hi);
   background: var(--bg-raised);
   font-family: var(--font-mono);
   font-size: var(--fs-meta);
@@ -1517,7 +1558,6 @@ main {
 @media (prefers-reduced-motion: reduce) {
   .attention-item--new-critical,
   .attention-item--reclassified { animation: none; }
-  .connection-spinner { animation: none; }
   .machine-drawer { transition-property: opacity; }
   button { transition: none; }
   #toast { transform: translate(-50%, 0); transition-property: opacity; }
@@ -1727,10 +1767,34 @@ main {
   white-space: nowrap;
 }
 
+/* == Unit 5: connection evidence ledger == */
+.connection-log {
+  width: min(var(--dialog-width), calc(100vw - var(--space-6)));
+}
+
+.connection-log section {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+}
+
 .connection-log header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: var(--line-width) solid var(--line-strong);
+}
+
+.connection-log h2 { margin: 0; font-size: var(--fs-md); }
+.connection-log-eyebrow {
+  margin: 0;
+  color: var(--text-mid);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
 }
 
 .connection-log header button {
@@ -1742,16 +1806,19 @@ main {
 .connection-log pre {
   max-height: var(--connection-log-max-height);
   overflow: auto;
-  padding: var(--space-3);
-  color: var(--text-mid);
+  margin: 0;
+  padding: var(--space-3) 0;
+  color: var(--text-hi);
   background: var(--bg-terminal);
-  border-radius: var(--radius-card);
+  border-top: var(--line-width) solid var(--line-subtle);
+  border-bottom: var(--line-width) solid var(--line-subtle);
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  line-height: var(--line-ui);
+  font-size: var(--fs-meta);
+  line-height: 1.45;
   white-space: pre-wrap;
 }
 
+/* == Unit 5: pairing dialog == */
 dialog {
   width: min(var(--dialog-width), calc(100vw - var(--space-6)));
   /* A soft keyboard can leave a phone barely 300px of viewport. Bounding the
@@ -1920,13 +1987,14 @@ fieldset {
 .dialog-actions .primary { width: auto; }
 
 .pair-code {
-  padding: var(--space-4);
+  padding: var(--space-2) 0 var(--space-3);
   color: var(--text-hi);
-  background: var(--bg-terminal);
-  border-radius: var(--radius-card);
-  font-size: var(--fs-lg);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-label);
+  background: transparent;
+  border-bottom: var(--rule-hero) solid var(--color-verdict);
+  font-size: clamp(56px, 8vw, 96px);
+  font-weight: var(--weight-medium);
+  letter-spacing: -0.03em;
+  line-height: 1;
   text-align: center;
 }
 
@@ -1943,18 +2011,24 @@ fieldset {
 
 .pair-details {
   display: grid;
-  gap: var(--space-2);
+  gap: 0;
   margin: 0;
-  padding: var(--space-3);
-  background: var(--bg-panel);
-  border-radius: var(--radius-card);
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  border-top: var(--line-width) solid var(--line-strong);
+  border-bottom: var(--line-width) solid var(--line-strong);
 }
 
 .pair-details div {
   display: grid;
   grid-template-columns: var(--pair-detail-label-width) 1fr;
   gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-top: var(--line-width) solid var(--line-subtle);
 }
+
+.pair-details div:first-child { border-top: 0; }
 
 .pair-details dt {
   color: var(--text-mid);
@@ -2003,9 +2077,11 @@ dialog form > *,
 }
 
 .pair-status {
-  padding: var(--space-3);
-  background: var(--bg-panel);
-  border-radius: var(--radius-card);
+  padding: var(--space-3) 0;
+  color: var(--text-hi);
+  background: transparent;
+  border-top: var(--line-width) solid var(--line-subtle);
+  border-bottom: var(--line-width) solid var(--line-subtle);
 }
 
 #toast {
@@ -2017,7 +2093,9 @@ dialog form > *,
   opacity: 0;
   pointer-events: none;
   padding: var(--space-3) var(--space-4);
+  color: var(--text-hi);
   background: var(--bg-raised);
+  border-top: var(--state-rule-width) solid var(--color-verdict);
   border-radius: var(--radius-card);
   box-shadow: var(--shadow-overlay);
   transition: opacity .2s, transform .2s;

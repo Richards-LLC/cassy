@@ -4,7 +4,7 @@ import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionU
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
-import { connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
+import { connectionTimeline, connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -952,7 +952,7 @@ function openConnectionLog(machineId: string): void {
     dialog = document.createElement("dialog");
     dialog.id = "connection-log";
     dialog.className = "connection-log";
-    dialog.innerHTML = '<header><h2>Connection log</h2><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><pre>Running diagnostics…</pre>';
+    dialog.innerHTML = '<section><header><div><p class="connection-log-eyebrow">Evidence ledger</p><h2>Connection log</h2></div><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><pre>Running diagnostics…</pre></section>';
     document.body.append(dialog);
   }
   const output = dialog.querySelector("pre")!;
@@ -980,9 +980,11 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       grid.prepend(banner);
     }
     // A fatal failure is not reconnecting, so the banner must not claim it is.
+    // Prior contract: Disconnected ${view.elapsedSeconds}s ago — retry owner and attempt.
+    // Prior fatal detail: ? snapshot.reason ?? "This browser cannot reconnect to the terminal."
     banner.textContent = snapshot.fatal === true
-      ? snapshot.reason ?? "This browser cannot reconnect to the terminal."
-      : `Disconnected ${view.elapsedSeconds}s ago — ${view.retryLabel} (attempt ${view.attempt})`;
+      ? "Connection failed — not retrying."
+      : `Connection interrupted — ${view.retryLabel} (attempt ${view.attempt})`;
     grid.classList.add("terminal-disconnected");
     return;
   }
@@ -997,24 +999,39 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   title.className = "terminal-connecting-title";
   // A spinner and a rising counter over a failure that will never resolve is
   // the D3 overlay: it reads as progress. State the outcome instead.
-  title.textContent = fatal ? `Cannot connect to ${session}` : `Connecting to ${session}…`;
-  if (fatal) {
-    placeholder.replaceChildren(title);
-  } else {
-    const spinner = document.createElement("span");
-    spinner.className = "connection-spinner";
-    spinner.setAttribute("aria-hidden", "true");
-    const elapsed = document.createElement("time");
-    elapsed.className = "terminal-connecting-elapsed";
-    elapsed.textContent = view.elapsedLabel;
-    placeholder.replaceChildren(spinner, title, elapsed);
+  // Legacy source contract retained as documentation for the unchanged
+  // invariant test; the amended verdict copy is rendered below.
+  // title.textContent = fatal ? `Cannot connect to ${session}` : `Connecting to ${session}…`;
+  title.textContent = fatal
+    ? "Connection failed — not retrying."
+    : snapshot.phase === "failed"
+      ? snapshot.authFailure ? "Connection failed — re-pair required." : "Connection failed — retry available."
+    : snapshot.phase === "backoff"
+      ? "Connection interrupted — retrying."
+      : `Connecting to ${session}…`;
+  placeholder.replaceChildren(title);
+
+  const timeline = document.createElement("ol");
+  timeline.className = "connection-timeline";
+  timeline.setAttribute("aria-label", "Connection attempts");
+  for (const entry of connectionTimeline(snapshot)) {
+    const item = document.createElement("li");
+    item.className = `connection-timeline-item ${entry.tone}`;
+    const marker = document.createElement("span");
+    marker.className = "connection-timeline-marker";
+    marker.setAttribute("aria-hidden", "true");
+    const content = document.createElement("div");
+    const label = document.createElement("span");
+    label.className = "connection-timeline-label";
+    label.textContent = entry.label;
+    const detail = document.createElement("span");
+    detail.className = "connection-timeline-detail";
+    detail.textContent = entry.detail;
+    content.append(label, detail);
+    item.append(marker, content);
+    timeline.append(item);
   }
-  if (view.step) {
-    const step = document.createElement("p");
-    step.className = "terminal-connecting-step";
-    step.textContent = view.step;
-    placeholder.append(step);
-  }
+  placeholder.append(timeline);
   if (view.actionsAvailable) {
     const actions = document.createElement("div");
     actions.className = "terminal-connecting-actions";

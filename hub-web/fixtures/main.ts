@@ -106,11 +106,10 @@ function renderRail(machineCount: number): HTMLElement {
   drawer.setAttribute("aria-hidden", "true");
   drawer.setAttribute("inert", "");
   const drawerHeader = element("header", "drawer-header");
-  drawerHeader.append(element("strong", undefined, "Machines"), button("×", "drawer-close"));
+  drawerHeader.append(element("strong"), button("", "drawer-close"));
   const drawerTree = element("nav");
   drawerTree.id = "machine-tree";
   drawerTree.setAttribute("aria-label", "Machine sessions");
-  drawerTree.append(element("p", "machine-empty", machineCount ? "Atlas laptop · bright-otter" : "No machines paired"));
   drawer.append(drawerHeader, drawerTree);
   navigation.append(drawer);
   return navigation;

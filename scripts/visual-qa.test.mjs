@@ -99,6 +99,42 @@ test('allowlist requires a reason and suppresses intentional findings', async ()
   assert.match(result.suppressed[0].reason, /Brand mark/);
 });
 
+test('allowlist selector semantics require the aria-hidden ancestor', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-aria-hidden-'));
+  const result = await runVisualQa({
+    urls: [join(repoRoot, 'scripts', 'visual-qa-fixtures', 'allowlist-aria-hidden.html')],
+    artifactDir,
+    schemes: ['light'],
+    viewports: [{ name: 'phone', width: 390, height: 800 }],
+    allowlistPath: join(repoRoot, 'hub-web', 'visual-qa-allowlist.json'),
+    strict: true,
+  });
+
+  const invisibleFindings = result.findings.filter((finding) => finding.type === 'invisible-text');
+  const invisibleSuppressed = result.suppressed.filter((finding) => finding.type === 'invisible-text');
+  assert.equal(result.status, 'FAIL');
+  assert.equal(invisibleFindings.length, 1);
+  assert.equal(invisibleSuppressed.length, 1);
+  assert.match(invisibleFindings[0].elementPath, /machine-drawer/);
+  assert.equal(invisibleSuppressed[0].allowlistedBy[0].selector, '.machine-drawer[aria-hidden="true"] *');
+});
+
+test('invalid allowlist selectors are informational failures of configuration', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-invalid-allowlist-'));
+  const allowlistPath = join(artifactDir, 'allowlist.json');
+  await writeFile(allowlistPath, JSON.stringify({ entries: [{ type: 'contrast', selector: '[', reason: 'Invalid test selector.' }] }));
+  const result = await runVisualQa({
+    urls: [fixture('clean.html')],
+    artifactDir,
+    schemes: ['light'],
+    viewports: [{ name: 'phone', width: 390, height: 800 }],
+    allowlistPath,
+  });
+
+  assert.equal(result.status, 'PASS');
+  assert.equal(result.infoFindings.filter((finding) => finding.type === 'invalid-allowlist-selector').length, 1);
+});
+
 test('strict mode exposes a non-zero exit code for any finding', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-strict-'));
   const result = await runVisualQa({

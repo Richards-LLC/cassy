@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Allowlist aria-hidden scope</title>
+    <style>
+      body { margin: 0; background: #fff; color: #111; }
+      .machine-drawer { width: 240px; height: 24px; opacity: 0; overflow: hidden; }
+    </style>
+  </head>
+  <body>
+    <div class="machine-drawer" aria-hidden="true"><p>Closed drawer content</p></div>
+    <div class="machine-drawer"><p>Visible-to-assistive-tech drawer content</p></div>
+  </body>
+</html>

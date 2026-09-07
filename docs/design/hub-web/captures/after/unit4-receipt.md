@@ -26,7 +26,7 @@ their own keyboard-reachable rows, twelve complete action labels, group collapse
 and phone worker stacking/height. Heading/code/tool-looking text and unfamiliar text are
 preserved literally; this reading surface introduces no Markdown parser.
 
-Fresh source checks: `npm run typecheck` exit 0; `npm test` exit 0, 30 files / 428 tests;
+Fresh source checks: `npm run typecheck` exit 0; `npm test` exit 0, 31 files / 431 tests;
 `npm run build -- --outDir .unit4-app-build` exit 0. Generated dist remains unchanged.
 The two amended invariant assertions remove the old shimmer/clamp contract; all other
 existing invariants remain unchanged. Pending enrichment now reads “Enriching…”.
@@ -39,13 +39,18 @@ Durable receipt root: `/home/pippenz/.cas/artifacts/cas-3c1c8/`:
 - `fixture-extension.patch`: fixture follow-up against Unit 6 branch commit
   `028c2cc18d5bacab05d517f4a9e0429226e2e1af` (fixture contents at capture time).
 
-Supervisor instruction 27202 accepts source plus these artifacts now; the fixture patch
-is integration-owned after Unit 6 merges. It preserves FIXTURE_NAMES and leaves fleet,
-pairing and connection fixture behavior intact. Reproduce by applying the patch after
-Unit 6, building its fixture entry with Vite, and invoking `runVisualQa` from
-`scripts/visual-qa.mjs` on the four URLs with the sizes above. The shared runner and final
-print sheet are integration-owned. These captures establish the working surfaces;
-live terminal output and the finished fleet shell are outside this receipt.
+After supervisor instruction 27208, the source branch rebased onto epic `a39919fc` and
+applied the fixture extension to `hub-web/fixtures/main.ts`; no fixture port remains pending.
+FIXTURE_NAMES is unchanged and fleet, pairing and connection fixture behavior remains intact.
+The committed fixture now carries the stress cases used for these captures.
+
+Final integration runner: `npm run visual-qa -- --artifact-dir <receipt>/runner-final`
+exited 0: **PASS 9 fixtures x 2 schemes x 2 viewports**, 36 captures and zero unsuppressed
+findings (`runner-final/visual-qa.md` and `.json` in the durable receipt root). The runner's
+phone viewport is 390×800; the 16 scoped captures above additionally prove 390×844.
+Its existing plan allowlist remains unchanged. The final print sheet and assembled-page
+critique are integration-owned. Terminal canvases here remain placeholders; this receipt
+does not claim to exercise live terminal output.
 
 ## Scoped critique
 

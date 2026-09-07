@@ -69,15 +69,15 @@ function attentionItems(count: number): AttentionItem[] {
     id: `event-${index + 1}`,
     machineId: "atlas",
     machineLabel: "Atlas laptop",
-    session: "otter",
-    kind: "reconnecting",
+    session: "commander-session-with-a-long-codename",
+    kind: index === 0 ? "daemon_disconnected" : index % 3 === 0 ? "checkpoint" : "reconnecting",
     createdAt: new Date(Date.now() - index * 60_000).toISOString(),
   }, {
-    headline: "Reconnecting to hub",
-    detail: "The session remains available for inspection while the hub retries.",
-    severity: "warning",
-    action: "retry",
-    fingerprint: "fixture-reconnecting",
+    headline: index === 0 ? "Daemon connection lost" : `Connection attempt ${index + 1}`,
+    detail: "The session remains available for inspection while the hub retries. Inspect the machine transport and keep this full explanation readable even on a phone.",
+    severity: index === 0 ? "critical" : index % 3 === 0 ? "info" : "warning",
+    action: index % 3 === 0 && index !== 0 ? "none" : "retry",
+    fingerprint: `fixture-reconnecting-${index}`,
     payload: { fixture: fixtureName, event: index + 1 },
   }));
 }
@@ -121,7 +121,7 @@ function renderHeader(openSession: boolean): HTMLElement {
   const heading = element("h1", openSession ? "toolbar-session-title" : undefined);
   const picker = button("", "session-picker-toggle");
   picker.append(
-    element("span", "session-picker-name", openSession ? "Penguinz-fierce-tiger-commander" : "Fleet overview"),
+    element("span", "session-picker-name", openSession ? (["session-canvas", "transcript", "attention-0", "attention-12"].includes(fixtureName) ? "bright-otter" : "Penguinz-fierce-tiger-commander") : "Fleet overview"),
     element("span", "session-picker-caret", "▾"),
   );
   picker.lastElementChild?.setAttribute("aria-hidden", "true");
@@ -168,9 +168,16 @@ function renderContext(count: number): HTMLElement {
 
 function paneHeader(title: string): HTMLElement {
   const header = element("header", "pane-header");
-  // The real renderer supplies role and activity chrome; the fixture keeps the
-  // viewport stable with only the identifying title around its static canvas.
-  header.append(element("span", "pane-status-dot live"), element("span", "pane-title", title));
+  // Exercise the production pane eyebrow, activity and view/search controls.
+  header.append(element("span", "pane-status-dot live"), element("span", "pane-title", title), element("span", "pane-role", title === "bright-otter" ? "supervisor" : "worker"), element("span", "pane-last-activity", "1m ago"));
+  const controls = element("div", "pane-layout-controls");
+  for (const [label, cls] of [["Show terminal", "pane-view-toggle"], ["Find", "pane-search"]]) {
+    const control = button(label, cls);
+    control.setAttribute("aria-label", label);
+    control.dataset.view = "transcript";
+    controls.append(control);
+  }
+  header.append(controls);
   return header;
 }
 
@@ -212,6 +219,11 @@ function renderTranscript(): HTMLElement {
   pane.append(paneHeader("bright-otter"));
   const source: TranscriptSource = {
     rows: () => [
+      row("# Build result"),
+      row("const answer = 42;"),
+      row("⎿ Tool: exec_command"),
+      row("<unknown-block>unfamiliar output</unknown-block>"),
+      row(`┌${"─".repeat(100)}┐`),
       row("$ cas factory status", false),
       row("  › supervisor is coordinating six workers", true),
       row("    across the Commander design pass", false, true),
@@ -226,7 +238,9 @@ function renderTranscript(): HTMLElement {
   };
   const view = new TranscriptView(document, source);
   view.update();
-  pane.append(view.element);
+  const mount = element("div", "terminal-mount transcript-active");
+  mount.append(view.element);
+  pane.append(mount);
   return pane;
 }
 
@@ -290,8 +304,8 @@ function renderPairing(cleanup: boolean): HTMLDialogElement {
 
 function renderShell(): void {
   const machineCount = fixtureName === "fleet-empty" ? 0 : 2;
-  const openSession = ["session-canvas", "transcript", "connection-failed-retry"].includes(fixtureName);
-  const shell = element("div", `shell attention-expanded${fixtureName === "fleet-empty" ? " fleet-empty" : ""}`);
+  const openSession = ["session-canvas", "transcript", "attention-0", "attention-12", "connection-failed-retry"].includes(fixtureName);
+  const shell = element("div", `shell ${["session-canvas", "transcript"].includes(fixtureName) ? "attention-collapsed" : "attention-expanded"}${fixtureName === "fleet-empty" ? " fleet-empty" : ""}`);
   shell.dataset.fixture = fixtureName;
   const signature = shellSignature({
     machineId: machineCount ? "atlas" : undefined,
@@ -333,13 +347,14 @@ function renderShell(): void {
     empty.append(element("p", "empty-title", "No machine paired yet"), element("p", "empty-hint", "Pair the machine your sessions run on. You will get a code to approve there."), button("Pair a machine", "primary"));
     grid.append(empty);
     main.append(grid);
-  } else if (fixtureName === "session-canvas") {
+  } else if (["session-canvas", "attention-0", "attention-12"].includes(fixtureName)) {
     const grid = element("section", "pane-grid pane-layout");
     const primary = element("div", "primary-pane-slot");
     primary.append(renderTerminalPlaceholder("bright-otter", "supervisor"));
     const secondary = element("div", "secondary-pane-strip");
     const collapsed = renderTerminalPlaceholder("agile-octopus", "worker", true);
-    secondary.append(collapsed);
+    if (!matchMedia("(max-width: 53rem)").matches) collapsed.classList.remove("collapsed");
+    secondary.append(collapsed, renderTerminalPlaceholder("steady-badger", "worker", true));
     grid.append(primary, secondary);
     main.append(grid);
   } else if (fixtureName === "transcript") {

@@ -2060,6 +2060,46 @@ mod workspace_contract_tests {
     }
 
     #[test]
+    fn bash_heredoc_js_regex_literal_is_not_a_write_target() {
+        let targets = bash_write_targets(
+            "cat > scripts/x.mjs <<'EOF'\nconst ok = /s/.test(\"s\");\nEOF",
+        );
+
+        assert_eq!(targets, vec!["scripts/x.mjs"]);
+    }
+
+    #[test]
+    fn bash_heredoc_body_paths_are_opaque_but_redirect_target_is_guarded() {
+        let cwd = tempfile::tempdir().expect("worktree");
+        std::fs::create_dir(cwd.path().join("scripts")).expect("scripts directory");
+        let body_only = bash_input(
+            "cat > scripts/x.mjs <<'EOF'\nconst output = \"/etc/cas-heredoc\";\ntouch /etc/cas-heredoc-body\nEOF",
+            cwd.path(),
+        );
+        assert_eq!(
+            factory_write_violation(&body_only, &None, None, false, Some(cwd.path())),
+            None,
+            "an absolute path in heredoc content is not a write target"
+        );
+
+        let outside_redirect = bash_input(
+            "cat > /etc/cas-heredoc <<'EOF'\nconst ok = true;\nEOF",
+            cwd.path(),
+        );
+        assert_eq!(
+            factory_write_violation(&outside_redirect, &None, None, false, Some(cwd.path()))
+                .map(|violation| violation.resolved_path),
+            Some(std::path::PathBuf::from("/etc/cas-heredoc")),
+            "an absolute redirect target must remain guarded"
+        );
+    }
+
+    #[test]
+    fn sed_substitution_expression_is_not_a_write_target() {
+        assert!(bash_write_targets("sed 's/a/b/' input.txt").is_empty());
+    }
+
+    #[test]
     fn factory_guard_allows_variable_rm_and_heredoc_inside_registered_worktree() {
         let cwd = tempfile::tempdir().expect("worktree");
         let mut env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", None)]);

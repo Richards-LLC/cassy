@@ -5188,6 +5188,43 @@ This is the body content."#;
         }
     }
 
+    /// cas-6cb5 (GH #731): file receipts must prove the bytes survived the
+    /// upload, not merely report a successful response or matching size.
+    #[test]
+    fn test_builtin_mecha_cassy_file_upload_integrity_contract() {
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let skill = catalog
+                .iter()
+                .find(|b| b.path == "skills/mecha-cassy/SKILL.md")
+                .unwrap_or_else(|| panic!("skills/mecha-cassy/SKILL.md missing from {label}"));
+            for required in [
+                "programmatic file path",
+                "reads bytes from disk",
+                "never paste base64 through the model",
+                "Download the posted file",
+                "returned permalink/URL",
+                "bot credential",
+                "SHA-256 (`sha256sum`) equality",
+                "successful decode",
+                "python3 -c 'from PIL import Image; im=Image.open(\"download\"); im.verify()'",
+                "im.verify()",
+                "visible preview",
+                "Never split, resize, or shrink",
+                "Byte count, `ok: true`, or permalink alone never prove upload integrity",
+                "escalate to the supervisor on the first weak receipt",
+            ] {
+                assert!(
+                    skill.content.contains(required),
+                    "{label} mecha-cassy SKILL.md missing upload-integrity marker: {required:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_builtin_skills_contains_project_overview() {
         // EPIC cas-19a2b: project-overview SKILL.md must be registered so

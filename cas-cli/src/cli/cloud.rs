@@ -5881,8 +5881,9 @@ fn validate_majority_foreign_override(
 fn delete_purge_rows(
     conn: &mut rusqlite::Connection,
     delete_set: &PurgeDeleteSet,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     let tx = conn.transaction()?;
+    let mut deleted = 0;
     for (table, rows) in [
         ("entries", &delete_set.entries),
         ("tasks", &delete_set.tasks),
@@ -5901,7 +5902,7 @@ fn delete_purge_rows(
                 tx.execute(&sql, [&row.id])
             };
             match result {
-                Ok(_) => {}
+                Ok(count) => deleted += count,
                 Err(error) if error.to_string().contains("no such table") => break,
                 Err(error) => return Err(error.into()),
             }
@@ -5930,8 +5931,72 @@ fn delete_purge_rows(
             Err(error) => return Err(error.into()),
         }
     }
+    verify_purge_deleted_count(delete_set.total(), deleted)?;
     tx.commit()?;
+    Ok(deleted)
+}
+
+/// Peer evidence identifies a task replica whose persisted origin still names
+/// this project. A scoped pull would otherwise accept that row immediately
+/// after the local delete. Keep the concrete plan row in the local quarantine
+/// ledger so the follow-up pull cannot re-admit it or enqueue it for push.
+fn quarantine_peer_evidence_rows(
+    queue: &SyncQueue,
+    delete_set: &PurgeDeleteSet,
+    delete_set_hash: &str,
+) -> anyhow::Result<usize> {
+    let mut quarantined = 0;
+    for row in &delete_set.tasks {
+        if row.evidence.source != "peer-evidence" {
+            continue;
+        }
+        let reason = format!(
+            "purge-foreign peer-evidence row from verified delete-set {delete_set_hash}"
+        );
+        if queue.quarantine_row(crate::cloud::QUARANTINE_TASK, &row.id, &reason)? {
+            quarantined += 1;
+        }
+    }
+    Ok(quarantined)
+}
+
+/// Confirm that every row in the verified plan was removed before reporting a
+/// successful purge. A changed title, missing table, or other store mutation
+/// must become a non-zero failure rather than a silent partial cleanup.
+fn verify_purge_deleted_count(planned: usize, deleted: usize) -> anyhow::Result<()> {
+    if deleted != planned {
+        anyhow::bail!(
+            "refusing purge: verified delete set planned {planned} row(s), but only {deleted} were removed; run --dry-run again"
+        );
+    }
     Ok(())
+}
+
+/// Check the post-pull store for rows that belonged to the applied plan. This
+/// catches a cloud response that reintroduces a planned row through a path not
+/// covered by the local quarantine or scope guard.
+fn count_remaining_purge_rows(
+    conn: &rusqlite::Connection,
+    delete_set: &PurgeDeleteSet,
+) -> anyhow::Result<usize> {
+    let mut remaining = 0;
+    for (table, rows) in [
+        ("entries", &delete_set.entries),
+        ("tasks", &delete_set.tasks),
+        ("rules", &delete_set.rules),
+        ("skills", &delete_set.skills),
+    ] {
+        for row in rows {
+            let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)");
+            match conn.query_row(&sql, [&row.id], |result| result.get::<_, bool>(0)) {
+                Ok(true) => remaining += 1,
+                Ok(false) => {}
+                Err(error) if error.to_string().contains("no such table") => break,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(remaining)
 }
 
 /// Parse a `last_pull_at` value. Accepts RFC3339 (what the syncer writes) and
@@ -6232,9 +6297,9 @@ pub(crate) fn execute_purge_foreign(
     )?;
     let mut delete_set_hash = purge_delete_set_hash(&analysis.delete_set);
 
-    if !args.dry_run && args.allow_majority_foreign {
-        // The first inspection is the required fresh dry-run. Recompute the
-        // complete state immediately before any backup or delete and bind the
+    if !args.dry_run {
+        // The first inspection is the required dry-run plan. Recompute the
+        // complete state immediately before any backup or delete and bind every
         // destructive operation to the first set's hash. A concurrent edit or
         // classifier change therefore fails closed instead of being purged.
         let fresh_total_tasks = task_store.list(None)?.len();
@@ -6247,7 +6312,7 @@ pub(crate) fn execute_purge_foreign(
         )?;
         if fresh_total_tasks != tasks_before {
             anyhow::bail!(
-                "refusing majority-foreign purge: the store task count changed after the fresh dry-run ({} != {}); run --dry-run again",
+                "refusing purge: the store task count changed after the verified dry-run plan ({} != {}); run --dry-run again",
                 tasks_before,
                 fresh_total_tasks
             );
@@ -6471,14 +6536,18 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
     // consumes its concrete ids rather than repeating a broader predicate.
     // (Preserves: sync_queue, sync_metadata, agents, sessions, verifications,
     // events, prompts, file_changes, commit_links, worktrees and local rows.)
-    {
+    let deleted = {
         let mut conn = rusqlite::Connection::open(&db_path)?;
-        delete_purge_rows(&mut conn, &delete_set)?;
-    }
+        let deleted = delete_purge_rows(&mut conn, &delete_set)?;
+        verify_purge_deleted_count(delete_set.total(), deleted)?;
+        deleted
+    };
 
     // Step 3: Re-pull from cloud with project-scoped filtering
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
+    let peer_evidence_tasks_quarantined =
+        quarantine_peer_evidence_rows(&queue, delete_set, &delete_set_hash)?;
     // Purge removes the local evidence used by team-pull watermarks. Clear
     // every scoped watermark so the next team pull cannot skip the rows that
     // need to be re-evaluated under the same ownership rule as doctor.
@@ -6511,7 +6580,17 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
     let skills_after = skill_store.list(None).map(|v| v.len()).unwrap_or(0);
     let total_after = entries_after + tasks_after + rules_after + skills_after;
 
-    let purged = total_before.saturating_sub(total_after);
+    let remaining_planned_rows = count_remaining_purge_rows(
+        &rusqlite::Connection::open(&db_path)?,
+        delete_set,
+    )?;
+    if remaining_planned_rows > 0 {
+        anyhow::bail!(
+            "refusing purge completion: {remaining_planned_rows} row(s) from verified delete set reappeared during pull; restore the backup or run --dry-run again"
+        );
+    }
+
+    let purged = deleted;
 
     if cli.json {
         println!(
@@ -6530,7 +6609,8 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
                 } else {
                     "default purge safety guards"
                 },
-                "fresh_delete_set_hash_verified": args.allow_majority_foreign,
+                "fresh_delete_set_hash_verified": !args.dry_run,
+                "peer_evidence_tasks_quarantined": peer_evidence_tasks_quarantined,
                 "entities_before": {
                     "entries": entries_before,
                     "tasks": tasks_before,
@@ -7937,6 +8017,51 @@ mod purge_foreign_safety_tests {
     }
 
     #[test]
+    fn peer_evidence_delete_rows_are_held_out_of_the_follow_up_pull() {
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
+
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 5,
+            peers_compared: vec!["accounting".to_string()],
+            foreign: vec![ForeignRow {
+                id: "own-1".to_string(),
+                title: "own task 1".to_string(),
+                closed: false,
+                origin_project: Some("cas-src".to_string()),
+                home_project: "accounting".to_string(),
+                also_present_in: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let analysis = collect_purge_delete_set_with_report(&conn, "cas-src", &report).unwrap();
+        let peer_row = analysis
+            .delete_set
+            .tasks
+            .iter()
+            .find(|row| row.id == "own-1")
+            .expect("peer evidence must add the fixture row to the plan");
+        assert_eq!(peer_row.evidence.source, "peer-evidence");
+
+        let temp = TempDir::new().unwrap();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let hash = purge_delete_set_hash(&analysis.delete_set);
+
+        assert_eq!(
+            quarantine_peer_evidence_rows(&queue, &analysis.delete_set, &hash).unwrap(),
+            1,
+            "a peer-evidence task must be suppressed before the re-pull"
+        );
+        assert_eq!(
+            queue.quarantined_ids(crate::cloud::QUARANTINE_TASK).unwrap(),
+            ["own-1".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
     fn accepted_proposal_tasks_with_foreign_origin_are_never_purge_candidates() {
         let conn = Connection::open_in_memory().unwrap();
         seed_project_scoped_db(&conn);
@@ -8144,7 +8269,7 @@ mod purge_foreign_safety_tests {
         seed_project_scoped_db(&conn);
         let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
 
-        delete_purge_rows(&mut conn, &set).unwrap();
+        assert_eq!(delete_purge_rows(&mut conn, &set).unwrap(), 2);
 
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| {
@@ -8160,6 +8285,30 @@ mod purge_foreign_safety_tests {
                 .unwrap(),
             1,
             "the local-to-legacy edge remains"
+        );
+    }
+
+    #[test]
+    fn applying_a_changed_plan_fails_atomically_instead_of_silently_under_deleting() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+        let set = collect_purge_delete_set(&conn, "test-project").unwrap();
+        conn.execute("UPDATE tasks SET title = 'changed after preview'", [])
+            .unwrap();
+
+        let error = delete_purge_rows(&mut conn, &set).unwrap_err();
+
+        assert!(
+            error.to_string().contains("planned 5 row(s), but only 4 were removed"),
+            "{error}"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM entries", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            2,
+            "the transaction must roll back all deletes when one planned row diverges"
         );
     }
 

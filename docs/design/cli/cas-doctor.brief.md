@@ -23,6 +23,11 @@
 Message text itself (the cause and remedy sentences) belongs to the doctor self-heal work;
 this brief covers the render only.
 
+The cloud queue warning now separates pending registration conflicts from retryable transport
+failures: it reports parked rows and gives `cas cloud project set <registered-canonical-id>`
+or the cloud-owner alias path, then directs the operator to sync; it does not prescribe
+`cas cloud queue --retry` for parked rows.
+
 ## Critique
 
 Before (build `eda3dfd1`): `terminal-qa: FAIL cas-doctor · 12 runs · 841 fail · 24 warn` — 788 contrast, 28 word-split, 24 overflow, 1 unicode-without-fallback.

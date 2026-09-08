@@ -132,6 +132,45 @@ fn diagnostic_keeps_a_server_skipped_row_retryable() {
 }
 
 #[test]
+fn registration_conflict_parks_team_rows_with_reason_without_retrying_them() {
+    let (_temp, queue) = create_test_queue();
+    queue
+        .enqueue_for_team(
+            EntityType::Task,
+            "task-registration-conflict",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"task-registration-conflict"}"#),
+            "team-1",
+        )
+        .unwrap();
+
+    let diagnostic = "project_registration_conflict: requested 'github.com/richards-llc/pulse-card' conflicts with registered 'pulse-card'; run `cas cloud project set pulse-card` or file an alias with the cloud owner";
+    assert_eq!(
+        queue
+            .park_team_rows_for_registration_conflict("team-1", diagnostic, 5)
+            .unwrap(),
+        1
+    );
+
+    let pending = queue.pending_for_team("team-1", 10, 5).unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "a parked registration row stays retryable after repair"
+    );
+    assert_eq!(
+        pending[0].retry_count, 0,
+        "registration conflicts are not transport retries"
+    );
+    assert_eq!(pending[0].last_outcome.as_deref(), Some("parked"));
+    assert_eq!(
+        pending[0].last_reason.as_deref(),
+        Some("project_registration_conflict")
+    );
+    assert_eq!(pending[0].last_error.as_deref(), Some(diagnostic));
+}
+
+#[test]
 fn conflict_journal_retains_the_discarded_row_and_prunes_by_age() {
     let (_temp, queue) = create_test_queue();
 

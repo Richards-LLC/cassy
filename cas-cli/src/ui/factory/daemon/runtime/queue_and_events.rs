@@ -381,6 +381,9 @@ fn append_workspace_contract_brief(
     else {
         return;
     };
+    if !task.demo_statement.trim().is_empty() {
+        message.push_str(&format!("\nDemo statement: {}", task.demo_statement.trim()));
+    }
     let worktree = open_agent_store(cas_dir)
         .ok()
         .and_then(|store| store.list(None).ok())
@@ -10682,6 +10685,38 @@ mod tests {
             prompts[0].prompt.contains("action=start"),
             "the brief must tell the worker how to pick the task up: {}",
             prompts[0].prompt
+        );
+    }
+
+    #[test]
+    fn registration_preassignment_brief_includes_demo_statement() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-demo-brief".to_string(), "demo brief".to_string());
+        task.demo_statement = "As a reader, I open the page and see the result.".to_string();
+        store.add(&task).unwrap();
+
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "demo-worker",
+            "cas-demo-brief",
+            "demo brief",
+            cas_mux::SupervisorCli::Claude,
+        )
+        .unwrap();
+
+        let prompt = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap()
+            .pop()
+            .expect("demo task brief")
+            .prompt;
+        assert!(
+            prompt.contains("Demo statement: As a reader, I open the page and see the result."),
+            "worker brief must carry the stored demo statement: {prompt}"
         );
     }
 

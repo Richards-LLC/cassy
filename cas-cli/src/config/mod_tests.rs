@@ -44,6 +44,39 @@ fn test_config_defaults() {
             .contains("Factory workers are exempt")
     );
 }
+
+#[test]
+fn qa_user_facing_labels_default_and_round_trip() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+
+    assert_eq!(
+        config.qa().user_facing_labels,
+        vec!["ui", "hub", "cli-ux", "commander", "frontend"]
+    );
+    assert_eq!(
+        config.get("qa.user_facing_labels"),
+        Some("ui,hub,cli-ux,commander,frontend".to_string())
+    );
+    assert!(meta::registry().get("qa.user_facing_labels").is_some());
+
+    config
+        .set("qa.user_facing_labels", "mobile, public-api")
+        .unwrap();
+    assert_eq!(
+        config
+            .list()
+            .into_iter()
+            .find(|(key, _)| key == "qa.user_facing_labels"),
+        Some((
+            "qa.user_facing_labels".to_string(),
+            "mobile,public-api".to_string()
+        ))
+    );
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(loaded.qa().user_facing_labels, vec!["mobile", "public-api"]);
+}
 #[test]
 fn memory_decay_policy_is_configurable_and_round_trips() {
     let temp = TempDir::new().unwrap();

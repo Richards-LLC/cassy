@@ -232,6 +232,31 @@ impl CasService {
         let target_project = req.project.clone();
         let blocks_origin_task_id = req.blocks_origin_task_id.clone();
         let proposal_attempt_id = req.proposal_attempt_id.clone();
+        let supervisor_override = req.effective_supervisor_override();
+        let task_type = req
+            .task_type
+            .as_deref()
+            .unwrap_or("task")
+            .parse()
+            .unwrap_or(crate::types::TaskType::Task);
+        let labels = req
+            .labels
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        crate::mcp::tools::core::task::lifecycle::validate_demo_statement_requirement(
+            task_type,
+            &labels,
+            req.demo_statement.as_deref(),
+            supervisor_override.unwrap_or(false),
+            crate::harness_policy::is_supervisor_from_env(),
+            &self.inner.load_config().qa().user_facing_labels,
+        )
+        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         let inner_req = TaskCreateRequest {
             title: req.title.ok_or_else(|| {
                 Self::error(

@@ -31,29 +31,72 @@ cat >"$tmpdir/bin/curl" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$*" >> "${FIXTURE_CURL_LOG:?}"
 output=''
+write_out=''
+url=''
 while (($#)); do
   case "$1" in
-    -o) output="$2"; shift 2 ;;
+    -o|--output) output="$2"; shift 2 ;;
+    -w|--write-out) write_out="$2"; shift 2 ;;
+    -H|--header) printf '%s\n' "$2" >> "${FIXTURE_CURL_LOG:?}"; shift 2 ;;
+    http://*|https://*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
-if [[ -n "$output" ]]; then
-  cp "${FIXTURE_ARCHIVE:?}" "$output"
-else
+if [[ "$url" == */releases/tags/* ]]; then
+  attempt=1
+  if [[ -n "${FIXTURE_RECEIPT_ATTEMPT_FILE:-}" ]]; then
+    if [[ -f "$FIXTURE_RECEIPT_ATTEMPT_FILE" ]]; then
+      attempt=$(( $(<"$FIXTURE_RECEIPT_ATTEMPT_FILE") + 1 ))
+    fi
+    printf '%s\n' "$attempt" >"$FIXTURE_RECEIPT_ATTEMPT_FILE"
+  fi
+
+  status=200
   case "${FIXTURE_RECEIPT_MODE:-valid}" in
+    http-error)
+      status=403
+      body='{"message":"API rate limit exceeded","documentation_url":"https://docs.github.com/rest"}'
+      ;;
+    retry-then-success)
+      if ((attempt < 3)); then
+        status=503
+        body='{"message":"GitHub API temporarily unavailable"}'
+      else
+        body=$(printf '{"tag_name":"v9.9.9","assets":[{"name":"cas-aarch64-apple-darwin.tar.gz","digest":"sha256:%s"}]}\n' "${FIXTURE_RECEIPT_SHA256:?}")
+      fi
+      ;;
     missing)
-      printf '%s\n' '{"tag_name":"v9.9.9","assets":[]}'
+      body='{"tag_name":"v9.9.9","assets":[]}'
       ;;
     invalid)
-      printf '{"tag_name":"v9.9.9","assets":[{"name":"cas-aarch64-apple-darwin.tar.gz","digest":"sha256:not-a-digest"},{"name":"cas-x86_64-unknown-linux-gnu.tar.gz","digest":"sha256:%s"}]}\n' \
-        "${FIXTURE_RECEIPT_SHA256:?}"
+      body=$(printf '{"tag_name":"v9.9.9","assets":[{"name":"cas-aarch64-apple-darwin.tar.gz","digest":"sha256:not-a-digest"},{"name":"cas-x86_64-unknown-linux-gnu.tar.gz","digest":"sha256:%s"}]}\n' \
+        "${FIXTURE_RECEIPT_SHA256:?}")
       ;;
     valid)
-      printf '{"tag_name":"v9.9.9","assets":[{"name":"cas-aarch64-apple-darwin.tar.gz","uploader":{"login":"fixture"},"digest":"sha256:%s"},{"name":"cas-x86_64-unknown-linux-gnu.tar.gz","digest":"sha256:%s"}]}\n' \
-        "${FIXTURE_RECEIPT_SHA256:?}" "${FIXTURE_RECEIPT_SHA256:?}"
+      body=$(printf '{"tag_name":"v9.9.9","assets":[{"name":"cas-aarch64-apple-darwin.tar.gz","uploader":{"login":"fixture"},"digest":"sha256:%s"},{"name":"cas-x86_64-unknown-linux-gnu.tar.gz","digest":"sha256:%s"}]}\n' \
+        "${FIXTURE_RECEIPT_SHA256:?}" "${FIXTURE_RECEIPT_SHA256:?}")
       ;;
   esac
+  if [[ -n "$output" ]]; then
+    printf '%s\n' "$body" >"$output"
+  else
+    printf '%s\n' "$body"
+  fi
+  if [[ -n "$write_out" ]]; then
+    printf '%s' "$status"
+  elif ((status >= 400)); then
+    exit 22
+  fi
+elif [[ -n "$output" ]]; then
+  cp "${FIXTURE_ARCHIVE:?}" "$output"
+else
+  printf '%s\n' '{"tag_name":"v9.9.9"}'
 fi
+EOF
+
+cat >"$tmpdir/bin/sleep" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FIXTURE_SLEEP_LOG:?}"
 EOF
 
 cat >"$tmpdir/bin/tar" <<'EOF'
@@ -66,7 +109,7 @@ cat >"$tmpdir/bin/xattr" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FIXTURE_XATTR_LOG:?}"
 EOF
-chmod +x "$tmpdir/bin/uname" "$tmpdir/bin/curl" "$tmpdir/bin/tar" "$tmpdir/bin/xattr"
+chmod +x "$tmpdir/bin/uname" "$tmpdir/bin/curl" "$tmpdir/bin/sleep" "$tmpdir/bin/tar" "$tmpdir/bin/xattr"
 
 darwin_output="$(
   PATH="$tmpdir/bin:/usr/bin:/bin" \
@@ -75,6 +118,7 @@ darwin_output="$(
   FIXTURE_ARCHIVE="$tmpdir/release.tar.gz" \
   FIXTURE_RECEIPT_SHA256="$release_sha256" \
   FIXTURE_CURL_LOG="$tmpdir/curl.log" \
+  FIXTURE_SLEEP_LOG="$tmpdir/sleep.log" \
   FIXTURE_REAL_TAR="$real_tar" \
   FIXTURE_TAR_LOG="$tmpdir/tar.log" \
   FIXTURE_XATTR_LOG="$tmpdir/xattr.log" \
@@ -109,6 +153,7 @@ assert_rejected_before_extraction() {
     FIXTURE_RECEIPT_MODE="$receipt_mode" \
     FIXTURE_RECEIPT_SHA256="$release_sha256" \
     FIXTURE_CURL_LOG="$tmpdir/curl.log" \
+    FIXTURE_SLEEP_LOG="$tmpdir/sleep.log" \
     FIXTURE_REAL_TAR="$real_tar" \
     FIXTURE_TAR_LOG="$tmpdir/tar.log" \
     FIXTURE_XATTR_LOG="$tmpdir/xattr.log" \
@@ -152,6 +197,69 @@ assert_rejected_before_extraction \
   invalid-receipt "$tmpdir/release.tar.gz" invalid \
   'Published GitHub release receipt has no valid SHA-256'
 echo 'ok   an invalid release digest cannot borrow another asset digest'
+
+# GitHub API failures must retain the HTTP status and response body, retry with
+# the documented backoff, and use a workflow-provided token when available.
+retry_attempts="$tmpdir/retry-attempts"
+retry_sleep_log="$tmpdir/retry-sleep.log"
+retry_output="$(
+  PATH="$tmpdir/bin:/usr/bin:/bin" \
+  FIXTURE_OS=Darwin \
+  FIXTURE_ARCH=arm64 \
+  FIXTURE_ARCHIVE="$tmpdir/release.tar.gz" \
+  FIXTURE_RECEIPT_MODE=retry-then-success \
+  FIXTURE_RECEIPT_SHA256="$release_sha256" \
+  FIXTURE_RECEIPT_ATTEMPT_FILE="$retry_attempts" \
+  FIXTURE_CURL_LOG="$tmpdir/curl.log" \
+  FIXTURE_SLEEP_LOG="$retry_sleep_log" \
+  FIXTURE_REAL_TAR="$real_tar" \
+  FIXTURE_TAR_LOG="$tmpdir/tar.log" \
+  FIXTURE_XATTR_LOG="$tmpdir/xattr.log" \
+  GITHUB_TOKEN= \
+  GH_TOKEN=fixture-gh-token \
+  CAS_INSTALL_DIR="$tmpdir/retry-install" \
+  CAS_REPO=fixture/cassy \
+  CAS_VERSION=v9.9.9 \
+  "$installer"
+)"
+grep -qF 'Verified SHA-256 against the published GitHub release receipt.' <<<"$retry_output"
+test "$(<"$retry_attempts")" -eq 3
+grep -qFx '5' "$retry_sleep_log"
+test "$(wc -l <"$retry_sleep_log")" -eq 2
+grep -qF 'Authorization: Bearer fixture-gh-token' "$tmpdir/curl.log"
+echo 'ok   receipt fetch retries twice, backs off five seconds, and sends GH_TOKEN'
+
+diagnostic_attempts="$tmpdir/diagnostic-attempts"
+diagnostic_sleep_log="$tmpdir/diagnostic-sleep.log"
+set +e
+diagnostic_output="$(
+  PATH="$tmpdir/bin:/usr/bin:/bin" \
+  FIXTURE_OS=Darwin \
+  FIXTURE_ARCH=arm64 \
+  FIXTURE_ARCHIVE="$tmpdir/release.tar.gz" \
+  FIXTURE_RECEIPT_MODE=http-error \
+  FIXTURE_RECEIPT_SHA256="$release_sha256" \
+  FIXTURE_RECEIPT_ATTEMPT_FILE="$diagnostic_attempts" \
+  FIXTURE_CURL_LOG="$tmpdir/curl.log" \
+  FIXTURE_SLEEP_LOG="$diagnostic_sleep_log" \
+  FIXTURE_REAL_TAR="$real_tar" \
+  FIXTURE_TAR_LOG="$tmpdir/tar.log" \
+  FIXTURE_XATTR_LOG="$tmpdir/xattr.log" \
+  GITHUB_TOKEN=fixture-github-token \
+  CAS_INSTALL_DIR="$tmpdir/diagnostic-install" \
+  CAS_REPO=fixture/cassy \
+  CAS_VERSION=v9.9.9 \
+  "$installer" 2>&1
+)"
+diagnostic_status=$?
+set -e
+test "$diagnostic_status" -ne 0
+grep -qF 'HTTP status: 403' <<<"$diagnostic_output"
+grep -qF 'API rate limit exceeded' <<<"$diagnostic_output"
+test "$(<"$diagnostic_attempts")" -eq 3
+test "$(wc -l <"$diagnostic_sleep_log")" -eq 2
+grep -qF 'Authorization: Bearer fixture-github-token' "$tmpdir/curl.log"
+echo 'ok   receipt failure reports the final HTTP status and GitHub API body'
 
 set +e
 intel_output="$(PATH="$tmpdir/bin:/usr/bin:/bin" FIXTURE_OS=Darwin FIXTURE_ARCH=x86_64 "$installer" 2>&1)"

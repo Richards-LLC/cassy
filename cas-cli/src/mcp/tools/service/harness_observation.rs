@@ -79,6 +79,35 @@ pub(crate) fn latest_turn_observations(
     }
 }
 
+/// Return whether the harness recorded a turn completion after `after`.
+///
+/// A wake-gate decline is a snapshot of a busy recipient, not a delivery
+/// failure. Once that recipient completes the turn, the daemon may retry the
+/// pending wake immediately instead of waiting for the next cadence interval.
+/// Keep this evidence separate from message-specific reaction: a completed
+/// turn may have been unrelated to the queued row, but it still establishes
+/// the turn boundary the gate was waiting for.
+pub(crate) fn turn_completed_after(
+    artifact_path: &Path,
+    cli: cas_mux::SupervisorCli,
+    after: DateTime<Utc>,
+) -> bool {
+    turn_completion_after(artifact_path, cli, after).is_some()
+}
+
+/// Return the latest authoritative turn-completion timestamp after `after`.
+pub(crate) fn turn_completion_after(
+    artifact_path: &Path,
+    cli: cas_mux::SupervisorCli,
+    after: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let observations = latest_turn_observations(artifact_path, cli);
+    observations
+        .completion
+        .filter(|completion| completion.at > after)
+        .map(|completion| completion.at)
+}
+
 fn scan_claude_message(
     path: &Path,
     delivered_at: DateTime<Utc>,
@@ -689,6 +718,24 @@ mod tests {
         assert_eq!(got.wake.unwrap().at, ts("2026-07-31T20:01:02Z"));
         assert_eq!(got.reaction.unwrap().at, ts("2026-07-31T20:01:03Z"));
         assert_eq!(got.completion.unwrap().at, ts("2026-07-31T20:01:04Z"));
+        assert!(turn_completed_after(
+            &transcript,
+            cas_mux::SupervisorCli::Claude,
+            ts("2026-07-31T20:01:00Z"),
+        ));
+        assert_eq!(
+            turn_completion_after(
+                &transcript,
+                cas_mux::SupervisorCli::Claude,
+                ts("2026-07-31T20:01:03Z"),
+            ),
+            Some(ts("2026-07-31T20:01:04Z")),
+        );
+        assert!(!turn_completed_after(
+            &transcript,
+            cas_mux::SupervisorCli::Claude,
+            ts("2026-07-31T20:01:04Z"),
+        ));
     }
 
     #[test]

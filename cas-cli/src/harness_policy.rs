@@ -170,16 +170,32 @@ pub fn mirror_receipts_across_aliases(
     rows: &[cas_store::QueuedPrompt],
     aliases: &[String],
 ) {
+    mirror_receipts_across_aliases_with_source(
+        queue,
+        rows,
+        aliases,
+        cas_store::SurfacingSource::InboxPoll,
+    );
+}
+
+/// Mirror a real recipient surfacing across all aliases for that identity.
+///
+/// TransportDelivered is intentionally not used here. The daemon's transport
+/// receipt is provisional: it keeps `message_status` truthful while leaving an
+/// explicit inbox poll or turn-start hook a recovery path if the harness
+/// silently drops the payload.
+pub fn mirror_receipts_across_aliases_with_source(
+    queue: &dyn cas_store::PromptQueueStore,
+    rows: &[cas_store::QueuedPrompt],
+    aliases: &[String],
+    source: cas_store::SurfacingSource,
+) {
     if aliases.len() < 2 {
         return;
     }
     for row in rows {
         for alias in aliases {
-            if let Err(error) = queue.record_recipient_surfaced(
-                row.id,
-                alias,
-                cas_store::SurfacingSource::TransportDelivered,
-            ) {
+            if let Err(error) = queue.record_recipient_surfaced(row.id, alias, source) {
                 tracing::debug!(
                     target: "cas::coordination",
                     message_id = row.id,
@@ -405,6 +421,46 @@ mod alias_receipt_tests {
                 .unwrap()
                 .is_empty(),
             "retirement must not depend on which alias happened to fetch it"
+        );
+    }
+
+    /// A daemon transport receipt may already exist under both supervisor
+    /// aliases when one reader claims the row. Mirroring that real claim must
+    /// upgrade the other provisional receipt, or the logical alias will poll
+    /// the same body again on the next turn.
+    #[test]
+    fn a_real_alias_claim_upgrades_provisional_transport_receipts() {
+        let (_temp, store) = store();
+        store.enqueue("director", "all_workers", "all hands").unwrap();
+        let aliases = inbox_aliases("warm-jaguar-96", true);
+        let row = store
+            .peek_all(10)
+            .unwrap()
+            .pop()
+            .expect("the broadcast is queued");
+
+        for alias in &aliases {
+            store
+                .record_recipient_surfaced(
+                    row.id,
+                    alias,
+                    cas_store::SurfacingSource::TransportDelivered,
+                )
+                .unwrap();
+        }
+
+        let surfaced = store
+            .poll_unseen_for_recipient("warm-jaguar-96", None, 10)
+            .unwrap();
+        assert_eq!(surfaced.len(), 1);
+        mirror_receipts_across_aliases(&store, &surfaced, &aliases);
+
+        assert!(
+            store
+                .poll_unseen_for_recipient("supervisor", None, 10)
+                .unwrap()
+                .is_empty(),
+            "alias mirroring must replace the other transport receipt with a real poll claim"
         );
     }
 

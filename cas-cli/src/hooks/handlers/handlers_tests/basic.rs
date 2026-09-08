@@ -3,6 +3,7 @@ use crate::hooks::handlers::*;
 #[test]
 fn test_format_file_change() {
     let input = HookInput {
+        prompt_id: None,
         session_id: "test".to_string(),
         agent_id: None,
         agent_type: None,
@@ -36,6 +37,7 @@ fn test_format_file_change() {
 #[test]
 fn test_format_bash_skips_simple() {
     let input = HookInput {
+        prompt_id: None,
         session_id: "test".to_string(),
         agent_id: None,
         agent_type: None,
@@ -69,6 +71,7 @@ fn test_format_bash_skips_simple() {
 #[test]
 fn test_format_bash_captures_cargo() {
     let input = HookInput {
+        prompt_id: None,
         session_id: "test".to_string(),
         agent_id: None,
         agent_type: None,
@@ -178,6 +181,7 @@ fn make_hook_input(
     tool_response: Option<serde_json::Value>,
 ) -> HookInput {
     HookInput {
+        prompt_id: None,
         session_id: "test-session".to_string(),
         agent_id: None,
         agent_type: None,
@@ -633,6 +637,7 @@ fn test_format_observation_unknown_tool() {
 #[test]
 fn test_format_observation_no_tool_input() {
     let input = HookInput {
+        prompt_id: None,
         session_id: "test".to_string(),
         agent_id: None,
         agent_type: None,

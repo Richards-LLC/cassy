@@ -143,7 +143,7 @@ fn default_post_tool_use_timeout() -> u32 {
 }
 
 fn default_post_tool_use_matcher() -> Vec<String> {
-    vec!["Write".into(), "Edit".into(), "Bash".into()]
+    vec!["*".into()]
 }
 
 fn default_max_observations() -> usize {

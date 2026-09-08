@@ -1129,6 +1129,19 @@ fn factory_supervisor_checks(agents: &[crate::types::Agent]) -> Vec<Check> {
         .collect()
 }
 
+fn prompt_hook_check(cas_root: &Path) -> Check {
+    let count = crate::hooks::turn_context::silent_prompt_count(cas_root);
+    Check {
+        name: "prompt hook".into(),
+        status: if count == 0 { CheckStatus::Ok } else { CheckStatus::Warning },
+        message: if count == 0 {
+            "No recent observed UserPromptSubmit misses".into()
+        } else {
+            format!("UserPromptSubmit hook silent for {count} prompts; restart Claude")
+        },
+    }
+}
+
 pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     let started = Instant::now();
     let mut checks = Vec::new();
@@ -1268,6 +1281,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     let host = host_checks(Some(project_root));
     if cli.full { checks.extend(host); } else { checks.push(host_summary(&host)); }
     recorder.mark("host checks", &checks);
+    checks.push(prompt_hook_check(&cas_root));
+    recorder.mark("prompt hook", &checks);
     // Check 2: Store type and database
     let store_type = detect_store_type(&cas_root);
     match store_type {
@@ -8974,4 +8989,24 @@ fn output_checks_timed(
     )?;
     fmt.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod prompt_hook_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_hook_row_reports_observed_silence_and_ignores_old_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(matches!(prompt_hook_check(temp.path()).status, CheckStatus::Ok));
+        let directory = temp.path().join("turn-context");
+        fs::create_dir(&directory).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        for (name, count, timestamp) in [("recent", 3, now), ("expired", 9, now - 90_000)] {
+            fs::write(directory.join(format!("{name}.json")), serde_json::json!({"delivered": [], "silent_prompts": count, "updated_at": timestamp}).to_string()).unwrap();
+        }
+        let check = prompt_hook_check(temp.path());
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert_eq!(check.message, "UserPromptSubmit hook silent for 3 prompts; restart Claude");
+    }
 }

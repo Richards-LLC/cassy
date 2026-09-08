@@ -125,3 +125,20 @@ Rules that keep that boundary honest:
 **Factory worker commit guard** (`cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs`, `check_worker_git_commit_scope`): Fires for ALL factory workers (`CAS_AGENT_ROLE=worker` + `CAS_FACTORY_MODE`) on every `git commit` / `git merge` Bash command. Denies commits to protected branches (`main`, `master`, `staging`, detached HEAD) regardless of whether the worker has an isolated worktree (`CAS_CLONE_PATH`). Isolated workers also get a cwd-outside-worktree guard. Non-isolated (standalone-task) workers that run in the shared primary checkout are therefore prevented from committing to `main` (cas-ba04 fix). The only bypass is switching to a non-protected branch — `--no-verify` does NOT bypass this guard (it only skips git hooks, not the Claude Code PreToolUse harness).
 
 **Team scope resolution chain** (`cas-cli/src/cloud/config.rs::active_team_id`, cas-ea2f5): When a write is dual-enqueued to the team push queue, the team UUID is resolved at `open_store` time via a four-step chain. (0) Kill-switch: if `team_auto_promote = Some(false)` in the project `.cas/cloud.json`, the result is always `None` — no team dual-enqueue regardless of other config. (1) Project-level explicit override: `team_id` in the project `.cas/cloud.json` wins unconditionally; set via `cas cloud team set <uuid>`. (2) User default: `default_team_id` in `~/.cas/cloud.json`, populated by `cas cloud team default <slug>` or automatically by `fetch_and_cache_teams` (`cloud/me.rs`) on `cas login`. (3) Implicit single-team auto-pick: if `teams[]` has exactly one entry and no `default_team_id` is set, that team is used automatically — no configuration needed. (4) `None` — ambiguous (0 or ≥2 teams without a nominated default) or not logged in. The testable inner `active_team_id_with_user_config(user_cfg: Option<&CloudConfig>)` accepts an injected user config for unit tests without disk I/O; the production `active_team_id()` reads from `user_level_cloud_json_path()` (honours the `CAS_USER_CLOUD_JSON` test-seam env var).
+
+### Factory context when a prompt hook is silent
+
+Claude's `UserPromptSubmit` remains the primary context channel. If it does
+not run, the first synchronous `PostToolUse` hook or successful CAS MCP tool
+response recovers inbox messages and local ambient recall. Both channels use
+`hooks/turn_context.rs`: the latest external prompt in a bounded Claude
+transcript tail supplies `promptId`, and a locked per-session receipt prevents
+repeated tools from reopening the inbox or retrievers. Normal prompt hooks
+record the same identifier. Recovery performs no embedding-provider requests
+and never captures transcript text into attribution or memory stores.
+
+`cas doctor` reports recent observed prompt-hook misses from these receipts;
+missing attribution rows alone are not evidence because supervisors omit them
+intentionally. Recovery needs a readable Claude transcript; missing or foreign
+transcripts do not authorize context delivery. Explicit PostToolUse matcher
+filters still apply, while the generated default covers all tools.

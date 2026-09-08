@@ -466,10 +466,20 @@ pub(crate) fn resolve_spawn_worktree_repo(
 /// continues to be the spawning session's store.
 pub(crate) fn spawn_provision_receipt(prep: &crate::ui::factory::app::WorkerSpawnPrep) -> String {
     match prep.worktree_info.as_ref() {
-        Some(worktree) => format!(
-            "Preparing worker filesystem and worktree. Worktree repository: {} (CAS_ROOT remains the factory session store).",
-            worktree.repo_root.display()
-        ),
+        Some(worktree) => {
+            let checkout_base = worktree
+                .base_ref
+                .as_deref()
+                .unwrap_or(&worktree.parent_branch);
+            let checkout_sha = short_sha(&worktree.repo_root, checkout_base);
+            format!(
+                "Preparing worker filesystem and worktree. Worktree repository: {} (CAS_ROOT remains the factory session store). Spawn base: '{}' @ {} (merge-back parent '{}').",
+                worktree.repo_root.display(),
+                checkout_base,
+                checkout_sha,
+                worktree.parent_branch,
+            )
+        }
         None => "Preparing worker filesystem (no isolated worktree).".to_string(),
     }
 }
@@ -2985,6 +2995,8 @@ mod spawn_base_tests {
         };
         let receipt = spawn_provision_receipt(&prep);
         assert!(receipt.contains("Worktree repository: /workspace/target-repo"), "{receipt}");
+        assert!(receipt.contains("Spawn base: 'main'"), "{receipt}");
+        assert!(receipt.contains("merge-back parent 'main'"), "{receipt}");
     }
 
     /// GH #122 repro, end to end: focus pinned to epic A, spawn requested with
@@ -3315,6 +3327,67 @@ mod spawn_base_tests {
             &SpawnBaseSource::PinnedFocus,
             Some("epic/alpha")
         ));
+    }
+
+    /// GH #746: an epic explicitly targeted at staging still owns a separate
+    /// coordination branch cut from staging. A taskless spawn under the
+    /// focused epic must use that live epic tip, not the WorkTarget's parent
+    /// branch (and never the project's default main branch).
+    #[test]
+    fn focused_staging_epic_taskless_spawn_uses_epic_tip_cas_ad05() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "staging"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit_file(&repo, "staging-only.txt", "staging baseline");
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "epic/staging-based"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit_file(&repo, "epic-only.txt", "focused epic change");
+        Command::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut epic = cas_types::Task::new("cas-ad05-epic".into(), "Staging epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/staging-based".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "staging".into(),
+        });
+        store.add(&epic).unwrap();
+
+        let data = crate::ui::factory::director::DirectorData::load_fast(&cas_dir).unwrap();
+        let state = crate::ui::factory::app::EpicState::Active {
+            epic_id: epic.id.clone(),
+            epic_title: epic.title.clone(),
+        };
+        let focused_branch = crate::ui::factory::app::epic_branch_for_state(&data, &state)
+            .expect("focused epic must resolve a branch");
+        assert_eq!(
+            focused_branch, "epic/staging-based",
+            "focus resolution must preserve the live epic branch over its staging parent"
+        );
+
+        let (base, source) = resolve_spawn_base(
+            &TaskBase::Unresolved,
+            Some(&focused_branch),
+            "main",
+        );
+        assert_eq!(base, "epic/staging-based");
+        assert!(matches!(source, SpawnBaseSource::PinnedFocus));
     }
 
     #[test]

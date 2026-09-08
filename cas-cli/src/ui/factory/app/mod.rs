@@ -142,12 +142,17 @@ pub struct WorkerSpawnResult {
     /// True only when this spawn invocation created the worktree on disk.
     /// Cancellation cleanup must not delete a pre-existing reused worktree.
     pub worktree_created: bool,
+    /// Hardlink counts from the immutable Cargo baseline used by this spawn.
+    /// `None` means the target was reused, seeding was disabled/unavailable,
+    /// or the worker was non-isolated.
+    pub(crate) target_seed: Option<TargetSeedStats>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct TargetSeedStats {
-    files: u64,
-    bytes: u64,
+pub(crate) struct TargetSeedStats {
+    pub(crate) snapshot: String,
+    pub(crate) files: u64,
+    pub(crate) bytes: u64,
 }
 
 /// Seed a new worker's private Cargo target from the immutable baseline named
@@ -197,7 +202,10 @@ fn seed_worker_target_from_baseline(
         std::fs::remove_dir_all(&staging)?;
     }
 
-    let mut stats = TargetSeedStats::default();
+    let mut stats = TargetSeedStats {
+        snapshot: snapshot_name.to_string(),
+        ..TargetSeedStats::default()
+    };
     if let Err(error) = hardlink_seed_tree(&source, &staging, &target, &mut stats) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
@@ -365,6 +373,7 @@ impl WorkerSpawnPrep {
                     cas_root: Some(wt.cas_dir),
                     worktree: Some(worktree),
                     worktree_created: false,
+                    target_seed: None,
                 });
             }
 
@@ -382,6 +391,7 @@ impl WorkerSpawnPrep {
                 .unwrap_or_else(|| wt.parent_branch.clone());
             git.create_worktree(&wt.worktree_path, &wt.branch_name, Some(&checkout_from))?;
 
+            let mut target_seed = None;
             if std::env::var("CAS_FACTORY_DISABLE_TARGET_SEED").as_deref() != Ok("1") {
                 // A cross-repository worker keeps the session store as
                 // `CAS_ROOT`, but its Cargo target must come from the target
@@ -390,12 +400,16 @@ impl WorkerSpawnPrep {
                 // target worktree.
                 let build_cache_cas_dir = wt.repo_root.join(".cas");
                 match seed_worker_target_from_baseline(&build_cache_cas_dir, &wt.worktree_path) {
-                    Ok(Some(stats)) => tracing::info!(
-                        worker = %self.worker_name,
-                        files = stats.files,
-                        bytes = stats.bytes,
-                        "spawn prep: seeded private Cargo target from quiescent baseline"
-                    ),
+                    Ok(Some(stats)) => {
+                        tracing::info!(
+                            worker = %self.worker_name,
+                            snapshot = %stats.snapshot,
+                            files = stats.files,
+                            bytes = stats.bytes,
+                            "spawn prep: seeded private Cargo target from quiescent baseline"
+                        );
+                        target_seed = Some(stats);
+                    }
                     Ok(None) => tracing::debug!(
                         worker = %self.worker_name,
                         "spawn prep: no worker Cargo target baseline available"
@@ -444,6 +458,7 @@ impl WorkerSpawnPrep {
                 cas_root: Some(wt.cas_dir),
                 worktree: Some(worktree),
                 worktree_created: true,
+                target_seed,
             })
         } else {
             // Non-isolated worker: cwd is wherever the daemon process is running.
@@ -462,6 +477,7 @@ impl WorkerSpawnPrep {
                 cas_root: None,
                 worktree: None,
                 worktree_created: false,
+                target_seed: None,
             })
         }
     }

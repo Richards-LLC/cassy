@@ -1899,6 +1899,30 @@ impl CasService {
         } else {
             worker_names.len()
         };
+        // Resource contention is checked immediately before worker-spec
+        // resolution and queue insertion. This keeps a rejected request from
+        // doing provider preflight work, and counts the full requested batch
+        // so a request cannot bypass the fleet cap by queueing four workers at
+        // once. `force=true` is an explicit operator override and remains
+        // visible in the queued receipt.
+        let factory_config = {
+            use crate::config::Config;
+            Config::load(&self.inner.cas_root)
+                .unwrap_or_default()
+                .factory()
+        };
+        let build_guard =
+            crate::factory_build_guard::inspect(&self.inner.cas_root, &factory_config, slots);
+        let force_build_guard = req.force.unwrap_or(false);
+        if !build_guard.violations().is_empty() && !force_build_guard {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                build_guard.refusal_message(),
+            ));
+        }
+        let build_guard_notice = build_guard.receipt_notice(force_build_guard);
+        let throttle_notice =
+            crate::factory_build_guard::throttle_notice(&factory_config, slots, &build_guard);
         // Resolve a concrete WorkerSpec per queued worker. Batch-level fields
         // remain the resolver defaults; `workers=[{...}]` is its final,
         // per-slot layer.
@@ -2197,11 +2221,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )

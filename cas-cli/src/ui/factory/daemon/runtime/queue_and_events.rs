@@ -5844,6 +5844,21 @@ impl FactoryDaemon {
                     // non-isolated spawns, so the roster could disagree with the
                     // live process about which directory the worker is in.
                     let bound_cwd = result.cwd.clone();
+                    if let Some(seed_receipt) =
+                        crate::ui::factory::app::render_and_ops::epic_workers::target_seed_receipt(
+                            &result,
+                        )
+                    {
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            request_id,
+                            Some(&pending_name),
+                            "provision",
+                            "seeded",
+                            &seed_receipt,
+                        );
+                    }
                     let task_id_for_finish = pending_task_id.clone();
                     match self.app.finish_worker_spawn(
                         result,

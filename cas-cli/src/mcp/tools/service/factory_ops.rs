@@ -4658,25 +4658,52 @@ impl CasService {
             }
         };
 
-        let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
-        let supervisor = std::env::var("CAS_SUPERVISOR_NAME")
-            .ok()
-            .filter(|name| !name.trim().is_empty())
-            .or_else(|| {
-                use cas_types::{AgentRole, AgentStatus};
-                crate::store::open_agent_store(&self.inner.cas_root)
-                    .ok()
-                    .and_then(|store| store.list(None).ok())
-                    .and_then(|agents| {
-                        agents
-                            .into_iter()
-                            .find(|a| {
-                                a.role == AgentRole::Supervisor
-                                    && matches!(a.status, AgentStatus::Active | AgentStatus::Idle)
-                            })
-                            .map(|a| a.name)
-                    })
-            });
+        use cas_types::{AgentRole, AgentStatus};
+        let agent_store = crate::store::open_agent_store(&self.inner.cas_root).ok();
+        let agents = agent_store
+            .as_ref()
+            .and_then(|store| store.list(None).ok())
+            .unwrap_or_default();
+        // Sync incidents are emitted on behalf of the worker whose worktree
+        // was stranded. Resolve that worker's persisted factory session first;
+        // a shared clone may have another live supervisor whose environment is
+        // newer but does not own this worker.
+        let worker_factory_session = agents
+            .iter()
+            .find(|agent| {
+                agent.role == AgentRole::Worker
+                    && (agent.name.eq_ignore_ascii_case(worker_name)
+                        || agent.id.eq_ignore_ascii_case(worker_name))
+            })
+            .and_then(|agent| agent.factory_session.clone())
+            .filter(|session| !session.trim().is_empty());
+        let factory_session = worker_factory_session
+            .clone()
+            .or_else(current_factory_session);
+        let supervisor = if let Some(session) = factory_session.as_deref() {
+            agent_store
+                .as_ref()
+                .and_then(|store| {
+                    crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_owning_supervisor(
+                        store.as_ref(),
+                        Some(session),
+                    )
+                })
+                .map(|supervisor| supervisor.name)
+        } else {
+            std::env::var("CAS_SUPERVISOR_NAME")
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+                .or_else(|| {
+                    agents
+                        .iter()
+                        .find(|agent| {
+                            agent.role == AgentRole::Supervisor
+                                && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+                        })
+                        .map(|agent| agent.name.clone())
+                })
+        };
 
         let mut outcomes = Vec::new();
         let mut targets = vec![worker_name.to_string()];

@@ -382,9 +382,19 @@ impl CasService {
         let env_agent_name = std::env::var("CAS_AGENT_NAME").ok();
         let agent_from_store = {
             use crate::store::open_agent_store;
-            open_agent_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|store| store.get(&source).ok())
+            open_agent_store(&self.inner.cas_root).ok().and_then(|store| {
+                store.get(&source).ok().or_else(|| {
+                    let name = env_agent_name.as_deref()?.trim();
+                    if name.is_empty() {
+                        return None;
+                    }
+                    store
+                        .list(None)
+                        .ok()?
+                        .into_iter()
+                        .find(|agent| agent.name.eq_ignore_ascii_case(name))
+                })
+            })
         };
         // The registered row is the explicit identity for this MCP caller.
         // CAS_AGENT_ROLE is only a bootstrap fallback when no row can be
@@ -396,55 +406,80 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
-        let factory_session = std::env::var("CAS_FACTORY_SESSION")
-            .ok()
-            .filter(|session| !session.trim().is_empty());
+        // A shared clone can have two live supervisors and a worker process
+        // whose ambient environment was inherited from the wrong harness.
+        // The registered caller row is the authoritative owner; the
+        // environment remains a compatibility fallback for legacy callers.
+        let factory_session = agent_from_store
+            .as_ref()
+            .and_then(|agent| agent.factory_session.clone())
+            .filter(|session| !session.trim().is_empty())
+            .or_else(|| {
+                std::env::var("CAS_FACTORY_SESSION")
+                    .ok()
+                    .filter(|session| !session.trim().is_empty())
+            });
 
         let resolve_supervisor_name = || -> Option<String> {
+            use crate::store::open_agent_store;
+            use cas_types::{AgentRole, AgentStatus};
+            let store = open_agent_store(&self.inner.cas_root).ok();
+            if role == "worker"
+                && let (Some(store), Some(session)) = (store.as_ref(), factory_session.as_deref())
+            {
+                // Do not let CAS_SUPERVISOR_NAME or roster order override a
+                // worker's registered factory owner.
+                return crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_owning_supervisor(
+                    store.as_ref(),
+                    Some(session),
+                )
+                .map(|supervisor| supervisor.name);
+            }
             if let Ok(name) = std::env::var("CAS_SUPERVISOR_NAME") {
                 if !name.trim().is_empty() {
                     return Some(name);
                 }
             }
-            use crate::store::open_agent_store;
-            use cas_types::{AgentRole, AgentStatus};
-            open_agent_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|store| store.list(None).ok())
-                .and_then(|agents| {
-                    agents
-                        .into_iter()
-                        .find(|a| {
-                            a.role == AgentRole::Supervisor
-                                && (a.status == AgentStatus::Active
-                                    || a.status == AgentStatus::Idle)
-                        })
-                        .map(|a| a.name)
-                })
+            store?.list(None).ok().and_then(|agents| {
+                agents
+                    .into_iter()
+                    .find(|a| {
+                        a.role == AgentRole::Supervisor
+                            && (a.status == AgentStatus::Active || a.status == AgentStatus::Idle)
+                    })
+                    .map(|a| a.name)
+            })
         };
 
         let addressed_logical_supervisor = target.eq_ignore_ascii_case("supervisor");
         let mut peer_supervisor_copy = None;
         let resolved_target = if role == "worker" {
-            if target == "supervisor" {
+            if target.eq_ignore_ascii_case("supervisor") {
                 resolve_supervisor_name().ok_or_else(|| {
                     Self::error(ErrorCode::INVALID_REQUEST,
                         "Cannot resolve 'supervisor' - no CAS_SUPERVISOR_NAME and no active supervisor agent found.")
                 })?
-            } else if target == "all_workers" {
+            } else if target.eq_ignore_ascii_case("all_workers") {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
                     "Workers cannot broadcast to all_workers",
                 ));
             } else {
                 let supervisor_name = resolve_supervisor_name();
-                let named_supervisor_is_registered = supervisor_name.as_deref() == Some(&target)
-                    && crate::store::open_agent_store(&self.inner.cas_root)
+                // An explicit supervisor name is a valid same-clone recipient
+                // whenever that supervisor is live. This is distinct from
+                // the logical `supervisor` target, which resolves to the
+                // worker's own factory session above.
+                let named_supervisor_is_registered = crate::store::open_agent_store(
+                    &self.inner.cas_root,
+                )
                         .ok()
                         .and_then(|store| store.list(None).ok())
                         .is_some_and(|agents| {
                             agents.iter().any(|agent| {
                                 agent.role == cas_types::AgentRole::Supervisor
+                                    && (agent.status == cas_types::AgentStatus::Active
+                                        || agent.status == cas_types::AgentStatus::Idle)
                                     && agent.name.eq_ignore_ascii_case(&target)
                             })
                         });
@@ -2970,6 +3005,16 @@ mod cas_89e1_post_merge_message_type_tests {
         .expect("static message request")
     }
 
+    fn message_request_to(target: &str) -> AgentRequest {
+        serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": target,
+            "summary": "shared-clone routing regression",
+            "message": "Route this message to the intended live supervisor.",
+        }))
+        .expect("static routing message request")
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn post_merge_suppression_requires_the_explicit_merge_request_type() {
         let mut env = TestEnvGuard::temp_home();
@@ -3079,5 +3124,71 @@ mod cas_89e1_post_merge_message_type_tests {
             stale_merge.contains("Merge already landed"),
             "an explicitly typed stale merge request must still be suppressed: {stale_merge}"
         );
+    }
+
+    /// GH #734: a worker in one factory session must not inherit the newest
+    /// supervisor from a sibling session on the same clone. Explicit names
+    /// remain valid same-clone recipients, and their rows belong to the named
+    /// supervisor's session.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_clone_worker_messages_follow_the_registered_owner_session() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            // Deliberately inherit the sibling session too: persisted worker
+            // ownership must outrank both stale ambient routing variables.
+            ("CAS_FACTORY_SESSION", Some("factory-b")),
+            ("CAS_SUPERVISOR_NAME", Some("supervisor-b")),
+            ("CAS_AGENT_ROLE", None),
+        ]);
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-a".to_string());
+        agents.register(&worker).expect("register worker");
+        let mut supervisor_a = Agent::new("supervisor-a-id".to_string(), "supervisor-a".to_string());
+        supervisor_a.role = AgentRole::Supervisor;
+        supervisor_a.factory_session = Some("factory-a".to_string());
+        agents.register(&supervisor_a).expect("register owning supervisor");
+        let mut supervisor_b = Agent::new("supervisor-b-id".to_string(), "supervisor-b".to_string());
+        supervisor_b.role = AgentRole::Supervisor;
+        supervisor_b.factory_session = Some("factory-b".to_string());
+        agents.register(&supervisor_b).expect("register sibling supervisor");
+        core.set_agent_id_for_testing(worker.id.clone());
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core.clone(), None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core.clone());
+
+        let owner_result = service
+            .message_send(message_request_to("supervisor"))
+            .await
+            .expect("owner message is delivered");
+        assert!(response_text(owner_result).contains("Message queued"));
+        let explicit_result = service
+            .message_send(message_request_to("supervisor-b"))
+            .await
+            .expect("explicit live supervisor message is delivered");
+        assert!(response_text(explicit_result).contains("Message queued"));
+
+        let rows = crate::store::open_prompt_queue_store(&cas_root)
+            .expect("prompt queue")
+            .poll_all(10)
+            .expect("queued messages");
+        assert_eq!(rows.len(), 2);
+        let owner_row = rows
+            .iter()
+            .find(|row| row.target == "supervisor-a")
+            .expect("logical supervisor target resolves to factory-a owner");
+        assert_eq!(owner_row.factory_session.as_deref(), Some("factory-a"));
+        let explicit_row = rows
+            .iter()
+            .find(|row| row.target == "supervisor-b")
+            .expect("explicit supervisor target remains accepted");
+        assert_eq!(explicit_row.factory_session.as_deref(), Some("factory-b"));
     }
 }

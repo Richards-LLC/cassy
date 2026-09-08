@@ -172,7 +172,7 @@ pub fn prepare_task_lifecycle_outbox(
     kind: LifecycleTransition,
     occurrence_id: &str,
 ) -> Option<cas_store::TaskReopenLifecycleOutbox> {
-    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
     let supervisor = resolve_owning_supervisor(agent_store, factory_session.as_deref())?;
     let transition_key = transition_key(
         task_id,
@@ -503,6 +503,52 @@ pub fn resolve_owning_supervisor(
     })
 }
 
+/// Resolve the factory session represented by a lifecycle actor.
+///
+/// Factory workers sometimes reach the MCP server through a shared clone
+/// without `CAS_FACTORY_SESSION` in the child environment. The actor is still
+/// persisted in the agent registry, so prefer its registered session (and the
+/// current `CAS_AGENT_NAME`/`CAS_AGENT_ID` identities) over ambient process
+/// state. The environment session remains a compatibility fallback for legacy
+/// callers and direct unit-test emitters.
+pub(crate) fn resolve_lifecycle_factory_session(
+    agent_store: &dyn AgentStore,
+    actor: &str,
+) -> Option<String> {
+    let agents = agent_store.list(None).unwrap_or_default();
+    let mut identities = Vec::with_capacity(3);
+    if !actor.trim().is_empty() && !actor.eq_ignore_ascii_case("unknown") {
+        identities.push(actor.trim().to_string());
+    }
+    for variable in ["CAS_AGENT_NAME", "CAS_AGENT_ID"] {
+        if let Ok(identity) = std::env::var(variable)
+            && !identity.trim().is_empty()
+            && !identities
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(identity.trim()))
+        {
+            identities.push(identity.trim().to_string());
+        }
+    }
+
+    for identity in identities {
+        if let Some(agent) = agents
+            .iter()
+            .find(|agent| agent.id.eq_ignore_ascii_case(&identity) || agent.name.eq_ignore_ascii_case(&identity))
+            && let Some(session) = agent
+                .factory_session
+                .as_deref()
+                .filter(|session| !session.trim().is_empty())
+        {
+            return Some(session.to_string());
+        }
+    }
+
+    std::env::var("CAS_FACTORY_SESSION")
+        .ok()
+        .filter(|session| !session.trim().is_empty())
+}
+
 fn build_prompt_body(
     kind: LifecycleTransition,
     task_id: &str,
@@ -562,7 +608,7 @@ pub fn emit_task_lifecycle_transition(
     kind: LifecycleTransition,
     occurrence_id: &str,
 ) -> Result<LifecyclePushResult, String> {
-    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
     let Some(supervisor) = resolve_owning_supervisor(agent_store, factory_session.as_deref())
     else {
         return Ok(LifecyclePushResult::NoSupervisor);
@@ -2346,6 +2392,75 @@ mod tests {
 
         assert_eq!(sq.pending_count("sup-a").unwrap(), 1);
         assert_eq!(sq.pending_count("sup-b").unwrap(), 0);
+    }
+
+    /// GH #734: lifecycle emission may run in a worker process that does not
+    /// inherit CAS_FACTORY_SESSION. The registered actor still identifies the
+    /// owning session, so the newest live supervisor in a sibling session must
+    /// not receive the relay.
+    #[test]
+    fn lifecycle_relay_uses_registered_worker_session_without_ambient_session() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_SESSION", None),
+            ("CAS_AGENT_NAME", None),
+            ("CAS_SUPERVISOR_NAME", Some("sup-b")),
+        ]);
+
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&agent_in_session(
+                "worker-a-id",
+                "worker-a",
+                AgentRole::Worker,
+                "sess-a",
+            ))
+            .unwrap();
+        agents
+            .register(&agent_in_session(
+                "sup-a-id",
+                "sup-a",
+                AgentRole::Supervisor,
+                "sess-a",
+            ))
+            .unwrap();
+        agents
+            .register(&agent_in_session(
+                "sup-b-id",
+                "sup-b",
+                AgentRole::Supervisor,
+                "sess-b",
+            ))
+            .unwrap();
+
+        let sq = SqliteSupervisorQueueStore::open(temp.path()).unwrap();
+        sq.init().unwrap();
+        let pq = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        pq.init().unwrap();
+
+        emit_task_lifecycle_transition(
+            &sq,
+            Some(&pq),
+            &agents,
+            "cas-gh734",
+            "shared clone lifecycle",
+            TaskStatus::Open,
+            TaskStatus::InProgress,
+            "worker-a",
+            None,
+            LifecycleTransition::Started,
+            "occ-gh734",
+        )
+        .unwrap();
+
+        assert_eq!(sq.pending_count("sup-a-id").unwrap(), 1);
+        assert_eq!(sq.pending_count("sup-b-id").unwrap(), 0);
+        let row = sq.peek("sup-a-id", 10).unwrap().pop().expect("relay row");
+        let payload: serde_json::Value = serde_json::from_str(&row.payload).unwrap();
+        assert_eq!(payload["factory_session"], "sess-a");
+        let prompt = pq.peek_all(10).unwrap().pop().expect("prompt row");
+        assert_eq!(prompt.factory_session.as_deref(), Some("sess-a"));
     }
 
     /// Simulate partial failure: durable insert without prompt stamp, then recover.

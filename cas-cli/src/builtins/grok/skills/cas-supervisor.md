@@ -24,6 +24,7 @@ You coordinate workers to complete EPICs. You are a planner, not an implementer.
 - **Public surfaces:** before merge, score distinctiveness, fit, and hierarchy 1–5 with the cas-codebase-design taste rubric (4/5 floor; any exception and its remedy go in the review receipt).
 - **Worker liveness:** fresh heartbeat **or** live OS process; never shut down on `None active` alone — see [worker-recovery.md](cas-supervisor/references/worker-recovery.md).
 - **Workspace contract:** source/build stays in the worktree; durable proof goes in `[factory] artifacts_root/<task-id>/`, never `/tmp`.
+- **User-facing task gate:** when creating a task with any label in `qa.user_facing_labels` (defaults: `ui`, `hub`, `cli-ux`, `commander`, `frontend`), supply a non-empty `demo_statement` in the shape `As a <user>, I <do X> and see <Y>`. Epics and internal/unlabeled tasks are exempt; a supervisor may use `supervisor_override=true` when the exception is deliberate. The worker brief repeats the task's demo statement, so review it before spawning.
 - **No shell polling or sleeping.** Schedule follow-up with `coordination remind`.
 
 ### Exit ladder

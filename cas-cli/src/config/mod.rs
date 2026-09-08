@@ -47,6 +47,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tasks: Option<TasksConfig>,
 
+    /// User-facing QA gate configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qa: Option<QaConfig>,
+
     /// Dev mode configuration for tracing
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dev: Option<DevConfig>,
@@ -183,6 +187,7 @@ impl Config {
         merge_option!(skills);
         merge_option!(hooks);
         merge_option!(tasks);
+        merge_option!(qa);
         merge_option!(dev);
         merge_option!(daemon);
         merge_option!(code);

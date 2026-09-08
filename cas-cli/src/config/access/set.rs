@@ -240,6 +240,15 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
+            "qa.user_facing_labels" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.user_facing_labels = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
             // Dev section
             "dev.dev_mode" => {
                 let dev = self.dev.get_or_insert_with(DevConfig::default);

@@ -733,6 +733,40 @@ fn nonempty_to_empty_restart_clears_public_proxy_state_without_a_live_engine() {
     }
 }
 
+#[test]
+fn proxy_health_reports_missing_credential_detail_for_configured_upstream() {
+    let sandbox = CasSandbox::new();
+    let missing = format!("CAS_PROXY_HEALTH_FIXTURE_MISSING_{}", std::process::id());
+    let mut config = Config::default();
+    config.add_server(
+        "neon".to_string(),
+        ServerConfig::Http {
+            url: "https://neon.example.invalid/mcp".to_string(),
+            auth: Some(format!("env:{missing}")),
+            headers: HashMap::new(),
+            oauth: false,
+        },
+    );
+    config
+        .save_to(&sandbox.cas_root().join("proxy.toml"))
+        .unwrap();
+
+    let mut client = McpClient::spawn(&sandbox);
+    client.initialize();
+    let health: Value = serde_json::from_str(&client.system_text("proxy_health")).unwrap();
+    let server = &health["servers"][0];
+    assert_eq!(server["name"], "neon");
+    assert_eq!(server["state"], "backoff");
+    assert_eq!(
+        server["last_error"],
+        format!("missing required environment variable {missing}")
+    );
+    assert_eq!(
+        server["last_error_code"],
+        format!("missing_credential_env:{missing}")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn engine_and_unreadable_config_failures_publish_fail_honest_state_then_recover() {

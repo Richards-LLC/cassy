@@ -28,6 +28,10 @@ failures: it reports parked rows and gives `cas cloud project set <registered-ca
 or the cloud-owner alias path, then directs the operator to sync; it does not prescribe
 `cas cloud queue --retry` for parked rows.
 
+The MCP upstream reachability check is one grouped row: it reports the number probed, names
+reachable upstreams, and includes the bounded credential-free cause for each unavailable one;
+the same message is carried in the existing `--json` check object.
+
 ## Critique
 
 Before (build `eda3dfd1`): `terminal-qa: FAIL cas-doctor · 12 runs · 841 fail · 24 warn` — 788 contrast, 28 word-split, 24 overflow, 1 unicode-without-fallback.
@@ -47,3 +51,7 @@ The registration-conflict fixture capture was also run at
 it reports 36 truncation findings from existing doctor checks plus the new remedy. The focused
 `doctor_queue` tests pass 4/4; the shared doctor renderer remains a follow-up surface outside
 this task.
+
+Task capture: `terminal-qa: PASS cas-doctor-fcba · 12 runs · 0 fail · 8 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-fcba/terminal-qa/cas-doctor/report.json`.
+The eight warnings are the existing 120-column word-split heuristics for temporary registered
+roots and the quarantine remedy; the new reachability row did not introduce a failure or overflow.

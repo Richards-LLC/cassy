@@ -72,6 +72,7 @@ impl Backend for OpenCode {
             launch.supervisor_cli,
             launch.active_workers,
             None,
+            launch.cas_root,
         );
         config
     }

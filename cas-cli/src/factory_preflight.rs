@@ -120,6 +120,8 @@ pub struct OptionalUpstreamPreflight {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_attempt_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_retry_at_ms: Option<u64>,
@@ -215,6 +217,7 @@ impl From<cmcp_core::ProxyHealthSnapshot> for ProxySnapshotInput {
                     consecutive_failures: server.consecutive_failures,
                     tool_count: server.tool_count,
                     last_error_code: server.last_error_code,
+                    last_error: server.last_error,
                     last_attempt_at_ms: server.last_attempt_at_ms,
                     next_retry_at_ms: server.next_retry_at_ms,
                 })
@@ -1795,6 +1798,7 @@ mod tests {
                     consecutive_failures: 2,
                     tool_count: 0,
                     last_error_code: Some("authentication_required".to_string()),
+                    last_error: None,
                     last_attempt_at_ms: Some(40),
                     next_retry_at_ms: Some(50),
                 }],
@@ -1843,6 +1847,7 @@ mod tests {
                     consecutive_failures: 1,
                     tool_count: 0,
                     last_error_code: Some("token=cache-secret\ncontrol".to_string()),
+                    last_error: Some("token=cache-secret\ncontrol".to_string()),
                     last_attempt_at_ms: Some(40),
                     next_retry_at_ms: Some(50),
                 },
@@ -1855,6 +1860,7 @@ mod tests {
                     consecutive_failures: 1,
                     tool_count: 0,
                     last_error_code: Some("timeout".to_string()),
+                    last_error: None,
                     last_attempt_at_ms: Some(40),
                     next_retry_at_ms: Some(50),
                 },
@@ -1911,6 +1917,10 @@ mod tests {
         }
         assert_eq!(servers[0].transport, "unknown");
         assert_eq!(servers[0].last_error_code.as_deref(), Some("unknown"));
+        assert_eq!(
+            servers[0].last_error.as_deref(),
+            Some("token=[redacted] control")
+        );
         assert_eq!(servers[1].transport, "http");
         assert_eq!(servers[1].last_error_code.as_deref(), Some("timeout"));
 
@@ -1920,7 +1930,6 @@ mod tests {
             second_name,
             "Bearer cache-secret",
             "token=cache-secret",
-            "control",
         ] {
             assert!(!json.contains(forbidden), "{forbidden:?} leaked: {json}");
         }

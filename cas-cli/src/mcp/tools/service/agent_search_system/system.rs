@@ -1034,6 +1034,7 @@ mod tests {
                 consecutive_failures: 1,
                 tool_count: 0,
                 last_error_code: Some("token=cache-secret\ncontrol".to_string()),
+                last_error: Some("token=cache-secret\ncontrol".to_string()),
                 last_attempt_at_ms: Some(40),
                 next_retry_at_ms: Some(50),
             }],
@@ -1044,6 +1045,10 @@ mod tests {
         assert_eq!(health["session_id"], "proxy-unknown");
         assert_eq!(health["servers"][0]["transport"], "unknown");
         assert_eq!(health["servers"][0]["last_error_code"], "unknown");
+        assert_eq!(
+            health["servers"][0]["last_error"],
+            "token=[redacted] control"
+        );
         assert!(
             health["servers"][0]["name"]
                 .as_str()
@@ -1054,7 +1059,6 @@ mod tests {
             raw_session,
             "Bearer cache-secret",
             "token=cache-secret",
-            "control",
         ] {
             assert!(!json.contains(forbidden), "{forbidden:?} leaked: {json}");
         }

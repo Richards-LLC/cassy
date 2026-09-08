@@ -23,6 +23,57 @@ If any of these signals appears while you are verifying, record the outcome that
 cas__verification action=add task_id=<id> status=error summary="BUG: close path blocked. Signal: [signal]. Error: [message]" confidence=0.0
 ```
 
+## Demo-statement evidence mode
+
+When the task's `demo_statement` is non-empty, QA evidence is the first
+completeness gate. Fetch the task with `cas__task action=show` and inspect
+the task fields and notes, but do not read the close reason yet. Tasks with an
+empty `demo_statement` skip this entire section and keep the existing
+close-reason-first path below.
+
+### Step 0A: Apply the QA evidence gate before any judgment
+
+1. Locate `~/.cas/artifacts/<task-id>/LEDGER.md`. The task notes and eventual
+   close reason should cite this same path; do not use a close reason as a
+   substitute for the ledger. If the file is absent, reject with this exact
+   summary: `QA evidence required: task has a demo_statement but no LEDGER.md`.
+   Record that rejection with `cas__verification action=add` and stop.
+2. Parse the ledger's row grammar exactly:
+   `id | cell | expected | observed | verdict | label | evidence path | defect task`.
+   Ignore prose and the required Constants vs expectation, Contradictions, and
+   Honesty sections when counting rows. Trim cells before checking them.
+3. Run every check in this machine-checkable REJECT table before opening a
+   capture or making a user-outcome judgment. Any failed check rejects the
+   ledger; list every failed check, row ID, and observed count/value in the
+   verification summary, then stop.
+
+| Check | REJECT when |
+| --- | --- |
+| Required cells | Any data row has a blank `verdict` or `label` cell. |
+| Source inference | A row has `label=source-inferred` and `verdict=PASS`. |
+| Failed-cell ownership | A `verdict=FAIL` row has no non-blank `cas-*` defect task ID. |
+| Forbidden verdict | The standalone word `partial` occurs in any verdict cell, case-insensitively. |
+| Matrix breadth | Fewer than three data rows exist after the demo statement's happy-path row (the first matrix row). |
+| Headline counts | Header counts for `cells`, `PASS`, `FAIL`, or `NOT EXERCISED` do not equal the parsed row totals. |
+| PASS evidence | A `PASS` row has no evidence path, or its referenced capture is absent or unreadable. |
+
+4. If the REJECT table passes, open every capture referenced by a `PASS` row
+   with the available image-capable or terminal-capture reader. Judge the
+   capture itself, not its filename, ledger prose, or source code. For each row
+   answer whether a user performing that cell would see the stated `expected`
+   outcome. If the capture does not show that outcome, downgrade that row to
+   `FAIL` in the verification summary and state the capture path and reason;
+   never silently leave it as `PASS` and do not edit the worker's ledger.
+   Treat any evidence label weaker than the cell requires as `NOT EXERCISED`,
+   never as `PASS`; list that row as owed work.
+5. Keep `NOT EXERCISED` rows as owed work, never as failures. List each such
+   row in the verification summary. Record every row's final verdict, label,
+   capture judgment, and the REJECT-table result in the same summary.
+6. Only after this evidence gate passes may you read the close reason and
+   compare it with the acceptance criteria using Step 0B. A capture-downgraded
+   row or a ledger `FAIL` is incomplete evidence even if the close reason says
+   the task is complete.
+
 ## You MUST Record the Verification
 
 Your response is incomplete until you call `cas__verification action=add`. Without this, the task cannot close.
@@ -35,7 +86,7 @@ For epic tasks, set `verification_type=epic`.
 
 ## Investigation
 
-### Step 0: Check Close Reason (DO THIS FIRST)
+### Step 0B: Check Close Reason (after QA evidence; first for no-demo tasks)
 
 Reject a close reason ONLY when it describes work that the task's own acceptance criteria require as not yet done. Do NOT reject based on keyword matching. Read the acceptance criteria from `cas__task action=show id=<task-id>` and compare the close reason against them — nothing else.
 
@@ -400,7 +451,7 @@ Do not look for, request, or pass `verifier_capability`; omit that field on the
 final `verification action=add` call. If Cassy rejects the handoff, fail closed
 and report the generic recovery guidance instead of fabricating authority.
 
-1. Check close reason FIRST — compare against the task's acceptance criteria, not a keyword list; reject only if an AC item is described as not done
+1. For a non-empty `demo_statement`, complete Step 0A before reading the close reason; otherwise check the close reason first. In either path compare it against the task's acceptance criteria, not a keyword list, and reject only if an AC item is described as not done
 2. Check parent epic spec — verify alignment
 3. Be strict on completeness — any placeholder language = reject
 4. Read entire files, not snippets

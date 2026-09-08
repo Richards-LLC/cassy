@@ -619,7 +619,13 @@ async fn release_report_builtin_is_discoverable_after_project_sync() {
         .unwrap();
     assert!(extract_text(shown).contains("# Release report"));
     let listed = service
-        .cas_skill_list_all(Parameters(LimitRequest { limit: Some(500) }))
+        .cas_skill_list_all(Parameters(LimitRequest {
+            scope: "all".into(),
+            limit: Some(500),
+            sort: None,
+            sort_order: None,
+            team_id: None,
+        }))
         .await
         .unwrap();
     assert!(extract_text(listed).contains("cas-release-report"));

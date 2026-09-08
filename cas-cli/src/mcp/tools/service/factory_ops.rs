@@ -2769,6 +2769,11 @@ impl CasService {
             .unwrap_or_default();
         if let Ok(stale_agents) = store.list_stale(worker_stale_threshold_secs) {
             for agent in stale_agents {
+                if crate::daemon::newest_agent_for_identity(store.as_ref(), &agent)
+                    .is_some_and(|newest| newest.id != agent.id)
+                {
+                    continue;
+                }
                 if !agent.visible_to_factory_session(factory_session.as_deref()) {
                     continue;
                 }
@@ -5579,6 +5584,11 @@ impl CasService {
         let stale_agents = agent_store.list_stale(stale_after).unwrap_or_default();
         let mut stale_marked = 0usize;
         for agent in stale_agents {
+            if crate::daemon::newest_agent_for_identity(agent_store.as_ref(), &agent)
+                .is_some_and(|newest| newest.id != agent.id)
+            {
+                continue;
+            }
             // Don't let workers prune supervisors/directors
             if agent.role == AgentRole::Supervisor || agent.role == AgentRole::Director {
                 continue;
@@ -5596,6 +5606,11 @@ impl CasService {
         let mut dead_agent_records_purged = 0usize;
         for status in [AgentStatus::Stale, AgentStatus::Shutdown] {
             for agent in agent_store.list(Some(status)).unwrap_or_default() {
+                if crate::daemon::newest_agent_for_identity(agent_store.as_ref(), &agent)
+                    .is_some_and(|newest| newest.id != agent.id)
+                {
+                    continue;
+                }
                 if agent.role == AgentRole::Supervisor || agent.role == AgentRole::Director {
                     continue;
                 }

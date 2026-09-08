@@ -192,47 +192,66 @@ pub(crate) fn register_session_start_agent(
     let configured_role = parse_agent_role_hint(agent_role);
     let requested_worker = configured_role == Some(AgentRole::Worker);
     let reusable = if requested_worker {
-        agent_name.and_then(|name| {
-            [
-                store.get_by_pid(cc_pid).ok().flatten(),
-                store.get_by_cc_pid(cc_pid).ok().flatten(),
-            ]
-            .into_iter()
+        // clear_context records the post-reset transcript id on the existing
+        // worker row before Claude emits SessionEnd for the old session.  This
+        // exact correlation is stronger than a name/PID hint and also works
+        // when the new hook does not provide a name.
+        store
+            .get_by_cc_session_id(session_id)
+            .ok()
             .flatten()
-            .find(|existing| {
-                if existing.id == session_id
-                    || existing.name != name
-                    || existing.role != AgentRole::Worker
-                {
-                    return false;
-                }
+            .filter(|existing| existing.role == AgentRole::Worker)
+            .or_else(|| {
+                agent_name.and_then(|name| {
+                    [
+                        store.get_by_pid(cc_pid).ok().flatten(),
+                        store.get_by_cc_pid(cc_pid).ok().flatten(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .find(|existing| {
+                        if existing.id == session_id
+                            || existing.name != name
+                            || existing.role != AgentRole::Worker
+                        {
+                            return false;
+                        }
 
-                // Socket registration records the Claude Code PID directly.
-                // Eager MCP registration records the MCP process and the
-                // Claude Code PID as its parent. Both describe the same
-                // durable worker identity, but the direct form can use its
-                // stronger start-time fingerprint check.
-                existing.pid == Some(cc_pid)
-                    && matches!(
-                        evaluate_liveness(existing, pid_alive, pid_matches_fingerprint),
-                        LivenessOutcome::Alive { .. }
-                    )
-                    || existing.ppid == Some(cc_pid) && pid_alive(cc_pid)
+                        // Socket registration records the Claude Code PID directly.
+                        // Eager MCP registration records the MCP process and the
+                        // Claude Code PID as its parent. Both describe the same
+                        // durable worker identity, but the direct form can use its
+                        // stronger start-time fingerprint check.
+                        existing.pid == Some(cc_pid)
+                            && matches!(
+                                evaluate_liveness(existing, pid_alive, pid_matches_fingerprint),
+                                LivenessOutcome::Alive { .. }
+                            )
+                            || existing.ppid == Some(cc_pid) && pid_alive(cc_pid)
+                    })
+                })
             })
-        })
     } else {
         None
     };
 
     let reused = reusable.is_some();
-    let name = agent_name
-        .map(str::to_owned)
+    let name = reusable
+        .as_ref()
+        .map(|existing| existing.name.clone())
+        .or_else(|| agent_name.map(str::to_owned))
         .unwrap_or_else(friendly_names::generate);
     let mut agent = reusable.unwrap_or_else(|| Agent::new(session_id.to_string(), name.clone()));
-    agent.name = name;
+    // A matched row owns the durable worker name.  In particular, do not let
+    // a missing/generic post-reset hook hint rename the row that still owns
+    // the worker's task leases.
+    if !reused {
+        agent.name = name;
+    }
     agent.status = AgentStatus::Active;
     agent.pid = Some(cc_pid);
     agent.ppid = None;
+    agent.cc_session_id = Some(session_id.to_string());
     stamp_pid_fingerprint(&mut agent, cc_pid);
     agent.machine_id = Some(Agent::get_or_generate_machine_id());
 
@@ -1288,6 +1307,16 @@ impl EmbeddedDaemon {
             // This is only for crash detection - normal cleanup via SessionEnd hook
             if let Ok(stale_agents) = agent_store.list_stale(600) {
                 for agent in stale_agents {
+                    if crate::daemon::newest_agent_for_identity(agent_store.as_ref(), &agent)
+                        .is_some_and(|newest| newest.id != agent.id)
+                    {
+                        tracing::debug!(
+                            worker = %agent.name,
+                            agent_id = %agent.id,
+                            "skipping stale superseded agent row in favor of newest registration"
+                        );
+                        continue;
+                    }
                     if !crate::daemon::heartbeat_stale_agent_should_be_reaped(&agent, |name| {
                         crate::cli::factory::wedged::find_worker_pid(
                             &crate::cli::factory::wedged::RealProcessTable,
@@ -1656,8 +1685,26 @@ impl EmbeddedDaemon {
                 }
             }
 
-            // Send agent heartbeat if registered
-            if let Some(id) = self.agent_id.read().await.clone() {
+            // Send agent heartbeat if registered. A reset/restart may leave an
+            // older same-name row behind; move heartbeat ownership to the
+            // newest row before liveness checks can reap the old one.
+            if let Some(mut id) = self.agent_id.read().await.clone() {
+                if let Ok(agent) = store.get(&id)
+                    && let Some(newest) = crate::daemon::newest_agent_for_identity(
+                        store.as_ref(),
+                        &agent,
+                    )
+                    && newest.id != id
+                {
+                    tracing::info!(
+                        worker = %newest.name,
+                        previous_agent_id = %id,
+                        current_agent_id = %newest.id,
+                        "switching heartbeat to newest agent registration"
+                    );
+                    id = newest.id;
+                    *self.agent_id.write().await = Some(id.clone());
+                }
                 // Liveness gate (EPIC cas-9508 / cas-2749): before heartbeating,
                 // verify the Claude Code client process our agent record belongs
                 // to is still alive. In factory mode a shared `cas serve` daemon

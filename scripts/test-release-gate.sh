@@ -210,7 +210,8 @@ assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config \
         version-literals fixture-paths workspace-tests nextest doctests archive-mode snapshot-portability \
-        builtin-projections changelog-and-versions release-script procedure-guardrails working-tree hub-web-visual-qa; do
+        builtin-projections changelog-and-versions release-script procedure-guardrails working-tree \
+        hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
             return
@@ -260,6 +261,12 @@ if [[ "$1" == ci ]]; then
   : >"${GATE_FIXTURE_NPM_CI_MARKER:?}"
   exit 0
 fi
+if [[ "$1" == run && "${2:-}" == build ]]; then
+  mkdir -p dist
+  printf 'built: ' >dist/app.js
+  cat src/main.ts >>dist/app.js
+  exit 0
+fi
 if [[ "$1" == exec && "$*" == *'playwright install chromium'* ]]; then
   exit 0
 fi
@@ -293,6 +300,93 @@ if grep -qF 'PASS hub-web-visual-qa' <<<"$output" && \
     ok 'hub-web-visual-qa installs dependencies before invoking the runner'
 else
     bad "hub-web-visual-qa dependency install contract failed (output: $output; npm log: $(cat "$tmp/npm.log" 2>/dev/null || true))"
+fi
+
+# cas-83ff. Building Commander web assets must prove committed dist stays in
+# sync with src, and the later visual-QA row must reuse the same npm install.
+repo="$(new_fixture hub-web-dist-drift)"
+mkdir -p "$repo/hub-web/src" "$repo/hub-web/dist"
+printf '%s\n' '{"name":"hub-web-fixture","private":true,"scripts":{"build":"fixture-build"}}' \
+    >"$repo/hub-web/package.json"
+printf '%s\n' '{"name":"hub-web-fixture","lockfileVersion":3,"packages":{"":{"name":"hub-web-fixture"}}}' \
+    >"$repo/hub-web/package-lock.json"
+printf '%s\n' 'initial source' >"$repo/hub-web/src/main.ts"
+printf '%s\n' 'built: initial source' >"$repo/hub-web/dist/app.js"
+printf '%s\n' 'export {}' >"$repo/hub-web/scripts/visual-qa.mjs"
+cat >"$repo/scripts/npm-stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${GATE_FIXTURE_NPM_LOG:?}"
+if [[ "$1" == ci ]]; then
+  : >"${GATE_FIXTURE_NPM_CI_MARKER:?}"
+  exit 0
+fi
+if [[ "$1" == run && "${2:-}" == build ]]; then
+  printf 'built: ' >dist/app.js
+  cat src/main.ts >>dist/app.js
+  exit 0
+fi
+if [[ "$1" == exec && "$*" == *'playwright install chromium'* ]]; then
+  exit 0
+fi
+if [[ "$1" == exec && "$*" == *'node scripts/visual-qa.mjs'* ]]; then
+  [[ -f "${GATE_FIXTURE_NPM_CI_MARKER:?}" ]]
+  exit 0
+fi
+printf 'unexpected npm invocation: %s\n' "$*" >&2
+exit 1
+EOF
+chmod +x "$repo/scripts/npm-stub"
+git -C "$repo" add hub-web
+git -C "$repo" commit -qm 'seed hub web committed dist'
+printf '%s\n' 'changed source' >"$repo/hub-web/src/main.ts"
+dist_drift_npm_log="$tmp/dist-drift-npm.log"
+dist_drift_marker="$tmp/dist-drift-npm-ci.marker"
+dist_drift_runner_log="$tmp/dist-drift-runner.log"
+output="$({
+    cd "$repo" && \
+    env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH -u RELEASE_GATE_HUB_WEB_VISUAL_QA \
+      CARGO="$repo/scripts/cargo-stub" \
+      NPM="$repo/scripts/npm-stub" \
+      GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+      GATE_FIXTURE_NPM_LOG="$dist_drift_npm_log" \
+      GATE_FIXTURE_NPM_CI_MARKER="$dist_drift_marker" \
+      GATE_FIXTURE_NPM_RUNNER_LOG="$dist_drift_runner_log" \
+      "$repo/scripts/release-gate.sh" 9.99.7 --only hub-web-dist-drift,hub-web-visual-qa
+} 2>&1 || true)"
+assert_named_failure hub-web-dist-drift "$output"
+if ! grep -qF 'FAIL hub-web-visual-qa' <<<"$output" && \
+   [[ "$(grep -c '^ci ' "$dist_drift_npm_log")" -eq 1 ]]; then
+    ok 'hub-web-dist-drift fails stale dist and visual QA reuses npm ci'
+else
+    bad "hub-web-dist-drift did not isolate stale dist or repeated npm ci (output: $output; npm log: $(cat "$dist_drift_npm_log" 2>/dev/null || true))"
+fi
+
+(cd "$repo/hub-web" && \
+    GATE_FIXTURE_NPM_LOG="$dist_drift_npm_log" \
+    GATE_FIXTURE_NPM_CI_MARKER="$dist_drift_marker" \
+    "$repo/scripts/npm-stub" run build)
+git -C "$repo" add hub-web/dist
+git -C "$repo" commit -qm 'regenerate hub web committed dist'
+: >"$dist_drift_npm_log"
+output="$({
+    cd "$repo" && \
+    env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH -u RELEASE_GATE_HUB_WEB_VISUAL_QA \
+      CARGO="$repo/scripts/cargo-stub" \
+      NPM="$repo/scripts/npm-stub" \
+      GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+      GATE_FIXTURE_NPM_LOG="$dist_drift_npm_log" \
+      GATE_FIXTURE_NPM_CI_MARKER="$dist_drift_marker" \
+      GATE_FIXTURE_NPM_RUNNER_LOG="$dist_drift_runner_log" \
+      "$repo/scripts/release-gate.sh" 9.99.7 --only hub-web-dist-drift,hub-web-visual-qa || true
+})"
+if grep -qF 'PASS hub-web-dist-drift' <<<"$output" && \
+   grep -qF 'PASS hub-web-visual-qa' <<<"$output" && \
+   grep -qF 'RELEASE GATE PASSED' <<<"$output" && \
+   [[ "$(grep -c '^ci ' "$dist_drift_npm_log")" -eq 1 ]]; then
+    ok 'hub-web-dist-drift passes after dist regeneration'
+else
+    bad "hub-web-dist-drift did not pass with regenerated dist (output: $output; npm log: $(cat "$dist_drift_npm_log" 2>/dev/null || true))"
 fi
 
 # cas-1f6e. A src-side test module that reads the producer checkout at runtime

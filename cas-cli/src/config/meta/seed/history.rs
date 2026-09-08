@@ -6,9 +6,11 @@ pub(super) fn register_history(registry: &mut ConfigRegistry) {
         key: "history.github_repo",
         section: "history",
         name: "History GitHub Repository",
-        description: "GitHub repository in owner/repo form for the code-history document index. When unset, use the checkout's GitHub origin. This is separate from issues.repo, which routes Cassy-system bug reports.",
+        description: "GitHub history repo; unset uses checkout origin; separate from issues.repo.",
         value_type: ConfigType::String,
-        default: "git origin",
+        // An empty override is the config default; the resolver supplies the
+        // checkout's GitHub origin when this remains unset.
+        default: "",
         constraint: Constraint::None,
         advanced: false,
         requires_feature: None,

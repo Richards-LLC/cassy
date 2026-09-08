@@ -509,7 +509,7 @@ fn history_github_repo_is_a_separate_optional_config_key() {
         .get("history.github_repo")
         .expect("history github repository metadata");
     assert_eq!(meta.section, "history");
-    assert_eq!(meta.default, "git origin");
+    assert_eq!(meta.default, "");
 
     config
         .set("history.github_repo", " owner/history-repo ")

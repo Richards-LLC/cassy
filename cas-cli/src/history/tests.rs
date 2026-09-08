@@ -101,6 +101,26 @@ fn github_repo_resolution_migrates_an_old_origin_value_in_issue_intake() {
 }
 
 #[test]
+fn github_repo_resolution_rejects_a_non_github_origin() {
+    let temp = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["remote", "add", "origin", "https://gitlab.com/team/project.git"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+
+    assert_eq!(
+        crate::history::resolve_github_repo(&crate::config::Config::default(), temp.path()),
+        None
+    );
+}
+
+#[test]
 fn github_repo_resolution_reloads_an_override_without_process_restart() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = crate::config::Config::default();

@@ -381,6 +381,10 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     )
     .args(["--exact", child_test, "--ignored", "--nocapture"])
     .env("CAS_FACTORY_CODEX_ISOLATED_CHILD", child_test)
+    // The child deliberately supplies HOME/PATH itself, so it cannot inherit
+    // the TestEnvGuard-owned override from the parent test process. Keep the
+    // factory build probe deterministic in this process too.
+    .env("CAS_FACTORY_BUILD_GUARD", "off")
     .env("HOME", home.path())
     .env("PATH", &bin_dir)
     .output()
@@ -1124,6 +1128,46 @@ async fn test_coordination_focus_epic_routes_clear_field() {
 // =============================================================================
 // spawn_workers tests
 // =============================================================================
+
+/// cas-77c1: an isolated integration child must keep spawn_workers usable
+/// when the host's load would make the production guard refuse the request.
+/// The guard's injected-snapshot unit tests cover refusal; this exercises the
+/// actual MCP handler with the fixture-owned disabled override.
+#[test]
+fn test_spawn_workers_build_guard_override_allows_loaded_fixture() {
+    run_isolated_codex_test(
+        "test_spawn_workers_build_guard_override_allows_loaded_fixture_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn test_spawn_workers_build_guard_override_allows_loaded_fixture_in_isolated_child() {
+    assert_eq!(
+        std::env::var("CAS_FACTORY_BUILD_GUARD").as_deref(),
+        Ok("off"),
+        "isolated fixture must own the build-guard override"
+    );
+    let env = factory_env_in_isolated_codex_child(
+        "test_spawn_workers_build_guard_override_allows_loaded_fixture_in_isolated_child",
+    );
+    env.create_epic("Build guard fixture Epic");
+
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+    let response = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("spawn_workers must ignore host load in the isolated fixture");
+    let text = get_text(&response);
+    assert!(
+        text.contains("Build guard: disabled by CAS_FACTORY_BUILD_GUARD=off"),
+        "spawn receipt must identify the fixture override: {text}"
+    );
+    assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
+}
 
 #[tokio::test]
 async fn test_spawn_workers_requires_epic() {

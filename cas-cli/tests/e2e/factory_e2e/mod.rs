@@ -32,6 +32,7 @@ async fn test_claude_spawn_without_epic_error() {
             .model("haiku")
             .cwd(env.dir())
             .mcp_config(env.mcp_config_path())
+            .env_var("CAS_FACTORY_BUILD_GUARD", "off")
             .max_turns(3)
             .allow_tool("mcp__cas__coordination"),
         |mut sess| async move {
@@ -84,6 +85,7 @@ async fn test_claude_spawn_with_epic() {
             .model("haiku")
             .cwd(env.dir())
             .mcp_config(env.mcp_config_path())
+            .env_var("CAS_FACTORY_BUILD_GUARD", "off")
             .max_turns(6)
             .allow_tool("mcp__cas__coordination")
             .allow_tool("mcp__cas__task"),

@@ -611,4 +611,21 @@ impl SqliteAgentStore {
             .optional()
             .map_err(Into::into)
     }
+
+    pub(crate) fn agent_get_by_cc_session_id(
+        &self,
+        cc_session_id: &str,
+    ) -> Result<Option<Agent>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, name, agent_type, role, status, pid, ppid, cc_session_id, parent_id,
+             machine_id, registered_at, last_heartbeat, active_tasks, metadata, pid_starttime, factory_session
+             FROM agents WHERE cc_session_id = ?
+             ORDER BY last_heartbeat DESC, registered_at DESC LIMIT 1",
+        )?;
+
+        stmt.query_row(params![cc_session_id], Self::agent_from_row)
+            .optional()
+            .map_err(Into::into)
+    }
 }

@@ -21,6 +21,27 @@ pub(crate) fn heartbeat_stale_agent_should_be_reaped(
     agent.role != crate::types::AgentRole::Worker || find_live_worker_pid(&agent.name).is_none()
 }
 
+/// Resolve duplicate registry rows to the newest row for one logical agent.
+///
+/// A context reset can briefly expose both the pre-reset and post-reset rows.
+/// Reaping the older row would revoke leases that belong to the still-live
+/// worker, so every liveness consumer must make this choice before acting.
+pub(crate) fn newest_agent_for_identity(
+    store: &dyn crate::store::AgentStore,
+    agent: &crate::types::Agent,
+) -> Option<crate::types::Agent> {
+    store
+        .list(None)
+        .ok()?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.role == agent.role
+                && candidate.name == agent.name
+                && candidate.factory_session == agent.factory_session
+        })
+        .max_by_key(|candidate| (candidate.last_heartbeat, candidate.registered_at))
+}
+
 fn heartbeat_stale_agent_has_live_process(agent: &crate::types::Agent) -> bool {
     !heartbeat_stale_agent_should_be_reaped(agent, |worker_name| {
         crate::cli::factory::wedged::find_worker_pid(
@@ -126,6 +147,11 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         // Grace period is 90s (not 60s) to accommodate the known first-MCP-call timeout.
         if let Ok(failed_startup_agents) = agent_store.list_failed_startup(90) {
             for agent in &failed_startup_agents {
+                if newest_agent_for_identity(agent_store.as_ref(), agent)
+                    .is_some_and(|newest| newest.id != agent.id)
+                {
+                    continue;
+                }
                 if heartbeat_stale_agent_has_live_process(agent) {
                     tracing::warn!(
                         worker = %agent.name,
@@ -165,6 +191,16 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
 
         if let Ok(stale_agents) = agent_store.list_stale(600) {
             for agent in &stale_agents {
+                if newest_agent_for_identity(agent_store.as_ref(), agent)
+                    .is_some_and(|newest| newest.id != agent.id)
+                {
+                    tracing::debug!(
+                        worker = %agent.name,
+                        agent_id = %agent.id,
+                        "skipping stale superseded agent row in favor of newest registration"
+                    );
+                    continue;
+                }
                 if heartbeat_stale_agent_has_live_process(agent) {
                     tracing::warn!(
                         worker = %agent.name,

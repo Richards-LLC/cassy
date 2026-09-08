@@ -158,15 +158,34 @@ pub(crate) fn cleanup_agent_leases(
 ) -> Option<Vec<String>> {
     let agent_store = open_agent_store(cas_root).ok()?;
 
-    // Use session_id as agent_id (agents are registered with their session_id)
-    let agent_id = session_id;
-
-    let agent = match agent_store.get(agent_id) {
-        Ok(a) => a,
-        Err(_) => {
-            return Some(Vec::new());
-        }
+    // The row primary key normally equals the harness session id. After
+    // clear_context, however, the old session emits SessionEnd after the
+    // durable row has already been pointed at the new session. Resolve both
+    // shapes, but never let the superseded SessionEnd tear down the rebound
+    // worker and cascade-delete its task leases.
+    let agent = agent_store.get(session_id).ok().or_else(|| {
+        agent_store
+            .get_by_cc_session_id(session_id)
+            .ok()
+            .flatten()
+    });
+    let Some(agent) = agent else {
+        return Some(Vec::new());
     };
+    if agent
+        .cc_session_id
+        .as_deref()
+        .is_some_and(|current| current != session_id)
+    {
+        tracing::info!(
+            ended_session = %session_id,
+            current_session = %agent.cc_session_id.as_deref().unwrap_or_default(),
+            agent_id = %agent.id,
+            agent_name = %agent.name,
+            "Preserving rebound agent during superseded SessionEnd"
+        );
+        return Some(Vec::new());
+    }
 
     // Gracefully shutdown the agent and get list of released task IDs
     let released_task_ids = agent_store.graceful_shutdown(&agent.id).unwrap_or_default();

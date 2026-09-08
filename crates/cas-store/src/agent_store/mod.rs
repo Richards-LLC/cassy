@@ -209,6 +209,14 @@ pub trait AgentStore: Send + Sync {
     /// Get agent by its own PID (for daemon PID-based adoption)
     fn get_by_pid(&self, pid: u32) -> Result<Option<Agent>>;
 
+    /// Get the newest agent row correlated with a harness session id.
+    ///
+    /// A Claude `/clear` starts a new harness session while Cassy must keep
+    /// the durable worker row (and its task leases).  The correlation is
+    /// therefore not necessarily the row's primary key; callers use this
+    /// lookup to rebind the new session to the existing worker identity.
+    fn get_by_cc_session_id(&self, cc_session_id: &str) -> Result<Option<Agent>>;
+
     /// Try to claim a task for an agent (atomic operation)
     fn try_claim(
         &self,

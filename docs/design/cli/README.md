@@ -7,6 +7,7 @@ and a before/after capture set under `captures/`.
 | Command | Brief | Before | After |
 | --- | --- | --- | --- |
 | `cas doctor` | [cas-doctor.brief.md](cas-doctor.brief.md) | [captures/before/cas-doctor](captures/before/cas-doctor/report.md) | [captures/after/cas-doctor](captures/after/cas-doctor/report.md) |
+| `cas known-repos prune-missing` | [cas-known-repos.brief.md](cas-known-repos.brief.md) | — | [captures/after/cas-known-repos/report.md](captures/after/cas-known-repos/report.md) |
 | `cas update --check` | [cas-update.brief.md](cas-update.brief.md) | [captures/before/cas-update-check](captures/before/cas-update-check/report.md) | [captures/after/cas-update-check](captures/after/cas-update-check/report.md) |
 | `cas factory status` | [cas-factory-status.brief.md](cas-factory-status.brief.md) | [captures/before/cas-factory-status](captures/before/cas-factory-status/report.md) | [captures/after/cas-factory-status](captures/after/cas-factory-status/report.md) |
 

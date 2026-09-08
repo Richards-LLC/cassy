@@ -546,9 +546,45 @@ fn host_known_repos_check() -> Check {
     if !db.is_file() { return Check::new("known repos", CheckStatus::Ok, "host registry is not initialized"); }
     match crate::worktree::discovery::list_tracked_repos() {
         Ok(repos) => {
-            let missing = repos.iter().filter(|repo| !repo.healthy).count();
-            if missing == 0 { Check::new("known repos", CheckStatus::Ok, format!("{} known repo(s); all roots exist", repos.len())) }
-            else { Check::new("known repos", CheckStatus::Warning, format!("{missing} missing root(s); run `cas doctor --fix` to prune them")) }
+            let missing = repos
+                .iter()
+                .filter(|repo| {
+                    matches!(
+                        crate::store::known_repos::classify_known_repo(&repo.path),
+                        crate::store::known_repos::KnownRepoState::MissingRoot
+                    )
+                })
+                .count();
+            let no_store = repos
+                .iter()
+                .filter(|repo| {
+                    matches!(
+                        crate::store::known_repos::classify_known_repo(&repo.path),
+                        crate::store::known_repos::KnownRepoState::MissingStore
+                    )
+                })
+                .count();
+            let mut findings = Vec::new();
+            if missing > 0 {
+                findings.push(format!(
+                    "{missing} missing root(s); run `cas doctor --fix` to prune them"
+                ));
+            }
+            if no_store > 0 {
+                findings.push(format!(
+                    "{} registered root(s) exist but have no Cassy store; run `cas init` in each root or `cas known-repos forget <path>`",
+                    no_store
+                ));
+            }
+            if findings.is_empty() {
+                Check::new(
+                    "known repos",
+                    CheckStatus::Ok,
+                    format!("{} known repo(s); all roots have Cassy stores", repos.len()),
+                )
+            } else {
+                Check::new("known repos", CheckStatus::Warning, findings.join("; "))
+            }
         }
         Err(error) => Check::new("known repos", CheckStatus::Warning, format!("cannot inspect host registry: {error}")),
     }
@@ -598,7 +634,32 @@ fn host_summary(checks: &[Check]) -> Check {
 fn host_autofix() -> Option<Check> {
     if !crate::store::known_repos::host_cas_dir().join("cas.db").is_file() { return None; }
     match crate::cli::known_repos::prune_missing(false) {
-        Ok(report) if report.removed > 0 => Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: known repos — pruned {} missing root(s)", report.removed))),
+        Ok(report) if report.removed > 0 => {
+            let retained = if report.no_store > 0 {
+                format!(
+                    "; retained {} live root(s) without a Cassy store — run `cas init` there or `cas known-repos forget <path>`",
+                    report.no_store
+                )
+            } else {
+                String::new()
+            };
+            Some(Check::new(
+                "auto-fix",
+                CheckStatus::Ok,
+                format!(
+                    "fixed: known repos — pruned {} missing root(s){retained}",
+                    report.removed
+                ),
+            ))
+        }
+        Ok(report) if report.no_store > 0 => Some(Check::new(
+            "auto-fix",
+            CheckStatus::Info,
+            format!(
+                "known repos: no safe automatic fix for {} live root(s) without a Cassy store — run `cas init` there or `cas known-repos forget <path>`",
+                report.no_store
+            ),
+        )),
         Ok(_) => None,
         Err(error) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("known-repos prune failed: {error}"))),
     }
@@ -6227,6 +6288,55 @@ mod tests {
             .filter(|c| c.name == name)
             .map(|c| c.message.clone())
             .collect()
+    }
+
+    #[test]
+    fn host_known_repos_distinguishes_a_live_root_without_a_cas_store() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let without_store = home.join("registered-without-cas");
+            std::fs::create_dir_all(&without_store).unwrap();
+            crate::store::known_repos::register_repo_strict(&without_store).unwrap();
+
+            let check = host_known_repos_check();
+            assert!(matches!(check.status, CheckStatus::Warning));
+            assert!(!check.message.contains("missing root"), "{}", check.message);
+            assert!(check.message.contains("have no Cassy store"), "{}", check.message);
+            assert!(check.message.contains("cas init"), "{}", check.message);
+            assert!(check.message.contains("cas known-repos forget"), "{}", check.message);
+
+            let fix = host_autofix().expect("doctor --fix should explain the manual remedy");
+            assert!(matches!(fix.status, CheckStatus::Info));
+            assert!(fix.message.contains("no safe automatic fix"), "{}", fix.message);
+            assert!(fix.message.contains("cas known-repos forget"), "{}", fix.message);
+        });
+    }
+
+    #[test]
+    fn host_known_repos_fix_prunes_a_gone_root_it_reports() {
+        use crate::store::KnownRepoStore as _;
+
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let gone = home.join("gone-repo");
+            crate::store::known_repos::register_repo_strict(&gone).unwrap();
+
+            let check = host_known_repos_check();
+            assert!(matches!(check.status, CheckStatus::Warning));
+            assert!(check.message.contains("missing root"), "{}", check.message);
+            assert!(check.message.contains("cas doctor --fix"), "{}", check.message);
+
+            let fix = host_autofix().expect("doctor --fix should prune the gone root");
+            assert!(matches!(fix.status, CheckStatus::Ok));
+            assert!(fix.message.contains("pruned 1 missing root"), "{}", fix.message);
+            assert_eq!(
+                crate::store::known_repos::open_host_known_repo_store()
+                    .unwrap()
+                    .count()
+                    .unwrap(),
+                0
+            );
+        });
     }
 
     #[test]

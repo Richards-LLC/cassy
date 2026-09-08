@@ -1572,6 +1572,46 @@ async fn team_pull_single_foreign_open_row_is_parked_before_local_insert() {
 }
 
 #[tokio::test]
+async fn team_pull_materializes_an_accepted_proposal_from_target_scope() {
+    let mut task = team_task_fixture(
+        "cas-0123456789abcdef",
+        TaskStatus::Open,
+        "target-project",
+        "origin-project",
+        chrono::Utc::now(),
+    );
+    task["proposal_provenance"] = serde_json::json!({
+        "server_attested": {
+            "proposal_id": "proposal-1",
+            "target_task_id": "cas-0123456789abcdef",
+            "creator_user_id": "user-1",
+            "team_id": "team-cas-2125",
+            "origin_project_canonical_id": "origin-project",
+            "target_project_canonical_id": "target-project",
+            "received_at": "2026-08-13T12:00:00Z",
+            "client_request_id": "request-1"
+        },
+        "client_asserted": {}
+    });
+
+    let (_temp, result, task_store, _queue) =
+        pull_team_task_fixtures("target-project", vec![task], None).await;
+
+    assert!(
+        result.errors.is_empty(),
+        "unexpected pull errors: {:?}",
+        result.errors
+    );
+    assert_eq!(result.pulled_tasks, 1);
+    let task = task_store
+        .get("cas-0123456789abcdef")
+        .expect("accepted target task must be locally visible after team pull");
+    assert_eq!(task.status, TaskStatus::Open);
+    assert_eq!(task.origin_project.as_deref(), Some("origin-project"));
+    assert!(task.notes.contains("proposal_id: \"proposal-1\""));
+}
+
+#[tokio::test]
 async fn team_pull_parks_malformed_task_and_continues_to_valid_neighbor() {
     let valid = team_task_fixture(
         "cas-c4c4-valid-neighbor",

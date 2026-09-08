@@ -14,7 +14,7 @@
 //! - **Stop**: Generates session summary when agent finishes
 //! - **SubagentStop**: Cleans up subagent leases when subagent finishes
 //! - **PostToolUse**: Captures interesting tool interactions as observations
-//! - **UserPromptSubmit**: Optional prompt capture (currently passthrough)
+//! - **UserPromptSubmit**: Factory context delivery and prompt capture
 //!
 //! # Usage
 //!
@@ -28,6 +28,7 @@ pub(crate) mod delivery_provenance;
 pub(crate) mod handlers;
 pub mod scorer;
 pub mod transcript;
+pub(crate) mod turn_context;
 mod types;
 
 // Re-export types from cas-core
@@ -147,7 +148,7 @@ pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput,
             });
     }
 
-    match event_name {
+    let result = match event_name {
         "SessionStart" => handle_session_start(&input, cas_root.as_deref()),
         "SessionEnd" => handle_session_end(&input, cas_root.as_deref()),
         "Stop" => handle_stop(&input, cas_root.as_deref()),
@@ -167,7 +168,13 @@ pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput,
             // Unknown hook, just pass through
             Ok(HookOutput::empty())
         }
+    };
+    if event_name == "UserPromptSubmit" && result.is_ok() {
+        if let Some(root) = cas_root.as_deref() {
+            turn_context::record_prompt_hook(root, &input);
+        }
     }
+    result
 }
 
 #[cfg(test)]

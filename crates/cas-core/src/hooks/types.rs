@@ -71,6 +71,10 @@ pub struct HookInput {
     #[serde(default, alias = "sessionId")]
     pub session_id: String,
 
+    /// Claude's stable turn identifier, also stored as `promptId` in its transcript.
+    #[serde(default)]
+    pub prompt_id: Option<String>,
+
     /// Path to the transcript file
     #[serde(default, alias = "transcriptPath")]
     pub transcript_path: Option<String>,

@@ -58,6 +58,38 @@ pub(crate) fn assignment_solicited_task_id(prompt: &str) -> Option<String> {
     first_task_id_token(prompt)
 }
 
+/// Return the task id named by an urgent assignment/recovery instruction.
+///
+/// Unlike ordinary stop messages, an urgent assignment is allowed to arm a
+/// worker halt only when the named task exists and belongs to that worker.
+/// Keep this parser narrow: the common supervisor form is `Task cas-xxxx is
+/// assigned`, while the factory incident form is `new task cas-xxxx assigned`.
+pub(crate) fn urgent_assignment_task_id(prompt: &str) -> Option<String> {
+    if let Some(id) = assignment_solicited_task_id(prompt) {
+        return Some(id);
+    }
+
+    let lowered = prompt.to_ascii_lowercase();
+    for marker in ["new task ", "task "] {
+        let mut search_from = 0;
+        while let Some(relative) = lowered[search_from..].find(marker) {
+            let marker_start = search_from + relative;
+            let suffix_start = marker_start + marker.len();
+            let suffix = &prompt[suffix_start..];
+            let lowered_suffix = &lowered[suffix_start..];
+            if let Some(id) = first_task_id_token(suffix)
+                && lowered_suffix
+                    .get(..lowered_suffix.len().min(96))
+                    .is_some_and(|nearby| nearby.contains("assigned"))
+            {
+                return Some(id);
+            }
+            search_from = suffix_start;
+        }
+    }
+    None
+}
+
 /// Terminal task states make an assignment's `task start` imperative stale.
 /// Missing/unreadable state deliberately returns false: delivery must fail
 /// open unless Cassy has positive terminal evidence.
@@ -942,7 +974,7 @@ pub(crate) fn revalidate_lifecycle_prompt(
 mod cas_8aee_assignment_delivery_tests {
     use super::{
         assignment_solicited_task_id, assignment_targets_started_task,
-        assignment_targets_terminal_task,
+        assignment_targets_terminal_task, urgent_assignment_task_id,
     };
     use cas_types::TaskStatus;
 
@@ -1018,6 +1050,22 @@ mod cas_8aee_assignment_delivery_tests {
             .is_none(),
             "an open task still needs its assignment instruction"
         );
+    }
+
+    #[test]
+    fn urgent_assignment_parser_accepts_recovery_forms_only() {
+        assert_eq!(
+            urgent_assignment_task_id(
+                "new task cas-b269 assigned. Following the recovery protocol."
+            )
+            .as_deref(),
+            Some("cas-b269")
+        );
+        assert_eq!(
+            urgent_assignment_task_id("Task cas-cafe is assigned. Start it now.").as_deref(),
+            Some("cas-cafe")
+        );
+        assert!(urgent_assignment_task_id("STOP — wrong file; report cas-b269").is_none());
     }
 }
 

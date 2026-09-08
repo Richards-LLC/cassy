@@ -1,5 +1,7 @@
 use crate::mcp::tools::service::imports::*;
-use crate::prompt_revalidation::{assignment_solicited_task_id, assignment_targets_terminal_task};
+use crate::prompt_revalidation::{
+    assignment_solicited_task_id, assignment_targets_terminal_task, urgent_assignment_task_id,
+};
 
 fn resolve_inbox_recipient(
     registered_name: Option<String>,
@@ -934,9 +936,10 @@ impl CasService {
         let mut halt_bindings: Vec<(String, u64)> = Vec::new();
         {
             use crate::mcp::tools::core::task::lifecycle::stale_close_guard::{
-                HaltWorkerCandidate, apply_halt_metadata, halt_targets_for_urgent,
-                is_merge_reclose_exempt_urgent, may_source_role_set_halt, may_source_set_halt,
-                next_halt_generation, session_scoped_worker_names, should_persist_urgent_halt,
+                HaltWorkerCandidate, apply_halt_metadata, bind_halt_to_task_if_generation,
+                halt_targets_for_urgent, is_merge_reclose_exempt_urgent, may_source_role_set_halt,
+                may_source_set_halt, next_halt_generation, session_scoped_worker_names,
+                should_persist_urgent_halt,
             };
             use crate::store::{open_agent_store, open_task_store};
             use cas_types::{AgentRole, TaskStatus};
@@ -981,6 +984,67 @@ impl CasService {
                     .collect();
                 let session_workers =
                     session_scoped_worker_names(&worker_candidates, factory_session.as_deref());
+
+                // cas-1145: an urgent assignment/recovery message is also a
+                // halt request, so its named task must be real and owned by
+                // the addressed worker before either metadata or queue state
+                // is touched. This closes the reserved-but-never-created id
+                // race while preserving ordinary urgent stop messages.
+                let assignment_task_id = urgent_assignment_task_id(&message);
+                if let Some(task_id) = assignment_task_id.as_deref() {
+                    let Some(target_agent) = resolved_target_agent.as_ref().filter(|agent| {
+                        agent.role == AgentRole::Worker
+                            && agent.name.eq_ignore_ascii_case(&resolved_target)
+                    }) else {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            format!(
+                                "Urgent assignment rejected for task {task_id}: target '{resolved_target}' is not a single registered worker"
+                            ),
+                        ));
+                    };
+                    let task_store = open_task_store(&self.inner.cas_root).map_err(|error| {
+                        Self::error(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!(
+                                "Urgent assignment rejected for task {task_id}: task store unavailable: {error}"
+                            ),
+                        )
+                    })?;
+                    let task = task_store.get(task_id).map_err(|error| {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            target = %resolved_target,
+                            error = %error,
+                            "cas-1145: urgent assignment named a task that does not exist"
+                        );
+                        Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            format!(
+                                "Urgent assignment rejected: task {task_id} does not exist; no halt or queue row was emitted"
+                            ),
+                        )
+                    })?;
+                    let owns_task = task.assignee.as_deref().is_some_and(|owner| {
+                        owner.eq_ignore_ascii_case(&target_agent.name)
+                            || owner.eq_ignore_ascii_case(&target_agent.id)
+                    });
+                    if !owns_task {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            target = %target_agent.name,
+                            assignee = ?task.assignee,
+                            "cas-1145: urgent assignment named a task not owned by its target"
+                        );
+                        return Err(Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            format!(
+                                "Urgent assignment rejected: task {task_id} is not assigned to worker {}",
+                                target_agent.name
+                            ),
+                        ));
+                    }
+                }
 
                 // cas-126b: an urgent "MERGE DONE → re-close now" hand-off both
                 // wakes the parked worker AND (before this guard) armed
@@ -1047,6 +1111,13 @@ impl CasService {
                         };
                         halt_compensation.push((agent.id.clone(), agent.metadata.clone()));
                         apply_halt_metadata(&mut agent.metadata, halt_generation);
+                        if let Some(task_id) = assignment_task_id.as_deref() {
+                            let _ = bind_halt_to_task_if_generation(
+                                &mut agent.metadata,
+                                halt_generation,
+                                task_id,
+                            );
+                        }
                         if let Err(e) = agent_store.update(&agent) {
                             // Compensate any prior successful writes.
                             for (id, prev) in halt_compensation.drain(..) {

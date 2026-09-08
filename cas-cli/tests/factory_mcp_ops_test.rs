@@ -5128,6 +5128,125 @@ async fn test_coordination_message_urgent_flag_enqueues_urgent() {
     );
 }
 
+/// GH #750 / cas-1145: an urgent assignment/recovery message must not arm a
+/// worker halt or enqueue a prompt for a task id that has not been created.
+/// The old path returned only because the hermetic worker had no transport,
+/// after already persisting both the queue row and halt metadata.
+#[tokio::test(start_paused = true)]
+async fn test_1145_urgent_assignment_of_missing_task_is_not_emitted() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    env.register_worker("swift-fox");
+
+    let req = coord_msg(
+        "message",
+        "swift-fox",
+        "new task cas-b269 assigned. Following the recovery protocol.",
+        Some(true),
+    );
+    let result = env.service.coordination(Parameters(req)).await;
+    assert!(
+        result.is_err(),
+        "an urgent assignment for a missing task must be rejected"
+    );
+    assert!(
+        env.prompt_queue().peek_all(10).expect("peek").is_empty(),
+        "the phantom assignment must not leave an urgent queue row"
+    );
+    assert!(
+        !env.worker_halted("swift-fox"),
+        "the phantom assignment must not arm halt_task_work"
+    );
+}
+
+/// GH #750 / cas-1145: the same urgent assignment shape remains deliverable
+/// when its task exists and is assigned to the addressed worker. The halt
+/// records that identity for later stale-halt revalidation.
+#[tokio::test(start_paused = true)]
+async fn test_1145_urgent_assignment_of_owned_task_is_emitted() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    env.register_worker("swift-fox");
+
+    let task_id = env.task_store().generate_id().expect("task id");
+    let mut task = Task::new(task_id.clone(), "owned assignment".to_string());
+    task.assignee = Some("swift-fox".to_string());
+    env.task_store().add(&task).expect("add assigned task");
+
+    let req = coord_msg(
+        "message",
+        "swift-fox",
+        &format!("Task {task_id} is assigned. Start it now."),
+        Some(true),
+    );
+    let result = env.service.coordination(Parameters(req)).await;
+    let error = result.expect_err("unobserved Claude urgent must fail explicitly");
+    assert!(
+        error
+            .message
+            .contains("Could not confirm Claude interrupt delivery"),
+        "unexpected urgent error: {}",
+        error.message
+    );
+    let prompt = env
+        .prompt_queue()
+        .peek_all(10)
+        .expect("peek")
+        .into_iter()
+        .next()
+        .expect("urgent row");
+    assert!(prompt.urgent);
+    let worker = env
+        .agent_store()
+        .list(None)
+        .expect("agents")
+        .into_iter()
+        .find(|agent| agent.name == "swift-fox")
+        .expect("worker");
+    assert_eq!(
+        worker.metadata.get("halt_task_work_task_id"),
+        Some(&task_id),
+        "owned assignment halt must retain the validated task identity"
+    );
+}
+
+/// GH #750 / cas-1145: existence alone is insufficient; an urgent assignment
+/// for another worker's task must not interrupt this recipient.
+#[tokio::test(start_paused = true)]
+async fn test_1145_urgent_assignment_of_other_workers_task_is_not_emitted() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    env.register_worker("swift-fox");
+
+    let task_id = env.task_store().generate_id().expect("task id");
+    let mut task = Task::new(task_id.clone(), "other worker assignment".to_string());
+    task.assignee = Some("brave-otter".to_string());
+    env.task_store().add(&task).expect("add assigned task");
+
+    let req = coord_msg(
+        "message",
+        "swift-fox",
+        &format!("Task {task_id} is assigned. Start it now."),
+        Some(true),
+    );
+    let result = env.service.coordination(Parameters(req)).await;
+    assert!(result.is_err(), "wrong-owner urgent assignment must be rejected");
+    assert!(
+        env.prompt_queue().peek_all(10).expect("peek").is_empty(),
+        "wrong-owner assignment must not leave an urgent queue row"
+    );
+    assert!(!env.worker_halted("swift-fox"));
+}
+
 /// When the daemon records the recipient-side transport stamp inside the
 /// confirmation window, the same Claude urgent call succeeds.
 #[tokio::test]

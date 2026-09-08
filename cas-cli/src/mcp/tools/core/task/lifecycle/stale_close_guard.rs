@@ -33,6 +33,11 @@ pub const HALT_TASK_WORK_GEN_META: &str = "halt_task_work_gen";
 /// `task start` recovery path.
 pub const HALT_TASK_WORK_PROMPT_META: &str = "halt_task_work_prompt_id";
 
+/// Task id named by the assignment/recovery prompt that armed this halt.
+/// Ordinary urgent stops intentionally leave this absent; only assignment
+/// halts need task-existence revalidation at the close/verify boundary.
+pub const HALT_TASK_WORK_TASK_META: &str = "halt_task_work_task_id";
+
 /// Last process-local urgent-halt generation. Wall-clock milliseconds alone
 /// can collide for two urgent sends in one tick; an exchange binding needs a
 /// strictly newer value so an old reply can never release the newer halt.
@@ -112,6 +117,14 @@ pub fn halt_prompt_id(metadata: &HashMap<String, String>) -> Option<i64> {
         .filter(|id| *id > 0)
 }
 
+/// Parse the task id attached to an assignment/recovery halt, if any.
+pub fn halt_task_id(metadata: &HashMap<String, String>) -> Option<&str> {
+    metadata
+        .get(HALT_TASK_WORK_TASK_META)
+        .map(String::as_str)
+        .filter(|id| !id.is_empty())
+}
+
 /// Whether `task start` may clear halt given the generation present at clear
 /// time and the ceiling captured after a successful start (unix millis).
 ///
@@ -153,11 +166,59 @@ pub fn bind_halt_to_prompt_if_generation(
     true
 }
 
+/// Bind the task named by an assignment/recovery prompt to its halt
+/// generation. The generation comparison prevents a concurrent urgent from
+/// inheriting an older task identity.
+pub fn bind_halt_to_task_if_generation(
+    metadata: &mut HashMap<String, String>,
+    generation: u64,
+    task_id: &str,
+) -> bool {
+    if task_id.is_empty()
+        || !agent_task_work_halted(metadata)
+        || halt_generation(metadata) != generation
+    {
+        return false;
+    }
+    metadata.insert(HALT_TASK_WORK_TASK_META.to_string(), task_id.to_string());
+    true
+}
+
 /// Clear halt metadata keys.
 pub fn clear_halt_metadata(metadata: &mut HashMap<String, String>) {
     metadata.remove(HALT_TASK_WORK_META);
     metadata.remove(HALT_TASK_WORK_GEN_META);
     metadata.remove(HALT_TASK_WORK_PROMPT_META);
+    metadata.remove(HALT_TASK_WORK_TASK_META);
+}
+
+/// Clear an assignment halt whose named task was never created (or was
+/// deleted before the worker reached its close/verify boundary). Store read
+/// errors remain fail-closed: only positive `TaskNotFound` evidence may
+/// discharge the halt. Returns whether metadata was cleared.
+pub fn clear_missing_task_halt(
+    metadata: &mut HashMap<String, String>,
+    task_store: &dyn cas_store::TaskStore,
+) -> cas_store::Result<bool> {
+    let Some(task_id) = halt_task_id(metadata).map(str::to_owned) else {
+        return Ok(false);
+    };
+    match task_store.get(&task_id) {
+        Ok(_) => Ok(false),
+        Err(cas_store::StoreError::TaskNotFound(_) | cas_store::StoreError::NotFound(_)) => {
+            let generation = halt_generation(metadata);
+            let prompt_id = halt_prompt_id(metadata);
+            clear_halt_metadata(metadata);
+            tracing::warn!(
+                task_id = %task_id,
+                generation,
+                ?prompt_id,
+                "cas-1145: cleared urgent halt for a task that does not exist"
+            );
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Whether the message **source** is authorized to set `halt_task_work`.
@@ -442,6 +503,30 @@ mod tests {
         clear_halt_metadata(&mut meta);
         assert!(!agent_task_work_halted(&meta));
         assert_eq!(halt_prompt_id(&meta), None);
+        assert_eq!(halt_task_id(&meta), None);
+    }
+
+    #[test]
+    fn cas_1145_task_identity_is_generation_bound_and_cleared() {
+        let mut meta = HashMap::new();
+        apply_halt_metadata(&mut meta, 41);
+        assert!(!bind_halt_to_task_if_generation(&mut meta, 40, "cas-b269"));
+        assert!(bind_halt_to_task_if_generation(&mut meta, 41, "cas-b269"));
+        assert_eq!(halt_task_id(&meta), Some("cas-b269"));
+        clear_halt_metadata(&mut meta);
+        assert_eq!(halt_task_id(&meta), None);
+    }
+
+    #[test]
+    fn cas_1145_missing_task_halt_self_clears_and_logs() {
+        let mut meta = HashMap::new();
+        apply_halt_metadata(&mut meta, 41);
+        assert!(bind_halt_to_task_if_generation(&mut meta, 41, "cas-b269"));
+
+        let task_store = crate::store::mock::MockTaskStore::new();
+        assert!(clear_missing_task_halt(&mut meta, &task_store).unwrap());
+        assert!(!agent_task_work_halted(&meta));
+        assert_eq!(halt_task_id(&meta), None);
     }
 
     #[test]

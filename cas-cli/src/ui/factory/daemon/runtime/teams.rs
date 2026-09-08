@@ -1568,18 +1568,24 @@ esac
 # Cassy factory worker push guard — installed by cas factory in the worker-private hooksPath.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 expected=\"factory/$CAS_AGENT_NAME\"
+record_push_rejection() {
+  CAS_PUSH_GUARD_BRANCH=\"$branch\" CAS_PUSH_GUARD_REMOTE_REF=\"$1\" \\
+    cas hook WorkerPushRejected >/dev/null 2>&1 || true
+}
 if [ -z \"$CAS_AGENT_NAME\" ]; then
   echo \"Cassy PUSH GUARD: CAS_AGENT_NAME is missing; cannot prove which factory branch this worker owns.\" >&2
   exit 1
 fi
 if [ \"$branch\" != \"$expected\" ]; then
-  echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' cannot push from '$branch'.\" >&2
+  record_push_rejection \"<head:$branch>\"
+  echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' cannot push from '$branch' — this is not your branch.\" >&2
   echo \"Expected the exact worker branch '$expected'. Refusing to graft the current HEAD onto another branch.\" >&2
   exit 1
 fi
 while read local_ref local_sha remote_ref remote_sha; do
   if [ \"$remote_ref\" != \"refs/heads/$expected\" ]; then
-    echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' may push only to 'refs/heads/$expected', not '$remote_ref'.\" >&2
+    record_push_rejection \"$remote_ref\"
+    echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' may push only to 'refs/heads/$expected', not '$remote_ref' — this is not your branch.\" >&2
     exit 1
   fi
 done
@@ -1758,7 +1764,7 @@ exit 0
         Ok(())
     }
 
-    /// Install the Cassy worker pre-commit guard, scoped to `worktree_path` alone.
+    /// Install the Cassy worker commit and push guards, scoped to `worktree_path` alone.
     ///
     /// # Why not just `git rev-parse --git-path hooks` (cas-2491)
     ///
@@ -1798,8 +1804,11 @@ exit 0
     /// [`Self::cleanup_legacy_shared_guard`], which detects and removes that
     /// specific artifact before anything else runs.
     ///
-    /// Non-fatal failures are logged as warnings by callers — LAYER 1
-    /// (PreToolUse) and LAYER 3 (SessionStart) are the primary guards.
+    /// The push guard records blocked destinations as `WorkerPushBlocked`
+    /// activity, so supervisors can see the incident even when the worker's
+    /// harness never reaches its PreToolUse hook. Non-fatal failures are logged
+    /// as warnings by callers — LAYER 1 (PreToolUse) and LAYER 3 (SessionStart)
+    /// are the primary guards.
     pub fn install_worker_pre_commit_hook(
         worktree_path: &std::path::Path,
     ) -> anyhow::Result<()> {
@@ -3637,6 +3646,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn worker_pre_push_hook_records_refused_pushes_for_worker_activity() {
+        assert!(
+            TeamsManager::WORKER_PRE_PUSH_HOOK.contains("cas hook WorkerPushRejected"),
+            "pre-push refusals must emit a worker-activity incident"
+        );
+    }
+
     /// After installation, the pre-commit hook file must exist and be executable.
     #[test]
     fn install_worker_pre_commit_hook_creates_executable_hook() {
@@ -4020,7 +4037,7 @@ mod tests {
 
         // Establish the legitimate remote worker branch first.
         let initial_push = std::process::Command::new("git")
-            .args(["push", "origin", "HEAD:refs/heads/factory/credit-repairs"])
+            .args(["push", "-u", "origin", "factory/credit-repairs"])
             .env("CAS_AGENT_NAME", "credit-repairs")
             .current_dir(&wt_path)
             .output()
@@ -4031,11 +4048,52 @@ mod tests {
             String::from_utf8_lossy(&initial_push.stderr)
         );
 
-        std::process::Command::new("git")
-            .args(["switch", "-c", "factory/support-triage"])
+        // A worker may push only its exact factory destination. Both the
+        // ordinary HEAD:staging spelling and an explicit foreign source ref
+        // must be refused even while HEAD remains correctly bound.
+        let wrong_destination = std::process::Command::new("git")
+            .args(["push", "origin", "HEAD:refs/heads/staging"])
+            .env("CAS_AGENT_NAME", "credit-repairs")
             .current_dir(&wt_path)
             .output()
             .unwrap();
+        assert!(!wrong_destination.status.success());
+        let stderr = String::from_utf8_lossy(&wrong_destination.stderr);
+        assert!(stderr.contains("not your branch"), "{stderr}");
+        assert!(stderr.contains("refs/heads/staging"), "{stderr}");
+
+        std::process::Command::new("git")
+            .args(["branch", "factory/support-triage"])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        let foreign_source = std::process::Command::new("git")
+            .args(["push", "origin", "factory/support-triage:refs/heads/staging"])
+            .env("CAS_AGENT_NAME", "credit-repairs")
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        assert!(!foreign_source.status.success());
+        let stderr = String::from_utf8_lossy(&foreign_source.stderr);
+        assert!(stderr.contains("not your branch"), "{stderr}");
+
+        // Finally, switch HEAD away from the worker's own branch and ensure
+        // even an otherwise valid destination is refused.
+        std::process::Command::new("git")
+            .args(["switch", "factory/support-triage"])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        let wrong_head = std::process::Command::new("git")
+            .args(["push", "origin", "HEAD:refs/heads/factory/credit-repairs"])
+            .env("CAS_AGENT_NAME", "credit-repairs")
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        assert!(!wrong_head.status.success());
+        let stderr = String::from_utf8_lossy(&wrong_head.stderr);
+        assert!(stderr.contains("not your branch"), "{stderr}");
+
         std::fs::write(wt_path.join("foreign.txt"), "foreign worker commit\n").unwrap();
         std::process::Command::new("git")
             .args(["add", "foreign.txt"])

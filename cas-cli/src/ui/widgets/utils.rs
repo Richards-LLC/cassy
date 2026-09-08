@@ -103,6 +103,7 @@ pub fn event_type_color(event_type: &cas_types::EventType, palette: &Palette) ->
         EventType::WorkerFileEdited => palette.text_primary,
         EventType::WorkerGitCommit => palette.accent,
         EventType::WorkerVerificationBlocked => palette.status_warning,
+        EventType::WorkerPushBlocked => palette.status_error,
         EventType::EpicSubtasksComplete => palette.status_success,
         // Verification lifecycle events
         EventType::VerificationStarted => palette.status_info,

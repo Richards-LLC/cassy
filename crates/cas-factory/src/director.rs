@@ -365,6 +365,7 @@ impl DirectorData {
             EventType::WorkerFileEdited,
             EventType::WorkerGitCommit,
             EventType::WorkerVerificationBlocked,
+            EventType::WorkerPushBlocked,
             EventType::VerificationStarted,
             EventType::VerificationAdded,
             EventType::TaskNoteAdded,

@@ -164,6 +164,7 @@ import hashlib, os
 ignored = {"_", "SHLVL", "CAS_RELEASE_GATE_LOG_DIR", "CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE"}
 print(hashlib.sha256(repr(sorted((k, v) for k, v in os.environ.items() if k not in ignored)).encode()).hexdigest())')"
 cache_head="$(git rev-parse HEAD)"
+gate_implementation="$(realpath "${BASH_SOURCE[0]}")"
 cache_toolchain=''
 if [[ -n "$cache_dir" && -z "$only_rows" ]]; then
     mkdir -p "$cache_dir"
@@ -202,11 +203,13 @@ row_cache_key() {
             inputs=(.) ;;
         *) return 1 ;;
     esac
+    local input_tree implementation_digest
+    input_tree="$(git ls-tree -r HEAD -- "${inputs[@]}")" || return 1
+    implementation_digest="$(sha256sum "$gate_implementation")" || return 1
     {
         printf '%s\n' row-cache-v1 "$name" "$version" "$repo_root" "$cache_environment" "$cache_toolchain"
         [[ "${inputs[0]}" != . ]] || printf '%s\n' "$cache_head"
-        git ls-tree -r HEAD -- "${inputs[@]}"
-        sha256sum "$repo_root/scripts/release-gate.sh"
+        printf '%s\n' "$input_tree" "$implementation_digest"
     } | sha256sum | cut -d' ' -f1
 }
 
@@ -233,7 +236,7 @@ run_check() {
     fi
     # Bash time measures shell functions and their children without moving
     # checks into subshells (the Zig resolver must export into later rows).
-    local TIMEFORMAT='%R %U %S'
+    local LC_NUMERIC=C TIMEFORMAT='%R %U %S'
     if { time "$function_name" >"$log" 2>&1; } 2>"$tmp_dir/$name.time"; then
         print_result PASS "$name" "$command"
         if [[ -n "$key" ]] && git diff --quiet HEAD \

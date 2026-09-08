@@ -198,6 +198,18 @@ else
     ok '--reuse cannot be combined with diagnostic --only'
 fi
 
+wt_web="$(new_worktree epic-web-rows)"
+dir_web="$("$train" 9.99.2 "$wt_web" --print-run-dir)"
+CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.2 "$wt_web" \
+    --gate --only hub-web-dist-drift,hub-web-visual-qa >/dev/null 2>&1
+wait_for_file "$dir_web/diagnostics/*/gate.done" || true
+web_log="$(find "$dir_web/diagnostics" -name gate.log -print -quit)"
+if grep -qF -- '--only hub-web-dist-drift,hub-web-visual-qa' "$web_log"; then
+    ok 'train accepts the same web diagnostic rows as the gate'
+else
+    bad 'train rejected or lost web diagnostic selection'
+fi
+
 # A targeted rerun forwards only known non-empty rows to the gate, writes a
 # diagnostic receipt, and never overwrites the full-gate authorization/history.
 wt_only="$(new_worktree epic-only-merge)"

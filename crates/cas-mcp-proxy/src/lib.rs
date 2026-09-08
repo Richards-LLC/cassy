@@ -24,6 +24,8 @@ pub struct ExecuteResult {
     pub text: String,
     /// Images returned by the execution.
     pub images: Vec<ImageResult>,
+    /// Whether any upstream tool result was marked as an error.
+    pub is_error: bool,
 }
 
 /// An image returned from MCP tool execution.
@@ -720,6 +722,7 @@ impl ProxyEngine {
 
         let mut text_parts: Vec<String> = Vec::new();
         let mut images: Vec<ImageResult> = Vec::new();
+        let mut is_error = false;
 
         if calls.len() == 1 {
             let call = &calls[0];
@@ -732,6 +735,7 @@ impl ProxyEngine {
                     call.args.clone(),
                 )
                 .await?;
+            is_error = result.is_error == Some(true);
             collect_result(&result, &mut text_parts, &mut images);
         } else {
             // Execute in parallel
@@ -752,7 +756,10 @@ impl ProxyEngine {
 
             for (i, result) in results.into_iter().enumerate() {
                 match result {
-                    Ok(result) => collect_result(&result, &mut text_parts, &mut images),
+                    Ok(result) => {
+                        is_error |= result.is_error == Some(true);
+                        collect_result(&result, &mut text_parts, &mut images);
+                    }
                     Err(e) => {
                         text_parts.push(format!(
                             "[{}.{} error]: {e}",
@@ -771,7 +778,11 @@ impl ProxyEngine {
             }
         }
 
-        Ok(ExecuteResult { text, images })
+        Ok(ExecuteResult {
+            text,
+            images,
+            is_error,
+        })
     }
 
     /// Return the total number of tools across all connected servers.
@@ -1339,6 +1350,23 @@ fn classify_live_failure(error: &rmcp::service::ServiceError) -> Option<&'static
     }
 }
 
+/// Preserve the structured JSON-RPC error returned by an upstream MCP server.
+///
+/// `ProxyEngine::call_upstream` adds context around the rmcp error with
+/// `anyhow`, so callers should use the error chain rather than parse its
+/// display string. The returned value is safe to attach to Cassy's MCP error:
+/// it contains only the upstream protocol envelope, never proxy credentials or
+/// request arguments.
+pub fn upstream_mcp_error_data(error: &anyhow::Error) -> Option<Value> {
+    let service_error = error.chain().find_map(|cause| {
+        cause.downcast_ref::<rmcp::service::ServiceError>()
+    })?;
+    let rmcp::service::ServiceError::McpError(error) = service_error else {
+        return None;
+    };
+    serde_json::to_value(error).ok()
+}
+
 fn safe_session_id(session_id: &str) -> String {
     if session_id.len() <= 96
         && session_id.strip_prefix("proxy-").is_some_and(|suffix| {
@@ -1746,6 +1774,70 @@ fn collect_result(
                 }
             }
         }
+    }
+
+    // Some MCP servers return a structured result without a text content
+    // item. Keep that envelope visible to callers, especially for tool errors
+    // whose detail is carried in `structuredContent`.
+    if result.content.is_empty()
+        && let Some(structured) = &result.structured_content
+        && let Ok(json) = serde_json::to_string_pretty(structured)
+    {
+        text_parts.push(json);
+    }
+}
+
+#[cfg(test)]
+mod cas_346b_regression_tests {
+    use super::*;
+
+    #[test]
+    fn structured_upstream_error_is_visible_when_content_is_empty() {
+        let result = rmcp::model::CallToolResult {
+            content: Vec::new(),
+            structured_content: Some(serde_json::json!({
+                "code": "upstream_unavailable",
+                "message": "Slack is temporarily unavailable",
+                "retryable": true,
+                "slack_error": "ratelimited"
+            })),
+            is_error: Some(true),
+            meta: None,
+        };
+        let mut text = Vec::new();
+        let mut images = Vec::new();
+
+        collect_result(&result, &mut text, &mut images);
+
+        assert_eq!(
+            text,
+            vec![
+                serde_json::to_string_pretty(result.structured_content.as_ref().unwrap())
+                    .unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn upstream_mcp_error_data_preserves_hub_error_envelope() {
+        let error = anyhow::Error::new(rmcp::service::ServiceError::McpError(
+            rmcp::ErrorData::internal_error(
+                "Slack is temporarily unavailable",
+                Some(serde_json::json!({
+                    "code": "upstream_unavailable",
+                    "retryable": true,
+                    "detail": "ratelimited",
+                    "slack_error": "ratelimited"
+                })),
+            ),
+        ));
+
+        let details = upstream_mcp_error_data(&error).expect("upstream MCP details");
+
+        assert_eq!(details["message"], "Slack is temporarily unavailable");
+        assert_eq!(details["data"]["code"], "upstream_unavailable");
+        assert_eq!(details["data"]["detail"], "ratelimited");
+        assert_eq!(details["data"]["slack_error"], "ratelimited");
     }
 }
 

@@ -5016,7 +5016,8 @@ This is the body content."#;
     /// harness, and both its files stay credential-free.
     ///
     /// The markers below are the operational load-bearing parts: without the
-    /// two-check preflight a worker posts into a channel it cannot read, without
+    /// authenticated tools/list gate and bounded read fallback a worker cannot
+    /// distinguish a read-only outage from a dead write path, without
     /// the ordered `thread_ts` capture the replies land as stray top-level
     /// messages, without the pacing rule the hub's one-per-second refusal reads
     /// as a hard failure, and without the `ts: null` rule an upload gets retried
@@ -5066,15 +5067,21 @@ This is the body content."#;
             for required in [
                 "name: mecha-cassy",
                 "https://mecha-cassy.vercel.app/mcp/slack",
-                // Channel rule, draft-first, two-check preflight.
+                // Channel rule, draft-first, bounded read preflight.
                 "^[a-z0-9-]+-internal$",
                 "docs/release-notes/<date>-<topic>-slack.md",
-                "Preflight, exactly two checks",
+                "Preflight, bounded read with a write-safe fallback",
                 // `since` is not schema-required, but omitting it fails
                 // `pagination_exhausted` on any busy channel, so the skill
                 // must keep saying so.
                 "pagination_exhausted",
                 "max_messages",
+                "3 attempts",
+                "10-second timeout",
+                "upstream_unavailable",
+                "slack_error",
+                "read-only outage",
+                "POSTED receipt ledger",
                 // Ordered posting, pacing, upload rule.
                 "user_thread_id",
                 "dev_thread_id",

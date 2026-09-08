@@ -3,15 +3,15 @@
 //! Watches for file changes in project directories and triggers
 //! incremental re-indexing of modified files.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
-use notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_mini::{DebouncedEvent, Debouncer, new_debouncer};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::error::CasError;
 
@@ -37,6 +37,123 @@ pub struct WatcherConfig {
     pub debounce_ms: u64,
     /// Patterns to ignore (in addition to .gitignore)
     pub ignore_patterns: Vec<String>,
+}
+
+struct WatcherRuntime {
+    _watcher: RecommendedWatcher,
+    stop_tx: Sender<()>,
+    debounce_thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for WatcherRuntime {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(thread) = self.debounce_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn run_debounce_loop(
+    raw_rx: Receiver<notify::Result<Event>>,
+    stop_rx: Receiver<()>,
+    debounce_duration: Duration,
+    pending_files: Arc<Mutex<HashSet<PathBuf>>>,
+    event_tx: Sender<WatchEvent>,
+    extensions: Vec<String>,
+    ignore_patterns: Vec<String>,
+) {
+    let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
+    let tick_floor = Duration::from_millis(1);
+    let debounce_duration = debounce_duration.max(tick_floor);
+
+    loop {
+        if stop_rx.try_recv().is_ok() {
+            break;
+        }
+
+        let wait = pending
+            .values()
+            .map(|updated| {
+                updated
+                    .checked_add(debounce_duration)
+                    .unwrap_or_else(Instant::now)
+                    .saturating_duration_since(Instant::now())
+                    .max(tick_floor)
+            })
+            .min()
+            .unwrap_or(debounce_duration);
+
+        match raw_rx.recv_timeout(wait) {
+            Ok(Ok(event)) => {
+                let updated = Instant::now();
+                for path in event.paths {
+                    pending.insert(path, updated);
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = event_tx.send(WatchEvent::Error(format!("Watch error: {error:?}")));
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                let now = Instant::now();
+                let ready = pending
+                    .iter()
+                    .filter_map(|(path, updated)| {
+                        (now.duration_since(*updated) >= debounce_duration).then(|| path.clone())
+                    })
+                    .collect::<Vec<_>>();
+                for path in ready {
+                    pending.remove(&path);
+                    emit_debounced_path(
+                        path,
+                        &pending_files,
+                        &event_tx,
+                        &extensions,
+                        &ignore_patterns,
+                    );
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+fn emit_debounced_path(
+    path: PathBuf,
+    pending_files: &Arc<Mutex<HashSet<PathBuf>>>,
+    event_tx: &Sender<WatchEvent>,
+    extensions: &[String],
+    ignore_patterns: &[String],
+) {
+    // FSEvents can coalesce a recursive change to its containing directory.
+    // Expand that directory so indexing remains file based.
+    if path.is_dir() {
+        let files = crate::daemon::indexing::collect_source_files(
+            std::slice::from_ref(&path),
+            extensions,
+            ignore_patterns,
+        );
+        if let Ok(mut pending) = pending_files.lock() {
+            for file in files {
+                pending.insert(file.clone());
+                let _ = event_tx.send(WatchEvent::Modified(file));
+            }
+        }
+        return;
+    }
+
+    if !CodeWatcher::should_watch_path(&path, extensions, ignore_patterns) {
+        return;
+    }
+
+    if let Ok(mut pending) = pending_files.lock() {
+        if path.exists() {
+            pending.insert(path.clone());
+            let _ = event_tx.send(WatchEvent::Modified(path));
+        } else {
+            let _ = event_tx.send(WatchEvent::Deleted(path));
+        }
+    }
 }
 
 impl Default for WatcherConfig {
@@ -71,8 +188,8 @@ pub struct CodeWatcher {
     event_rx: Option<Receiver<WatchEvent>>,
     /// Sender for watch events (kept alive to prevent channel close)
     _event_tx: Option<Sender<WatchEvent>>,
-    /// The debouncer (kept alive to maintain the watcher)
-    _debouncer: Option<Debouncer<RecommendedWatcher>>,
+    /// The raw watcher and filtered debounce loop, kept alive together.
+    _watcher: Option<WatcherRuntime>,
     /// The first drain is a full reconciliation, not merely a batch of
     /// watcher events. Atomic because the scheduler reads it through `&self`.
     initial_reconcile: AtomicBool,
@@ -86,7 +203,7 @@ impl CodeWatcher {
             pending_files: Arc::new(Mutex::new(HashSet::new())),
             event_rx: None,
             _event_tx: None,
-            _debouncer: None,
+            _watcher: None,
             initial_reconcile: AtomicBool::new(false),
         }
     }
@@ -100,84 +217,84 @@ impl CodeWatcher {
         let pending = self.pending_files.clone();
         let extensions = self.config.extensions.clone();
         let ignore_patterns = self.config.ignore_patterns.clone();
-
-        // Create debounced watcher
         let debounce_duration = Duration::from_millis(self.config.debounce_ms);
 
-        let mut debouncer = new_debouncer(
-            debounce_duration,
-            move |res: Result<Vec<DebouncedEvent>, _>| {
-                match res {
-                    Ok(events) => {
-                        for event in events {
-                            let path = event.path;
-
-                            // FSEvents can coalesce a recursive change to its
-                            // containing directory. Expand that directory so
-                            // the portable indexing contract remains file
-                            // based rather than silently discarding it for
-                            // having no extension.
-                            if path.is_dir() {
-                                let files = crate::daemon::indexing::collect_source_files(
-                                    std::slice::from_ref(&path),
-                                    &extensions,
-                                    &ignore_patterns,
-                                );
-                                if let Ok(mut pending) = pending.lock() {
-                                    for file in files {
-                                        pending.insert(file.clone());
-                                        let _ = tx.send(WatchEvent::Modified(file));
-                                    }
-                                }
-                                continue;
-                            }
-
-                            // Check if this file should be watched
-                            if !Self::should_watch_path(&path, &extensions, &ignore_patterns) {
-                                continue;
-                            }
-
-                            // Add to pending set
-                            if let Ok(mut pending) = pending.lock() {
-                                if path.exists() {
-                                    pending.insert(path.clone());
-                                    let _ = tx.send(WatchEvent::Modified(path));
-                                } else {
-                                    let _ = tx.send(WatchEvent::Deleted(path));
-                                }
-                            }
-                        }
+        let (raw_tx, raw_rx) = channel::<notify::Result<Event>>();
+        let raw_extensions = extensions.clone();
+        let raw_ignore_patterns = ignore_patterns.clone();
+        let mut watcher = RecommendedWatcher::new(
+            move |result: notify::Result<Event>| match result {
+                Ok(mut event) => {
+                    // notify's native backends include open/close events. They
+                    // are filesystem reads, not code changes, and feeding them
+                    // into a debounce queue is enough to keep a serve process
+                    // hot while another tool scans the tree.
+                    if matches!(event.kind, EventKind::Access(_)) {
+                        return;
                     }
-                    Err(e) => {
-                        let _ = tx.send(WatchEvent::Error(format!("Watch error: {e:?}")));
+                    event.paths.retain(|path| {
+                        CodeWatcher::should_watch_event_path(
+                            path,
+                            &raw_extensions,
+                            &raw_ignore_patterns,
+                        )
+                    });
+                    if !event.paths.is_empty() {
+                        let _ = raw_tx.send(Ok(event));
                     }
                 }
+                Err(error) => {
+                    let _ = raw_tx.send(Err(error));
+                }
             },
+            notify::Config::default().with_follow_symlinks(false),
         )
         .map_err(|e| {
             CasError::Io(std::io::Error::other(format!(
-                "Failed to create debouncer: {e}"
+                "Failed to create watcher: {e}"
             )))
         })?;
+
+        let (stop_tx, stop_rx) = channel();
+        let debounce_thread = std::thread::Builder::new()
+            .name("notify-rs debouncer loop".to_string())
+            .spawn(move || {
+                run_debounce_loop(
+                    raw_rx,
+                    stop_rx,
+                    debounce_duration,
+                    pending,
+                    tx,
+                    extensions,
+                    ignore_patterns,
+                );
+            })
+            .map_err(|e| {
+                CasError::Io(std::io::Error::other(format!(
+                    "Failed to start watcher debounce thread: {e}"
+                )))
+            })?;
 
         // Start watching each configured path
         for path in &self.config.watch_paths {
             if path.exists() {
-                debouncer
-                    .watcher()
-                    .watch(path, RecursiveMode::Recursive)
-                    .map_err(|e| {
-                        CasError::Io(std::io::Error::other(format!(
-                            "Failed to watch {}: {}",
-                            path.display(),
-                            e
-                        )))
-                    })?;
+                watcher.watch(path, RecursiveMode::Recursive).map_err(|e| {
+                    CasError::Io(std::io::Error::other(format!(
+                        "Failed to watch {}: {}",
+                        path.display(),
+                        e
+                    )))
+                })?;
             }
         }
 
-        // Store the debouncer to keep it alive
-        self._debouncer = Some(debouncer);
+        // Store the watcher and debounce thread together so shutdown signals
+        // the filtered loop before joining it.
+        self._watcher = Some(WatcherRuntime {
+            _watcher: watcher,
+            stop_tx,
+            debounce_thread: Some(debounce_thread),
+        });
 
         Ok(())
     }
@@ -207,6 +324,10 @@ impl CodeWatcher {
 
     /// Check if a path should be watched based on extension and ignore patterns
     fn should_watch_path(path: &Path, extensions: &[String], ignore_patterns: &[String]) -> bool {
+        if Self::is_ignored_path(path, ignore_patterns) {
+            return false;
+        }
+
         // Check extension
         let ext = path
             .extension()
@@ -218,25 +339,51 @@ impl CodeWatcher {
             return false;
         }
 
-        // Check ignore patterns
+        true
+    }
+
+    /// Check whether an event path is relevant before it reaches the debounce queue.
+    fn should_watch_event_path(
+        path: &Path,
+        extensions: &[String],
+        ignore_patterns: &[String],
+    ) -> bool {
+        if Self::is_ignored_path(path, ignore_patterns) {
+            return false;
+        }
+        path.is_dir() || Self::should_watch_path(path, extensions, &[])
+    }
+
+    fn is_ignored_path(path: &Path, ignore_patterns: &[String]) -> bool {
         let path_str = path.to_string_lossy();
         for pattern in ignore_patterns {
-            if pattern.ends_with('/') {
+            let pattern = pattern.trim();
+            if let Some(prefix) = pattern.strip_suffix("/**") {
+                let prefix = prefix.trim_end_matches('/');
+                let prefix_components: Vec<_> = Path::new(prefix).components().collect();
+                let path_components: Vec<_> = path.components().collect();
+                if !prefix_components.is_empty()
+                    && path_components
+                        .windows(prefix_components.len())
+                        .any(|components| components == prefix_components.as_slice())
+                {
+                    return true;
+                }
+            } else if pattern.ends_with('/') {
                 // Directory pattern
                 if path_str.contains(pattern) {
-                    return false;
+                    return true;
                 }
             } else if let Some(suffix) = pattern.strip_prefix('*') {
                 // Suffix pattern (e.g., *.pyc)
                 if path_str.ends_with(suffix) {
-                    return false;
+                    return true;
                 }
             } else if path_str.contains(pattern) {
-                return false;
+                return true;
             }
         }
-
-        true
+        false
     }
 
     /// Get and clear pending files for indexing
@@ -301,6 +448,18 @@ mod tests {
     fn test_should_ignore_target() {
         let extensions = vec!["rs".to_string()];
         let ignore = vec!["target/".to_string()];
+
+        assert!(!CodeWatcher::should_watch_path(
+            Path::new("target/debug/main.rs"),
+            &extensions,
+            &ignore,
+        ));
+    }
+
+    #[test]
+    fn test_should_ignore_double_star_directory_pattern() {
+        let extensions = vec!["rs".to_string()];
+        let ignore = vec!["target/**".to_string()];
 
         assert!(!CodeWatcher::should_watch_path(
             Path::new("target/debug/main.rs"),
@@ -417,5 +576,93 @@ mod tests {
         assert!(pending.contains(&created));
         // The first snapshot lets reconciliation retire this now-missing file.
         assert!(pending.contains(&deleted));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ignored_file_activity_does_not_spin_debouncer() {
+        use std::io::Write;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+        use std::time::Duration;
+
+        fn debouncer_ticks() -> u64 {
+            let task_dir = std::path::Path::new("/proc/self/task");
+            let Some(entry) = std::fs::read_dir(task_dir)
+                .unwrap()
+                .flatten()
+                .find(|entry| {
+                    // Linux exposes only the first 15 bytes of a thread name
+                    // through comm, so the crate's full name is truncated.
+                    std::fs::read_to_string(entry.path().join("comm"))
+                        .map(|name| name.trim() == "notify-rs debou")
+                        .unwrap_or(false)
+                })
+            else {
+                return 0;
+            };
+
+            let stat = std::fs::read_to_string(entry.path().join("stat")).unwrap();
+            let fields = stat.rsplit_once(") ").unwrap().1.split_whitespace();
+            let fields = fields.collect::<Vec<_>>();
+            fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+        }
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let project_dir = temp.path().join("project");
+        let ignored_dir = temp.path().join("ignored-target");
+        std::fs::create_dir(&project_dir).unwrap();
+        std::fs::create_dir(&ignored_dir).unwrap();
+        let ignored_file = ignored_dir.join("ignored.rs");
+        std::fs::write(&ignored_file, "initial\n").unwrap();
+        std::os::unix::fs::symlink(&ignored_dir, project_dir.join("target")).unwrap();
+
+        let mut watcher = CodeWatcher::new(WatcherConfig {
+            watch_paths: vec![project_dir],
+            extensions: vec!["rs".to_string()],
+            debounce_ms: 500,
+            ignore_patterns: vec!["target/".to_string()],
+        });
+        watcher.start().unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers = (0..8)
+            .map(|_| {
+                let writer_stop = Arc::clone(&stop);
+                let ignored_file = ignored_file.clone();
+                thread::spawn(move || {
+                    while !writer_stop.load(Ordering::Relaxed) {
+                        let mut file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .truncate(true)
+                            .open(&ignored_file)
+                            .unwrap();
+                        file.write_all(b"ignored\n").unwrap();
+                        drop(file);
+                        let _ = std::fs::File::open(&ignored_file);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let before = debouncer_ticks();
+        thread::sleep(Duration::from_secs(5));
+        let after = debouncer_ticks();
+
+        stop.store(true, Ordering::Relaxed);
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        drop(watcher);
+
+        let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+        let max_ticks = (ticks_per_second * 5 / 50).max(1) + 1;
+        assert!(
+            after.saturating_sub(before) <= max_ticks,
+            "ignored file activity used {} debouncer ticks in 5s (limit {})",
+            after.saturating_sub(before),
+            max_ticks
+        );
     }
 }

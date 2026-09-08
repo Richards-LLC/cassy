@@ -112,7 +112,6 @@ walkdir = "2.5"
 tempfile = "3.14"
 ignore = "0.4"
 notify = { version = "8.0", default-features = false, features = ["macos_fsevent"] }
-notify-debouncer-mini = "0.7"
 glob = "0.3"
 fs2 = "0.4"
 urlencoding = "2.1"

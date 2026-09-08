@@ -4880,6 +4880,87 @@ async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_un
     );
 }
 
+/// cas-5255 / GH #719: a transport-delivered row must remain recoverable by
+/// the recipient's explicit poll until that poll claims it. The daemon's
+/// inbox write is not proof that the worker's harness surfaced the body: a
+/// declined idle-gate wake leaves the row stage=delivered while the worker's
+/// next inbox_poll is the only supported recovery path.
+#[tokio::test]
+async fn inbox_poll_claims_a_transport_delivered_row_after_a_declined_wake() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", Some("registered-worker")),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("registered-worker-id");
+    env.register_worker_with_id("registered-worker-id", "registered-worker", None);
+    let queue = env.prompt_queue();
+    let notification_id = queue
+        .enqueue(
+            "supervisor",
+            "registered-worker",
+            "scope changed: hold the merge until the supervisor replies",
+        )
+        .expect("enqueue supervisor message");
+
+    // Reproduce the daemon's wake-gate decline before the later transport
+    // bookkeeping. The row is still pending while the decline is recorded.
+    queue
+        .record_wake_attempt(
+            notification_id,
+            cas_store::WakeAttempt::NotAttempted,
+            Some("wake_declined_by_policy: pane has not been silent long enough"),
+        )
+        .expect("record wake decline");
+    queue
+        .record_wake_gate_decline(
+            notification_id,
+            "wake_declined_by_policy: pane has not been silent long enough",
+        )
+        .expect("record wake-gate decline");
+    // `record_recipient_surfaced(TransportDelivered)` is deliberately only a
+    // transport receipt; it must not make the body disappear from inbox_poll.
+    queue
+        .record_recipient_surfaced(
+            notification_id,
+            "registered-worker",
+            cas_store::SurfacingSource::TransportDelivered,
+        )
+        .expect("record transport receipt");
+    queue
+        .mark_transport_delivered(notification_id)
+        .expect("mark transport delivered");
+
+    let report = queue
+        .message_delivery_report(notification_id)
+        .expect("delivery report")
+        .expect("message delivery report exists");
+    assert_eq!(report.stage, cas_store::DeliveryStage::Delivered);
+    assert_eq!(report.wake_gate_declines, 1);
+
+    let first = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("first inbox poll");
+    let text = get_text(&first);
+    assert!(
+        text.contains("scope changed: hold the merge"),
+        "a delivered row whose wake was declined must still be immediately pollable: {text}"
+    );
+
+    let second = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("second inbox poll");
+    assert_eq!(
+        get_text(&second),
+        "No unread messages for registered-worker",
+        "the explicit poll must claim the row exactly once"
+    );
+}
+
 /// cas-53a7: the MCP reader must mirror its real receipt across every alias a
 /// supervisor answers to.  A broadcast reaches the pane-name alias first; if
 /// this reader drops `mirror_receipts_across_aliases`, the logical

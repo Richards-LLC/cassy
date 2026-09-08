@@ -7,6 +7,62 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.19.0] - 2026-09-08
+
+### Added
+- `cas doctor` now includes separate `known repos` and `MCP upstream
+  reachability` checks. Missing roots are distinguished from live roots that
+  lack a Cassy store, and each result names the appropriate `cas doctor --fix`,
+  `cas init`, or `cas known-repos forget` remedy.
+- `cas config set/get/list history.github_repo` gives code-history indexing its
+  own GitHub repository instead of reusing the bug-intake `issues.repo` key;
+  `cas history` and its daemon path use the explicit setting or a GitHub origin
+  fallback and report the new key when neither is available.
+- `cas config set factory.max_concurrent_builders` and
+  `cas config set factory.worker_build_jobs` configure process-level and
+  Cargo-level factory build limits, and `mcp__cas__coordination` spawn output
+  reports the active throttle.
+- `mcp__cas__coordination action=epic_status` now accepts `offset`, `limit`,
+  and `summary` for bounded paging and fast ancestry-only reports.
+
+### Changed
+- `cas hub status` now reports a healthy CAS-created Tailscale Serve route
+  with its live hub target, while retaining distinct loopback-only and
+  unavailable states.
+- `cas cloud sync` now explains HTTP 409 project-registration conflicts,
+  parks affected rows without pretending they are transport retries, and
+  gives the exact `cas cloud project set` or alias remedy. `cas doctor` shows
+  the same queue diagnosis.
+- `cas cloud pull --purge-foreign` now applies only the verified dry-run delete
+  set, checks the deleted count, quarantines the exact rows, and aborts if
+  rows reappear or the store changes during the operation.
+- `cas cloud pull` now materializes accepted cross-project proposals as open
+  local tasks, admits them only by the server-attested target, and prints
+  concrete pull errors in non-verbose output.
+- Factory lifecycle output now bounds `epic_status` work, preserves the
+  declared close target through close and commit guards, keeps a focused epic
+  as the spawn base, and records rejected non-factory pushes in worker
+  activity instead of leaving them only in hook stderr.
+- Delivery and messaging now refresh parked anchors, preserve upstream Slack
+  errors, validate urgent assignment ownership, keep context-reset identity
+  tied to the recipient harness, route relays to the owning supervisor
+  session, cap Claude redelivery, and keep transport-delivered inbox rows
+  pollable until an observed wake consumes them.
+- The `mecha-cassy` skill mirrors now document the read preflight fallback and
+  channel/edit/delete contract, while file uploads require downloaded SHA-256
+  equality, image decoding, and visible preview checks rather than byte counts.
+- The installer and install-path proof now require the selected published
+  asset's SHA-256 before extraction or replacement and preserve actionable
+  receipts for missing, malformed, or mismatched digests.
+
+### Fixed
+- Codex workers now derive `HOME` and the Playwright MCP profile from the
+  host home instead of using a fixed path, so MCP startup works on macOS and
+  other hosts with different home directories.
+- The release gate now rejects committed hub-web `dist` drift before a tag can
+  be prepared, and factory build guards isolate test overrides so concurrent
+  builders cannot leak settings between processes.
+
 ## [3.18.1] - 2026-09-08
 
 ### Added

@@ -263,6 +263,12 @@ mod tests {
 
     #[test]
     fn disabled_override_neutralizes_live_probe_for_test_fixtures() {
+        let loaded_snapshot = evaluate(1, Some(2.0), 0, 1, 4);
+        assert!(
+            !loaded_snapshot.violations().is_empty(),
+            "the injected loaded snapshot must exercise the refusal path"
+        );
+
         let _env =
             crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
         let snapshot = inspect(

@@ -161,6 +161,7 @@ fn spawn_factory(cwd: &std::path::Path, cas_root: &std::path::Path) -> PtyRunner
         .inherit_env()
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("CLAUDECODE")
+        .env("CAS_FACTORY_BUILD_GUARD", "off")
         .env("CAS_ROOT", cas_root.to_string_lossy())
         .cwd(cwd);
 

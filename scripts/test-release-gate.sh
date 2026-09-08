@@ -532,6 +532,26 @@ else
     bad "--learn did not record the nextest factory-session diagnosis: $learn_output"
 fi
 
+# cas-77c1. Integration spawn fixtures must carry the build-guard override into
+# isolated children: otherwise a saturated host makes them read live
+# /proc/loadavg and refuse a request that is healthy under the test contract.
+repo="$(new_fixture learn-nextest-factory-build-guard)"
+nextest_symptom='nextest: spawn_workers integration tests refused by build guard under host load'
+nextest_cause='integration harness never set CAS_FACTORY_BUILD_GUARD=off; guard read live /proc/loadavg during full-suite run'
+learn_output="$(cd "$repo" && \
+    "$repo/scripts/release-gate.sh" --learn "$nextest_symptom" "$nextest_cause" nextest 2>&1)"
+if grep -qF 'Learned release failure in all three mirrors' <<<"$learn_output" \
+    && grep -qF "Symptom: $nextest_symptom Root cause: $nextest_cause" \
+        "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" \
+    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"; then
+    ok '--learn records the nextest factory build-guard diagnosis in all mirrors'
+else
+    bad "--learn did not record the nextest factory build-guard diagnosis: $learn_output"
+fi
+
 # cas-4ccc. A populated .cas/proxy.toml ABOVE the worktree is readable by any
 # test that resolves project config by walking up from its cwd. The gate must
 # neutralize it and name it — never refuse, because blocking a release on the

@@ -164,6 +164,7 @@ impl CasCore {
         });
 
         let input = HookInput {
+            prompt_id: None,
             session_id: session_id.clone(),
             cwd,
             workspace_root: None,
@@ -349,6 +350,7 @@ impl CasCore {
             .to_string();
 
         let input = HookInput {
+            prompt_id: None,
             session_id: session_id.clone(),
             cwd,
             workspace_root: None,

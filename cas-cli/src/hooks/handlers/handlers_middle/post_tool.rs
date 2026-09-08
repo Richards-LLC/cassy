@@ -7,9 +7,18 @@ pub fn handle_post_tool_use(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    handle_post_tool_use_with_guardrail(input, cas_root, |cas_root, input, stores| {
-        maybe_tmpfs_guardrail_warning(cas_root, input, stores.config())
-    })
+    let output =
+        handle_post_tool_use_with_guardrail(input, cas_root, |cas_root, input, stores| {
+            maybe_tmpfs_guardrail_warning(cas_root, input, stores.config())
+        })?;
+    let Some(context) =
+        cas_root.and_then(|root| crate::hooks::turn_context::fallback_context(root, input))
+    else {
+        return Ok(output);
+    };
+    Ok(HookOutput::with_post_tool_context(
+        merge_post_tool_contexts(Some(&output), context),
+    ))
 }
 
 fn handle_post_tool_use_with_guardrail(

@@ -53,13 +53,12 @@
       {
         "hooks": [
           {
-            "async": true,
             "command": "cas hook PostToolUse",
             "timeout": 3000,
             "type": "command"
           }
         ],
-        "matcher": "Write|Edit|Bash"
+        "matcher": "*"
       }
     ],
     "PostToolUseFailure": [

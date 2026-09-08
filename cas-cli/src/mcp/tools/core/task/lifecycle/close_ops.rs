@@ -2116,6 +2116,21 @@ impl CasCore {
                 .is_some();
         let factory_merge_enforcement =
             std::env::var_os("CAS_FACTORY_MODE").is_some() && has_recorded_merge_evidence;
+        let parent_epic = task_store.get_parent_epic(&task.id).ok().flatten();
+        let close_work_target = effective_close_work_target(task, parent_epic.as_ref());
+        let inherited_repo_context = close_work_target
+            .as_ref()
+            .map(|target| {
+                crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                    &self.cas_root,
+                    target,
+                )
+            })
+            .transpose()
+            .map_err(|message| TaskLifecycleGateError::UnmergedChildBranch { message })?;
+        let declared_repo_context = inherited_repo_context
+            .as_ref()
+            .or(declared_repo_context);
         let resolved_repo = declared_repo_context
             .map(|context| Ok(context.repo_root.clone()))
             .unwrap_or_else(|| resolve_close_gate_repo_root(&self.cas_root));
@@ -2138,30 +2153,35 @@ impl CasCore {
                 .and_then(|store| store.get(wt_id).ok())
                 .map(|wt| wt.parent_branch.clone())
         });
-        let epic_parent_branch = task_store
-            .get_parent_epic(&task.id)
-            .ok()
-            .flatten()
-            .and_then(|parent| parent.branch);
+        let epic_parent_branch = parent_epic.as_ref().and_then(|parent| parent.branch.clone());
+        let epic_work_target_branch = parent_epic.as_ref().and_then(|parent| {
+            parent
+                .deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.clone())
+        });
         let parent_branch_resolution = if let Some(context) = declared_repo_context {
             Ok(context.target_branch.clone())
         } else if close_repo_verified {
             resolve_close_parent_branch(
                 worktree_store_parent_branch,
                 epic_parent_branch,
+                epic_work_target_branch,
                 &close_project_root,
             )
         } else {
             Ok(worktree_store_parent_branch
                 .or(epic_parent_branch)
-                .unwrap_or_else(|| "main".to_string()))
+                .or(epic_work_target_branch)
+                .unwrap_or_else(|| UNRESOLVED_CLOSE_TARGET.to_string()))
         };
         let resolved_parent_branch = match parent_branch_resolution {
             Ok(branch) => branch,
             Err(message) if factory_merge_enforcement => {
                 return Err(TaskLifecycleGateError::UnmergedChildBranch { message });
             }
-            Err(_) => "main".to_string(),
+            Err(_) => UNRESOLVED_CLOSE_TARGET.to_string(),
         };
         let req = TaskCloseRequest {
             stranded_branch_override: None,
@@ -2574,9 +2594,15 @@ impl CasCore {
         };
         let factory_merge_enforcement =
             std::env::var_os("CAS_FACTORY_MODE").is_some() && has_recorded_merge_evidence;
+        let parent_epic = task_store.get_parent_epic(&req.id).ok().flatten();
+        let close_work_target = effective_close_work_target(&task, parent_epic.as_ref());
         // An explicit task work target overrides the factory spawn repo.
-        // Resolve once before any merge/reachability query and reuse it.
-        let declared_repo_context = match task.deliverables.work_target.as_ref() {
+        // Resolve once before any merge/reachability query and reuse it. A
+        // child whose target still equals its parent's original default is an
+        // implicit epic target, so late epic association can retarget the
+        // close guard to the live epic lane without overriding a distinct
+        // supervisor-selected task target.
+        let declared_repo_context = match close_work_target.as_ref() {
             Some(target) => {
                 match crate::mcp::tools::core::task::repo_context::resolve_repo_context(
                     &self.cas_root,
@@ -2839,27 +2865,34 @@ impl CasCore {
                 .and_then(|store| store.get(wt_id).ok())
                 .map(|wt| wt.parent_branch.clone())
         });
-        let parent_epic = task_store.get_parent_epic(&req.id).ok().flatten();
         let epic_parent_branch = parent_epic.as_ref().and_then(|p| p.branch.clone());
+        let epic_work_target_branch = parent_epic.as_ref().and_then(|p| {
+            p.deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.clone())
+        });
         let parent_branch_resolution = if let Some(context) = declared_repo_context.as_ref() {
             Ok(context.target_branch.clone())
         } else if close_repo_verified {
             resolve_close_parent_branch(
                 worktree_store_parent_branch,
                 epic_parent_branch,
+                epic_work_target_branch,
                 &close_project_root,
             )
         } else {
             Ok(worktree_store_parent_branch
                 .or(epic_parent_branch)
-                .unwrap_or_else(|| "main".to_string()))
+                .or(epic_work_target_branch)
+                .unwrap_or_else(|| UNRESOLVED_CLOSE_TARGET.to_string()))
         };
         let resolved_parent_branch = match parent_branch_resolution {
             Ok(branch) => branch,
             Err(message) if factory_merge_enforcement => {
                 return Ok(Self::tool_error(message));
             }
-            Err(_) => "main".to_string(),
+            Err(_) => UNRESOLVED_CLOSE_TARGET.to_string(),
         };
         // cas-fdc9 (GH #56): a receipt is only evidence if it exists in the
         // repository this close is bound to. The cross-repo delivery in the
@@ -8173,6 +8206,38 @@ fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> Result<String
     }
 }
 
+/// Compatibility value for the non-Git close path. It is used only after
+/// repository resolution has already failed and factory enforcement is off,
+/// so the branch-sensitive gates retain their historical graceful behavior
+/// without inventing a `main` target. Verified Git closes must resolve a real
+/// task, epic, or repository target through [`resolve_close_parent_branch`].
+const UNRESOLVED_CLOSE_TARGET: &str = "cassy-unresolved-close-target";
+
+/// Resolve the task-owned WorkTarget used by close-time repository binding.
+///
+/// A child created before it was attached to an epic can retain the epic's
+/// original WorkTarget (usually the repository trunk). Treat that exact
+/// parent-default value as implicit epic scope, matching task creation and
+/// worker-spawn normalization, so a late parent link cannot leave close
+/// checking the stale trunk. A distinct task target remains explicit
+/// supervisor authority and is never overwritten.
+fn effective_close_work_target(
+    task: &Task,
+    parent_epic: Option<&Task>,
+) -> Option<cas_types::WorkTarget> {
+    parent_epic
+        .and_then(|epic| {
+            (task.task_type != TaskType::Epic)
+                .then(|| {
+                    crate::mcp::tools::core::task::repo_context::default_child_work_target_from_epic(
+                        task, epic,
+                    )
+                })
+                .flatten()
+        })
+        .or_else(|| task.deliverables.work_target.clone())
+}
+
 /// cas-7efe: the single, authoritative parent-branch resolution policy for
 /// every close-time gate in `cas_task_close` (merge gate, commit-claim
 /// gate, additive-only gate, zero-commit gate, diff stat).
@@ -8204,7 +8269,10 @@ fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> Result<String
 /// 2. `epic_branch` — `task_store.get_parent_epic(task_id).branch`. Covers
 ///    System-B isolated workers (`spawn_workers isolate=true`), which are
 ///    the day-to-day factory path and almost never set `worktree_id`.
-/// 3. [`resolve_standalone_merge_target`] — configured `epic_base_branch`,
+/// 3. `epic_work_target_branch` — the parent epic's durable WorkTarget when
+///    no live legacy branch is recorded. This is the authoritative fallback
+///    for legacy children and staging-first epics whose branch field is absent.
+/// 4. [`resolve_standalone_merge_target`] — configured `epic_base_branch`,
 ///    falling back to git's own detected default branch. Used only when
 ///    neither tier above resolves (a standalone task with no parent epic).
 ///
@@ -8214,9 +8282,13 @@ fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> Result<String
 fn resolve_close_parent_branch(
     worktree_parent_branch: Option<String>,
     epic_branch: Option<String>,
+    epic_work_target_branch: Option<String>,
     repo_path: &std::path::Path,
 ) -> Result<String, String> {
-    match worktree_parent_branch.or(epic_branch) {
+    match worktree_parent_branch
+        .or(epic_branch)
+        .or(epic_work_target_branch)
+    {
         Some(branch) => Ok(branch),
         None => resolve_standalone_merge_target(repo_path),
     }
@@ -8284,6 +8356,7 @@ mod parent_branch_resolver_tests {
         let resolved = resolve_close_parent_branch(
             Some("staging".to_string()),
             Some("epic/other".to_string()),
+            None,
             dir.path(),
         )
         .expect("explicit worktree branch resolves without git fallback");
@@ -8301,12 +8374,79 @@ mod parent_branch_resolver_tests {
         // must still prefer the real epic branch over guessing "main".
         let dir = tempfile::tempdir().unwrap();
         let resolved =
-            resolve_close_parent_branch(None, Some("epic/staging-thing".to_string()), dir.path())
-                .expect("explicit epic branch resolves without git fallback");
+            resolve_close_parent_branch(
+                None,
+                Some("epic/staging-thing".to_string()),
+                None,
+                dir.path(),
+            )
+            .expect("explicit epic branch resolves without git fallback");
         assert_eq!(
             resolved, "epic/staging-thing",
             "must never fall through to a bare 'main' literal when the \
              epic branch is known"
+        );
+    }
+
+    /// GH #748: a legacy child can have no recorded `epic.branch` even though
+    /// its parent epic's durable WorkTarget names the real integration lane.
+    /// The close guard must use that declaration instead of falling through to
+    /// the project default (often `main`).
+    #[test]
+    fn epic_work_target_wins_over_project_trunk_when_legacy_branch_is_missing() {
+        let dir = init_committed_repo("main");
+        git(dir.path(), &["checkout", "-q", "-b", "staging"]);
+        let resolved = resolve_close_parent_branch(
+            None,
+            None,
+            Some("staging".to_string()),
+            dir.path(),
+        )
+        .expect("parent epic WorkTarget must resolve before project trunk");
+        assert_eq!(resolved, "staging");
+        assert_ne!(resolved, "main");
+    }
+
+    #[test]
+    fn close_target_normalizes_legacy_default_but_preserves_explicit_lane() {
+        let mut epic = Task::new("cas-epic".into(), "epic".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/live-lane".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+
+        let child = Task::new("cas-child".into(), "child".into());
+        assert_eq!(
+            effective_close_work_target(&child, Some(&epic))
+                .expect("untargeted child must inherit the live epic lane")
+                .target_branch,
+            "epic/live-lane"
+        );
+
+        let mut legacy_default_child = child.clone();
+        legacy_default_child.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+        assert_eq!(
+            effective_close_work_target(&legacy_default_child, Some(&epic))
+                .expect("legacy epic default must be normalized")
+                .target_branch,
+            "epic/live-lane"
+        );
+
+        let mut explicit_child = child;
+        explicit_child.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "release/operator-selected".into(),
+        });
+        assert_eq!(
+            effective_close_work_target(&explicit_child, Some(&epic))
+                .expect("explicit task target must remain authoritative")
+                .target_branch,
+            "release/operator-selected"
         );
     }
 
@@ -8318,7 +8458,7 @@ mod parent_branch_resolver_tests {
         // answer, not a blind guess. A repo whose default is the legacy
         // `master` name proves both supported conventions work.
         let dir = init_committed_repo("master");
-        let resolved = resolve_close_parent_branch(None, None, dir.path())
+        let resolved = resolve_close_parent_branch(None, None, None, dir.path())
             .expect("master must be detected as the default branch");
         assert_eq!(
             resolved, "master",
@@ -23582,8 +23722,13 @@ mod zero_change_close_tests {
         // The fix: resolve_close_parent_branch must select the epic
         // branch, never guess "main", when the worktree store has
         // nothing recorded (the common System-B factory-isolation shape).
-        let resolved = resolve_close_parent_branch(None, Some("epic/foo".to_string()), p)
-            .expect("explicit epic branch resolves");
+        let resolved = resolve_close_parent_branch(
+            None,
+            Some("epic/foo".to_string()),
+            None,
+            p,
+        )
+        .expect("explicit epic branch resolves");
         assert_eq!(
             resolved, "epic/foo",
             "must resolve the real epic branch, never a bare 'main'"

@@ -44,7 +44,10 @@ describe("hub-web fixture visual QA", () => {
     expect(fixtureSource).toContain("renderConnectionSurfaceInto(card, \"bright-otter\"");
     expect(mainSource).toContain("renderConnectionSurfaceInto(placeholder, session, snapshot");
     expect(fixtureSource).toContain("K7MW-4H2Q");
-    expect(fixtureSource).toContain("dialog.showModal();");
+    expect(fixtureSource).toContain("function appendOpenPairingDialog(cleanup: boolean): void");
+    expect(fixtureSource).toContain("if (fixtureName === \"pairing-step-1\") appendOpenPairingDialog(false);");
+    expect(fixtureSource).toContain("if (fixtureName === \"pairing-cleanup\") appendOpenPairingDialog(true);");
+    expect(fixtureSource).toContain('if (!dialog.open) throw new Error("Pairing fixture dialog did not open");');
     expect(cssSource).toContain("container-type: inline-size;");
     expect(cssSource).toContain("font-size: clamp(44px, 10cqw, 76px);");
   });

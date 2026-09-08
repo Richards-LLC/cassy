@@ -294,6 +294,13 @@ function renderPairing(cleanup: boolean): HTMLDialogElement {
   return dialog;
 }
 
+function appendOpenPairingDialog(cleanup: boolean): void {
+  const dialog = renderPairing(cleanup);
+  app.append(dialog);
+  dialog.showModal();
+  if (!dialog.open) throw new Error("Pairing fixture dialog did not open");
+}
+
 function renderShell(): void {
   const machineCount = fixtureName === "fleet-empty" ? 0 : 2;
   const openSession = ["session-canvas", "transcript", "attention-0", "attention-12", "connection-failed-retry"].includes(fixtureName);
@@ -368,12 +375,8 @@ function renderShell(): void {
   if (fixtureName === "attention-0" || fixtureName === "attention-12") shell.append(renderContext(fixtureName === "attention-12" ? 12 : 0));
   app.replaceChildren(shell);
   renderRestingToast();
-  if (fixtureName === "pairing-step-1") {
-    const dialog = renderPairing(false);
-    app.append(dialog);
-    dialog.showModal();
-  }
-  if (fixtureName === "pairing-cleanup") app.append(renderPairing(true));
+  if (fixtureName === "pairing-step-1") appendOpenPairingDialog(false);
+  if (fixtureName === "pairing-cleanup") appendOpenPairingDialog(true);
   if (fixtureName === "fleet-populated" && new URLSearchParams(window.location.search).has("broken")) {
     const style = document.createElement("style");
     style.textContent = ".fixture-broken-contrast { color: var(--bg-panel); background: var(--bg-panel); }";

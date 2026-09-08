@@ -2465,19 +2465,17 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
         let mut fmt = Formatter::stdout(&mut out, theme);
 
         if stats.total == 0 {
-            let success_color = fmt.theme().palette.status_success;
-            fmt.write_colored("  \u{25CF} ", success_color)?;
+            fmt.write_raw(if fmt.unicode() { "  \u{25CF} " } else { "  * " })?;
             fmt.write_raw("Sync queue is empty")?;
             fmt.newline()?;
             return Ok(());
         }
 
-        let accent_color = fmt.theme().palette.accent;
         let error_color = fmt.theme().palette.status_error;
         let warning_color = fmt.theme().palette.status_warning;
 
         fmt.newline()?;
-        fmt.write_colored("  \u{25CF} ", accent_color)?;
+        fmt.write_raw(if fmt.unicode() { "  \u{25CF} " } else { "  * " })?;
         fmt.write_raw("Sync Queue")?;
         fmt.newline()?;
         fmt.newline()?;
@@ -2515,14 +2513,15 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
                 fmt.newline()?;
                 fmt.write_muted("  Queued items:")?;
                 fmt.newline()?;
+                let unicode = fmt.unicode();
                 for item in items {
                     fmt.write_raw("    ")?;
                     if item.retry_count >= max_retries {
-                        fmt.write_colored("\u{2717}", error_color)?;
+                        fmt.write_colored(if unicode { "\u{2717}" } else { "!" }, error_color)?;
                     } else if item.retry_count > 0 {
-                        fmt.write_colored("\u{21BB}", warning_color)?;
+                        fmt.write_colored(if unicode { "\u{21BB}" } else { "~" }, warning_color)?;
                     } else {
-                        fmt.write_muted("\u{25CB}")?;
+                        fmt.write_muted(if unicode { "\u{25CB}" } else { "-" })?;
                     }
                     fmt.write_raw(&format!(
                         " {} {} ({})",
@@ -2537,10 +2536,18 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
                         fmt.write_raw(&format!(" retries: {}", item.retry_count))?;
                         fmt.newline()?;
                     }
-                    if let Some(err) = &item.last_error {
+                    if item.last_outcome.as_deref() == Some("parked") {
                         fmt.write_muted("      ")?;
-                        fmt.write_raw(&format!(" error: {}", err))?;
+                        fmt.write_raw(" parked-with-reason: ")?;
+                        fmt.write_raw(item.last_reason.as_deref().unwrap_or("unspecified"))?;
                         fmt.newline()?;
+                    }
+                    if item.last_outcome.as_deref() != Some("parked") {
+                        if let Some(err) = &item.last_error {
+                            fmt.write_muted("      ")?;
+                            fmt.write_raw(&format!(" error: {}", err))?;
+                            fmt.newline()?;
+                        }
                     }
                 }
             }
@@ -4060,6 +4067,27 @@ fn ensure_team_project_registration_with_output(
             Ok(())
         }
         Err(failure) => {
+            let diagnostic = failure.to_string();
+            if failure.reason.contains("project_registration_conflict") {
+                if let Some(q) = queue.as_ref() {
+                    match q.park_team_rows_for_registration_conflict(
+                        &team_id,
+                        &diagnostic,
+                        CloudSyncerConfig::default().max_retries,
+                    ) {
+                        Ok(count) => tracing::info!(
+                            team_id = %team_id,
+                            parked_rows = count,
+                            "parked pending team rows behind project registration conflict"
+                        ),
+                        Err(error) => tracing::warn!(
+                            team_id = %team_id,
+                            error = %error,
+                            "could not annotate team rows behind project registration conflict"
+                        ),
+                    }
+                }
+            }
             tracing::error!(
                 team_id = %team_id,
                 canonical_id = %canonical_id,
@@ -4082,7 +4110,7 @@ fn ensure_team_project_registration_with_output(
             }
             Err(anyhow::anyhow!(
                 "Sync aborted: this project is not registered with your team, so team \
-                 memories and team pushes would silently do nothing.\n  {failure}"
+                 memories and team pushes would silently do nothing.\n  {diagnostic}"
             ))
         }
     }

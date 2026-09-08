@@ -260,7 +260,7 @@ impl SyncQueue {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count, last_error
+            SELECT id, entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count, last_error, last_outcome, last_reason, failed_client_version
             FROM sync_queue
             WHERE retry_count < ?1 AND (team_id IS NULL OR team_id = '')
               AND entity_type != 'knowledge_page'
@@ -294,7 +294,7 @@ impl SyncQueue {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count, last_error
+            SELECT id, entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count, last_error, last_outcome, last_reason, failed_client_version
             FROM sync_queue
             WHERE retry_count >= ?1 AND (team_id IS NULL OR team_id = '')
               AND entity_type != 'knowledge_page'
@@ -328,7 +328,7 @@ impl SyncQueue {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count, last_error
+            SELECT id, entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count, last_error, last_outcome, last_reason, failed_client_version
             FROM sync_queue
             WHERE retry_count < ?1 AND team_id = ?2
             ORDER BY created_at ASC, id ASC
@@ -364,7 +364,7 @@ impl SyncQueue {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count, last_error
+            SELECT id, entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count, last_error, last_outcome, last_reason, failed_client_version
             FROM sync_queue
             ORDER BY created_at DESC
             LIMIT ?1
@@ -402,6 +402,9 @@ impl SyncQueue {
                 .unwrap_or_else(|_| Utc::now()),
             retry_count: row.get(8)?,
             last_error: row.get(9)?,
+            last_outcome: row.get(10)?,
+            last_reason: row.get(11)?,
+            failed_client_version: row.get(12)?,
         })
     }
 }

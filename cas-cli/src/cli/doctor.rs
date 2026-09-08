@@ -4202,8 +4202,30 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .map(|(entity_type, count)| format!("{entity_type}: {count}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let registration_conflicts = cloud_queue_registration_conflicts(&conn);
     let remediation = "Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.";
     let rejections = cloud_queue_rejections(&conn);
+
+    if !registration_conflicts.is_empty() {
+        let parked = registration_conflicts
+            .iter()
+            .map(|(_, count, _)| *count)
+            .sum::<usize>();
+        let detail = registration_conflicts
+            .iter()
+            .map(|(entity_type, count, _)| format!("{entity_type}: {count}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let remedy = "Resolve with `cas cloud project set <registered-canonical-id>` or a cloud-owner alias, then run `cas cloud sync`; parked rows are not transport retries.";
+        return Check {
+            name: "cloud sync queue".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "{} queued content change(s) block purge-foreign ({breakdown}); {parked} pending-with-registration-conflict row(s) are parked-with-reason: {detail}. {remedy}",
+                pending.len()
+            ),
+        };
+    }
 
     if pending.is_empty() && rejections.is_empty() {
         Check {
@@ -4240,6 +4262,46 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
             ),
         }
     }
+}
+
+/// Pending rows annotated before a sync could attempt them because the cloud
+/// rejected the project registration. They remain retryable (`retry_count = 0`)
+/// but need identity repair, not a queue retry.
+fn cloud_queue_registration_conflicts(
+    conn: &rusqlite::Connection,
+) -> Vec<(String, usize, String)> {
+    let has_columns: bool = conn
+        .query_row(
+            "SELECT COUNT(*) = 2 FROM pragma_table_info('sync_queue') WHERE name IN ('last_outcome', 'last_reason')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_columns {
+        return Vec::new();
+    }
+
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT entity_type, COUNT(*), COALESCE(MAX(last_error), '')
+         FROM sync_queue
+         WHERE retry_count < 5
+           AND last_outcome = 'parked'
+           AND last_reason = 'project_registration_conflict'
+         GROUP BY entity_type
+         ORDER BY entity_type",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)? as usize,
+            row.get::<_, String>(2)?,
+        ))
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
 }
 
 /// Terminal queue rows the cloud itself refused, grouped by its reason.
@@ -5835,6 +5897,60 @@ mod tests {
             "a row with no cloud verdict is not a rejection: {}",
             check.message
         );
+    }
+
+    #[test]
+    fn doctor_queue_check_does_not_prescribe_retry_for_pending_registration_conflicts() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_outcome TEXT,
+                last_reason TEXT,
+                failed_client_version TEXT
+            );
+            INSERT INTO sync_queue
+                (id, entity_type, entity_id, operation, created_at, retry_count,
+                 last_error, last_outcome, last_reason)
+            VALUES
+                (1, 'task', 'task-a', 'upsert', '2026-09-01T00:00:00Z', 0,
+                 'project_registration_conflict: requested github.com/richards-llc/pulse-card conflicts with registered pulse-card; run cas cloud project set pulse-card or file an alias with the cloud owner',
+                 'parked', 'project_registration_conflict');
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            check.message.contains("pending-with-registration-conflict"),
+            "{}",
+            check.message
+        );
+        assert!(check.message.contains("parked-with-reason"), "{}", check.message);
+        assert!(
+            check
+                .message
+                .contains("cas cloud project set <registered-canonical-id>"),
+            "{}",
+            check.message
+        );
+        assert!(!check.message.contains("cas cloud queue --retry"), "{}", check.message);
     }
 
     #[test]

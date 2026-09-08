@@ -35,7 +35,9 @@ const TOOL_TRIGGER_TERM_CAP: usize = 24;
 /// Automatic hooks are on the user's interactive critical path. Semantic
 /// recall may spend at most this long waiting for the optional provider; a
 /// timeout is an explicit degradation to the always-local lexical channel.
-const HOOK_SEMANTIC_TIMEOUT: Duration = Duration::from_millis(400);
+// 2026-09-08 host measurement, ten authenticated calls: p50 354 ms,
+// p95 956 ms. Allow provider variance above p95 while keeping failure bounded.
+const HOOK_SEMANTIC_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Maximum authoritative rows whose cached vectors may be read and compared
 /// for one namespace during one hook. Candidate discovery uses bounded FTS /
@@ -46,6 +48,8 @@ const SEMANTIC_CANDIDATE_CAP_PER_NAMESPACE: usize = 32;
 /// absent. This keeps one noisy local match from crowding out the channel that
 /// carries most recall value while preserving exact task/file bindings.
 const LEXICAL_INJECTION_CAP: usize = 3;
+const QUERY_TERM_CAP: usize = 16;
+const HISTORY_COMMIT_INJECTION_CAP: usize = 1;
 
 /// A focused epic is an explicit domain signal from the factory session. A
 /// row that does not overlap that domain needs an unambiguously strong vector
@@ -441,6 +445,8 @@ struct RecallDecisionCandidate {
     relevance: f64,
     lexical_score: f64,
     semantic_score: Option<f64>,
+    lexical_match_count: usize,
+    recency_score: f64,
     structural_score: f64,
     role_score: f64,
     lexical_eligible: bool,
@@ -452,7 +458,7 @@ struct RecallDecisionCandidate {
 fn decision_trigger_terms(query: &RecallQuery) -> Vec<RecallTriggerTerm> {
     // Report only terms that can actually influence ranking. Previously this
     // omitted structural `project=` / `task=` terms even though query_terms()
-    // scored them, while listing title terms beyond the retriever's ten-term
+    // scored them, while listing title terms beyond the retriever's bounded term
     // budget. That made a noisy selection look better grounded than it was.
     let ranking_terms: HashSet<String> = query_terms(&query.canonical)
         .into_iter()
@@ -606,6 +612,8 @@ fn record_recall_decision_with_semantic(
                     relevance: candidate.relevance,
                     lexical_score: candidate.lexical_score,
                     semantic_score: candidate.semantic_score,
+                    lexical_match_count: candidate.lexical_match_count,
+                    recency_score: candidate.recency_score,
                     structural_score: candidate.structural_score,
                     role_score: candidate.role_score,
                     lexical_eligible: candidate.lexical_eligible,
@@ -870,13 +878,7 @@ impl RecallRetriever for SqliteRecallRetriever {
             .into_iter()
             .map(|row| local_candidate(row, query, &terms))
             .collect();
-        candidates.sort_by(|a, b| {
-            b.binding
-                .cmp(&a.binding)
-                .then_with(|| a.stale.cmp(&b.stale))
-                .then_with(|| b.relevance.total_cmp(&a.relevance))
-                .then_with(|| a.evidence_id.cmp(&b.evidence_id))
-        });
+        sort_candidates(&mut candidates);
         candidates.truncate(limit);
         candidates
     }
@@ -1007,13 +1009,7 @@ impl RecallRetriever for SemanticRecallRetriever {
             };
             candidates.push(candidate);
         }
-        candidates.sort_by(|a, b| {
-            b.binding
-                .cmp(&a.binding)
-                .then_with(|| a.stale.cmp(&b.stale))
-                .then_with(|| b.relevance.total_cmp(&a.relevance))
-                .then_with(|| a.evidence_id.cmp(&b.evidence_id))
-        });
+        sort_candidates(&mut candidates);
         candidates.truncate(limit);
         candidates
     }
@@ -1464,6 +1460,12 @@ fn read_surface(
         .map(|index| format!("lower({}) like ?{}", spec.text, index + 1))
         .collect::<Vec<_>>()
         .join(" or ");
+    // Rank the matching rows before the bounded discovery window. Sorting
+    // only by update time let refreshed weak rows evict exact current lessons.
+    let overlap_score = (0..terms.len())
+        .map(|index| format!("(lower(substr({}, 1, 480)) like ?{})", spec.text, index + 1))
+        .collect::<Vec<_>>()
+        .join(" + ");
     let team_index = terms.len() + 1;
     let limit_index = terms.len() + 2;
     let extra = spec
@@ -1472,7 +1474,7 @@ fn read_surface(
     let sql = format!(
         "select {}, {}, {}, {}, substr({}, 1, 480), {}, {}, {} from {} \
          where ({}) and ({} is null or {} = ?{}) and coalesce({}, '') != 'private' \
-         and ({}) order by {} desc, {} asc limit ?{}",
+         and ({}) order by ({}) desc, {} desc, {} asc limit ?{}",
         spec.id,
         spec.scope,
         spec.team,
@@ -1489,6 +1491,7 @@ fn read_surface(
         team_index,
         spec.share,
         term_predicate,
+        overlap_score,
         spec.revision,
         spec.id,
         limit_index,
@@ -1535,7 +1538,7 @@ fn query_terms(canonical: &str) -> Vec<String> {
     let mut terms = Vec::new();
     // The submitted turn is the reason this recall is happening.  Prioritize
     // it over durable task/epic metadata: the lexical retriever has a hard
-    // ten-term work budget, and putting request terms last made an active
+    // bounded term work budget, and putting request terms last made an active
     // supervisor task title silently consume that entire budget (cas-0337).
     // Preserve the remaining canonical context as a fallback after the turn.
     let mut lines: Vec<&str> = canonical
@@ -1562,7 +1565,7 @@ fn query_terms(canonical: &str) -> Vec<String> {
     }
 
     // A prompt with at least two content-bearing terms is already a strong
-    // lexical request.  Do not spend the remaining ten-term budget on an
+    // lexical request.  Do not spend the remaining bounded term budget on an
     // unrelated active task title: a title such as "cas serve mcp servers
     // spin" previously displaced the prompt's own signal and made a short
     // conversational turn look like a task lookup.  Metadata remains useful
@@ -1580,7 +1583,7 @@ fn query_terms(canonical: &str) -> Vec<String> {
                 continue;
             }
             terms.push(term);
-            if terms.len() == 10 {
+            if terms.len() == QUERY_TERM_CAP {
                 return terms;
             }
         }
@@ -1596,7 +1599,7 @@ fn terms_from_text(text: &str) -> Vec<String> {
         let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
         if is_content_bearing_term(&term) && !terms.contains(&term) {
             terms.push(term);
-            if terms.len() == 10 {
+            if terms.len() == QUERY_TERM_CAP {
                 break;
             }
         }
@@ -1671,6 +1674,7 @@ fn is_high_document_frequency_term(term: &str) -> bool {
         "after",
         "before",
         "between",
+        "because",
         "over",
         "under",
         "again",
@@ -2535,17 +2539,27 @@ impl RecallLedger {
     }
 }
 
+/// Commit hashes are supporting history, not ambient guidance. Exact task or
+/// file bindings retain priority; otherwise memory/rule cards get first use of
+/// the budget even when a generic commit has a large semantic or role score.
+fn is_history_commit(candidate: &EvidenceCandidate) -> bool {
+    candidate.surface == EvidenceSurface::History
+        && matches!(candidate.evidence_id.len(), 40 | 64)
+        && candidate
+            .evidence_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn sort_candidates(candidates: &mut [EvidenceCandidate]) {
     candidates.sort_by(|a, b| {
-        b.strong_session_signal
-            .cmp(&a.strong_session_signal)
-            .then_with(|| {
-                b.binding
-                    .cmp(&a.binding)
-                    .then_with(|| a.stale.cmp(&b.stale))
-                    .then_with(|| b.relevance.total_cmp(&a.relevance))
-                    .then_with(|| a.evidence_id.cmp(&b.evidence_id))
-            })
+        (is_history_commit(a) && !a.binding)
+            .cmp(&(is_history_commit(b) && !b.binding))
+            .then_with(|| b.strong_session_signal.cmp(&a.strong_session_signal))
+            .then_with(|| b.binding.cmp(&a.binding))
+            .then_with(|| a.stale.cmp(&b.stale))
+            .then_with(|| b.relevance.total_cmp(&a.relevance))
+            .then_with(|| a.evidence_id.cmp(&b.evidence_id))
     });
 }
 
@@ -3153,12 +3167,14 @@ pub(crate) fn render_packet(
     let mut injected = Vec::new();
     let cap = policy.injection_cap.min(delta.len());
     // Exact task/file bindings are complementary context, not a semantic
-    // replacement; keep the bounded lexical fallback beside them. Semantic
-    // evidence is the channel that suppresses pure-lexical rows.
+    // replacement; keep the bounded lexical fallback beside them. Three-term
+    // lexical matches remain useful alongside semantics: memories and rules
+    // do not necessarily have vectors in the semantic namespaces.
     let semantic_evidence_exists = delta
         .iter()
         .any(|candidate| candidate.semantic_score.is_some());
     let mut lexical_injected = 0usize;
+    let mut history_commits_injected = 0usize;
     let mut non_weak_injected = 0usize;
     let mut weak_lexical_injected = 0usize;
     // Stronger evidence gets first use of the packet budget. A second pass may
@@ -3176,6 +3192,12 @@ pub(crate) fn render_packet(
             }) {
                 if injected.len() == cap {
                     break;
+                }
+                if is_history_commit(candidate)
+                    && !candidate.binding
+                    && history_commits_injected >= HISTORY_COMMIT_INJECTION_CAP
+                {
+                    continue;
                 }
                 if query.conversational
                     && is_weak_lexical_only(candidate)
@@ -3196,7 +3218,8 @@ pub(crate) fn render_packet(
                 let lexical_only = !candidate.binding && candidate.semantic_score.is_none();
                 if lexical_only
                     && !candidate.strong_session_signal
-                    && (semantic_evidence_exists || lexical_injected == LEXICAL_INJECTION_CAP)
+                    && ((semantic_evidence_exists && candidate.lexical_match_count < 3)
+                        || lexical_injected == LEXICAL_INJECTION_CAP)
                 {
                     continue;
                 }
@@ -3214,6 +3237,9 @@ pub(crate) fn render_packet(
                 let card = render_card(&candidate);
                 if full.len() + 1 + card.len() + footer_reserve > byte_budget {
                     break;
+                }
+                if is_history_commit(&candidate) && !candidate.binding {
+                    history_commits_injected += 1;
                 }
                 full.push('\n');
                 full.push_str(&card);
@@ -3407,17 +3433,7 @@ pub(crate) fn retrieve_candidates(
         .filter(|candidate| authored_evidence.contains(&candidate.evidence_id))
         .count();
     candidates.retain(|candidate| !authored_evidence.contains(&candidate.evidence_id));
-    candidates.sort_by(|a, b| {
-        b.strong_session_signal
-            .cmp(&a.strong_session_signal)
-            .then_with(|| {
-                b.binding
-                    .cmp(&a.binding)
-                    .then_with(|| a.stale.cmp(&b.stale))
-                    .then_with(|| b.relevance.total_cmp(&a.relevance))
-                    .then_with(|| a.evidence_id.cmp(&b.evidence_id))
-            })
-    });
+    sort_candidates(&mut candidates);
     candidates.truncate(policy.candidate_cap);
     Some(RecallCandidates {
         candidates,
@@ -4526,6 +4542,109 @@ mod tests {
         assert_eq!(rows.candidates[0].evidence_id, "same-day-learning");
         assert!(rows.candidates[0].lexical_match_count >= 5);
         assert!(rows.candidates[0].recency_score > 0.0);
+    }
+
+    /// Exact production memory/query, with newer weak rows that used to evict
+    /// the learning before scoring. Dates move with the test, content does not.
+    #[test]
+    fn release_build_guard_live_store_replay() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "ambient_recall_fixtures/release_build_guard.json"
+        ))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let entries = crate::store::open_store_local(&root).unwrap();
+        let now = Utc::now();
+        entries
+            .add(&Entry {
+                id: fixture["memory_id"].as_str().unwrap().into(),
+                content: fixture["content"].as_str().unwrap().into(),
+                created: now,
+                ..Entry::default()
+            })
+            .unwrap();
+        for index in 0..32 {
+            entries
+                .add(&Entry {
+                    id: format!("newer-weak-{index}"),
+                    content: "release announcement instructions".into(),
+                    created: now,
+                    ..Entry::default()
+                })
+                .unwrap();
+        }
+        let conn = Connection::open(root.join("cas.db")).unwrap();
+        conn.execute(
+            "update entries set updated_at = ?1 where id like 'newer-weak-%'",
+            params![(now + chrono::TimeDelta::seconds(1)).to_rfc3339()],
+        )
+        .unwrap();
+        let request = RecallRequest {
+            prompt: fixture["prompt"].as_str().unwrap().into(),
+            ..Default::default()
+        };
+        for role in [RecallRole::Worker, RecallRole::Supervisor] {
+            let identity = identity(role);
+            let local = SqliteRecallRetriever::existing(&root).unwrap();
+            let mut commit = candidate(&"a".repeat(40), EvidenceScope::Project("project-a".into()));
+            commit.surface = EvidenceSurface::History;
+            commit.semantic_score = Some(0.99);
+            commit.relevance = 1.5;
+            let semantic = FixedRetriever {
+                calls: Cell::new(0),
+                rows: (0..4)
+                    .map(|index| {
+                        let mut row = commit.clone();
+                        row.evidence_id = format!("{index:040x}");
+                        row
+                    })
+                    .collect(),
+            };
+            for retrievers in [
+                vec![&local as &dyn RecallRetriever],
+                vec![&local as &dyn RecallRetriever, &semantic],
+            ] {
+                let rows = retrieve_candidates(&identity, &request, &retrievers).unwrap();
+                assert_eq!(
+                    rows.candidates[0].evidence_id,
+                    fixture["memory_id"].as_str().unwrap()
+                );
+                assert!(rows.candidates[0].lexical_match_count >= 3);
+                let query = RecallQuery::build(&identity, &request).unwrap();
+                let terms = query_terms(&query.canonical);
+                assert!(terms.iter().any(|term| term == "host"));
+                assert!(terms.iter().any(|term| term == "load"));
+                let (_, injected) =
+                    render_packet(&identity, &query, &rows, &mut RecallLedger::default()).unwrap();
+                assert_eq!(
+                    injected[0].evidence_id,
+                    fixture["memory_id"].as_str().unwrap()
+                );
+                assert!(injected.iter().filter(|row| is_history_commit(row)).count() <= 1);
+            }
+        }
+    }
+
+    #[test]
+    fn history_priority_preserves_bindings_and_non_commit_evidence() {
+        let mut guidance = candidate("memory", EvidenceScope::Global);
+        guidance.relevance = 0.3;
+        let mut commit = candidate(&"a".repeat(40), EvidenceScope::Global);
+        commit.surface = EvidenceSurface::History;
+        commit.relevance = 1.5;
+        let mut bound_commit = commit.clone();
+        bound_commit.evidence_id = "b".repeat(40);
+        bound_commit.binding = true;
+        let mut document = candidate("history-document", EvidenceScope::Global);
+        document.surface = EvidenceSurface::History;
+        let hash_named_memory = candidate(&"c".repeat(40), EvidenceScope::Global);
+        let mut rows = vec![commit, guidance, bound_commit, document, hash_named_memory];
+        sort_candidates(&mut rows);
+        assert!(rows[0].binding);
+        assert_eq!(rows.last().unwrap().evidence_id, "a".repeat(40));
+        assert!(!is_history_commit(&rows[1]));
+        assert!(!is_history_commit(&rows[2]));
     }
 
     #[test]

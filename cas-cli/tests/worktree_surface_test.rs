@@ -223,6 +223,8 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cleanup: None,
         clear: None,
         limit: None,
+        offset: None,
+        summary_mode: None,
         name: None,
         agent_type: None,
         parent_id: None,

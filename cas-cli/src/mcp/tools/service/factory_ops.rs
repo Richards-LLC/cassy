@@ -5229,7 +5229,8 @@ impl CasService {
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::core::task::lifecycle::close_ops::{
-            collect_epic_branch_statuses, render_epic_status_report_with_stack,
+            EPIC_STATUS_BUDGET, EpicStatusOptions, collect_epic_branch_statuses_with_options,
+            render_epic_status_collection,
         };
         use crate::store::open_task_store;
         use cas_types::TaskType;
@@ -5308,9 +5309,18 @@ impl CasService {
             )
         })?;
 
-        let mut statuses =
-            collect_epic_branch_statuses(&subtasks, parent_branch, &close_project_root);
-
+        let status_options = EpicStatusOptions {
+            offset: req.offset.unwrap_or(0),
+            limit: req.limit,
+            summary: req.summary.unwrap_or(false),
+            budget: EPIC_STATUS_BUDGET,
+        };
+        let mut collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            parent_branch,
+            &close_project_root,
+            status_options,
+        );
         // cas-aae6 (GH #110): an epic stacked on other unlanded epic branches
         // cannot land alone. Show that here, where the supervisor decides
         // merge order, rather than only in the creation message that scrolled
@@ -5345,7 +5355,7 @@ impl CasService {
         };
         if let Ok(agent_store) = crate::store::open_agent_store(&self.inner.cas_root) {
             if let Ok(agents) = agent_store.list(None) {
-                for status in &mut statuses {
+                for status in &mut collection.statuses {
                     status.dead_or_stale_assignee =
                         status.assignee.as_ref().is_some_and(|assignee| {
                             agents.iter().any(|agent| {
@@ -5361,7 +5371,7 @@ impl CasService {
             }
         }
         let report =
-            render_epic_status_report_with_stack(epic_id, parent_branch, &statuses, &stacked_on);
+            render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
 
         Ok(Self::success(report))
     }

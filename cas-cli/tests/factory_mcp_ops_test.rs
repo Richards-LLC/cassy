@@ -452,6 +452,9 @@ fn factory_req(action: &str) -> FactoryRequest {
         action: action.to_string(),
         id: None,
         count: None,
+        limit: None,
+        offset: None,
+        summary: None,
         worker_names: None,
         task_id: None,
         delivery_mode: None,
@@ -502,6 +505,8 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cleanup: None,
         clear: None,
         limit: None,
+        offset: None,
+        summary_mode: None,
         name: None,
         agent_type: None,
         parent_id: None,
@@ -5012,6 +5017,8 @@ fn coord_msg(
         cleanup: None,
         clear: None,
         limit: None,
+        offset: None,
+        summary_mode: None,
         name: None,
         agent_type: None,
         parent_id: None,
@@ -7594,6 +7601,19 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
             && status.contains("✓ All child factory branches are merged"),
         "status must evaluate the configured integration target, not the cosmetic epic branch: {status}"
     );
+
+    let mut summary_req = factory_req("epic_status");
+    summary_req.id = Some(epic.id.clone());
+    summary_req.limit = Some(1);
+    summary_req.offset = Some(0);
+    summary_req.summary = Some(true);
+    let summary = get_text(
+        &env.service
+            .factory(Parameters(summary_req))
+            .await
+            .expect("paged summary epic_status"),
+    );
+    assert!(summary.contains("View: summary") && summary.contains("Page: children 1–1 of 1"));
 
     std::fs::write(
         env.cas_root.join("config.toml"),

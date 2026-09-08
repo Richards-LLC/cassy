@@ -823,5 +823,102 @@ repo="$(new_fixture passing)"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1)"
 assert_all_pass "$output"
 
+# Whole gate executes the workspace complement only once; a focused nextest
+# diagnostic still executes the complete in-tree suite.
+repo="$(new_fixture suite-coverage)"
+: >"$tmp/cargo.log"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/coverage.log" 2>&1
+if grep -qF "nextest run --workspace --filterset binary_id(~component_output_test)" "$tmp/cargo.log" \
+    && ! grep -qxF 'nextest run --workspace' "$tmp/cargo.log" \
+    && [[ "$(grep -c '^nextest archive --workspace ' "$tmp/cargo.log")" == 1 ]] \
+    && grep -qF -- '--filterset not binary_id(~component_output_test)' "$tmp/cargo.log"; then
+    ok 'full gate builds one archive and runs complementary suite filters'
+else
+    bad "full gate duplicated or lost suite coverage: $(cat "$tmp/cargo.log")"
+fi
+: >"$tmp/cargo.log"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only nextest >"$tmp/diagnostic.log" 2>&1
+if grep -qxF 'nextest run --workspace' "$tmp/cargo.log"; then
+    ok 'focused nextest diagnostic retains whole-workspace execution'
+else
+    bad 'focused nextest diagnostic lost whole-workspace coverage'
+fi
+
+# Receipts from real fixture executions, never forged PASS to prove success.
+repo="$(new_fixture row-cache)"
+export CAS_RELEASE_GATE_CACHE_DIR="$tmp/row-cache"
+export CAS_RELEASE_GATE_LOG_DIR="$tmp/row-logs"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-first.log" 2>&1
+if [[ "$(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 20 ]] \
+    && [[ -s "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" ]] \
+    && grep -qE '^  timing: wall=[0-9]+\.[0-9]+s user=' "$tmp/cache-first.log"; then
+    ok 'every row retains wall/CPU timing and successful raw logs'
+else
+    bad 'row timing or successful logs missing'
+fi
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-second.log" 2>&1
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 8 ]]; then
+    ok 'unchanged full gate reuses eight eligible PASS receipts'
+else
+    bad "unchanged full gate did not reuse eligible rows: $(cat "$tmp/cache-second.log")"
+fi
+if awk -F '\t' '$1 ~ /scratch-base|epic-worktree|builtin-projections|working-tree/ && $7 == "REUSED" {bad=1} END {exit bad}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"; then
+    ok 'live preconditions, ledger regeneration and final cleanliness never reuse'
+else
+    bad 'a live precondition reused stale evidence'
+fi
+printf '// Rust-only fix\n' >>"$repo/cas-cli/tests/smoke.rs"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'fixture Rust fix'
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-rust.log" 2>&1
+if [[ "$(awk -F '\t' '$7 == "REUSED" {print $1}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == $'hub-web-dist-drift\nhub-web-visual-qa' ]]; then
+    ok 'Rust-only commit reuses web evidence and reruns all Rust-dependent rows'
+else
+    bad "Rust change cache invalidation failed: $(cat "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")"
+fi
+printf '// web change\n' >"$repo/hub-web/scripts/changed.mjs"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'fixture web fix'
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-web.log" 2>&1
+if ! grep -q REUSED "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"; then
+    ok 'web change invalidates web evidence and conservative Rust evidence'
+else
+    bad 'web change retained stale web evidence'
+fi
+# Corrupt, expired and future receipts are cache misses, not authorization.
+for bad_epoch in 1000000000 9999999999 malformed; do
+    for receipt in "$CAS_RELEASE_GATE_CACHE_DIR"/*; do
+        read -r key sha epoch status <"$receipt"
+        printf '%s %s %s PASS\n' "$key" "$sha" "$bad_epoch" >"$receipt"
+    done
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-invalid.log" 2>&1
+    if ! grep -q REUSED "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"; then
+        ok "cache rejects receipt epoch $bad_epoch"
+    else
+        bad "cache trusted receipt epoch $bad_epoch"
+    fi
+done
+# --only neither reads nor populates the full-gate cache.
+before="$(sha256sum "$CAS_RELEASE_GATE_CACHE_DIR"/*)"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only nextest >"$tmp/cache-only.log" 2>&1
+after="$(sha256sum "$CAS_RELEASE_GATE_CACHE_DIR"/*)"
+if [[ "$before" == "$after" ]] && ! grep -q REUSED "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"; then
+    ok 'diagnostic rows cannot read or modify full-gate row receipts'
+else
+    bad 'diagnostic row modified the authorization cache'
+fi
+# Environment mutations and failed fresh attempts cannot inherit old PASS.
+GATE_FIXTURE_DOCTEST_FAIL=1 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-env.log" 2>&1 && bad 'changed failing environment reused PASS'
+assert_named_failure doctests "$(cat "$tmp/cache-env.log")"
+# An uncommitted source edit must never be vouched for with old evidence.
+printf '// dirty edit\n' >>"$repo/cas-cli/tests/smoke.rs"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-dirty.log" 2>&1 && bad 'dirty tree authorized'
+if ! grep -q REUSED "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"; then
+    ok 'dirty tree cannot reuse prior PASS'
+else
+    bad 'dirty tree reused prior evidence'
+fi
+unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

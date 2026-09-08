@@ -38,6 +38,7 @@ pub mod duplicate_check;
 pub mod error;
 pub mod extraction;
 pub mod factory_auth_health;
+pub(crate) mod factory_build_guard;
 pub mod factory_context_reset;
 pub mod factory_isolation;
 pub mod factory_preflight;
@@ -155,7 +156,14 @@ pub(crate) mod test_support {
 
     #[test]
     fn test_env_guard_scrubs_ambient_cas_and_factory_environment() {
+        let ambient_build_guard =
+            crate::test_env_guard::AmbientEnvRestore::set("CAS_FACTORY_BUILD_GUARD", "inherit");
         let guard = TestEnvGuard::temp_home();
+        assert_eq!(
+            std::env::var("CAS_FACTORY_BUILD_GUARD").as_deref(),
+            Ok("off"),
+            "TestEnvGuard must replace, not inherit, the ambient build-guard value"
+        );
         assert!(
             std::env::vars_os().all(|(key, _)| {
                 let Some(key) = key.to_str() else {
@@ -173,7 +181,8 @@ pub(crate) mod test_support {
                 // its own tests there.
                 (!key.starts_with("CAS_")
                     || key == "CAS_ROOT"
-                    || key == crate::test_env_guard::AMBIENT_INIT_TIMEOUT_SECS)
+                    || key == crate::test_env_guard::AMBIENT_INIT_TIMEOUT_SECS
+                    || key == "CAS_FACTORY_BUILD_GUARD")
                     && !matches!(
                         key,
                         "CLAUDE_CONFIG_DIR"
@@ -194,6 +203,13 @@ pub(crate) mod test_support {
             guard.home().join(".cas"),
             "CAS_ROOT must be the hermetic root inside the temp HOME"
         );
+        drop(guard);
+        assert_eq!(
+            std::env::var("CAS_FACTORY_BUILD_GUARD").as_deref(),
+            Ok("inherit"),
+            "ambient build-guard value must be restored after the fixture"
+        );
+        drop(ambient_build_guard);
     }
 
     #[test]

@@ -38,6 +38,19 @@ impl Config {
         };
 
         match key {
+            // Factory build contention
+            "factory.max_concurrent_builders" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.max_concurrent_builders = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.max_concurrent_builders: {value}"
+                    ))
+                })?;
+            }
+            "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.cargo_build_jobs = value.to_string();
+            }
             // Sync section
             "sync.enabled" => {
                 self.sync.enabled = value

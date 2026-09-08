@@ -484,6 +484,20 @@ pub(crate) fn spawn_provision_receipt(prep: &crate::ui::factory::app::WorkerSpaw
     }
 }
 
+/// Receipt emitted after slow provisioning has completed. Unlike the initial
+/// provision receipt this can truthfully name the immutable snapshot and the
+/// hardlink counts observed in the new worker target.
+pub(crate) fn target_seed_receipt(
+    result: &crate::ui::factory::app::WorkerSpawnResult,
+) -> Option<String> {
+    result.target_seed.as_ref().map(|stats| {
+        format!(
+            "Cargo target seed: snapshot='{}'; hardlinked_files={}; hardlinked_bytes={}",
+            stats.snapshot, stats.files, stats.bytes
+        )
+    })
+}
+
 /// cas-7587: resolve `task_id` → its epic → that epic's branch.
 ///
 /// A task that *is* an epic resolves to itself. The branch is the one persisted
@@ -4090,6 +4104,7 @@ mod spawn_base_tests {
             cas_root: None,
             worktree: Some(worktree),
             worktree_created: true,
+            target_seed: None,
         };
 
         assert!(
@@ -4137,6 +4152,7 @@ mod spawn_base_tests {
             cas_root: None,
             worktree: Some(worktree),
             worktree_created: false,
+            target_seed: None,
         };
 
         assert!(
@@ -4165,6 +4181,7 @@ mod spawn_base_tests {
             cas_root: None,
             worktree: None,
             worktree_created: true,
+            target_seed: None,
         };
 
         assert!(
@@ -4204,6 +4221,7 @@ mod spawn_base_tests {
             cas_root: None,
             worktree: Some(worktree),
             worktree_created: true,
+            target_seed: None,
         };
 
         let error = cleanup_cancelled_spawn_worktree_with_manager(None, &mut result)

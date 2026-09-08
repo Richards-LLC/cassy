@@ -97,6 +97,15 @@ mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude mode
    Spawn the tier mix the ready backlog needs — one `spawn_workers` call per tier; rubric
    and routing in [model-selection.md](model-selection.md).
    Full parameter table in [reference.md](reference.md#spawn_workers-parameters).
+   **Build-load guard:** `spawn_workers` measures the one-minute host load and
+   live Cargo builders before queueing. It refuses a request that would push
+   past `[factory] max_concurrent_builders` (default `4`) or load above CPU
+   capacity; use `force=true` only for an intentional override. The receipt
+   records the effective per-worker `CARGO_BUILD_JOBS` (configure with
+   `[factory] worker_build_jobs`, with `cargo_build_jobs` accepted as an alias), `nice -n` priority,
+   load/cap measurements, and (after isolated provisioning) build-cache
+   snapshot hardlink counts. Refresh the quiescent baseline from the epic tip
+   with `scripts/refresh-worker-build-cache.sh` during a quiet window.
 2. Verify workers appear in TUI before assigning (stale DB records are not real workers)
 3. Assign tasks: `mcp__cas__task action=update id=<id> assignee=<worker>`
 4. Pin epic focus so the TUI shows it immediately: `mcp__cas__coordination action=focus_epic id=<epic-id>`. Without this, the TASKS/FACTORY panels stay empty until a worker's first `task action=start` on a subtask lets the panel infer the epic — and inference only fires once that subtask's `assignee` matches a live session agent (workers now get this for free: `task action=start` sets `assignee` automatically when unset, cas-6945). Clear with `action=focus_epic clear=true` when the epic wraps.

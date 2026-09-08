@@ -5,7 +5,9 @@ execution, and supervisor hand-off time. The saved evidence does **not** support
 "every gate takes 25 minutes": the second full 3.18.1 gate took 319 seconds.
 A further 952 seconds elapsed before its pipeline was launched. The final
 3.19.0 gate took 317 seconds, followed by a 600-second hand-off. Its queue
-phase took 970 seconds and its local publisher phase took 1,161 seconds.
+phase took 970 seconds and its local publisher phase took 1,161 seconds. The current-tip dry run
+passed in 1,169.714 seconds; an unchanged full retry with `--reuse` passed in
+37.530 seconds while preserving live checks.
 
 ## Evidence and limits
 
@@ -172,18 +174,23 @@ resource demands.
 
 ## Validation and measurement status
 
-At checkpoint `a99ee8ef12ae93ae57c4684a92cc44b2c0894509`, the gate self-test
-passed 71 cases and the train self-test passed 124, both with exit status zero.
-They cover complementary suite filters, zero-test rejection, cache invalidation,
-expiry, dirty trees, environment changes, web diagnostic forwarding, exact-SHA
-receipts and refusal of diagnostic receipts at the pipeline boundary. Terminal
-QA passed 11 captures; its 17 allowed findings concern existing path/command
-width and Unicode separators, not the new timing lines. Full production flavor
-drift validation and an uncontended before/after comparison remain pending.
+Current executable proof on measured commit
+`491d69f73bbba295044ed1ca0d33834ea202b565`: gate self-tests passed 74 cases,
+train self-tests passed 124, both exit zero. Terminal QA passed 11 captures,
+with 17 documented existing width/Unicode exceptions and no new timing
+exceptions; critique floor 4/5. The real warmup, baseline and optimized full
+gates all passed, including every builtin flavor-drift case in the archive
+suite. Each archive executed 9,112 tests successfully (90 excluded or skipped;
+the complementary snapshot row covers the archive's explicit exclusion).
+Nextest reported two leaky passing tests in warmup; those are retained in raw
+logs. Exact-SHA pipeline authorization remains unchanged and was not invoked
+by this measurement. The final report-only commit does not transfer the measured
+SHA's pipeline authority to a new SHA.
 
 ### Discarded concurrent-host attempt
 
-The attempted real measurement began at 19:05:07Z on the checkpoint above. Its
+The discarded measurement began at 19:05:07Z on the prior checkpoint
+`a99ee8ef12ae93ae57c4684a92cc44b2c0894509`. Its
 recorded process group was 3010712 and Cargo build concurrency was limited to
 four. The driver intended to warm once, then compare an instrumented full
 in-tree baseline with complementary execution and an unchanged `--reuse` run
@@ -202,19 +209,20 @@ under `~/.cas/artifacts/cas-d136/measurement/`. Both `validity.json` and
 These values must not be used to estimate normal row costs or savings. Its
 row-cache directory is also part of the invalid trial and must not seed a new
 performance experiment. The supervisor authorized a fresh trial at 20:57Z after confirming publication.
-Each trial must find zero host cargo/rustc processes and load1 below four,
-waiting at most ten minutes in thirty-second intervals; otherwise it is
-recorded as skipped for contention.
+The initial below-four load threshold never admitted a trial. At 21:06Z,
+the supervisor raised it to below twelve while retaining zero host cargo/rustc
+processes, because idle cas serve load is known issue #754. Each phase records
+the serve process count and lifetime CPU percentage. The driver retained its
+ten-minute waiting bound in thirty-second intervals. A missed window is
+recorded as skipped for contention; no retry was authorized.
 
 ### Remaining work and release follow-ups
 
-After release sequencing permits an exclusive measurement window, start a new
-evidence directory at the then-current candidate SHA, warm the private build
-artifacts, and compare baseline, optimized and reused full gates with identical
-resource limits. Preserve every row's raw output and nonzero-test counts. A
-failure is a failed proof even if its duration is shorter. Update this report
-with actual timings only after those conditions hold; do not substitute the
-fixture tests' elapsed time for production measurements.
+The post-publication comparison below completed on the current main-based
+candidate with identical four-job/four-test-thread limits and private target
+artifacts. The supervisor owns any further quiet-window rerun after the fleet
+drains. Background process counts varied, so the observed total difference is
+not an isolated causal estimate of duplicate-suite removal.
 
 The historical receipts already justify investigating hand-off automation and
 publication audit reuse. The next changes should remain separately reviewable:
@@ -233,8 +241,8 @@ publication audit reuse. The next changes should remain separately reviewable:
   it cannot remove actual runner queue time or justify bypassing queue checks.
 
 The implementation checkpoint delivers duplicate-suite removal, conservative
-row reuse and durable measurements. It does not yet establish the requested
-end-to-end latency reduction or deliver those larger follow-up optimizations.
+row reuse and durable measurements. The current dry comparison is below. It does not establish an end-to-end
+published-release latency reduction or deliver those larger optimizations.
 
 ### Follow-up implementation specifications
 
@@ -275,3 +283,64 @@ mismatch, damaged/missing artifact, failed audit, concurrent producer and absenc
 of remote mutation in producer mode. Potential overlap is bounded by 804s /
 1,161s of observed local publisher time; it is not a promised full saving, and
 the unchanged workflow still needs 174s / 172s to publish assets.
+
+## Current-tip dry comparison
+
+All trials use the immutable measured SHA above, Cargo jobs=4 and nextest
+threads=4. Warmup is excluded from the warm comparison. The baseline is a
+copy of the instrumented gate that restores only the full in-tree nextest
+selection; archive coverage and every other gate row remain identical. Raw
+proof is in `~/.cas/artifacts/cas-d136/measurement-serve-baseline/`, including
+`measure.py`, `baseline.patch`, phase logs, CPU TSVs, idle samples and terminal
+receipts. Each completed phase confirmed a clean, unchanged source tree.
+
+| Phase | Gate wall seconds | Result | Pre-trial load1 | Serve count / summed CPU % |
+| --- | ---: | --- | ---: | --- |
+| warmup | 1214.872 | PASS (exit 0) | 9.22 | 15 / 608.7 |
+| baseline | 1206.976 | PASS (exit 0) | 9.85 | 14 / 497.1 |
+| optimized | 1169.714 | PASS (exit 0) | 9.66 | 23 / 711.6 |
+| reuse | 37.53 | PASS (exit 0) | 11.34 | 19 / 388.0 |
+
+The serve percentages are `ps` lifetime CPU snapshots, not measured phase CPU.
+The baseline-to-optimized total decreased **37.262s (3.09%)** in this sample.
+The selected nextest row decreased from 198.193s to 57.004s (141.189s), while
+the archive row increased from 903.143s to 976.934s. Background serve counts
+changed from 14 to 23 and other workers remained active after admission; this
+is an observed comparison under the authorized admission rule, not proof of
+an uncontended production speedup. A one-test Rust fix still reruns the Rust
+rows; the demonstrated cache contract only permits unchanged web rows to
+survive it. No fixed 25-minute saving is claimed.
+
+Each executed cell below is **wall / user CPU / system CPU seconds**. Reused
+rows have zero execution time; driver wall time also includes cache lookup.
+
+| Row | warmup | baseline | optimized | reuse |
+| --- | ---: | ---: | ---: | ---: |
+| scratch-base | 0.024 / 0.006 / 0.016 | 0.020 / 0.010 / 0.012 | 0.024 / 0.006 / 0.018 | 0.036 / 0.012 / 0.011 |
+| epic-worktree-fresh | 0.019 / 0.007 / 0.016 | 0.017 / 0.010 / 0.012 | 0.016 / 0.009 / 0.011 | 0.019 / 0.006 / 0.018 |
+| epic-worktree-zig | 0.005 / 0.002 / 0.003 | 0.005 / 0.002 / 0.003 | 0.006 / 0.004 / 0.002 | 0.005 / 0.001 / 0.004 |
+| failure-log | 0.006 / 0.005 / 0.001 | 0.008 / 0.006 / 0.001 | 0.007 / 0.006 / 0.001 | 0.007 / 0.005 / 0.002 |
+| ancestor-proxy-config | 0.015 / 0.003 / 0.012 | 0.015 / 0.003 / 0.012 | 0.017 / 0.006 / 0.011 | 0.016 / 0.005 / 0.011 |
+| version-literals | 2.169 / 1.006 / 1.190 | 2.803 / 1.330 / 1.508 | 3.147 / 1.325 / 1.784 | 2.988 / 1.354 / 1.611 |
+| fixture-paths | 105.792 / 242.729 / 19.491 | 8.879 / 6.747 / 1.564 | 13.959 / 8.910 / 2.000 | REUSED |
+| workspace-tests | 63.954 / 129.234 / 13.611 | 10.831 / 19.620 / 8.151 | 12.291 / 21.573 / 8.429 | REUSED |
+| hub-web-dist-drift | 1.695 / 2.080 / 0.398 | 1.420 / 1.746 / 0.471 | 1.726 / 2.029 / 0.511 | REUSED |
+| hub-web-visual-qa | 19.132 / 16.872 / 3.161 | 19.093 / 16.601 / 3.193 | 21.074 / 19.069 / 3.488 | REUSED |
+| nextest | 80.655 / 228.745 / 37.611 | 198.193 / 208.327 / 122.205 | 57.004 / 56.674 / 22.589 | REUSED |
+| doctests | 7.644 / 6.016 / 1.359 | 7.789 / 5.840 / 1.364 | 23.064 / 17.203 / 3.698 | REUSED |
+| archive-mode | 886.650 / 295.024 / 134.323 | 903.143 / 288.636 / 132.775 | 976.934 / 367.931 / 154.942 | REUSED |
+| snapshot-portability | 21.336 / 9.331 / 2.998 | 26.958 / 12.507 / 3.764 | 25.534 / 10.789 / 3.623 | REUSED |
+| builtin-projections | 24.696 / 19.880 / 7.243 | 26.763 / 21.092 / 7.273 | 33.829 / 23.107 / 7.614 | 33.676 / 26.103 / 8.597 |
+| changelog-and-versions | 0.026 / 0.011 / 0.021 | 0.021 / 0.011 / 0.015 | 0.019 / 0.010 / 0.016 | 0.018 / 0.007 / 0.018 |
+| release-script | 0.007 / 0.002 / 0.005 | 0.004 / 0.003 / 0.001 | 0.004 / 0.002 / 0.002 | 0.004 / 0.002 / 0.002 |
+| procedure-guardrails | 0.025 / 0.004 / 0.020 | 0.016 / 0.006 / 0.011 | 0.018 / 0.003 / 0.016 | 0.015 / 0.006 / 0.010 |
+| working-tree | 0.019 / 0.009 / 0.016 | 0.017 / 0.008 / 0.014 | 0.017 / 0.008 / 0.014 | 0.016 / 0.008 / 0.012 |
+
+The unchanged full retry took **37.530s**, 96.89% below the 1,206.976s baseline
+(32.16× shorter in this sample), and reused 8 eligible PASS rows: `fixture-paths`, `workspace-tests`, `hub-web-dist-drift`, `hub-web-visual-qa`, `nextest`, `doctests`, `archive-mode`, `snapshot-portability`. Live preconditions, ledger regeneration and cleanliness ran again.
+
+The rerun launcher is retained as
+`~/.cas/artifacts/cas-d136/launch-comparison.py`. It requires a clean worktree
+and a new output directory, records its detached PID, derives the version from
+the current manifest and repeats the same four phases and admission rule.
+The exact command is in the task close notes; the supervisor owns execution.

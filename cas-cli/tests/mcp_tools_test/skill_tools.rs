@@ -605,3 +605,28 @@ async fn test_skill_update_validation_failure_is_atomic() {
         .snapshot_json
         .contains("Original description"));
 }
+
+#[tokio::test]
+async fn release_report_builtin_is_discoverable_after_project_sync() {
+    let (temp, service) = setup_cas();
+    cas::builtins::sync_all_builtins_for_project(cas_mux::SupervisorCli::Claude, temp.path())
+        .unwrap();
+    let shown = service
+        .cas_skill_show(Parameters(IdRequest {
+            id: "cas-release-report".into(),
+        }))
+        .await
+        .unwrap();
+    assert!(extract_text(shown).contains("# Release report"));
+    let listed = service
+        .cas_skill_list_all(Parameters(LimitRequest {
+            scope: "all".into(),
+            limit: Some(500),
+            sort: None,
+            sort_order: None,
+            team_id: None,
+        }))
+        .await
+        .unwrap();
+    assert!(extract_text(listed).contains("cas-release-report"));
+}

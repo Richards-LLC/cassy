@@ -51,6 +51,16 @@ Post order: user top-level → capture `ts` → user reply → dev top-level →
 Good: `Was → Codex ignored an allowed hook decision. Now → it receives the harness-specific empty allow response.`
 Lead with the user-visible before/after; an implementation inventory is not a release note.
 
+## Published version report
+
+After every published version release, before its Slack announcement, run
+`cas-release-report`. Commit the Markdown source, concept brief, standalone HTML,
+verified PDF and QA receipt under `docs/release-reports/`; link the HTML and PDF
+in the announcement draft. Verify continuous A4 and Letter pagination, source
+fidelity and the brief's rubric. Carry these post-publication artifacts into the
+next release-prep commit without rewriting the published tag. A branch merge
+without a published version continues to use the normal release-note draft.
+
 ## Artifact
 
 Save the postable draft as `docs/release-notes/<date>-<topic>-slack.md`

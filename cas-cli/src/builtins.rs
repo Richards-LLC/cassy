@@ -143,6 +143,34 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-supervisor.md"),
     },
     BuiltinFile {
+        path: "skills/cas-release-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-release-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/brief-template.md",
+        content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/default-tokens.json",
+        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/exemplar.md",
+        content: include_str!("builtins/skills/cas-release-report/references/exemplar.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/pdf.md",
+        content: include_str!("builtins/skills/cas-release-report/references/pdf.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/template.html",
+        content: include_str!("builtins/skills/cas-release-report/references/template.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/render.py",
+        content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
         content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
@@ -663,6 +691,34 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-supervisor.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-release-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/brief-template.md",
+        content: include_str!("builtins/codex/skills/cas-release-report/references/brief-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/default-tokens.json",
+        content: include_str!("builtins/codex/skills/cas-release-report/references/default-tokens.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/exemplar.md",
+        content: include_str!("builtins/codex/skills/cas-release-report/references/exemplar.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/pdf.md",
+        content: include_str!("builtins/codex/skills/cas-release-report/references/pdf.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/template.html",
+        content: include_str!("builtins/codex/skills/cas-release-report/references/template.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/render.py",
+        content: include_str!("builtins/codex/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -1213,6 +1269,34 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
         content: include_str!("builtins/grok/skills/cas-supervisor/references/filing-cas-bugs.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-release-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/brief-template.md",
+        content: include_str!("builtins/grok/skills/cas-release-report/references/brief-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/default-tokens.json",
+        content: include_str!("builtins/grok/skills/cas-release-report/references/default-tokens.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/exemplar.md",
+        content: include_str!("builtins/grok/skills/cas-release-report/references/exemplar.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/pdf.md",
+        content: include_str!("builtins/grok/skills/cas-release-report/references/pdf.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/template.html",
+        content: include_str!("builtins/grok/skills/cas-release-report/references/template.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/render.py",
+        content: include_str!("builtins/grok/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",

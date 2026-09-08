@@ -4148,6 +4148,46 @@ async fn test_clear_context_refuses_harness_without_verified_reset() {
     );
 }
 
+/// GH #751: clear_context is not a recovery action once Claude is repeatedly
+/// rejecting prompts for context size. Refuse before queueing another `/clear`
+/// and direct the operator to worker recycling.
+#[tokio::test]
+async fn test_clear_context_refuses_prompt_overflow_failure_loop() {
+    let (guard, fixture) = clear_context_fixture("lynx", "claude", "0");
+    std::fs::write(
+        fixture.projects.join("failed-session.jsonl"),
+        r#"{"idleReason":"failed","failureReason":"Prompt is too long"}
+"#,
+    )
+    .expect("write prompt-overflow transcript");
+    let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
+
+    let store = env.agent_store();
+    store
+        .register(&Agent::new(
+            "test-sup".to_string(),
+            "supervisor".to_string(),
+        ))
+        .expect("register supervisor");
+    store.register(&fixture.worker).expect("register worker");
+
+    let mut req = factory_req("clear_context");
+    req.target = Some("lynx".to_string());
+    let error = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("prompt-overflow failure loop must refuse clear_context");
+    let message = error.message.to_string();
+    assert!(message.contains("prompt-overflow failure loop"), "{message}");
+    assert!(message.contains("shutdown_workers"), "{message}");
+    assert!(message.contains("spawn_workers"), "{message}");
+    assert!(
+        env.prompt_queue().peek_all(10).expect("peek").is_empty(),
+        "failure-loop refusal must not queue another reset"
+    );
+}
+
 /// cas-dffe live measurement, codified: does typing the production reset
 /// command into a REAL `claude` produce the production post-condition?
 ///

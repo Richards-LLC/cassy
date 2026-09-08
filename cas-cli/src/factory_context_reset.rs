@@ -64,6 +64,10 @@ pub const CLEAR_COMMAND_MARKER: &str = "<command-name>/clear</command-name>";
 /// then the command itself), so a bounded read keeps this cheap even when the
 /// projects directory holds multi-megabyte transcripts.
 const TRANSCRIPT_HEAD_BYTES: usize = 64 * 1024;
+/// Prompt-overflow failures are emitted near the tail of the current
+/// transcript. Keep the scan bounded because clear_context is an operator
+/// recovery command and must remain responsive on multi-megabyte sessions.
+const TRANSCRIPT_FAILURE_TAIL_BYTES: u64 = 64 * 1024;
 
 /// Whether a queued prompt is the context-reset control command.
 pub fn is_context_reset_control(prompt: &str) -> bool {
@@ -186,6 +190,41 @@ pub fn transcript_records_clear(path: &Path) -> bool {
     };
     buf.truncate(read);
     String::from_utf8_lossy(&buf).contains(CLEAR_COMMAND_MARKER)
+}
+
+/// Whether a Claude transcript shows the harness in the terminal prompt-size
+/// failure loop reported by GH #751. The paired failure markers avoid treating
+/// an ordinary user sentence containing "prompt is too long" as a harness
+/// failure.
+pub fn transcript_has_prompt_overflow_failure(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(size) = file.metadata().map(|metadata| metadata.len()) else {
+        return false;
+    };
+    let start = size.saturating_sub(TRANSCRIPT_FAILURE_TAIL_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return false;
+    }
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    let lower = String::from_utf8_lossy(&buf).to_ascii_lowercase();
+    lower.contains("prompt is too long")
+        && (lower.contains("failurereason") || lower.contains("idlereason"))
+}
+
+/// Return the transcript that proves a worker is already in the prompt-size
+/// failure loop, if any. Existing transcripts are intentionally included: the
+/// caller invokes this before snapshotting and before queueing `/clear`.
+pub fn prompt_overflow_failure_evidence(dirs: &[PathBuf]) -> Option<PathBuf> {
+    snapshot_transcripts(dirs)
+        .into_iter()
+        .find(|path| transcript_has_prompt_overflow_failure(path))
 }
 
 /// Evidence that a context reset actually happened.
@@ -341,5 +380,31 @@ mod tests {
                 None => std::env::remove_var("CAS_CONTEXT_RESET_TIMEOUT_SECS"),
             }
         }
+    }
+
+    #[test]
+    fn prompt_overflow_failure_is_detected_from_bounded_transcript_tail() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let transcript = tmp.path().join("failed-session.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{{\"idleReason\":\"failed\",\"failureReason\":\"Prompt is too long\"}}\n"
+            ),
+        )
+        .unwrap();
+        assert!(transcript_has_prompt_overflow_failure(&transcript));
+        assert_eq!(
+            prompt_overflow_failure_evidence(&[tmp.path().to_path_buf()]),
+            Some(transcript)
+        );
+    }
+
+    #[test]
+    fn ordinary_prompt_text_does_not_trigger_overflow_guard() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let transcript = tmp.path().join("healthy-session.jsonl");
+        std::fs::write(&transcript, "{\"message\":\"Prompt is too long\"}\n").unwrap();
+        assert!(!transcript_has_prompt_overflow_failure(&transcript));
     }
 }

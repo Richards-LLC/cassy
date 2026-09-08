@@ -1463,3 +1463,92 @@ fn guard_detects_injected_drift() {
         "prefix normalization must not mask a changed action name"
     );
 }
+
+/// Release-report templates and Python helpers must be installed with the skill,
+/// including assets outside the general markdown/shell drift walker.
+#[test]
+fn release_report_bundle_is_complete_for_every_harness() {
+    let files = [
+        "SKILL.md",
+        "references/brief-template.md",
+        "references/default-tokens.json",
+        "references/exemplar.md",
+        "references/pdf.md",
+        "references/template.html",
+        "scripts/render.py",
+    ];
+    let opencode = skill_catalog_for_harness(SupervisorCli::OpenCode);
+    for file in files {
+        let path = format!("skills/cas-release-report/{file}");
+        let source = builtin_catalog::find(builtin_catalog::Flavor::Claude, &path);
+        assert!(!source.is_empty(), "empty report resource: {path}");
+        for twin in TWINS {
+            let mirror = builtin_catalog::find(catalog_for(twin), &path);
+            assert_eq!(canonicalize(source), canonicalize(mirror), "{path}");
+        }
+        let projected = opencode
+            .iter()
+            .find(|entry| entry.path == path)
+            .unwrap_or_else(|| panic!("missing OpenCode resource: {path}"));
+        assert_eq!(
+            canonicalize_opencode(source),
+            canonicalize_opencode(projected.content),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
+    let fixture = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
+    for (harness, directory) in [
+        (SupervisorCli::Claude, ".claude"),
+        (SupervisorCli::Codex, ".codex"),
+        (SupervisorCli::Grok, ".grok"),
+    ] {
+        let destination = fixture.path().join(directory);
+        cas::builtins::sync_all_builtins_for_project(harness, fixture.path()).unwrap();
+        let skill = destination.join("skills/cas-release-report");
+        for file in [
+            "SKILL.md",
+            "references/brief-template.md",
+            "references/default-tokens.json",
+            "references/exemplar.md",
+            "references/pdf.md",
+            "references/template.html",
+            "scripts/render.py",
+        ] {
+            assert!(skill.join(file).is_file(), "missing installed {file}");
+            println!("installed {directory}/skills/cas-release-report/{file}");
+        }
+        // Exercise installed resources, not the source copy, from a new project.
+        let source = fixture.path().join("release.md");
+        fs::write(
+            &source,
+            include_str!("../../docs/release-reports/2026-09-08-v3.19.0.md"),
+        )
+        .unwrap();
+        let output = fixture.path().join("release.html");
+        let rendered = Command::new("python3")
+            .arg(skill.join("scripts/render.py"))
+            .arg(&source)
+            .arg("--output")
+            .arg(&output)
+            .arg("--project-root")
+            .arg(fixture.path())
+            .output()
+            .expect("run installed release renderer");
+        assert!(
+            rendered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rendered.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&output)
+                .unwrap()
+                .matches("data-issue=\"")
+                .count(),
+            21
+        );
+    }
+}

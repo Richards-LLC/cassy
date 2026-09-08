@@ -9947,6 +9947,8 @@ mod spawn_lifecycle_tests {
     #[tokio::test]
     async fn spawn_response_surfaces_related_recall_for_active_epic_cas_0efb() {
         use cas_types::{Entry, Task, TaskType};
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
 
         let temp = tempfile::tempdir().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);

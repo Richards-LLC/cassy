@@ -100,6 +100,11 @@ impl TestEnvGuard {
             saved_cwd: None,
         };
         guard.scrub_ambient_cas_environment();
+        // Factory spawn tests must not inherit the runner's live load. The
+        // production probe remains enabled unless an explicit test fixture
+        // opts into this override; guard unit tests use evaluate() with
+        // injected snapshots and therefore still exercise refusal behavior.
+        guard.set("CAS_FACTORY_BUILD_GUARD", "off");
         guard
     }
 

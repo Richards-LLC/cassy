@@ -19,12 +19,16 @@ pub(crate) struct BuildGuardSnapshot {
     pub live_cargo_workers: usize,
     pub requested_workers: usize,
     pub max_concurrent_builders: usize,
+    pub disabled: bool,
 }
 
 impl BuildGuardSnapshot {
     /// A spawn is refused when it would leave more builders than configured,
     /// or when the host's one-minute load is already above CPU capacity.
     pub(crate) fn violations(&self) -> Vec<String> {
+        if self.disabled {
+            return Vec::new();
+        }
         let mut violations = Vec::new();
         if let Some(load) = self.load_1m
             && load > self.cpu_count as f64
@@ -61,7 +65,9 @@ impl BuildGuardSnapshot {
 
     pub(crate) fn receipt_notice(&self, forced: bool) -> String {
         let violations = self.violations();
-        let state = if violations.is_empty() {
+        let state = if self.disabled {
+            "disabled by CAS_FACTORY_BUILD_GUARD=off".to_string()
+        } else if violations.is_empty() {
             "within limits".to_string()
         } else if forced {
             format!("forced override ({})", violations.join("; "))
@@ -94,6 +100,7 @@ pub(crate) fn evaluate(
         live_cargo_workers,
         requested_workers,
         max_concurrent_builders,
+        disabled: false,
     }
 }
 
@@ -106,6 +113,16 @@ pub(crate) fn inspect(
     let cpu_count = std::thread::available_parallelism()
         .map(|parallelism| parallelism.get())
         .unwrap_or(1);
+    if build_guard_disabled_override() {
+        return BuildGuardSnapshot {
+            cpu_count,
+            load_1m: None,
+            live_cargo_workers: 0,
+            requested_workers,
+            max_concurrent_builders: config.max_concurrent_builders,
+            disabled: true,
+        };
+    }
     evaluate(
         cpu_count,
         one_minute_load(),
@@ -113,6 +130,12 @@ pub(crate) fn inspect(
         requested_workers,
         config.max_concurrent_builders,
     )
+}
+
+fn build_guard_disabled_override() -> bool {
+    std::env::var("CAS_FACTORY_BUILD_GUARD")
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("off"))
 }
 
 /// Render the effective worker build settings in the queued spawn receipt.
@@ -236,6 +259,20 @@ mod tests {
     fn healthy_snapshot_has_no_guard_violation() {
         let snapshot = evaluate(32, Some(1.0), 2, 1, 4);
         assert!(snapshot.violations().is_empty());
+    }
+
+    #[test]
+    fn disabled_override_neutralizes_live_probe_for_test_fixtures() {
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let snapshot = inspect(
+            Path::new("/nonexistent-cas-root"),
+            &FactoryConfig::default(),
+            1,
+        );
+        assert!(snapshot.disabled);
+        assert!(snapshot.violations().is_empty());
+        assert!(snapshot.receipt_notice(false).contains("disabled"));
     }
 
     #[test]

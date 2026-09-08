@@ -180,7 +180,10 @@ pub(crate) fn merge_request_delivery_decision(
                 status: task.status,
             };
         }
-        if task.deliverables.factory_branch_anchor.as_deref() != Some(&envelope.branch_tip) {
+        let current_anchor = task.deliverables.factory_branch_anchor.as_deref();
+        if current_anchor != Some(&envelope.branch_tip)
+            && !(current_anchor.is_some() && envelope.anchor_tip.as_deref() == current_anchor)
+        {
             return MergeRequestDelivery::SuppressInvalidatedAnchor {
                 current_anchor: task.deliverables.factory_branch_anchor.clone(),
             };
@@ -214,6 +217,16 @@ pub(crate) fn merge_request_anchor_invalidated_guidance(
          is no longer current (current anchor: {current}). Do not ask the supervisor to merge \
          the prior tip. Re-read the task with `task action=show id={task_id}` before sending \
          anything further about it."
+    )
+}
+
+/// Human-readable annotation for a request composed after a worker pushed past
+/// the task's parked anchor. The structured envelope carries the same values
+/// for transport-time validation; this sentence keeps the supervisor's view
+/// explicit about which tip is the current merge boundary.
+pub(crate) fn merge_request_anchor_advanced_note(previous: &str, current: &str) -> String {
+    format!(
+        "Cassy delivery note: anchor advanced from `{previous}` to `{current}`; this merge request is for the current branch tip."
     )
 }
 
@@ -1804,6 +1817,36 @@ mod tests {
             },
             "git reachability is positive evidence even when the task is unreadable"
         );
+    }
+
+    /// GH #744 / #743: a worker can push a new tip after the first
+    /// AwaitingMerge park and before the retry re-anchors the task. The
+    /// request explicitly reports the old anchor as its base, so suppressing
+    /// it as an invalidated cycle would strand the new tip.
+    #[test]
+    fn live_tip_advance_from_current_anchor_remains_deliverable() {
+        let task = merge_task(TaskStatus::AwaitingMerge, Some("anchor-tip"));
+        let envelope = MergeRequestEnvelope {
+            task_id: "cas-test".to_string(),
+            branch_tip: "new-tip".to_string(),
+            target_branch: "main".to_string(),
+            target_branch_tip: "base-tip".to_string(),
+            anchor_tip: Some("anchor-tip".to_string()),
+        };
+
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&task),
+                &envelope,
+                &MergeRequestDecision::Pending {
+                    target_tip: "base-tip".to_string(),
+                },
+            ),
+            MergeRequestDelivery::Deliver,
+            "a request composed for the current anchor's live successor is actionable"
+        );
+        assert!(merge_request_anchor_advanced_note("anchor-tip", "new-tip")
+            .contains("anchor advanced from `anchor-tip` to `new-tip`"));
     }
 
     /// GH #340: request_changes clears the anchor before a queued worker

@@ -737,13 +737,13 @@ impl CasService {
         // names the one AwaitingMerge task; only an explicit merge request is
         // eligible for revalidation and suppression.
         if role == "worker" && req.merge_request.unwrap_or(false) {
-            use crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha;
             use crate::mcp::tools::core::task::repo_context::{
                 resolve_repo_context, resolve_repo_context_from_local_root,
             };
             use crate::prompt_revalidation::{
                 MergeRequestDecision, MergeRequestEnvelope, attach_merge_request_envelope,
-                merge_landed_guidance, revalidate_merge_request, select_unambiguous_merge_task,
+                merge_landed_guidance, merge_request_anchor_advanced_note,
+                revalidate_merge_request, select_unambiguous_merge_task,
             };
             use crate::store::open_task_store_local;
             use cas_types::TaskStatus;
@@ -831,6 +831,19 @@ impl CasService {
                             )));
                         }
                         MergeRequestDecision::Pending { target_tip } => {
+                            let anchor_tip = recorded_anchor
+                                .as_deref()
+                                .filter(|anchor| *anchor != branch_tip)
+                                .map(str::to_string);
+                            if let Some(previous_anchor) = anchor_tip.as_deref() {
+                                message = format!(
+                                    "{message}\n\n{}",
+                                    merge_request_anchor_advanced_note(
+                                        previous_anchor,
+                                        &branch_tip,
+                                    )
+                                );
+                            }
                             message = attach_merge_request_envelope(
                                 &message,
                                 &MergeRequestEnvelope {
@@ -838,8 +851,7 @@ impl CasService {
                                     // Live tip; the anchor rides along only
                                     // when it disagrees, so the supervisor
                                     // sees the drift instead of inferring it.
-                                    anchor_tip: recorded_anchor
-                                        .filter(|anchor| anchor != &branch_tip),
+                                    anchor_tip,
                                     branch_tip,
                                     target_branch: repo.target_branch,
                                     target_branch_tip: target_tip,

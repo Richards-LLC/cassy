@@ -1900,8 +1900,9 @@ impl CasCore {
         parked.deliverables.merge_conflicted = merge_conflicted;
         // cas-4b3f/cas-3d37: retain the commit-time task anchor when present;
         // otherwise snapshot the factory tip the FIRST time this task parks.
-        // Anchors `run_factory_branch_merge_gate`'s later retries to THIS
-        // task's own work instead of a reused branch's live HEAD.
+        // A later AwaitingMerge retry may advance this anchor through
+        // `advance_awaiting_merge_anchor`, but never replaces the parked
+        // branch name that preserves task ownership across reassignment.
         if parked.deliverables.factory_branch_anchor.is_none() {
             parked.deliverables.factory_branch_anchor = factory_branch_anchor;
         }
@@ -2000,6 +2001,100 @@ impl CasCore {
         }
 
         self.record_close_rejection_activity(&task.id, reason, message);
+    }
+
+    /// Advance a parked task's delivery boundary when the worker has pushed
+    /// since the first AwaitingMerge park (GH #744 / #743). The first park's
+    /// anchor remains in `notes` for auditability; the persisted deliverable
+    /// must follow the current branch tip so the next merge request cannot be
+    /// mistaken for an invalidated prior cycle.
+    fn advance_awaiting_merge_anchor(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        factory_branch_anchor: Option<&str>,
+    ) {
+        let Some(factory_branch_anchor) = factory_branch_anchor else {
+            return;
+        };
+        let mut advanced = task.clone();
+        let now = chrono::Utc::now();
+        let Some(audit) = Self::apply_awaiting_merge_anchor_advance(
+            &mut advanced,
+            factory_branch_anchor,
+            now,
+        ) else {
+            return;
+        };
+
+        match task_store.update(&advanced) {
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %error,
+                    "failed to advance parked task delivery anchor after close retry"
+                );
+            }
+            Ok(persisted_at) => {
+                let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
+                let actor_name = self
+                    .open_agent_store()
+                    .ok()
+                    .and_then(|store| store.get(&actor).ok())
+                    .map(|agent| agent.name)
+                    .unwrap_or_else(|| actor.clone());
+                let occurrence =
+                    super::supervisor_push::occurrence_from_updated_at(persisted_at);
+                if let Err(error) = self.push_task_lifecycle(
+                    &task.id,
+                    &task.title,
+                    TaskStatus::AwaitingMerge,
+                    TaskStatus::AwaitingMerge,
+                    &actor_name,
+                    Some(&audit),
+                    super::supervisor_push::LifecycleTransition::AwaitingMerge,
+                    &occurrence,
+                ) {
+                    tracing::error!(
+                        task_id = %task.id,
+                        error = %error,
+                        "supervisor lifecycle push failed after AwaitingMerge anchor advance (task remains updated; replay outbox)"
+                    );
+                }
+            }
+        }
+    }
+
+    fn apply_awaiting_merge_anchor_advance(
+        task: &mut Task,
+        factory_branch_anchor: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<String> {
+        if task.status != TaskStatus::AwaitingMerge
+            || task.deliverables.factory_branch_anchor.as_deref()
+                == Some(factory_branch_anchor)
+        {
+            return None;
+        }
+
+        let previous_anchor = task
+            .deliverables
+            .factory_branch_anchor
+            .as_deref()
+            .unwrap_or("none")
+            .to_string();
+        task.deliverables.factory_branch_anchor = Some(factory_branch_anchor.to_string());
+        task.updated_at = now;
+        let timestamp = now.format("%Y-%m-%d %H:%M");
+        let audit = format!(
+            "[{timestamp}] AwaitingMerge delivery anchor advanced from `{previous_anchor}` to `{factory_branch_anchor}`; this tip is the current merge-request boundary. The prior anchor remains in this audit history."
+        );
+        task.notes = if task.notes.is_empty() {
+            audit.clone()
+        } else {
+            format!("{}\n\n{}", task.notes, audit)
+        };
+        Some(audit)
     }
 
     /// cas-a844: refresh `merge_conflicted` on an already-parked task when a
@@ -2987,16 +3082,16 @@ impl CasCore {
                     // event each time, unboundedly. Park (and record the
                     // rejection activity) only the first time a task
                     // transitions into `AwaitingMerge`; once it's already
-                    // parked, a retry gets the same rejection message with
-                    // no further state mutation.
+                    // parked, a retry gets the same rejection message unless
+                    // a new branch tip requires the delivery anchor to move.
+                    let anchor = task.assignee.as_deref().and_then(|assignee| {
+                        resolve_branch_sha(&close_project_root, &format!("factory/{assignee}"))
+                    });
                     if task.status != TaskStatus::AwaitingMerge {
                         // cas-4b3f: snapshot the factory branch's current
                         // tip so later retries anchor to THIS task's own
                         // commit range, not whatever HEAD drifts to if a
                         // second task starts on the same branch.
-                        let anchor = task.assignee.as_deref().and_then(|assignee| {
-                            resolve_branch_sha(&close_project_root, &format!("factory/{assignee}"))
-                        });
                         self.park_task_awaiting_merge(
                             task_store.as_ref(),
                             &task,
@@ -3005,12 +3100,26 @@ impl CasCore {
                             anchor,
                             merge_conflicted,
                         );
-                    } else if merge_conflicted && !task.deliverables.merge_conflicted {
-                        // Already parked (a retry), but a fresh preflight now
-                        // shows a genuine conflict or cannot be evaluated.
-                        // Refresh the flag so the worker exit remains open
-                        // without duplicating the park audit note.
-                        self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
+                    } else {
+                        // GH #744 / #743: a worker may push again after the
+                        // first park. Re-anchor before the retry returns its
+                        // merge-required refusal so the queued request and
+                        // supervisor status describe the current tip.
+                        self.advance_awaiting_merge_anchor(
+                            task_store.as_ref(),
+                            &task,
+                            anchor.as_deref(),
+                        );
+                        if merge_conflicted && !task.deliverables.merge_conflicted {
+                            // Already parked (a retry), but a fresh preflight now
+                            // shows a genuine conflict or cannot be evaluated.
+                            // Refresh the flag so the worker exit remains open
+                            // without duplicating the park audit note.
+                            self.mark_awaiting_merge_conflicted(
+                                task_store.as_ref(),
+                                &task.id,
+                            );
+                        }
                     }
 
                     return Ok(Self::tool_error(msg));
@@ -8316,6 +8425,62 @@ fn format_close_success_message(
         "Closed task: {task_id} - {task_title}{verification_note}{lease_msg}{worktree_msg}\
          {diff_stat_msg}{epic_close_msg}{commit_nudge_msg}{auto_unblock_msg}"
     )
+}
+
+#[cfg(test)]
+mod awaiting_merge_anchor_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn retried_awaiting_merge_close_advances_anchor_and_keeps_audit_history() {
+        let mut task = Task::new("cas-ab57".to_string(), "anchor retry".to_string());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some("first-tip".to_string());
+        task.deliverables.parked_branch = Some("factory/worker".to_string());
+        task.notes = "initial park".to_string();
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 9, 8, 14, 0, 0)
+            .single()
+            .expect("fixed timestamp");
+
+        let audit = CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now)
+            .expect("a pushed tip advances the parked anchor");
+
+        assert_eq!(
+            task.deliverables.factory_branch_anchor.as_deref(),
+            Some("second-tip")
+        );
+        assert_eq!(
+            task.deliverables.parked_branch.as_deref(),
+            Some("factory/worker"),
+            "the recovery branch name remains tied to the original park"
+        );
+        assert!(audit.contains("advanced from `first-tip` to `second-tip`"));
+        assert!(task.notes.contains("initial park"));
+        assert!(task.notes.contains("first-tip"));
+        assert!(task.notes.contains("second-tip"));
+        assert_eq!(task.updated_at, now);
+
+        assert!(
+            CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now).is_none(),
+            "repeating close at the same tip is idempotent"
+        );
+    }
+
+    #[test]
+    fn anchor_advance_ignores_non_awaiting_merge_tasks() {
+        let mut in_progress = Task::new("cas-ab57".to_string(), "active".to_string());
+        in_progress.status = TaskStatus::InProgress;
+        assert!(
+            CasCore::apply_awaiting_merge_anchor_advance(
+                &mut in_progress,
+                "new-tip",
+                chrono::Utc::now(),
+            )
+            .is_none()
+        );
+    }
 }
 
 #[cfg(test)]

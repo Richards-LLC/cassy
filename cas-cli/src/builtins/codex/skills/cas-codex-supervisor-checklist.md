@@ -69,7 +69,6 @@ Do not use `/cas-start`, `/cas-context`, or `/cas-end` — they are not availabl
 - [ ] Scope broken into discrete chunks if sprawling
 - [ ] No conflicts with existing architecture or prior decisions
 - [ ] User override logged if any challenge was overridden
-- [ ] Each user-facing task carries a non-empty `demo_statement` in the shape `As a <user>, I <do X> and see <Y>`; the configured label list is `qa.user_facing_labels` (defaults: `ui`, `hub`, `cli-ux`, `commander`, `frontend`)
 
 ## During Coordination
 
@@ -86,8 +85,7 @@ mcp__cs__memory action=remember title="..." content="..." tags="decision"
 
 ## Epic Planning Checklist
 
-- Every user-facing subtask has a non-empty `demo_statement`; `mcp__cs__task action=create` enforces this for configured labels. Internal/unlabeled tasks and epics are unaffected, and `supervisor_override=true` is reserved for an explicit supervisor exception.
-- Worker assignment briefs show the stored `demo_statement`; confirm it describes the observable outcome before dispatch.
+- User-facing subtasks with labels in `qa.user_facing_labels` (defaults `ui,hub,cli-ux,commander,frontend`) require `demo_statement` shaped `As a <user>, I <do X> and see <Y>`; epics/internal tasks and deliberate `supervisor_override=true` exceptions are exempt, and briefs include it.
 - Investigation tasks use `task_type=spike` with question-based acceptance criteria
 - When multiple approaches exist, a spike with a fit check comparison in `design_notes` precedes implementation tasks
 

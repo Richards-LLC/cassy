@@ -3,7 +3,7 @@
 //!
 //! Extends the existing `gh api graphql` acquisition path (`crate::gh_graphql`,
 //! factored out of the SessionStart triage banner) rather than adding a second
-//! GitHub client. One binary, one `issues.repo` key, one failure taxonomy.
+//! GitHub client. One binary, a dedicated history repository key, one failure taxonomy.
 //!
 //! # Incrementality, and why the cursor is a data timestamp
 //!
@@ -36,7 +36,8 @@
 //!
 //! # Boundaries, never silent partials (spec §8, §10.2)
 //!
-//! Absent `gh`, an unauthenticated `gh`, an unset `issues.repo`, a timeout, a
+//! Absent `gh`, an unauthenticated `gh`, an unset `history.github_repo` and
+//! GitHub origin, a timeout, a
 //! GraphQL error: each is returned as a named boundary, recorded in
 //! `history_index_state('github').last_error`, and surfaced by
 //! `cas history status`. None of them is an empty success, and none of them
@@ -872,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unconfigured_repo_is_a_boundary_before_any_call() {
+    fn an_unconfigured_history_repo_is_a_boundary_before_any_call() {
         let (_d, store) = store();
         let transport = Recorded::new(vec![], vec![]);
         let error = run_pass_with(&store, &transport, "not-a-repo", "/repo", false).unwrap_err();
@@ -880,7 +881,7 @@ mod tests {
         assert!(is_boundary(&error));
         assert!(
             transport.calls.borrow().is_empty(),
-            "a malformed issues.repo must never reach the network"
+            "a malformed history repository must never reach the network"
         );
     }
 

@@ -430,6 +430,15 @@ impl Config {
                     Some(value.trim().to_string())
                 };
             }
+            // History section
+            "history.github_repo" => {
+                let history = self.history.get_or_insert_with(HistoryConfig::default);
+                history.github_repo = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
             // Release section
             "release.claude_account_allowlist" => {
                 let release = self.release.get_or_insert_with(ReleaseConfig::default);

@@ -12,6 +12,7 @@ fn test_registry_has_all_sections() {
     assert!(sections.contains(&"hooks.plan_mode"));
     assert!(sections.contains(&"tasks"));
     assert!(sections.contains(&"issues"));
+    assert!(sections.contains(&"history"));
     assert!(sections.contains(&"dev"));
     assert!(sections.contains(&"notifications"));
     assert!(sections.contains(&"notifications.tasks"));

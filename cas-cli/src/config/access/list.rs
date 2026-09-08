@@ -9,6 +9,7 @@ impl Config {
         let daemon = self.daemon.clone().unwrap_or_default();
         let staging = self.staging.clone().unwrap_or_default();
         let issues = self.issues.clone().unwrap_or_default();
+        let history = self.history.clone().unwrap_or_default();
         let issue_repos = issues.resolved_registry();
         let notifications = self.notifications.clone().unwrap_or_default();
         let skill_validation = self.skill_validation.clone().unwrap_or_default();
@@ -244,6 +245,11 @@ impl Config {
             (
                 "issues.components.cloud".to_string(),
                 issue_repos.cloud,
+            ),
+            // History section
+            (
+                "history.github_repo".to_string(),
+                history.github_repo.unwrap_or_default(),
             ),
             // Notifications section
             (

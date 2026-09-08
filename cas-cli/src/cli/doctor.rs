@@ -3937,9 +3937,12 @@ fn is_missing_changelog_error(source: &str, error: &str) -> bool {
 fn format_history_source_error(source: &str, error: &str) -> String {
     if source.eq_ignore_ascii_case("github") {
         let lower = error.to_ascii_lowercase();
-        if lower.contains("issues.repo") || lower.contains("repo is not configured") {
+        if lower.contains("issues.repo")
+            || lower.contains("history.github_repo")
+            || lower.contains("repo is not configured")
+        {
             return format!(
-                "github: {}. Run `cas config set issues.repo <owner/repo>`",
+                "github: {}. Run `cas config set history.github_repo <owner/repo>` (or configure a GitHub origin)",
                 truncate(error, 100)
             );
         }

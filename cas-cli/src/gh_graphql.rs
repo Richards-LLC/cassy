@@ -10,7 +10,7 @@
 //!
 //! # What is shared, and what is deliberately not
 //!
-//! Shared: the `gh` binary, the `issues.repo` owner/name split and its
+//! Shared: the `gh` binary, the owner/name split for each configured source and its
 //! validation, the bounded-process discipline, and the classification of
 //! *why* a call failed.
 //!
@@ -38,10 +38,9 @@ use crate::bounded_process::{Deadline, run_command};
 /// `history_index_state.last_error` tells an operator what to do next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GhError {
-    /// `issues.repo` is unset or malformed. Following the precedent set by the
-    /// SessionStart detector (`session_hygiene.rs`), this reports and proposes
-    /// nothing — guessing a repository from the git remote would index the
-    /// wrong project's issues into this project's store.
+    /// `history.github_repo` is unset or malformed. This reports a boundary
+    /// when no GitHub origin can provide the default; `issues.repo` remains
+    /// reserved for Cassy-system bug intake.
     RepoNotConfigured,
     /// The `gh` binary is not installed or could not be executed.
     GhUnavailable,
@@ -59,7 +58,7 @@ impl std::fmt::Display for GhError {
         match self {
             Self::RepoNotConfigured => write!(
                 f,
-                "issues.repo is not configured; set it with `cas config set issues.repo owner/name`"
+                "history.github_repo is not configured; set it with `cas config set history.github_repo owner/name` or configure a GitHub origin"
             ),
             Self::GhUnavailable => write!(f, "the `gh` CLI is not available on PATH"),
             Self::CallFailed(detail) => write!(f, "gh api graphql failed: {detail}"),
@@ -73,7 +72,7 @@ impl std::fmt::Display for GhError {
 
 impl std::error::Error for GhError {}
 
-/// Validate and split `owner/name` from the shared `issues.repo` key.
+/// Validate and split `owner/name` from a GitHub source or issue-intake key.
 ///
 /// The character allowlist is the banner's, unchanged: it is what stops a
 /// crafted repo value from injecting extra argument-looking text.
@@ -247,7 +246,7 @@ mod tests {
     #[test]
     fn every_boundary_renders_an_actionable_message() {
         for (error, needle) in [
-            (GhError::RepoNotConfigured, "issues.repo"),
+            (GhError::RepoNotConfigured, "history.github_repo"),
             (GhError::GhUnavailable, "gh"),
             (GhError::CallFailed("401".into()), "401"),
             (GhError::TimedOut, "timed out"),

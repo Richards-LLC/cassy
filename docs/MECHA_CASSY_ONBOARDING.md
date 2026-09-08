@@ -38,18 +38,18 @@ cas integrate mecha-cassy --label DANIEL_LAPTOP
 ```
 
 The command calls `POST /api/clients` with the Cassy Cloud bearer. If the hub
-returns `409 {"error":"label_taken"}`, it retries once with the label plus
+returns `401` or `403`, the Cassy Cloud login is not authorized for the hub. If
+it returns `409 {"error":"label_taken"}`, it retries once with the label plus
 `_` and the first six characters of `~/.config/cas/device.json`'s device ID.
 The token and bypass are written to `~/.config/cas/credentials.env` with
 `0600` permissions, and the active login-shell profile sources that file.
 
-If the create response has no bypass, Cassy reads `GET /api/bypass`. When that
-route is unavailable it performs a read-only Vercel lookup, then falls back to
-one hidden bypass prompt. It never uses the Vercel PATCH endpoint, which rotates
-the shared secret.
-
-Both hub routes are currently absent. Until `mecha-cassy#5` is deployed, the
-command fails closed with the route name; it never mints a token locally.
+If the create response has no bypass, Cassy reads the live `GET /api/bypass`
+route with the same Cloud bearer. A Cloud outage is reported as HTTP `503`
+with `{"error":"cloud_unavailable"}`; this is not a local token-minting
+fallback. When the bypass route is unavailable for another reason, Cassy
+performs a read-only Vercel lookup, then falls back to one hidden bypass prompt.
+It never uses the Vercel PATCH endpoint, which rotates the shared secret.
 
 Start a new shell after onboarding so an already-running client or `cas serve`
 inherits the exported values.
@@ -120,11 +120,14 @@ widening its policy.
 The hub lives in `petra_stella_tools/mecha_cassy`. The client contract is:
 
 - `POST /api/clients` accepts `Authorization: Bearer <Cassy Cloud token>` and
-  `{"label":"…","connector":"slack"}`; it returns a bearer once.
+  `{"label":"…","connector":"slack"}`; it returns a bearer once, rejects
+  unauthorized callers with `401` or `403`, and reports a duplicate label as
+  `409 {"error":"label_taken"}`.
 - `GET /api/bypass` accepts the same authorization and returns the existing
-  bypass value.
-- Missing routes must remain a hard failure for token creation until
-  `mecha-cassy#5` is deployed.
+  bypass value; Cloud outages return `503 {"error":"cloud_unavailable"}`.
+- `DELETE /api/clients/<label>` revokes that machine label and its bearer.
+- `MECHA_CLOUD_TEAMS` is the hub's allowlist of Cassy Cloud team slugs;
+  production includes `petra-stella`.
 
 The hub should generate a random secret, append its `label:sha256` pair to the
 allowlist variable, and **redeploy**. An environment change does not alter an
@@ -138,6 +141,13 @@ other machine is disturbed.
 Rotating `MECHA_VERCEL_BYPASS` affects every machine at once: rotate it, then
 have everyone update their credentials file and restart their clients and
 `cas serve`.
+
+---
+
+## Consumer test channel
+
+Use `#cas-scratch` (`C0BUZEB4H3M`) for consumer validation of the hub tools. Keep
+test posts there rather than in release or internal announcement channels.
 
 ---
 

@@ -12,10 +12,10 @@ Endpoint `https://mecha-cassy.vercel.app/mcp/slack` exposes exactly:
 
 | Tool | Inputs | Returns |
 |---|---|---|
-| `mecha_read` | `channel`; `since` (RFC3339), `max_messages` (≤ 500, default 200), `mentions_only`, `include_threads`, `include_files`, `max_files` (≤ 50), `max_file_bytes` (≤ 4194304), `max_bytes` (≤ 8388608) | `channel`, `messages[]`, `files[]`, `counts`, `complete` |
-| `mecha_post` | `channel`, `kind`, and the fields for that kind: `message` → `text`; `file` → `file{filename,content,content_encoding,title?}`, `initial_comment?`; `reaction` → `message_id`, `reaction`, `action`. `message` and `file` also take `reply_to`. | `kind`, `channel`, `message{message_id,thread_id,permalink}` |
+| `mecha_read` | `channel`; `since` (RFC3339), `max_messages` (≤ 500, default 200), `mentions_only`, `include_threads`, `include_files`, `max_files` (≤ 50), `max_file_bytes` (≤ 4194304), `max_bytes` (≤ 8388608) | `channel`, `channels[]`, `messages[]`, `files[]`, `counts`, `complete` |
+| `mecha_post` | `channel`, `kind`, and the fields for that kind: `message` → `text`; `file` → `file{filename,content,content_encoding,title?}`, `initial_comment?`; `reaction` → `message_id`, `reaction`, `action`; `edit` → `message_id`, `text`; `delete` → `message_id`. `message` and `file` also take `reply_to`. | `kind`, `channel`, `message{message_id,thread_id,permalink}` |
 
-Every call answers `{"ok": true, "schema_version": 1, …}` or `{"ok": false, "error": {"code", "message", "retryable"}}`. There is no `ts` field and no separate upload tool.
+Every call answers `{"ok": true, "schema_version": 1, …}` or `{"ok": false, "error": {"code", "message", "retryable"}}`. There is no `ts` field and no separate upload tool. Every successful `mecha_read` envelope includes `channels`, an array of every channel the bot is in; each item is `{id, name, is_private}` and `channel` remains the resolved request. The `edit` and `delete` `mecha_post` kinds require a `message_id` and operate only on MechaCassy-authored messages; `edit` takes `text` and returns the same `message_id`, while `delete` returns the deleted `message_id`. Both keep `schema_version: 1`.
 
 A `mecha_post` receipt looks like this, with a per-kind block alongside it:
 

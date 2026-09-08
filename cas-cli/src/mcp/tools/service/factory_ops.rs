@@ -4386,6 +4386,14 @@ impl CasService {
                 ));
                 continue;
             }
+            if let Some(evidence) = reset::prompt_overflow_failure_evidence(&dirs) {
+                refusals.push(format!(
+                    "{}: refusing clear_context because the Claude harness is in a terminal prompt-overflow failure loop ({}). Use shutdown_workers + spawn_workers to recycle it; retrying /clear would add another failed prompt.",
+                    agent.name,
+                    evidence.display()
+                ));
+                continue;
+            }
             let before = reset::snapshot_transcripts(&dirs);
             pending.push(PendingReset {
                 agent,

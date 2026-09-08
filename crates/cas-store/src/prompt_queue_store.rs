@@ -1222,6 +1222,18 @@ const PROMPT_QUEUE_DELIVERY_STALLED_NOTIFIED_AT_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN delivery_stalled_notified_at TEXT;
 "#;
 
+/// Durable marker for a successful Agent-Teams inbox handoff that remains
+/// pending while Cassy waits for the recipient harness to surface it. The
+/// daemon-local probe is still useful for pane byte baselines, but this marker
+/// is what prevents a daemon restart from treating a previously written row as
+/// a first delivery (GH #751).
+const PROMPT_QUEUE_DEFERRED_INBOX_AT_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN deferred_inbox_at TEXT;
+"#;
+const PROMPT_QUEUE_DEFERRED_INBOX_BYTES_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN deferred_inbox_bytes INTEGER;
+"#;
+
 /// cas-7a01 (GH #155): which surfacing path wrote a receipt. NULL on rows
 /// receipted before this column existed — those all came from `inbox_poll`,
 /// the only writer at the time, but they are left NULL rather than
@@ -1547,6 +1559,18 @@ pub trait PromptQueueStore: Send + Sync {
     /// Persist one declined wake-gate pass and return its consecutive count.
     /// The count is per message, not per daemon process.
     fn record_wake_gate_decline(&self, prompt_id: i64, detail: &str) -> Result<u32>;
+
+    /// Read the durable wake-gate retry state for one pending message.
+    /// `wake_gate_declines` is the attempt budget and `wake_attempt_at` is the
+    /// spacing watermark; both survive daemon restarts.
+    fn wake_gate_state(&self, prompt_id: i64) -> Result<(u32, Option<DateTime<Utc>>) >;
+
+    /// Record that a Teams inbox write succeeded while the row stayed pending
+    /// for a later wake. This marker is idempotent and survives daemon restart.
+    fn record_deferred_inbox(&self, prompt_id: i64, pane_bytes: u64) -> Result<()>;
+
+    /// Return the durable deferred-inbox handoff timestamp and pane baseline.
+    fn deferred_inbox_state(&self, prompt_id: i64) -> Result<Option<(DateTime<Utc>, u64)>>;
 
     /// Count the messages `recipient` has NOT yet seen, without consuming them.
     ///
@@ -2470,6 +2494,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     "delivery_stalled_notified_at",
                     PROMPT_QUEUE_DELIVERY_STALLED_NOTIFIED_AT_MIGRATION,
                 ),
+                ("deferred_inbox_at", PROMPT_QUEUE_DEFERRED_INBOX_AT_MIGRATION),
+                (
+                    "deferred_inbox_bytes",
+                    PROMPT_QUEUE_DEFERRED_INBOX_BYTES_MIGRATION,
+                ),
             ] {
                 crate::shared_db::ensure_column(&conn, "prompt_queue", col, mig)?;
             }
@@ -2542,6 +2571,80 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 .flatten();
             Ok(declines.unwrap_or(0).try_into().unwrap_or(u32::MAX))
         })
+    }
+
+    fn wake_gate_state(&self, prompt_id: i64) -> Result<(u32, Option<DateTime<Utc>>)> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let row = conn
+            .query_row(
+                "SELECT wake_gate_declines, wake_attempt_at
+                 FROM prompt_queue WHERE id = ?",
+                params![prompt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0).unwrap_or(0),
+                        row.get::<_, Option<String>>(1).unwrap_or(None),
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((declines, at)) = row else {
+            return Ok((0, None));
+        };
+        let at = at
+            .as_deref()
+            .map(|raw| {
+                Self::parse_datetime(raw).ok_or_else(|| {
+                    StoreError::Parse(format!(
+                        "prompt_queue id={prompt_id}: corrupt/unparseable wake_attempt_at timestamp: {raw:?}"
+                    ))
+                })
+            })
+            .transpose()?;
+        Ok((declines.try_into().unwrap_or(u32::MAX), at))
+    }
+
+    fn record_deferred_inbox(&self, prompt_id: i64, pane_bytes: u64) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            conn.execute(
+                "UPDATE prompt_queue
+                 SET deferred_inbox_at = COALESCE(deferred_inbox_at, ?),
+                     deferred_inbox_bytes = COALESCE(deferred_inbox_bytes, ?)
+                 WHERE id = ? AND processed_at IS NULL",
+                params![Utc::now().to_rfc3339(), i64::try_from(pane_bytes).unwrap_or(i64::MAX), prompt_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn deferred_inbox_state(&self, prompt_id: i64) -> Result<Option<(DateTime<Utc>, u64)>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let row = conn
+            .query_row(
+                "SELECT deferred_inbox_at, deferred_inbox_bytes
+                 FROM prompt_queue WHERE id = ?",
+                params![prompt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0).unwrap_or(None),
+                        row.get::<_, Option<i64>>(1).unwrap_or(None),
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((at, bytes)) = row else {
+            return Ok(None);
+        };
+        let Some(at) = at else {
+            return Ok(None);
+        };
+        let at = Self::parse_datetime(&at).ok_or_else(|| {
+            StoreError::Parse(format!(
+                "prompt_queue id={prompt_id}: corrupt/unparseable deferred_inbox_at timestamp: {at:?}"
+            ))
+        })?;
+        Ok(Some((at, bytes.unwrap_or(0).try_into().unwrap_or(u64::MAX))))
     }
 
     fn enqueue(&self, source: &str, target: &str, prompt: &str) -> Result<i64> {
@@ -5639,6 +5742,32 @@ mod tests {
             "INSERT OR IGNORE: a re-observed delivery must leave the original \
              receipt instant untouched"
         );
+    }
+
+    #[test]
+    fn deferred_inbox_handoff_and_wake_budget_survive_store_reopen() {
+        let (temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-1", "dispatch", "session")
+            .unwrap();
+        let first = store.record_wake_gate_decline(id, "worker busy").unwrap();
+        assert_eq!(first, 1);
+        store.record_deferred_inbox(id, 1234).unwrap();
+
+        drop(store);
+        let reopened = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        reopened.init().unwrap();
+        assert_eq!(
+            reopened.wake_gate_state(id).unwrap().0,
+            1,
+            "a daemon restart must not reset the per-message retry budget"
+        );
+        let (at, bytes) = reopened
+            .deferred_inbox_state(id)
+            .unwrap()
+            .expect("successful deferred inbox handoff must be durable");
+        assert!(at <= Utc::now());
+        assert_eq!(bytes, 1234);
     }
 
     /// Read back the persisted receipt instant for one (message, recipient).

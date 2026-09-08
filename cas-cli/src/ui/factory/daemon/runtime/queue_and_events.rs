@@ -1180,6 +1180,62 @@ pub(super) fn lifecycle_redelivery_decision(
     }
 }
 
+/// GH #751: Claude's Agent-Teams inbox path must not redeliver a pending row
+/// on the daemon poll cadence. The budget is deliberately small because the
+/// fallback after three unsuccessful wake attempts is supervisor escalation,
+/// not an ever-growing Claude prompt.
+pub(super) const CLAUDE_REDELIVERY_MAX_ATTEMPTS: u32 = 3;
+pub(super) const CLAUDE_REDELIVERY_BASE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClaudeRedelivery {
+    Deliver,
+    Cooldown,
+    StopAcknowledged,
+    StopUndelivered,
+}
+
+fn claude_redelivery_delay(attempts: u32) -> std::time::Duration {
+    let exponent = attempts.saturating_sub(1).min(10);
+    let multiplier = 1_u64 << exponent;
+    std::time::Duration::from_secs(
+        CLAUDE_REDELIVERY_BASE_INTERVAL
+            .as_secs()
+            .saturating_mul(multiplier),
+    )
+}
+
+/// Decide whether a pending Claude inbox row may be re-offered.
+///
+/// Unlike [`lifecycle_redelivery_decision`], this consumes the durable
+/// `wake_gate_declines` and `wake_attempt_at` values. A daemon restart therefore
+/// cannot reset the budget and append the same supervisor dispatch again.
+pub(super) fn claude_redelivery_decision(
+    acked: bool,
+    attempts: u32,
+    last_attempt: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ClaudeRedelivery {
+    if acked {
+        return ClaudeRedelivery::StopAcknowledged;
+    }
+    if attempts >= CLAUDE_REDELIVERY_MAX_ATTEMPTS {
+        return ClaudeRedelivery::StopUndelivered;
+    }
+    let Some(last_attempt) = last_attempt else {
+        return ClaudeRedelivery::Deliver;
+    };
+    let Ok(elapsed) = (now - last_attempt).to_std() else {
+        return ClaudeRedelivery::Cooldown;
+    };
+    if elapsed >= claude_redelivery_delay(attempts) {
+        ClaudeRedelivery::Deliver
+    } else {
+        ClaudeRedelivery::Cooldown
+    }
+}
+
 /// cas-ceae (GH #124): which pending rows are governed by the cas-d732
 /// re-nudge cadence (one delivery per [`LIFECYCLE_RENUDGE_INTERVAL`], ack and
 /// consume terminal).
@@ -1447,6 +1503,16 @@ pub(super) fn deferred_inbox_outcome(
     }
 }
 
+/// A transcript reaction is a message-specific consumption signal. Keep the
+/// predicate separate from inbox-file and pane-byte heuristics so the GH #751
+/// path cannot accidentally consume on transport alone.
+pub(super) fn deferred_inbox_reaction_consumes(
+    written_earlier: bool,
+    reaction_observed: bool,
+) -> bool {
+    written_earlier && reaction_observed
+}
+
 /// cas-ef14 (GH #139): how long the daemon waits for a recipient's pane to show
 /// ANY output after its inbox copy was drained before concluding the harness
 /// ingested the message without surfacing it as a turn.
@@ -1477,6 +1543,9 @@ pub(crate) struct InboxDeferredWrite {
     pub(crate) bytes_at_write: u64,
     /// When the copy was written, for the observation window.
     pub(crate) written_at: std::time::Instant,
+    /// Wall-clock timestamp used to correlate the queued prompt with a
+    /// Claude transcript after a daemon restart.
+    pub(crate) delivered_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl FactoryDaemon {
@@ -2018,14 +2087,12 @@ impl FactoryDaemon {
     /// so the common path costs nothing.
     fn deferred_inbox_outcome_for(
         &self,
+        queue: &dyn cas_store::PromptQueueStore,
         row_id: i64,
         target: &str,
         from: &str,
         text: &str,
     ) -> DeferredInboxOutcome {
-        let Some(written) = self.inbox_deferred_writes.get(&row_id) else {
-            return DeferredInboxOutcome::Deliver;
-        };
         let Some(teams) = self.teams.as_ref() else {
             return DeferredInboxOutcome::Deliver;
         };
@@ -2040,6 +2107,39 @@ impl FactoryDaemon {
             != super::delivery::DeliveryChannel::TeamsInbox
         {
             return DeferredInboxOutcome::Deliver;
+        }
+        let written = if let Some(written) = self.inbox_deferred_writes.get(&row_id) {
+            written.clone()
+        } else {
+            // GH #751: reconstruct the daemon-local probe from the durable
+            // handoff marker. Without this branch a restarted daemon sees a
+            // drained row as a first delivery and appends another Claude
+            // inbox copy.
+            let Ok(Some((delivered_at, bytes_at_write))) = queue.deferred_inbox_state(row_id)
+            else {
+                return DeferredInboxOutcome::Deliver;
+            };
+            let elapsed = (chrono::Utc::now() - delivered_at)
+                .to_std()
+                .unwrap_or_default();
+            InboxDeferredWrite {
+                pane: pane_target.to_string(),
+                bytes_at_write,
+                written_at: std::time::Instant::now()
+                    .checked_sub(elapsed)
+                    .unwrap_or_else(std::time::Instant::now),
+                delivered_at,
+            }
+        };
+        // A Claude assistant record after the exact queued message is the
+        // harness reaction. It is stronger than inbox-file state or pane byte
+        // growth, and consumes the row even when the worker never calls
+        // message_ack (the GH #751 failure mode).
+        if deferred_inbox_reaction_consumes(
+            true,
+            self.claude_reaction_observed(pane_target, written.delivered_at, text),
+        ) {
+            return DeferredInboxOutcome::HarnessConsumed;
         }
         let inbox_target = if pane_target == self.app.supervisor_name() {
             "supervisor"
@@ -2068,6 +2168,41 @@ impl FactoryDaemon {
         )
     }
 
+    fn claude_reaction_observed(
+        &self,
+        pane_target: &str,
+        delivered_at: chrono::DateTime<chrono::Utc>,
+        prompt: &str,
+    ) -> bool {
+        let Ok(store) = open_agent_store(self.app.cas_dir()) else {
+            return false;
+        };
+        let Ok(agents) = store.list(None) else {
+            return false;
+        };
+        let Some(agent) = agents.into_iter().find(|agent| agent.name == pane_target) else {
+            return false;
+        };
+        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
+        if cli != cas_mux::SupervisorCli::Claude {
+            return false;
+        }
+        let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+            self.app.cas_dir(),
+            &agent,
+        ) else {
+            return false;
+        };
+        crate::mcp::tools::service::harness_observation::observations_after_delivery(
+            &path,
+            cli,
+            delivered_at,
+            prompt,
+        )
+        .reaction
+        .is_some()
+    }
+
     /// cas-b8ce (GH #176): stamp the per-recipient surfacing receipt for a row
     /// this daemon's own transport put in front of `recipient`.
     ///
@@ -2093,6 +2228,58 @@ impl FactoryDaemon {
                 "cas-b8ce: could not persist the transport surfacing receipt — \
                  the row may be re-served by the recipient's next inbox_poll"
             );
+        }
+    }
+
+    /// Tell the supervisor when a Claude inbox row exhausted its bounded
+    /// wake/redelivery budget. Keep the notice short: forwarding the original
+    /// dispatch is exactly how a prompt-overflow failure becomes another
+    /// prompt-overflow failure (GH #751).
+    fn notify_wake_starved_supervisor(
+        &self,
+        queue: &dyn cas_store::PromptQueueStore,
+        queued: &cas_store::QueuedPrompt,
+        pane_target: &str,
+        attempts: u32,
+    ) {
+        let summary: String = queued
+            .summary
+            .as_deref()
+            .unwrap_or("(no summary)")
+            .chars()
+            .take(240)
+            .collect();
+        let notice = format!(
+            "<system-notice>Claude worker wake failed: notification_id={}; target='{}'; attempts={}; summary='{}'. The bounded redelivery budget was exhausted without a transcript reaction. Reassign or recycle the worker; Cassy stopped retrying this dispatch to protect its context.</system-notice>",
+            queued.id, pane_target, attempts, summary
+        );
+        let summary_line = format!("Claude wake budget exhausted: {}", pane_target);
+        match queue.enqueue_with_summary(
+            "daemon",
+            self.app.supervisor_name(),
+            &notice,
+            Some(self.session_name.as_str()),
+            Some(&summary_line),
+        ) {
+            Ok(id) => {
+                super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
+                tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "wake_starved_escalated",
+                    message_id = queued.id,
+                    escalation_id = id,
+                    target_agent = %pane_target,
+                    attempts,
+                    "GH #751: exhausted Claude redelivery budget and escalated a bounded notice"
+                );
+            }
+            Err(error) => tracing::error!(
+                target: "cas::coordination",
+                message_id = queued.id,
+                target_agent = %pane_target,
+                %error,
+                "GH #751: failed to enqueue wake-budget escalation"
+            ),
         }
     }
 
@@ -3890,7 +4077,27 @@ impl FactoryDaemon {
             // re-nudge cadence gate then actually grants a re-offer, so the
             // line count is O(retries) and not O(poll ticks).
             let mut announce_drain_unsurfaced = false;
+            let pane_target = if target == "supervisor" {
+                self.app.supervisor_name()
+            } else {
+                target
+            };
+            let claude_inbox_target = self.teams.is_some()
+                && self.app.harness_for(pane_target) == cas_mux::SupervisorCli::Claude
+                && super::delivery::choose_channel(
+                    self.app.harness_for(pane_target),
+                    true,
+                ) == super::delivery::DeliveryChannel::TeamsInbox;
+            let durable_deferred_inbox = claude_inbox_target
+                && queue
+                    .deferred_inbox_state(queued.id)
+                    .ok()
+                    .flatten()
+                    .is_some();
+            let deferred_inbox_recorded = self.inbox_deferred_writes.contains_key(&queued.id)
+                || durable_deferred_inbox;
             match self.deferred_inbox_outcome_for(
+                queue.as_ref(),
                 queued.id,
                 target,
                 &inbox_source,
@@ -3985,6 +4192,60 @@ impl FactoryDaemon {
                 DeferredInboxOutcome::Deliver => {}
             }
 
+            // GH #751: Claude inbox retries use the durable per-message wake
+            // budget and exponential spacing. The older lifecycle cadence is
+            // intentionally left in place for lifecycle relays and other
+            // harnesses, but must not govern this Claude failure path.
+            let claude_redelivery_applies = claude_inbox_target && deferred_inbox_recorded;
+            if claude_redelivery_applies {
+                let (attempts, last_attempt) = queue
+                    .wake_gate_state(queued.id)
+                    .unwrap_or((0, None));
+                match claude_redelivery_decision(
+                    queued.acked_at.is_some(),
+                    attempts,
+                    last_attempt,
+                    chrono::Utc::now(),
+                ) {
+                    ClaudeRedelivery::Deliver => {}
+                    ClaudeRedelivery::Cooldown => {
+                        let _ = queue.record_pending_reason(
+                            queued.id,
+                            cas_store::PendingReason::GatedNotReady,
+                            Some(
+                                "Claude inbox redelivery cooldown — exponential spacing protects the worker context",
+                            ),
+                        );
+                        continue;
+                    }
+                    ClaudeRedelivery::StopAcknowledged => {
+                        let _ = queue.mark_suppressed(
+                            queued.id,
+                            Some("Claude inbox notification already acknowledged by the recipient"),
+                        );
+                        self.forget_row_delivery_state(queued.id);
+                        continue;
+                    }
+                    ClaudeRedelivery::StopUndelivered => {
+                        let detail = format!(
+                            "Claude inbox wake/redelivery budget exhausted after {attempts} attempts; escalated to supervisor"
+                        );
+                        let _ = queue.mark_undelivered_after_wake_declines(
+                            queued.id,
+                            Some(detail.as_str()),
+                        );
+                        self.notify_wake_starved_supervisor(
+                            queue.as_ref(),
+                            &queued,
+                            pane_target,
+                            attempts,
+                        );
+                        self.forget_row_delivery_state(queued.id);
+                        continue;
+                    }
+                }
+            }
+
             // cas-d732 (GH #119): a lifecycle row is deliberately not consumed
             // until it wakes the pane (cas-f02b), so on a 100ms poll it would
             // otherwise be re-written and re-nudged ten times a second — the
@@ -3998,14 +4259,14 @@ impl FactoryDaemon {
             // daemon has written to an inbox and left pending now carries the
             // same cadence contract: one delivery per nudge interval, ack and
             // consume terminal.
-            if row_needs_renudge_cadence(
+            if !claude_redelivery_applies && row_needs_renudge_cadence(
                 Self::row_is_supervisor_wake(
                     &wake_sender,
                     self.app.supervisor_name(),
                     &queued.source,
                     &queued.prompt,
                 ),
-                self.inbox_deferred_writes.contains_key(&queued.id),
+                deferred_inbox_recorded,
                 urgent_wake_is_unresolved(
                     queued.urgent,
                     self.lifecycle_redelivery_attempts.contains_key(&queued.id),
@@ -4673,6 +4934,14 @@ impl FactoryDaemon {
                                     queued.id,
                                     Some(detail.as_str()),
                                 );
+                                if claude_inbox_target {
+                                    self.notify_wake_starved_supervisor(
+                                        queue.as_ref(),
+                                        &queued,
+                                        &pane_target,
+                                        declines,
+                                    );
+                                }
                                 self.forget_row_delivery_state(queued.id);
                                 tracing::warn!(
                                     target: "cas::coordination",
@@ -5047,7 +5316,18 @@ impl FactoryDaemon {
                         pane: deferred_pane,
                         bytes_at_write,
                         written_at: std::time::Instant::now(),
+                        delivered_at: chrono::Utc::now(),
                     });
+                // GH #751: persist the successful write after the transport
+                // returned. A restarted daemon must recover this row as a
+                // pending handoff, not append a new Claude inbox copy.
+                if let Err(error) = queue.record_deferred_inbox(queued.id, bytes_at_write) {
+                    tracing::warn!(
+                        prompt_id = queued.id,
+                        %error,
+                        "failed to persist deferred Claude inbox handoff"
+                    );
+                }
                 self.lifecycle_redelivery_attempts
                     .entry(queued.id)
                     .or_insert_with(std::time::Instant::now);
@@ -8072,7 +8352,58 @@ mod tests {
     // cas-d732 (GH #119): one transition, one delivery per nudge interval
     // -----------------------------------------------------------------------
 
-    use super::{LIFECYCLE_RENUDGE_INTERVAL, LifecycleRedelivery, lifecycle_redelivery_decision};
+    use super::{
+        CLAUDE_REDELIVERY_BASE_INTERVAL, CLAUDE_REDELIVERY_MAX_ATTEMPTS, ClaudeRedelivery,
+        LIFECYCLE_RENUDGE_INTERVAL, LifecycleRedelivery, claude_redelivery_decision,
+        lifecycle_redelivery_decision,
+    };
+
+    #[test]
+    fn gh_751_non_acking_claude_dispatch_has_bounded_exponential_redelivery() {
+        let start = chrono::DateTime::parse_from_rfc3339("2026-09-08T14:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let before_first_retry = start + chrono::Duration::seconds(29);
+        assert_eq!(
+            claude_redelivery_decision(false, 0, None, start),
+            ClaudeRedelivery::Deliver
+        );
+        assert_eq!(
+            claude_redelivery_decision(false, 1, Some(start), before_first_retry),
+            ClaudeRedelivery::Cooldown,
+            "the first retry waits for the base spacing"
+        );
+        let second = start + chrono::Duration::seconds(CLAUDE_REDELIVERY_BASE_INTERVAL.as_secs() as i64);
+        assert_eq!(
+            claude_redelivery_decision(false, 1, Some(start), second),
+            ClaudeRedelivery::Deliver
+        );
+        assert_eq!(
+            claude_redelivery_decision(false, 2, Some(second), second + chrono::Duration::seconds(59)),
+            ClaudeRedelivery::Cooldown,
+            "the second retry doubles the spacing"
+        );
+        let third = second + chrono::Duration::seconds(60);
+        assert_eq!(
+            claude_redelivery_decision(false, 2, Some(second), third),
+            ClaudeRedelivery::Deliver
+        );
+        assert_eq!(
+            claude_redelivery_decision(
+                false,
+                CLAUDE_REDELIVERY_MAX_ATTEMPTS,
+                Some(third),
+                third + chrono::Duration::days(1),
+            ),
+            ClaudeRedelivery::StopUndelivered,
+            "a non-acking Claude worker must reach a terminal supervisor escalation"
+        );
+        assert_eq!(
+            claude_redelivery_decision(true, 999, Some(third), third),
+            ClaudeRedelivery::StopAcknowledged,
+            "an explicit ack always wins over the retry budget"
+        );
+    }
 
     /// The reported storm, simulated on the decision the daemon actually
     /// makes: a wake-eligible lifecycle row that never wakes the pane stays
@@ -8777,8 +9108,21 @@ mod tests {
 
     use super::{
         DeferredInboxOutcome, INBOX_DRAIN_TURN_WINDOW, UrgentWakeOutcome, deferred_inbox_outcome,
-        row_needs_renudge_cadence,
+        deferred_inbox_reaction_consumes, row_needs_renudge_cadence,
     };
+
+    #[test]
+    fn claude_reaction_consumes_without_explicit_message_ack() {
+        assert!(deferred_inbox_reaction_consumes(true, true));
+        assert!(
+            !deferred_inbox_reaction_consumes(true, false),
+            "a drained inbox without a transcript reaction must remain pending"
+        );
+        assert!(
+            !deferred_inbox_reaction_consumes(false, true),
+            "a reaction cannot consume a row Cassy never deferred"
+        );
+    }
 
     /// Outcome of replaying one pending queue row across a window of daemon
     /// polls while the recipient's harness drains its inbox on its own cadence.

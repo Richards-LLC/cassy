@@ -521,21 +521,27 @@ fn resolve_hub_url(
 
 fn verify_public_hub_ready(hub_url: &str) -> Result<()> {
     let health_url = Url::parse(hub_url)?.join("/v1/health")?;
-    let recovery = || {
-        format!(
-            "hub public URL {hub_url} is not reachable from this machine; the pairing code remains unclaimed and no invitation was created. Restore its HTTPS route (for Tailscale Serve, run `cas hub restart --tailscale-serve`) or pass a reachable `--hub-url`, then retry"
-        )
-    };
     let agent = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout(PUBLIC_HUB_READINESS_TIMEOUT)
         .build();
-    let response = agent
-        .get(health_url.as_str())
-        .call()
-        .with_context(recovery)?;
-    anyhow::ensure!(response.status() == 200, "{}", recovery());
-    let health: serde_json::Value = response.into_json().with_context(recovery)?;
+    let response = match agent.get(health_url.as_str()).call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(status, _)) => {
+            return Err(public_hub_readiness_error(hub_url, Some(status)));
+        }
+        Err(error) => {
+            return Err(error).with_context(|| public_hub_readiness_error(hub_url, None));
+        }
+    };
+    anyhow::ensure!(
+        response.status() == 200,
+        "{}",
+        public_hub_readiness_error(hub_url, Some(response.status()))
+    );
+    let health: serde_json::Value = response
+        .into_json()
+        .with_context(|| public_hub_readiness_error(hub_url, None))?;
     anyhow::ensure!(
         health
             .get("schema_version")
@@ -543,9 +549,21 @@ fn verify_public_hub_ready(hub_url: &str) -> Result<()> {
             == Some(1)
             && health.get("ready").and_then(serde_json::Value::as_bool) == Some(true),
         "{}",
-        recovery()
+        public_hub_readiness_error(hub_url, None)
     );
     Ok(())
+}
+
+fn public_hub_readiness_error(hub_url: &str, status: Option<u16>) -> anyhow::Error {
+    if status == Some(502) {
+        anyhow::anyhow!(
+            "hub public URL {hub_url} route exists but the backend is gone (HTTP 502); the pairing code remains unclaimed and no invitation was created. Restore its HTTPS route (for Tailscale Serve, run `cas hub restart --tailscale-serve`) or pass a reachable `--hub-url`, then retry"
+        )
+    } else {
+        anyhow::anyhow!(
+            "hub public URL {hub_url} is not reachable from this machine; the pairing code remains unclaimed and no invitation was created. Restore its HTTPS route (for Tailscale Serve, run `cas hub restart --tailscale-serve`) or pass a reachable `--hub-url`, then retry"
+        )
+    }
 }
 
 fn validate_hub_url(url: &str) -> Result<Url> {
@@ -863,6 +881,14 @@ fn relay_error_from_parts(status: Option<u16>, code: &str, description: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dead_backend_readiness_message_distinguishes_a_502_route() {
+        let error = public_hub_readiness_error("https://soundwave.example", Some(502)).to_string();
+        assert!(error.contains("route exists but the backend is gone"));
+        assert!(error.contains("HTTP 502"));
+        assert!(!error.contains("not reachable"));
+    }
 
     #[test]
     fn section_four_claim_fixture_is_byte_faithful() {
@@ -1293,6 +1319,7 @@ mod tests {
                 public_url: public_url.map(str::to_owned),
                 tailscale_serve_port: Some(443),
                 tailscale_cli: None,
+                tailscale_serve_target: None,
                 transport_warning: None,
             })
             .unwrap();

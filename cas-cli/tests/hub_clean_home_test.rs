@@ -204,11 +204,79 @@ esac
     );
 
     let plaintext_port = record["port"].as_u64().unwrap() as u16;
+    let first_backend_port = fs::read_to_string(home.path().join("mock-port"))
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    assert_ne!(first_backend_port, plaintext_port);
+
+    // A prior explicit Serve publication is durable operator intent. A plain
+    // restart must carry it forward even when the flag is omitted.
+    let plain_restart = cas_command(home.path(), bin.as_os_str())
+        .args(["hub", "restart", "--port", "0"])
+        .output()
+        .expect("restart trusted proxy hub without the Serve flag");
+    assert!(
+        plain_restart.status.success(),
+        "flagless trusted-proxy restart failed: {}",
+        String::from_utf8_lossy(&plain_restart.stderr)
+    );
+    let plain_status = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("status after flagless restart");
+    assert!(plain_status.status.success());
+    let plain_status: Value = serde_json::from_slice(&plain_status.stdout).unwrap();
+    assert_eq!(plain_status["record"]["public_url"], "https://clean-host.tail.example/");
     let trusted_backend_port = fs::read_to_string(home.path().join("mock-port"))
         .unwrap()
         .parse::<u16>()
         .unwrap();
     assert_ne!(trusted_backend_port, plaintext_port);
+    assert_ne!(trusted_backend_port, first_backend_port);
+    assert!(
+        TcpStream::connect(("127.0.0.1", first_backend_port)).is_err(),
+        "the pre-restart Serve shim listener survived the flagless restart"
+    );
+
+    // A route that no longer targets the live shim is a hard diagnostic
+    // failure, with the same finding surfaced by both hub status and doctor.
+    fs::write(home.path().join("mock-port"), "33427\n").unwrap();
+    let mismatch_status = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("inspect mismatched Serve route");
+    assert!(!mismatch_status.status.success());
+    let mismatch_status: Value = serde_json::from_slice(&mismatch_status.stdout).unwrap();
+    assert_eq!(mismatch_status["tailscale_serve"]["status"], "fail");
+    assert!(mismatch_status["tailscale_serve"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("does not match the live hub shim"));
+
+    let doctor = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "doctor", "--host"])
+        .output()
+        .expect("doctor mismatched Serve route");
+    assert!(doctor.status.success());
+    let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let transport_check = doctor
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "hub transport")
+        .expect("doctor hub transport row");
+    assert_eq!(transport_check["status"], "error");
+    assert!(transport_check["message"]
+        .as_str()
+        .unwrap()
+        .contains("does not match the live hub shim"));
+    fs::write(
+        home.path().join("mock-port"),
+        format!("{trusted_backend_port}\n"),
+    )
+    .unwrap();
+
     for (path, status) in [
         ("/", 200),
         ("/v1/health", 200),

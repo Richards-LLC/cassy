@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
+use serde::Serialize;
 
 use crate::ai_enrichment::HttpAiEnrichmentProvider;
 use crate::cli::Cli;
@@ -15,8 +16,8 @@ use crate::hub::{
     AuthStore, DEFAULT_HUB_PORT, DEFAULT_VIEWER_QUEUE_CAPACITY, DaemonConnector, HubProcessRecord,
     HubRuntimePaths, HubState, LocalSessionReadModel, MachineEventBus, MachineIdentityStore,
     MachineMetadata, MachineTransport, PreAuthAuthorizer, Scope, SessionCatalog,
-    SessionMultiplexer, TailscaleServeManager, TransportSecurity, load_cloud_device_suggestions,
-    router, spawn_attention_enricher, validate_control_bind,
+    SessionMultiplexer, TailscaleServeManager, TailscaleServeReceipt, TransportSecurity,
+    load_cloud_device_suggestions, router, spawn_attention_enricher, validate_control_bind,
 };
 
 const HUB_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -215,8 +216,92 @@ struct HubRestartSpec {
     tailscale_port: u16,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct HubTransportReport {
+    status: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actual_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remedy: Option<String>,
+}
+
+impl HubTransportReport {
+    fn ok(message: impl Into<String>) -> Self {
+        Self {
+            status: "ok".to_owned(),
+            message: message.into(),
+            expected_target: None,
+            actual_target: None,
+            remedy: None,
+        }
+    }
+
+    fn fail(
+        message: impl Into<String>,
+        expected_target: Option<String>,
+        actual_target: Option<String>,
+    ) -> Self {
+        Self {
+            status: "fail".to_owned(),
+            message: message.into(),
+            expected_target,
+            actual_target,
+            remedy: Some("Run `cas hub restart --tailscale-serve` to republish the route.".to_owned()),
+        }
+    }
+
+    fn unavailable(error: impl Into<String>) -> Self {
+        Self::fail(
+            format!("cannot inspect the CAS-created Tailscale Serve route: {}", error.into()),
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn is_failure(&self) -> bool {
+        self.status == "fail"
+    }
+
+    pub(crate) fn message_with_remedy(&self) -> String {
+        match &self.remedy {
+            Some(remedy) => format!("{}; {remedy}", self.message),
+            None => self.message.clone(),
+        }
+    }
+}
+
 fn default_hub_command() -> HubCommands {
     HubCommands::Status
+}
+
+fn resolved_tailscale_request(
+    requested: bool,
+    requested_port: u16,
+    owned_receipt: Option<&TailscaleServeReceipt>,
+) -> (bool, u16) {
+    if requested {
+        (true, requested_port)
+    } else if let Some(receipt) = owned_receipt {
+        (true, receipt.https_port)
+    } else {
+        (false, requested_port)
+    }
+}
+
+fn resolve_lifecycle_tailscale_request(
+    requested: bool,
+    requested_port: u16,
+    paths: &HubRuntimePaths,
+) -> Result<(bool, u16)> {
+    let receipt = TailscaleServeManager::new(paths.root()).owned_receipt()?;
+    Ok(resolved_tailscale_request(
+        requested,
+        requested_port,
+        receipt.as_ref(),
+    ))
 }
 
 fn tailscale_enabled(record: &HubProcessRecord) -> bool {
@@ -238,9 +323,13 @@ fn decide_live_start(
             && record
                 .tailscale_serve_port
                 .is_some_and(|port| port != tailscale_port));
+    let target_missing = tailscale_serve
+        && record.tailscale_serve_target.is_none()
+        && record.transport_warning.is_none();
     let flags_differ = record.bind != args.bind.to_string()
         || record.port != args.port
-        || tailscale_flags_differ;
+        || tailscale_flags_differ
+        || target_missing;
 
     if version_drift || flags_differ {
         HubStartDecision::Restart {
@@ -295,6 +384,12 @@ fn running_hub_satisfies_request(
         && record
             .tailscale_serve_port
             .is_some_and(|port| port != tailscale_port)
+    {
+        return false;
+    }
+    if tailscale_serve
+        && record.tailscale_serve_target.is_none()
+        && record.transport_warning.is_none()
     {
         return false;
     }
@@ -464,12 +559,12 @@ fn render_status(record: &HubProcessRecord, live: bool, binary_version: &str) ->
             .map(str::to_owned)
             .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
         format!(
-            "Cassy hub is running at {endpoint} (pid {}, version {}, binary: {binary_version})",
+            "Cassy hub is running at {endpoint}\n  pid {}, version {}, binary: {binary_version}",
             record.pid, record.version
         )
     } else {
         format!(
-            "Cassy hub is not running (last pid {} exited; started by {} at {}) \
+            "Cassy hub is not running (last pid {} exited)\n  started by {} at {} \
              (version {}, binary: {binary_version})",
             record.pid,
             record.launched_by.as_deref().unwrap_or("unknown"),
@@ -497,6 +592,12 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         HubCommands::Status => status(cli),
         HubCommands::Stop => stop(cli),
         HubCommands::Restart(serve) => {
+            let paths = HubRuntimePaths::default_for_user()?;
+            let (tailscale_serve, tailscale_port) = resolve_lifecycle_tailscale_request(
+                args.tailscale_serve,
+                args.tailscale_serve_port,
+                &paths,
+            )?;
             // `hub restart` is a stop-to-relaunch, so its stop carries the
             // intent: if a concurrent lifecycle command already produced a hub
             // with these flags, the restart's goal is met and waiting out the
@@ -507,8 +608,8 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
                 true,
                 Some(RelaunchIntent {
                     args: &serve,
-                    tailscale_serve: args.tailscale_serve,
-                    tailscale_port: args.tailscale_serve_port,
+                    tailscale_serve,
+                    tailscale_port,
                 }),
             )? {
                 StopOutcome::AlreadySatisfied(record) => {
@@ -523,7 +624,14 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
                     Ok(())
                 }
                 StopOutcome::Stopped => {
-                    start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
+                    start_with_output_resolved(
+                        &serve,
+                        cli,
+                        tailscale_serve,
+                        tailscale_port,
+                        true,
+                        cli_launch_origin(),
+                    )
                 }
             }
         }
@@ -551,6 +659,35 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
 }
 
 fn start_with_output_from(
+    args: &HubServeArgs,
+    cli: &Cli,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+    emit_output: bool,
+    launch_origin: HubLaunchOrigin,
+) -> Result<()> {
+    let paths = HubRuntimePaths::default_for_user()?;
+    validate_control_bind(
+        SocketAddr::new(args.bind, args.port),
+        TransportSecurity::Plaintext,
+    )?;
+    crate::hub::ensure_private_dir(paths.root())?;
+    let (tailscale_serve, tailscale_port) = resolve_lifecycle_tailscale_request(
+        tailscale_serve,
+        tailscale_port,
+        &paths,
+    )?;
+    start_with_output_resolved(
+        args,
+        cli,
+        tailscale_serve,
+        tailscale_port,
+        emit_output,
+        launch_origin,
+    )
+}
+
+fn start_with_output_resolved(
     args: &HubServeArgs,
     cli: &Cli,
     tailscale_serve: bool,
@@ -633,7 +770,7 @@ fn start_with_output_from(
                         }
                         return Ok(());
                     }
-                    return start_with_output_from(
+                    return start_with_output_resolved(
                         args,
                         cli,
                         tailscale_serve,
@@ -874,6 +1011,11 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
     validate_control_bind(addr, TransportSecurity::Plaintext)?;
     let paths = HubRuntimePaths::default_for_user()?;
     let _lock = paths.acquire_instance_lock()?;
+    let (tailscale_serve, tailscale_port) = resolve_lifecycle_tailscale_request(
+        tailscale_serve,
+        tailscale_port,
+        &paths,
+    )?;
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
     let auth = AuthStore::open(paths.root(), machine.id.clone())?;
     // Commander hub is machine-scoped, so its one AI-enrichment opt-in comes
@@ -925,7 +1067,10 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             launched_at: Some(launched_at.unwrap_or(started_at)),
             public_url: tailscale.as_ref().map(|receipt| receipt.public_url.clone()),
             tailscale_serve_port: tailscale.as_ref().map(|receipt| receipt.https_port),
+            // Keep the requested transport as durable lifecycle intent even
+            // when optional publication falls back to loopback with a warning.
             tailscale_cli: tailscale_serve.then(|| tailscale_manager.executable_display()),
+            tailscale_serve_target: tailscale.as_ref().map(|receipt| receipt.local_target.clone()),
             transport_warning,
         };
         if let Err(error) = paths.write_process_record(&record) {
@@ -1252,6 +1397,7 @@ fn status(cli: &Cli) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record()?;
     let live = record_is_live(&record);
+    let transport = hub_transport_report(&paths, Some(&record));
     if cli.json {
         println!(
             "{}",
@@ -1259,6 +1405,7 @@ fn status(cli: &Cli) -> Result<()> {
                 "running": live,
                 "record": record,
                 "binary": env!("CARGO_PKG_VERSION"),
+                "tailscale_serve": transport,
             })
         );
     } else {
@@ -1266,9 +1413,43 @@ fn status(cli: &Cli) -> Result<()> {
             "{}",
             render_status(&record, live, env!("CARGO_PKG_VERSION"))
         );
+        println!("{}", render_transport_status(&transport));
     }
     anyhow::ensure!(live, "cas hub is not running");
+    anyhow::ensure!(
+        !transport.is_failure(),
+        "Tailscale Serve check failed: {}",
+        transport.message_with_remedy()
+    );
     Ok(())
+}
+
+fn render_transport_status(report: &HubTransportReport) -> String {
+    if !report.is_failure() {
+        if report
+            .message
+            .starts_with("hub is loopback-only; Tailscale Serve publication")
+        {
+            return "Tailscale Serve: WARN - unavailable; hub remains loopback-only".to_owned();
+        }
+        return "Tailscale Serve: OK - loopback-only; no CAS-created route".to_owned();
+    }
+
+    let mut lines = if report.expected_target.is_some() && report.actual_target.is_some() {
+        vec!["Tailscale Serve: FAIL - route target differs from the live hub shim".to_owned()]
+    } else {
+        vec!["Tailscale Serve: FAIL - CAS ownership receipt is missing".to_owned()]
+    };
+    if let Some(expected) = &report.expected_target {
+        lines.push(format!("  expected: {expected}"));
+    }
+    if let Some(actual) = &report.actual_target {
+        lines.push(format!("  actual: {actual}"));
+    }
+    if let Some(remedy) = &report.remedy {
+        lines.push(format!("  remedy: {remedy}"));
+    }
+    lines.join("\n")
 }
 
 fn stop(cli: &Cli) -> Result<()> {
@@ -1465,7 +1646,7 @@ fn current_process_group_id() -> Option<u32> {
     }
 }
 
-pub(super) fn record_is_live(record: &HubProcessRecord) -> bool {
+pub(crate) fn record_is_live(record: &HubProcessRecord) -> bool {
     if !process_is_running(record.pid) {
         return false;
     }
@@ -1482,6 +1663,105 @@ pub(super) fn record_is_live(record: &HubProcessRecord) -> bool {
                 == Some(1)
                 && health.get("ready").and_then(|value| value.as_bool()) == Some(true)
         })
+}
+
+pub(crate) fn hub_transport_report(
+    paths: &HubRuntimePaths,
+    record: Option<&HubProcessRecord>,
+) -> HubTransportReport {
+    let manager = TailscaleServeManager::new(paths.root());
+    let receipt = match manager.owned_receipt() {
+        Ok(receipt) => receipt,
+        Err(error) => return HubTransportReport::unavailable(error.to_string()),
+    };
+    let Some(receipt) = receipt else {
+        if record.is_some_and(|record| {
+            record.tailscale_serve_target.is_some()
+                || (tailscale_enabled(record) && record.transport_warning.is_none())
+        }) {
+            return HubTransportReport::fail(
+                "the hub record advertises Tailscale Serve but its CAS ownership receipt is missing",
+                record.and_then(|record| record.tailscale_serve_target.clone()),
+                None,
+            );
+        }
+        if let Some(warning) = record.and_then(|record| record.transport_warning.as_deref()) {
+            return HubTransportReport::ok(format!(
+                "hub is loopback-only; Tailscale Serve publication was unavailable: {warning}"
+            ));
+        }
+        return HubTransportReport::ok(
+            "hub is loopback-only; no CAS-created Tailscale Serve route is recorded",
+        );
+    };
+    let live = record.is_some_and(record_is_live);
+    let handlers = match manager.serve_handlers(receipt.https_port) {
+        Ok(handlers) => handlers,
+        Err(error) => return HubTransportReport::unavailable(error.to_string()),
+    };
+    classify_tailscale_serve(record, live, Some(&receipt), &handlers)
+}
+
+fn classify_tailscale_serve(
+    record: Option<&HubProcessRecord>,
+    live: bool,
+    receipt: Option<&TailscaleServeReceipt>,
+    handlers: &[(String, String)],
+) -> HubTransportReport {
+    let Some(receipt) = receipt else {
+        return HubTransportReport::ok(
+            "hub is loopback-only; no CAS-created Tailscale Serve route is recorded",
+        );
+    };
+    let expected = record
+        .and_then(|record| record.tailscale_serve_target.clone())
+        .unwrap_or_else(|| receipt.local_target.clone());
+    let actual = actual_serve_target(handlers);
+
+    if !live
+        || !record.is_some_and(tailscale_enabled)
+        || record
+            .and_then(|record| record.tailscale_serve_target.as_deref())
+            != Some(receipt.local_target.as_str())
+    {
+        return HubTransportReport::fail(
+            format!(
+                "CAS-created Tailscale Serve route targets {}, but the current hub does not own a live Serve shim",
+                actual.as_deref().unwrap_or("no handler")
+            ),
+            Some(expected),
+            actual,
+        );
+    }
+
+    let expected_handlers = vec![("/".to_owned(), expected.clone())];
+    if handlers != expected_handlers {
+        return HubTransportReport::fail(
+            format!(
+                "Tailscale Serve route target {} does not match the live hub shim {expected}",
+                actual.as_deref().unwrap_or("no handler")
+            ),
+            Some(expected),
+            actual,
+        );
+    }
+
+    HubTransportReport::ok(format!(
+        "Tailscale Serve route targets the live hub shim at {expected}"
+    ))
+}
+
+fn actual_serve_target(handlers: &[(String, String)]) -> Option<String> {
+    if handlers.len() == 1 && handlers[0].0 == "/" {
+        return Some(handlers[0].1.clone());
+    }
+    (!handlers.is_empty()).then(|| {
+        handlers
+            .iter()
+            .map(|(path, target)| format!("{path} -> {target}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
 }
 
 #[cfg(test)]
@@ -1503,8 +1783,64 @@ mod tests {
             public_url: tailscale_serve_port.map(|port| format!("https://hub.example:{port}")),
             tailscale_serve_port,
             tailscale_cli: tailscale_serve_port.map(|_| "tailscale".to_owned()),
+            tailscale_serve_target: tailscale_serve_port
+                .map(|port| format!("http://127.0.0.1:{port}")),
             transport_warning: None,
         }
+    }
+
+    #[test]
+    fn flagless_lifecycle_inherits_the_owned_serve_port() {
+        let receipt = TailscaleServeReceipt {
+            schema_version: 1,
+            public_url: "https://hub.example/".to_owned(),
+            local_target: "http://127.0.0.1:43813".to_owned(),
+            https_port: 8443,
+            created_by_cas: true,
+            executable: "tailscale".to_owned(),
+            status_before: serde_json::json!({}),
+            status_after: serde_json::json!({}),
+            recorded_at: "2026-09-08T00:00:00Z".to_owned(),
+        };
+
+        assert_eq!(
+            resolved_tailscale_request(false, 443, Some(&receipt)),
+            (true, 8443)
+        );
+        assert_eq!(resolved_tailscale_request(true, 9443, Some(&receipt)), (true, 9443));
+        assert_eq!(resolved_tailscale_request(false, 443, None), (false, 443));
+    }
+
+    #[test]
+    fn serve_report_fails_when_route_target_does_not_match_live_shim() {
+        let mut live = record(env!("CARGO_PKG_VERSION"), DEFAULT_HUB_PORT, Some(443));
+        live.tailscale_serve_target = Some("http://127.0.0.1:43813".to_owned());
+        let receipt = TailscaleServeReceipt {
+            schema_version: 1,
+            public_url: "https://hub.example/".to_owned(),
+            local_target: "http://127.0.0.1:43813".to_owned(),
+            https_port: 443,
+            created_by_cas: true,
+            executable: "tailscale".to_owned(),
+            status_before: serde_json::json!({}),
+            status_after: serde_json::json!({}),
+            recorded_at: "2026-09-08T00:00:00Z".to_owned(),
+        };
+
+        let report = classify_tailscale_serve(
+            Some(&live),
+            true,
+            Some(&receipt),
+            &[("/".to_owned(), "http://127.0.0.1:33427".to_owned())],
+        );
+        assert_eq!(report.status, "fail");
+        assert!(report.message.contains("does not match the live hub shim"));
+        assert_eq!(report.expected_target.as_deref(), Some("http://127.0.0.1:43813"));
+        assert_eq!(report.actual_target.as_deref(), Some("http://127.0.0.1:33427"));
+        assert!(report
+            .remedy
+            .as_deref()
+            .is_some_and(|remedy| remedy.contains("cas hub restart --tailscale-serve")));
     }
 
     #[test]
@@ -1711,10 +2047,9 @@ mod tests {
 
         let rendered = render_status(&stale, false, "3.7.7");
 
+        assert!(rendered.contains("not running (last pid 42 exited)"), "{rendered}");
         assert!(
-            rendered.contains(
-                "not running (last pid 42 exited; started by update at 2026-09-01T12:34:56Z)"
-            ),
+            rendered.contains("started by update at 2026-09-01T12:34:56Z"),
             "{rendered}"
         );
     }

@@ -495,6 +495,41 @@ fn issues_repo_is_project_local_config_with_no_inferred_default() {
 }
 
 #[test]
+fn history_github_repo_is_a_separate_optional_config_key() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+
+    assert_eq!(config.get("history.github_repo"), Some(String::new()));
+    assert!(
+        config
+            .list()
+            .contains(&("history.github_repo".to_string(), String::new()))
+    );
+    let meta = meta::registry()
+        .get("history.github_repo")
+        .expect("history github repository metadata");
+    assert_eq!(meta.section, "history");
+    assert_eq!(meta.default, "git origin");
+
+    config
+        .set("history.github_repo", " owner/history-repo ")
+        .unwrap();
+    assert_eq!(
+        config.get("history.github_repo"),
+        Some("owner/history-repo".to_string())
+    );
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(
+        loaded
+            .history
+            .as_ref()
+            .and_then(|history| history.github_repo.as_deref()),
+        Some("owner/history-repo")
+    );
+}
+
+#[test]
 fn issue_repo_registry_resolves_defaults_and_overrides_without_serializing_defaults() {
     let temp = TempDir::new().unwrap();
     let mut config = Config::default();

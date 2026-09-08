@@ -7498,6 +7498,16 @@ mod tests {
         assert!(check.message.contains("changelog"), "{}", check.message);
     }
 
+    #[test]
+    fn history_repo_configuration_error_names_history_key_not_issue_intake() {
+        let rendered = format_history_source_error(
+            "github",
+            "history.github_repo is not configured; set it with `cas config set history.github_repo owner/name`",
+        );
+        assert!(rendered.contains("history.github_repo"), "{rendered}");
+        assert!(!rendered.contains("cas config set issues.repo"), "{rendered}");
+    }
+
     /// An unreadable health signal reads as health. This arm is why the check
     /// never silently skips.
     #[test]

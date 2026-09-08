@@ -42,6 +42,9 @@ impl AgentStore for SqliteAgentStore {
     fn get_by_pid(&self, pid: u32) -> Result<Option<Agent>> {
         self.agent_get_by_pid(pid)
     }
+    fn get_by_cc_session_id(&self, cc_session_id: &str) -> Result<Option<Agent>> {
+        self.agent_get_by_cc_session_id(cc_session_id)
+    }
 
     fn try_claim(
         &self,

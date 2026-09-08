@@ -52,6 +52,7 @@ impl Backend for Codex {
             launch.supervisor_cli,
             launch.active_workers,
             launch.config_dir,
+            launch.cas_root,
         );
         config.args.push("-c".to_string());
         config.args.push(format!(

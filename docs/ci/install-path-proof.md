@@ -23,6 +23,12 @@ The release event and a versioned manual run fetch `cas-install.sh` from the
 same tag being tested, then pass `CAS_VERSION` so the archive cannot silently
 come from a different release.
 
+The installer accepts `GITHUB_TOKEN` (or the `GH_TOKEN` fallback) to
+authenticate its GitHub release-receipt request. The proof workflow passes
+`github.token` to the install step in both lanes, avoiding the shared-IP limit
+on unauthenticated API requests. Receipt failures retry three times with a
+five-second backoff and print the final HTTP status plus GitHub response body.
+
 ## What the receipt proves
 
 Both jobs upload a transcript artifact, even when their assertions fail.

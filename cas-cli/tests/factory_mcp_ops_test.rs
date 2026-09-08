@@ -381,6 +381,10 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     )
     .args(["--exact", child_test, "--ignored", "--nocapture"])
     .env("CAS_FACTORY_CODEX_ISOLATED_CHILD", child_test)
+    // The child deliberately supplies HOME/PATH itself, so it cannot inherit
+    // the TestEnvGuard-owned override from the parent test process. Keep the
+    // factory build probe deterministic in this process too.
+    .env("CAS_FACTORY_BUILD_GUARD", "off")
     .env("HOME", home.path())
     .env("PATH", &bin_dir)
     .output()
@@ -452,6 +456,9 @@ fn factory_req(action: &str) -> FactoryRequest {
         action: action.to_string(),
         id: None,
         count: None,
+        limit: None,
+        offset: None,
+        summary: None,
         worker_names: None,
         task_id: None,
         delivery_mode: None,
@@ -502,6 +509,8 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cleanup: None,
         clear: None,
         limit: None,
+        offset: None,
+        summary_mode: None,
         name: None,
         agent_type: None,
         parent_id: None,
@@ -1119,6 +1128,46 @@ async fn test_coordination_focus_epic_routes_clear_field() {
 // =============================================================================
 // spawn_workers tests
 // =============================================================================
+
+/// cas-77c1: an isolated integration child must keep spawn_workers usable
+/// when the host's load would make the production guard refuse the request.
+/// The guard's injected-snapshot unit tests cover refusal; this exercises the
+/// actual MCP handler with the fixture-owned disabled override.
+#[test]
+fn test_spawn_workers_build_guard_override_allows_loaded_fixture() {
+    run_isolated_codex_test(
+        "test_spawn_workers_build_guard_override_allows_loaded_fixture_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn test_spawn_workers_build_guard_override_allows_loaded_fixture_in_isolated_child() {
+    assert_eq!(
+        std::env::var("CAS_FACTORY_BUILD_GUARD").as_deref(),
+        Ok("off"),
+        "isolated fixture must own the build-guard override"
+    );
+    let env = factory_env_in_isolated_codex_child(
+        "test_spawn_workers_build_guard_override_allows_loaded_fixture_in_isolated_child",
+    );
+    env.create_epic("Build guard fixture Epic");
+
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+    let response = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("spawn_workers must ignore host load in the isolated fixture");
+    let text = get_text(&response);
+    assert!(
+        text.contains("Build guard: disabled by CAS_FACTORY_BUILD_GUARD=off"),
+        "spawn receipt must identify the fixture override: {text}"
+    );
+    assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
+}
 
 #[tokio::test]
 async fn test_spawn_workers_requires_epic() {
@@ -4148,6 +4197,46 @@ async fn test_clear_context_refuses_harness_without_verified_reset() {
     );
 }
 
+/// GH #751: clear_context is not a recovery action once Claude is repeatedly
+/// rejecting prompts for context size. Refuse before queueing another `/clear`
+/// and direct the operator to worker recycling.
+#[tokio::test]
+async fn test_clear_context_refuses_prompt_overflow_failure_loop() {
+    let (guard, fixture) = clear_context_fixture("lynx", "claude", "0");
+    std::fs::write(
+        fixture.projects.join("failed-session.jsonl"),
+        r#"{"idleReason":"failed","failureReason":"Prompt is too long"}
+"#,
+    )
+    .expect("write prompt-overflow transcript");
+    let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
+
+    let store = env.agent_store();
+    store
+        .register(&Agent::new(
+            "test-sup".to_string(),
+            "supervisor".to_string(),
+        ))
+        .expect("register supervisor");
+    store.register(&fixture.worker).expect("register worker");
+
+    let mut req = factory_req("clear_context");
+    req.target = Some("lynx".to_string());
+    let error = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("prompt-overflow failure loop must refuse clear_context");
+    let message = error.message.to_string();
+    assert!(message.contains("prompt-overflow failure loop"), "{message}");
+    assert!(message.contains("shutdown_workers"), "{message}");
+    assert!(message.contains("spawn_workers"), "{message}");
+    assert!(
+        env.prompt_queue().peek_all(10).expect("peek").is_empty(),
+        "failure-loop refusal must not queue another reset"
+    );
+}
+
 /// cas-dffe live measurement, codified: does typing the production reset
 /// command into a REAL `claude` produce the production post-condition?
 ///
@@ -4835,6 +4924,87 @@ async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_un
     );
 }
 
+/// cas-5255 / GH #719: a transport-delivered row must remain recoverable by
+/// the recipient's explicit poll until that poll claims it. The daemon's
+/// inbox write is not proof that the worker's harness surfaced the body: a
+/// declined idle-gate wake leaves the row stage=delivered while the worker's
+/// next inbox_poll is the only supported recovery path.
+#[tokio::test]
+async fn inbox_poll_claims_a_transport_delivered_row_after_a_declined_wake() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", Some("registered-worker")),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("registered-worker-id");
+    env.register_worker_with_id("registered-worker-id", "registered-worker", None);
+    let queue = env.prompt_queue();
+    let notification_id = queue
+        .enqueue(
+            "supervisor",
+            "registered-worker",
+            "scope changed: hold the merge until the supervisor replies",
+        )
+        .expect("enqueue supervisor message");
+
+    // Reproduce the daemon's wake-gate decline before the later transport
+    // bookkeeping. The row is still pending while the decline is recorded.
+    queue
+        .record_wake_attempt(
+            notification_id,
+            cas_store::WakeAttempt::NotAttempted,
+            Some("wake_declined_by_policy: pane has not been silent long enough"),
+        )
+        .expect("record wake decline");
+    queue
+        .record_wake_gate_decline(
+            notification_id,
+            "wake_declined_by_policy: pane has not been silent long enough",
+        )
+        .expect("record wake-gate decline");
+    // `record_recipient_surfaced(TransportDelivered)` is deliberately only a
+    // transport receipt; it must not make the body disappear from inbox_poll.
+    queue
+        .record_recipient_surfaced(
+            notification_id,
+            "registered-worker",
+            cas_store::SurfacingSource::TransportDelivered,
+        )
+        .expect("record transport receipt");
+    queue
+        .mark_transport_delivered(notification_id)
+        .expect("mark transport delivered");
+
+    let report = queue
+        .message_delivery_report(notification_id)
+        .expect("delivery report")
+        .expect("message delivery report exists");
+    assert_eq!(report.stage, cas_store::DeliveryStage::Delivered);
+    assert_eq!(report.wake_gate_declines, 1);
+
+    let first = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("first inbox poll");
+    let text = get_text(&first);
+    assert!(
+        text.contains("scope changed: hold the merge"),
+        "a delivered row whose wake was declined must still be immediately pollable: {text}"
+    );
+
+    let second = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("second inbox poll");
+    assert_eq!(
+        get_text(&second),
+        "No unread messages for registered-worker",
+        "the explicit poll must claim the row exactly once"
+    );
+}
+
 /// cas-53a7: the MCP reader must mirror its real receipt across every alias a
 /// supervisor answers to.  A broadcast reaches the pane-name alias first; if
 /// this reader drops `mirror_receipts_across_aliases`, the logical
@@ -5012,6 +5182,8 @@ fn coord_msg(
         cleanup: None,
         clear: None,
         limit: None,
+        offset: None,
+        summary_mode: None,
         name: None,
         agent_type: None,
         parent_id: None,
@@ -5126,6 +5298,125 @@ async fn test_coordination_message_urgent_flag_enqueues_urgent() {
         cas_store::NotificationPriority::Critical,
         "urgent with no explicit priority defaults to Critical so it jumps the queue"
     );
+}
+
+/// GH #750 / cas-1145: an urgent assignment/recovery message must not arm a
+/// worker halt or enqueue a prompt for a task id that has not been created.
+/// The old path returned only because the hermetic worker had no transport,
+/// after already persisting both the queue row and halt metadata.
+#[tokio::test(start_paused = true)]
+async fn test_1145_urgent_assignment_of_missing_task_is_not_emitted() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    env.register_worker("swift-fox");
+
+    let req = coord_msg(
+        "message",
+        "swift-fox",
+        "new task cas-b269 assigned. Following the recovery protocol.",
+        Some(true),
+    );
+    let result = env.service.coordination(Parameters(req)).await;
+    assert!(
+        result.is_err(),
+        "an urgent assignment for a missing task must be rejected"
+    );
+    assert!(
+        env.prompt_queue().peek_all(10).expect("peek").is_empty(),
+        "the phantom assignment must not leave an urgent queue row"
+    );
+    assert!(
+        !env.worker_halted("swift-fox"),
+        "the phantom assignment must not arm halt_task_work"
+    );
+}
+
+/// GH #750 / cas-1145: the same urgent assignment shape remains deliverable
+/// when its task exists and is assigned to the addressed worker. The halt
+/// records that identity for later stale-halt revalidation.
+#[tokio::test(start_paused = true)]
+async fn test_1145_urgent_assignment_of_owned_task_is_emitted() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    env.register_worker("swift-fox");
+
+    let task_id = env.task_store().generate_id().expect("task id");
+    let mut task = Task::new(task_id.clone(), "owned assignment".to_string());
+    task.assignee = Some("swift-fox".to_string());
+    env.task_store().add(&task).expect("add assigned task");
+
+    let req = coord_msg(
+        "message",
+        "swift-fox",
+        &format!("Task {task_id} is assigned. Start it now."),
+        Some(true),
+    );
+    let result = env.service.coordination(Parameters(req)).await;
+    let error = result.expect_err("unobserved Claude urgent must fail explicitly");
+    assert!(
+        error
+            .message
+            .contains("Could not confirm Claude interrupt delivery"),
+        "unexpected urgent error: {}",
+        error.message
+    );
+    let prompt = env
+        .prompt_queue()
+        .peek_all(10)
+        .expect("peek")
+        .into_iter()
+        .next()
+        .expect("urgent row");
+    assert!(prompt.urgent);
+    let worker = env
+        .agent_store()
+        .list(None)
+        .expect("agents")
+        .into_iter()
+        .find(|agent| agent.name == "swift-fox")
+        .expect("worker");
+    assert_eq!(
+        worker.metadata.get("halt_task_work_task_id"),
+        Some(&task_id),
+        "owned assignment halt must retain the validated task identity"
+    );
+}
+
+/// GH #750 / cas-1145: existence alone is insufficient; an urgent assignment
+/// for another worker's task must not interrupt this recipient.
+#[tokio::test(start_paused = true)]
+async fn test_1145_urgent_assignment_of_other_workers_task_is_not_emitted() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    env.register_worker("swift-fox");
+
+    let task_id = env.task_store().generate_id().expect("task id");
+    let mut task = Task::new(task_id.clone(), "other worker assignment".to_string());
+    task.assignee = Some("brave-otter".to_string());
+    env.task_store().add(&task).expect("add assigned task");
+
+    let req = coord_msg(
+        "message",
+        "swift-fox",
+        &format!("Task {task_id} is assigned. Start it now."),
+        Some(true),
+    );
+    let result = env.service.coordination(Parameters(req)).await;
+    assert!(result.is_err(), "wrong-owner urgent assignment must be rejected");
+    assert!(
+        env.prompt_queue().peek_all(10).expect("peek").is_empty(),
+        "wrong-owner assignment must not leave an urgent queue row"
+    );
+    assert!(!env.worker_halted("swift-fox"));
 }
 
 /// When the daemon records the recipient-side transport stamp inside the
@@ -7594,6 +7885,19 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
             && status.contains("✓ All child factory branches are merged"),
         "status must evaluate the configured integration target, not the cosmetic epic branch: {status}"
     );
+
+    let mut summary_req = factory_req("epic_status");
+    summary_req.id = Some(epic.id.clone());
+    summary_req.limit = Some(1);
+    summary_req.offset = Some(0);
+    summary_req.summary = Some(true);
+    let summary = get_text(
+        &env.service
+            .factory(Parameters(summary_req))
+            .await
+            .expect("paged summary epic_status"),
+    );
+    assert!(summary.contains("View: summary") && summary.contains("Page: children 1–1 of 1"));
 
     std::fs::write(
         env.cas_root.join("config.toml"),

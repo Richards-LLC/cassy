@@ -13,7 +13,9 @@ use anyhow::Result;
 use tracing::debug;
 
 use crate::store::KnownRepoStore;
-use crate::store::known_repos::{host_cas_dir, open_host_known_repo_store};
+use crate::store::known_repos::{
+    KnownRepoState, classify_known_repo, host_cas_dir, open_host_known_repo_store,
+};
 
 /// A repository discovered via the host registry.
 #[derive(Debug, Clone)]
@@ -26,9 +28,9 @@ pub struct DiscoveredRepo {
     pub touch_count: u64,
 }
 
-/// List every known repo, tagging each with a health flag (`.cas/` exists
-/// on disk). Callers can filter on `healthy` to skip repos that have been
-/// deleted or moved.
+/// List every known repo, tagging each with a health flag (the root and its
+/// `.cas/` store both exist on disk). Callers can filter on `healthy` to skip
+/// repos that have been deleted, moved, or de-initialized.
 ///
 /// Returns repos in `last_touched_at DESC` order (most-recently-used first),
 /// which matches how `cas sweep-all` wants to process them.
@@ -38,7 +40,7 @@ pub fn list_tracked_repos() -> Result<Vec<DiscoveredRepo>> {
     Ok(records
         .into_iter()
         .map(|r| DiscoveredRepo {
-            healthy: r.path.join(".cas").is_dir(),
+            healthy: matches!(classify_known_repo(&r.path), KnownRepoState::Ready),
             path: r.path,
             touch_count: r.touch_count,
         })

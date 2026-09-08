@@ -52,6 +52,7 @@ async fn test_supervisor_creates_epic_and_spawns_workers() {
             .model("haiku")
             .cwd(env.dir())
             .mcp_config(env.mcp_config_path())
+            .env_var("CAS_FACTORY_BUILD_GUARD", "off")
             .max_turns(6)
             .allow_tool("mcp__cas__coordination")
             .allow_tool("mcp__cas__task"),

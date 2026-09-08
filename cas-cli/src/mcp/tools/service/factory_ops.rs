@@ -341,6 +341,7 @@ fn is_worker_activity_event(event: &cas_types::Event) -> bool {
             | EventType::WorkerFileEdited
             | EventType::WorkerGitCommit
             | EventType::WorkerVerificationBlocked
+            | EventType::WorkerPushBlocked
             | EventType::VerificationStarted
             | EventType::VerificationAdded
             | EventType::TaskNoteAdded
@@ -1899,6 +1900,30 @@ impl CasService {
         } else {
             worker_names.len()
         };
+        // Resource contention is checked immediately before worker-spec
+        // resolution and queue insertion. This keeps a rejected request from
+        // doing provider preflight work, and counts the full requested batch
+        // so a request cannot bypass the fleet cap by queueing four workers at
+        // once. `force=true` is an explicit operator override and remains
+        // visible in the queued receipt.
+        let factory_config = {
+            use crate::config::Config;
+            Config::load(&self.inner.cas_root)
+                .unwrap_or_default()
+                .factory()
+        };
+        let build_guard =
+            crate::factory_build_guard::inspect(&self.inner.cas_root, &factory_config, slots);
+        let force_build_guard = req.force.unwrap_or(false);
+        if !build_guard.violations().is_empty() && !force_build_guard {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                build_guard.refusal_message(),
+            ));
+        }
+        let build_guard_notice = build_guard.receipt_notice(force_build_guard);
+        let throttle_notice =
+            crate::factory_build_guard::throttle_notice(&factory_config, slots, &build_guard);
         // Resolve a concrete WorkerSpec per queued worker. Batch-level fields
         // remain the resolver defaults; `workers=[{...}]` is its final,
         // per-slot layer.
@@ -2197,11 +2222,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -2769,6 +2794,11 @@ impl CasService {
             .unwrap_or_default();
         if let Ok(stale_agents) = store.list_stale(worker_stale_threshold_secs) {
             for agent in stale_agents {
+                if crate::daemon::newest_agent_for_identity(store.as_ref(), &agent)
+                    .is_some_and(|newest| newest.id != agent.id)
+                {
+                    continue;
+                }
                 if !agent.visible_to_factory_session(factory_session.as_deref()) {
                     continue;
                 }
@@ -4386,6 +4416,14 @@ impl CasService {
                 ));
                 continue;
             }
+            if let Some(evidence) = reset::prompt_overflow_failure_evidence(&dirs) {
+                refusals.push(format!(
+                    "{}: refusing clear_context because the Claude harness is in a terminal prompt-overflow failure loop ({}). Use shutdown_workers + spawn_workers to recycle it; retrying /clear would add another failed prompt.",
+                    agent.name,
+                    evidence.display()
+                ));
+                continue;
+            }
             let before = reset::snapshot_transcripts(&dirs);
             pending.push(PendingReset {
                 agent,
@@ -4658,25 +4696,52 @@ impl CasService {
             }
         };
 
-        let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
-        let supervisor = std::env::var("CAS_SUPERVISOR_NAME")
-            .ok()
-            .filter(|name| !name.trim().is_empty())
-            .or_else(|| {
-                use cas_types::{AgentRole, AgentStatus};
-                crate::store::open_agent_store(&self.inner.cas_root)
-                    .ok()
-                    .and_then(|store| store.list(None).ok())
-                    .and_then(|agents| {
-                        agents
-                            .into_iter()
-                            .find(|a| {
-                                a.role == AgentRole::Supervisor
-                                    && matches!(a.status, AgentStatus::Active | AgentStatus::Idle)
-                            })
-                            .map(|a| a.name)
-                    })
-            });
+        use cas_types::{AgentRole, AgentStatus};
+        let agent_store = crate::store::open_agent_store(&self.inner.cas_root).ok();
+        let agents = agent_store
+            .as_ref()
+            .and_then(|store| store.list(None).ok())
+            .unwrap_or_default();
+        // Sync incidents are emitted on behalf of the worker whose worktree
+        // was stranded. Resolve that worker's persisted factory session first;
+        // a shared clone may have another live supervisor whose environment is
+        // newer but does not own this worker.
+        let worker_factory_session = agents
+            .iter()
+            .find(|agent| {
+                agent.role == AgentRole::Worker
+                    && (agent.name.eq_ignore_ascii_case(worker_name)
+                        || agent.id.eq_ignore_ascii_case(worker_name))
+            })
+            .and_then(|agent| agent.factory_session.clone())
+            .filter(|session| !session.trim().is_empty());
+        let factory_session = worker_factory_session
+            .clone()
+            .or_else(current_factory_session);
+        let supervisor = if let Some(session) = factory_session.as_deref() {
+            agent_store
+                .as_ref()
+                .and_then(|store| {
+                    crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_owning_supervisor(
+                        store.as_ref(),
+                        Some(session),
+                    )
+                })
+                .map(|supervisor| supervisor.name)
+        } else {
+            std::env::var("CAS_SUPERVISOR_NAME")
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+                .or_else(|| {
+                    agents
+                        .iter()
+                        .find(|agent| {
+                            agent.role == AgentRole::Supervisor
+                                && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+                        })
+                        .map(|agent| agent.name.clone())
+                })
+        };
 
         let mut outcomes = Vec::new();
         let mut targets = vec![worker_name.to_string()];
@@ -5229,7 +5294,8 @@ impl CasService {
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::core::task::lifecycle::close_ops::{
-            collect_epic_branch_statuses, render_epic_status_report_with_stack,
+            EPIC_STATUS_BUDGET, EpicStatusOptions, collect_epic_branch_statuses_with_options,
+            render_epic_status_collection,
         };
         use crate::store::open_task_store;
         use cas_types::TaskType;
@@ -5308,9 +5374,18 @@ impl CasService {
             )
         })?;
 
-        let mut statuses =
-            collect_epic_branch_statuses(&subtasks, parent_branch, &close_project_root);
-
+        let status_options = EpicStatusOptions {
+            offset: req.offset.unwrap_or(0),
+            limit: req.limit,
+            summary: req.summary.unwrap_or(false),
+            budget: EPIC_STATUS_BUDGET,
+        };
+        let mut collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            parent_branch,
+            &close_project_root,
+            status_options,
+        );
         // cas-aae6 (GH #110): an epic stacked on other unlanded epic branches
         // cannot land alone. Show that here, where the supervisor decides
         // merge order, rather than only in the creation message that scrolled
@@ -5345,7 +5420,7 @@ impl CasService {
         };
         if let Ok(agent_store) = crate::store::open_agent_store(&self.inner.cas_root) {
             if let Ok(agents) = agent_store.list(None) {
-                for status in &mut statuses {
+                for status in &mut collection.statuses {
                     status.dead_or_stale_assignee =
                         status.assignee.as_ref().is_some_and(|assignee| {
                             agents.iter().any(|agent| {
@@ -5361,7 +5436,7 @@ impl CasService {
             }
         }
         let report =
-            render_epic_status_report_with_stack(epic_id, parent_branch, &statuses, &stacked_on);
+            render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
 
         Ok(Self::success(report))
     }
@@ -5579,6 +5654,11 @@ impl CasService {
         let stale_agents = agent_store.list_stale(stale_after).unwrap_or_default();
         let mut stale_marked = 0usize;
         for agent in stale_agents {
+            if crate::daemon::newest_agent_for_identity(agent_store.as_ref(), &agent)
+                .is_some_and(|newest| newest.id != agent.id)
+            {
+                continue;
+            }
             // Don't let workers prune supervisors/directors
             if agent.role == AgentRole::Supervisor || agent.role == AgentRole::Director {
                 continue;
@@ -5596,6 +5676,11 @@ impl CasService {
         let mut dead_agent_records_purged = 0usize;
         for status in [AgentStatus::Stale, AgentStatus::Shutdown] {
             for agent in agent_store.list(Some(status)).unwrap_or_default() {
+                if crate::daemon::newest_agent_for_identity(agent_store.as_ref(), &agent)
+                    .is_some_and(|newest| newest.id != agent.id)
+                {
+                    continue;
+                }
                 if agent.role == AgentRole::Supervisor || agent.role == AgentRole::Director {
                     continue;
                 }
@@ -9863,6 +9948,8 @@ mod spawn_lifecycle_tests {
     #[tokio::test]
     async fn spawn_response_surfaces_related_recall_for_active_epic_cas_0efb() {
         use cas_types::{Entry, Task, TaskType};
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
 
         let temp = tempfile::tempdir().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);

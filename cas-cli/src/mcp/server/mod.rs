@@ -441,8 +441,8 @@ impl CasCore {
                     agent_name = %agent_name,
                     "Auto-registering agent from CAS_SESSION_ID"
                 );
-                self.register_agent(session_id.clone(), agent_name, None)?;
-                return Ok(session_id);
+                let canonical_id = self.register_agent(session_id, agent_name, None)?;
+                return Ok(canonical_id);
             }
         }
 
@@ -458,8 +458,7 @@ impl CasCore {
                     agent_name = %agent_name,
                     "Auto-registering agent from session mapping"
                 );
-                self.register_agent(session_id.clone(), agent_name, None)?;
-                Ok(session_id)
+                self.register_agent(session_id, agent_name, None)
             }
             Ok(_) => Err(McpError {
                 code: ErrorCode::INVALID_REQUEST,
@@ -680,12 +679,42 @@ impl CasCore {
             self.ensure_public_registration_target(&session_id)?;
         }
 
-        // Create and register the agent
-        let mut agent = if let Some(parent) = parent_id {
-            crate::types::Agent::new_sub_agent(session_id.clone(), name, parent)
-        } else {
-            crate::types::Agent::new(session_id.clone(), name)
+        let environment_role = crate::mcp::daemon::parse_agent_role_hint(
+            std::env::var("CAS_AGENT_ROLE").ok().as_deref(),
+        );
+        let configured_role = match source {
+            AgentIdentitySource::ServerInternal => role_hint.or(environment_role),
+            // A typed registration request is explicit caller input. Ambient
+            // role is only a bootstrap fallback when no role was requested.
+            AgentIdentitySource::PublicRegistration => role_hint.or(environment_role),
         };
+
+        // clear_context stores the new harness session id on the existing
+        // worker row. Rebind to that row before constructing a new one so its
+        // durable name and task leases survive the SessionStart transition.
+        let rebound_worker = (configured_role == Some(crate::types::AgentRole::Worker))
+            .then(|| {
+                agent_store
+                    .get_by_cc_session_id(&session_id)
+                    .ok()
+                    .flatten()
+                    .filter(|agent| agent.role == crate::types::AgentRole::Worker)
+            })
+            .flatten();
+        let canonical_id = rebound_worker
+            .as_ref()
+            .map(|agent| agent.id.clone())
+            .unwrap_or_else(|| session_id.clone());
+
+        // Create and register the agent, or refresh the durable worker row
+        // matched by the post-reset session id.
+        let mut agent = rebound_worker.unwrap_or_else(|| {
+            if let Some(parent) = parent_id.clone() {
+                crate::types::Agent::new_sub_agent(session_id.clone(), name.clone(), parent)
+            } else {
+                crate::types::Agent::new(session_id.clone(), name.clone())
+            }
+        });
 
         if let Some(agent_type) = agent_type_hint {
             agent.agent_type = agent_type;
@@ -700,15 +729,6 @@ impl CasCore {
         }
         agent.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
 
-        let environment_role = crate::mcp::daemon::parse_agent_role_hint(
-            std::env::var("CAS_AGENT_ROLE").ok().as_deref(),
-        );
-        let configured_role = match source {
-            AgentIdentitySource::ServerInternal => role_hint.or(environment_role),
-            // A typed registration request is explicit caller input. Ambient
-            // role is only a bootstrap fallback when no role was requested.
-            AgentIdentitySource::PublicRegistration => role_hint.or(environment_role),
-        };
         if let Some(role) = configured_role {
             agent.role = role;
             agent.agent_type = match role {
@@ -735,6 +755,7 @@ impl CasCore {
         }
 
         crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
+        agent.cc_session_id = Some(session_id.clone());
 
         crate::mcp::daemon::register_with_role_reconciliation(
             agent_store.as_ref(),
@@ -747,10 +768,10 @@ impl CasCore {
             data: None,
         })?;
 
-        self.bind_agent_identity(session_id.clone(), source)?;
+        self.bind_agent_identity(canonical_id.clone(), source)?;
 
         info!(
-            agent_id = %session_id,
+            agent_id = %canonical_id,
             agent_name = %agent.name,
             pid = ?agent.pid,
             ppid = ?agent.ppid,
@@ -765,14 +786,14 @@ impl CasCore {
         // Tell the daemon to send heartbeats for this agent
         // This keeps the agent alive and prevents it from being marked as dead
         if let Some(ref daemon) = self.daemon {
-            let session_id_clone = session_id.clone();
+            let session_id_clone = canonical_id.clone();
             let daemon_clone = Arc::clone(daemon);
             tokio::spawn(async move {
                 daemon_clone.set_agent_id(session_id_clone).await;
             });
         }
 
-        Ok(session_id)
+        Ok(canonical_id)
     }
 
     /// Auto-claim the exact task whose close is awaiting verification.
@@ -909,9 +930,9 @@ pub use runtime::{
 #[cfg(test)]
 mod role_registration_tests {
     use super::*;
-    use crate::store::{init_cas_dir, open_agent_store};
+    use crate::store::{init_cas_dir, open_agent_store, open_task_store};
     use crate::test_support::TestEnvGuard;
-    use crate::types::{AgentRole, AgentType};
+    use crate::types::{Agent, AgentRole, AgentType, Task};
 
     #[test]
     fn eager_environment_registration_persists_supervisor_role() {
@@ -967,5 +988,62 @@ mod role_registration_tests {
         assert_eq!(agent.name, "Primary (re-registered)");
         assert_eq!(agent.role, AgentRole::Supervisor);
         assert_eq!(agent.agent_type, AgentType::Primary);
+    }
+
+    #[test]
+    fn context_reset_server_registration_reuses_worker_identity_for_claude_and_codex() {
+        for worker_cli in ["claude", "codex"] {
+            let _env = TestEnvGuard::with_optional_vars(&[
+                ("CAS_AGENT_ROLE", Some("worker")),
+                ("CAS_FACTORY_SESSION", Some("factory-context-reset")),
+                ("CAS_FACTORY_WORKER_CLI", Some(worker_cli)),
+            ]);
+            let temp = tempfile::tempdir().unwrap();
+            let cas_root = init_cas_dir(temp.path()).unwrap();
+            let store = open_agent_store(&cas_root).unwrap();
+            let tasks = open_task_store(&cas_root).unwrap();
+            tasks
+                .add(&Task::new(
+                    "cas-742-server-lease".to_string(),
+                    "reset lease".to_string(),
+                ))
+                .unwrap();
+
+            let new_session = format!("{worker_cli}-post-clear-session");
+            let mut original = Agent::new(
+                format!("{worker_cli}-old-session"),
+                "patient-lion-85".to_string(),
+            );
+            original.role = AgentRole::Worker;
+            original.agent_type = AgentType::Worker;
+            original.cc_session_id = Some(new_session.clone());
+            store.register(&original).unwrap();
+            store
+                .try_claim("cas-742-server-lease", &original.id, 600, Some("in progress"))
+                .unwrap();
+
+            let core = CasCore::with_daemon(cas_root.clone(), None, None);
+            let canonical_id = core
+                .register_agent(
+                    new_session.clone(),
+                    "Primary (re-registered)".to_string(),
+                    None,
+                )
+                .unwrap();
+
+            assert_eq!(canonical_id, original.id);
+            let rebound = store.get(&original.id).unwrap();
+            assert_eq!(rebound.name, original.name);
+            assert_eq!(rebound.cc_session_id.as_deref(), Some(new_session.as_str()));
+            assert_eq!(
+                store
+                    .get_lease("cas-742-server-lease")
+                    .unwrap()
+                    .unwrap()
+                    .agent_id,
+                original.id
+            );
+            assert!(store.get(&new_session).is_err());
+        }
     }
 }

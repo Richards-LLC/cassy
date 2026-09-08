@@ -77,6 +77,18 @@ action=proxy_health` is credential-free: the healthy record for `mecha-cassy`
 reports `tool_count=2` and no error code. `.cas/proxy_catalog.json` is a
 generated cache, not source configuration.
 
+### Downstream projects and workers
+
+Run `cas integrate mecha-cassy` from the downstream checkout as well as on the
+machine. A checkout with no `.cas/proxy.toml` inherits the machine-level hub
+server and allowlist; a checkout with its own file uses that file's allowlist
+as the dispatch policy. If `mcp_search` for `server:mecha-cassy` returns no
+tools while the machine registration is healthy, run `cas doctor` in that
+checkout and add the exact `mecha-cassy.mecha_read` and
+`mecha-cassy.mecha_post` entries it prints before restarting `cas serve`.
+Do not copy a token into the project file. Verify the fresh worker sees both
+tools before starting a release posting run.
+
 ## Codex
 
 `config.toml` under the Codex home:

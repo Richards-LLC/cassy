@@ -1,5 +1,7 @@
 use crate::mcp::tools::service::imports::*;
-use crate::prompt_revalidation::{assignment_solicited_task_id, assignment_targets_terminal_task};
+use crate::prompt_revalidation::{
+    assignment_solicited_task_id, assignment_targets_terminal_task, urgent_assignment_task_id,
+};
 
 fn resolve_inbox_recipient(
     registered_name: Option<String>,
@@ -382,9 +384,19 @@ impl CasService {
         let env_agent_name = std::env::var("CAS_AGENT_NAME").ok();
         let agent_from_store = {
             use crate::store::open_agent_store;
-            open_agent_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|store| store.get(&source).ok())
+            open_agent_store(&self.inner.cas_root).ok().and_then(|store| {
+                store.get(&source).ok().or_else(|| {
+                    let name = env_agent_name.as_deref()?.trim();
+                    if name.is_empty() {
+                        return None;
+                    }
+                    store
+                        .list(None)
+                        .ok()?
+                        .into_iter()
+                        .find(|agent| agent.name.eq_ignore_ascii_case(name))
+                })
+            })
         };
         // The registered row is the explicit identity for this MCP caller.
         // CAS_AGENT_ROLE is only a bootstrap fallback when no row can be
@@ -396,55 +408,80 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
-        let factory_session = std::env::var("CAS_FACTORY_SESSION")
-            .ok()
-            .filter(|session| !session.trim().is_empty());
+        // A shared clone can have two live supervisors and a worker process
+        // whose ambient environment was inherited from the wrong harness.
+        // The registered caller row is the authoritative owner; the
+        // environment remains a compatibility fallback for legacy callers.
+        let factory_session = agent_from_store
+            .as_ref()
+            .and_then(|agent| agent.factory_session.clone())
+            .filter(|session| !session.trim().is_empty())
+            .or_else(|| {
+                std::env::var("CAS_FACTORY_SESSION")
+                    .ok()
+                    .filter(|session| !session.trim().is_empty())
+            });
 
         let resolve_supervisor_name = || -> Option<String> {
+            use crate::store::open_agent_store;
+            use cas_types::{AgentRole, AgentStatus};
+            let store = open_agent_store(&self.inner.cas_root).ok();
+            if role == "worker"
+                && let (Some(store), Some(session)) = (store.as_ref(), factory_session.as_deref())
+            {
+                // Do not let CAS_SUPERVISOR_NAME or roster order override a
+                // worker's registered factory owner.
+                return crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_owning_supervisor(
+                    store.as_ref(),
+                    Some(session),
+                )
+                .map(|supervisor| supervisor.name);
+            }
             if let Ok(name) = std::env::var("CAS_SUPERVISOR_NAME") {
                 if !name.trim().is_empty() {
                     return Some(name);
                 }
             }
-            use crate::store::open_agent_store;
-            use cas_types::{AgentRole, AgentStatus};
-            open_agent_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|store| store.list(None).ok())
-                .and_then(|agents| {
-                    agents
-                        .into_iter()
-                        .find(|a| {
-                            a.role == AgentRole::Supervisor
-                                && (a.status == AgentStatus::Active
-                                    || a.status == AgentStatus::Idle)
-                        })
-                        .map(|a| a.name)
-                })
+            store?.list(None).ok().and_then(|agents| {
+                agents
+                    .into_iter()
+                    .find(|a| {
+                        a.role == AgentRole::Supervisor
+                            && (a.status == AgentStatus::Active || a.status == AgentStatus::Idle)
+                    })
+                    .map(|a| a.name)
+            })
         };
 
         let addressed_logical_supervisor = target.eq_ignore_ascii_case("supervisor");
         let mut peer_supervisor_copy = None;
         let resolved_target = if role == "worker" {
-            if target == "supervisor" {
+            if target.eq_ignore_ascii_case("supervisor") {
                 resolve_supervisor_name().ok_or_else(|| {
                     Self::error(ErrorCode::INVALID_REQUEST,
                         "Cannot resolve 'supervisor' - no CAS_SUPERVISOR_NAME and no active supervisor agent found.")
                 })?
-            } else if target == "all_workers" {
+            } else if target.eq_ignore_ascii_case("all_workers") {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
                     "Workers cannot broadcast to all_workers",
                 ));
             } else {
                 let supervisor_name = resolve_supervisor_name();
-                let named_supervisor_is_registered = supervisor_name.as_deref() == Some(&target)
-                    && crate::store::open_agent_store(&self.inner.cas_root)
+                // An explicit supervisor name is a valid same-clone recipient
+                // whenever that supervisor is live. This is distinct from
+                // the logical `supervisor` target, which resolves to the
+                // worker's own factory session above.
+                let named_supervisor_is_registered = crate::store::open_agent_store(
+                    &self.inner.cas_root,
+                )
                         .ok()
                         .and_then(|store| store.list(None).ok())
                         .is_some_and(|agents| {
                             agents.iter().any(|agent| {
                                 agent.role == cas_types::AgentRole::Supervisor
+                                    && (agent.status == cas_types::AgentStatus::Active
+                                        || agent.status == cas_types::AgentStatus::Idle)
                                     && agent.name.eq_ignore_ascii_case(&target)
                             })
                         });
@@ -737,13 +774,13 @@ impl CasService {
         // names the one AwaitingMerge task; only an explicit merge request is
         // eligible for revalidation and suppression.
         if role == "worker" && req.merge_request.unwrap_or(false) {
-            use crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha;
             use crate::mcp::tools::core::task::repo_context::{
                 resolve_repo_context, resolve_repo_context_from_local_root,
             };
             use crate::prompt_revalidation::{
                 MergeRequestDecision, MergeRequestEnvelope, attach_merge_request_envelope,
-                merge_landed_guidance, revalidate_merge_request, select_unambiguous_merge_task,
+                merge_landed_guidance, merge_request_anchor_advanced_note,
+                revalidate_merge_request, select_unambiguous_merge_task,
             };
             use crate::store::open_task_store_local;
             use cas_types::TaskStatus;
@@ -831,6 +868,19 @@ impl CasService {
                             )));
                         }
                         MergeRequestDecision::Pending { target_tip } => {
+                            let anchor_tip = recorded_anchor
+                                .as_deref()
+                                .filter(|anchor| *anchor != branch_tip)
+                                .map(str::to_string);
+                            if let Some(previous_anchor) = anchor_tip.as_deref() {
+                                message = format!(
+                                    "{message}\n\n{}",
+                                    merge_request_anchor_advanced_note(
+                                        previous_anchor,
+                                        &branch_tip,
+                                    )
+                                );
+                            }
                             message = attach_merge_request_envelope(
                                 &message,
                                 &MergeRequestEnvelope {
@@ -838,8 +888,7 @@ impl CasService {
                                     // Live tip; the anchor rides along only
                                     // when it disagrees, so the supervisor
                                     // sees the drift instead of inferring it.
-                                    anchor_tip: recorded_anchor
-                                        .filter(|anchor| anchor != &branch_tip),
+                                    anchor_tip,
                                     branch_tip,
                                     target_branch: repo.target_branch,
                                     target_branch_tip: target_tip,
@@ -934,9 +983,10 @@ impl CasService {
         let mut halt_bindings: Vec<(String, u64)> = Vec::new();
         {
             use crate::mcp::tools::core::task::lifecycle::stale_close_guard::{
-                HaltWorkerCandidate, apply_halt_metadata, halt_targets_for_urgent,
-                is_merge_reclose_exempt_urgent, may_source_role_set_halt, may_source_set_halt,
-                next_halt_generation, session_scoped_worker_names, should_persist_urgent_halt,
+                HaltWorkerCandidate, apply_halt_metadata, bind_halt_to_task_if_generation,
+                halt_targets_for_urgent, is_merge_reclose_exempt_urgent, may_source_role_set_halt,
+                may_source_set_halt, next_halt_generation, session_scoped_worker_names,
+                should_persist_urgent_halt,
             };
             use crate::store::{open_agent_store, open_task_store};
             use cas_types::{AgentRole, TaskStatus};
@@ -981,6 +1031,67 @@ impl CasService {
                     .collect();
                 let session_workers =
                     session_scoped_worker_names(&worker_candidates, factory_session.as_deref());
+
+                // cas-1145: an urgent assignment/recovery message is also a
+                // halt request, so its named task must be real and owned by
+                // the addressed worker before either metadata or queue state
+                // is touched. This closes the reserved-but-never-created id
+                // race while preserving ordinary urgent stop messages.
+                let assignment_task_id = urgent_assignment_task_id(&message);
+                if let Some(task_id) = assignment_task_id.as_deref() {
+                    let Some(target_agent) = resolved_target_agent.as_ref().filter(|agent| {
+                        agent.role == AgentRole::Worker
+                            && agent.name.eq_ignore_ascii_case(&resolved_target)
+                    }) else {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            format!(
+                                "Urgent assignment rejected for task {task_id}: target '{resolved_target}' is not a single registered worker"
+                            ),
+                        ));
+                    };
+                    let task_store = open_task_store(&self.inner.cas_root).map_err(|error| {
+                        Self::error(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!(
+                                "Urgent assignment rejected for task {task_id}: task store unavailable: {error}"
+                            ),
+                        )
+                    })?;
+                    let task = task_store.get(task_id).map_err(|error| {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            target = %resolved_target,
+                            error = %error,
+                            "cas-1145: urgent assignment named a task that does not exist"
+                        );
+                        Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            format!(
+                                "Urgent assignment rejected: task {task_id} does not exist; no halt or queue row was emitted"
+                            ),
+                        )
+                    })?;
+                    let owns_task = task.assignee.as_deref().is_some_and(|owner| {
+                        owner.eq_ignore_ascii_case(&target_agent.name)
+                            || owner.eq_ignore_ascii_case(&target_agent.id)
+                    });
+                    if !owns_task {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            target = %target_agent.name,
+                            assignee = ?task.assignee,
+                            "cas-1145: urgent assignment named a task not owned by its target"
+                        );
+                        return Err(Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            format!(
+                                "Urgent assignment rejected: task {task_id} is not assigned to worker {}",
+                                target_agent.name
+                            ),
+                        ));
+                    }
+                }
 
                 // cas-126b: an urgent "MERGE DONE → re-close now" hand-off both
                 // wakes the parked worker AND (before this guard) armed
@@ -1047,6 +1158,13 @@ impl CasService {
                         };
                         halt_compensation.push((agent.id.clone(), agent.metadata.clone()));
                         apply_halt_metadata(&mut agent.metadata, halt_generation);
+                        if let Some(task_id) = assignment_task_id.as_deref() {
+                            let _ = bind_halt_to_task_if_generation(
+                                &mut agent.metadata,
+                                halt_generation,
+                                task_id,
+                            );
+                        }
                         if let Err(e) = agent_store.update(&agent) {
                             // Compensate any prior successful writes.
                             for (id, prev) in halt_compensation.drain(..) {
@@ -2958,6 +3076,16 @@ mod cas_89e1_post_merge_message_type_tests {
         .expect("static message request")
     }
 
+    fn message_request_to(target: &str) -> AgentRequest {
+        serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": target,
+            "summary": "shared-clone routing regression",
+            "message": "Route this message to the intended live supervisor.",
+        }))
+        .expect("static routing message request")
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn post_merge_suppression_requires_the_explicit_merge_request_type() {
         let mut env = TestEnvGuard::temp_home();
@@ -3067,5 +3195,71 @@ mod cas_89e1_post_merge_message_type_tests {
             stale_merge.contains("Merge already landed"),
             "an explicitly typed stale merge request must still be suppressed: {stale_merge}"
         );
+    }
+
+    /// GH #734: a worker in one factory session must not inherit the newest
+    /// supervisor from a sibling session on the same clone. Explicit names
+    /// remain valid same-clone recipients, and their rows belong to the named
+    /// supervisor's session.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_clone_worker_messages_follow_the_registered_owner_session() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            // Deliberately inherit the sibling session too: persisted worker
+            // ownership must outrank both stale ambient routing variables.
+            ("CAS_FACTORY_SESSION", Some("factory-b")),
+            ("CAS_SUPERVISOR_NAME", Some("supervisor-b")),
+            ("CAS_AGENT_ROLE", None),
+        ]);
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-a".to_string());
+        agents.register(&worker).expect("register worker");
+        let mut supervisor_a = Agent::new("supervisor-a-id".to_string(), "supervisor-a".to_string());
+        supervisor_a.role = AgentRole::Supervisor;
+        supervisor_a.factory_session = Some("factory-a".to_string());
+        agents.register(&supervisor_a).expect("register owning supervisor");
+        let mut supervisor_b = Agent::new("supervisor-b-id".to_string(), "supervisor-b".to_string());
+        supervisor_b.role = AgentRole::Supervisor;
+        supervisor_b.factory_session = Some("factory-b".to_string());
+        agents.register(&supervisor_b).expect("register sibling supervisor");
+        core.set_agent_id_for_testing(worker.id.clone());
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core.clone(), None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core.clone());
+
+        let owner_result = service
+            .message_send(message_request_to("supervisor"))
+            .await
+            .expect("owner message is delivered");
+        assert!(response_text(owner_result).contains("Message queued"));
+        let explicit_result = service
+            .message_send(message_request_to("supervisor-b"))
+            .await
+            .expect("explicit live supervisor message is delivered");
+        assert!(response_text(explicit_result).contains("Message queued"));
+
+        let rows = crate::store::open_prompt_queue_store(&cas_root)
+            .expect("prompt queue")
+            .poll_all(10)
+            .expect("queued messages");
+        assert_eq!(rows.len(), 2);
+        let owner_row = rows
+            .iter()
+            .find(|row| row.target == "supervisor-a")
+            .expect("logical supervisor target resolves to factory-a owner");
+        assert_eq!(owner_row.factory_session.as_deref(), Some("factory-a"));
+        let explicit_row = rows
+            .iter()
+            .find(|row| row.target == "supervisor-b")
+            .expect("explicit supervisor target remains accepted");
+        assert_eq!(explicit_row.factory_session.as_deref(), Some("factory-b"));
     }
 }

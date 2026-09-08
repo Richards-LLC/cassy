@@ -78,30 +78,46 @@ pub(crate) fn setup_cas() -> (TempDir, CasCore) {
     setup_cas_as(AgentRole::Standard)
 }
 
+/// Remove factory identity inherited from the worker that launched this test
+/// process. The test agent must be registered without a factory session so
+/// GH #734's registered-session precedence cannot bind it to the parent
+/// supervisor. Callers must hold [`env_test_lock`] while mutating the process
+/// environment.
+fn scrub_factory_identity_env() {
+    // SAFETY: callers hold the process-wide env lock while scrubbing the
+    // factory identity used by AgentStore::register.
+    unsafe {
+        std::env::remove_var("CAS_FACTORY_SESSION");
+        std::env::remove_var("CAS_AGENT_ROLE");
+        std::env::remove_var("CAS_AGENT_NAME");
+        std::env::remove_var("CAS_SUPERVISOR_NAME");
+        std::env::remove_var("CAS_AGENT_ID");
+    }
+}
+
 /// Helper to create an initialized CAS environment and register the test
 /// session agent with the requested role.
 pub(crate) fn setup_cas_as(role: AgentRole) -> (TempDir, CasCore) {
     pin_home_to_a_sandbox();
 
-    // Clear factory env vars that leak from parent process (e.g., running
-    // inside a factory supervisor session). Without this, is_supervisor_from_env()
-    // returns true and the assignee_inactive bypass skips verification checks.
+    // Clear factory env vars that leak from the parent process (e.g., running
+    // inside a factory supervisor session) before registering the test agent.
+    // Without this, AgentStore::register records the parent's factory session
+    // and GH #734's registered-session precedence routes lifecycle events away
+    // from the fixture's supervisor.
     //
     // cas-3bd4: acquire the shared env lock for the duration of these
-    // mutations. Other tests that also call `setup_cas` will serialize
-    // through this brief critical section, and any test that holds the
-    // lock for its body (see `env_test_lock` docs) will block a
-    // competing `setup_cas` from clearing env vars mid-test.
-    {
-        let _env_guard = env_test_lock();
-        // SAFETY: we hold the process-wide env lock for the duration of
-        // this block; no other test thread can observe a torn env read.
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-            std::env::remove_var("CAS_FACTORY_MODE");
-            std::env::remove_var("CAS_FACTORY_SUPERVISOR_CLI");
-            std::env::remove_var("CAS_FACTORY_WORKER_CLI");
-        }
+    // mutations. Keep the lock until after registration so another test
+    // cannot restore the parent identity between the scrub and the store
+    // write.
+    let _env_guard = env_test_lock();
+    scrub_factory_identity_env();
+    // SAFETY: we hold the process-wide env lock for the duration of this
+    // block; no other test thread can observe a torn env read.
+    unsafe {
+        std::env::remove_var("CAS_FACTORY_MODE");
+        std::env::remove_var("CAS_FACTORY_SUPERVISOR_CLI");
+        std::env::remove_var("CAS_FACTORY_WORKER_CLI");
     }
 
     let temp = TempDir::new().expect("temp dir should be created");
@@ -168,6 +184,9 @@ pub(crate) fn core_with_test_agent(cas_dir: impl AsRef<Path>) -> CasCore {
     let agent_store = open_agent_store(&cas_dir).expect("agent store should open");
     // Idempotent if setup_cas already initialized the store.
     let _ = agent_store.init();
+    // This helper is used by tests that already hold env_test_lock() for the
+    // full scenario (see the ordering contract above).
+    scrub_factory_identity_env();
     let agent = Agent::new(session_id.clone(), "test-agent".to_string());
     agent_store
         .register(&agent)

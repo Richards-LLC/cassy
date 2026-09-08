@@ -80,7 +80,7 @@ pub struct TaskSummary {
     /// Parent epic ID (if this is a subtask)
     pub epic: Option<String>,
     /// The branch that is authoritative for this summary's delivery boundary:
-    /// an epic's branch, or a task's declared WorkTarget branch.
+    /// an epic's coordination branch, or a task's declared WorkTarget branch.
     ///
     /// A task-level WorkTarget deliberately wins over its parent epic. The
     /// factory relay must advertise the same destination that close enforces.
@@ -284,12 +284,26 @@ impl DirectorData {
                 assignee: t.assignee.clone(),
                 task_type: t.task_type,
                 epic: child_to_epic.get(&t.id).cloned(),
-                branch: t
-                    .deliverables
-                    .work_target
-                    .as_ref()
-                    .map(|target| target.target_branch.clone())
-                    .or_else(|| t.branch.clone()),
+                // An epic has two distinct branch authorities when it was
+                // created with an explicit integration target: `branch` is
+                // the live coordination branch workers must build on, while
+                // `WorkTarget.target_branch` is its parent delivery branch.
+                // Keep the former in the director snapshot so focus-based
+                // worker spawns retain the epic tip (GH #746).
+                branch: if t.task_type == TaskType::Epic {
+                    t.branch.clone().or_else(|| {
+                        t.deliverables
+                            .work_target
+                            .as_ref()
+                            .map(|target| target.target_branch.clone())
+                    })
+                } else {
+                    t.deliverables
+                        .work_target
+                        .as_ref()
+                        .map(|target| target.target_branch.clone())
+                        .or_else(|| t.branch.clone())
+                },
                 updated_at: Some(t.updated_at),
                 epic_verification_owner: t.epic_verification_owner.clone(),
             }
@@ -351,6 +365,7 @@ impl DirectorData {
             EventType::WorkerFileEdited,
             EventType::WorkerGitCommit,
             EventType::WorkerVerificationBlocked,
+            EventType::WorkerPushBlocked,
             EventType::VerificationStarted,
             EventType::VerificationAdded,
             EventType::TaskNoteAdded,

@@ -120,6 +120,29 @@ impl SyncQueue {
         Ok(())
     }
 
+    /// Mark all still-pending rows for a team as blocked by project
+    /// registration, without consuming a retry. Registration happens before
+    /// the team push, so these rows were never attempted and must remain
+    /// eligible immediately after the operator pins or aliases the project.
+    pub fn park_team_rows_for_registration_conflict(
+        &self,
+        team_id: &str,
+        diagnostic: &str,
+        max_retries: i32,
+    ) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE sync_queue
+             SET last_outcome = 'parked',
+                 last_reason = 'project_registration_conflict',
+                 last_error = ?2
+             WHERE team_id = ?1
+               AND retry_count < ?3",
+            params![team_id, diagnostic, max_retries],
+        )?;
+        Ok(changed)
+    }
+
     /// Get the number of items in the queue.
     pub fn queue_depth(&self) -> Result<usize, CasError> {
         let conn = self.conn.lock().unwrap();

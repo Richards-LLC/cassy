@@ -5016,7 +5016,8 @@ This is the body content."#;
     /// harness, and both its files stay credential-free.
     ///
     /// The markers below are the operational load-bearing parts: without the
-    /// two-check preflight a worker posts into a channel it cannot read, without
+    /// authenticated tools/list gate and bounded read fallback a worker cannot
+    /// distinguish a read-only outage from a dead write path, without
     /// the ordered `thread_ts` capture the replies land as stray top-level
     /// messages, without the pacing rule the hub's one-per-second refusal reads
     /// as a hard failure, and without the `ts: null` rule an upload gets retried
@@ -5066,15 +5067,21 @@ This is the body content."#;
             for required in [
                 "name: mecha-cassy",
                 "https://mecha-cassy.vercel.app/mcp/slack",
-                // Channel rule, draft-first, two-check preflight.
+                // Channel rule, draft-first, bounded read preflight.
                 "^[a-z0-9-]+-internal$",
                 "docs/release-notes/<date>-<topic>-slack.md",
-                "Preflight, exactly two checks",
+                "Preflight, bounded read with a write-safe fallback",
                 // `since` is not schema-required, but omitting it fails
                 // `pagination_exhausted` on any busy channel, so the skill
                 // must keep saying so.
                 "pagination_exhausted",
                 "max_messages",
+                "3 attempts",
+                "10-second timeout",
+                "upstream_unavailable",
+                "slack_error",
+                "read-only outage",
+                "POSTED receipt ledger",
                 // Ordered posting, pacing, upload rule.
                 "user_thread_id",
                 "dev_thread_id",
@@ -5178,6 +5185,43 @@ This is the body content."#;
                 "{label} mecha-cassy SKILL.md has {} lines, over the ~80-line authoring target",
                 skill.content.lines().count()
             );
+        }
+    }
+
+    /// cas-6cb5 (GH #731): file receipts must prove the bytes survived the
+    /// upload, not merely report a successful response or matching size.
+    #[test]
+    fn test_builtin_mecha_cassy_file_upload_integrity_contract() {
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let skill = catalog
+                .iter()
+                .find(|b| b.path == "skills/mecha-cassy/SKILL.md")
+                .unwrap_or_else(|| panic!("skills/mecha-cassy/SKILL.md missing from {label}"));
+            for required in [
+                "programmatic file path",
+                "reads bytes from disk",
+                "never paste base64 through the model",
+                "Download the posted file",
+                "returned permalink/URL",
+                "bot credential",
+                "SHA-256 (`sha256sum`) equality",
+                "successful decode",
+                "python3 -c 'from PIL import Image; im=Image.open(\"download\"); im.verify()'",
+                "im.verify()",
+                "visible preview",
+                "Never split, resize, or shrink",
+                "Byte count, `ok: true`, or permalink alone never prove upload integrity",
+                "escalate to the supervisor on the first weak receipt",
+            ] {
+                assert!(
+                    skill.content.contains(required),
+                    "{label} mecha-cassy SKILL.md missing upload-integrity marker: {required:?}"
+                );
+            }
         }
     }
 

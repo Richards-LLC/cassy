@@ -51,6 +51,7 @@ impl Backend for Claude {
             launch.supervisor_cli,
             launch.active_workers,
             launch.config_dir,
+            launch.cas_root,
         );
         config
     }

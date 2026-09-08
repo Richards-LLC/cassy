@@ -11,6 +11,8 @@
 #   CAS_WIRE_PATH     1 = wire PATH into the login shell's rc file without asking,
 #                     0 = never edit an rc file (just print the line to add).
 #                     Unset = ask on the terminal when one is available.
+#   GITHUB_TOKEN      GitHub API token for the published-release receipt request
+#   GH_TOKEN          Fallback GitHub API token when GITHUB_TOKEN is unset
 #
 # Artifact trust model: the installer requires the selected asset's SHA-256
 # from GitHub Release metadata and checks it before extraction. This detects
@@ -214,6 +216,65 @@ resolve_version() {
 # Download and install
 # ---------------------------------------------------------------------------
 
+fetch_release_receipt() {
+  local receipt_url="$1" body_path="$2" error_path="$3"
+  local github_token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  local attempt status fetch_status
+  local -a curl_auth_args=() wget_auth_args=()
+
+  if [ -n "$github_token" ]; then
+    curl_auth_args=(--header "Authorization: Bearer $github_token")
+    wget_auth_args=(--header="Authorization: Bearer $github_token")
+  fi
+
+  for attempt in 1 2 3; do
+    : >"$body_path"
+    : >"$error_path"
+    status="000"
+    fetch_status=127
+
+    if command -v curl &>/dev/null; then
+      status="$(curl --silent --show-error --location \
+        "${curl_auth_args[@]}" \
+        --output "$body_path" \
+        --write-out '%{http_code}' \
+        "$receipt_url" 2>"$error_path")" && fetch_status=0 || fetch_status=$?
+    elif command -v wget &>/dev/null; then
+      wget --server-response --tries=1 --output-document="$body_path" \
+        "${wget_auth_args[@]}" "$receipt_url" 2>"$error_path" && fetch_status=0 || fetch_status=$?
+      status="$(sed -n 's/^[[:space:]]*HTTP\/[0-9.]*[[:space:]]\+\([0-9][0-9][0-9]\).*/\1/p' "$error_path" | tail -1)"
+      status="${status:-000}"
+    else
+      error "Neither curl nor wget found. Install one and try again."
+      return 1
+    fi
+
+    if [ "$fetch_status" -eq 0 ] && [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
+      return 0
+    fi
+
+    if [ "$attempt" -lt 3 ]; then
+      sleep 5
+    fi
+  done
+
+  error "Failed to fetch the published release receipt: $receipt_url (HTTP status: $status)"
+  if [ -s "$body_path" ]; then
+    error "GitHub API response body:"
+    while IFS= read -r line; do
+      error "  $line"
+    done <"$body_path"
+  elif [ -s "$error_path" ]; then
+    error "GitHub API request error:"
+    while IFS= read -r line; do
+      error "  $line"
+    done <"$error_path"
+  else
+    error "GitHub API response body: <empty>"
+  fi
+  return 1
+}
+
 release_asset_sha256() {
   local asset_name="$1"
   local asset_record digest_record
@@ -257,22 +318,19 @@ download_and_install() {
   local release_receipt expected_sha256 actual_sha256
 
   info "Fetching the published GitHub release receipt..."
-  if command -v curl &>/dev/null; then
-    release_receipt="$(curl -fsSL "$receipt_url" 2>/dev/null)" || {
-      error "Failed to fetch the published release receipt: $receipt_url"
-      error "Refusing to install without a verifiable SHA-256 receipt."
-      exit 1
-    }
-  elif command -v wget &>/dev/null; then
-    release_receipt="$(wget -qO- "$receipt_url" 2>/dev/null)" || {
-      error "Failed to fetch the published release receipt: $receipt_url"
-      error "Refusing to install without a verifiable SHA-256 receipt."
-      exit 1
-    }
-  else
-    error "Neither curl nor wget found. Install one and try again."
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  # Capture the path while the local exists; an EXIT trap that expands
+  # `$tmp_dir` later fails under `set -u` after this function has returned.
+  trap "rm -rf -- $(printf '%q' "$tmp_dir")" EXIT
+
+  local receipt_body="${tmp_dir}/release-receipt.json"
+  local receipt_error="${tmp_dir}/release-receipt.error"
+  if ! fetch_release_receipt "$receipt_url" "$receipt_body" "$receipt_error"; then
+    error "Refusing to install without a verifiable SHA-256 receipt."
     exit 1
   fi
+  release_receipt="$(<"$receipt_body")"
 
   expected_sha256="$(printf '%s\n' "$release_receipt" | release_asset_sha256 "$asset_name")" || {
     error "Published GitHub release receipt has no valid SHA-256 for ${asset_name}."
@@ -281,12 +339,6 @@ download_and_install() {
   }
 
   info "Downloading Cassy ${VERSION} for ${PLATFORM}..."
-
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  # Capture the path while the local exists; an EXIT trap that expands
-  # `$tmp_dir` later fails under `set -u` after this function has returned.
-  trap "rm -rf -- $(printf '%q' "$tmp_dir")" EXIT
 
   local archive_path="${tmp_dir}/${asset_name}"
 

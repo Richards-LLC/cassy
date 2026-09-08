@@ -47,6 +47,17 @@ pub struct IssueRepoRegistry {
     pub cloud: String,
 }
 
+/// GitHub source configuration for the code-history document index. Lives at
+/// `[history]` in `.cas/config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HistoryConfig {
+    /// GitHub repository in `owner/repo` form. When unset, the indexer uses
+    /// the checkout's GitHub `origin`; this is deliberately separate from
+    /// [`IssuesConfig::repo`], which routes Cassy-system bug reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+}
+
 impl IssueComponentsConfig {
     fn resolved_value(value: Option<&String>, default: &'static str) -> String {
         value
@@ -309,7 +320,7 @@ pub struct FactoryConfig {
     ///   16-thread dev box. Override via `CAS_FACTORY_CARGO_BUILD_JOBS`
     ///   if the supervisor's scale differs.
     /// - Any numeric string (e.g. `"4"`): exported verbatim.
-    #[serde(default = "default_auto")]
+    #[serde(default = "default_auto", alias = "worker_build_jobs")]
     pub cargo_build_jobs: String,
 
     /// When true, prefix each worker's spawn command with `nice -n 10`
@@ -324,6 +335,13 @@ pub struct FactoryConfig {
     /// cargo builds under contention.
     #[serde(default = "default_true")]
     pub nice_cargo: bool,
+
+    /// Maximum number of workers allowed to build concurrently on this host.
+    /// `spawn_workers` refuses a request that would exceed this cap or when
+    /// the one-minute load is already above CPU capacity; `force=true` is the
+    /// explicit operator override for exceptional runs.
+    #[serde(default = "default_max_concurrent_builders")]
+    pub max_concurrent_builders: usize,
 
     /// Seconds a worker may hold an in-progress task with a fresh heartbeat
     /// but zero observable activity (no file edits, commits, or subagent
@@ -450,6 +468,10 @@ fn default_auto() -> String {
     "auto".to_string()
 }
 
+fn default_max_concurrent_builders() -> usize {
+    4
+}
+
 fn default_stall_threshold_secs() -> u64 {
     cas_factory::DEFAULT_STALL_THRESHOLD_SECS
 }
@@ -491,6 +513,7 @@ impl Default for FactoryConfig {
             stale_threshold_commits: default_stale_threshold(),
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
+            max_concurrent_builders: default_max_concurrent_builders(),
             stall_threshold_secs: default_stall_threshold_secs(),
             stall_after_secs: default_supervisor_stall_after_secs(),
             delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),
@@ -1309,6 +1332,10 @@ mod tests {
             fc.nice_cargo,
             "nice_cargo default must be true so workers run niced relative to supervisor"
         );
+        assert_eq!(
+            fc.max_concurrent_builders, 4,
+            "max_concurrent_builders default must keep the fleet at four builders"
+        );
     }
 
     /// Round-trip: a persisted config with no factory section deserializes
@@ -1326,6 +1353,10 @@ mod tests {
             FactoryConfig::default().cargo_build_jobs
         );
         assert_eq!(fc.nice_cargo, FactoryConfig::default().nice_cargo);
+        assert_eq!(
+            fc.max_concurrent_builders,
+            FactoryConfig::default().max_concurrent_builders
+        );
         assert_eq!(
             fc.stall_threshold_secs,
             FactoryConfig::default().stall_threshold_secs
@@ -1352,6 +1383,24 @@ mod tests {
         assert_eq!(fc.target_cache_low_watermark_percent, 70);
         assert_eq!(fc.target_cache_min_idle_secs, 7200);
         assert_eq!(fc.target_cache_retention_count, 2);
+    }
+
+    #[test]
+    fn factory_build_concurrency_cap_is_configurable() {
+        let toml_str = "[factory]\nmax_concurrent_builders = 6\n";
+        let parsed: std::collections::HashMap<String, FactoryConfig> =
+            toml::from_str(toml_str).expect("valid toml");
+        let fc = parsed.get("factory").expect("section present");
+        assert_eq!(fc.max_concurrent_builders, 6);
+    }
+
+    #[test]
+    fn worker_build_jobs_alias_is_configurable() {
+        let toml_str = "[factory]\nworker_build_jobs = \"3\"\n";
+        let parsed: std::collections::HashMap<String, FactoryConfig> =
+            toml::from_str(toml_str).expect("valid toml");
+        let fc = parsed.get("factory").expect("section present");
+        assert_eq!(fc.cargo_build_jobs, "3");
     }
 
     /// cas-9829: `stall_threshold_secs` defaults to a few minutes

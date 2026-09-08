@@ -1432,7 +1432,17 @@ fn render_transport_status(report: &HubTransportReport) -> String {
         {
             return "Tailscale Serve: WARN - unavailable; hub remains loopback-only".to_owned();
         }
-        return "Tailscale Serve: OK - loopback-only; no CAS-created route".to_owned();
+        if report
+            .message
+            .starts_with("hub is loopback-only; no CAS-created Tailscale Serve route")
+        {
+            return "Tailscale Serve: OK - loopback-only; no CAS-created route".to_owned();
+        }
+        let message = report
+            .message
+            .strip_prefix("Tailscale Serve ")
+            .unwrap_or(&report.message);
+        return format!("Tailscale Serve: OK - {message}");
     }
 
     let mut lines = if report.expected_target.is_some() && report.actual_target.is_some() {
@@ -1841,6 +1851,33 @@ mod tests {
             .remedy
             .as_deref()
             .is_some_and(|remedy| remedy.contains("cas hub restart --tailscale-serve")));
+    }
+
+    #[test]
+    fn transport_status_renders_healthy_route_loopback_and_unavailable_shapes() {
+        let healthy = HubTransportReport::ok(
+            "Tailscale Serve route targets the live hub shim at http://127.0.0.1:38063",
+        );
+        assert_eq!(
+            render_transport_status(&healthy),
+            "Tailscale Serve: OK - route targets the live hub shim at http://127.0.0.1:38063"
+        );
+
+        let loopback = HubTransportReport::ok(
+            "hub is loopback-only; no CAS-created Tailscale Serve route is recorded",
+        );
+        assert_eq!(
+            render_transport_status(&loopback),
+            "Tailscale Serve: OK - loopback-only; no CAS-created route"
+        );
+
+        let unavailable = HubTransportReport::ok(
+            "hub is loopback-only; Tailscale Serve publication was unavailable: tailscale is not installed",
+        );
+        assert_eq!(
+            render_transport_status(&unavailable),
+            "Tailscale Serve: WARN - unavailable; hub remains loopback-only"
+        );
     }
 
     #[test]

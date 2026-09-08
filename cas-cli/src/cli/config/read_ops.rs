@@ -276,7 +276,7 @@ pub(crate) fn execute_describe(
             let mut out = std::io::stdout();
             let mut fmt = Formatter::stdout(&mut out, theme);
 
-            fmt.write_accent(&format!("## {}", meta.name))?;
+            fmt.write_bold(&format!("## {}", meta.name))?;
             fmt.newline()?;
             fmt.newline()?;
             fmt.field("Key", meta.key)?;

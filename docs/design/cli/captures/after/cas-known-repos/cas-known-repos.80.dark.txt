@@ -1,0 +1,3 @@
+Dry run: 0 missing known-repo row(s) would be removed.
+Retained 1 registered root(s) without a Cassy store.
+  Remedy: run `cas init` there or `cas known-repos forget <path>`.

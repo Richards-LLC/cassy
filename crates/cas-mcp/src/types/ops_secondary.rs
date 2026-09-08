@@ -553,6 +553,25 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub count: Option<i32>,
 
+    /// Maximum child rows to inspect/render for epic_status.
+    #[schemars(
+        description = "epic_status only: maximum child rows to inspect/render; combine with offset for paging"
+    )]
+    #[serde(default, deserialize_with = "deser::option_usize")]
+    pub limit: Option<usize>,
+
+    /// Number of child rows to skip before inspecting/rendering for epic_status.
+    #[schemars(description = "epic_status only: number of child rows to skip before the page")]
+    #[serde(default, deserialize_with = "deser::option_usize")]
+    pub offset: Option<usize>,
+
+    /// Use the bounded ancestry-only epic_status view without expensive content proofs.
+    #[schemars(
+        description = "epic_status only: return a fast summary view that omits expensive delivery-content proofs"
+    )]
+    #[serde(default)]
+    pub summary: Option<bool>,
+
     /// Specific worker names (comma-separated)
     #[schemars(
         description = "Comma-separated worker names (optional for spawn, specific targets for shutdown)"
@@ -883,6 +902,20 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
 
+    /// Number of child rows to skip before the epic_status page.
+    #[schemars(description = "epic_status only: number of child rows to skip before the page")]
+    #[serde(default, deserialize_with = "deser::option_usize")]
+    pub offset: Option<usize>,
+
+    /// Use the bounded ancestry-only epic_status view without expensive content proofs.
+    /// `summary` is already the message preview field on this unified request,
+    /// so this field is named explicitly to avoid changing message callers.
+    #[schemars(
+        description = "epic_status only: return a fast summary view that omits expensive delivery-content proofs"
+    )]
+    #[serde(default)]
+    pub summary_mode: Option<bool>,
+
     // ========== Agent Fields ==========
     /// Human-readable agent name (for register)
     #[schemars(description = "Human-readable name for the agent")]
@@ -1205,6 +1238,9 @@ impl CoordinationRequest {
             action: self.action.clone(),
             id: self.id.clone(),
             count: self.count,
+            limit: self.limit,
+            offset: self.offset,
+            summary: self.summary_mode,
             worker_names: self.worker_names.clone(),
             task_id: self.task_id.clone(),
             delivery_mode: self.delivery_mode.clone(),

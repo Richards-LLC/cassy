@@ -48,6 +48,10 @@ project, the Cassy component key for runtime/hooks/MCP/factory/skill defects,
 the MechaCassy key for Slack hub defects, and the Cloud key for sync,
 relay, or pairing defects. If you hit a bug during operation, file a ticket in the matching repo before moving on; do not infer a destination from git remotes.
 
+The code-history document index has a separate source setting. Configure
+`history.github_repo` for an override, or leave it empty to use the checkout's
+GitHub `origin`; never set `issues.repo` to make history indexing work.
+
 ## 1. List open issues
 
 Fetch the open issues with their bodies **and comment counts**. An issue whose

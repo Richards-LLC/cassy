@@ -24,6 +24,8 @@ pub struct ExecuteResult {
     pub text: String,
     /// Images returned by the execution.
     pub images: Vec<ImageResult>,
+    /// Whether any upstream tool result was marked as an error.
+    pub is_error: bool,
 }
 
 /// An image returned from MCP tool execution.
@@ -322,6 +324,14 @@ pub struct UpstreamHealth {
     pub consecutive_failures: u32,
     pub tool_count: usize,
     pub last_error_code: Option<String>,
+    /// Bounded, credential-free detail from the latest failed connection.
+    ///
+    /// `last_error_code` is intentionally coarse for machine classification;
+    /// this field keeps the operator-facing status useful when several
+    /// failures share `connection_failed` (for example an HTTP status/body or
+    /// a child-process spawn error).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
     pub last_attempt_at_ms: Option<u64>,
     pub next_retry_at_ms: Option<u64>,
 }
@@ -370,6 +380,7 @@ impl ProxyHealthSnapshot {
                 .last_error_code
                 .as_deref()
                 .map(safe_error_code);
+            server.last_error = server.last_error.as_deref().map(safe_error_detail_text);
         }
         self
     }
@@ -491,6 +502,20 @@ impl ProxyEngine {
         self.retry_unhealthy_at(now_ms()).await
     }
 
+    /// Probe configured upstreams once and return the credential-free health
+    /// snapshot. This is used by synchronous diagnostics such as `cas doctor`;
+    /// it deliberately does not publish a live proxy cache or retain any
+    /// connected services after the probe completes.
+    pub async fn probe_configs(
+        configs: HashMap<String, ServerConfig>,
+        connect_timeout: Duration,
+    ) -> Result<ProxyHealthSnapshot> {
+        let engine = Self::from_configs_with_timeout(configs, connect_timeout).await?;
+        let snapshot = engine.health_snapshot().await;
+        engine.shutdown().await;
+        Ok(snapshot)
+    }
+
     async fn retry_unhealthy_at(&self, now: u64) -> usize {
         let due: Vec<String> = {
             let health = self.health.read().await;
@@ -572,7 +597,7 @@ impl ProxyEngine {
                     {
                         record.executable = Some(command.trim().to_string());
                     }
-                    record_failure(record, &code, now)
+                    record_failure_with_detail(record, &code, Some(&error), now)
                 };
                 match visibility {
                     FailureVisibility::Error if code == "executable_missing" => tracing::error!(
@@ -720,6 +745,7 @@ impl ProxyEngine {
 
         let mut text_parts: Vec<String> = Vec::new();
         let mut images: Vec<ImageResult> = Vec::new();
+        let mut is_error = false;
 
         if calls.len() == 1 {
             let call = &calls[0];
@@ -732,6 +758,7 @@ impl ProxyEngine {
                     call.args.clone(),
                 )
                 .await?;
+            is_error = result.is_error == Some(true);
             collect_result(&result, &mut text_parts, &mut images);
         } else {
             // Execute in parallel
@@ -752,7 +779,10 @@ impl ProxyEngine {
 
             for (i, result) in results.into_iter().enumerate() {
                 match result {
-                    Ok(result) => collect_result(&result, &mut text_parts, &mut images),
+                    Ok(result) => {
+                        is_error |= result.is_error == Some(true);
+                        collect_result(&result, &mut text_parts, &mut images);
+                    }
                     Err(e) => {
                         text_parts.push(format!(
                             "[{}.{} error]: {e}",
@@ -771,7 +801,11 @@ impl ProxyEngine {
             }
         }
 
-        Ok(ExecuteResult { text, images })
+        Ok(ExecuteResult {
+            text,
+            images,
+            is_error,
+        })
     }
 
     /// Return the total number of tools across all connected servers.
@@ -1227,6 +1261,7 @@ fn initial_health(name: &str, config: &ServerConfig) -> UpstreamHealth {
         consecutive_failures: 0,
         tool_count: 0,
         last_error_code: None,
+        last_error: None,
         last_attempt_at_ms: None,
         next_retry_at_ms: None,
     }
@@ -1247,15 +1282,26 @@ fn record_success(record: &mut UpstreamHealth, tool_count: usize, now: u64) {
     record.state = UpstreamState::Healthy;
     record.executable = None;
     record.last_error_code = None;
+    record.last_error = None;
     record.last_attempt_at_ms = Some(now);
     record.next_retry_at_ms = None;
 }
 
 fn record_failure(record: &mut UpstreamHealth, error_code: &str, now: u64) -> FailureVisibility {
+    record_failure_with_detail(record, error_code, None, now)
+}
+
+fn record_failure_with_detail(
+    record: &mut UpstreamHealth,
+    error_code: &str,
+    error: Option<&anyhow::Error>,
+    now: u64,
+) -> FailureVisibility {
     record.attempts = record.attempts.saturating_add(1);
     record.consecutive_failures = record.consecutive_failures.saturating_add(1);
     record.tool_count = 0;
     record.last_error_code = Some(error_code.to_string());
+    record.last_error = error.map(safe_error_detail);
     record.last_attempt_at_ms = Some(now);
     if error_code == "executable_missing" {
         record.state = UpstreamState::ExecutableMissing;
@@ -1339,6 +1385,23 @@ fn classify_live_failure(error: &rmcp::service::ServiceError) -> Option<&'static
     }
 }
 
+/// Preserve the structured JSON-RPC error returned by an upstream MCP server.
+///
+/// `ProxyEngine::call_upstream` adds context around the rmcp error with
+/// `anyhow`, so callers should use the error chain rather than parse its
+/// display string. The returned value is safe to attach to Cassy's MCP error:
+/// it contains only the upstream protocol envelope, never proxy credentials or
+/// request arguments.
+pub fn upstream_mcp_error_data(error: &anyhow::Error) -> Option<Value> {
+    let service_error = error.chain().find_map(|cause| {
+        cause.downcast_ref::<rmcp::service::ServiceError>()
+    })?;
+    let rmcp::service::ServiceError::McpError(error) = service_error else {
+        return None;
+    };
+    serde_json::to_value(error).ok()
+}
+
 fn safe_session_id(session_id: &str) -> String {
     if session_id.len() <= 96
         && session_id.strip_prefix("proxy-").is_some_and(|suffix| {
@@ -1397,6 +1460,64 @@ fn safe_error_code(code: &str) -> String {
         | "connection_failed"
         | "executable_missing" => code.to_string(),
         _ => "unknown".to_string(),
+    }
+}
+
+/// Keep connection diagnostics useful without allowing credentials, URLs, or
+/// control characters to cross the health-cache/MCP boundary.
+fn safe_error_detail(error: &anyhow::Error) -> String {
+    if let Some(name) = error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<MissingCredentialError>()
+            .map(|missing| missing.name.as_str())
+    }) {
+        return format!("missing required environment variable {name}");
+    }
+    safe_error_detail_text(&format!("{error:#}"))
+}
+
+fn safe_error_detail_text(detail: &str) -> String {
+    let mut output = String::with_capacity(detail.len().min(512));
+    let mut redact_next = false;
+    for token in detail.split_whitespace() {
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        let lower = token.to_ascii_lowercase();
+        if redact_next {
+            output.push_str("[redacted]");
+            redact_next = false;
+        } else if lower == "bearer" || lower.ends_with("bearer:") {
+            output.push_str(token);
+            redact_next = true;
+        } else if [
+            "token=",
+            "secret=",
+            "password=",
+            "api_key=",
+            "apikey=",
+            "access_token=",
+        ]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+        {
+            let prefix_len = token.find('=').map(|index| index + 1).unwrap_or(0);
+            output.push_str(&token[..prefix_len]);
+            output.push_str("[redacted]");
+        } else if token.contains("http://") || token.contains("https://") {
+            output.push_str("[upstream-url]");
+        } else {
+            output.push_str(token);
+        }
+        if output.len() >= 512 {
+            output.truncate(512);
+            break;
+        }
+    }
+    if output.is_empty() {
+        "upstream connection failed".to_string()
+    } else {
+        output
     }
 }
 
@@ -1512,7 +1633,14 @@ async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedSe
     let service: McpClientService = match config {
         ServerConfig::Stdio { command, args, env } => {
             let cmd = Command::new(command);
-            let env_clone = env.clone();
+            let env_clone = env
+                .iter()
+                .map(|(key, value)| {
+                    resolve_credential(value)
+                        .with_context(|| format!("failed to resolve stdio environment key '{key}'"))
+                        .map(|value| (key.clone(), value))
+                })
+                .collect::<Result<Vec<_>>>()?;
             let args_clone = args.clone();
             let transport = TokioChildProcess::new(cmd.configure(move |cmd| {
                 cmd.args(&args_clone);
@@ -1746,6 +1874,70 @@ fn collect_result(
                 }
             }
         }
+    }
+
+    // Some MCP servers return a structured result without a text content
+    // item. Keep that envelope visible to callers, especially for tool errors
+    // whose detail is carried in `structuredContent`.
+    if result.content.is_empty()
+        && let Some(structured) = &result.structured_content
+        && let Ok(json) = serde_json::to_string_pretty(structured)
+    {
+        text_parts.push(json);
+    }
+}
+
+#[cfg(test)]
+mod cas_346b_regression_tests {
+    use super::*;
+
+    #[test]
+    fn structured_upstream_error_is_visible_when_content_is_empty() {
+        let result = rmcp::model::CallToolResult {
+            content: Vec::new(),
+            structured_content: Some(serde_json::json!({
+                "code": "upstream_unavailable",
+                "message": "Slack is temporarily unavailable",
+                "retryable": true,
+                "slack_error": "ratelimited"
+            })),
+            is_error: Some(true),
+            meta: None,
+        };
+        let mut text = Vec::new();
+        let mut images = Vec::new();
+
+        collect_result(&result, &mut text, &mut images);
+
+        assert_eq!(
+            text,
+            vec![
+                serde_json::to_string_pretty(result.structured_content.as_ref().unwrap())
+                    .unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn upstream_mcp_error_data_preserves_hub_error_envelope() {
+        let error = anyhow::Error::new(rmcp::service::ServiceError::McpError(
+            rmcp::ErrorData::internal_error(
+                "Slack is temporarily unavailable",
+                Some(serde_json::json!({
+                    "code": "upstream_unavailable",
+                    "retryable": true,
+                    "detail": "ratelimited",
+                    "slack_error": "ratelimited"
+                })),
+            ),
+        ));
+
+        let details = upstream_mcp_error_data(&error).expect("upstream MCP details");
+
+        assert_eq!(details["message"], "Slack is temporarily unavailable");
+        assert_eq!(details["data"]["code"], "upstream_unavailable");
+        assert_eq!(details["data"]["detail"], "ratelimited");
+        assert_eq!(details["data"]["slack_error"], "ratelimited");
     }
 }
 
@@ -2396,7 +2588,12 @@ mod tests {
             .find(|server| server.name == "mecha-cassy")
             .expect("configured upstream health must be present");
         let expected_code = format!("{MISSING_CREDENTIAL_ENV_PREFIX}{missing}");
-        assert_eq!(server.last_error_code.as_deref(), Some(expected_code.as_str()));
+        let expected_detail = format!("missing required environment variable {missing}");
+        assert_eq!(
+            server.last_error_code.as_deref(),
+            Some(expected_code.as_str())
+        );
+        assert_eq!(server.last_error.as_deref(), Some(expected_detail.as_str()));
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(json.contains(&missing));
         assert!(!json.contains(secret));
@@ -2484,6 +2681,7 @@ mod tests {
                     consecutive_failures: 1,
                     tool_count: 0,
                     last_error_code: Some("token=private\ncontrol".to_string()),
+                    last_error: Some("token=private\ncontrol".to_string()),
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: Some(5_001),
                 },
@@ -2496,6 +2694,7 @@ mod tests {
                     consecutive_failures: 1,
                     tool_count: 0,
                     last_error_code: Some("timeout".to_string()),
+                    last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: Some(5_001),
                 },
@@ -2514,6 +2713,10 @@ mod tests {
             snapshot.servers[0].last_error_code.as_deref(),
             Some("unknown")
         );
+        assert_eq!(
+            snapshot.servers[0].last_error.as_deref(),
+            Some("token=[redacted] control")
+        );
         assert_eq!(snapshot.servers[1].transport, "http");
         assert_eq!(
             snapshot.servers[1].last_error_code.as_deref(),
@@ -2530,11 +2733,14 @@ mod tests {
             second_raw,
             "Bearer private",
             "token=private",
-            "control",
             "https://token@example.invalid/session",
         ] {
             assert!(!json.contains(forbidden), "{forbidden:?} leaked: {json}");
         }
+        assert!(
+            !json.contains('\n'),
+            "health diagnostics must not contain newlines"
+        );
     }
 
     #[test]
@@ -2557,6 +2763,7 @@ mod tests {
                     consecutive_failures: 0,
                     tool_count: 1,
                     last_error_code: None,
+                    last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
                 })
@@ -2636,6 +2843,7 @@ mod tests {
                     consecutive_failures: 1,
                     tool_count: 0,
                     last_error_code: Some("executable_missing".to_string()),
+                    last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
                 },
@@ -2648,6 +2856,7 @@ mod tests {
                     consecutive_failures: 1,
                     tool_count: 0,
                     last_error_code: Some("executable_missing".to_string()),
+                    last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
                 },
@@ -2660,6 +2869,7 @@ mod tests {
                     consecutive_failures: 0,
                     tool_count: 1,
                     last_error_code: None,
+                    last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
                 },
@@ -2784,6 +2994,7 @@ mod tests {
                 consecutive_failures: 1,
                 tool_count: 0,
                 last_error_code: Some("authentication_required".to_string()),
+                last_error: None,
                 last_attempt_at_ms: Some(1),
                 next_retry_at_ms: Some(5_001),
             }],

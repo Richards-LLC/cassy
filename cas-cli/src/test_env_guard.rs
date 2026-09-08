@@ -70,6 +70,42 @@ pub(crate) fn test_env_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Install an ambient value before constructing a `TestEnvGuard`, restoring it
+/// after the fixture drops. This keeps invariant tests from mutating process
+/// environment directly while proving that guard-owned overrides replace,
+/// rather than inherit, ambient values.
+pub(crate) struct AmbientEnvRestore {
+    saved: Vec<(OsString, Option<OsString>)>,
+}
+
+impl AmbientEnvRestore {
+    pub(crate) fn set(key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
+        let key = key.as_ref();
+        let _lock = test_env_lock();
+        let saved = vec![(key.to_os_string(), std::env::var_os(key))];
+        // SAFETY: the mutation is serialized by the shared test environment
+        // lock and the original value is restored on Drop.
+        unsafe { std::env::set_var(key, value) };
+        drop(_lock);
+        Self { saved }
+    }
+}
+
+impl Drop for AmbientEnvRestore {
+    fn drop(&mut self) {
+        let _lock = test_env_lock();
+        for (key, value) in self.saved.iter().rev() {
+            // SAFETY: the lock prevents concurrent test environment changes.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
+
 /// Canonical process-wide environment fixture for tests.
 ///
 /// The guard owns the one shared lock, captures every variable before its
@@ -100,6 +136,11 @@ impl TestEnvGuard {
             saved_cwd: None,
         };
         guard.scrub_ambient_cas_environment();
+        // Factory spawn tests must not inherit the runner's live load. The
+        // production probe remains enabled unless an explicit test fixture
+        // opts into this override; guard unit tests use evaluate() with
+        // injected snapshots and therefore still exercise refusal behavior.
+        guard.set("CAS_FACTORY_BUILD_GUARD", "off");
         guard
     }
 

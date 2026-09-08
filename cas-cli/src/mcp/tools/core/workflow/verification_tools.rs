@@ -104,7 +104,7 @@ impl CasCore {
         // Caller-supplied names, models, verifier types, task ownership, harness
         // labels, and orphan state never grant verification authority.
         let caller_id = self.get_agent_id()?;
-        let caller = agent_store.get(&caller_id).map_err(|_| McpError {
+        let mut caller = agent_store.get(&caller_id).map_err(|_| McpError {
             code: ErrorCode::INVALID_REQUEST,
             message: Cow::from(
                 "Verification requires an authenticated registered Cassy session. Anonymous or orphan callers cannot add verification records.",
@@ -329,6 +329,33 @@ impl CasCore {
         // task-verifier (which calls this endpoint) was as stuck as closing.
         // The exemption only skips the halt flag; it does not fabricate a
         // verification verdict.
+        //
+        // cas-1145: if an older assignment halt names a task that was never
+        // created, clear it durably before applying the normal halt gate.
+        let mut cleared_metadata = caller.metadata.clone();
+        match crate::mcp::tools::core::task::lifecycle::stale_close_guard::clear_missing_task_halt(
+            &mut cleared_metadata,
+            task_store.as_ref(),
+        ) {
+            Ok(true) => {
+                let previous_metadata = caller.metadata.clone();
+                caller.metadata = cleared_metadata;
+                if let Err(error) = agent_store.update(&caller) {
+                    caller.metadata = previous_metadata;
+                    tracing::warn!(
+                        agent_id = %caller_id,
+                        error = %error,
+                        "cas-1145: failed to persist phantom urgent-halt cleanup; keeping halt"
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                agent_id = %caller_id,
+                error = %error,
+                "cas-1145: could not verify urgent-halt task; keeping halt"
+            ),
+        }
         let halt_exempt =
             crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_exempt_for_owned_task(
                 task.status,

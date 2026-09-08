@@ -422,6 +422,63 @@ async fn alias_registration_project_list_remote_alias_is_owned() {
     assert!(!outcome.newly_registered());
 }
 
+/// GH #717/#740: a registration conflict must preserve both project
+/// identities and tell the operator how to converge them. A bare HTTP status
+/// is not enough to repair a pinned canonical id that disagrees with the
+/// cloud's registered bucket.
+#[tokio::test]
+async fn registration_conflict_names_both_identities_and_convergence_path() {
+    let server = MockServer::start().await;
+    let requested_id = "github.com/richards-llc/pulse-card";
+    let registered_id = "pulse-card";
+
+    Mock::given(method("GET"))
+        .and(path(projects_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_project_list_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(team_push_path()))
+        .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "error": "project_registration_conflict",
+            "canonical_id": requested_id,
+            "registered_canonical_id": registered_id,
+            "message": "the git remote and pinned canonical id resolve to different projects"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let endpoint = server.uri();
+    let failure = tokio::task::spawn_blocking(move || {
+        cas::cloud::TeamRegistration::new(&endpoint, "test-token", TEST_TEAM, requested_id)
+            .ensure()
+            .expect_err("a project registration conflict must fail with an actionable error")
+    })
+    .await
+    .unwrap();
+    let message = failure.to_string();
+
+    assert!(
+        message.contains("project_registration_conflict"),
+        "{message}"
+    );
+    assert!(
+        message.contains(requested_id),
+        "requested identity must be preserved: {message}"
+    );
+    assert!(
+        message.contains(registered_id),
+        "registered identity must be preserved: {message}"
+    );
+    assert!(
+        message.contains("cas cloud project set") && message.contains("alias"),
+        "the error must name both convergence remedies: {message}"
+    );
+    assert!(message.contains("HTTP 409"), "{message}");
+}
+
 /// A divergent server response is an identity-resolution result, not evidence
 /// of a server-side defect. If its listed bucket disappears between the push
 /// and the verification GET, name the resolved id honestly for recovery.

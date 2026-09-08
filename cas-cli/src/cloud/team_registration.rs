@@ -122,6 +122,101 @@ fn body_excerpt(body: &str) -> String {
     format!("{}…", head.replace('\n', " "))
 }
 
+/// Return the first non-empty string value for one of the known identity
+/// fields in a cloud error envelope. The conflict response has evolved from a
+/// flat object to nested `details` objects, so this intentionally walks both
+/// objects and arrays without trusting a free-form message to identify a
+/// project.
+fn json_string_for_keys(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if keys
+                    .iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+                {
+                    if let Some(string) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        return Some(string.to_string());
+                    }
+                }
+            }
+            object
+                .values()
+                .find_map(|value| json_string_for_keys(value, keys))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .find_map(|value| json_string_for_keys(value, keys)),
+        _ => None,
+    }
+}
+
+fn response_contains_project_registration_conflict(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(string) => {
+            string
+                .trim()
+                .eq_ignore_ascii_case("project_registration_conflict")
+                || string
+                    .to_ascii_lowercase()
+                    .contains("project_registration_conflict")
+        }
+        serde_json::Value::Object(object) => object
+            .values()
+            .any(response_contains_project_registration_conflict),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(response_contains_project_registration_conflict),
+        _ => false,
+    }
+}
+
+/// Extract the two identities that the cloud says cannot be registered as one
+/// project. Returning `None` means this is a generic 409, not the structured
+/// project-registration conflict contract.
+fn registration_conflict_identities(
+    body: &str,
+    requested_fallback: &str,
+) -> Option<(String, String)> {
+    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    if !response_contains_project_registration_conflict(&value) {
+        return None;
+    }
+
+    let requested = json_string_for_keys(
+        &value,
+        &[
+            "requested_canonical_id",
+            "incoming_canonical_id",
+            "attempted_canonical_id",
+            "project_canonical_id",
+            "canonical_id",
+            "requested",
+            "incoming",
+            "attempted",
+            "git_remote",
+        ],
+    )
+    .unwrap_or_else(|| requested_fallback.to_string());
+    let registered = json_string_for_keys(
+        &value,
+        &[
+            "registered_canonical_id",
+            "existing_canonical_id",
+            "conflicting_canonical_id",
+            "owner_canonical_id",
+            "resolved_canonical_id",
+            "registered",
+            "existing",
+            "conflicting",
+            "owner",
+        ],
+    )
+    .filter(|identity| identity != &requested)?;
+
+    Some((requested, registered))
+}
+
 /// One project↔team registration check, parameterized so integration tests can
 /// point it at a wiremock server.
 pub struct TeamRegistration<'a> {
@@ -415,6 +510,35 @@ impl<'a> TeamRegistration<'a> {
                 "Your account is not allowed to register projects for team {} on {}.",
                 self.team_id, self.endpoint
             ),
+            409 => match registration_conflict_identities(body, &self.wire_canonical_id()) {
+                Some((requested, registered)) => format!(
+                    "Project registration conflict (project_registration_conflict, HTTP 409): requested identity \
+                     '{}' conflicts with the team's registered identity '{}'. Pin the project to \
+                     the registered identity with `cas cloud project set {registered}`, or file an \
+                     alias from '{}' to '{}' with the cloud owner; this client will not retry the \
+                     conflicting registration automatically.",
+                    requested, registered, requested, registered
+                ),
+                None if response_contains_project_registration_conflict(
+                    &serde_json::from_str::<serde_json::Value>(body).unwrap_or_default(),
+                ) =>
+                {
+                    format!(
+                        "Project registration conflict (project_registration_conflict) for '{}'. \
+                     Pin the project to the cloud's registered identity with `cas cloud project set \
+                     <registered-canonical-id>`, or file an alias with the cloud owner; this client \
+                     will not retry the conflicting registration automatically.",
+                        self.wire_canonical_id()
+                    )
+                }
+                None => format!(
+                    "Could not register project '{}' with team {} on {}: the server returned \
+                     HTTP {status}.",
+                    self.wire_canonical_id(),
+                    self.team_id,
+                    self.endpoint
+                ),
+            },
             _ => format!(
                 "Could not register project '{}' with team {} on {}: the server returned \
                  HTTP {status}.",

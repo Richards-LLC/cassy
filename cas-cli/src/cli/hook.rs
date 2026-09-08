@@ -72,6 +72,9 @@ pub enum HookCommand {
     PreCompact,
     /// Handle MessageDisplay hook event (Ink-crash guard + assistant-text redaction, opt-in)
     MessageDisplay,
+    /// Record a factory worker pre-push refusal for supervisor activity views.
+    #[command(name = "WorkerPushRejected")]
+    WorkerPushRejected,
     /// Remove duplicate Cassy hooks from project-level .claude/settings.json files
     ///
     /// When Cassy hooks are configured globally in ~/.claude/settings.json,
@@ -106,7 +109,64 @@ pub fn execute(args: &HookArgs, cli: &Cli) -> anyhow::Result<()> {
         HookCommand::Notification => execute_event("Notification", cli),
         HookCommand::PreCompact => execute_event("PreCompact", cli),
         HookCommand::MessageDisplay => execute_event("MessageDisplay", cli),
+        HookCommand::WorkerPushRejected => execute_worker_push_rejected(),
     }
+}
+
+/// Persist a pre-push guard refusal without making the guard depend on the
+/// daemon being alive. The shell hook supplies the branch/ref through the
+/// environment so arbitrary Git ref text never becomes shell source.
+fn execute_worker_push_rejected() -> anyhow::Result<()> {
+    let Some(cas_root) = std::env::var_os("CAS_ROOT").map(std::path::PathBuf::from) else {
+        return Ok(());
+    };
+    let worker_name = std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "unknown-worker".into());
+    let branch = std::env::var("CAS_PUSH_GUARD_BRANCH").unwrap_or_else(|_| "<unknown>".into());
+    let remote_ref =
+        std::env::var("CAS_PUSH_GUARD_REMOTE_REF").unwrap_or_else(|_| "<unknown>".into());
+    record_worker_push_rejection(&cas_root, &worker_name, &branch, &remote_ref);
+    Ok(())
+}
+
+/// Emit one worker-activity event for a refused push. The daemon socket is the
+/// fast path used by ordinary hooks; direct EventStore recording is the
+/// fail-open fallback for a worker whose daemon is restarting or unavailable.
+pub(crate) fn record_worker_push_rejection(
+    cas_root: &Path,
+    worker_name: &str,
+    branch: &str,
+    remote_ref: &str,
+) {
+    let expected = format!("factory/{worker_name}");
+    let session_id = std::env::var("CAS_SESSION_ID")
+        .or_else(|_| std::env::var("CAS_FACTORY_SESSION"))
+        .unwrap_or_else(|_| worker_name.to_string());
+    let description = format!(
+        "worker push blocked: not your branch — worker '{worker_name}' is on '{branch}', requested destination '{remote_ref}'; expected 'refs/heads/{expected}'"
+    );
+    let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
+        session_id: session_id.clone(),
+        event_type: "worker_push_blocked".to_string(),
+        description: description.clone(),
+        entity_id: Some(worker_name.to_string()),
+    };
+    if crate::mcp::socket::send_event(cas_root, &event).is_ok() {
+        return;
+    }
+
+    use cas_store::{EventStore, SqliteEventStore};
+    use cas_types::{Event, EventEntityType, EventType};
+    let Ok(store) = SqliteEventStore::open(cas_root) else {
+        return;
+    };
+    let event = Event::new(
+        EventType::WorkerPushBlocked,
+        EventEntityType::Agent,
+        worker_name,
+        description,
+    )
+    .with_session(session_id);
+    let _ = store.record(&event);
 }
 
 /// Handle a hook event (reads JSON from stdin)

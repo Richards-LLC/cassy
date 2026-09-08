@@ -7909,6 +7909,51 @@ mod purge_foreign_safety_tests {
     }
 
     #[test]
+    fn peer_evidence_delete_rows_are_held_out_of_the_follow_up_pull() {
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
+
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 5,
+            peers_compared: vec!["accounting".to_string()],
+            foreign: vec![ForeignRow {
+                id: "own-1".to_string(),
+                title: "own task 1".to_string(),
+                closed: false,
+                origin_project: Some("cas-src".to_string()),
+                home_project: "accounting".to_string(),
+                also_present_in: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let analysis = collect_purge_delete_set_with_report(&conn, "cas-src", &report).unwrap();
+        let peer_row = analysis
+            .delete_set
+            .tasks
+            .iter()
+            .find(|row| row.id == "own-1")
+            .expect("peer evidence must add the fixture row to the plan");
+        assert_eq!(peer_row.evidence.source, "peer-evidence");
+
+        let temp = TempDir::new().unwrap();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let hash = purge_delete_set_hash(&analysis.delete_set);
+
+        assert_eq!(
+            quarantine_peer_evidence_rows(&queue, &analysis.delete_set, &hash).unwrap(),
+            1,
+            "a peer-evidence task must be suppressed before the re-pull"
+        );
+        assert_eq!(
+            queue.quarantined_ids(crate::cloud::QUARANTINE_TASK).unwrap(),
+            ["own-1".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
     fn accepted_proposal_tasks_with_foreign_origin_are_never_purge_candidates() {
         let conn = Connection::open_in_memory().unwrap();
         seed_project_scoped_db(&conn);

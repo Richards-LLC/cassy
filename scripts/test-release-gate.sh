@@ -50,6 +50,7 @@ new_fixture() {
     mkdir -p "$repo/scripts" "$repo/hub-web/scripts" "$repo/cas-cli/src" "$repo/cas-cli/tests" "$repo/crates" \
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
+    cp "$script_dir/run-verified-tests.sh" "$repo/scripts/run-verified-tests.sh"
     cat >"$repo/.gitignore" <<'EOF'
 .context/zig/
 EOF
@@ -130,6 +131,7 @@ printf 'CAS_INIT_TIMEOUT_SECS=%s :: %s\n' "${CAS_INIT_TIMEOUT_SECS:-unset}" "$*"
   >>"${GATE_FIXTURE_ENV_LOG:-/dev/null}"
 printf 'ZIG=%s :: %s\n' "${ZIG:-unset}" "$*" \
   >>"${GATE_FIXTURE_ZIG_LOG:-/dev/null}"
+printf 'INSTA_WORKSPACE_ROOT=%s :: %s\n' "${INSTA_WORKSPACE_ROOT:-unset}" "$*" >>"${GATE_FIXTURE_ARCHIVE_ENV_LOG:-/dev/null}"
 printf 'RUSTC_WRAPPER=%s CARGO_HOME=%s :: %s\n' "${RUSTC_WRAPPER:-unset}" "${CARGO_HOME:-unset}" "$*" \
   >>"${GATE_FIXTURE_ARCHIVE_ENV_LOG:-/dev/null}"
 printf 'CAS_FACTORY_SESSION=%s CAS_AGENT_ROLE=%s CAS_AGENT_NAME=%s CAS_SUPERVISOR_NAME=%s CAS_AGENT_ID=%s :: %s\n' \
@@ -151,6 +153,9 @@ if [[ "$*" == 'nextest archive --workspace'* ]]; then
   for arg in "$@"; do [[ "$arg" == *.tar.zst ]] && archive_file="$arg"; done
   [[ -n "$archive_file" ]] && printf archive >"$archive_file"
   exit 0
+fi
+if [[ "$*" == 'nextest run '* && "${GATE_FIXTURE_EMPTY_SUITE:-}" != 1 ]]; then
+  printf 'Summary [0.001s] 1 test run: 1 passed, 0 skipped\n'
 fi
 if [[ "$*" == 'nextest run --archive-file '* ]]; then
   [[ "${RUSTC_WRAPPER:-}" == /nonexistent/sccache ]] || { printf 'archive fixture: wrapper=%s\n' "${RUSTC_WRAPPER:-unset}" >&2; exit 1; }
@@ -829,7 +834,7 @@ repo="$(new_fixture suite-coverage)"
 : >"$tmp/cargo.log"
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/coverage.log" 2>&1
 if grep -qF "nextest run --workspace --filterset binary_id(~component_output_test)" "$tmp/cargo.log" \
-    && ! grep -qxF 'nextest run --workspace' "$tmp/cargo.log" \
+    && ! grep -qxF 'nextest run --workspace --no-fail-fast' "$tmp/cargo.log" \
     && [[ "$(grep -c '^nextest archive --workspace ' "$tmp/cargo.log")" == 1 ]] \
     && grep -qF -- '--filterset not binary_id(~component_output_test)' "$tmp/cargo.log"; then
     ok 'full gate builds one archive and runs complementary suite filters'
@@ -838,17 +843,26 @@ else
 fi
 : >"$tmp/cargo.log"
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only nextest >"$tmp/diagnostic.log" 2>&1
-if grep -qxF 'nextest run --workspace' "$tmp/cargo.log"; then
+if grep -qxF 'nextest run --workspace --no-fail-fast' "$tmp/cargo.log"; then
     ok 'focused nextest diagnostic retains whole-workspace execution'
 else
     bad 'focused nextest diagnostic lost whole-workspace coverage'
 fi
 
+output="$(run_gate "$repo" GATE_FIXTURE_EMPTY_SUITE "$repo/scripts/release-gate.sh" 9.99.7 --only nextest,archive-mode 2>&1 || true)"
+assert_named_failure nextest "$output"
+assert_named_failure archive-mode "$output"
+if grep -qE '^INSTA_WORKSPACE_ROOT=.*/workspace-remap :: nextest run --archive-file .*--no-fail-fast' "$archive_env_log"; then
+    ok 'archive consumer pins snapshot workspace and completes all binaries like CI'
+else
+    bad 'archive consumer drifted from CI snapshot-root or no-fail-fast contract'
+fi
+
 # Receipts from real fixture executions, never forged PASS to prove success.
 repo="$(new_fixture row-cache)"
-export CAS_RELEASE_GATE_CACHE_DIR="$tmp/row-cache"
+export CAS_RELEASE_GATE_CACHE_DIR="$tmp/pass-cache"
 export CAS_RELEASE_GATE_LOG_DIR="$tmp/row-logs"
-run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-first.log" 2>&1
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-first.log" 2>&1 || { cat "$tmp/cache-first.log"; exit 1; }
 if [[ "$(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 20 ]] \
     && [[ -s "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" ]] \
     && grep -qE '^  timing: wall=[0-9]+\.[0-9]+s user=' "$tmp/cache-first.log"; then

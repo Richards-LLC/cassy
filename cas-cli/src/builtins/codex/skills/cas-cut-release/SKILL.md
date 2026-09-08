@@ -142,3 +142,42 @@ name the blocking step in the operator timeline, and require its receipt.
    to equal the released version. Carry the POSTED receipt into the next prep
    commit. Close only after merge and stranded-branch inspection; use
    `stranded_branch_override` only with proof on main.
+
+## Release-gate timing and full retries
+
+A full `scripts/release-train.sh <version> <epic-worktree> --gate` retains every
+row's raw log, visual-QA evidence and `timing.tsv` under the run directory's
+`rows/<UTC>-<pid>/`. The table records UTC boundaries, wall seconds, user CPU
+seconds, system CPU seconds, status and source SHA. Successful logs survive a
+retry; `gate.log` remains the current attempt's summary.
+
+After a fix, use `--gate --reuse` for a complete gate that may reuse eligible
+PASS rows. It requires the same tool/environment fingerprint, row input content
+and checkout identity, with evidence no older than 24 hours. Rust rows depend
+on the whole commit; web rows depend on `hub-web`, `scripts`, and `.github`, so
+a Rust-only fix can retain web evidence while Rust tests rerun. Scratch and
+identity checks, procedure checks, ledger regeneration and final cleanliness
+always execute. Unknown tool identity, dirty trees, missing, corrupt, future or
+expired receipts force execution. Default full gates populate this cache but
+rerun each row; `--reuse` is explicit and cannot combine with `--only`.
+
+An incremental full gate still writes the exact-SHA `gate.full.sha` only after
+all rows pass and the current SHA remains unchanged. The pipeline checks that
+same full receipt against the current clean tree. Individual row receipts and
+`--only` diagnostics never authorize pipeline; diagnostics do not populate or
+read the full-gate cache. Logs mark reused rows with their original source SHA.
+
+When archive-mode is selected, the in-tree nextest row executes only the
+`component_output_test` complement and archive-mode runs the rest of the whole
+workspace once. A focused `--only nextest` still executes the entire in-tree
+workspace. Preserve the five-variable factory identity scrub in both paths,
+CI's `--no-fail-fast`, the verified nonzero-test wrapper, and the archive
+consumer's `INSTA_WORKSPACE_ROOT` remap. Full suite coverage is the union of
+these complementary rows; neither row alone supplies full-gate authorization.
+
+Report green-to-pipeline and merged-to-publisher hand-off delays separately
+from execution. A green receipt is not a publication receipt. Bare
+`release.sh` remains audit-only: Linux currently cleans its release target on
+each invocation, so running it early alone does not make later publication a
+warm build. Any future automated continuation must be explicitly requested,
+PID-recorded, and must invoke the existing exact-SHA authorization checks.

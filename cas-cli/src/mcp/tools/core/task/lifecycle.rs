@@ -94,6 +94,54 @@ const DUPLICATE_TITLE_SIMILARITY_THRESHOLD: f64 = 0.7;
 const DUPLICATE_DESCRIPTION_SIMILARITY_THRESHOLD: f64 = 0.2;
 const MIN_SHARED_DISTINCTIVE_IDENTIFIERS: usize = 2;
 
+pub(crate) fn validate_demo_statement_requirement(
+    task_type: TaskType,
+    labels: &[String],
+    demo_statement: Option<&str>,
+    supervisor_override: bool,
+    is_supervisor: bool,
+    user_facing_labels: &[String],
+) -> Result<(), String> {
+    if supervisor_override && !is_supervisor {
+        return Err(
+            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true is only available to a registered supervisor."
+                .to_string(),
+        );
+    }
+
+    if supervisor_override
+        || task_type == TaskType::Epic
+        || !labels.iter().any(|label| {
+            user_facing_labels
+                .iter()
+                .any(|configured| label.trim().eq_ignore_ascii_case(configured.trim()))
+        })
+    {
+        return Ok(());
+    }
+
+    if demo_statement
+        .map(str::trim)
+        .is_some_and(|statement| !statement.is_empty())
+    {
+        return Ok(());
+    }
+
+    let matched_labels = labels
+        .iter()
+        .filter(|label| {
+            user_facing_labels
+                .iter()
+                .any(|configured| label.trim().eq_ignore_ascii_case(configured.trim()))
+        })
+        .map(|label| label.trim())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "TASK CREATE REJECTED: label(s) [{matched_labels}] mark this as user-facing, so a non-empty demo_statement is required. Expected shape: \"As a <user>, I <do X> and see <Y>\". Add demo_statement=... or ask a supervisor to use supervisor_override=true."
+    ))
+}
+
 fn no_code_external_ref_guidance(task: &Task) -> &'static str {
     if task.execution_note.as_deref() == Some("no-code") {
         "\n\n📎 No-code close requirement: record a non-empty portable `external_ref` for the produced report/artifact before closing. Local absolute paths and secret-shaped values are not durable proof references."
@@ -410,6 +458,20 @@ impl CasCore {
                     .collect()
             })
             .unwrap_or_default();
+
+        validate_demo_statement_requirement(
+            task_type,
+            &labels,
+            req.demo_statement.as_deref(),
+            false,
+            crate::harness_policy::is_supervisor_from_env(),
+            &self.load_config().qa().user_facing_labels,
+        )
+        .map_err(|message| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(message),
+            data: None,
+        })?;
 
         let status = TaskStatus::Open;
         let blocked_by_ids: Vec<String> = req
@@ -1765,6 +1827,111 @@ mod factory_epic_owner_tests {
     }
 }
 
+#[cfg(test)]
+mod demo_statement_gate_tests {
+    use super::validate_demo_statement_requirement;
+    use crate::types::TaskType;
+
+    fn labels(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn user_facing_label_requires_non_empty_demo_statement() {
+        let error = validate_demo_statement_requirement(
+            TaskType::Feature,
+            &labels(&["ui"]),
+            None,
+            false,
+            false,
+            &labels(&["ui", "frontend"]),
+        )
+        .unwrap_err();
+        assert!(error.contains("non-empty demo_statement"));
+        assert!(error.contains("As a <user>, I <do X> and see <Y>"));
+    }
+
+    #[test]
+    fn user_facing_label_accepts_non_empty_demo_statement() {
+        validate_demo_statement_requirement(
+            TaskType::Feature,
+            &labels(&["UI"]),
+            Some(" As a reader, I open the page and see the result. "),
+            false,
+            false,
+            &labels(&["ui"]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn epics_and_unlabeled_tasks_are_unaffected() {
+        validate_demo_statement_requirement(
+            TaskType::Epic,
+            &labels(&["frontend"]),
+            None,
+            false,
+            false,
+            &labels(&["frontend"]),
+        )
+        .unwrap();
+        validate_demo_statement_requirement(
+            TaskType::Task,
+            &labels(&["internal"]),
+            None,
+            false,
+            false,
+            &labels(&["ui"]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn supervisor_override_bypasses_gate_but_not_role_check() {
+        validate_demo_statement_requirement(
+            TaskType::Task,
+            &labels(&["commander"]),
+            None,
+            true,
+            true,
+            &labels(&["commander"]),
+        )
+        .unwrap();
+        let error = validate_demo_statement_requirement(
+            TaskType::Task,
+            &labels(&["commander"]),
+            None,
+            true,
+            false,
+            &labels(&["commander"]),
+        )
+        .unwrap_err();
+        assert!(error.contains("SUPERVISOR OVERRIDE REJECTED"));
+    }
+
+    #[test]
+    fn configured_label_list_controls_the_gate() {
+        validate_demo_statement_requirement(
+            TaskType::Task,
+            &labels(&["mobile"]),
+            None,
+            false,
+            false,
+            &labels(&["mobile"]),
+        )
+        .unwrap_err();
+        validate_demo_statement_requirement(
+            TaskType::Task,
+            &labels(&["mobile"]),
+            None,
+            false,
+            false,
+            &labels(&["ui"]),
+        )
+        .unwrap();
+    }
+}
+
 /// Response-level regression coverage for GH #257. Recall must be useful at
 /// the decision point, but a project with no prior context must receive the
 /// exact legacy create receipt rather than a permanent empty heading.
@@ -2000,6 +2167,45 @@ mod related_recall_response_tests {
             epic: None,
             depth: None,
         }
+    }
+
+    #[tokio::test]
+    async fn create_path_enforces_and_persists_user_facing_demo_statement() {
+        let temp = TempDir::new().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let mut request = plain_task_request("User-facing task gate");
+        request.task_type = "feature".to_string();
+        request.labels = Some("ui".to_string());
+
+        let error = core
+            .cas_task_create(Parameters(request.clone()))
+            .await
+            .expect_err("user-facing create without demo must be refused");
+        assert!(error.message.contains("non-empty demo_statement"));
+        assert!(
+            core.open_task_store()
+                .expect("task store")
+                .list(None)
+                .expect("list tasks")
+                .is_empty(),
+            "rejected creation must not leave a task row"
+        );
+
+        request.demo_statement = Some("As a reader, I open the page and see the result.".into());
+        core.cas_task_create(Parameters(request))
+            .await
+            .expect("non-empty demo statement should permit creation");
+        let task = core
+            .open_task_store()
+            .expect("task store")
+            .list(None)
+            .expect("list tasks")
+            .pop()
+            .expect("created task");
+        assert_eq!(
+            task.demo_statement,
+            "As a reader, I open the page and see the result."
+        );
     }
 
     fn described_task_request(title: &str, description: &str) -> TaskCreateRequest {

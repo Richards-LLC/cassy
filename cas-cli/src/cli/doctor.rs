@@ -251,6 +251,7 @@ impl CheckGroup {
             | "config repair"
             | "mcp config"
             | "mcp stdio upstreams"
+            | "mcp upstream reachability"
             | "sync target"
             | "models" =>
             {
@@ -1553,6 +1554,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     #[cfg(feature = "mcp-proxy")]
     checks.push(proxy_stdio_commands_check(&cas_root));
+    #[cfg(feature = "mcp-proxy")]
+    checks.push(proxy_upstream_reachability_check(&cas_root));
 
     recorder.mark("config and proxy", &checks);
     // Check 6: Sync target
@@ -4429,6 +4432,98 @@ fn proxy_stdio_commands_check(cas_root: &Path) -> Check {
     }
 }
 
+#[cfg(feature = "mcp-proxy")]
+fn proxy_upstream_reachability_check(cas_root: &Path) -> Check {
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+    let proxy_path = cas_root.join("proxy.toml");
+    let config = match cmcp_core::config::Config::load_merged(
+        proxy_path.exists().then_some(proxy_path.as_path()),
+    ) {
+        Ok(config) => config,
+        Err(error) => {
+            return Check {
+                name: "MCP upstream reachability".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot probe configured upstreams: {error}"),
+            };
+        }
+    };
+    if config.servers.is_empty() {
+        return Check {
+            name: "MCP upstream reachability".to_string(),
+            status: CheckStatus::Ok,
+            message: "no configured upstreams to probe".to_string(),
+        };
+    }
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return Check {
+                name: "MCP upstream reachability".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("could not create bounded probe runtime: {error}"),
+            };
+        }
+    };
+    let snapshot = match runtime.block_on(cmcp_core::ProxyEngine::probe_configs(
+        config.servers,
+        PROBE_TIMEOUT,
+    )) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return Check {
+                name: "MCP upstream reachability".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "probe failed before checking each configured upstream once: {error}"
+                ),
+            };
+        }
+    };
+
+    let mut reachable = Vec::new();
+    let mut unavailable = Vec::new();
+    for server in snapshot.servers {
+        if server.state == cmcp_core::UpstreamState::Healthy {
+            reachable.push(server.name);
+        } else {
+            let detail = server
+                .last_error
+                .or(server.last_error_code)
+                .unwrap_or_else(|| "no diagnostic detail".to_string());
+            unavailable.push(format!("{} ({detail})", server.name));
+        }
+    }
+    reachable.sort();
+    unavailable.sort();
+    let status = if unavailable.is_empty() {
+        CheckStatus::Ok
+    } else {
+        CheckStatus::Warning
+    };
+    let mut message = format!(
+        "checked {} configured upstream(s) once; reachable: {}",
+        reachable.len() + unavailable.len(),
+        if reachable.is_empty() {
+            "(none)".to_string()
+        } else {
+            reachable.join(", ")
+        }
+    );
+    if !unavailable.is_empty() {
+        message.push_str(&format!("; unavailable: {}", unavailable.join(", ")));
+    }
+    Check {
+        name: "MCP upstream reachability".to_string(),
+        status,
+        message,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6144,6 +6239,43 @@ mod tests {
             "{}",
             check.message
         );
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn doctor_proxy_reachability_check_reports_real_missing_credential_detail() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|_| {
+            let temp = TempDir::new().unwrap();
+            let cas_root = temp.path().join(".cas");
+            fs::create_dir_all(&cas_root).unwrap();
+            let missing = format!("CAS_DOCTOR_PROXY_MISSING_{}", std::process::id());
+            let mut config = cmcp_core::config::Config::default();
+            config.add_server(
+                "neon".to_string(),
+                cmcp_core::config::ServerConfig::Http {
+                    url: "https://neon.example.invalid/mcp".to_string(),
+                    auth: Some(format!("env:{missing}")),
+                    headers: std::collections::HashMap::new(),
+                    oauth: false,
+                },
+            );
+            config.save_to(&cas_root.join("proxy.toml")).unwrap();
+
+            let check = proxy_upstream_reachability_check(&cas_root);
+            assert!(matches!(check.status, CheckStatus::Warning));
+            assert!(
+                check
+                    .message
+                    .contains("checked 1 configured upstream(s) once")
+            );
+            assert!(
+                check.message.contains(&format!(
+                    "neon (missing required environment variable {missing})"
+                )),
+                "{}",
+                check.message
+            );
+        });
     }
 
     #[test]

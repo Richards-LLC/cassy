@@ -366,7 +366,10 @@ async fn run_server_impl() -> anyhow::Result<()> {
                             ))
                             .await;
                         let count = engine.tool_count().await;
-                        eprintln!("[Cassy] MCP proxy ready ({count} upstream tools)");
+                        eprintln!(
+                            "[Cassy] MCP proxy ready ({count} upstream tools; {})",
+                            proxy_boot_reachability_receipt(&engine).await
+                        );
                         if let Err(error) = write_proxy_snapshot_cache_for_config(
                             &cas_root,
                             &engine,
@@ -527,6 +530,39 @@ pub(crate) async fn install_proxy_policy(
     let policy = cmcp_core::ExternalToolAllowlistPolicy::new(routes)
         .with_supervisor_delegation_routes(delegation_routes);
     engine.set_policy(std::sync::Arc::new(policy)).await;
+}
+
+#[cfg(feature = "mcp-proxy")]
+async fn proxy_boot_reachability_receipt(engine: &cmcp_core::ProxyEngine) -> String {
+    let snapshot = engine.health_snapshot().await;
+    let mut reachable = Vec::new();
+    let mut unavailable = Vec::new();
+    for server in snapshot.servers {
+        if server.state == cmcp_core::UpstreamState::Healthy {
+            reachable.push(server.name);
+        } else {
+            let detail = server
+                .last_error
+                .or(server.last_error_code)
+                .unwrap_or_else(|| "no diagnostic detail".to_string());
+            unavailable.push(format!("{} ({detail})", server.name));
+        }
+    }
+    reachable.sort();
+    unavailable.sort();
+    format!(
+        "upstream reachability at boot: reachable=[{}] unavailable=[{}]",
+        if reachable.is_empty() {
+            "none".to_string()
+        } else {
+            reachable.join(",")
+        },
+        if unavailable.is_empty() {
+            "none".to_string()
+        } else {
+            unavailable.join(",")
+        }
+    )
 }
 
 /// Replace only Cassy's in-memory managed Viktor credential reference. Project
@@ -1469,6 +1505,34 @@ mod tests {
             assert!(receipt.timestamp_ms > 0);
         }
         assert!(!audit.last().unwrap().allowed);
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn boot_reachability_receipt_includes_unavailable_upstream_detail() {
+        use std::collections::HashMap;
+
+        let missing = format!("CAS_BOOT_RECEIPT_MISSING_{}", std::process::id());
+        let config = cmcp_core::config::ServerConfig::Http {
+            url: "https://neon.example.invalid/mcp".to_string(),
+            auth: Some(format!("env:{missing}")),
+            headers: HashMap::new(),
+            oauth: false,
+        };
+        let engine =
+            cmcp_core::ProxyEngine::from_configs(HashMap::from([("neon".to_string(), config)]))
+                .await
+                .unwrap();
+
+        let receipt = super::proxy_boot_reachability_receipt(&engine).await;
+        assert!(receipt.contains("reachable=[none]"), "{receipt}");
+        assert!(
+            receipt.contains(&format!(
+                "unavailable=[neon (missing required environment variable {missing})]"
+            )),
+            "{receipt}"
+        );
+        engine.shutdown().await;
     }
 
     fn make_m233_pending(cas_root: &std::path::Path, wrong_ledger_identity: bool) {

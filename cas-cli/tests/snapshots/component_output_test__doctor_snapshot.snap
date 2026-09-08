@@ -2,7 +2,7 @@
 source: cas-cli/tests/component_output_test.rs
 expression: redacted
 ---
-[WARN] 3 warnings · 25 ok · [PROJECT] · [VERSION]
+[WARN] 3 warnings · 26 ok · [PROJECT] · [VERSION]
 ────────────────────────────────────────────────────────────────────────────────
 Host          [OK] registered project roots
   [WARN] host  host: [N] finding — see `cas doctor --host`
@@ -11,7 +11,7 @@ Indexes       [OK] legacy search index  [OK] symbol index  [OK] embedding drain 
   [WARN] search index        Index not found at [CAS_PATH] Will be created on first search; Run a search to build it
   [WARN] code history index  cannot check code history index: not a git repository: [TEMP_PATH] ([GIT_NOT_REPOSITORY])
 Cloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [OK] cloud sync queue  [OK] cross-project rows
-Config        [OK] configuration  [OK] issue repositories  [OK] MCP stdio upstreams  [OK] sync target  [OK] mcp config
+Config        [OK] configuration  [OK] issue repositories  [OK] MCP stdio upstreams  [OK] MCP upstream reachability  [OK] sync target  [OK] mcp config
 Integrations  [OK] integrations
 
-25 ok · 3 warnings · 0 errors · [DURATION] · cas doctor --verbose for timings and full messages
+26 ok · 3 warnings · 0 errors · [DURATION] · cas doctor --verbose for timings and full messages

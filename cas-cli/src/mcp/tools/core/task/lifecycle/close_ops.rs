@@ -2243,6 +2243,15 @@ impl CasCore {
                 .to_path_buf(),
         };
 
+        let standalone_worker_repo = if close_repo_verified {
+            None
+        } else {
+            self.resolve_worker_worktree_path(task, None).ok().flatten()
+        };
+        let standalone_target_repo = standalone_worker_repo
+            .clone()
+            .unwrap_or_else(|| close_project_root.clone());
+
         let worktree_store_parent_branch = task.worktree_id.as_deref().and_then(|wt_id| {
             self.open_worktree_store()
                 .ok()
@@ -2267,18 +2276,25 @@ impl CasCore {
                 &close_project_root,
             )
         } else {
-            Ok(worktree_store_parent_branch
-                .or(epic_parent_branch)
-                .or(epic_work_target_branch)
-                .unwrap_or_else(|| UNRESOLVED_CLOSE_TARGET.to_string()))
+            resolve_close_parent_branch(
+                worktree_store_parent_branch,
+                epic_parent_branch,
+                epic_work_target_branch,
+                &standalone_target_repo,
+            )
         };
         let resolved_parent_branch = match parent_branch_resolution {
             Ok(branch) => branch,
-            Err(message) if factory_merge_enforcement => {
-                return Err(TaskLifecycleGateError::UnmergedChildBranch { message });
-            }
-            Err(_) => UNRESOLVED_CLOSE_TARGET.to_string(),
+            // Non-factory lightweight stores may intentionally have neither a
+            // Git repository nor a task-owned worker checkout. Their close
+            // path has no branch-sensitive worker gate to run, so preserve
+            // the historical verification flow without inventing a ref.
+            Err(_) if !close_repo_verified && standalone_worker_repo.is_none() => String::new(),
+            Err(message) => return Err(TaskLifecycleGateError::UnmergedChildBranch { message }),
         };
+        if !close_repo_verified && standalone_worker_repo.is_none() {
+            return Ok(());
+        }
         let req = TaskCloseRequest {
             stranded_branch_override: None,
             id: task.id.clone(),
@@ -2755,6 +2771,23 @@ impl CasCore {
                 .to_path_buf(),
         };
 
+        // Resolve the worker checkout before the branch target so a degraded
+        // close (where Cassy's own root is not inside a repository) can still
+        // discover the standalone task's configured or detected trunk from
+        // the task-owned System-A/System-B worktree.
+        let worker_worktree_path =
+            match self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()) {
+                Ok(path) => path,
+                Err(message) => return Ok(Self::tool_error(message)),
+            };
+        let standalone_target_repo = if close_repo_verified {
+            close_project_root.clone()
+        } else {
+            worker_worktree_path
+                .clone()
+                .unwrap_or_else(|| close_project_root.clone())
+        };
+
         // cas-e74c: resolve the work-cycle identity before the later
         // delivery/review gates. cas-a699 needs the same current-cycle
         // boundary used by the delivery and verification gates below.
@@ -3006,17 +3039,20 @@ impl CasCore {
                 &close_project_root,
             )
         } else {
-            Ok(worktree_store_parent_branch
-                .or(epic_parent_branch)
-                .or(epic_work_target_branch)
-                .unwrap_or_else(|| UNRESOLVED_CLOSE_TARGET.to_string()))
+            resolve_close_parent_branch(
+                worktree_store_parent_branch,
+                epic_parent_branch,
+                epic_work_target_branch,
+                &standalone_target_repo,
+            )
         };
         let resolved_parent_branch = match parent_branch_resolution {
             Ok(branch) => branch,
-            Err(message) if factory_merge_enforcement => {
-                return Ok(Self::tool_error(message));
-            }
-            Err(_) => UNRESOLVED_CLOSE_TARGET.to_string(),
+            // A repository-less, non-factory close has no worker checkout and
+            // therefore no branch-sensitive delivery gate. Keep that
+            // lightweight path available without passing a fake ref to Git.
+            Err(_) if !close_repo_verified && worker_worktree_path.is_none() => String::new(),
+            Err(message) => return Ok(Self::tool_error(message)),
         };
         // cas-fdc9 (GH #56): a receipt is only evidence if it exists in the
         // repository this close is bound to. The cross-repo delivery in the
@@ -3041,6 +3077,7 @@ impl CasCore {
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && task.assignee.is_some()
+            && (close_repo_verified || worker_worktree_path.is_some())
         {
             match run_factory_branch_merge_gate_with_attribution(
                 &task,
@@ -3998,11 +4035,6 @@ impl CasCore {
         // verification and tmpfs-proof exceptions. Delivery-state gates
         // remain mandatory for every delivered close.
         let bypass_close_gates = !close_disposition.requires_delivery_gates();
-        let worker_worktree_path =
-            match self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()) {
-                Ok(path) => path,
-                Err(message) => return Ok(Self::tool_error(message)),
-            };
         // Explicit work targets opt into a fail-closed executable gate on
         // every close path, independent of review owner/depth/bypass. This
         // keeps normal close aligned with direct update-to-closed: neither
@@ -4339,6 +4371,7 @@ impl CasCore {
             && task.execution_note.as_deref() != Some("additive-only")
             && !bypass_close_gates
             && effective_has_reviewable
+            && (close_repo_verified || worker_worktree_path.is_some())
         {
             if let Some(assignee) = task.assignee.as_deref() {
                 // cas-7efe: single close-time resolver, not a bare "main".
@@ -8344,13 +8377,6 @@ fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> Result<String
     }
 }
 
-/// Compatibility value for the non-Git close path. It is used only after
-/// repository resolution has already failed and factory enforcement is off,
-/// so the branch-sensitive gates retain their historical graceful behavior
-/// without inventing a `main` target. Verified Git closes must resolve a real
-/// task, epic, or repository target through [`resolve_close_parent_branch`].
-const UNRESOLVED_CLOSE_TARGET: &str = "cassy-unresolved-close-target";
-
 /// Resolve the task-owned WorkTarget used by close-time repository binding.
 ///
 /// A child created before it was attached to an epic can retain the epic's
@@ -8428,7 +8454,11 @@ fn resolve_close_parent_branch(
         .or(epic_work_target_branch)
     {
         Some(branch) => Ok(branch),
-        None => resolve_standalone_merge_target(repo_path),
+        None => resolve_standalone_merge_target(repo_path).map_err(|error| {
+            format!(
+                "close target could not be resolved: declare target_branch or attach an epic ({error})"
+            )
+        }),
     }
 }
 
@@ -8659,6 +8689,41 @@ mod parent_branch_resolver_tests {
             "final tier must reflect the repo's real detected default, \
              never a hardcoded 'main'"
         );
+    }
+
+    #[test]
+    fn standalone_fallback_detects_main_default() {
+        let dir = init_committed_repo("main");
+        let resolved = resolve_close_parent_branch(None, None, None, dir.path())
+            .expect("main must be detected as the default branch");
+        assert_eq!(resolved, "main");
+    }
+
+    #[test]
+    fn standalone_fallback_honors_configured_staging_default() {
+        let dir = init_committed_repo("staging");
+        let cas_dir = dir.path().join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[factory]\nepic_base_branch = \"staging\"\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_close_parent_branch(None, None, None, dir.path())
+            .expect("configured staging branch must resolve");
+        assert_eq!(resolved, "staging");
+    }
+
+    #[test]
+    fn unresolved_standalone_fallback_rejects_without_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = resolve_close_parent_branch(None, None, None, dir.path())
+            .expect_err("a repository without a detectable target must reject");
+        assert!(error.starts_with(
+            "close target could not be resolved: declare target_branch or attach an epic"
+        ));
+        assert!(!error.contains("cassy-unresolved-close-target"));
     }
 
     #[test]

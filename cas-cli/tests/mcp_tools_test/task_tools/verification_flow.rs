@@ -4418,6 +4418,112 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
     );
 }
 
+/// cas-113f regression: a degraded System-B close must resolve a standalone
+/// task's configured staging trunk from the worker repository instead of
+/// comparing its committed branch against the old unresolved-target sentinel.
+#[tokio::test]
+async fn test_task_close_resolves_configured_staging_system_b_target_cas_113f() {
+    use std::process::Command;
+
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = false\n",
+    )
+    .expect("write config");
+
+    let worktree_path = cas_dir.join("worktrees").join("staging-default-worker");
+    std::fs::create_dir_all(&worktree_path).expect("mkdir worktree");
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(&worktree_path)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "staging"]);
+    std::fs::write(worktree_path.join(".gitignore"), ".cas/\n").unwrap();
+    std::fs::write(worktree_path.join("seed.txt"), "seed\n").unwrap();
+    git(&["add", ".gitignore", "seed.txt"]);
+    git(&["commit", "-q", "-m", "seed"]);
+    std::fs::create_dir_all(worktree_path.join(".cas")).unwrap();
+    std::fs::write(
+        worktree_path.join(".cas/config.toml"),
+        "[factory]\nepic_base_branch = \"staging\"\n",
+    )
+    .unwrap();
+    git(&["checkout", "-q", "-b", "factory/staging-default-worker"]);
+    std::fs::write(worktree_path.join("work.rs"), "// staging work\n").unwrap();
+    git(&["add", "work.rs"]);
+    git(&["commit", "-q", "-m", "feat: standalone staging work"]);
+
+    let create_req = TaskCreateRequest {
+        depth: None,
+        title: "cas-113f: standalone staging target close".to_string(),
+        description: None,
+        priority: 2,
+        task_type: "task".to_string(),
+        labels: None,
+        notes: None,
+        blocked_by: None,
+        design: None,
+        acceptance_criteria: None,
+        external_ref: None,
+        assignee: None,
+        demo_statement: None,
+        execution_note: None,
+        epic: None,
+    };
+    let id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(create_req))
+            .await
+            .expect("task_create"),
+    ))
+    .expect("task id")
+    .to_string();
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let mut task = task_store.get(&id).expect("task exists");
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("staging-default-worker".to_string());
+    task_store.update(&task).expect("update task");
+
+    let resp = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                stranded_branch_override: None,
+                id: id.clone(),
+                reason: Some("staging work is committed".to_string()),
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+                commit_receipt: None,
+            }))
+            .await
+            .expect("close returns result"),
+    );
+    assert!(
+        resp.contains("Closed task:"),
+        "committed System-B work must pass against configured staging: {resp}"
+    );
+    assert!(!resp.contains("cassy-unresolved-close-target"), "{resp}");
+    assert_eq!(
+        task_store.get(&id).expect("task exists").status,
+        TaskStatus::Closed
+    );
+}
+
 /// cas-bc1b regression: `execution_note=additive-only` close must inspect
 /// the **worker branch's committed history**, not the main worktree's
 /// unstaged state. Before the fix the additive-only check ran

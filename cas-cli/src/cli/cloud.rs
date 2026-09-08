@@ -3097,6 +3097,13 @@ pub(crate) fn render_sync_summary(
                 fmt.success(&message)?;
             } else {
                 fmt.warning(&message)?;
+                if !verbose {
+                    for error in summary.errors.iter().chain(summary.team_errors.iter()) {
+                        fmt.write_muted("    - ")?;
+                        fmt.write_raw(error)?;
+                        fmt.newline()?;
+                    }
+                }
             }
             if verbose {
                 for key in [
@@ -6963,6 +6970,26 @@ mod team_cmd_tests {
         assert_eq!(
             tf.output(),
             "[OK] Pull complete · 3 entries, 12 tasks, 1 rule · team + personal\n"
+        );
+    }
+
+    #[test]
+    fn sync_summary_prints_pull_errors_in_non_verbose_mode() {
+        let summary = SyncSummary::pull(
+            &crate::cloud::SyncResult {
+                errors: vec!["task deserialize error (id=cas-bad): invalid status".to_string()],
+                ..Default::default()
+            },
+            true,
+        );
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(120);
+
+        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+
+        assert!(tf.output().contains("Pull incomplete · 1 errors"));
+        assert!(
+            tf.output()
+                .contains("- task deserialize error (id=cas-bad)")
         );
     }
 

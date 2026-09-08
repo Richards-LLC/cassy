@@ -7,6 +7,7 @@ use crate::cloud::task_proposals::{
     authorize_registered_role, render_proposal,
 };
 use crate::cloud::{CloudConfig, canonical_id_from_config_toml};
+use crate::store::open_task_store_local;
 
 const EXPLICIT_ORIGIN_REQUIRED: &str = "Cross-project task proposals require an explicit [project] canonical_id in .cas/config.toml; nothing is inferred from cwd, folder name, or git remote.";
 const TRUSTED_PRODUCTION_ENDPOINT: &str = "https://petra-stella-cloud.vercel.app";
@@ -270,13 +271,48 @@ impl CasCore {
         let target_project = self.require_local_project(target_project)?;
         let proposal_id = proposal_id.to_string();
         let client = self.proposal_client_after_authority()?;
-        let proposal =
-            tokio::task::spawn_blocking(move || client.accept(&proposal_id, &target_project))
-                .await
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+        let request_target_project = target_project.clone();
+        let proposal = tokio::task::spawn_blocking(move || {
+            client.accept(&proposal_id, &request_target_project)
+        })
+        .await
+        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+        let task = materialize_accepted_proposal(&proposal, &target_project)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        let task_store = open_task_store_local(&self.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        match task_store.get(&task.id) {
+            Ok(existing) => {
+                let proposal_marker = format!("proposal_id: {:?}", proposal.proposal_id);
+                if existing.origin_project.as_deref()
+                    != Some(
+                        proposal
+                            .provenance
+                            .server_attested
+                            .origin_project_canonical_id
+                            .as_str(),
+                    )
+                    || !existing.notes.contains(&proposal_marker)
+                {
+                    return Err(Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Accepted proposal target task ID {} already belongs to a different local task.",
+                            task.id
+                        ),
+                    ));
+                }
+            }
+            Err(cas_store::StoreError::TaskNotFound(_)) => task_store
+                .add(&task)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?,
+            Err(error) => {
+                return Err(Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()));
+            }
+        }
         Ok(Self::success(format!(
-            "Accepted proposal atomically as one open target task.\n\n{}",
+            "Accepted proposal atomically as one open target task and materialized it locally.\n\n{}",
             render_proposal(&proposal)
         )))
     }
@@ -409,6 +445,91 @@ impl CasCore {
             },
         )))
     }
+}
+
+fn materialize_accepted_proposal(
+    proposal: &TaskProposal,
+    target_project: &str,
+) -> Result<cas_types::Task, String> {
+    if proposal.state != "accepted" {
+        return Err("Cloud accepted response did not contain state=accepted.".to_string());
+    }
+    if proposal
+        .provenance
+        .server_attested
+        .target_project_canonical_id
+        != target_project
+    {
+        return Err(
+            "Cloud accepted response target project did not match the local project.".to_string(),
+        );
+    }
+    let raw_task = proposal.task.clone().ok_or_else(|| {
+        "Cloud accepted response did not include the materialized task.".to_string()
+    })?;
+    let object = raw_task
+        .as_object()
+        .ok_or_else(|| "Cloud accepted response task was not a JSON object.".to_string())?;
+    let title = object
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .filter(|title| !title.trim().is_empty())
+        .ok_or_else(|| "Cloud accepted response task did not include a title.".to_string())?;
+
+    let mut encoded = serde_json::to_value(cas_types::Task::new(
+        proposal.target_task_id.clone(),
+        title.to_string(),
+    ))
+    .map_err(|error| format!("Could not initialize accepted task: {error}"))?;
+    let encoded_object = encoded
+        .as_object_mut()
+        .expect("Task serializes as a JSON object");
+    for (key, value) in object {
+        encoded_object.insert(key.clone(), value.clone());
+    }
+    if let Some(raw_id) = encoded_object.get("id").and_then(serde_json::Value::as_str)
+        && raw_id != proposal.target_task_id
+    {
+        return Err(
+            "Cloud accepted response task ID did not match the attested target task.".to_string(),
+        );
+    }
+    encoded_object.insert(
+        "id".to_string(),
+        serde_json::Value::String(proposal.target_task_id.clone()),
+    );
+    encoded_object.insert(
+        "scope".to_string(),
+        serde_json::Value::String("project".to_string()),
+    );
+    encoded_object.insert(
+        "status".to_string(),
+        serde_json::Value::String("open".to_string()),
+    );
+    // Accepted target rows retain the proposing project in origin_project;
+    // the server-attested provenance separately identifies the local target.
+    encoded_object.insert(
+        "origin_project".to_string(),
+        serde_json::Value::String(
+            proposal
+                .provenance
+                .server_attested
+                .origin_project_canonical_id
+                .clone(),
+        ),
+    );
+    encoded_object.insert(
+        "project_id".to_string(),
+        serde_json::Value::String(target_project.to_string()),
+    );
+    encoded_object.insert(
+        "proposal_provenance".to_string(),
+        serde_json::to_value(&proposal.provenance)
+            .map_err(|error| format!("Could not encode proposal provenance: {error}"))?,
+    );
+    crate::cloud::syncer::render_task_proposal_provenance(&mut encoded);
+    serde_json::from_value(encoded)
+        .map_err(|error| format!("Cloud accepted response task was invalid: {error}"))
 }
 
 fn validate_proposal_attempt_id(value: Option<&str>) -> Result<String, McpError> {
@@ -617,5 +738,42 @@ mod tests {
         ] {
             assert_eq!(normalized_trusted_proposal_endpoint(deceptive), None);
         }
+    }
+
+    #[test]
+    fn accepted_proposal_materializes_an_open_task_for_local_show() {
+        let proposal: TaskProposal = serde_json::from_value(serde_json::json!({
+            "proposal_id": "proposal-1",
+            "target_task_id": "cas-0123456789abcdef",
+            "state": "accepted",
+            "task": {"title": "Accepted work", "description": "Do it"},
+            "provenance": {
+                "server_attested": {
+                    "proposal_id": "proposal-1",
+                    "target_task_id": "cas-0123456789abcdef",
+                    "creator_user_id": "user-1",
+                    "team_id": "team-1",
+                    "origin_project_canonical_id": "origin-project",
+                    "target_project_canonical_id": "target-project",
+                    "received_at": "2026-08-13T12:00:00Z",
+                    "client_request_id": "request-1"
+                },
+                "client_asserted": {}
+            }
+        }))
+        .unwrap();
+
+        let task = materialize_accepted_proposal(&proposal, "target-project").unwrap();
+        assert_eq!(task.id, "cas-0123456789abcdef");
+        assert_eq!(task.title, "Accepted work");
+        assert_eq!(task.status, TaskStatus::Open);
+        assert_eq!(task.origin_project.as_deref(), Some("origin-project"));
+        assert!(task.notes.contains("proposal_id: \"proposal-1\""));
+
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store_local(&cas_root).unwrap();
+        store.add(&task).unwrap();
+        assert_eq!(store.get(&task.id).unwrap().title, "Accepted work");
     }
 }

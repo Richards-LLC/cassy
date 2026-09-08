@@ -33,7 +33,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   parks affected rows without pretending they are transport retries, and
   gives the exact `cas cloud project set` or alias remedy. `cas doctor` shows
   the same queue diagnosis.
-- `cas cloud pull --purge-foreign` now applies only the verified dry-run delete
+- `cas cloud purge-foreign` now applies only the verified dry-run delete
   set, checks the deleted count, quarantines the exact rows, and aborts if
   rows reappear or the store changes during the operation.
 - `cas cloud pull` now materializes accepted cross-project proposals as open
@@ -51,17 +51,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The `mecha-cassy` skill mirrors now document the read preflight fallback and
   channel/edit/delete contract, while file uploads require downloaded SHA-256
   equality, image decoding, and visible preview checks rather than byte counts.
-- The installer and install-path proof now require the selected published
-  asset's SHA-256 before extraction or replacement and preserve actionable
-  receipts for missing, malformed, or mismatched digests.
+- Release-receipt fetches now send a GitHub token when present, retry three
+  times with backoff, and print the HTTP status and response body on failure;
+  install-path proof passes the token on both validation lanes.
 
 ### Fixed
 - Codex workers now derive `HOME` and the Playwright MCP profile from the
   host home instead of using a fixed path, so MCP startup works on macOS and
   other hosts with different home directories.
-- The release gate now rejects committed hub-web `dist` drift before a tag can
-  be prepared, and factory build guards isolate test overrides so concurrent
-  builders cannot leak settings between processes.
+- The spawn build guard refuses new workers when the one-minute load exceeds
+  the CPU count or live Cargo builders exceed `factory.max_concurrent_builders`,
+  unless `force=true`; the release gate now rejects committed hub-web `dist`
+  drift.
 
 ## [3.18.1] - 2026-09-08
 

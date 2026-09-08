@@ -565,6 +565,54 @@ mod codex_home_contract_tests {
 
         assert!(!env.iter().any(|(k, _)| k == "CODEX_HOME"));
     }
+
+    #[test]
+    fn worker_home_is_an_existing_host_home() {
+        let host_home = dirs::home_dir().expect("test host has a home directory");
+        assert!(
+            host_home.is_dir(),
+            "host home must exist: {}",
+            host_home.display()
+        );
+
+        let config = PtyConfig::codex(
+            "test-worker",
+            "worker",
+            std::path::PathBuf::from("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let worker_home = config
+            .env
+            .iter()
+            .rev()
+            .find_map(|(key, value)| (key == "HOME").then_some(value.as_str()))
+            .expect("Codex worker must receive an explicit HOME");
+        assert_eq!(worker_home, host_home.to_string_lossy());
+        assert!(std::path::Path::new(worker_home).is_dir());
+        let profile = config
+            .env
+            .iter()
+            .rev()
+            .find_map(|(key, value)| {
+                (key == "PLAYWRIGHT_MCP_USER_DATA_DIR").then_some(value.as_str())
+            })
+            .expect("Codex worker must receive an explicit Playwright profile path");
+        assert_eq!(
+            profile,
+            host_home.join(".playwright-mcp-profile").to_string_lossy()
+        );
+        assert!(
+            std::path::Path::new(profile)
+                .parent()
+                .is_some_and(std::path::Path::is_dir),
+            "Playwright profile parent must exist: {profile}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -726,6 +774,31 @@ fn push_codex_home_env(env: &mut Vec<(String, String)>, role: &str, config_dir: 
         },
     );
     env.push(("CODEX_HOME".to_string(), expanded));
+}
+
+/// Pin the worker process and its Codex MCP children to the host home.
+///
+/// Codex forwards the allowlisted `HOME` and Playwright profile variables to
+/// stdio MCP servers. An inherited Linux-style value can therefore make a
+/// macOS worker resolve a profile under a nonexistent `/home/...` directory.
+/// `dirs::home_dir` is the factory's platform-aware home resolver, so the
+/// explicit worker values keep nested MCP processes on the same host home as
+/// the factory daemon.
+fn push_host_home_env(env: &mut Vec<(String, String)>, role: &str) {
+    if role != "worker" {
+        return;
+    }
+    if let Some(home) = dirs::home_dir() {
+        let home = home.to_string_lossy().into_owned();
+        env.push(("HOME".to_string(), home.clone()));
+        env.push((
+            "PLAYWRIGHT_MCP_USER_DATA_DIR".to_string(),
+            std::path::Path::new(&home)
+                .join(".playwright-mcp-profile")
+                .to_string_lossy()
+                .into_owned(),
+        ));
+    }
 }
 
 impl PtyConfig {
@@ -1066,6 +1139,8 @@ impl PtyConfig {
             ),
             ("IS_DEMO".to_string(), "true".to_string()),
         ];
+
+        push_host_home_env(&mut env, role);
 
         if let Ok(term) = std::env::var("TERM")
             && term.contains("ghostty")

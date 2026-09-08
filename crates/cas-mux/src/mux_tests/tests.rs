@@ -136,6 +136,36 @@ auth = "env:NEON_API_KEY_TEST_WORKER"
     );
 }
 
+#[test]
+fn factory_pane_configs_codex_worker_home_is_existing_host_home() {
+    let config = MuxConfig {
+        cwd: PathBuf::from("/tmp/test"),
+        workers: 1,
+        include_director: false,
+        supervisor_cli: SupervisorCli::Claude,
+        worker_cli: SupervisorCli::Codex,
+        ..MuxConfig::default()
+    };
+    let configs = Mux::factory_pane_configs(&config);
+    let (_, worker_config) = configs
+        .iter()
+        .find(|(name, _)| name == "worker-1")
+        .expect("worker config must be present");
+
+    let home = spawned_env(worker_config, "HOME").expect("Codex worker HOME must be set");
+    assert!(
+        std::path::Path::new(home).is_dir(),
+        "Codex worker HOME must exist on the host: {home}"
+    );
+    let profile = spawned_env(worker_config, "PLAYWRIGHT_MCP_USER_DATA_DIR")
+        .expect("Codex worker Playwright profile must be set");
+    assert_eq!(
+        std::path::Path::new(profile).parent(),
+        Some(std::path::Path::new(home)),
+        "Playwright profile must be rooted under worker HOME: {profile}"
+    );
+}
+
 fn codex_factory_session_arg(config: &crate::pty::PtyConfig) -> Option<&str> {
     config
         .args

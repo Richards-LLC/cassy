@@ -13,6 +13,7 @@ describe("hub-web fixture visual QA", () => {
     for (const name of FIXTURE_NAMES) expect(source).toContain(`"${name}"`);
     expect(REQUIRED_SCHEMES).toEqual(["light", "dark"]);
     expect(REQUIRED_VIEWPORTS.map(({ width }) => width)).toEqual([1280, 390]);
+    expect(REQUIRED_VIEWPORTS.map(({ height }) => height)).toEqual([800, 844]);
   });
 
   it("renders every scoped allowlist shape with its production attributes", async () => {
@@ -32,6 +33,20 @@ describe("hub-web fixture visual QA", () => {
       ".session-picker-toggle > .session-picker-name",
       ".pane.collapsed",
     ]));
+  });
+
+  it("keeps changed fixtures on the production connection and pairing surfaces", async () => {
+    const [fixtureSource, mainSource, cssSource] = await Promise.all([
+      readFile(join(repoRoot, "fixtures", "main.ts"), "utf8"),
+      readFile(join(repoRoot, "src", "main.ts"), "utf8"),
+      readFile(join(repoRoot, "src", "styles.css"), "utf8"),
+    ]);
+    expect(fixtureSource).toContain("renderConnectionSurfaceInto(card, \"bright-otter\"");
+    expect(mainSource).toContain("renderConnectionSurfaceInto(placeholder, session, snapshot");
+    expect(fixtureSource).toContain("K7MW-4H2Q");
+    expect(fixtureSource).toContain("dialog.showModal();");
+    expect(cssSource).toContain("container-type: inline-size;");
+    expect(cssSource).toContain("font-size: clamp(44px, 10cqw, 76px);");
   });
 
   it("wires a deliberately broken fixture through the strict gate", async () => {

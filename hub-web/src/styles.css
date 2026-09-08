@@ -1871,6 +1871,7 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 dialog form,
 .pair-flow {
   display: grid;
+  container-type: inline-size;
   min-height: 0;
   gap: var(--space-3);
   overflow-y: auto;
@@ -1991,7 +1992,7 @@ fieldset {
   color: var(--text-hi);
   background: transparent;
   border-bottom: var(--rule-hero) solid var(--color-verdict);
-  font-size: clamp(44px, 14vw, 76px);
+  font-size: clamp(44px, 10cqw, 76px);
   font-weight: var(--weight-medium);
   letter-spacing: -0.03em;
   line-height: 1;

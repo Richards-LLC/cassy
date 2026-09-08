@@ -24,7 +24,7 @@ export const FIXTURE_NAMES = [
 export const REQUIRED_SCHEMES = ["light", "dark"];
 export const REQUIRED_VIEWPORTS = [
   { name: "desktop", width: 1280, height: 800 },
-  { name: "phone", width: 390, height: 800 },
+  { name: "phone", width: 390, height: 844 },
 ];
 
 const here = fileURLToPath(new URL(".", import.meta.url));

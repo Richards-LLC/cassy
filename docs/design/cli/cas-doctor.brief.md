@@ -41,3 +41,9 @@ After (with the doctor self-heal epic merged): `terminal-qa: PASS cas-doctor · 
 | Craft | 4 | no split tokens, no overflow at 80 or 120; the `×N` widens the name column for the whole group |
 | Theme safety | 5 | marks only; four palettes pass |
 | Machine contract | 5 | `--json` unchanged, one array |
+
+The registration-conflict fixture capture was also run at
+`/home/pippenz/.cas/artifacts/cas-998a/terminal-qa/cas-doctor-registration-conflict-final/report.json`;
+it reports 36 truncation findings from existing doctor checks plus the new remedy. The focused
+`doctor_queue` tests pass 4/4; the shared doctor renderer remains a follow-up surface outside
+this task.

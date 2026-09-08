@@ -18,4 +18,14 @@
 
 ## Critique
 
-Pending terminal QA receipt after the rebuilt binary is captured.
+terminal-qa: PASS cas-cloud-queue-parked · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-998a/terminal-qa/cas-cloud-queue-parked-after/report.json
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | The verbose queue keeps the item row first, then labels the parked reason directly below it. |
+| Fit | 5 | Parked state is one concise row; the long registration error is not duplicated in queue output. |
+| Craft | 4 | Queue marks use ASCII fallbacks and the capture fits at 80 and 120 columns. |
+| Theme safety | 5 | Four palettes, no-color, piped, and C-locale runs pass. |
+| Machine contract | 5 | `--json` emits one queue document including the structured outcome fields. |
+
+Scored by the worker on 2026-09-08; floor holds.

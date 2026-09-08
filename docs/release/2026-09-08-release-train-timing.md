@@ -116,6 +116,11 @@ not a regression in the prior close-target change (corrected epic note 18:34).
    locks serialize competing Cargo writers and increase resource contention.
    Prefer one archive producer plus read-only consumers with an explicit CPU
    allocation. Do not add concurrent cold builds to an already busy host.
+   Reserve an exclusive host window for release measurements: no live release
+   gate, CI suite, factory build or publish audit may overlap. Limiting Cargo
+   build jobs alone does not bound nextest's runtime concurrency. The failed
+   measurement below demonstrates why CPU budgeting is insufficient without
+   host scheduling.
 6. **Reduce queue polling only after the larger costs.**
    Saved polls are about 46 seconds apart. Queue success was visible at
    13:54:43; merged was detected at 13:55:30. That bounds detection overhead,
@@ -152,10 +157,66 @@ CI's three partitions remain a scheduling difference: running their complete
 union in one invocation preserves coverage while avoiding competing local
 resource demands.
 
-## Validation
+## Validation and measurement status
 
-Fixture self-tests exercise suite coverage, cache invalidation, expiry, dirty
-working trees, environment changes, and diagnostic isolation. Train self-tests
-exercise forwarding and exact-SHA receipts, including rejection of diagnostic
-receipts at the pipeline boundary. Production before/after timings are pending;
-fixture durations must not be presented as production speedups.
+At checkpoint `a99ee8ef12ae93ae57c4684a92cc44b2c0894509`, the gate self-test
+passed 71 cases and the train self-test passed 124, both with exit status zero.
+They cover complementary suite filters, zero-test rejection, cache invalidation,
+expiry, dirty trees, environment changes, web diagnostic forwarding, exact-SHA
+receipts and refusal of diagnostic receipts at the pipeline boundary. Terminal
+QA passed 11 captures; its 17 allowed findings concern existing path/command
+width and Unicode separators, not the new timing lines. Full production flavor
+drift validation and an uncontended before/after comparison remain pending.
+
+### Discarded concurrent-host attempt
+
+The attempted real measurement began at 19:05:07Z on the checkpoint above. Its
+recorded process group was 3010712 and Cargo build concurrency was limited to
+four. The driver intended to warm once, then compare an instrumented full
+in-tree baseline with complementary execution and an unchanged `--reuse` run
+on the same immutable source tree. Only the warmup ran before cancellation.
+
+The supervisor ordered it stopped at 19:09 after identifying overlap with the
+live 3.19.0 release gate run 3 on the same host. That release gate reported a
+load-sensitive spawn-test failure. The shared load confounds both the release
+check and the benchmark. SIGTERM was sent to process group 3010712; a subsequent
+process-group query returned no members. There is no completed comparison and
+**no valid production speedup measurement** from this attempt.
+
+The partial raw logs and per-row CPU/wall values are retained for diagnosis
+under `~/.cas/artifacts/cas-d136/measurement/`. Both `validity.json` and
+`INVALID-DUE-TO-CONTENTION.md` mark the attempt `invalid-due-to-contention`.
+These values must not be used to estimate normal row costs or savings. Its
+row-cache directory is also part of the invalid trial and must not seed a new
+performance experiment. No restart is authorized until the supervisor explicitly
+confirms that 3.19.0 has landed.
+
+### Remaining work and release follow-ups
+
+After release sequencing permits an exclusive measurement window, start a new
+evidence directory at the then-current candidate SHA, warm the private build
+artifacts, and compare baseline, optimized and reused full gates with identical
+resource limits. Preserve every row's raw output and nonzero-test counts. A
+failure is a failed proof even if its duration is shorter. Update this report
+with actual timings only after those conditions hold; do not substitute the
+fixture tests' elapsed time for production measurements.
+
+The historical receipts already justify investigating hand-off automation and
+publication audit reuse. The next changes should remain separately reviewable:
+
+- An explicit gate-to-pipeline continuation can remove the observed 952-second
+  hand-off. It must require a prepared PR body, run the existing exact-SHA check,
+  retain a recorded process group, stop on any failed row and write a separate
+  pipeline terminal receipt. Publication remains a separate explicit action.
+- A prewarmed local publisher needs a validated artifact receipt, not just a
+  background invocation of the current audit-only command. That receipt must
+  cover landed revision, toolchain, target/ISA flags, embedded build metadata
+  and secret-dependent build inputs without exposing their values. On mismatch,
+  rebuild and rerun the existing audits. Avoid the unconditional Linux clean
+  only when this evidence proves reuse safe.
+- Shorter bounded queue polling can reduce tens of seconds of detection delay;
+  it cannot remove actual runner queue time or justify bypassing queue checks.
+
+The implementation checkpoint delivers duplicate-suite removal, conservative
+row reuse and durable measurements. It does not yet establish the requested
+end-to-end latency reduction or deliver those larger follow-up optimizations.

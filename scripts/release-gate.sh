@@ -7,7 +7,7 @@
 # printed even when one check fails so the failure can be pasted into the epic
 # close note without relying on supervisor memory.
 #
-# Usage: scripts/release-gate.sh <version> [--only <row,row>]
+# Usage: scripts/release-gate.sh <version> [--reuse | --only <row,row>]
 
 set -euo pipefail
 
@@ -25,7 +25,7 @@ readonly -a gate_check_ids=(
 )
 
 usage() {
-    printf 'Usage: %s <version> [--only <row,row>]\n' "$0"
+    printf 'Usage: %s <version> [--reuse | --only <row,row>]\n' "$0"
     printf '       %s --learn "<symptom>" "<cause>" "<check-id>"\n' "$0"
 }
 
@@ -74,7 +74,7 @@ if [[ "${1:-}" == '--learn' ]]; then
     exit $?
 fi
 
-if [[ "$#" -ne 1 && "$#" -ne 3 ]] || [[ ! "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [[ "$#" -ne 1 && "$#" -ne 2 && "$#" -ne 3 ]] || [[ ! "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     usage >&2
     exit 2
 fi
@@ -83,8 +83,14 @@ if [[ "$#" -eq 3 && "$2" != '--only' ]]; then
     exit 2
 fi
 
+if [[ "$#" -eq 2 && "$2" != '--reuse' ]]; then
+    usage >&2
+    exit 2
+fi
 version="$1"
 only_rows="${3:-}"
+reuse_rows=false
+[[ "${2:-}" == --reuse ]] && reuse_rows=true
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
@@ -145,6 +151,25 @@ readonly init_timeout_origin
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/cas-release-gate.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
 
+# The train supplies a unique attempt directory. Successful logs survive just
+# like failures; the temporary fallback remains useful for direct diagnostics.
+row_log_dir="${CAS_RELEASE_GATE_LOG_DIR:-$tmp_dir/rows}"
+mkdir -p "$row_log_dir"
+printf 'row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n' >"$row_log_dir/timing.tsv"
+cache_dir="${CAS_RELEASE_GATE_CACHE_DIR:-}"
+# Fingerprint the caller environment before the gate installs temporary roots.
+# Never persist environment values (which may contain credentials).
+cache_environment="$(python3 -c '
+import hashlib, os
+ignored = {"_", "SHLVL", "CAS_RELEASE_GATE_LOG_DIR", "CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE"}
+print(hashlib.sha256(repr(sorted((k, v) for k, v in os.environ.items() if k not in ignored)).encode()).hexdigest())')"
+cache_head="$(git rev-parse HEAD)"
+cache_toolchain=''
+if [[ -n "$cache_dir" && -z "$only_rows" ]]; then
+    mkdir -p "$cache_dir"
+    cache_toolchain="$( { "$cargo_bin" --version; "$cargo_bin" nextest --version;
+        rustc -Vv; node --version; npm --version; } 2>&1 | sha256sum | cut -d' ' -f1)"
+fi
 failures=()
 
 row_selected() {
@@ -157,21 +182,77 @@ print_result() {
     printf '%s %s — %s\n' "$status" "$name" "$command"
 }
 
+# Explicit dependency boundary. Live checks and any unknown future row never
+# reuse evidence. Web tests are independent of Rust; Cargo tests conservatively
+# depend on the entire commit, including build.rs's embedded revision.
+row_cache_key() {
+    local name="$1"
+    [[ -n "$cache_dir" && -z "$only_rows" ]] || return 1
+    git diff --quiet HEAD || return 1
+    [[ "$(git rev-parse HEAD)" == "$cache_head" ]] || return 1
+    [[ -z "$(git ls-files --others --exclude-standard)" ]] || return 1
+    local -a inputs=()
+    case "$name" in
+        hub-web-visual-qa|hub-web-dist-drift) inputs=(hub-web scripts .github) ;;
+        fixture-paths|workspace-tests|nextest|doctests|archive-mode|snapshot-portability)
+            inputs=(.) ;;
+        *) return 1 ;;
+    esac
+    {
+        printf '%s\n' row-cache-v1 "$name" "$version" "$repo_root" "$cache_environment" "$cache_toolchain"
+        [[ "${inputs[0]}" != . ]] || printf '%s\n' "$cache_head"
+        git ls-tree -r HEAD -- "${inputs[@]}"
+        sha256sum "$repo_root/scripts/release-gate.sh"
+    } | sha256sum | cut -d' ' -f1
+}
+
 run_check() {
-    local name="$1" command="$2" function_name="$3" log status
+    local name="$1" command="$2" function_name="$3" log status=0
+    local started ended wall user system key='' source_sha="$cache_head"
+    local receipt_key receipt_sha receipt_epoch receipt_status now
     row_selected "$name" || return 0
-    log="$tmp_dir/$name.log"
-    if "$function_name" >"$log" 2>&1; then
+    log="$row_log_dir/$name.log"
+    started="$(date -u +%FT%TZ)"
+    key="$(row_cache_key "$name" || true)"
+    if "$reuse_rows" && [[ -n "$key" && -f "$cache_dir/$name.$key" ]]; then
+        read -r receipt_key receipt_sha receipt_epoch receipt_status <"$cache_dir/$name.$key" || true
+        now="$(date +%s)"
+        if [[ "$receipt_key" == "$key" && "$receipt_sha" =~ ^[0-9a-f]{40}$ \
+            && "$receipt_epoch" =~ ^[0-9]{10}$ && "$receipt_status" == PASS ]] \
+            && (( now >= receipt_epoch && now - receipt_epoch <= 86400 )); then
+            print_result PASS "$name" "$command"
+            printf '  reused PASS from %s\n' "$receipt_sha"
+            printf 'Reused PASS key=%s source_sha=%s epoch=%s\n' "$key" "$receipt_sha" "$receipt_epoch" >"$log"
+            printf '%s\t%s\t%s\t0\t0\t0\tREUSED\t%s\n' "$name" "$started" "$started" "$receipt_sha" >>"$row_log_dir/timing.tsv"
+            return 0
+        fi
+    fi
+    # Bash time measures shell functions and their children without moving
+    # checks into subshells (the Zig resolver must export into later rows).
+    local TIMEFORMAT='%R %U %S'
+    if { time "$function_name" >"$log" 2>&1; } 2>"$tmp_dir/$name.time"; then
         print_result PASS "$name" "$command"
+        if [[ -n "$key" ]] && git diff --quiet HEAD \
+            && [[ "$(git rev-parse HEAD)" == "$cache_head" ]] \
+            && [[ -z "$(git ls-files --others --exclude-standard)" ]]; then
+            printf '%s %s %s PASS\n' "$key" "$cache_head" "$(date +%s)" >"$cache_dir/$name.$key.tmp.$$"
+            mv "$cache_dir/$name.$key.tmp.$$" "$cache_dir/$name.$key"
+        fi
     else
         status=$?
         print_result FAIL "$name" "$command"
         failures+=("$name")
+        [[ -z "$key" ]] || rm -f "$cache_dir/$name.$key"
         if [[ -s "$log" ]]; then
             sed 's/^/  | /' "$log" | tail -20
         fi
         printf '  | exit status: %s\n' "$status"
     fi
+    ended="$(date -u +%FT%TZ)"
+    read -r wall user system <"$tmp_dir/$name.time"
+    printf '  interval: %s to %s\n' "$started" "$ended"
+    printf '  timing: wall=%ss user=%ss system=%ss\n' "$wall" "$user" "$system"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$started" "$ended" "$wall" "$user" "$system" "$status" "$source_sha" >>"$row_log_dir/timing.tsv"
 }
 
 is_gate_check_id() {
@@ -505,9 +586,16 @@ check_workspace_tests() {
 # do too (cas-1f6e: a cas-mux snapshot test failed in the queue after a local
 # `-p cas` gate passed). The non-cas crates add roughly a minute to each row.
 check_nextest() {
+    # The archive row executes the remaining workspace tests in the queue's
+    # remapped environment. Cover its one exclusion here, once, instead of
+    # running the entire suite a second time. --only nextest stays diagnostic.
+    local -a selection=()
+    if row_selected archive-mode; then
+        selection=(--filterset 'binary_id(~component_output_test)')
+    fi
     env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
         -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
-        "$cargo_bin" nextest run --workspace
+        "$cargo_bin" nextest run --workspace "${selection[@]}"
 }
 
 check_doctests() {
@@ -879,7 +967,7 @@ run_check hub-web-visual-qa \
     'npm exec --yes --package=playwright -- node scripts/visual-qa.mjs --artifact-dir <gate-scratch>/hub-web-visual-qa' \
     check_hub_web_visual_qa
 run_check nextest \
-    "env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID $cargo_bin nextest run --workspace" \
+    "$cargo_bin nextest run --workspace (factory environment scrubbed; archive-selected: snapshot complement)" \
     check_nextest
 run_check doctests \
     "$cargo_bin test -p cas --doc" \

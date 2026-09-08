@@ -20,7 +20,7 @@
 #
 # Usage:
 #   scripts/release-train.sh <version> <epic-worktree> --check-lane <branch>
-#   scripts/release-train.sh <version> <epic-worktree> --gate [--only <row,row>]
+#   scripts/release-train.sh <version> <epic-worktree> --gate [--reuse | --only <row,row>]
 #   scripts/release-train.sh <version> <epic-worktree> --pipeline
 #   scripts/release-train.sh <version> <epic-worktree> --publish [<landed-sha>]
 #   scripts/release-train.sh <version> <epic-worktree> --status
@@ -41,7 +41,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s <version> <epic-worktree> [--check-lane <branch>|--gate [--only <row,row>]|--pipeline|--publish [sha]|--status|--stop|--print-run-dir]\n' "$0"
+    printf 'Usage: %s <version> <epic-worktree> [--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--status|--stop|--print-run-dir]\n' "$0"
 }
 
 version="${1:-}"
@@ -590,6 +590,7 @@ case "$action" in
         ;;
     --gate)
         only_rows=''
+        reuse_rows=false
         if [[ "${4:-}" == '--only' ]]; then
             only_rows="${5:-}"
             [[ -n "$only_rows" && "$#" -eq 5 ]] || {
@@ -603,6 +604,8 @@ case "$action" in
                     exit 2
                 fi
             done
+        elif [[ "${4:-}" == --reuse && "$#" -eq 4 ]]; then
+            reuse_rows=true
         elif [[ "$#" -ne 3 ]]; then
             usage >&2
             exit 2
@@ -682,9 +685,15 @@ fi
 
 export CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-/var/tmp/cas-release-gate}"
 export CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$receipt_dir/archive-size-bytes"
+# Keep every attempt's successful row logs and timings, even when gate.log is
+# replaced on the next full run. Only full gates populate/read row PASS cache.
+export CAS_RELEASE_GATE_LOG_DIR="$receipt_dir/rows/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+export CAS_RELEASE_GATE_CACHE_DIR="$run_dir/row-cache"
 gate_args=("$version")
 if [[ -n "${only_rows:-}" ]]; then
     gate_args+=(--only "$only_rows")
+elif "$reuse_rows"; then
+    gate_args+=(--reuse)
 fi
 nohup setsid bash -c '
     worktree=$1; done_file=$2; green_file=$3; sha_file=$4; expected_sha=$5; mode=$6; shift 6

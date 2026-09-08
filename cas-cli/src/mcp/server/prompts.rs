@@ -115,6 +115,7 @@ impl CasCore {
                     });
                 let context = crate::hooks::build_context(
                     &crate::hooks::HookInput {
+                        prompt_id: None,
                         session_id: "mcp".to_string(),
                         transcript_path: None,
                         cwd: self

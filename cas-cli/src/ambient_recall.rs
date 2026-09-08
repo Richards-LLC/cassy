@@ -1964,7 +1964,17 @@ pub(crate) fn build_ambient_recall_context(
         session_start,
         None,
         None,
+        true,
     )
+}
+
+/// Local-only recovery on the synchronous tool-result path. Never waits for cloud.
+pub(crate) fn build_local_ambient_recall_context(
+    input: &cas_core::hooks::types::HookInput,
+    cas_root: &Path,
+    prompt: &str,
+) -> Option<RecallPacket> {
+    build_ambient_recall_context_with_factory_identity(input, cas_root, Some(prompt), false, None, None, false)
 }
 
 /// Build an ambient packet for a factory launch before the harness has made
@@ -1985,6 +1995,7 @@ pub(crate) fn build_ambient_recall_context_for_factory_launch(
         true,
         Some(agent_name),
         Some(factory_session),
+        true,
     )
 }
 
@@ -2030,6 +2041,7 @@ fn build_ambient_recall_context_with_factory_identity(
     session_start: bool,
     factory_agent_name: Option<&str>,
     factory_session: Option<&str>,
+    allow_semantic: bool,
 ) -> Option<RecallPacket> {
     if crate::internal_llm::is_internal_invocation() {
         record_recall_decision(
@@ -2136,7 +2148,9 @@ fn build_ambient_recall_context_with_factory_identity(
     let config_started = std::time::Instant::now();
     let config = crate::cloud::CloudConfig::load_from_cas_dir(cas_root).unwrap_or_default();
     let config_load_ms = config_started.elapsed().as_millis();
-    let semantic = SemanticRecallRetriever::existing(cas_root, &config, config_load_ms);
+    let semantic = allow_semantic
+        .then(|| SemanticRecallRetriever::existing(cas_root, &config, config_load_ms))
+        .flatten();
     let mut retrievers: Vec<&dyn RecallRetriever> = vec![&retriever];
     if let Some(semantic) = semantic.as_ref() {
         retrievers.push(semantic);

@@ -385,14 +385,15 @@ fn factory_worker_captures_operator_context_but_not_typed_machine_relays() {
                     MachinePromptOrigin::DirectorGenerated => "director-generated",
                 }
             );
-            let payload = crate::ui::factory::daemon::runtime::delivery::prepare_pty_machine_delivery(
-                &cas_root,
-                WORKER,
-                SupervisorCli::Codex,
-                source,
-                &rendered,
-                Some(123),
-            );
+            let payload =
+                crate::ui::factory::daemon::runtime::delivery::prepare_pty_machine_delivery(
+                    &cas_root,
+                    WORKER,
+                    SupervisorCli::Codex,
+                    source,
+                    &rendered,
+                    Some(123),
+                );
             let input: HookInput = serde_json::from_value(serde_json::json!({
                 "session_id": "hook-test-session",
                 "cwd": project.path(),
@@ -495,4 +496,117 @@ fn a_non_factory_session_surfaces_nothing() {
         .user_prompt_context()
         .is_some_and(|c| c.contains("factory-only traffic"));
     assert!(!surfaced, "a solo session must not drain factory queues");
+}
+
+/// cas-b8f6: read-first turns recover mail even when UserPromptSubmit is absent.
+#[test]
+fn post_tool_read_recovers_mail_once_without_prompt_hook() {
+    let _lock = super::env_lock();
+    let _env = worker_env();
+    let temp = TempDir::new().unwrap();
+    let store = store_at(&temp);
+    store
+        .enqueue_with_session("supervisor", WORKER, "recover missing hook mail", SESSION)
+        .unwrap();
+    let mut hook = input("worker");
+    hook.hook_event_name = "PostToolUse".into();
+    hook.tool_name = Some("Read".into());
+    let transcript = temp.path().join("session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"type":"user","promptId":"p","message":{"content":"continue"}}"#,
+    )
+    .unwrap();
+    hook.transcript_path = Some(transcript.to_string_lossy().into_owned());
+    let output = crate::hooks::handle_post_tool_use(&hook, Some(temp.path())).unwrap();
+    let Some(HookSpecificOutput::PostToolUse {
+        additional_context: Some(additional_context),
+    }) = output.hook_specific_output
+    else {
+        panic!("read-first PostToolUse must surface queued mail");
+    };
+    assert!(additional_context.contains("recover missing hook mail"));
+    let second = crate::hooks::handle_post_tool_use(&hook, Some(temp.path())).unwrap();
+    assert!(second.hook_specific_output.is_none());
+    assert_receipted_for_every_alias(&store, &[WORKER.into()]);
+}
+
+/// Exact 2.1.265 headless payload shape captured during the live investigation.
+#[test]
+fn captured_265_prompt_payload_reaches_handler_and_records_turn() {
+    let _lock = super::env_lock();
+    let _env = worker_env();
+    let temp = TempDir::new().unwrap();
+    let _root = EnvGuard::set(&[("CAS_ROOT", Some(temp.path().to_str().unwrap()))]);
+    let store = store_at(&temp);
+    store
+        .enqueue_with_session("supervisor", WORKER, "captured payload mail", SESSION)
+        .unwrap();
+    let payload = r#"{"session_id":"cbd23493-0cf2-404e-95a3-ad60bf9d1505","transcript_path":"/fixture/session.jsonl","cwd":"/fixture/project","prompt_id":"695ddcaa-d5b2-4d95-9bdd-4f20a4ed0923","permission_mode":"default","hook_event_name":"UserPromptSubmit","prompt":"reply with the single word ok","session_title":"[supervisor] factory"}"#;
+    let input: HookInput = serde_json::from_str(payload).unwrap();
+    assert_eq!(
+        input.prompt_id.as_deref(),
+        Some("695ddcaa-d5b2-4d95-9bdd-4f20a4ed0923")
+    );
+    let output = crate::hooks::handle_hook("UserPromptSubmit", input).unwrap();
+    assert!(context_of(&output).contains("captured payload mail"));
+    assert_eq!(
+        crate::hooks::turn_context::silent_prompt_count(temp.path()),
+        0
+    );
+    assert_eq!(
+        std::fs::read_dir(temp.path().join("turn-context"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn post_tool_second_prompt_recovers_recall_and_skips_repeated_tools() {
+    let _lock = super::env_lock();
+    let _env = supervisor_env();
+    let project = TempDir::new().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let entries = crate::store::open_store_local(&cas_root).unwrap();
+    let mut memory = Entry::new("recall-hook-recovery".into(), "epic_status compares child branches against stale local main; fast-forward origin/main before trusting its unmerged report".into());
+    memory.entry_type = EntryType::Learning;
+    memory.importance = 0.95;
+    entries.add(&memory).unwrap();
+    let transcript = project.path().join("session.jsonl");
+    let mut hook = input("supervisor");
+    hook.cwd = project.path().to_string_lossy().into_owned();
+    hook.transcript_path = Some(transcript.to_string_lossy().into_owned());
+    hook.prompt_id = Some("first".into());
+    crate::hooks::turn_context::record_prompt_hook(&cas_root, &hook);
+    std::fs::write(&transcript, format!("{{\"type\":\"user\",\"sessionId\":\"{}\",\"promptId\":\"second\",\"message\":{{\"content\":\"Investigate epic_status before trusting stale refs on main\"}}}}\n", hook.session_id)).unwrap();
+    hook.hook_event_name = "PostToolUse".into();
+    hook.tool_name = Some("Read".into());
+    let output = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
+    let Some(HookSpecificOutput::PostToolUse {
+        additional_context: Some(additional_context),
+    }) = output.hook_specific_output
+    else {
+        panic!("missing recovered recall");
+    };
+    assert!(
+        additional_context.contains("recall-hook-recovery"),
+        "{additional_context}"
+    );
+    assert_eq!(
+        crate::hooks::turn_context::silent_prompt_count(&cas_root),
+        1
+    );
+    let repeated = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
+    assert!(repeated.hook_specific_output.is_none());
+    assert_eq!(
+        crate::hooks::turn_context::silent_prompt_count(&cas_root),
+        1
+    );
+    hook.prompt_id = Some("second".into());
+    crate::hooks::turn_context::record_prompt_hook(&cas_root, &hook);
+    assert_eq!(
+        crate::hooks::turn_context::silent_prompt_count(&cas_root),
+        0
+    );
 }

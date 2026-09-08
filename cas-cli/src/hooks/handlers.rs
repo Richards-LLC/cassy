@@ -283,7 +283,7 @@ pub use handlers_state::{
     get_session_files, handle_subagent_start, handle_subagent_stop, handle_verifier_spawn_cleanup,
 };
 
-mod handlers_middle;
+pub(crate) mod handlers_middle;
 #[cfg(test)]
 pub(crate) use handlers_middle::is_file_within_project;
 pub use handlers_middle::{handle_post_tool_use, handle_stop, handle_user_prompt_submit};

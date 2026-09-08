@@ -1,4 +1,4 @@
-mod factory_inbox;
+pub(crate) mod factory_inbox;
 mod post_tool;
 mod prompt_capture;
 mod session_stop;

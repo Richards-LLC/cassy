@@ -167,8 +167,12 @@ cache_head="$(git rev-parse HEAD)"
 cache_toolchain=''
 if [[ -n "$cache_dir" && -z "$only_rows" ]]; then
     mkdir -p "$cache_dir"
-    cache_toolchain="$( { "$cargo_bin" --version; "$cargo_bin" nextest --version;
-        rustc -Vv; node --version; npm --version; } 2>&1 | sha256sum | cut -d' ' -f1)"
+    if ! cache_toolchain="$( { "$cargo_bin" --version && "$cargo_bin" nextest --version &&
+        rustc -Vv && node --version && "${NPM:-npm}" --version &&
+        printf '%s\n' "$BASH_VERSION"; } 2>&1 | sha256sum | cut -d' ' -f1)"; then
+        # Unknown tool identity is a cache miss, never a reason to skip tests.
+        cache_dir=''
+    fi
 fi
 failures=()
 
@@ -548,7 +552,7 @@ check_hub_web_dist_drift() {
 check_hub_web_visual_qa() {
     local artifact_dir npm_bin
     if [[ -n "${RELEASE_GATE_HUB_WEB_VISUAL_QA:-}" ]]; then
-        artifact_dir="$tmp_dir/hub-web-visual-qa"
+        artifact_dir="$row_log_dir/hub-web-visual-qa"
         mkdir -p "$artifact_dir"
         "$RELEASE_GATE_HUB_WEB_VISUAL_QA" "$artifact_dir"
         return $?
@@ -565,7 +569,7 @@ check_hub_web_visual_qa() {
         return 1
     }
     npm_bin="${NPM:-npm}"
-    artifact_dir="$tmp_dir/hub-web-visual-qa"
+    artifact_dir="$row_log_dir/hub-web-visual-qa"
     mkdir -p "$artifact_dir" "$tmp_dir/playwright"
     install_hub_web_dependencies && \
     (cd hub-web && \
@@ -595,7 +599,8 @@ check_nextest() {
     fi
     env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
         -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
-        "$cargo_bin" nextest run --workspace "${selection[@]}"
+        CARGO="$cargo_bin" "$repo_root/scripts/run-verified-tests.sh" \
+        nextest run --workspace "${selection[@]}" --no-fail-fast
 }
 
 check_doctests() {
@@ -763,9 +768,10 @@ check_archive_mode() {
             -u CAS_AGENT_NAME -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
             HOME="${HOME:-$archive_dir}" TMPDIR="$archive_tmp" \
             CARGO_HOME="$archive_cargo_home" RUSTC_WRAPPER=/nonexistent/sccache \
+            INSTA_WORKSPACE_ROOT="$remap" CARGO="$cargo_bin" \
             PATH="$archive_bin${archive_path:+:$archive_path}" \
-            "$cargo_bin" nextest run --archive-file "$archive" \
-            --workspace-remap "$remap" \
+            "$remap/scripts/run-verified-tests.sh" nextest run --archive-file "$archive" \
+            --workspace-remap "$remap" --no-fail-fast \
             --filterset 'not binary_id(~component_output_test)'
     ); then
         status=0

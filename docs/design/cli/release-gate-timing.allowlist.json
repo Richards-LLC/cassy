@@ -1,0 +1,7 @@
+[
+  {"check":"overflow","match":"archive size receipts:","reason":"Existing release-gate absolute receipt paths retained for copyable log evidence; timing additions fit 80 columns."},
+  {"check":"overflow","match":"note: ancestor .cas/proxy.toml visible","reason":"Existing absolute ancestor diagnostic retained unchanged; no new timing overflow."},
+  {"check":"overflow","match":"note: running with CAS_ROOT=","reason":"Existing hermetic-root diagnostic retained unchanged; this task adds timing evidence only."},
+  {"check":"overflow","match":"PASS release-script","reason":"Existing full row command description retained for receipt compatibility; the new timing lines fit 80 columns."},
+  {"check":"unicode-without-fallback","match":"PASS release-script","reason":"Existing em-dash row separator is outside the additive timing scope; new interval and timing lines are ASCII."}
+]

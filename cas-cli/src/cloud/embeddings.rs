@@ -276,7 +276,17 @@ impl KnowledgeEmbedder {
             "input": texts,
         });
 
-        let response = ureq::post(&url)
+        // `ureq` keeps a separate 30-second connect timeout unless it is
+        // overridden explicitly.  The request-level timeout alone therefore
+        // does not bound DNS/connect stalls (the documented exception to the
+        // overall deadline), which made ambient recall report every semantic
+        // request as a timeout even when the endpoint itself was healthy.
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(self.timeout)
+            .timeout(self.timeout)
+            .build();
+        let response = agent
+            .post(&url)
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
@@ -699,7 +709,8 @@ impl KnowledgeVectorCache {
     /// `None` means "no rebuild since this cache first appeared" — a first
     /// build is not a rebuild and must not be reported as one.
     pub fn code_cache_rebuild(cas_root: &Path) -> Option<CacheRebuild> {
-        let raw = std::fs::read_to_string(Self::rebuild_path(&Self::code_cache_dir(cas_root))).ok()?;
+        let raw =
+            std::fs::read_to_string(Self::rebuild_path(&Self::code_cache_dir(cas_root))).ok()?;
         serde_json::from_str(&raw).ok()
     }
 

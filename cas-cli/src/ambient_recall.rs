@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -67,6 +68,23 @@ const UBIQUITOUS_TERM_DOCUMENT_FREQUENCY: f64 = 0.80;
 /// a large local candidate window.
 const RECALL_DECISION_CANDIDATE_CAP: usize = 24;
 const RECALL_DECISION_TERM_CAP: usize = 24;
+
+/// Timings for the optional semantic channel.  These are deliberately
+/// bounded, credential-free diagnostics: a decision trace must explain why a
+/// provider result was absent without retaining the endpoint token or query.
+#[derive(Debug, Clone, Default, Serialize)]
+struct SemanticRecallTiming {
+    config_load_ms: u128,
+    token_present: bool,
+    embedder_init_ms: u128,
+    shared_cache_open_ms: u128,
+    shared_cache_count_ms: u128,
+    code_cache_open_ms: u128,
+    code_cache_count_ms: u128,
+    http_ms: Option<u128>,
+    outcome: Option<String>,
+    error_kind: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -227,6 +245,13 @@ pub(crate) struct EvidenceCandidate {
     pub(crate) provenance: EvidenceProvenance,
     pub(crate) relevance: f64,
     pub(crate) lexical_score: f64,
+    /// Number of distinct prompt terms present in the candidate.  The ratio
+    /// alone undervalues a same-day memory that matches several exact terms
+    /// when the bounded query contains unrelated metadata.
+    pub(crate) lexical_match_count: usize,
+    /// Small recency signal for current project learnings.  Kept separate so
+    /// semantic/lexical fusion cannot accidentally discard it.
+    pub(crate) recency_score: f64,
     pub(crate) lexical_eligible: bool,
     pub(crate) lexical_weak: bool,
     pub(crate) strong_session_signal: bool,
@@ -400,6 +425,8 @@ struct RecallDecisionTrace {
     #[serde(default)]
     injected: Vec<String>,
     rejected_scope: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic: Option<SemanticRecallTiming>,
 }
 
 #[derive(Debug, Serialize)]
@@ -543,6 +570,26 @@ fn record_recall_decision(
     injected: &[EvidenceCandidate],
     silence_reason: Option<&'static str>,
 ) {
+    record_recall_decision_with_semantic(
+        cas_root,
+        session_id,
+        query,
+        candidates,
+        injected,
+        silence_reason,
+        None,
+    );
+}
+
+fn record_recall_decision_with_semantic(
+    cas_root: &Path,
+    session_id: &str,
+    query: Option<&RecallQuery>,
+    candidates: Option<&RecallCandidates>,
+    injected: &[EvidenceCandidate],
+    silence_reason: Option<&'static str>,
+    semantic: Option<&SemanticRecallTiming>,
+) {
     let injected_ids: Vec<String> = injected
         .iter()
         .map(|candidate| candidate.evidence_id.clone())
@@ -586,6 +633,7 @@ fn record_recall_decision(
         candidates: trace_candidates,
         injected: injected_ids,
         rejected_scope: candidates.map_or(0, |candidates| candidates.rejected_scope),
+        semantic: semantic.cloned(),
     };
     let Ok(bytes) = serde_json::to_vec(&trace) else {
         return;
@@ -623,7 +671,7 @@ pub(crate) trait RecallRetriever {
 /// then must reuse that exact vector for every compatible namespace.
 trait RecallQueryEmbedder {
     fn meta(&self) -> EmbeddingMeta;
-    fn embed_query(&self, query: &str) -> Result<Vec<f32>, ()>;
+    fn embed_query(&self, query: &str) -> Result<Vec<f32>, String>;
 }
 
 impl RecallQueryEmbedder for KnowledgeEmbedder {
@@ -631,12 +679,12 @@ impl RecallQueryEmbedder for KnowledgeEmbedder {
         KnowledgeEmbedder::meta(self)
     }
 
-    fn embed_query(&self, query: &str) -> Result<Vec<f32>, ()> {
+    fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
         self.embed_batch(&[query.to_string()])
-            .map_err(|_| ())?
+            .map_err(|error| error.to_string())?
             .into_iter()
             .next()
-            .ok_or(())
+            .ok_or_else(|| "embedding response contained no vector".to_string())
     }
 }
 
@@ -653,12 +701,52 @@ struct SemanticRecallRetriever {
     embedder: Box<dyn RecallQueryEmbedder>,
     shared_cache: Option<KnowledgeVectorCache>,
     code_cache: Option<KnowledgeVectorCache>,
+    timing: Mutex<SemanticRecallTiming>,
 }
 
 impl SemanticRecallRetriever {
-    fn existing(cas_root: &Path, config: &crate::cloud::CloudConfig) -> Option<Self> {
+    fn existing(
+        cas_root: &Path,
+        config: &crate::cloud::CloudConfig,
+        config_load_ms: u128,
+    ) -> Option<Self> {
+        let initialized = std::time::Instant::now();
         let embedder = KnowledgeEmbedder::from_config(config)?.with_timeout(HOOK_SEMANTIC_TIMEOUT);
-        Self::with_embedder(cas_root, Box::new(embedder))
+        let embedder_init_ms = initialized.elapsed().as_millis();
+        let shared_started = std::time::Instant::now();
+        let shared_cache = KnowledgeVectorCache::open_existing(cas_root).ok().flatten();
+        let shared_cache_open_ms = shared_started.elapsed().as_millis();
+        let shared_count_started = std::time::Instant::now();
+        let shared_cache = shared_cache.filter(|cache| cache.count().unwrap_or(0) > 0);
+        let shared_cache_count_ms = shared_count_started.elapsed().as_millis();
+        let code_started = std::time::Instant::now();
+        let code_cache = KnowledgeVectorCache::open_existing_code_read_only(cas_root)
+            .ok()
+            .flatten();
+        let code_cache_open_ms = code_started.elapsed().as_millis();
+        let code_count_started = std::time::Instant::now();
+        let code_cache = code_cache.filter(|cache| cache.count().unwrap_or(0) > 0);
+        let code_cache_count_ms = code_count_started.elapsed().as_millis();
+        if shared_cache.is_none() && code_cache.is_none() {
+            return None;
+        }
+        Some(Self {
+            cas_root: cas_root.to_path_buf(),
+            db_path: cas_root.join("cas.db"),
+            embedder: Box::new(embedder),
+            shared_cache,
+            code_cache,
+            timing: Mutex::new(SemanticRecallTiming {
+                config_load_ms,
+                token_present: config.token.is_some(),
+                embedder_init_ms,
+                shared_cache_open_ms,
+                shared_cache_count_ms,
+                code_cache_open_ms,
+                code_cache_count_ms,
+                ..Default::default()
+            }),
+        })
     }
 
     fn with_embedder(cas_root: &Path, embedder: Box<dyn RecallQueryEmbedder>) -> Option<Self> {
@@ -684,7 +772,15 @@ impl SemanticRecallRetriever {
             embedder,
             shared_cache,
             code_cache,
+            timing: Mutex::new(SemanticRecallTiming::default()),
         })
+    }
+
+    fn timing(&self) -> SemanticRecallTiming {
+        self.timing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -805,17 +901,38 @@ impl RecallRetriever for SemanticRecallRetriever {
         }
         // Exactly one provider request per recall event. The returned vector
         // is then fanned out locally; namespace count never multiplies cost.
+        let http_started = std::time::Instant::now();
         let query_vector = match self.embedder.embed_query(&query.canonical) {
             Ok(vector) => vector,
-            Err(()) => {
+            Err(error) => {
+                let mut timing = self
+                    .timing
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                timing.http_ms = Some(http_started.elapsed().as_millis());
+                timing.outcome = Some("error".to_string());
+                timing.error_kind = Some(classify_embedding_error(&error));
                 eprintln!(
                     "cas: ambient recall semantic channel timed out or failed; using lexical fallback"
                 );
                 return Vec::new();
             }
         };
+        {
+            let mut timing = self
+                .timing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            timing.http_ms = Some(http_started.elapsed().as_millis());
+            timing.outcome = Some("vector".to_string());
+        }
         let meta = self.embedder.meta();
         if is_zero_vector(&query_vector) || query_vector.len() != meta.dims {
+            let mut timing = self
+                .timing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            timing.outcome = Some("unusable_vector".to_string());
             eprintln!(
                 "cas: ambient recall semantic channel returned an unusable vector; using lexical fallback"
             );
@@ -878,7 +995,9 @@ impl RecallRetriever for SemanticRecallRetriever {
             candidate.relevance = candidate.lexical_score * 0.32
                 + f64::from(score) * 0.52
                 + candidate.structural_score * 0.24
-                + candidate.role_score;
+                + candidate.role_score
+                + candidate.recency_score
+                + lexical_depth_bonus(candidate.lexical_match_count);
             candidate.why_relevant = if candidate.binding {
                 format!("exact binding + semantic match {:.3}", score)
             } else if candidate.lexical_score > 0.0 {
@@ -897,6 +1016,23 @@ impl RecallRetriever for SemanticRecallRetriever {
         });
         candidates.truncate(limit);
         candidates
+    }
+}
+
+fn classify_embedding_error(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
+        "timeout".to_string()
+    } else if lower.contains("status 401") || lower.contains("status 403") {
+        "auth".to_string()
+    } else if lower.contains("status 429") {
+        "rate_limit".to_string()
+    } else if lower.contains("status 404") || lower.contains("status 501") {
+        "unsupported".to_string()
+    } else if lower.contains("response") || lower.contains("parse") {
+        "response".to_string()
+    } else {
+        "transport_or_provider".to_string()
     }
 }
 
@@ -1424,17 +1560,44 @@ fn query_terms(canonical: &str) -> Vec<String> {
         let request = lines.remove(request_index);
         lines.insert(0, request);
     }
+
+    // A prompt with at least two content-bearing terms is already a strong
+    // lexical request.  Do not spend the remaining ten-term budget on an
+    // unrelated active task title: a title such as "cas serve mcp servers
+    // spin" previously displaced the prompt's own signal and made a short
+    // conversational turn look like a task lookup.  Metadata remains useful
+    // for session-start/underspecified prompts, which have fewer than two
+    // request terms.
+    if let Some(request) = lines.first().and_then(|line| line.strip_prefix("request=")) {
+        let request_terms = terms_from_text(request);
+        if request_terms.len() >= 2 {
+            return request_terms;
+        }
+    }
     for line in lines {
-        for raw in line
-            .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
-        {
-            let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
-            if !is_content_bearing_term(&term) || terms.contains(&term) {
+        for term in terms_from_text(line) {
+            if terms.contains(&term) {
                 continue;
             }
             terms.push(term);
             if terms.len() == 10 {
                 return terms;
+            }
+        }
+    }
+    terms
+}
+
+fn terms_from_text(text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for raw in
+        text.split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
+    {
+        let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
+        if is_content_bearing_term(&term) && !terms.contains(&term) {
+            terms.push(term);
+            if terms.len() == 10 {
+                break;
             }
         }
     }
@@ -1483,6 +1646,7 @@ fn is_high_document_frequency_term(term: &str) -> bool {
         "where",
         "who",
         "why",
+        "how",
         "the",
         "and",
         "are",
@@ -1602,8 +1766,21 @@ fn exclude_corpus_ubiquitous_lexical_terms(candidates: &mut [EvidenceCandidate],
             .filter(|term| haystack.contains(term))
             .filter(|term| !ubiquitous.contains(term))
             .collect();
+        candidate.lexical_match_count = matched.len();
+        candidate.lexical_score = matched.len() as f64 / terms.len().max(1) as f64;
         candidate.lexical_eligible = lexical_match_is_eligible(&matched);
         candidate.lexical_weak = matched.len() == 1;
+        candidate.relevance = candidate.lexical_score
+            * if candidate.semantic_score.is_some() {
+                0.32
+            } else {
+                0.66
+            }
+            + candidate.semantic_score.unwrap_or(0.0) * 0.52
+            + candidate.structural_score * 0.24
+            + candidate.role_score
+            + candidate.recency_score
+            + lexical_depth_bonus(candidate.lexical_match_count);
         if candidate.semantic_score.is_none() {
             candidate.why_relevant = match matched.len() {
                 0 => "lexical match:".to_string(),
@@ -1667,6 +1844,8 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
         .collect();
     let lexical_eligible = lexical_match_is_eligible(&matched);
     let lexical = matched.len() as f64 / terms.len().max(1) as f64;
+    let lexical_match_count = matched.len();
+    let recency_score = recency_score(&row.revision);
     let binding = query.task_id.as_deref() == Some(row.id.as_str())
         || names_current_task(query.task_id.as_deref(), &haystack)
         || query.files.iter().any(|file| haystack.contains(file))
@@ -1718,8 +1897,14 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
             observed_at: None,
             revision: clean_scalar(&row.revision, 96),
         },
-        relevance: lexical * 0.66 + structural * 0.24 + role_score,
+        relevance: lexical * 0.66
+            + structural * 0.24
+            + role_score
+            + recency_score
+            + lexical_depth_bonus(lexical_match_count),
         lexical_score: lexical,
+        lexical_match_count,
+        recency_score,
         lexical_eligible,
         lexical_weak,
         strong_session_signal,
@@ -1731,6 +1916,36 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
         stale: row.stale,
         conflict_key: None,
         body_available: row.body_available,
+    }
+}
+
+fn lexical_depth_bonus(matched_terms: usize) -> f64 {
+    matched_terms.saturating_sub(1).min(3) as f64 * 0.08
+}
+
+fn recency_score(revision: &str) -> f64 {
+    let now = Utc::now();
+    let parsed = DateTime::parse_from_rfc3339(revision)
+        .map(|value| value.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDate::parse_from_str(revision.trim(), "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|date| DateTime::<Utc>::from_naive_utc_and_offset(date, Utc))
+        });
+    let Some(when) = parsed else {
+        return 0.0;
+    };
+    let age = now.signed_duration_since(when);
+    if when.date_naive() == now.date_naive() {
+        0.22
+    } else if age >= chrono::TimeDelta::zero() && age <= chrono::TimeDelta::days(7) {
+        0.08
+    } else if age >= chrono::TimeDelta::zero() && age <= chrono::TimeDelta::days(31) {
+        0.02
+    } else {
+        0.0
     }
 }
 
@@ -1918,8 +2133,10 @@ fn build_ambient_recall_context_with_factory_identity(
         );
         return None;
     };
+    let config_started = std::time::Instant::now();
     let config = crate::cloud::CloudConfig::load_from_cas_dir(cas_root).unwrap_or_default();
-    let semantic = SemanticRecallRetriever::existing(cas_root, &config);
+    let config_load_ms = config_started.elapsed().as_millis();
+    let semantic = SemanticRecallRetriever::existing(cas_root, &config, config_load_ms);
     let mut retrievers: Vec<&dyn RecallRetriever> = vec![&retriever];
     if let Some(semantic) = semantic.as_ref() {
         retrievers.push(semantic);
@@ -1935,6 +2152,7 @@ fn build_ambient_recall_context_with_factory_identity(
         );
         return None;
     };
+    let semantic_timing = semantic.as_ref().map(SemanticRecallRetriever::timing);
     apply_outcome_feedback(cas_root, &mut candidates.candidates);
     let ledger_file = ledger_path(cas_root, &identity.session_id);
     let mut ledger = RecallLedger::load(&ledger_file);
@@ -1946,13 +2164,14 @@ fn build_ambient_recall_context_with_factory_identity(
     let rendered = render_packet(&identity, &query, &candidates, &mut ledger);
     match rendered {
         Some((packet, injected)) => {
-            record_recall_decision(
+            record_recall_decision_with_semantic(
                 cas_root,
                 &input.session_id,
                 Some(&query),
                 Some(&candidates),
                 &injected,
                 None,
+                semantic_timing.as_ref(),
             );
             let query_id =
                 record_ambient_query(cas_root, &identity, &query, &injected, session_start);
@@ -1967,13 +2186,14 @@ fn build_ambient_recall_context_with_factory_identity(
         }
         None => {
             let silence_reason = silent_decision_reason(&query, &candidates, &ledger);
-            record_recall_decision(
+            record_recall_decision_with_semantic(
                 cas_root,
                 &input.session_id,
                 Some(&query),
                 Some(&candidates),
                 &[],
                 Some(silence_reason),
+                semantic_timing.as_ref(),
             );
             ledger.save(&ledger_file);
             None
@@ -2657,15 +2877,45 @@ fn is_sensitive_tool_text(value: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
+/// Keep only dictionary-shaped trigger terms from tool results.  SQLite/ps
+/// output routinely contains hex ids and duration counters such as
+/// `010074085c210ef4`, `014s`, and `0600`; admitting any token with a digit
+/// turned those implementation details into the next prompt's recall query.
+fn is_dictionary_like_trigger_term(term: &str) -> bool {
+    if !is_content_bearing_term(term) {
+        return false;
+    }
+    let alphabetic = term.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    let numeric = term.chars().filter(|ch| ch.is_ascii_digit()).count();
+    if alphabetic < 3 {
+        return false;
+    }
+    if numeric > 0 {
+        let hex_only = term
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch));
+        if hex_only || numeric >= alphabetic {
+            return false;
+        }
+        let lower = term.to_ascii_lowercase();
+        for suffix in ["ms", "secs", "sec", "mins", "min", "hours", "hour", "s"] {
+            if let Some(prefix) = lower.strip_suffix(suffix) {
+                if !prefix.is_empty() && prefix.chars().all(|ch| ch.is_ascii_digit()) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 fn collect_result_terms(value: &serde_json::Value, terms: &mut Vec<String>) {
     match value {
         serde_json::Value::String(text) if !is_sensitive_tool_text(text) => {
             for raw in text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
             {
                 let term = raw.trim_matches(['-', '_']).to_ascii_lowercase();
-                if (is_content_bearing_term(&term) || term.chars().any(|ch| ch.is_ascii_digit()))
-                    && !terms.contains(&term)
-                {
+                if is_dictionary_like_trigger_term(&term) && !terms.contains(&term) {
                     terms.push(term);
                     if terms.len() == TOOL_TRIGGER_TERM_CAP {
                         return;
@@ -3165,6 +3415,10 @@ pub(crate) fn retrieve_candidates(
 
 fn fuse_candidate(existing: &mut EvidenceCandidate, incoming: EvidenceCandidate) {
     existing.lexical_score = existing.lexical_score.max(incoming.lexical_score);
+    existing.lexical_match_count = existing
+        .lexical_match_count
+        .max(incoming.lexical_match_count);
+    existing.recency_score = existing.recency_score.max(incoming.recency_score);
     existing.lexical_eligible |= incoming.lexical_eligible;
     existing.lexical_weak &= incoming.lexical_weak;
     existing.strong_session_signal |= incoming.strong_session_signal;
@@ -3186,7 +3440,9 @@ fn fuse_candidate(existing: &mut EvidenceCandidate, incoming: EvidenceCandidate)
     existing.relevance = existing.lexical_score * 0.32
         + semantic * 0.52
         + existing.structural_score * 0.24
-        + existing.role_score;
+        + existing.role_score
+        + existing.recency_score
+        + lexical_depth_bonus(existing.lexical_match_count);
     existing.why_relevant = match (existing.lexical_score > 0.0, semantic > 0.0) {
         (true, true) if existing.binding => {
             format!("exact binding + lexical + semantic match {semantic:.3}")
@@ -3308,6 +3564,8 @@ mod tests {
             },
             relevance: 0.8,
             lexical_score: 0.8,
+            lexical_match_count: 1,
+            recency_score: 0.0,
             lexical_eligible: true,
             lexical_weak: false,
             strong_session_signal: false,
@@ -3338,7 +3596,7 @@ mod tests {
             self.meta.clone()
         }
 
-        fn embed_query(&self, _query: &str) -> Result<Vec<f32>, ()> {
+        fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.vector.clone())
         }
@@ -3354,14 +3612,14 @@ mod tests {
             self.inner.meta()
         }
 
-        fn embed_query(&self, query: &str) -> Result<Vec<f32>, ()> {
+        fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.inner
                 .embed_batch(&[query.to_string()])
-                .map_err(|_| ())?
+                .map_err(|error| error.to_string())?
                 .into_iter()
                 .next()
-                .ok_or(())
+                .ok_or_else(|| "embedding response contained no vector".to_string())
         }
     }
 
@@ -4180,6 +4438,97 @@ mod tests {
             query_terms("the old context use queue for release signing"),
             vec!["release", "signing"]
         );
+    }
+
+    #[test]
+    fn strong_prompt_terms_do_not_get_padded_by_an_unrelated_task_title() {
+        let query = RecallQuery::build(
+            &identity(RecallRole::Supervisor),
+            &RecallRequest {
+                prompt: "is ambient recall still bad".into(),
+                task_title: Some("754 cas serve mcp servers spin".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let terms = query_terms(&query.canonical);
+        assert_eq!(terms, vec!["ambient", "recall", "still", "bad"]);
+        assert!(!terms.iter().any(|term| term == "serve"));
+        assert!(!terms.iter().any(|term| term == "servers"));
+    }
+
+    #[test]
+    fn same_day_multi_term_memory_outranks_old_common_word_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        let today = Utc::now().date_naive().to_string();
+        let old = (Utc::now() - chrono::TimeDelta::days(31))
+            .date_naive()
+            .to_string();
+        conn.execute_batch(
+            r#"
+            create table entries (
+                id text primary key, title text, content text, scope text,
+                team_id text, share text, updated_at text, created text,
+                valid_until text, archived integer
+            );
+            create table rules (
+                id text primary key, content text, scope text, team_id text,
+                share text, created text, status text
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "insert into entries values (?1, '', ?2, 'project', null, null, ?3, ?3, null, 0)",
+            params![
+                "same-day-learning",
+                "release gate nextest factory build guard reads live host load",
+                today
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into rules values (?1, ?2, 'project', null, null, ?3, 'proven')",
+            params![
+                "old-common-rule",
+                "release build guard compatibility note",
+                old
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        let rows = retrieve_candidates(
+            &identity(RecallRole::Supervisor),
+            &RecallRequest {
+                prompt: "release gate nextest factory build guard".into(),
+                ..Default::default()
+            },
+            &[&retriever],
+        )
+        .unwrap();
+        assert_eq!(rows.candidates[0].evidence_id, "same-day-learning");
+        assert!(rows.candidates[0].lexical_match_count >= 5);
+        assert!(rows.candidates[0].recency_score > 0.0);
+    }
+
+    #[test]
+    fn post_tool_result_terms_reject_hex_ids_and_durations() {
+        let value = serde_json::json!([
+            "010074085c210ef4",
+            "02007408b7738d65",
+            "014s",
+            "0600",
+            "release gate build guard"
+        ]);
+        let mut terms = Vec::new();
+        collect_result_terms(&value, &mut terms);
+        assert_eq!(terms, vec!["release", "gate", "build", "guard"]);
+        assert!(!terms.iter().any(|term| term == "010074085c210ef4"));
+        assert!(!terms.iter().any(|term| term == "014s"));
+        assert!(!terms.iter().any(|term| term == "0600"));
     }
 
     /// cas-8284: fixtures mirror the first live post-floor injection: English
@@ -5836,18 +6185,36 @@ mod tests {
             current,
             "ci wall-clock work on cas-src (cas-096e/gh #142, extended 2026-08-18)"
         ));
-        assert!(names_current_task(current, "tags: [\"ci\",\"cas-096e\",\"nextest\"]"));
+        assert!(names_current_task(
+            current,
+            "tags: [\"ci\",\"cas-096e\",\"nextest\"]"
+        ));
         assert!(names_current_task(current, "cas-096e"));
         assert!(names_current_task(current, "see cas-096e."));
 
         // Decoys: longer ids that contain the current one as a substring.
-        assert!(!names_current_task(current, "cas-096e1 is a different task"));
-        assert!(!names_current_task(current, "cas-096e-extra is a different task"));
-        assert!(!names_current_task(current, "cas-096e_2 is a different task"));
-        assert!(!names_current_task(current, "xcas-096e is a different task"));
+        assert!(!names_current_task(
+            current,
+            "cas-096e1 is a different task"
+        ));
+        assert!(!names_current_task(
+            current,
+            "cas-096e-extra is a different task"
+        ));
+        assert!(!names_current_task(
+            current,
+            "cas-096e_2 is a different task"
+        ));
+        assert!(!names_current_task(
+            current,
+            "xcas-096e is a different task"
+        ));
 
         // Another task entirely.
-        assert!(!names_current_task(current, "work on cas-1939 and cas-b7f5"));
+        assert!(!names_current_task(
+            current,
+            "work on cas-1939 and cas-b7f5"
+        ));
 
         // No current task, or an empty one, binds nothing — including against
         // text that would otherwise look like a match.
@@ -5855,7 +6222,6 @@ mod tests {
         assert!(!names_current_task(Some(""), "cas-096e"));
         assert!(!names_current_task(Some("   "), "cas-096e"));
     }
-
 
     /// cas-4028. The helper test pins the token rule; this pins the SEAM —
     /// what the production retriever actually fetches and hands to the packet
@@ -5963,11 +6329,19 @@ mod tests {
     #[test]
     fn a_non_ascii_task_id_or_haystack_is_handled_without_panicking() {
         assert!(!names_current_task(Some("café-01"), "notes about café-011"));
-        assert!(names_current_task(Some("café-01"), "notes about café-01 here"));
-        assert!(!names_current_task(Some("cas-096e"), "日本語 cas-096e1 日本語"));
-        assert!(names_current_task(Some("cas-096e"), "日本語 cas-096e 日本語"));
+        assert!(names_current_task(
+            Some("café-01"),
+            "notes about café-01 here"
+        ));
+        assert!(!names_current_task(
+            Some("cas-096e"),
+            "日本語 cas-096e1 日本語"
+        ));
+        assert!(names_current_task(
+            Some("cas-096e"),
+            "日本語 cas-096e 日本語"
+        ));
         assert!(!names_current_task(Some("🎯"), "🎯x"));
         assert!(names_current_task(Some("🎯"), "a 🎯 b"));
     }
-
 }

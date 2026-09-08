@@ -9251,6 +9251,13 @@ async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
     // Register a factory-session supervisor that owns lifecycle events.
     let session = "sess-062d-vf";
     let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let test_agent = agent_store
+        .get(&format!("test-session-{}", std::process::id()))
+        .expect("test agent");
+    assert_eq!(
+        test_agent.factory_session, None,
+        "setup_cas must not register the test agent under an ambient CAS_FACTORY_SESSION"
+    );
     let mut sup = cas::types::Agent::new("sup-062d-vf".to_string(), "sup-062d-vf".to_string());
     sup.role = AgentRole::Supervisor;
     sup.factory_session = Some(session.to_string());

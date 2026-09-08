@@ -132,6 +132,10 @@ printf 'ZIG=%s :: %s\n' "${ZIG:-unset}" "$*" \
   >>"${GATE_FIXTURE_ZIG_LOG:-/dev/null}"
 printf 'RUSTC_WRAPPER=%s CARGO_HOME=%s :: %s\n' "${RUSTC_WRAPPER:-unset}" "${CARGO_HOME:-unset}" "$*" \
   >>"${GATE_FIXTURE_ARCHIVE_ENV_LOG:-/dev/null}"
+printf 'CAS_FACTORY_SESSION=%s CAS_AGENT_ROLE=%s CAS_AGENT_NAME=%s CAS_SUPERVISOR_NAME=%s CAS_AGENT_ID=%s :: %s\n' \
+  "${CAS_FACTORY_SESSION:-unset}" "${CAS_AGENT_ROLE:-unset}" "${CAS_AGENT_NAME:-unset}" \
+  "${CAS_SUPERVISOR_NAME:-unset}" "${CAS_AGENT_ID:-unset}" "$*" \
+  >>"${GATE_FIXTURE_FACTORY_ENV_LOG:-/dev/null}"
 if [[ "$*" == 'check --workspace --tests' && "${GATE_FIXTURE_CHECK_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'nextest run --workspace'* && "${GATE_FIXTURE_NEXTEST_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == *'builtin_archive_portability_test'* && "${GATE_FIXTURE_FIXTURE_PATHS_FAIL:-}" == 1 ]]; then exit 1; fi
@@ -511,6 +515,23 @@ cmp "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md
     "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"
 ok '--learn appends and mirrors a dated failure entry'
 
+# cas-6df6. Keep the release diagnosis in the executable nextest failure-log
+# category and prove --learn accepts the exact operator-reported cause.
+repo="$(new_fixture learn-nextest-factory-session)"
+nextest_cause='gate inherited the supervisor shell'"'"'s CAS_FACTORY_SESSION; a test agent registered under it routed lifecycle pushes to a supervisor absent from the fixture'
+learn_output="$(cd "$repo" && \
+    "$repo/scripts/release-gate.sh" --learn 'nextest inherited factory identity' "$nextest_cause" nextest 2>&1)"
+if grep -qF 'Learned release failure in all three mirrors' <<<"$learn_output" \
+    && grep -qF "$nextest_cause" "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" \
+    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"; then
+    ok '--learn records the nextest factory-session diagnosis in all mirrors'
+else
+    bad "--learn did not record the nextest factory-session diagnosis: $learn_output"
+fi
+
 # cas-4ccc. A populated .cas/proxy.toml ABOVE the worktree is readable by any
 # test that resolves project config by walking up from its cwd. The gate must
 # neutralize it and name it — never refuse, because blocking a release on the
@@ -698,6 +719,35 @@ if grep -qE '^RUSTC_WRAPPER=/nonexistent/sccache CARGO_HOME=.*/cargo-home :: nex
     ok 'archive-mode runs the extracted suite with a missing wrapper and empty CARGO_HOME'
 else
     bad "archive-mode did not reproduce the shard environment: $(cat "$archive_env_log") (output: $output)"
+fi
+
+# cas-6df6. A release gate launched inside a factory supervisor must not let
+# its shell identity become the registered session for integration fixtures.
+# Both the ordinary nextest row and both archive-mode cargo invocations must
+# receive a scrubbed factory identity, while the archive row keeps its existing
+# CAS_ROOT isolation.
+factory_env_log="$tmp/factory-environment.log"
+: >"$factory_env_log"
+output="$(cd "$repo" && \
+    CAS_FACTORY_SESSION=foreign-supervisor-session \
+    CAS_AGENT_ROLE=supervisor \
+    CAS_AGENT_NAME=foreign-supervisor \
+    CAS_SUPERVISOR_NAME=foreign-supervisor \
+    CAS_AGENT_ID=foreign-agent-id \
+    GATE_FIXTURE_FACTORY_ENV_LOG="$factory_env_log" \
+    GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+    CARGO="$repo/scripts/cargo-stub" \
+    RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
+    "$repo/scripts/release-gate.sh" 9.99.7 --only nextest,archive-mode 2>&1 || true)"
+if grep -qF 'CAS_FACTORY_SESSION=unset CAS_AGENT_ROLE=unset CAS_AGENT_NAME=unset CAS_SUPERVISOR_NAME=unset CAS_AGENT_ID=unset :: nextest run --workspace' \
+    "$factory_env_log" \
+    && grep -qF 'CAS_FACTORY_SESSION=unset CAS_AGENT_ROLE=unset CAS_AGENT_NAME=unset CAS_SUPERVISOR_NAME=unset CAS_AGENT_ID=unset :: nextest archive --workspace' \
+    "$factory_env_log" \
+    && grep -qF 'CAS_FACTORY_SESSION=unset CAS_AGENT_ROLE=unset CAS_AGENT_NAME=unset CAS_SUPERVISOR_NAME=unset CAS_AGENT_ID=unset :: nextest run --archive-file' \
+    "$factory_env_log"; then
+    ok 'nextest and archive-mode scrub inherited factory identity'
+else
+    bad "nextest or archive-mode leaked factory identity: $(cat "$factory_env_log") (output: $output)"
 fi
 
 # cas-c0411. The `cas init` watchdog budget the gate hands its children is the

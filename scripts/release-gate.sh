@@ -505,7 +505,9 @@ check_workspace_tests() {
 # do too (cas-1f6e: a cas-mux snapshot test failed in the queue after a local
 # `-p cas` gate passed). The non-cas crates add roughly a minute to each row.
 check_nextest() {
-    "$cargo_bin" nextest run --workspace
+    env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
+        -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+        "$cargo_bin" nextest run --workspace
 }
 
 check_doctests() {
@@ -639,7 +641,9 @@ check_archive_mode() {
         return 1
     }
     archive_path="$(make_archive_path)"
-    if "$cargo_bin" nextest archive --workspace --archive-file "$archive"; then
+    if env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
+        -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+        "$cargo_bin" nextest archive --workspace --archive-file "$archive"; then
         :
     else
         status=$?
@@ -667,7 +671,9 @@ check_archive_mode() {
     # source-tree .snap files and are excluded rather than "fixed".
     if (
         cd "$archive_dir"
-        env -u CAS_ROOT -u COLUMNS HOME="${HOME:-$archive_dir}" TMPDIR="$archive_tmp" \
+        env -u CAS_ROOT -u COLUMNS -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE \
+            -u CAS_AGENT_NAME -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+            HOME="${HOME:-$archive_dir}" TMPDIR="$archive_tmp" \
             CARGO_HOME="$archive_cargo_home" RUSTC_WRAPPER=/nonexistent/sccache \
             PATH="$archive_bin${archive_path:+:$archive_path}" \
             "$cargo_bin" nextest run --archive-file "$archive" \
@@ -873,13 +879,13 @@ run_check hub-web-visual-qa \
     'npm exec --yes --package=playwright -- node scripts/visual-qa.mjs --artifact-dir <gate-scratch>/hub-web-visual-qa' \
     check_hub_web_visual_qa
 run_check nextest \
-    "$cargo_bin nextest run --workspace" \
+    "env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID $cargo_bin nextest run --workspace" \
     check_nextest
 run_check doctests \
     "$cargo_bin test -p cas --doc" \
     check_doctests
 run_check archive-mode \
-    "$cargo_bin nextest archive --workspace --archive-file <home-disk>/suite.tar.zst; archive run outside checkout with remap and rg removed" \
+    "env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID $cargo_bin nextest archive --workspace --archive-file <home-disk>/suite.tar.zst; archive run outside checkout with remap and rg removed" \
     check_archive_mode
 run_check snapshot-portability \
     'env -u COLUMNS TMPDIR=<deep path> cargo nextest run -p cas --test component_output_test' \

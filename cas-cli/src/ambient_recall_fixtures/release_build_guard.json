@@ -1,0 +1,5 @@
+{
+  "prompt": "the release gate nextest row failed because the factory build guard read live host load; how do I avoid this next release?",
+  "memory_id": "2026-09-08-10",
+  "content": "2026-09-08 release lesson (3.19.0 gate run 3): never let any Cargo build or benchmark run on the release host while a full gate is running. The factory build guard (cas-a8ea) refuses spawn_workers when 1-minute load exceeds CPU count, and integration tests in cas-cli/tests never set CAS_FACTORY_BUILD_GUARD=off, so a full nextest run plus a concurrent worker benchmark made spawn tests fail deterministically (cas-77c1 fixes the harness). Before --gate: check `ps` for cargo processes and load, and hold workers that run builds until the gate reports."
+}

@@ -34,6 +34,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   continuous A4/Letter pagination evidence for review.
 
 ### Fixed
+- Ambient recall now runs its semantic channel within budget (connect and request
+  deadlines are both bounded), ranks recent memories with deep term overlap ahead
+  of old rules that match one common word, stops padding prompts with unrelated
+  task titles, and filters hex ids and durations out of tool-traffic trigger terms.
 - An idle `cas serve` code watcher no longer spins a CPU core while it waits
   for file changes.
 

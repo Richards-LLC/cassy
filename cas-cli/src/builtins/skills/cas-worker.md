@@ -19,6 +19,7 @@ working directory.
 2. Choose exactly one assigned task. Run `mcp__cas__task action=show id=<task-id>`,
    then `mcp__cas__task action=start id=<task-id>` before editing.
 3. Read the task's depth and acceptance criteria and the project `CLAUDE.md`.
+   For non-empty `demo_statement`, run `cas-qa-craft` before close.
 4. Implement only the assigned scope. Commit logical units with the task ID.
    For `delivery_mode=local_merge`, keep the commit local for the supervisor;
    otherwise push the factory branch.

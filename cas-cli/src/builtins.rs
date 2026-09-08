@@ -143,6 +143,34 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-supervisor.md"),
     },
     BuiltinFile {
+        path: "skills/cas-release-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-release-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/brief-template.md",
+        content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/default-tokens.json",
+        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/exemplar.md",
+        content: include_str!("builtins/skills/cas-release-report/references/exemplar.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/pdf.md",
+        content: include_str!("builtins/skills/cas-release-report/references/pdf.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/template.html",
+        content: include_str!("builtins/skills/cas-release-report/references/template.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/render.py",
+        content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
         content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
@@ -440,6 +468,23 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
         content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/before-after.html"),
     },
+    // cas-21dc: demo-statement exploration matrix and durable evidence ledger.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/SKILL.md",
+        content: include_str!("builtins/skills/cas-qa-craft/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/matrix-builder.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/matrix-builder.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/evidence-ledger.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/evidence-ledger.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/exemplar.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/exemplar.md"),
+    },
     // release-notes skill (GH #65): drafts/posts the user + dev Slack threads
     // for every staging/main merge and installs the canonical rubric template
     // at docs/release-notes/RUBRIC.md when a project has none.
@@ -646,6 +691,34 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-supervisor.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-release-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/brief-template.md",
+        content: include_str!("builtins/codex/skills/cas-release-report/references/brief-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/default-tokens.json",
+        content: include_str!("builtins/codex/skills/cas-release-report/references/default-tokens.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/exemplar.md",
+        content: include_str!("builtins/codex/skills/cas-release-report/references/exemplar.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/pdf.md",
+        content: include_str!("builtins/codex/skills/cas-release-report/references/pdf.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/template.html",
+        content: include_str!("builtins/codex/skills/cas-release-report/references/template.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/render.py",
+        content: include_str!("builtins/codex/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -936,6 +1009,23 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
         content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/before-after.html"),
     },
+    // cas-21dc: Codex mirror of the demo-statement QA skill.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-qa-craft/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/matrix-builder.md",
+        content: include_str!("builtins/codex/skills/cas-qa-craft/references/matrix-builder.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/evidence-ledger.md",
+        content: include_str!("builtins/codex/skills/cas-qa-craft/references/evidence-ledger.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/exemplar.md",
+        content: include_str!("builtins/codex/skills/cas-qa-craft/references/exemplar.md"),
+    },
     // release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
         path: "skills/release-notes/SKILL.md",
@@ -1179,6 +1269,34 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
         content: include_str!("builtins/grok/skills/cas-supervisor/references/filing-cas-bugs.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-release-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/brief-template.md",
+        content: include_str!("builtins/grok/skills/cas-release-report/references/brief-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/default-tokens.json",
+        content: include_str!("builtins/grok/skills/cas-release-report/references/default-tokens.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/exemplar.md",
+        content: include_str!("builtins/grok/skills/cas-release-report/references/exemplar.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/pdf.md",
+        content: include_str!("builtins/grok/skills/cas-release-report/references/pdf.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/references/template.html",
+        content: include_str!("builtins/grok/skills/cas-release-report/references/template.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/render.py",
+        content: include_str!("builtins/grok/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -1443,6 +1561,23 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
         content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
+    // cas-21dc: Grok mirror of the demo-statement QA skill.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-qa-craft/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/matrix-builder.md",
+        content: include_str!("builtins/grok/skills/cas-qa-craft/references/matrix-builder.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/evidence-ledger.md",
+        content: include_str!("builtins/grok/skills/cas-qa-craft/references/evidence-ledger.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/exemplar.md",
+        content: include_str!("builtins/grok/skills/cas-qa-craft/references/exemplar.md"),
     },
     // release-notes skill (GH #65) — grok twin.
     BuiltinFile {
@@ -1850,6 +1985,15 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/cas-ui-craft"),
         codex: Some("skills/cas-ui-craft"),
         grok: Some("skills/cas-ui-craft"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-21dc: every harness needs the same demo-statement evidence pass;
+        // the skill is byte-identical because its procedure is tool-neutral.
+        id: "cas-qa-craft",
+        claude: Some("skills/cas-qa-craft"),
+        codex: Some("skills/cas-qa-craft"),
+        grok: Some("skills/cas-qa-craft"),
         note: "",
     },
     RequiredCapability {
@@ -4715,6 +4859,95 @@ This is the body content."#;
                 .map(|(_, body)| *body)
                 .expect("claude body collected");
             assert_eq!(on_disk, shipped, "{doc} drifted from {builtin}");
+        }
+    }
+
+    /// cas-21dc: demo-statement QA is a cross-harness skill. Keep its matrix
+    /// quotas, label vocabulary, stable ledger grammar, and worked example
+    /// identical so the verifier can consume any harness's receipt.
+    #[test]
+    fn test_builtin_skills_contains_cas_qa_craft() {
+        const FILES: &[&str] = &[
+            "skills/cas-qa-craft/SKILL.md",
+            "skills/cas-qa-craft/references/matrix-builder.md",
+            "skills/cas-qa-craft/references/evidence-ledger.md",
+            "skills/cas-qa-craft/references/exemplar.md",
+        ];
+        let mut claude_bodies = Vec::new();
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let get = |path: &str| -> &'static str {
+                catalog
+                    .iter()
+                    .find(|b| b.path == path)
+                    .unwrap_or_else(|| panic!("{path} missing from {label} catalog"))
+                    .content
+            };
+            let skill = get(FILES[0]);
+            assert!(is_managed_by_cas(skill), "{label} cas-qa-craft is unmanaged");
+            assert!(skill.lines().count() < 120, "{label} cas-qa-craft exceeds 120 lines");
+            for marker in [
+                "name: cas-qa-craft",
+                "demo_statement",
+                "exploration matrix",
+                "at least three unmentioned",
+                "adjacent surface",
+                "no replay cells",
+                "Cap the matrix at **8 cells**",
+                "real build",
+                "30 minutes",
+                "source-inferred",
+                "fixture",
+                "real-build",
+                "eyewitness",
+                "NOT EXERCISED",
+                "MIN_",
+                "contradictory claims",
+                "one task per defect",
+                "evidence-ledger.md",
+                "exemplar.md",
+            ] {
+                assert!(skill.contains(marker), "{label} cas-qa-craft missing {marker:?}");
+            }
+            let matrix = get(FILES[1]);
+            for marker in [
+                "Richards-LLC/cassy/issues/759",
+                "at least three conditions",
+                "adjacent surface",
+                "zero replay cells",
+                "cap the matrix at eight",
+                "expected result",
+            ] {
+                assert!(matrix.contains(marker), "{label} matrix builder missing {marker:?}");
+            }
+            let ledger = get(FILES[2]);
+            for marker in [
+                "id | cell | expected | observed | verdict | label | evidence path | defect task",
+                "source-inferred",
+                "fixture",
+                "real-build",
+                "eyewitness",
+                "NOT EXERCISED",
+                "Constants vs expectation",
+                "Contradictions",
+                "Honesty",
+            ] {
+                assert!(ledger.contains(marker), "{label} evidence ledger missing {marker:?}");
+            }
+            let exemplar = get(FILES[3]);
+            for marker in ["M01", "M07", "real-build", "FAIL", "adjacent", "Honesty"] {
+                assert!(exemplar.contains(marker), "{label} exemplar missing {marker:?}");
+            }
+            if label == "claude" {
+                claude_bodies = FILES.iter().map(|path| (*path, get(path))).collect();
+            } else {
+                for (path, claude) in &claude_bodies {
+                    assert_eq!(get(path), *claude, "{label} {path} drifted from Claude mirror");
+                }
+            }
         }
     }
 

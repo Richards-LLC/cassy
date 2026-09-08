@@ -81,7 +81,7 @@ mcp__cas__memory action=remember title="..." content="..." tags="decision"
 
 ## Epic Planning Checklist
 
-- Every subtask has a `demo_statement` (if not, it may be a horizontal slice — restructure)
+- User-facing subtasks with labels in `qa.user_facing_labels` (defaults `ui,hub,cli-ux,commander,frontend`) require `demo_statement` shaped `As a <user>, I <do X> and see <Y>`; epics/internal tasks and deliberate `supervisor_override=true` exceptions are exempt, and briefs include it.
 - Investigation tasks use `task_type=spike` with question-based acceptance criteria
 - When multiple approaches exist, a spike with a fit check comparison in `design_notes` precedes implementation tasks
 

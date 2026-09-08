@@ -81,7 +81,7 @@ pub fn validate_delivery_mode(value: Option<&str>) -> Result<Option<DeliveryMode
     }
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TaskCreateRequest {
     /// Task title
     #[schemars(description = "Short descriptive title for the task")]

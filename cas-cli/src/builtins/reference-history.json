@@ -236,6 +236,30 @@
       "b74b96068a8e21c2f394b2d564842c79c669dfc339238529cc0c50d2710e70d8",
       "d9437509594c27626f8d71ef2c39c7391b1fdb2ec68ab2109fb5e17de23170dd"
     ],
+    "skills/cas-qa-craft/references/evidence-ledger.md": [
+      "49b39e853bf2d23f7b7c13cf97d53bb5496a1e753fe9b25b76be64204b6d8e82"
+    ],
+    "skills/cas-qa-craft/references/exemplar.md": [
+      "01e262c379080a2f4676064091cb3c8b34d278337eab8a17626053408e7d82be"
+    ],
+    "skills/cas-qa-craft/references/matrix-builder.md": [
+      "b259edd54251c807929e68f52685653346abff1fd440c3324b7b87869f56393e"
+    ],
+    "skills/cas-release-report/references/brief-template.md": [
+      "3ce3883daed131aea74844e3efd36f70896ea6fba904c2324487d4cce264c40d"
+    ],
+    "skills/cas-release-report/references/default-tokens.json": [
+      "fe03b39654b68a546efc20053a847b8d53485a82739ced6afe8f70a0b91eb88f"
+    ],
+    "skills/cas-release-report/references/exemplar.md": [
+      "37ed9be31413c4ef93ee723fac48a6aa77691a43bc147d2b79a227ba16a171c7"
+    ],
+    "skills/cas-release-report/references/pdf.md": [
+      "bfccc9a553e655913708972ce3ee623a79965a62ceedc300875150c83aefa8ce"
+    ],
+    "skills/cas-release-report/references/template.html": [
+      "380cd4ca42607f408e470eaa531128d38f41e9d2bc632593bd6ae3f7f6072e9b"
+    ],
     "skills/cas-supervisor/references/epic-driving.md": [
       "eb744fd4f41d6b08f84a3d3394f57a8d84cea9ef8aaf0bc9b8b290320bcb197b",
       "f46d8104c66be30f9e6bfdfb26d0c720944f0ec22db0aeb2d836146db3039214"
@@ -865,6 +889,7 @@
     ],
     "skills/release-notes/references/RUBRIC-template.md": [
       "1d114e9b6f61cefa40566ca0bdd20e6cde2c8c28c283c53ece11485231243e29",
+      "3b0e5e2281441c98b3583877cabc616ec7bfef43b31c9650733597cb5da1079e",
       "bdf3cb455513e2f61752b359bab4601bb5486bbf570db99e458e50cd3417714e",
       "e888b68caf0cca1b226e1945c25d0e15580ad34225b42b0b9edd6be23ad4aa63",
       "f5ffe63ae4240588eb3d3497e24e1dba1827e10603240cbbeca033c5dfaaf214",

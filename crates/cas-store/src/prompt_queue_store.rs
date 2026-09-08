@@ -881,11 +881,11 @@ impl std::fmt::Display for ObservationStatus {
 /// Which surfacing path wrote a `prompt_queue_recipient_seen` receipt
 /// (cas-7a01, GH #155).
 ///
-/// Both values are genuine surfacing receipts — the row's content was put in
-/// front of the recipient — but they are not the same evidence. `InboxPoll`
-/// requires the recipient to have decided to look; `HookSurfaced` means CAS
-/// injected the content into the recipient's turn at turn start, which is the
-/// only path that can rescue a message the recipient does not know exists.
+/// These sources are genuine surfacing receipts, but they are not the same
+/// evidence. `InboxPoll` requires the recipient to have decided to look;
+/// `HookSurfaced` means CAS injected the content into the recipient's turn at
+/// turn start; and `ObservedWake` means the daemon observed the recipient take
+/// the turn after an urgent wake or transcript-backed reaction.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SurfacingSource {
@@ -902,6 +902,11 @@ pub enum SurfacingSource {
     /// receipt and claim the row, while a stronger surfacing receipt stays
     /// terminal.
     TransportDelivered,
+    /// The daemon observed the recipient consume the delivered body, through
+    /// an urgent wake probe or a transcript-backed turn reaction. Unlike a
+    /// transport handoff, this is a strong claim and retires the row from the
+    /// unread view.
+    ObservedWake,
 }
 
 impl SurfacingSource {
@@ -910,6 +915,7 @@ impl SurfacingSource {
             Self::InboxPoll => "inbox_poll",
             Self::HookSurfaced => "hook_surfaced",
             Self::TransportDelivered => "transport_delivered",
+            Self::ObservedWake => "observed_wake",
         }
     }
 
@@ -918,6 +924,7 @@ impl SurfacingSource {
             "inbox_poll" => Some(Self::InboxPoll),
             "hook_surfaced" => Some(Self::HookSurfaced),
             "transport_delivered" => Some(Self::TransportDelivered),
+            "observed_wake" => Some(Self::ObservedWake),
             _ => None,
         }
     }

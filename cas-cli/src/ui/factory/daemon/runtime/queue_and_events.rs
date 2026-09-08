@@ -2277,17 +2277,47 @@ impl FactoryDaemon {
         prompt_id: i64,
         recipient: &str,
     ) {
-        if let Err(error) = queue.record_recipient_surfaced(
+        Self::record_surfacing_receipt(
+            queue,
             prompt_id,
             recipient,
             cas_store::SurfacingSource::TransportDelivered,
+        );
+    }
+
+    /// Record a strong receipt after the daemon observed the recipient take a
+    /// turn containing this row. Unlike the transport handoff receipt, this
+    /// must retire the row from the unread view (cas-1a54/cas-5255).
+    fn record_observed_wake_receipt(
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) {
+        Self::record_surfacing_receipt(
+            queue,
+            prompt_id,
+            recipient,
+            cas_store::SurfacingSource::ObservedWake,
+        );
+    }
+
+    fn record_surfacing_receipt(
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+        source: cas_store::SurfacingSource,
+    ) {
+        if let Err(error) = queue.record_recipient_surfaced(
+            prompt_id,
+            recipient,
+            source,
         ) {
             tracing::debug!(
                 target: "cas::coordination",
                 message_id = prompt_id,
                 %recipient,
                 %error,
-                "cas-b8ce: could not persist the transport surfacing receipt — \
+                "cas-b8ce: could not persist the surfacing receipt — \
                  the row may be re-served by the recipient's next inbox_poll"
             );
         }
@@ -2346,7 +2376,7 @@ impl FactoryDaemon {
     }
 
     /// cas-1a54: terminalize an urgent row whose wake the pane corroborated —
-    /// receipt first, then the transport stamp.
+    /// strong observed-wake receipt first, then the transport stamp.
     ///
     /// This is the whole pairing the `ConsumeRow` arm of
     /// [`Self::resolve_urgent_wake_probes`] performs, extracted so a test can
@@ -2365,7 +2395,7 @@ impl FactoryDaemon {
         row_id: i64,
         recipient: &str,
     ) -> anyhow::Result<()> {
-        Self::record_transport_receipt(queue, row_id, recipient);
+        Self::record_observed_wake_receipt(queue, row_id, recipient);
         queue.mark_transport_delivered(row_id)?;
         Ok(())
     }
@@ -4183,10 +4213,9 @@ impl FactoryDaemon {
                     // cas-b8ce (GH #176): this arm is Cassy's strongest evidence
                     // that a NON-Cassy transport surfaced the content — the
                     // harness took our inbox copy AND the pane then produced
-                    // output. Keep the transport receipt for status parity;
-                    // an explicit inbox poll or turn-start hook can still
-                    // replace it with a stronger surfacing claim.
-                    Self::record_transport_receipt(&*queue, queued.id, &queued.target);
+                    // output. Record the strong observed-wake receipt so the
+                    // consumed row does not reappear in inbox_poll.
+                    Self::record_observed_wake_receipt(&*queue, queued.id, &queued.target);
                     if let Err(error) = queue.mark_transport_delivered(queued.id) {
                         tracing::error!(
                             prompt_id = queued.id,

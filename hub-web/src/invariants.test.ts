@@ -885,9 +885,12 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
       "/v1/health", "/v1/machine", "/v1/sessions",
     ]);
-    const main = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const [main, connectionView] = await Promise.all([
+      readFile(new URL("main.ts", import.meta.url), "utf8"),
+      readFile(new URL("connection-state-view.ts", import.meta.url), "utf8"),
+    ]);
     expect(main).toContain('state.authFailure === "needs-pairing" ? "Machine needs pairing"');
-    expect(main).toContain('snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing"');
+    expect(connectionView).toContain('snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing"');
     supervisor.stop();
   });
 
@@ -914,7 +917,7 @@ describe("binding Cassy Commander browser invariants", () => {
   });
 
   it("degrades an unusable engine honestly instead of spinning at 0s", async () => {
-    const [connection, main, css] = await Promise.all(["connection.ts", "main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [connection, main, connectionView, css] = await Promise.all(["connection.ts", "main.ts", "connection-state-view.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     // The version floor that broke every attach on Chrome 113 is gone: the
     // combined signal is built through a helper with a fallback.
     expect(connection).toContain("signal: anySignal([this.eventAbort.signal, signal]),");
@@ -934,9 +937,9 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(css).toContain(".shell.with-browser-notice { height: calc(100dvh - var(--browser-notice-height)); }");
     // No spinner, no rising counter, and no "reconnecting" claim over a
     // failure that will never resolve.
-    expect(main).toContain('? "Connection failed — not retrying."');
+    expect(connectionView).toContain('? "Connection failed — not retrying."');
     expect(main).toContain("if (snapshot.fatal === true) return;");
-    expect(main).toMatch(/import \{ connectionTimeline,[\s\S]*for \(const entry of connectionTimeline\(snapshot\)\)/);
+    expect(connectionView).toMatch(/for \(const entry of connectionTimeline\(snapshot\)/);
     // One recurring failure is one attention entry, not one per retry.
     expect(main).toContain("const merge = mergeAttentionItem(attention, item);");
     expect(main).toContain("await attentionStore.put(merge.stored);");
@@ -1071,11 +1074,15 @@ describe("binding Cassy Commander browser invariants", () => {
   });
 
   it("turns connection failures into timed actions while retaining prior terminal frames", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const [source, connectionView] = await Promise.all([
+      readFile(new URL("main.ts", import.meta.url), "utf8"),
+      readFile(new URL("connection-state-view.ts", import.meta.url), "utf8"),
+    ]);
     const styles = await readFile(new URL("styles.css", import.meta.url), "utf8");
-    expect(source).toContain("const view = connectingView(snapshot, now)");
-    expect(source).toContain('retry.textContent = "Retry"');
-    expect(source).toContain('diagnose.textContent = "Diagnose"');
+    expect(source).toContain("renderConnectionSurfaceInto(placeholder, session, snapshot");
+    expect(connectionView).toContain("const view = connectingView(snapshot, now)");
+    expect(connectionView).toContain('addAction("Retry", actions.retry)');
+    expect(connectionView).toContain('addAction("Diagnose", actions.diagnose)');
     expect(source).toContain("openConnectionLog(machineId)");
     expect(source).toContain("const view = disconnectedView(snapshot, now)");
     expect(source).toContain("Connection interrupted — ${view.retryLabel} (attempt ${view.attempt})");

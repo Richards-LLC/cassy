@@ -66,6 +66,8 @@ pub enum EventType {
     WorkerGitCommit,
     /// Worker blocked waiting for verification
     WorkerVerificationBlocked,
+    /// Worker push was refused by the factory branch guard
+    WorkerPushBlocked,
 
     /// All subtasks of an epic are closed — epic ready to close
     EpicSubtasksComplete,
@@ -108,6 +110,7 @@ impl fmt::Display for EventType {
             EventType::WorkerFileEdited => write!(f, "worker_file_edited"),
             EventType::WorkerGitCommit => write!(f, "worker_git_commit"),
             EventType::WorkerVerificationBlocked => write!(f, "worker_verification_blocked"),
+            EventType::WorkerPushBlocked => write!(f, "worker_push_blocked"),
             EventType::EpicSubtasksComplete => write!(f, "epic_subtasks_complete"),
             EventType::VerificationStarted => write!(f, "verification_started"),
             EventType::VerificationAdded => write!(f, "verification_added"),
@@ -145,6 +148,7 @@ impl FromStr for EventType {
             "worker_file_edited" => Ok(EventType::WorkerFileEdited),
             "worker_git_commit" => Ok(EventType::WorkerGitCommit),
             "worker_verification_blocked" => Ok(EventType::WorkerVerificationBlocked),
+            "worker_push_blocked" => Ok(EventType::WorkerPushBlocked),
             "epic_subtasks_complete" => Ok(EventType::EpicSubtasksComplete),
             "verification_started" => Ok(EventType::VerificationStarted),
             "verification_added" => Ok(EventType::VerificationAdded),
@@ -280,6 +284,7 @@ impl Event {
             EventType::WorkerFileEdited => "✎",           // Pencil (edited)
             EventType::WorkerGitCommit => "⬆",            // Up arrow (commit)
             EventType::WorkerVerificationBlocked => "🔒", // Lock (blocked)
+            EventType::WorkerPushBlocked => "🚫",         // No entry (push blocked)
             EventType::EpicSubtasksComplete => "🎉",       // Party (all subtasks done)
             EventType::VerificationStarted => "🔍",       // Magnifying glass (verifying)
             EventType::VerificationAdded => "📋",         // Clipboard (result recorded)
@@ -344,6 +349,23 @@ mod tests {
             "test gap",
         );
         assert!(!event.icon().is_empty());
+    }
+
+    #[test]
+    fn test_worker_push_blocked_round_trips() {
+        let s = EventType::WorkerPushBlocked.to_string();
+        assert_eq!(s, "worker_push_blocked");
+        assert_eq!(s.parse::<EventType>().unwrap(), EventType::WorkerPushBlocked);
+        assert_eq!(
+            Event::new(
+                EventType::WorkerPushBlocked,
+                EventEntityType::Agent,
+                "worker",
+                "push blocked",
+            )
+            .icon(),
+            "🚫"
+        );
     }
 
     #[test]

@@ -1496,6 +1496,7 @@ impl EmbeddedDaemon {
                         "worker_file_edited" => CasEventType::WorkerFileEdited,
                         "worker_git_commit" => CasEventType::WorkerGitCommit,
                         "worker_verification_blocked" => CasEventType::WorkerVerificationBlocked,
+                        "worker_push_blocked" => CasEventType::WorkerPushBlocked,
                         "verification_started" => CasEventType::VerificationStarted,
                         "verification_added" => CasEventType::VerificationAdded,
                         "epic_subtasks_complete" => CasEventType::EpicSubtasksComplete,

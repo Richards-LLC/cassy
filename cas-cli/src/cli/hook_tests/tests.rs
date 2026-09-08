@@ -4,8 +4,31 @@ use crate::cli::hook::config_gen::{
 };
 use crate::cli::hook::configure_claude_hooks_with_home;
 use crate::config::HookConfig;
+use crate::store::{init_cas_dir, open_event_store};
 use tempfile::TempDir;
 use toml::map::Map;
+
+#[test]
+fn worker_push_rejection_is_visible_in_worker_activity_store() {
+    let project = TempDir::new().unwrap();
+    let cas_root = init_cas_dir(project.path()).unwrap();
+
+    record_worker_push_rejection(
+        &cas_root,
+        "silent-lynx-74",
+        "factory/silent-lynx-74",
+        "refs/heads/staging",
+    );
+
+    let events = open_event_store(&cas_root).unwrap().list_recent(10).unwrap();
+    let rejection = events
+        .iter()
+        .find(|event| event.event_type == cas_types::EventType::WorkerPushBlocked)
+        .expect("refused push must be recorded as worker activity");
+    assert_eq!(rejection.entity_id, "silent-lynx-74");
+    assert!(rejection.summary.contains("not your branch"));
+    assert!(rejection.summary.contains("refs/heads/staging"));
+}
 
 /// Create a TempDir that acts as an isolated $HOME with no global settings.
 /// Pass this to `configure_claude_hooks_with_home` / `global_has_cas_hooks_in`

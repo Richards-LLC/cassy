@@ -348,8 +348,8 @@ impl WorkerSpawnPrep {
                 let _ = git.init_submodules(&wt.worktree_path);
                 // Ensure gitignored config is available (may be missing from prior run)
                 crate::worktree::symlink_project_config(&wt.repo_root, &wt.worktree_path);
-                // (Re-)install the pre-commit guard on reuse — the hook may have been
-                // removed if the main repo was cloned fresh (cas-bea2 LAYER 2).
+                // (Re-)install the worker commit/push guards on reuse — hooks may have
+                // been removed if the main repo was cloned fresh (cas-bea2 LAYER 2).
                 if let Err(e) = crate::ui::factory::daemon::runtime::teams::TeamsManager::install_worker_pre_commit_hook(&wt.worktree_path) {
                     tracing::warn!("Failed to install worker pre-commit guard on reuse: {e}");
                 }
@@ -423,10 +423,10 @@ impl WorkerSpawnPrep {
             // Symlink .mcp.json and .claude/ so workers get MCP access
             crate::worktree::symlink_project_config(&wt.repo_root, &wt.worktree_path);
 
-            // Install pre-commit guard (cas-bea2 LAYER 2) — hard backstop that
-            // blocks commits on protected branches even via raw `git` invocations
-            // that bypass the PreToolUse hook. Non-fatal: LAYER 1 + LAYER 3 cover
-            // the model-visible and SessionStart paths.
+            // Install worker commit/push guards (cas-bea2/cas-07bb LAYER 2) —
+            // hard backstops that block protected commits and off-branch pushes
+            // even via raw `git` invocations that bypass the PreToolUse hook.
+            // Non-fatal: LAYER 1 + LAYER 3 cover model-visible and SessionStart paths.
             if let Err(e) = crate::ui::factory::daemon::runtime::teams::TeamsManager::install_worker_pre_commit_hook(&wt.worktree_path) {
                 tracing::warn!("Failed to install worker pre-commit guard: {e}");
             }

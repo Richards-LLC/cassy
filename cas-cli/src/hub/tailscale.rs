@@ -97,6 +97,40 @@ impl TailscaleServeManager {
         let before = self.serve_status()?;
         let handlers = handlers_on_port(&before, https_port);
         let created_by_cas = if handlers.is_empty() {
+            true
+        } else {
+            if handlers == vec![("/".to_owned(), local_target.clone())] {
+                false
+            } else if let Some(previous) = self.owned_receipt()? {
+                // A fresh hub gets a fresh ephemeral shim port. If the old
+                // process died before its cleanup ran, remove only the exact
+                // unchanged mapping described by Cassy's receipt before
+                // publishing the new shim. Any changed mapping remains owned
+                // by its operator and is never overwritten.
+                anyhow::ensure!(
+                    previous.https_port == https_port
+                        && handlers
+                            == vec![("/".to_owned(), previous.local_target.clone())],
+                    "tailscale Serve HTTPS port {https_port} is already owned by another mapping"
+                );
+                self.run(&[
+                    "serve".into(),
+                    format!("--https={https_port}"),
+                    "off".into(),
+                ])?;
+                anyhow::ensure!(
+                    handlers_on_port(&self.serve_status()?, https_port).is_empty(),
+                    "tailscale Serve did not remove the stale Cassy mapping"
+                );
+                remove_receipt_if_present(&self.state_dir.join(RECEIPT_FILE))?;
+                true
+            } else {
+                anyhow::bail!(
+                    "tailscale Serve HTTPS port {https_port} is already owned by another mapping"
+                )
+            }
+        };
+        if created_by_cas {
             self.run(&[
                 "serve".into(),
                 "--bg".into(),
@@ -104,14 +138,7 @@ impl TailscaleServeManager {
                 format!("--https={https_port}"),
                 local_target.clone(),
             ])?;
-            true
-        } else {
-            anyhow::ensure!(
-                handlers == vec![("/".to_owned(), local_target.clone())],
-                "tailscale Serve HTTPS port {https_port} is already owned by another mapping"
-            );
-            false
-        };
+        }
         let finish = || -> Result<TailscaleServeReceipt> {
             let after = self.serve_status()?;
             anyhow::ensure!(
@@ -227,6 +254,12 @@ impl TailscaleServeManager {
     /// Check whether the exact mapping recorded in an ownership receipt is gone.
     pub fn mapping_is_absent(&self, receipt: &TailscaleServeReceipt) -> Result<bool> {
         Ok(handlers_on_port(&self.serve_status()?, receipt.https_port).is_empty())
+    }
+
+    /// Read the handlers currently published on one HTTPS port without
+    /// changing the user's Tailscale configuration.
+    pub fn serve_handlers(&self, https_port: u16) -> Result<Vec<(String, String)>> {
+        Ok(handlers_on_port(&self.serve_status()?, https_port))
     }
 
     fn status(&self) -> Result<Value> {

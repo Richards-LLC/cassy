@@ -36,6 +36,11 @@ pub struct HubProcessRecord {
     pub tailscale_serve_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tailscale_cli: Option<String>,
+    /// The ephemeral loopback listener that Tailscale Serve proxies to.
+    /// Older records omit this field and are intentionally treated as unable
+    /// to prove that the current hub owns the Serve route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailscale_serve_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_warning: Option<String>,
 }

@@ -228,6 +228,7 @@ impl CheckGroup {
     fn for_name(name: &str) -> Self {
         match name.to_ascii_lowercase().as_str() {
             "host" | "user-level store" | "known repos" | "host proxy" | "hub service"
+            | "hub transport"
             | "registered project roots" | "host user skills" => Self::Host,
             "user skills" => Self::Config,
             "legacy search index"
@@ -527,6 +528,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         Check::new("user-level store", CheckStatus::Ok, format!("host root {}", root.display())),
         host_known_repos_check(),
         Check::new("hub service", CheckStatus::Ok, "inspect with `cas hub service status`"),
+        host_hub_transport_check(),
     ];
     #[cfg(feature = "mcp-proxy")]
     checks.push(host_proxy_check());
@@ -550,6 +552,30 @@ fn host_known_repos_check() -> Check {
         }
         Err(error) => Check::new("known repos", CheckStatus::Warning, format!("cannot inspect host registry: {error}")),
     }
+}
+
+fn host_hub_transport_check() -> Check {
+    let paths = match crate::hub::HubRuntimePaths::default_for_user() {
+        Ok(paths) => paths,
+        Err(error) => {
+            return Check::new(
+                "hub transport",
+                CheckStatus::Error,
+                format!("cannot locate hub runtime: {error}"),
+            );
+        }
+    };
+    let record = paths.read_process_record().ok();
+    let report = crate::cli::hub::hub_transport_report(&paths, record.as_ref());
+    Check::new(
+        "hub transport",
+        if report.is_failure() {
+            CheckStatus::Error
+        } else {
+            CheckStatus::Ok
+        },
+        report.message_with_remedy(),
+    )
 }
 
 #[cfg(feature = "mcp-proxy")]

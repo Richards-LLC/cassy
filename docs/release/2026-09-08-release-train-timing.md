@@ -3,7 +3,9 @@
 The largest proven costs are a cold publication audit, repeated full-suite
 execution, and supervisor hand-off time. The saved evidence does **not** support
 "every gate takes 25 minutes": the second full 3.18.1 gate took 319 seconds.
-A further 952 seconds elapsed before its pipeline was launched.
+A further 952 seconds elapsed before its pipeline was launched. The final
+3.19.0 gate took 317 seconds, followed by a 600-second hand-off. Its queue
+phase took 970 seconds and its local publisher phase took 1,161 seconds.
 
 ## Evidence and limits
 
@@ -65,7 +67,17 @@ verdict for the second attempt; wall/user/system seconds are unavailable for
 | 3.19.0 gate 1 | 17:34:34 | by 17:58 | ≤1,406 | Note bounds; original receipt overwritten |
 | 3.19.0 fix / hand-off before gate 2 | after gate 1 | about 18:15 | Unavailable | Includes reproduction, worker correction and merge; not a measured gate row |
 | 3.19.0 gate 2 | about 18:15 | 18:21:03 | about 363 | Launch minute from saved run files/task description; done mtime |
-| 3.19.0 pipeline / queue / publish | — | — | Not reached | Both initial full attempts failed; no publication receipt existed at collection |
+| 3.19.0 final gate | 19:51:36 | 19:56:53 | 317 | Final run.env and gate.green.epoch; intermediate failed attempts are not reconstructed |
+| 3.19.0 hand-off, green to pipeline | 19:56:53 | 20:06:53 | 600 | Epoch receipt and pipeline.log |
+| 3.19.0 pipeline launch to PR identified | 20:06:53 | 20:06:56 | 3 | PR #761 |
+| 3.19.0 PR identified to queue admitted | 20:06:56 | 20:07:46 | 50 | Includes required-check wait |
+| 3.19.0 queue admitted to merged detection | 20:07:46 | 20:23:56 | 970 | Queue run 34273007205 |
+| 3.19.0 hand-off, merged to publisher | 20:23:56 | 20:24:08 | 12 | Pipeline and publish logs |
+| 3.19.0 local publisher audit/tag launch | 20:24:08 | 20:43:29 | 1,161 | publish.log |
+| ↳ development preflight build | — | — | 53.11 | release.log Cargo summary |
+| ↳ release-profile build | — | — | 423 | release.log Cargo summary; remainder of publisher phase lacks substep timing |
+| 3.19.0 tag push to assets published | 20:43:31 | 20:46:23 | 172 | Verified latency receipt; workflow 34276474931 |
+| 3.19.0 green to published | 19:56:53 | 20:46:23 | 2970 | Final gate epoch to verified publication |
 
 The 3.18.1 root `gate.full.sha` names `3afcccce`; there is no diagnostics
 subdirectory or second per-attempt `gate.done` in the saved run directory.
@@ -85,7 +97,8 @@ not a regression in the prior close-target change (corrected epic note 18:34).
    pipeline terminal receipt. This removes reminder cadence without inferring
    permission to publish. It is a follow-up, not an authorization relaxation.
 2. **Move publication audit off the green-to-published critical path.**
-   The observed local audit costs 804s (674s release compilation). Start an
+   The observed local audits cost 804s in 3.18.1 (674s release compilation)
+   and 1,161s in 3.19.0 (423s release compilation). Start an
    audit before queue completion, then reuse only when source tree, toolchain,
    target flags, embedded revision and secret-dependent build inputs match the
    landed commit. `release.sh` currently runs `cargo clean --release --target`
@@ -153,7 +166,7 @@ archive paths retain cas-6df6's scrub of the five factory identity variables.
 The archive consumer keeps missing sccache, empty Cargo home, unset CAS_ROOT /
 COLUMNS and workspace remapping. Both suite execution paths now use CI's verified nonzero-test wrapper and
 `--no-fail-fast`; the archive consumer pins `INSTA_WORKSPACE_ROOT` to its remap.
-CI's three partitions remain a scheduling difference: running their complete
+The doctest row also uses CI's verified nonzero-test wrapper and scrubs all five factory identity variables. CI's three partitions remain a scheduling difference: running their complete
 union in one invocation preserves coverage while avoiding competing local
 resource demands.
 
@@ -188,8 +201,10 @@ under `~/.cas/artifacts/cas-d136/measurement/`. Both `validity.json` and
 `INVALID-DUE-TO-CONTENTION.md` mark the attempt `invalid-due-to-contention`.
 These values must not be used to estimate normal row costs or savings. Its
 row-cache directory is also part of the invalid trial and must not seed a new
-performance experiment. No restart is authorized until the supervisor explicitly
-confirms that 3.19.0 has landed.
+performance experiment. The supervisor authorized a fresh trial at 20:57Z after confirming publication.
+Each trial must find zero host cargo/rustc processes and load1 below four,
+waiting at most ten minutes in thirty-second intervals; otherwise it is
+recorded as skipped for contention.
 
 ### Remaining work and release follow-ups
 
@@ -220,3 +235,43 @@ publication audit reuse. The next changes should remain separately reviewable:
 The implementation checkpoint delivers duplicate-suite removal, conservative
 row reuse and durable measurements. It does not yet establish the requested
 end-to-end latency reduction or deliver those larger follow-up optimizations.
+
+### Follow-up implementation specifications
+
+The supervisor authorized the implemented pair and parity fixes first, with
+these larger changes delivered as specifications if context does not permit
+safe implementation in this task. Both specifications preserve publication as
+an explicitly requested action and must ship their own script self-tests.
+
+**Continuation:** add an explicit full-train mode to `release-train.sh` that
+accepts a prepared PR body and an explicit publication selection before launch.
+Its recorded process group owns gate → pipeline → optional publisher; `--stop`
+terminates all descendants. After gate success, call the existing pipeline
+boundary so exact SHA, clean tree and full receipt are checked again. Require
+`pipeline.done=MERGED`, the recorded landed SHA and matching origin/main before
+calling the existing publisher. Keep separate gate, pipeline and publisher
+terminal receipts, and distinguish tag completion from verified asset
+publication. Resume checks recorded state and live PIDs before retrying a
+phase; never infer success from a stale or partial file. Test dirty/stale SHA,
+`--only`, failed gate, dropped queue, failed publish, cancellation, duplicate
+launch and restart after each boundary. Update all three skill mirrors, add
+`--learn`, and regenerate the ledger last. Proven upper bounds on removable
+hand-offs: 1,129s in 3.18.1 and 612s in 3.19.0. Actual saving requires a fresh
+train measurement; polling and network calls remain.
+
+**Publisher artifact reuse:** first measure all substeps inside `release.sh`,
+because the 1,161s 3.19.0 publisher phase includes only 476.11s identified Cargo
+build time. Add an audit-only producer and a validated consumer receipt keyed
+by exact source SHA/tree, toolchain versions, target and ISA flags, Zig, build
+metadata (including embedded revision/date), build-script inputs and hashed
+secret-dependent environment. Include artifact digests, successful preflight
+and ISA audits; write the receipt atomically after completion. A missing,
+expired, modified or mismatched receipt reruns the current full audit, including
+Linux cleanup. No receipt authorizes tag push by itself. A pipeline-era build
+cannot be reused for a different landed revision just because Git trees match:
+embedded revision is observable. Establish the exact landed SHA before claiming
+reuse or explicitly design and test the metadata rebuild. Test every input
+mismatch, damaged/missing artifact, failed audit, concurrent producer and absence
+of remote mutation in producer mode. Potential overlap is bounded by 804s /
+1,161s of observed local publisher time; it is not a promised full saving, and
+the unchanged workflow still needs 174s / 172s to publish assets.

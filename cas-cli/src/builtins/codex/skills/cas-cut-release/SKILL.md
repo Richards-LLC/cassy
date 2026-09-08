@@ -181,3 +181,6 @@ from execution. A green receipt is not a publication receipt. Bare
 each invocation, so running it early alone does not make later publication a
 warm build. Any future automated continuation must be explicitly requested,
 PID-recorded, and must invoke the existing exact-SHA authorization checks.
+
+Require a nonzero-test receipt for doctests as CI does; the gate scrubs
+inherited factory identity before executing that row.

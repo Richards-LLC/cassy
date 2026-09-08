@@ -154,6 +154,9 @@ if [[ "$*" == 'nextest archive --workspace'* ]]; then
   [[ -n "$archive_file" ]] && printf archive >"$archive_file"
   exit 0
 fi
+if [[ "$*" == 'test -p cas --doc' && "${GATE_FIXTURE_EMPTY_SUITE:-}" != 1 ]]; then
+  printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n'
+fi
 if [[ "$*" == 'nextest run '* && "${GATE_FIXTURE_EMPTY_SUITE:-}" != 1 ]]; then
   printf 'Summary [0.001s] 1 test run: 1 passed, 0 skipped\n'
 fi
@@ -763,13 +766,18 @@ output="$(cd "$repo" && \
     GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
     CARGO="$repo/scripts/cargo-stub" \
     RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
-    "$repo/scripts/release-gate.sh" 9.99.7 --only nextest,archive-mode 2>&1 || true)"
+    "$repo/scripts/release-gate.sh" 9.99.7 --only nextest,doctests,archive-mode 2>&1 || true)"
 if grep -qF 'CAS_FACTORY_SESSION=unset CAS_AGENT_ROLE=unset CAS_AGENT_NAME=unset CAS_SUPERVISOR_NAME=unset CAS_AGENT_ID=unset :: nextest run --workspace' \
     "$factory_env_log" \
     && grep -qF 'CAS_FACTORY_SESSION=unset CAS_AGENT_ROLE=unset CAS_AGENT_NAME=unset CAS_SUPERVISOR_NAME=unset CAS_AGENT_ID=unset :: nextest archive --workspace' \
     "$factory_env_log" \
     && grep -qF 'CAS_FACTORY_SESSION=unset CAS_AGENT_ROLE=unset CAS_AGENT_NAME=unset CAS_SUPERVISOR_NAME=unset CAS_AGENT_ID=unset :: nextest run --archive-file' \
     "$factory_env_log"; then
+    if grep -qF 'CAS_FACTORY_SESSION=unset CAS_AGENT_ROLE=unset CAS_AGENT_NAME=unset CAS_SUPERVISOR_NAME=unset CAS_AGENT_ID=unset :: test -p cas --doc' "$factory_env_log"; then
+        ok 'doctests scrub inherited factory identity'
+    else
+        bad 'doctests leaked inherited factory identity'
+    fi
     ok 'nextest and archive-mode scrub inherited factory identity'
 else
     bad "nextest or archive-mode leaked factory identity: $(cat "$factory_env_log") (output: $output)"
@@ -869,9 +877,10 @@ else
     bad 'focused nextest diagnostic lost whole-workspace coverage'
 fi
 
-output="$(run_gate "$repo" GATE_FIXTURE_EMPTY_SUITE "$repo/scripts/release-gate.sh" 9.99.7 --only nextest,archive-mode 2>&1 || true)"
+output="$(run_gate "$repo" GATE_FIXTURE_EMPTY_SUITE "$repo/scripts/release-gate.sh" 9.99.7 --only nextest,doctests,archive-mode 2>&1 || true)"
 assert_named_failure nextest "$output"
 assert_named_failure archive-mode "$output"
+assert_named_failure doctests "$output"
 if grep -qE '^INSTA_WORKSPACE_ROOT=.*/workspace-remap :: nextest run --archive-file .*--no-fail-fast' "$archive_env_log"; then
     ok 'archive consumer pins snapshot workspace and completes all binaries like CI'
 else

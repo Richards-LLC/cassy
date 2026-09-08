@@ -607,7 +607,9 @@ check_nextest() {
 }
 
 check_doctests() {
-    "$cargo_bin" test -p cas --doc
+    env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
+        -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+        CARGO="$cargo_bin" "$repo_root/scripts/run-verified-tests.sh" test -p cas --doc
 }
 
 # A populated proxy.toml in an ancestor .cas is visible to any test that

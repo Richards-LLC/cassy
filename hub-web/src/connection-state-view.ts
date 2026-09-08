@@ -31,6 +31,12 @@ export interface ConnectionTimelineEntry {
   readonly tone: "current" | "retry" | "failed" | "evidence";
 }
 
+export interface ConnectionSurfaceActions {
+  readonly retry?: () => void;
+  readonly diagnose?: () => void;
+  readonly repair?: () => void;
+}
+
 const STAGE_COPY: Record<ConnectionSnapshot["stage"], string> = {
   idle: "waiting to start the connection",
   resolving: "resolving the target node",
@@ -119,6 +125,78 @@ export function disconnectedView(snapshot: ConnectionSnapshotView, now = Date.no
       ? "not retrying"
       : retrySeconds === undefined ? "reconnecting" : `reconnecting in ${retrySeconds}s`,
   };
+}
+
+/**
+ * Render the connection verdict and attempt timeline shared by the live app
+ * and the visual-QA fixture. Lifecycle retention and selection stay in the
+ * caller; this seam owns only the presentation of a not-yet-live snapshot.
+ */
+export function renderConnectionSurfaceInto(
+  target: HTMLElement,
+  session: string,
+  snapshot: ConnectionSnapshotView,
+  actions: ConnectionSurfaceActions = {},
+  now = Date.now(),
+): void {
+  const document = target.ownerDocument;
+  const view = connectingView(snapshot, now);
+  const fatal = snapshot.fatal === true;
+  target.className = `empty terminal-state terminal-connecting${fatal ? " terminal-connect-failed" : ""}`;
+
+  const title = document.createElement("p");
+  title.className = "terminal-connecting-title";
+  // A spinner and a rising counter over a failure that will never resolve is
+  // the D3 overlay: it reads as progress. State the outcome instead.
+  title.textContent = fatal
+    ? "Connection failed — not retrying."
+    : snapshot.phase === "failed"
+      ? snapshot.authFailure ? "Connection failed — re-pair required." : "Connection failed — retry available."
+    : snapshot.phase === "backoff"
+      ? "Connection interrupted — retrying."
+      : `Connecting to ${session}…`;
+  target.replaceChildren(title);
+
+  const timeline = document.createElement("ol");
+  timeline.className = "connection-timeline";
+  timeline.setAttribute("aria-label", "Connection attempts");
+  for (const entry of connectionTimeline(snapshot)) {
+    const item = document.createElement("li");
+    item.className = `connection-timeline-item ${entry.tone}`;
+    const marker = document.createElement("span");
+    marker.className = "connection-timeline-marker";
+    marker.setAttribute("aria-hidden", "true");
+    const content = document.createElement("div");
+    const label = document.createElement("span");
+    label.className = "connection-timeline-label";
+    label.textContent = entry.label;
+    const detail = document.createElement("span");
+    detail.className = "connection-timeline-detail";
+    detail.textContent = entry.detail;
+    content.append(label, detail);
+    item.append(marker, content);
+    timeline.append(item);
+  }
+  target.append(timeline);
+
+  if (view.actionsAvailable) {
+    const actionRow = document.createElement("div");
+    actionRow.className = "terminal-connecting-actions";
+    const addAction = (label: string, action: (() => void) | undefined): void => {
+      if (!action) return;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.onclick = action;
+      actionRow.append(button);
+    };
+    addAction("Retry", actions.retry);
+    addAction("Diagnose", actions.diagnose);
+    if (snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing") {
+      addAction("Re-pair", actions.repair);
+    }
+    if (actionRow.childElementCount > 0) target.append(actionRow);
+  }
 }
 
 export function shouldRetainDisconnectedFrame(snapshot: ConnectionSnapshotView): boolean {

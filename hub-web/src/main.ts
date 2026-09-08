@@ -4,7 +4,7 @@ import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionU
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
-import { connectionTimeline, connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
+import { disconnectedView, renderConnectionSurfaceInto, shouldRetainDisconnectedFrame } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -990,64 +990,11 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   if (snapshot.phase === "live") return;
   const placeholder = grid.querySelector<HTMLElement>(".empty");
   if (!placeholder) return;
-  const view = connectingView(snapshot, now);
-  const fatal = snapshot.fatal === true;
-  placeholder.className = `empty terminal-state terminal-connecting${fatal ? " terminal-connect-failed" : ""}`;
-  const title = document.createElement("p");
-  title.className = "terminal-connecting-title";
-  // A spinner and a rising counter over a failure that will never resolve is
-  // the D3 overlay: it reads as progress. State the outcome instead.
-  title.textContent = fatal
-    ? "Connection failed — not retrying."
-    : snapshot.phase === "failed"
-      ? snapshot.authFailure ? "Connection failed — re-pair required." : "Connection failed — retry available."
-    : snapshot.phase === "backoff"
-      ? "Connection interrupted — retrying."
-      : `Connecting to ${session}…`;
-  placeholder.replaceChildren(title);
-
-  const timeline = document.createElement("ol");
-  timeline.className = "connection-timeline";
-  timeline.setAttribute("aria-label", "Connection attempts");
-  for (const entry of connectionTimeline(snapshot)) {
-    const item = document.createElement("li");
-    item.className = `connection-timeline-item ${entry.tone}`;
-    const marker = document.createElement("span");
-    marker.className = "connection-timeline-marker";
-    marker.setAttribute("aria-hidden", "true");
-    const content = document.createElement("div");
-    const label = document.createElement("span");
-    label.className = "connection-timeline-label";
-    label.textContent = entry.label;
-    const detail = document.createElement("span");
-    detail.className = "connection-timeline-detail";
-    detail.textContent = entry.detail;
-    content.append(label, detail);
-    item.append(marker, content);
-    timeline.append(item);
-  }
-  placeholder.append(timeline);
-  if (view.actionsAvailable) {
-    const actions = document.createElement("div");
-    actions.className = "terminal-connecting-actions";
-    const retry = document.createElement("button");
-    retry.type = "button";
-    retry.textContent = "Retry";
-    retry.onclick = () => { void connections.get(machineId)?.attach(session); };
-    const diagnose = document.createElement("button");
-    diagnose.type = "button";
-    diagnose.textContent = "Diagnose";
-    diagnose.onclick = () => openConnectionLog(machineId);
-    actions.append(retry, diagnose);
-    if (snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing") {
-      const repair = document.createElement("button");
-      repair.type = "button";
-      repair.textContent = "Re-pair";
-      repair.onclick = () => openRepairDialog(machineId);
-      actions.append(repair);
-    }
-    placeholder.append(actions);
-  }
+  renderConnectionSurfaceInto(placeholder, session, snapshot, {
+    retry: () => { void connections.get(machineId)?.attach(session); },
+    diagnose: () => openConnectionLog(machineId),
+    repair: () => openRepairDialog(machineId),
+  }, now);
 }
 
 function syncConnectionViewTicker(): void {

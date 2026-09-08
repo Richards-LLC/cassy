@@ -1,7 +1,7 @@
 import "../src/styles.css";
 import { attentionCounts, createAttentionItem } from "../src/attention";
 import { renderAttentionPanel } from "../src/attention-view";
-import { connectingView, disconnectedView } from "../src/connection-state-view";
+import { renderConnectionSurfaceInto } from "../src/connection-state-view";
 import { DeferredRenderScheduler } from "../src/deferred-render";
 import { renderFleetBoardInto, type FleetBoardModel } from "../src/fleet-board";
 import { pairingDialogCancellationActive } from "../src/pairing-dialog";
@@ -246,16 +246,9 @@ function renderTranscript(): HTMLElement {
 
 function renderConnection(): HTMLElement {
   const grid = element("section", "pane-grid");
-  const snapshot = { phase: "failed" as const, stage: "dialing" as const, since: Date.now() - 12_000, attempt: 3, reason: "The machine did not answer its hub address.", retryInMs: 8_000, missedHeartbeats: 0, degraded: false };
-  const view = disconnectedView(snapshot, Date.now());
-  const connecting = connectingView(snapshot, Date.now());
-  const card = element("div", "terminal-state");
-  card.append(element("p", "empty-title", "Could not connect to bright-otter"));
-  card.append(element("p", "terminal-connecting-step", snapshot.reason));
-  card.append(element("p", "terminal-connecting-step", `Attempt ${view.attempt} · ${connecting.elapsedLabel} elapsed · ${view.retryLabel}`));
-  const actions = element("div", "terminal-connecting-actions");
-  actions.append(button("Try again", "primary retry-terminal"), button("Connection log"));
-  card.append(actions);
+  const snapshot = { phase: "failed" as const, stage: "dialing" as const, since: Date.now() - 16_000, attempt: 3, reason: "The machine did not answer its hub address.", retryInMs: 8_000, missedHeartbeats: 0, degraded: false };
+  const card = element("div", "empty empty-pane-slot");
+  renderConnectionSurfaceInto(card, "bright-otter", snapshot, { retry: () => {}, diagnose: () => {} });
   grid.append(card);
   return grid;
 }
@@ -263,7 +256,6 @@ function renderConnection(): HTMLElement {
 function renderPairing(cleanup: boolean): HTMLDialogElement {
   const dialog = document.createElement("dialog");
   dialog.id = "pair-dialog";
-  dialog.open = true;
   const flow = element("section", `pair-flow${cleanup ? " pair-cleanup" : ""}`);
   if (cleanup) {
     const copy = cleanupStepCopy({ cause: "failure", storeOpen: true, rollbackPending: true });
@@ -276,7 +268,7 @@ function renderPairing(cleanup: boolean): HTMLDialogElement {
     flow.append(actions);
   } else {
     flow.append(element("h2", undefined, "Pair a machine"), element("p", undefined, "Create a one-time pairing code and approve it on the machine you want to monitor."));
-    const code = element("code", "pair-code", "CAS-7Q4M-2P9K");
+    const code = element("code", "pair-code", "K7MW-4H2Q");
     flow.append(code);
     const details = element("dl", "pair-details");
     const capability = element("div");
@@ -300,6 +292,13 @@ function renderPairing(cleanup: boolean): HTMLDialogElement {
   dialog.dataset.failureCopy = failure.message;
   dialog.append(flow);
   return dialog;
+}
+
+function appendOpenPairingDialog(cleanup: boolean): void {
+  const dialog = renderPairing(cleanup);
+  app.append(dialog);
+  dialog.showModal();
+  if (!dialog.open) throw new Error("Pairing fixture dialog did not open");
 }
 
 function renderShell(): void {
@@ -376,8 +375,8 @@ function renderShell(): void {
   if (fixtureName === "attention-0" || fixtureName === "attention-12") shell.append(renderContext(fixtureName === "attention-12" ? 12 : 0));
   app.replaceChildren(shell);
   renderRestingToast();
-  if (fixtureName === "pairing-step-1") app.append(renderPairing(false));
-  if (fixtureName === "pairing-cleanup") app.append(renderPairing(true));
+  if (fixtureName === "pairing-step-1") appendOpenPairingDialog(false);
+  if (fixtureName === "pairing-cleanup") appendOpenPairingDialog(true);
   if (fixtureName === "fleet-populated" && new URLSearchParams(window.location.search).has("broken")) {
     const style = document.createElement("style");
     style.textContent = ".fixture-broken-contrast { color: var(--bg-panel); background: var(--bg-panel); }";

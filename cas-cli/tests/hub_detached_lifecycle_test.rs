@@ -109,6 +109,7 @@ fn write_stale_record(home: &Path, cgroup: PathBuf) {
             public_url: None,
             tailscale_serve_port: None,
             tailscale_cli: None,
+            tailscale_serve_target: None,
             transport_warning: None,
         })
         .expect("write stale hub record");

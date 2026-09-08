@@ -7,6 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.18.1] - 2026-09-08
+
+### Added
+- `cas doctor --host` now includes a `hub transport` row so the health report
+  shows whether the hub's public route is available and points to the live hub.
+- Commander connection and pairing fixtures now use the same connection
+  surfaces as the product, keeping their failure and recovery states honest.
+
+### Changed
+- `cas hub status` now exits non-zero when the CAS-created Tailscale Serve
+  route no longer targets the live hub shim.
+- CAS-created Tailscale Serve routes now remain part of the hub's durable
+  lifecycle across relaunches.
+
+### Fixed
+- Pairing diagnostics now distinguish an HTTP 502 route with a missing hub
+  backend and explain how to restore the route or use a reachable hub URL.
+
 ## [3.18.0] - 2026-09-07
 
 ### Added

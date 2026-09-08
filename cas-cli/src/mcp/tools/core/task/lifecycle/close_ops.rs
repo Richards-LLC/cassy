@@ -64,6 +64,7 @@ pub(crate) fn required_verification_type(task_type: TaskType) -> VerificationTyp
     } else {
         VerificationType::Task
     }
+
 }
 
 fn delivery_audit_text_is_portable(value: &str) -> bool {
@@ -2589,7 +2590,35 @@ impl CasCore {
         // AwaitingMerge or InProgress.
         if let Ok(agent_id) = self.get_agent_id() {
             if let Ok(agent_store) = self.open_agent_store() {
-                if let Ok(agent) = agent_store.get(&agent_id) {
+                if let Ok(mut agent) = agent_store.get(&agent_id) {
+                    // cas-1145: a halt bound to a task id that was never
+                    // created must not strand a healthy worker at close. Keep
+                    // the metadata update durable before using the cleared
+                    // view for this gate; update failure remains fail-closed.
+                    let mut cleared_metadata = agent.metadata.clone();
+                    match super::stale_close_guard::clear_missing_task_halt(
+                        &mut cleared_metadata,
+                        task_store.as_ref(),
+                    ) {
+                        Ok(true) => {
+                            let previous_metadata = agent.metadata.clone();
+                            agent.metadata = cleared_metadata;
+                            if let Err(error) = agent_store.update(&agent) {
+                                agent.metadata = previous_metadata;
+                                tracing::warn!(
+                                    agent_id = %agent_id,
+                                    error = %error,
+                                    "cas-1145: failed to persist phantom urgent-halt cleanup; keeping halt"
+                                );
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            agent_id = %agent_id,
+                            error = %error,
+                            "cas-1145: could not verify urgent-halt task; keeping halt"
+                        ),
+                    }
                     let halt_exempt = super::stale_close_guard::halt_exempt_for_owned_task(
                         task.status,
                         task.assignee.as_deref(),

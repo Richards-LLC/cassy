@@ -11,7 +11,9 @@ use cas_store::KnownRepoStore;
 use clap::Subcommand;
 use std::path::PathBuf;
 
-use crate::store::known_repos::{ensure_host_schema, open_host_known_repo_store};
+use crate::store::known_repos::{
+    KnownRepoState, classify_known_repo, ensure_host_schema, open_host_known_repo_store,
+};
 use crate::worktree::discovery::{list_tracked_repos, seed};
 
 #[derive(Subcommand, Clone, Debug)]
@@ -216,34 +218,52 @@ fn execute_prune_missing(dry_run: bool) -> Result<()> {
             report.removed
         );
     }
+    if report.no_store > 0 {
+        println!(
+            "Retained {} registered root(s) without a Cassy store.",
+            report.no_store
+        );
+        println!("  Remedy: run `cas init` there or `cas known-repos forget <path>`.");
+    }
     Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PruneMissingReport {
     pub(crate) missing: usize,
+    pub(crate) no_store: usize,
     pub(crate) removed: usize,
 }
 
 pub(crate) fn prune_missing(dry_run: bool) -> Result<PruneMissingReport> {
     let store = open_host_known_repo_store()?;
-    let missing = store
+    let classified = store
         .list()?
         .into_iter()
-        .filter(|repo| !repo.path.exists())
+        .map(|repo| (repo.clone(), classify_known_repo(&repo.path)))
         .collect::<Vec<_>>();
+    let missing = classified
+        .iter()
+        .filter(|(_, state)| matches!(state, KnownRepoState::MissingRoot))
+        .map(|(repo, _)| repo)
+        .collect::<Vec<_>>();
+    let no_store = classified
+        .iter()
+        .filter(|(_, state)| matches!(state, KnownRepoState::MissingStore))
+        .count();
     let mut removed = 0;
     if !dry_run {
         for repo in &missing {
             // Recheck immediately before the registry-only delete so a path
             // restored during the scan is retained.
-            if !repo.path.exists() {
+            if matches!(classify_known_repo(&repo.path), KnownRepoState::MissingRoot) {
                 removed += store.forget(&repo.path)?;
             }
         }
     }
     Ok(PruneMissingReport {
         missing: missing.len(),
+        no_store,
         removed,
     })
 }
@@ -333,6 +353,7 @@ mod tests {
                 prune_missing(true).unwrap(),
                 PruneMissingReport {
                     missing: 1,
+                    no_store: 1,
                     removed: 0,
                 }
             );
@@ -342,12 +363,34 @@ mod tests {
                 prune_missing(false).unwrap(),
                 PruneMissingReport {
                     missing: 1,
+                    no_store: 1,
                     removed: 1,
                 }
             );
             let rows = store.list().unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].path, existing.canonicalize().unwrap());
+        });
+    }
+
+    #[test]
+    fn prune_missing_distinguishes_a_live_root_without_a_cas_store() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let without_store = home.join("registered-without-cas");
+            std::fs::create_dir_all(&without_store).unwrap();
+            let store = open_host_known_repo_store().unwrap();
+            store.upsert(&without_store).unwrap();
+
+            assert_eq!(
+                prune_missing(true).unwrap(),
+                PruneMissingReport {
+                    missing: 0,
+                    no_store: 1,
+                    removed: 0,
+                }
+            );
+            assert_eq!(store.count().unwrap(), 1);
         });
     }
 
@@ -431,6 +474,7 @@ mod tests {
                 prune_missing(false).unwrap(),
                 PruneMissingReport {
                     missing: 1,
+                    no_store: 0,
                     removed: 1,
                 }
             );

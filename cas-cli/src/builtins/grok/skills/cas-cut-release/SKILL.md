@@ -132,7 +132,14 @@ name the blocking step in the operator timeline, and require its receipt.
    `release-latency-receipt.sh "$TAG"` output as `release-latency.receipt` in
    the run directory. Only the published receipt's matching tag, SHA, actual
    `PUBLISHED_AT`, and both required asset digests authorize `--status` to name
-   green-to-published latency. Use
+   green-to-published latency.
+13. Run `cas-release-report` after publication and before Slack: produce the
+   Markdown, concept brief, standalone HTML, verified PDF and QA receipt under
+   `docs/release-reports/`. Require continuous A4/Letter pagination and source
+   fidelity. Commit the report and PDF with their sources; link both in the
+   announcement draft and carry them into the next prep commit. Keep the
+   published tag unchanged.
+14. Use
    MechaCassy's default `cas-internal` channel, retain `C0B44GUKDK2` only for
    verification, and save four Slack POSTED entries with timestamps and
    permalinks. If the live proxy lacks registration, use the configured direct

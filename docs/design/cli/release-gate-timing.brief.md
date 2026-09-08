@@ -16,7 +16,7 @@ legacy log output, outside this additive change's rendering scope.
 
 `terminal-qa: PASS release-gate-timing · 11 runs · 0 fail · 0 warn · 17 allowed`
 
-Receipt: `/home/pippenz/.cas/artifacts/cas-d136/terminal-qa/report.json`.
+Receipt: `/home/pippenz/.cas/artifacts/cas-d136/resume/terminal-qa/report.json`.
 The five allowlist rules cover unchanged command descriptions, absolute paths,
 and the legacy em-dash separator. No new timing line requires an exception.
 
@@ -28,4 +28,5 @@ and the legacy em-dash separator. No new timing line requires an exception.
 | Theme safety | 5 | Added lines are ASCII and contain no colour codes. |
 | Machine contract | 5 | Stable TSV carries status and original source SHA separately. |
 
-Scored by bright-raven-48 on 2026-09-08; all dimensions meet the floor.
+Scored by bright-raven-48; rechecked by witty-wolf-66 on 2026-09-08 with the same
+11-run PASS receipt and unchanged 17 legacy exceptions. All dimensions meet the floor.

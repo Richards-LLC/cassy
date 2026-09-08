@@ -846,9 +846,7 @@ fn cas_root_for_session(session: &SessionInfo) -> Result<std::path::PathBuf> {
 fn session_agent_name_set(session: &SessionInfo) -> std::collections::HashSet<String> {
     let mut allowed = std::collections::HashSet::new();
     allowed.insert(session.metadata.supervisor.name.clone());
-    for worker in &session.metadata.workers {
-        allowed.insert(worker.name.clone());
-    }
+    allowed.extend(session.worker_names());
     allowed
 }
 
@@ -1033,6 +1031,66 @@ struct QueuedPromptJson {
     source: String,
     target: String,
     created_at_rfc3339: String,
+}
+
+#[cfg(test)]
+mod session_filter_tests {
+    use super::*;
+    use crate::store::{AgentStore, SqliteAgentStore, init_cas_dir};
+    use crate::ui::factory::{SessionInfo, create_metadata};
+    use cas_types::{AgentRole, AgentType, EventEntityType, EventType};
+
+    #[test]
+    fn factory_query_filters_include_live_registry_workers_missing_from_metadata() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = init_cas_dir(project.path()).unwrap();
+        env.set("CAS_ROOT", &cas_root);
+
+        let session_name = "factory-query-registry-filter";
+        let worker_name = "live-registry-worker";
+        let session = SessionInfo {
+            name: session_name.to_string(),
+            metadata: create_metadata(
+                session_name,
+                std::process::id(),
+                "supervisor-agent",
+                &[],
+                None,
+                Some(project.path().to_str().unwrap()),
+                None,
+            ),
+            is_running: true,
+            socket_exists: false,
+        };
+
+        let agents = SqliteAgentStore::open(&cas_root).unwrap();
+        agents.init().unwrap();
+        let mut worker =
+            cas_types::Agent::new("registry-worker-id".to_string(), worker_name.to_string());
+        worker.agent_type = AgentType::Worker;
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some(session_name.to_string());
+        agents.register(&worker).unwrap();
+
+        let allowed_names = session_agent_name_set(&session);
+        assert!(
+            allowed_names.contains(worker_name),
+            "query session filter must include the live registry worker"
+        );
+
+        let mut events = vec![
+            Event::new(
+                EventType::WorkerFileEdited,
+                EventEntityType::Agent,
+                "registry-worker-id",
+                "worker edited a file",
+            )
+            .with_session(worker_name),
+        ];
+        filter_events_for_session_agents(&mut events, &allowed_names);
+        assert_eq!(events.len(), 1, "worker activity must remain visible");
+    }
 }
 
 #[cfg(test)]

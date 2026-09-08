@@ -123,6 +123,12 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issues: Option<IssuesConfig>,
 
+    /// `[history]` — GitHub repository for the code-history document index.
+    /// When unset, history uses the checkout's GitHub `origin`; this setting
+    /// must not be confused with `[issues] repo`, which is bug intake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<HistoryConfig>,
+
     /// `[memory]` — opt-in auto-extraction via the `session-learn` skill
     /// (cas-39f5, EPIC cas-ebea). Defaults to `None` (i.e. the auto-trigger
     /// from the `Stop` hook is disabled); set `session_learn_auto = true`
@@ -195,6 +201,7 @@ impl Config {
         merge_option!(llm);
         merge_option!(integrations);
         merge_option!(issues);
+        merge_option!(history);
         merge_option!(memory);
         merge_option!(hub);
         merge_option!(project);

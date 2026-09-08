@@ -650,19 +650,14 @@ fn requested_sources(args: &DocsArgs) -> (bool, bool) {
 fn execute_docs(args: &DocsArgs, cas_root: &Path) -> anyhow::Result<()> {
     let repo_root = history::repo_root_for(cas_root)?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
-    let repo = config
-        .issues
-        .as_ref()
-        .and_then(|i| i.repo.as_deref())
-        .map(str::trim)
-        .filter(|r| !r.is_empty());
+    let repo = history::resolve_github_repo(&config, &repo_root);
 
     let (want_github, want_changelog) = requested_sources(args);
     let started = std::time::Instant::now();
     let outcome = history::run_docs_pass(
         cas_root,
         &repo_root,
-        repo,
+        repo.as_deref(),
         args.force,
         want_github,
         want_changelog,

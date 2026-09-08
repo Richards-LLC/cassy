@@ -915,7 +915,7 @@ impl EmbeddedDaemon {
                 // Ungated like the git arm above, but on a fifteen-minute
                 // interval rather than five: this half is bounded by a third
                 // party's rate limits and by how fast humans write issues, not
-                // by local work (spec §8). Absent `gh`, an unset `issues.repo`
+                // by local work (spec §8). Absent `gh`, an unset history source
                 // or a missing CHANGELOG are declared boundaries recorded on
                 // the ledger rows — they must never surface as a daemon error,
                 // or every repository without GitHub configured would report a
@@ -1096,7 +1096,7 @@ impl EmbeddedDaemon {
     /// Run one GitHub + CHANGELOG doc indexing pass (EPIC cas-6212 / cas-9a38).
     ///
     /// Returns `Ok` for every *declared boundary* — no git repo, no `gh`, no
-    /// `issues.repo`, no CHANGELOG — because those are states of the world, not
+    /// `history.github_repo` or GitHub origin, no CHANGELOG — because those are states of the world, not
     /// daemon failures, and each has already been recorded on its own
     /// `history_index_state` row where `cas history status` will report it
     /// (spec §10.2). Only a local store failure reaches the caller.
@@ -1107,13 +1107,8 @@ impl EmbeddedDaemon {
             let Ok(repo_root) = crate::history::repo_root_for(&cas_root) else {
                 return None;
             };
-            let repo = crate::config::Config::load(&cas_root)
-                .unwrap_or_default()
-                .issues
-                .as_ref()
-                .and_then(|i| i.repo.clone())
-                .map(|r| r.trim().to_string())
-                .filter(|r| !r.is_empty());
+            let config = crate::config::Config::load(&cas_root).unwrap_or_default();
+            let repo = crate::history::resolve_github_repo(&config, &repo_root);
             Some(crate::history::run_docs_pass(
                 &cas_root,
                 &repo_root,

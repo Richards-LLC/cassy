@@ -34,7 +34,7 @@ confirmation). Human findings are never changed automatically.
 | malformed `.cas/config.toml` | project | consent-fix | `cas doctor --fix --yes`; preserves `config.toml.corrupt-*` | config repair tests |
 | missing `CHANGELOG.md` | project | info | no action; the repository has no changelog | history-index tests |
 | GitHub history authentication | external | human | `gh auth login` | history-index tests |
-| unconfigured history repository | project | human | `cas config set issues.repo <owner/repo>` | history-index tests |
+| unconfigured history repository | project | human | `cas config set history.github_repo <owner/repo>` or configure a GitHub origin | history-index tests |
 | unregistered cloud project (`project_not_found`) | cloud | human | `cas cloud sync` | cloud registration tests |
 
 Project runs report host findings once as `host: N findings — see `cas

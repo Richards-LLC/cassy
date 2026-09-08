@@ -4001,9 +4001,12 @@ fn is_missing_changelog_error(source: &str, error: &str) -> bool {
 fn format_history_source_error(source: &str, error: &str) -> String {
     if source.eq_ignore_ascii_case("github") {
         let lower = error.to_ascii_lowercase();
-        if lower.contains("issues.repo") || lower.contains("repo is not configured") {
+        if lower.contains("issues.repo")
+            || lower.contains("history.github_repo")
+            || lower.contains("repo is not configured")
+        {
             return format!(
-                "github: {}. Run `cas config set issues.repo <owner/repo>`",
+                "github: {}. Run `cas config set history.github_repo <owner/repo>` (or configure a GitHub origin)",
                 truncate(error, 100)
             );
         }
@@ -7738,6 +7741,16 @@ mod tests {
             check.message
         );
         assert!(check.message.contains("changelog"), "{}", check.message);
+    }
+
+    #[test]
+    fn history_repo_configuration_error_names_history_key_not_issue_intake() {
+        let rendered = format_history_source_error(
+            "github",
+            "history.github_repo is not configured; set it with `cas config set history.github_repo owner/name`",
+        );
+        assert!(rendered.contains("history.github_repo"), "{rendered}");
+        assert!(!rendered.contains("cas config set issues.repo"), "{rendered}");
     }
 
     /// An unreadable health signal reads as health. This arm is why the check

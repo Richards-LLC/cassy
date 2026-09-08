@@ -9,7 +9,7 @@ pub(super) fn register_issues(registry: &mut ConfigRegistry) {
         key: "issues.repo",
         section: "issues",
         name: "Issue Intake Repository",
-        description: "GitHub repository in owner/repo form for Cassy-system bug reports. This is project-local and intentionally has no inferred default: a downstream project's origin may not be the Cassy upstream.",
+        description: "GitHub repository in owner/repo form for Cassy-system bug reports. This is project-local and intentionally has no inferred default: a downstream project's origin may not be the Cassy upstream. Code-history indexing uses history.github_repo instead.",
         value_type: ConfigType::String,
         default: "",
         constraint: Constraint::None,

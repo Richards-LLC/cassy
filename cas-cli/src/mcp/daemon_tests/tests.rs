@@ -5,7 +5,7 @@ use tempfile::TempDir;
 use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
 use crate::store::SqliteStore;
 use crate::store::init_cas_dir;
-use cas_types::{Agent, AgentRole, Session};
+use cas_types::{Agent, AgentRole, Session, Task};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -124,6 +124,110 @@ fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
         .filter(|agent| agent.name == "strong-bear-44")
         .count();
     assert_eq!(same_worker_rows, 1, "worker identity must remain singular");
+}
+
+/// GH #742: clear_context advances the transcript session before the old
+/// SessionEnd hook arrives. The old hook must preserve the worker row and its
+/// lease, and the following Claude/Codex registration must bind back to that
+/// row even when no name hint is available.
+#[test]
+fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
+    for worker_cli in ["claude", "codex"] {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_SESSION", Some("factory-context-reset")),
+            ("CAS_FACTORY_WORKER_CLI", Some(worker_cli)),
+        ]);
+        let temp = TempDir::new().expect("temp project");
+        let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
+        let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
+        let task_store = crate::store::open_task_store(&cas_root).expect("open task store");
+        let old_session = format!("{worker_cli}-old-session");
+        let new_session = format!("{worker_cli}-post-clear-session");
+        task_store
+            .add(&Task::new("cas-742-lease".to_string(), "reset lease".to_string()))
+            .expect("seed lease task");
+
+        let mut original = Agent::new(old_session.clone(), "patient-lion-85".to_string());
+        original.role = AgentRole::Worker;
+        original.agent_type = cas_types::AgentType::Worker;
+        original.cc_session_id = Some(new_session.clone());
+        original
+            .metadata
+            .insert("worker_cli".to_string(), worker_cli.to_string());
+        agent_store
+            .register(&original)
+            .expect("register pre-reset worker");
+        agent_store
+            .try_claim("cas-742-lease", &original.id, 600, Some("in progress"))
+            .expect("claim task before reset");
+
+        // SessionEnd for the old conversation must not unregister the row now
+        // correlated with the post-clear session.
+        let released = crate::hooks::handlers::cleanup_agent_leases(&cas_root, &old_session)
+            .expect("cleanup result");
+        assert!(released.is_empty());
+        assert_eq!(agent_store.get(&original.id).unwrap().name, original.name);
+        assert_eq!(
+            agent_store
+                .get_lease("cas-742-lease")
+                .unwrap()
+                .expect("lease survives old SessionEnd")
+                .agent_id,
+            original.id
+        );
+
+        let (resolved, reused) = register_session_start_agent(
+            agent_store.as_ref(),
+            &new_session,
+            None,
+            Some("worker"),
+            std::process::id(),
+            Some("/tmp/patient-lion-85"),
+        )
+        .expect("rebind post-clear worker");
+        assert!(reused, "{worker_cli} registration must reuse the row");
+        assert_eq!(resolved.id, original.id);
+        assert_eq!(resolved.name, original.name);
+        assert_eq!(resolved.cc_session_id.as_deref(), Some(new_session.as_str()));
+        assert_eq!(
+            agent_store
+                .get_lease("cas-742-lease")
+                .unwrap()
+                .expect("lease remains bound to canonical worker")
+                .agent_id,
+            original.id
+        );
+        assert_eq!(agent_store.list(None).unwrap().len(), 1);
+    }
+}
+
+/// Duplicate rows are a recovery case for databases written by the buggy
+/// build. Both harnesses must make the daemon choose the newest identity row
+/// before stale cleanup or heartbeat ownership is evaluated.
+#[test]
+fn liveness_prefers_newest_same_name_worker_row_for_claude_and_codex() {
+    for worker_cli in ["claude", "codex"] {
+        let temp = TempDir::new().expect("temp project");
+        let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
+        let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
+        let mut old = Agent::new("old-row".to_string(), "patient-lion-85".to_string());
+        old.role = AgentRole::Worker;
+        old.factory_session = Some("factory-context-reset".to_string());
+        old.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(2);
+        old.metadata
+            .insert("worker_cli".to_string(), worker_cli.to_string());
+        let mut newest = old.clone();
+        newest.id = format!("{worker_cli}-new-row");
+        newest.registered_at = chrono::Utc::now();
+        newest.last_heartbeat = chrono::Utc::now();
+        agent_store.register(&old).expect("register old row");
+        agent_store.register(&newest).expect("register newest row");
+
+        let resolved = crate::daemon::newest_agent_for_identity(agent_store.as_ref(), &old)
+            .expect("newest duplicate row is discoverable");
+        assert_eq!(resolved.id, newest.id);
+    }
 }
 
 #[test]

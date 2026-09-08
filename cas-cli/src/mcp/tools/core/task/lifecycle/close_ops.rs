@@ -64,6 +64,7 @@ pub(crate) fn required_verification_type(task_type: TaskType) -> VerificationTyp
     } else {
         VerificationType::Task
     }
+
 }
 
 fn delivery_audit_text_is_portable(value: &str) -> bool {
@@ -1900,8 +1901,9 @@ impl CasCore {
         parked.deliverables.merge_conflicted = merge_conflicted;
         // cas-4b3f/cas-3d37: retain the commit-time task anchor when present;
         // otherwise snapshot the factory tip the FIRST time this task parks.
-        // Anchors `run_factory_branch_merge_gate`'s later retries to THIS
-        // task's own work instead of a reused branch's live HEAD.
+        // A later AwaitingMerge retry may advance this anchor through
+        // `advance_awaiting_merge_anchor`, but never replaces the parked
+        // branch name that preserves task ownership across reassignment.
         if parked.deliverables.factory_branch_anchor.is_none() {
             parked.deliverables.factory_branch_anchor = factory_branch_anchor;
         }
@@ -2000,6 +2002,100 @@ impl CasCore {
         }
 
         self.record_close_rejection_activity(&task.id, reason, message);
+    }
+
+    /// Advance a parked task's delivery boundary when the worker has pushed
+    /// since the first AwaitingMerge park (GH #744 / #743). The first park's
+    /// anchor remains in `notes` for auditability; the persisted deliverable
+    /// must follow the current branch tip so the next merge request cannot be
+    /// mistaken for an invalidated prior cycle.
+    fn advance_awaiting_merge_anchor(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        factory_branch_anchor: Option<&str>,
+    ) {
+        let Some(factory_branch_anchor) = factory_branch_anchor else {
+            return;
+        };
+        let mut advanced = task.clone();
+        let now = chrono::Utc::now();
+        let Some(audit) = Self::apply_awaiting_merge_anchor_advance(
+            &mut advanced,
+            factory_branch_anchor,
+            now,
+        ) else {
+            return;
+        };
+
+        match task_store.update(&advanced) {
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %error,
+                    "failed to advance parked task delivery anchor after close retry"
+                );
+            }
+            Ok(persisted_at) => {
+                let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
+                let actor_name = self
+                    .open_agent_store()
+                    .ok()
+                    .and_then(|store| store.get(&actor).ok())
+                    .map(|agent| agent.name)
+                    .unwrap_or_else(|| actor.clone());
+                let occurrence =
+                    super::supervisor_push::occurrence_from_updated_at(persisted_at);
+                if let Err(error) = self.push_task_lifecycle(
+                    &task.id,
+                    &task.title,
+                    TaskStatus::AwaitingMerge,
+                    TaskStatus::AwaitingMerge,
+                    &actor_name,
+                    Some(&audit),
+                    super::supervisor_push::LifecycleTransition::AwaitingMerge,
+                    &occurrence,
+                ) {
+                    tracing::error!(
+                        task_id = %task.id,
+                        error = %error,
+                        "supervisor lifecycle push failed after AwaitingMerge anchor advance (task remains updated; replay outbox)"
+                    );
+                }
+            }
+        }
+    }
+
+    fn apply_awaiting_merge_anchor_advance(
+        task: &mut Task,
+        factory_branch_anchor: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<String> {
+        if task.status != TaskStatus::AwaitingMerge
+            || task.deliverables.factory_branch_anchor.as_deref()
+                == Some(factory_branch_anchor)
+        {
+            return None;
+        }
+
+        let previous_anchor = task
+            .deliverables
+            .factory_branch_anchor
+            .as_deref()
+            .unwrap_or("none")
+            .to_string();
+        task.deliverables.factory_branch_anchor = Some(factory_branch_anchor.to_string());
+        task.updated_at = now;
+        let timestamp = now.format("%Y-%m-%d %H:%M");
+        let audit = format!(
+            "[{timestamp}] AwaitingMerge delivery anchor advanced from `{previous_anchor}` to `{factory_branch_anchor}`; this tip is the current merge-request boundary. The prior anchor remains in this audit history."
+        );
+        task.notes = if task.notes.is_empty() {
+            audit.clone()
+        } else {
+            format!("{}\n\n{}", task.notes, audit)
+        };
+        Some(audit)
     }
 
     /// cas-a844: refresh `merge_conflicted` on an already-parked task when a
@@ -2116,6 +2212,21 @@ impl CasCore {
                 .is_some();
         let factory_merge_enforcement =
             std::env::var_os("CAS_FACTORY_MODE").is_some() && has_recorded_merge_evidence;
+        let parent_epic = task_store.get_parent_epic(&task.id).ok().flatten();
+        let close_work_target = effective_close_work_target(task, parent_epic.as_ref());
+        let inherited_repo_context = close_work_target
+            .as_ref()
+            .map(|target| {
+                crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                    &self.cas_root,
+                    target,
+                )
+            })
+            .transpose()
+            .map_err(|message| TaskLifecycleGateError::UnmergedChildBranch { message })?;
+        let declared_repo_context = inherited_repo_context
+            .as_ref()
+            .or(declared_repo_context);
         let resolved_repo = declared_repo_context
             .map(|context| Ok(context.repo_root.clone()))
             .unwrap_or_else(|| resolve_close_gate_repo_root(&self.cas_root));
@@ -2132,37 +2243,58 @@ impl CasCore {
                 .to_path_buf(),
         };
 
+        let standalone_worker_repo = if close_repo_verified {
+            None
+        } else {
+            self.resolve_worker_worktree_path(task, None).ok().flatten()
+        };
+        let standalone_target_repo = standalone_worker_repo
+            .clone()
+            .unwrap_or_else(|| close_project_root.clone());
+
         let worktree_store_parent_branch = task.worktree_id.as_deref().and_then(|wt_id| {
             self.open_worktree_store()
                 .ok()
                 .and_then(|store| store.get(wt_id).ok())
                 .map(|wt| wt.parent_branch.clone())
         });
-        let epic_parent_branch = task_store
-            .get_parent_epic(&task.id)
-            .ok()
-            .flatten()
-            .and_then(|parent| parent.branch);
+        let epic_parent_branch = parent_epic.as_ref().and_then(|parent| parent.branch.clone());
+        let epic_work_target_branch = parent_epic.as_ref().and_then(|parent| {
+            parent
+                .deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.clone())
+        });
         let parent_branch_resolution = if let Some(context) = declared_repo_context {
             Ok(context.target_branch.clone())
         } else if close_repo_verified {
             resolve_close_parent_branch(
                 worktree_store_parent_branch,
                 epic_parent_branch,
+                epic_work_target_branch,
                 &close_project_root,
             )
         } else {
-            Ok(worktree_store_parent_branch
-                .or(epic_parent_branch)
-                .unwrap_or_else(|| "main".to_string()))
+            resolve_close_parent_branch(
+                worktree_store_parent_branch,
+                epic_parent_branch,
+                epic_work_target_branch,
+                &standalone_target_repo,
+            )
         };
         let resolved_parent_branch = match parent_branch_resolution {
             Ok(branch) => branch,
-            Err(message) if factory_merge_enforcement => {
-                return Err(TaskLifecycleGateError::UnmergedChildBranch { message });
-            }
-            Err(_) => "main".to_string(),
+            // Non-factory lightweight stores may intentionally have neither a
+            // Git repository nor a task-owned worker checkout. Their close
+            // path has no branch-sensitive worker gate to run, so preserve
+            // the historical verification flow without inventing a ref.
+            Err(_) if !close_repo_verified && standalone_worker_repo.is_none() => String::new(),
+            Err(message) => return Err(TaskLifecycleGateError::UnmergedChildBranch { message }),
         };
+        if !close_repo_verified && standalone_worker_repo.is_none() {
+            return Ok(());
+        }
         let req = TaskCloseRequest {
             stranded_branch_override: None,
             id: task.id.clone(),
@@ -2474,7 +2606,35 @@ impl CasCore {
         // AwaitingMerge or InProgress.
         if let Ok(agent_id) = self.get_agent_id() {
             if let Ok(agent_store) = self.open_agent_store() {
-                if let Ok(agent) = agent_store.get(&agent_id) {
+                if let Ok(mut agent) = agent_store.get(&agent_id) {
+                    // cas-1145: a halt bound to a task id that was never
+                    // created must not strand a healthy worker at close. Keep
+                    // the metadata update durable before using the cleared
+                    // view for this gate; update failure remains fail-closed.
+                    let mut cleared_metadata = agent.metadata.clone();
+                    match super::stale_close_guard::clear_missing_task_halt(
+                        &mut cleared_metadata,
+                        task_store.as_ref(),
+                    ) {
+                        Ok(true) => {
+                            let previous_metadata = agent.metadata.clone();
+                            agent.metadata = cleared_metadata;
+                            if let Err(error) = agent_store.update(&agent) {
+                                agent.metadata = previous_metadata;
+                                tracing::warn!(
+                                    agent_id = %agent_id,
+                                    error = %error,
+                                    "cas-1145: failed to persist phantom urgent-halt cleanup; keeping halt"
+                                );
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            agent_id = %agent_id,
+                            error = %error,
+                            "cas-1145: could not verify urgent-halt task; keeping halt"
+                        ),
+                    }
                     let halt_exempt = super::stale_close_guard::halt_exempt_for_owned_task(
                         task.status,
                         task.assignee.as_deref(),
@@ -2574,9 +2734,15 @@ impl CasCore {
         };
         let factory_merge_enforcement =
             std::env::var_os("CAS_FACTORY_MODE").is_some() && has_recorded_merge_evidence;
+        let parent_epic = task_store.get_parent_epic(&req.id).ok().flatten();
+        let close_work_target = effective_close_work_target(&task, parent_epic.as_ref());
         // An explicit task work target overrides the factory spawn repo.
-        // Resolve once before any merge/reachability query and reuse it.
-        let declared_repo_context = match task.deliverables.work_target.as_ref() {
+        // Resolve once before any merge/reachability query and reuse it. A
+        // child whose target still equals its parent's original default is an
+        // implicit epic target, so late epic association can retarget the
+        // close guard to the live epic lane without overriding a distinct
+        // supervisor-selected task target.
+        let declared_repo_context = match close_work_target.as_ref() {
             Some(target) => {
                 match crate::mcp::tools::core::task::repo_context::resolve_repo_context(
                     &self.cas_root,
@@ -2603,6 +2769,23 @@ impl CasCore {
                 .parent()
                 .unwrap_or(&self.cas_root)
                 .to_path_buf(),
+        };
+
+        // Resolve the worker checkout before the branch target so a degraded
+        // close (where Cassy's own root is not inside a repository) can still
+        // discover the standalone task's configured or detected trunk from
+        // the task-owned System-A/System-B worktree.
+        let worker_worktree_path =
+            match self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()) {
+                Ok(path) => path,
+                Err(message) => return Ok(Self::tool_error(message)),
+            };
+        let standalone_target_repo = if close_repo_verified {
+            close_project_root.clone()
+        } else {
+            worker_worktree_path
+                .clone()
+                .unwrap_or_else(|| close_project_root.clone())
         };
 
         // cas-e74c: resolve the work-cycle identity before the later
@@ -2839,27 +3022,37 @@ impl CasCore {
                 .and_then(|store| store.get(wt_id).ok())
                 .map(|wt| wt.parent_branch.clone())
         });
-        let parent_epic = task_store.get_parent_epic(&req.id).ok().flatten();
         let epic_parent_branch = parent_epic.as_ref().and_then(|p| p.branch.clone());
+        let epic_work_target_branch = parent_epic.as_ref().and_then(|p| {
+            p.deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.clone())
+        });
         let parent_branch_resolution = if let Some(context) = declared_repo_context.as_ref() {
             Ok(context.target_branch.clone())
         } else if close_repo_verified {
             resolve_close_parent_branch(
                 worktree_store_parent_branch,
                 epic_parent_branch,
+                epic_work_target_branch,
                 &close_project_root,
             )
         } else {
-            Ok(worktree_store_parent_branch
-                .or(epic_parent_branch)
-                .unwrap_or_else(|| "main".to_string()))
+            resolve_close_parent_branch(
+                worktree_store_parent_branch,
+                epic_parent_branch,
+                epic_work_target_branch,
+                &standalone_target_repo,
+            )
         };
         let resolved_parent_branch = match parent_branch_resolution {
             Ok(branch) => branch,
-            Err(message) if factory_merge_enforcement => {
-                return Ok(Self::tool_error(message));
-            }
-            Err(_) => "main".to_string(),
+            // A repository-less, non-factory close has no worker checkout and
+            // therefore no branch-sensitive delivery gate. Keep that
+            // lightweight path available without passing a fake ref to Git.
+            Err(_) if !close_repo_verified && worker_worktree_path.is_none() => String::new(),
+            Err(message) => return Ok(Self::tool_error(message)),
         };
         // cas-fdc9 (GH #56): a receipt is only evidence if it exists in the
         // repository this close is bound to. The cross-repo delivery in the
@@ -2884,6 +3077,7 @@ impl CasCore {
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && task.assignee.is_some()
+            && (close_repo_verified || worker_worktree_path.is_some())
         {
             match run_factory_branch_merge_gate_with_attribution(
                 &task,
@@ -2954,16 +3148,16 @@ impl CasCore {
                     // event each time, unboundedly. Park (and record the
                     // rejection activity) only the first time a task
                     // transitions into `AwaitingMerge`; once it's already
-                    // parked, a retry gets the same rejection message with
-                    // no further state mutation.
+                    // parked, a retry gets the same rejection message unless
+                    // a new branch tip requires the delivery anchor to move.
+                    let anchor = task.assignee.as_deref().and_then(|assignee| {
+                        resolve_branch_sha(&close_project_root, &format!("factory/{assignee}"))
+                    });
                     if task.status != TaskStatus::AwaitingMerge {
                         // cas-4b3f: snapshot the factory branch's current
                         // tip so later retries anchor to THIS task's own
                         // commit range, not whatever HEAD drifts to if a
                         // second task starts on the same branch.
-                        let anchor = task.assignee.as_deref().and_then(|assignee| {
-                            resolve_branch_sha(&close_project_root, &format!("factory/{assignee}"))
-                        });
                         self.park_task_awaiting_merge(
                             task_store.as_ref(),
                             &task,
@@ -2972,12 +3166,26 @@ impl CasCore {
                             anchor,
                             merge_conflicted,
                         );
-                    } else if merge_conflicted && !task.deliverables.merge_conflicted {
-                        // Already parked (a retry), but a fresh preflight now
-                        // shows a genuine conflict or cannot be evaluated.
-                        // Refresh the flag so the worker exit remains open
-                        // without duplicating the park audit note.
-                        self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
+                    } else {
+                        // GH #744 / #743: a worker may push again after the
+                        // first park. Re-anchor before the retry returns its
+                        // merge-required refusal so the queued request and
+                        // supervisor status describe the current tip.
+                        self.advance_awaiting_merge_anchor(
+                            task_store.as_ref(),
+                            &task,
+                            anchor.as_deref(),
+                        );
+                        if merge_conflicted && !task.deliverables.merge_conflicted {
+                            // Already parked (a retry), but a fresh preflight now
+                            // shows a genuine conflict or cannot be evaluated.
+                            // Refresh the flag so the worker exit remains open
+                            // without duplicating the park audit note.
+                            self.mark_awaiting_merge_conflicted(
+                                task_store.as_ref(),
+                                &task.id,
+                            );
+                        }
                     }
 
                     return Ok(Self::tool_error(msg));
@@ -3827,11 +4035,6 @@ impl CasCore {
         // verification and tmpfs-proof exceptions. Delivery-state gates
         // remain mandatory for every delivered close.
         let bypass_close_gates = !close_disposition.requires_delivery_gates();
-        let worker_worktree_path =
-            match self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()) {
-                Ok(path) => path,
-                Err(message) => return Ok(Self::tool_error(message)),
-            };
         // Explicit work targets opt into a fail-closed executable gate on
         // every close path, independent of review owner/depth/bypass. This
         // keeps normal close aligned with direct update-to-closed: neither
@@ -4168,6 +4371,7 @@ impl CasCore {
             && task.execution_note.as_deref() != Some("additive-only")
             && !bypass_close_gates
             && effective_has_reviewable
+            && (close_repo_verified || worker_worktree_path.is_some())
         {
             if let Some(assignee) = task.assignee.as_deref() {
                 // cas-7efe: single close-time resolver, not a bare "main".
@@ -8173,6 +8377,31 @@ fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> Result<String
     }
 }
 
+/// Resolve the task-owned WorkTarget used by close-time repository binding.
+///
+/// A child created before it was attached to an epic can retain the epic's
+/// original WorkTarget (usually the repository trunk). Treat that exact
+/// parent-default value as implicit epic scope, matching task creation and
+/// worker-spawn normalization, so a late parent link cannot leave close
+/// checking the stale trunk. A distinct task target remains explicit
+/// supervisor authority and is never overwritten.
+fn effective_close_work_target(
+    task: &Task,
+    parent_epic: Option<&Task>,
+) -> Option<cas_types::WorkTarget> {
+    parent_epic
+        .and_then(|epic| {
+            (task.task_type != TaskType::Epic)
+                .then(|| {
+                    crate::mcp::tools::core::task::repo_context::default_child_work_target_from_epic(
+                        task, epic,
+                    )
+                })
+                .flatten()
+        })
+        .or_else(|| task.deliverables.work_target.clone())
+}
+
 /// cas-7efe: the single, authoritative parent-branch resolution policy for
 /// every close-time gate in `cas_task_close` (merge gate, commit-claim
 /// gate, additive-only gate, zero-commit gate, diff stat).
@@ -8204,7 +8433,10 @@ fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> Result<String
 /// 2. `epic_branch` — `task_store.get_parent_epic(task_id).branch`. Covers
 ///    System-B isolated workers (`spawn_workers isolate=true`), which are
 ///    the day-to-day factory path and almost never set `worktree_id`.
-/// 3. [`resolve_standalone_merge_target`] — configured `epic_base_branch`,
+/// 3. `epic_work_target_branch` — the parent epic's durable WorkTarget when
+///    no live legacy branch is recorded. This is the authoritative fallback
+///    for legacy children and staging-first epics whose branch field is absent.
+/// 4. [`resolve_standalone_merge_target`] — configured `epic_base_branch`,
 ///    falling back to git's own detected default branch. Used only when
 ///    neither tier above resolves (a standalone task with no parent epic).
 ///
@@ -8214,11 +8446,19 @@ fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> Result<String
 fn resolve_close_parent_branch(
     worktree_parent_branch: Option<String>,
     epic_branch: Option<String>,
+    epic_work_target_branch: Option<String>,
     repo_path: &std::path::Path,
 ) -> Result<String, String> {
-    match worktree_parent_branch.or(epic_branch) {
+    match worktree_parent_branch
+        .or(epic_branch)
+        .or(epic_work_target_branch)
+    {
         Some(branch) => Ok(branch),
-        None => resolve_standalone_merge_target(repo_path),
+        None => resolve_standalone_merge_target(repo_path).map_err(|error| {
+            format!(
+                "close target could not be resolved: declare target_branch or attach an epic ({error})"
+            )
+        }),
     }
 }
 
@@ -8244,6 +8484,62 @@ fn format_close_success_message(
         "Closed task: {task_id} - {task_title}{verification_note}{lease_msg}{worktree_msg}\
          {diff_stat_msg}{epic_close_msg}{commit_nudge_msg}{auto_unblock_msg}"
     )
+}
+
+#[cfg(test)]
+mod awaiting_merge_anchor_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn retried_awaiting_merge_close_advances_anchor_and_keeps_audit_history() {
+        let mut task = Task::new("cas-ab57".to_string(), "anchor retry".to_string());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some("first-tip".to_string());
+        task.deliverables.parked_branch = Some("factory/worker".to_string());
+        task.notes = "initial park".to_string();
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 9, 8, 14, 0, 0)
+            .single()
+            .expect("fixed timestamp");
+
+        let audit = CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now)
+            .expect("a pushed tip advances the parked anchor");
+
+        assert_eq!(
+            task.deliverables.factory_branch_anchor.as_deref(),
+            Some("second-tip")
+        );
+        assert_eq!(
+            task.deliverables.parked_branch.as_deref(),
+            Some("factory/worker"),
+            "the recovery branch name remains tied to the original park"
+        );
+        assert!(audit.contains("advanced from `first-tip` to `second-tip`"));
+        assert!(task.notes.contains("initial park"));
+        assert!(task.notes.contains("first-tip"));
+        assert!(task.notes.contains("second-tip"));
+        assert_eq!(task.updated_at, now);
+
+        assert!(
+            CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now).is_none(),
+            "repeating close at the same tip is idempotent"
+        );
+    }
+
+    #[test]
+    fn anchor_advance_ignores_non_awaiting_merge_tasks() {
+        let mut in_progress = Task::new("cas-ab57".to_string(), "active".to_string());
+        in_progress.status = TaskStatus::InProgress;
+        assert!(
+            CasCore::apply_awaiting_merge_anchor_advance(
+                &mut in_progress,
+                "new-tip",
+                chrono::Utc::now(),
+            )
+            .is_none()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -8284,6 +8580,7 @@ mod parent_branch_resolver_tests {
         let resolved = resolve_close_parent_branch(
             Some("staging".to_string()),
             Some("epic/other".to_string()),
+            None,
             dir.path(),
         )
         .expect("explicit worktree branch resolves without git fallback");
@@ -8301,12 +8598,79 @@ mod parent_branch_resolver_tests {
         // must still prefer the real epic branch over guessing "main".
         let dir = tempfile::tempdir().unwrap();
         let resolved =
-            resolve_close_parent_branch(None, Some("epic/staging-thing".to_string()), dir.path())
-                .expect("explicit epic branch resolves without git fallback");
+            resolve_close_parent_branch(
+                None,
+                Some("epic/staging-thing".to_string()),
+                None,
+                dir.path(),
+            )
+            .expect("explicit epic branch resolves without git fallback");
         assert_eq!(
             resolved, "epic/staging-thing",
             "must never fall through to a bare 'main' literal when the \
              epic branch is known"
+        );
+    }
+
+    /// GH #748: a legacy child can have no recorded `epic.branch` even though
+    /// its parent epic's durable WorkTarget names the real integration lane.
+    /// The close guard must use that declaration instead of falling through to
+    /// the project default (often `main`).
+    #[test]
+    fn epic_work_target_wins_over_project_trunk_when_legacy_branch_is_missing() {
+        let dir = init_committed_repo("main");
+        git(dir.path(), &["checkout", "-q", "-b", "staging"]);
+        let resolved = resolve_close_parent_branch(
+            None,
+            None,
+            Some("staging".to_string()),
+            dir.path(),
+        )
+        .expect("parent epic WorkTarget must resolve before project trunk");
+        assert_eq!(resolved, "staging");
+        assert_ne!(resolved, "main");
+    }
+
+    #[test]
+    fn close_target_normalizes_legacy_default_but_preserves_explicit_lane() {
+        let mut epic = Task::new("cas-epic".into(), "epic".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/live-lane".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+
+        let child = Task::new("cas-child".into(), "child".into());
+        assert_eq!(
+            effective_close_work_target(&child, Some(&epic))
+                .expect("untargeted child must inherit the live epic lane")
+                .target_branch,
+            "epic/live-lane"
+        );
+
+        let mut legacy_default_child = child.clone();
+        legacy_default_child.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+        assert_eq!(
+            effective_close_work_target(&legacy_default_child, Some(&epic))
+                .expect("legacy epic default must be normalized")
+                .target_branch,
+            "epic/live-lane"
+        );
+
+        let mut explicit_child = child;
+        explicit_child.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "release/operator-selected".into(),
+        });
+        assert_eq!(
+            effective_close_work_target(&explicit_child, Some(&epic))
+                .expect("explicit task target must remain authoritative")
+                .target_branch,
+            "release/operator-selected"
         );
     }
 
@@ -8318,13 +8682,48 @@ mod parent_branch_resolver_tests {
         // answer, not a blind guess. A repo whose default is the legacy
         // `master` name proves both supported conventions work.
         let dir = init_committed_repo("master");
-        let resolved = resolve_close_parent_branch(None, None, dir.path())
+        let resolved = resolve_close_parent_branch(None, None, None, dir.path())
             .expect("master must be detected as the default branch");
         assert_eq!(
             resolved, "master",
             "final tier must reflect the repo's real detected default, \
              never a hardcoded 'main'"
         );
+    }
+
+    #[test]
+    fn standalone_fallback_detects_main_default() {
+        let dir = init_committed_repo("main");
+        let resolved = resolve_close_parent_branch(None, None, None, dir.path())
+            .expect("main must be detected as the default branch");
+        assert_eq!(resolved, "main");
+    }
+
+    #[test]
+    fn standalone_fallback_honors_configured_staging_default() {
+        let dir = init_committed_repo("staging");
+        let cas_dir = dir.path().join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[factory]\nepic_base_branch = \"staging\"\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_close_parent_branch(None, None, None, dir.path())
+            .expect("configured staging branch must resolve");
+        assert_eq!(resolved, "staging");
+    }
+
+    #[test]
+    fn unresolved_standalone_fallback_rejects_without_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = resolve_close_parent_branch(None, None, None, dir.path())
+            .expect_err("a repository without a detectable target must reject");
+        assert!(error.starts_with(
+            "close target could not be resolved: declare target_branch or attach an epic"
+        ));
+        assert!(!error.contains("cassy-unresolved-close-target"));
     }
 
     #[test]
@@ -10054,6 +10453,41 @@ pub(crate) struct EpicChildBranchStatus {
     pub refs_unresolved: bool,
 }
 
+/// The read-only epic-status action has a stricter wall-clock budget than the
+/// close gate.  A supervisor needs a useful partial diagnostic before the MCP
+/// tool deadline, while the close gate must continue to inspect every child
+/// and fail closed.
+pub(crate) const EPIC_STATUS_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EpicStatusOptions {
+    pub offset: usize,
+    pub limit: Option<usize>,
+    pub summary: bool,
+    pub budget: std::time::Duration,
+}
+
+impl EpicStatusOptions {
+    pub(crate) const fn full_for_close_gate() -> Self {
+        Self {
+            offset: 0,
+            limit: None,
+            summary: false,
+            budget: std::time::Duration::MAX,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct EpicStatusCollection {
+    pub statuses: Vec<EpicChildBranchStatus>,
+    pub total_children: usize,
+    pub offset: usize,
+    pub requested_limit: Option<usize>,
+    pub summary: bool,
+    pub budget_exhausted: bool,
+}
+
 /// Which ref an epic-status row's unmerged count was actually read from
 /// (cas-2a99 / GH #131).
 ///
@@ -10329,193 +10763,250 @@ pub(crate) fn collect_epic_branch_statuses(
     parent_branch: &str,
     repo_path: &std::path::Path,
 ) -> Vec<EpicChildBranchStatus> {
-    subtasks
-        .iter()
-        .map(|t| {
-            // cas-6c50: a measured negative result deliberately has no
-            // delivery to integrate. Its structured supervisor receipt is
-            // durable close evidence, so neither the historical parked branch
-            // nor the assignee's reusable live lane belongs in parent-epic
-            // delivery accounting for this child.
-            let has_delivery = t.has_delivery_to_integrate();
-            let parked_branch = has_delivery
-                .then(|| t.deliverables.parked_branch.clone())
-                .flatten();
-            let live_factory_branch = has_delivery
-                .then(|| {
-                    t.assignee
-                        .as_ref()
-                        .map(|assignee| format!("factory/{assignee}"))
-                })
-                .flatten();
-            let recorded_anchor = has_delivery
-                .then_some(t.deliverables.factory_branch_anchor.as_deref())
-                .flatten();
-            let resolved_anchor =
-                recorded_anchor.filter(|anchor| git_ref_exists(repo_path, anchor));
+    collect_epic_branch_statuses_with_options(
+        subtasks,
+        parent_branch,
+        repo_path,
+        EpicStatusOptions::full_for_close_gate(),
+    )
+    .statuses
+}
 
-            let mut fallback_branches = Vec::new();
-            if let Some(branch) = parked_branch.as_ref() {
-                fallback_branches.push(branch.clone());
-            }
-            if let Some(branch) = live_factory_branch.as_ref()
-                && !fallback_branches.contains(branch)
-            {
-                fallback_branches.push(branch.clone());
-            }
-            let factory_branch = fallback_branches.first().cloned().or(parked_branch);
-            let additional_factory_branches: Vec<String> =
-                fallback_branches.into_iter().skip(1).collect();
+/// Collect the read-only epic-status view with an explicit page and deadline.
+/// The default close-gate collector above intentionally remains unbounded and
+/// full-fidelity; only the supervisor diagnostic uses this budgeted path.
+pub(crate) fn collect_epic_branch_statuses_with_options(
+    subtasks: &[Task],
+    parent_branch: &str,
+    repo_path: &std::path::Path,
+    options: EpicStatusOptions,
+) -> EpicStatusCollection {
+    let total_children = subtasks.len();
+    let offset = options.offset.min(total_children);
+    let page_len = options
+        .limit
+        .unwrap_or(total_children.saturating_sub(offset));
+    let deadline = (options.budget != std::time::Duration::MAX)
+        .then(|| std::time::Instant::now().checked_add(options.budget))
+        .flatten();
+    let mut statuses = Vec::with_capacity(page_len.min(total_children.saturating_sub(offset)));
+    let mut budget_exhausted = false;
 
-            let fallback_branches = factory_branch
-                .iter()
-                .chain(additional_factory_branches.iter())
-                .cloned()
-                .collect::<Vec<_>>();
-            // The table's stranded count is a live Git measurement of the
-            // current lane tip, never a historical count from the task's
-            // recorded anchor. An anchor is delivery evidence below; it is
-            // not a substitute for the branch state the operator needs to
-            // act on now. Fall back to an anchor only when there is no live
-            // branch receipt at all.
-            let checked_refs: Vec<&str> = if fallback_branches.is_empty() {
-                resolved_anchor.into_iter().collect()
-            } else {
-                fallback_branches.iter().map(String::as_str).collect()
-            };
-            // cas-2a99 (GH #131): resolve each commit-ish through the dual-ref
-            // read before measuring anything. A merged child whose worker
-            // shutdown deleted the local `factory/<worker>` ref must be counted
-            // against `origin/factory/<worker>`, and a commit-ish that resolves
-            // NOWHERE must not fail open to `0` — that reported a vanished
-            // branch as merged.
-            let mut unmerged_count = 0;
-            let mut latest_commit_unix = None;
-            let mut checked_ref_reads = Vec::new();
-            let mut any_ref_resolved = false;
-            for commit in checked_refs {
-                let read = read_ref_preferring_local(repo_path, commit);
-                if let Some(refname) = read.read_ref() {
-                    any_ref_resolved = true;
-                    let count = count_unmerged_against_targets(repo_path, refname, parent_branch)
-                        .unwrap_or_else(|| {
-                            count_unmerged_factory_commits(repo_path, refname, parent_branch)
-                        });
-                    unmerged_count = unmerged_count.max(count);
-                    latest_commit_unix =
-                        latest_commit_unix.max(last_commit_unix(repo_path, refname));
-                }
-                checked_ref_reads.push(read);
+    for t in subtasks.iter().skip(offset).take(page_len) {
+        if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
+            budget_exhausted = true;
+            break;
+        }
+        // cas-6c50: a measured negative result deliberately has no
+        // delivery to integrate. Its structured supervisor receipt is
+        // durable close evidence, so neither the historical parked branch
+        // nor the assignee's reusable live lane belongs in parent-epic
+        // delivery accounting for this child.
+        let has_delivery = t.has_delivery_to_integrate();
+        let parked_branch = has_delivery
+            .then(|| t.deliverables.parked_branch.clone())
+            .flatten();
+        let live_factory_branch = has_delivery
+            .then(|| {
+                t.assignee
+                    .as_ref()
+                    .map(|assignee| format!("factory/{assignee}"))
+            })
+            .flatten();
+        let recorded_anchor = has_delivery
+            .then_some(t.deliverables.factory_branch_anchor.as_deref())
+            .flatten();
+        let resolved_anchor =
+            recorded_anchor.filter(|anchor| git_ref_exists(repo_path, anchor));
+
+        let mut fallback_branches = Vec::new();
+        if let Some(branch) = parked_branch.as_ref() {
+            fallback_branches.push(branch.clone());
+        }
+        if let Some(branch) = live_factory_branch.as_ref()
+            && !fallback_branches.contains(branch)
+        {
+            fallback_branches.push(branch.clone());
+        }
+        let factory_branch = fallback_branches.first().cloned().or(parked_branch);
+        let additional_factory_branches: Vec<String> =
+            fallback_branches.into_iter().skip(1).collect();
+
+        let fallback_branches = factory_branch
+            .iter()
+            .chain(additional_factory_branches.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        // The table's stranded count is a live Git measurement of the
+        // current lane tip, never a historical count from the task's
+        // recorded anchor. An anchor is delivery evidence below; it is
+        // not a substitute for the branch state the operator needs to
+        // act on now. Fall back to an anchor only when there is no live
+        // branch receipt at all.
+        let checked_refs: Vec<&str> = if fallback_branches.is_empty() {
+            resolved_anchor.into_iter().collect()
+        } else {
+            fallback_branches.iter().map(String::as_str).collect()
+        };
+        // cas-2a99 (GH #131): resolve each commit-ish through the dual-ref
+        // read before measuring anything. A merged child whose worker
+        // shutdown deleted the local `factory/<worker>` ref must be counted
+        // against `origin/factory/<worker>`, and a commit-ish that resolves
+        // NOWHERE must not fail open to `0` — that reported a vanished
+        // branch as merged.
+        let mut unmerged_count = 0;
+        let mut latest_commit_unix = None;
+        let mut checked_ref_reads = Vec::new();
+        let mut any_ref_resolved = false;
+        for commit in checked_refs {
+            let read = read_ref_preferring_local(repo_path, commit);
+            if let Some(refname) = read.read_ref() {
+                any_ref_resolved = true;
+                let count = count_unmerged_against_targets(repo_path, refname, parent_branch)
+                    .unwrap_or_else(|| {
+                        count_unmerged_factory_commits(repo_path, refname, parent_branch)
+                    });
+                unmerged_count = unmerged_count.max(count);
+                latest_commit_unix =
+                    latest_commit_unix.max(last_commit_unix(repo_path, refname));
             }
-            let refs_unresolved = !checked_ref_reads.is_empty() && !any_ref_resolved;
-            let mut merge_evidence_note = None;
-            let mut content_evolution_note = None;
-            let mut dropped_paths = Vec::new();
-            let mut content_check_error = None;
-            if let Some(anchor) = resolved_anchor
-                && unmerged_count == 0
-                && commit_is_merged_into_parent(repo_path, anchor, parent_branch)
-            {
-                match delivery_content_presence_in_parent(repo_path, anchor, parent_branch) {
-                    DeliveryContentPresence::Present { .. } => {}
-                    DeliveryContentPresence::Superseded { paths, commits } => {
-                        content_evolution_note = Some(format!(
-                            "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
+            checked_ref_reads.push(read);
+        }
+        let refs_unresolved = !checked_ref_reads.is_empty() && !any_ref_resolved;
+
+        // Summary mode intentionally stops after the cheap ancestry
+        // measurement. Delivery-content reconciliation is the dominant
+        // cost on large epics and remains available in the paged full
+        // view when an operator needs it for a specific child range.
+        if options.summary {
+            statuses.push(EpicChildBranchStatus {
+                task_id: t.id.clone(),
+                task_status: t.status,
+                assignee: t.assignee.clone(),
+                dead_or_stale_assignee: false,
+                recorded_anchor: recorded_anchor.map(str::to_string),
+                factory_branch,
+                additional_factory_branches,
+                unmerged_count,
+                last_commit_unix: latest_commit_unix,
+                merge_evidence_note: None,
+                content_evolution_note: None,
+                dropped_paths: Vec::new(),
+                content_check_error: None,
+                checked_ref_reads,
+                refs_unresolved,
+            });
+            continue;
+        }
+
+        let mut merge_evidence_note = None;
+        let mut content_evolution_note = None;
+        let mut dropped_paths = Vec::new();
+        let mut content_check_error = None;
+        if let Some(anchor) = resolved_anchor
+            && unmerged_count == 0
+            && commit_is_merged_into_parent(repo_path, anchor, parent_branch)
+        {
+            match delivery_content_presence_in_parent(repo_path, anchor, parent_branch) {
+                DeliveryContentPresence::Present { .. } => {}
+                DeliveryContentPresence::Superseded { paths, commits } => {
+                    content_evolution_note = Some(format!(
+                        "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
                              is merged and its delivered path(s) {} were intentionally evolved by \
                              later first-parent commit(s) {}. The original byte-identical patch no \
                              longer reverse-applies, but this is explicit post-integration \
                              supersession rather than merge-resolution loss.",
-                            t.id,
-                            paths.join(", "),
-                            commits.join(", "),
-                        ));
-                    }
-                    DeliveryContentPresence::Dropped { paths } => {
-                        // Keep the live branch count honest: history can be
-                        // fully integrated while content proof independently
-                        // rejects the delivery. `blocks_epic_close()` carries
-                        // the fail-closed dropped-content verdict.
-                        dropped_paths = paths;
-                    }
-                    DeliveryContentPresence::Unknown { reason } => {
-                        // Unknown content evidence is fail-closed through
-                        // `blocks_epic_close()`, not by manufacturing a Git
-                        // commit count that the branch does not have.
-                        content_check_error = Some(reason);
-                    }
+                        t.id,
+                        paths.join(", "),
+                        commits.join(", "),
+                    ));
+                }
+                DeliveryContentPresence::Dropped { paths } => {
+                    // Keep the live branch count honest: history can be
+                    // fully integrated while content proof independently
+                    // rejects the delivery. `blocks_epic_close()` carries
+                    // the fail-closed dropped-content verdict.
+                    dropped_paths = paths;
+                }
+                DeliveryContentPresence::Unknown { reason } => {
+                    // Unknown content evidence is fail-closed through
+                    // `blocks_epic_close()`, not by manufacturing a Git
+                    // commit count that the branch does not have.
+                    content_check_error = Some(reason);
                 }
             }
-            if let Some(anchor) = resolved_anchor
-                && unmerged_count > 0
-                && dropped_paths.is_empty()
-                && content_check_error.is_none()
-            {
-                let mut live_summaries = Vec::new();
-                for branch in &fallback_branches {
-                    match live_branch_merge_evidence(repo_path, branch, parent_branch) {
-                        Some((state, summaries)) => live_summaries.extend(
-                            summaries
-                                .into_iter()
-                                .map(|summary| format!("{summary} ({state:?})")),
-                        ),
-                        None => live_summaries.push(format!("{branch} unresolved")),
-                    }
+        }
+        if let Some(anchor) = resolved_anchor
+            && unmerged_count > 0
+            && dropped_paths.is_empty()
+            && content_check_error.is_none()
+        {
+            let mut live_summaries = Vec::new();
+            for branch in &fallback_branches {
+                match live_branch_merge_evidence(repo_path, branch, parent_branch) {
+                    Some((state, summaries)) => live_summaries.extend(
+                        summaries
+                            .into_iter()
+                            .map(|summary| format!("{summary} ({state:?})")),
+                    ),
+                    None => live_summaries.push(format!("{branch} unresolved")),
                 }
-                // cas-2a99 / cas-65e0 (GH #288): apply the existing
-                // task-specific content proof to every stranded anchor before
-                // emitting hard-block wording. A squash leaves the source ref
-                // non-ancestral by design, so requiring that ref to become
-                // KnownZero recreated ancestry loss after content was already
-                // proven. The cherry arm still excludes only inherited
-                // trunk-reachable commits; a dropped WORK commit remains a
-                // positive `+` and poisons the proof.
-                let origin_parent = format!("origin/{parent_branch}");
-                let content_parent = [parent_branch, origin_parent.as_str()]
-                    .into_iter()
-                    .filter(|candidate| git_ref_exists(repo_path, candidate))
-                    .find(|candidate| {
-                        commit_tip_tree_reachable_from(repo_path, anchor, candidate)
+            }
+            // cas-2a99 / cas-65e0 (GH #288): apply the existing
+            // task-specific content proof to every stranded anchor before
+            // emitting hard-block wording. A squash leaves the source ref
+            // non-ancestral by design, so requiring that ref to become
+            // KnownZero recreated ancestry loss after content was already
+            // proven. The cherry arm still excludes only inherited
+            // trunk-reachable commits; a dropped WORK commit remains a
+            // positive `+` and poisons the proof.
+            let origin_parent = format!("origin/{parent_branch}");
+            let content_parent = [parent_branch, origin_parent.as_str()]
+                .into_iter()
+                .filter(|candidate| git_ref_exists(repo_path, candidate))
+                .find(|candidate| {
+                    commit_tip_tree_reachable_from(repo_path, anchor, candidate)
                             || anchor_work_patches_equivalent_on_parent(
                                 repo_path, anchor, candidate,
                             )
-                    });
-                if let Some(content_parent) = content_parent {
-                    unmerged_count = 0;
-                    merge_evidence_note = Some(format!(
-                        "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
+                });
+            if let Some(content_parent) = content_parent {
+                unmerged_count = 0;
+                merge_evidence_note = Some(format!(
+                    "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
                          is merged (squash, ancestry lost): it is not an ancestor of \
                          `{parent_branch}`, but its task-specific content is proven on \
                          `{content_parent}`. Live branch evidence: {}. Treated the recorded \
                          anchor as superseded rather than requiring history pollution.",
-                        t.id,
-                        if live_summaries.is_empty() {
-                            "none recorded".to_string()
-                        } else {
-                            live_summaries.join("; ")
-                        },
-                    ));
-                }
+                    t.id,
+                    if live_summaries.is_empty() {
+                        "none recorded".to_string()
+                    } else {
+                        live_summaries.join("; ")
+                    },
+                ));
             }
-            // A GitHub squash loses the original anchor's ancestry. If a
-            // later first-parent commit then evolves the same files, neither
-            // an exact anchor tree nor cherry patch remains on the current
-            // target. Re-anchor the child at the earliest target commit where
-            // its own effect is proven, then reuse the child-close content
-            // checker from that accepted integration point. That checker
-            // includes cas-fe81's zero-context hunk-survival proof and its
-            // fail-closed distinction between ordinary evolution and a merge
-            // resolution that dropped delivery content.
-            if let Some(anchor) = resolved_anchor
-                && !commit_is_merged_into_parent(repo_path, anchor, parent_branch)
-                && dropped_paths.is_empty()
-                && content_check_error.is_none()
-                && merge_evidence_note.is_none()
-            {
-                match reanchored_delivery_content_in_parent(repo_path, anchor, parent_branch) {
-                    Some(ReanchoredDeliveryContent::Present { integration }) => {
-                        unmerged_count = 0;
-                        merge_evidence_note = Some(format!(
-                            "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
+        }
+        // A GitHub squash loses the original anchor's ancestry. If a
+        // later first-parent commit then evolves the same files, neither
+        // an exact anchor tree nor cherry patch remains on the current
+        // target. Re-anchor the child at the earliest target commit where
+        // its own effect is proven, then reuse the child-close content
+        // checker from that accepted integration point. That checker
+        // includes cas-fe81's zero-context hunk-survival proof and its
+        // fail-closed distinction between ordinary evolution and a merge
+        // resolution that dropped delivery content.
+        if let Some(anchor) = resolved_anchor
+            && !commit_is_merged_into_parent(repo_path, anchor, parent_branch)
+            && dropped_paths.is_empty()
+            && content_check_error.is_none()
+            && merge_evidence_note.is_none()
+        {
+            match reanchored_delivery_content_in_parent(repo_path, anchor, parent_branch) {
+                Some(ReanchoredDeliveryContent::Present { integration }) => {
+                    unmerged_count = 0;
+                    merge_evidence_note = Some(format!(
+                        "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
                              is integrated through accepted squash re-anchor `{integration}`. Its \
                              task-specific effect survives on `{parent_branch}` under the same \
                              hunk-survival proof used by child close.",
@@ -10535,108 +11026,116 @@ pub(crate) fn collect_epic_branch_statuses(
                              first-parent commit(s) {}. The child close content proof (including \
                              hunk survival) accepts this as post-integration evolution, not \
                              stranded work.",
-                            t.id,
-                            paths.join(", "),
-                            commits.join(", "),
-                        ));
-                    }
-                    None => {}
+                        t.id,
+                        paths.join(", "),
+                        commits.join(", "),
+                    ));
                 }
+                None => {}
             }
-            // cas-edba: the current worker lane is useful operational context,
-            // but a reset/reused lane at the parent tip cannot prove that this
-            // child's *recorded* delivery landed.  cas-32ee deliberately
-            // measures the live lane for the status count, then reconciles a
-            // non-ancestral anchor through task-specific direct or re-anchored
-            // content proof above.  If neither proof succeeds, preserve a
-            // positive sentinel for the close gate instead of allowing the
-            // lane's zero-ahead count to erase a dropped child delivery.
-            if let Some(anchor) = resolved_anchor
-                && !commit_is_merged_into_parent(repo_path, anchor, parent_branch)
-                && dropped_paths.is_empty()
-                && content_check_error.is_none()
-                && merge_evidence_note.is_none()
-                && content_evolution_note.is_none()
-            {
-                unmerged_count = unmerged_count.max(1);
-            }
-            // cas-b192: the reconciliation above proves content only through
-            // BYTE-IDENTICAL patch equivalence against a recorded anchor. That
-            // fails the moment later lanes refactor the same files, which is
-            // the normal shape of an epic that squash-landed and then evolved —
-            // and it never runs at all for a child with no resolvable anchor.
-            // Both cases then read as "stranded" purely because ancestry was
-            // lost, which is what produced a hard block plus a destructive
-            // merge instruction on five live lanes.
-            //
-            // So fall back to the same question one level down: does the branch
-            // still deliver anything the target does not already have? Only a
-            // positive CONTENT-PRESENT answer clears the child. BehindTarget
-            // and Unknown deliberately keep blocking — being behind is not
-            // proof that nothing was lost, and this guard must stay fail-closed
-            // even while it stops issuing destructive advice.
-            if unmerged_count > 0
-                && dropped_paths.is_empty()
-                && content_check_error.is_none()
-                && merge_evidence_note.is_none()
-                && !fallback_branches.is_empty()
-            {
-                let directions: Vec<BranchContentDirection> = fallback_branches
+        }
+        // cas-edba: the current worker lane is useful operational context,
+        // but a reset/reused lane at the parent tip cannot prove that this
+        // child's *recorded* delivery landed.  cas-32ee deliberately
+        // measures the live lane for the status count, then reconciles a
+        // non-ancestral anchor through task-specific direct or re-anchored
+        // content proof above.  If neither proof succeeds, preserve a
+        // positive sentinel for the close gate instead of allowing the
+        // lane's zero-ahead count to erase a dropped child delivery.
+        if let Some(anchor) = resolved_anchor
+            && !commit_is_merged_into_parent(repo_path, anchor, parent_branch)
+            && dropped_paths.is_empty()
+            && content_check_error.is_none()
+            && merge_evidence_note.is_none()
+            && content_evolution_note.is_none()
+        {
+            unmerged_count = unmerged_count.max(1);
+        }
+        // cas-b192: the reconciliation above proves content only through
+        // BYTE-IDENTICAL patch equivalence against a recorded anchor. That
+        // fails the moment later lanes refactor the same files, which is
+        // the normal shape of an epic that squash-landed and then evolved —
+        // and it never runs at all for a child with no resolvable anchor.
+        // Both cases then read as "stranded" purely because ancestry was
+        // lost, which is what produced a hard block plus a destructive
+        // merge instruction on five live lanes.
+        //
+        // So fall back to the same question one level down: does the branch
+        // still deliver anything the target does not already have? Only a
+        // positive CONTENT-PRESENT answer clears the child. BehindTarget
+        // and Unknown deliberately keep blocking — being behind is not
+        // proof that nothing was lost, and this guard must stay fail-closed
+        // even while it stops issuing destructive advice.
+        if unmerged_count > 0
+            && dropped_paths.is_empty()
+            && content_check_error.is_none()
+            && merge_evidence_note.is_none()
+            && !fallback_branches.is_empty()
+        {
+            let directions: Vec<BranchContentDirection> = fallback_branches
+                .iter()
+                .map(|branch| branch_content_direction(repo_path, branch, parent_branch))
+                .collect();
+            let delivered: Vec<String> = directions
+                .iter()
+                .flat_map(|d| match d {
+                    BranchContentDirection::ContentPresent { paths } => paths.clone(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            // A branch that delivers NO paths at all proves nothing about
+            // this child. That is the recycled/reset-to-parent shape: the
+            // branch was reused for other work and no longer represents the
+            // task, so "nothing to merge from it" must not be read as "the
+            // task's delivery landed". Withholding a merge instruction for
+            // such a branch is still correct — that is the guidance layer's
+            // job — but clearing the gate needs positive evidence, so this
+            // path requires at least one compared delivery path.
+            if !delivered.is_empty()
+                && directions
                     .iter()
-                    .map(|branch| branch_content_direction(repo_path, branch, parent_branch))
-                    .collect();
-                let delivered: Vec<String> = directions
-                    .iter()
-                    .flat_map(|d| match d {
-                        BranchContentDirection::ContentPresent { paths } => paths.clone(),
-                        _ => Vec::new(),
-                    })
-                    .collect();
-                // A branch that delivers NO paths at all proves nothing about
-                // this child. That is the recycled/reset-to-parent shape: the
-                // branch was reused for other work and no longer represents the
-                // task, so "nothing to merge from it" must not be read as "the
-                // task's delivery landed". Withholding a merge instruction for
-                // such a branch is still correct — that is the guidance layer's
-                // job — but clearing the gate needs positive evidence, so this
-                // path requires at least one compared delivery path.
-                if !delivered.is_empty()
-                    && directions
-                        .iter()
-                        .all(|d| matches!(d, BranchContentDirection::ContentPresent { .. }))
-                {
-                    unmerged_count = 0;
-                    merge_evidence_note = Some(format!(
-                        "decision: child task `{}` branch(es) {} are merged (squash, ancestry \
+                    .all(|d| matches!(d, BranchContentDirection::ContentPresent { .. }))
+            {
+                unmerged_count = 0;
+                merge_evidence_note = Some(format!(
+                    "decision: child task `{}` branch(es) {} are merged (squash, ancestry \
                          lost): every path they deliver is already byte-identical on \
                          `{parent_branch}`, so there is nothing left to integrate. Delivered \
                          path(s) checked: {}. Requiring a merge here would only pollute history \
                          — and where the branch is additionally behind, revert shipped work.",
-                        t.id,
-                        fallback_branches.join(", "),
-                        delivered.join(", "),
-                    ));
-                }
+                    t.id,
+                    fallback_branches.join(", "),
+                    delivered.join(", "),
+                ));
             }
-            EpicChildBranchStatus {
-                task_id: t.id.clone(),
-                task_status: t.status,
-                assignee: t.assignee.clone(),
-                dead_or_stale_assignee: false,
-                recorded_anchor: recorded_anchor.map(str::to_string),
-                factory_branch,
-                additional_factory_branches,
-                unmerged_count,
-                last_commit_unix: latest_commit_unix,
-                merge_evidence_note,
-                content_evolution_note,
-                dropped_paths,
-                content_check_error,
-                checked_ref_reads,
-                refs_unresolved,
-            }
-        })
-        .collect()
+        }
+        statuses.push(EpicChildBranchStatus {
+            task_id: t.id.clone(),
+            task_status: t.status,
+            assignee: t.assignee.clone(),
+            dead_or_stale_assignee: false,
+            recorded_anchor: recorded_anchor.map(str::to_string),
+            factory_branch,
+            additional_factory_branches,
+            unmerged_count,
+            last_commit_unix: latest_commit_unix,
+            merge_evidence_note,
+            content_evolution_note,
+            dropped_paths,
+            content_check_error,
+            checked_ref_reads,
+            refs_unresolved,
+        });
+    }
+
+    EpicStatusCollection {
+        statuses,
+        total_children,
+        offset,
+        requested_limit: options.limit,
+        summary: options.summary,
+        budget_exhausted,
+    }
 }
 
 /// Render the per-child branch statuses as a Markdown report for the
@@ -10662,11 +11161,70 @@ pub(crate) fn render_epic_status_report_with_stack(
     statuses: &[EpicChildBranchStatus],
     stacked_on: &[String],
 ) -> String {
+    render_epic_status_report_with_stack_and_view(
+        epic_id,
+        parent_branch,
+        statuses,
+        stacked_on,
+        None,
+    )
+}
+
+/// Render a budgeted or paged read-only epic-status collection. The view
+/// banner is intentionally omitted by the legacy renderer above so existing
+/// snapshots and close-gate diagnostics remain byte-stable.
+pub(crate) fn render_epic_status_collection(
+    epic_id: &str,
+    parent_branch: &str,
+    collection: &EpicStatusCollection,
+    stacked_on: &[String],
+) -> String {
+    render_epic_status_report_with_stack_and_view(
+        epic_id,
+        parent_branch,
+        &collection.statuses,
+        stacked_on,
+        Some(collection),
+    )
+}
+
+fn render_epic_status_report_with_stack_and_view(
+    epic_id: &str,
+    parent_branch: &str,
+    statuses: &[EpicChildBranchStatus],
+    stacked_on: &[String],
+    view: Option<&EpicStatusCollection>,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "Epic {epic_id} — factory branch status\n\
          Parent branch: {parent_branch}\n",
     ));
+    if let Some(view) = view {
+        if view.summary {
+            out.push_str("View: summary (ancestry-only; delivery-content proofs omitted)\n");
+        }
+        let page_start = view.offset.saturating_add(1);
+        let page_end = view.offset.saturating_add(statuses.len());
+        let omitted_before = view.offset.min(view.total_children);
+        let omitted_after = view
+            .total_children
+            .saturating_sub(view.offset.saturating_add(statuses.len()));
+        if view.requested_limit.is_some() || view.offset > 0 {
+            out.push_str(&format!(
+                "Page: children {page_start}–{page_end} of {} ({} before, {} after not shown)\n",
+                view.total_children, omitted_before, omitted_after
+            ));
+        }
+        if view.budget_exhausted {
+            let checked = view.offset.saturating_add(statuses.len());
+            let not_checked = view.total_children.saturating_sub(checked);
+            out.push_str(&format!(
+                "⚠️ Partial result: budget guard stopped after {} child task(s); {} child task(s) not checked.\n",
+                checked, not_checked
+            ));
+        }
+    }
     if !stacked_on.is_empty() {
         let quoted: Vec<String> = stacked_on.iter().map(|b| format!("'{b}'")).collect();
         let mut order = quoted.clone();
@@ -19605,6 +20163,154 @@ mod epic_status_gate_tests {
         }
     }
 
+    #[test]
+    fn epic_status_summary_pages_children_without_content_proof() {
+        let dir = init_epic_repo(&[("alpha", 1), ("bravo", 1), ("charlie", 1)]);
+        let subtasks = vec![
+            child("cas-c1", TaskStatus::Closed, Some("alpha")),
+            child("cas-c2", TaskStatus::Closed, Some("bravo")),
+            child("cas-c3", TaskStatus::Closed, Some("charlie")),
+        ];
+
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "main",
+            dir.path(),
+            EpicStatusOptions {
+                offset: 1,
+                limit: Some(1),
+                summary: true,
+                budget: EPIC_STATUS_BUDGET,
+            },
+        );
+
+        assert_eq!(collection.total_children, 3);
+        assert_eq!(collection.offset, 1);
+        assert_eq!(collection.requested_limit, Some(1));
+        assert!(collection.summary);
+        assert!(!collection.budget_exhausted);
+        assert_eq!(collection.statuses.len(), 1);
+        assert_eq!(collection.statuses[0].task_id, "cas-c2");
+        assert!(collection.statuses[0].merge_evidence_note.is_none());
+        assert!(collection.statuses[0].content_check_error.is_none());
+
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+        assert!(report.contains("View: summary (ancestry-only; delivery-content proofs omitted)"));
+        assert!(report.contains("Page: children 2–2 of 3 (1 before, 1 after not shown)"));
+    }
+
+    #[test]
+    fn epic_status_budget_guard_labels_unchecked_children() {
+        let dir = init_epic_repo(&[("alpha", 1)]);
+        let subtasks = vec![
+            child("cas-c1", TaskStatus::Closed, Some("alpha")),
+            child("cas-c2", TaskStatus::Closed, Some("missing")),
+        ];
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "main",
+            dir.path(),
+            EpicStatusOptions {
+                offset: 0,
+                limit: None,
+                summary: false,
+                budget: std::time::Duration::ZERO,
+            },
+        );
+
+        assert!(collection.statuses.is_empty());
+        assert!(collection.budget_exhausted);
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+        assert!(report.contains("Partial result"));
+        assert!(report.contains("2 child task(s) not checked"));
+    }
+
+    #[test]
+    fn epic_status_summary_scales_to_60_children() {
+        let workers: Vec<(&str, usize)> = (0..60)
+            .map(|index| {
+                (
+                    Box::leak(format!("worker-{index}").into_boxed_str()) as &str,
+                    1,
+                )
+            })
+            .collect();
+        let dir = init_epic_repo(&workers);
+        let subtasks: Vec<Task> = workers
+            .iter()
+            .enumerate()
+            .map(|(index, (worker, _))| {
+                child(&format!("cas-c{index}"), TaskStatus::Closed, Some(worker))
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "main",
+            dir.path(),
+            EpicStatusOptions {
+                offset: 0,
+                limit: None,
+                summary: true,
+                budget: EPIC_STATUS_BUDGET,
+            },
+        );
+
+        assert_eq!(collection.statuses.len(), 60);
+        assert!(!collection.budget_exhausted);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "60-child summary took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn epic_status_full_view_budget_stays_bounded_for_60_children() {
+        let workers: Vec<(&str, usize)> = (0..60)
+            .map(|index| (Box::leak(format!("anchored-worker-{index}").into_boxed_str()) as &str, 1))
+            .collect();
+        let dir = init_epic_repo(&workers);
+        let subtasks: Vec<Task> = workers
+            .iter()
+            .enumerate()
+            .map(|(index, (worker, _))| {
+                let mut task = child(
+                    &format!("cas-anchored-{index}"),
+                    TaskStatus::Closed,
+                    Some(worker),
+                );
+                task.deliverables.factory_branch_anchor =
+                    Some(epic_git_stdout(dir.path(), &["rev-parse", &format!("factory/{worker}")]));
+                task
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "main",
+            dir.path(),
+            EpicStatusOptions {
+                offset: 0,
+                limit: None,
+                summary: false,
+                budget: EPIC_STATUS_BUDGET,
+            },
+        );
+
+        assert!(collection.budget_exhausted || collection.statuses.len() == 60);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "60-child full view exceeded the MCP safety budget: {:?}",
+            started.elapsed()
+        );
+        if collection.budget_exhausted {
+            let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+            assert!(report.contains("Partial result"));
+            assert!(report.contains("not checked"));
+        }
+    }
+
     // --- collect_epic_branch_statuses ---------------------------------------
 
     #[test]
@@ -23582,8 +24288,13 @@ mod zero_change_close_tests {
         // The fix: resolve_close_parent_branch must select the epic
         // branch, never guess "main", when the worktree store has
         // nothing recorded (the common System-B factory-isolation shape).
-        let resolved = resolve_close_parent_branch(None, Some("epic/foo".to_string()), p)
-            .expect("explicit epic branch resolves");
+        let resolved = resolve_close_parent_branch(
+            None,
+            Some("epic/foo".to_string()),
+            None,
+            p,
+        )
+        .expect("explicit epic branch resolves");
         assert_eq!(
             resolved, "epic/foo",
             "must resolve the real epic branch, never a bare 'main'"

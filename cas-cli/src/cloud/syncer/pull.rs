@@ -883,7 +883,7 @@ fn unique_complete_provenance_block(notes: &str) -> Option<(usize, usize)> {
 /// Persist proposal provenance visibly in the ordinary local task record.
 /// The cloud proposal row remains authoritative; this rendering is explicitly
 /// labeled and is refreshed whenever the materialized task is pulled.
-fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
+pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
     let Some(raw_provenance) = raw.get("proposal_provenance").cloned() else {
         return;
     };
@@ -992,6 +992,21 @@ pub(crate) fn entity_matches_project(
         .and_then(|value| value.as_str())
         .unwrap_or("<unknown>");
 
+    // Accepted cross-project proposals are the one deliberate exception to
+    // the origin-first rule below. Their task row belongs to the receiving
+    // project, while `origin_project` records the proposing project. The
+    // server-attested provenance binds the exception to both the requested
+    // target scope and the exact task id; an ordinary foreign row cannot pass
+    // this predicate.
+    if entity_kind == "task" {
+        if accepted_proposal_targets_project(raw, current_project_id) {
+            return true;
+        }
+        if accepted_proposal_origin_project(raw, current_project_id) {
+            return false;
+        }
+    }
+
     // GH #701: the row's own `origin_project` outranks the server's scope
     // stamp. See `row_attribution` for the measurement that forced this — the
     // stamp is an echo of the requested scope, so reading it first admits
@@ -1065,6 +1080,62 @@ pub(crate) fn entity_matches_project(
             false
         }
     }
+}
+
+fn accepted_proposal_targets_project(raw: &serde_json::Value, current_project_id: &str) -> bool {
+    let Some(task_id) = raw.get("id").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(raw_provenance) = raw.get("proposal_provenance") else {
+        return false;
+    };
+    let Ok(provenance) = serde_json::from_value::<crate::cloud::task_proposals::ProposalProvenance>(
+        raw_provenance.clone(),
+    ) else {
+        return false;
+    };
+    let server = &provenance.server_attested;
+    if server.target_task_id != task_id
+        || !project_ids_match(&server.target_project_canonical_id, current_project_id)
+    {
+        return false;
+    }
+
+    // Keep the normal server-scope requirement in force. The exception is
+    // only for the origin-vs-target ownership distinction, never for a row
+    // that lacks or contradicts the target scope stamp.
+    let Some(server_scope) = task_wire_cloud_project(raw) else {
+        return false;
+    };
+    if !project_ids_match(server_scope, current_project_id) {
+        return false;
+    }
+    raw.get("origin_project")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|origin| project_ids_match(origin, &server.origin_project_canonical_id))
+}
+
+fn accepted_proposal_origin_project(raw: &serde_json::Value, current_project_id: &str) -> bool {
+    let Some(task_id) = raw.get("id").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(raw_provenance) = raw.get("proposal_provenance") else {
+        return false;
+    };
+    let Ok(provenance) = serde_json::from_value::<crate::cloud::task_proposals::ProposalProvenance>(
+        raw_provenance.clone(),
+    ) else {
+        return false;
+    };
+    let server = &provenance.server_attested;
+    server.target_task_id == task_id
+        && project_ids_match(&server.origin_project_canonical_id, current_project_id)
+        && raw
+            .get("origin_project")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|origin| project_ids_match(origin, &server.origin_project_canonical_id))
+        && task_wire_cloud_project(raw)
+            .is_some_and(|scope| project_ids_match(scope, &server.target_project_canonical_id))
 }
 
 fn project_ids_match(candidate: &str, current: &str) -> bool {
@@ -3262,6 +3333,35 @@ mod tests {
         });
         assert!(!entity_matches_project(&task, "gabber-studio", "task"));
         assert!(entity_matches_project(&task, "cas-src", "task"));
+    }
+
+    #[test]
+    fn an_accepted_proposal_row_is_admitted_by_attested_target_scope() {
+        let mut task = json!({
+            "id": "cas-0123456789abcdef",
+            "title": "accepted target work",
+            "origin_project": "origin-project",
+            "project_id": "target-project",
+        });
+        task["proposal_provenance"] = json!({
+            "server_attested": {
+                "proposal_id": "proposal-1",
+                "target_task_id": "cas-0123456789abcdef",
+                "creator_user_id": "user-1",
+                "team_id": "team-1",
+                "origin_project_canonical_id": "origin-project",
+                "target_project_canonical_id": "target-project",
+                "received_at": "2026-08-13T12:00:00Z",
+                "client_request_id": "request-1"
+            },
+            "client_asserted": {}
+        });
+
+        assert!(entity_matches_project(&task, "target-project", "task"));
+        assert!(!entity_matches_project(&task, "origin-project", "task"));
+
+        task["proposal_provenance"]["server_attested"]["target_task_id"] = json!("cas-other-task");
+        assert!(!entity_matches_project(&task, "target-project", "task"));
     }
 
     /// The fallback is load-bearing: rows written before `origin_project`

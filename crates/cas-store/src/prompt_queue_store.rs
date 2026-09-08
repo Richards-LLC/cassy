@@ -121,6 +121,14 @@ const UNSURFACED_UNLESS_EXPLICIT_ACK_SQL: &str = "AND (q.target = 'all_workers'
                       OR q.acked_via IS NULL
                       OR q.acked_via <> 'explicit_ack')";
 
+/// A daemon transport receipt is a provisional handoff, not proof the
+/// recipient's harness surfaced the body. Keep it visible to the recipient's
+/// next `inbox_poll`; that poll (or the turn-start hook) atomically replaces
+/// the provisional source with its own surfacing source. A missing receipt is
+/// also unseen, as before. (cas-5255 / GH #719)
+const UNCLAIMED_RECIPIENT_RECEIPT_SQL: &str =
+    "AND (seen.prompt_id IS NULL OR seen.source = 'transport_delivered')";
+
 /// cas-dcf2 (GH #390): may later activity be recorded as a weak, visibly
 /// non-confirming indication that a delivered message might have been seen?
 ///
@@ -873,11 +881,11 @@ impl std::fmt::Display for ObservationStatus {
 /// Which surfacing path wrote a `prompt_queue_recipient_seen` receipt
 /// (cas-7a01, GH #155).
 ///
-/// Both values are genuine surfacing receipts — the row's content was put in
-/// front of the recipient — but they are not the same evidence. `InboxPoll`
-/// requires the recipient to have decided to look; `HookSurfaced` means CAS
-/// injected the content into the recipient's turn at turn start, which is the
-/// only path that can rescue a message the recipient does not know exists.
+/// These sources are genuine surfacing receipts, but they are not the same
+/// evidence. `InboxPoll` requires the recipient to have decided to look;
+/// `HookSurfaced` means CAS injected the content into the recipient's turn at
+/// turn start; and `ObservedWake` means the daemon observed the recipient take
+/// the turn after an urgent wake or transcript-backed reaction.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SurfacingSource {
@@ -886,17 +894,19 @@ pub enum SurfacingSource {
     /// The `UserPromptSubmit` hook injected the row into the recipient's turn.
     HookSurfaced,
     /// The daemon's own transport (agent-teams inbox file or PTY injection)
-    /// put this row's content in front of this recipient (cas-b8ce, GH #176).
+    /// handed this row to the recipient (cas-b8ce, GH #176).
     ///
-    /// WHY THIS VARIANT EXISTS: the receipt table used to be written by CAS's
-    /// two surfacing paths ONLY. Every message a Claude teammate actually
-    /// receives arrives over a different transport — `write_to_inbox` into the
-    /// agent-teams inbox file, or a PTY injection — and those stamped
-    /// `transport_delivered_at` while leaving the per-recipient receipt empty.
-    /// `poll_unseen_for_recipient` defines "unread" as "no receipt", so the
-    /// recipient's own `inbox_poll` re-served its entire already-actioned
-    /// history. Two transports, one ledger.
+    /// This remains distinct from `InboxPoll`/`HookSurfaced` because a
+    /// successful handoff is provisional: a harness may drop the body before
+    /// surfacing it. The recipient's explicit poll can therefore replace this
+    /// receipt and claim the row, while a stronger surfacing receipt stays
+    /// terminal.
     TransportDelivered,
+    /// The daemon observed the recipient consume the delivered body, through
+    /// an urgent wake probe or a transcript-backed turn reaction. Unlike a
+    /// transport handoff, this is a strong claim and retires the row from the
+    /// unread view.
+    ObservedWake,
 }
 
 impl SurfacingSource {
@@ -905,6 +915,7 @@ impl SurfacingSource {
             Self::InboxPoll => "inbox_poll",
             Self::HookSurfaced => "hook_surfaced",
             Self::TransportDelivered => "transport_delivered",
+            Self::ObservedWake => "observed_wake",
         }
     }
 
@@ -913,6 +924,7 @@ impl SurfacingSource {
             "inbox_poll" => Some(Self::InboxPoll),
             "hook_surfaced" => Some(Self::HookSurfaced),
             "transport_delivered" => Some(Self::TransportDelivered),
+            "observed_wake" => Some(Self::ObservedWake),
             _ => None,
         }
     }
@@ -1222,6 +1234,18 @@ const PROMPT_QUEUE_DELIVERY_STALLED_NOTIFIED_AT_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN delivery_stalled_notified_at TEXT;
 "#;
 
+/// Durable marker for a successful Agent-Teams inbox handoff that remains
+/// pending while Cassy waits for the recipient harness to surface it. The
+/// daemon-local probe is still useful for pane byte baselines, but this marker
+/// is what prevents a daemon restart from treating a previously written row as
+/// a first delivery (GH #751).
+const PROMPT_QUEUE_DEFERRED_INBOX_AT_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN deferred_inbox_at TEXT;
+"#;
+const PROMPT_QUEUE_DEFERRED_INBOX_BYTES_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN deferred_inbox_bytes INTEGER;
+"#;
+
 /// cas-7a01 (GH #155): which surfacing path wrote a receipt. NULL on rows
 /// receipted before this column existed — those all came from `inbox_poll`,
 /// the only writer at the time, but they are left NULL rather than
@@ -1494,27 +1518,24 @@ pub trait PromptQueueStore: Send + Sync {
     /// # Why this exists
     ///
     /// `prompt_queue_recipient_seen` is the single ledger every "has this
-    /// recipient read it" question is answered from — most importantly
-    /// [`PromptQueueStore::poll_unseen_for_recipient`], whose predicate is
-    /// literally `seen.prompt_id IS NULL`. Until this method existed, that
-    /// ledger was written by two callers only: the `inbox_poll` drain and the
-    /// `UserPromptSubmit` hook. But the transport that actually delivers to a
-    /// Claude teammate is the agent-teams inbox file (`write_to_inbox`) or a
-    /// PTY injection, and those recorded delivery in `prompt_queue` columns
-    /// (`transport_delivered_at`, `processed_at`, `highest_stage`) that the
-    /// unread predicate does not consult. So a message could be delivered,
-    /// read, replied to and acted on, and still be re-served in full by the
-    /// recipient's next `inbox_poll` — GH #176's redelivery bursts.
+    /// recipient surfaced it" question is answered from — most importantly
+    /// [`PromptQueueStore::poll_unseen_for_recipient`]. The daemon's transport
+    /// writes a provisional receipt because `transport_delivered_at` proves a
+    /// handoff, not that the harness rendered the body. An explicit poll or
+    /// turn-start hook replaces that provisional source with its stronger
+    /// claim, preserving recovery for GH #719 without resurrecting a row after
+    /// it has actually been polled.
     ///
     /// # Contract
     ///
-    /// Callers must hold POSITIVE per-message evidence that THIS recipient
-    /// received THIS content — a completed PTY injection, or the harness
-    /// having taken the inbox copy with the pane then producing output. A
-    /// transport *attempt* is not evidence and must not call this: writing a
-    /// receipt for content nobody saw makes the message vanish from the only
-    /// view that would reveal it, which is the failure mode cas-ac7e
-    /// (GH #130) exists to prevent.
+    /// Callers must hold evidence about THIS recipient and THIS content. A
+    /// completed PTY injection, or the harness having taken the inbox copy
+    /// with the pane then producing output, is a surfaced receipt. A successful
+    /// inbox write may also record `TransportDelivered`, but that source is
+    /// provisional: the recipient's next `inbox_poll` remains eligible and
+    /// atomically replaces it with `InboxPoll`. This keeps a wake-declined row
+    /// recoverable instead of making it vanish from the only view that would
+    /// reveal it (cas-5255 / GH #719).
     ///
     /// Deliberately does NOT set `acked_at`. Delivery is not acknowledgement;
     /// any later outbound activity is separately recorded as `assumed_seen`,
@@ -1547,6 +1568,18 @@ pub trait PromptQueueStore: Send + Sync {
     /// Persist one declined wake-gate pass and return its consecutive count.
     /// The count is per message, not per daemon process.
     fn record_wake_gate_decline(&self, prompt_id: i64, detail: &str) -> Result<u32>;
+
+    /// Read the durable wake-gate retry state for one pending message.
+    /// `wake_gate_declines` is the attempt budget and `wake_attempt_at` is the
+    /// spacing watermark; both survive daemon restarts.
+    fn wake_gate_state(&self, prompt_id: i64) -> Result<(u32, Option<DateTime<Utc>>) >;
+
+    /// Record that a Teams inbox write succeeded while the row stayed pending
+    /// for a later wake. This marker is idempotent and survives daemon restart.
+    fn record_deferred_inbox(&self, prompt_id: i64, pane_bytes: u64) -> Result<()>;
+
+    /// Return the durable deferred-inbox handoff timestamp and pane baseline.
+    fn deferred_inbox_state(&self, prompt_id: i64) -> Result<Option<(DateTime<Utc>, u64)>>;
 
     /// Count the messages `recipient` has NOT yet seen, without consuming them.
     ///
@@ -2366,7 +2399,8 @@ impl SqlitePromptQueueStore {
             "FROM prompt_queue q
              LEFT JOIN prompt_queue_recipient_seen seen
                ON seen.prompt_id = q.id AND seen.recipient = ?
-             WHERE seen.prompt_id IS NULL
+             WHERE 1 = 1
+               {UNCLAIMED_RECIPIENT_RECEIPT_SQL}
                {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                {deliverable_sql}
                AND (q.target = ? OR q.target = 'all_workers')
@@ -2470,6 +2504,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     "delivery_stalled_notified_at",
                     PROMPT_QUEUE_DELIVERY_STALLED_NOTIFIED_AT_MIGRATION,
                 ),
+                ("deferred_inbox_at", PROMPT_QUEUE_DEFERRED_INBOX_AT_MIGRATION),
+                (
+                    "deferred_inbox_bytes",
+                    PROMPT_QUEUE_DEFERRED_INBOX_BYTES_MIGRATION,
+                ),
             ] {
                 crate::shared_db::ensure_column(&conn, "prompt_queue", col, mig)?;
             }
@@ -2542,6 +2581,80 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 .flatten();
             Ok(declines.unwrap_or(0).try_into().unwrap_or(u32::MAX))
         })
+    }
+
+    fn wake_gate_state(&self, prompt_id: i64) -> Result<(u32, Option<DateTime<Utc>>)> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let row = conn
+            .query_row(
+                "SELECT wake_gate_declines, wake_attempt_at
+                 FROM prompt_queue WHERE id = ?",
+                params![prompt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0).unwrap_or(0),
+                        row.get::<_, Option<String>>(1).unwrap_or(None),
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((declines, at)) = row else {
+            return Ok((0, None));
+        };
+        let at = at
+            .as_deref()
+            .map(|raw| {
+                Self::parse_datetime(raw).ok_or_else(|| {
+                    StoreError::Parse(format!(
+                        "prompt_queue id={prompt_id}: corrupt/unparseable wake_attempt_at timestamp: {raw:?}"
+                    ))
+                })
+            })
+            .transpose()?;
+        Ok((declines.try_into().unwrap_or(u32::MAX), at))
+    }
+
+    fn record_deferred_inbox(&self, prompt_id: i64, pane_bytes: u64) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            conn.execute(
+                "UPDATE prompt_queue
+                 SET deferred_inbox_at = COALESCE(deferred_inbox_at, ?),
+                     deferred_inbox_bytes = COALESCE(deferred_inbox_bytes, ?)
+                 WHERE id = ? AND processed_at IS NULL",
+                params![Utc::now().to_rfc3339(), i64::try_from(pane_bytes).unwrap_or(i64::MAX), prompt_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn deferred_inbox_state(&self, prompt_id: i64) -> Result<Option<(DateTime<Utc>, u64)>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let row = conn
+            .query_row(
+                "SELECT deferred_inbox_at, deferred_inbox_bytes
+                 FROM prompt_queue WHERE id = ?",
+                params![prompt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0).unwrap_or(None),
+                        row.get::<_, Option<i64>>(1).unwrap_or(None),
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((at, bytes)) = row else {
+            return Ok(None);
+        };
+        let Some(at) = at else {
+            return Ok(None);
+        };
+        let at = Self::parse_datetime(&at).ok_or_else(|| {
+            StoreError::Parse(format!(
+                "prompt_queue id={prompt_id}: corrupt/unparseable deferred_inbox_at timestamp: {at:?}"
+            ))
+        })?;
+        Ok(Some((at, bytes.unwrap_or(0).try_into().unwrap_or(u64::MAX))))
     }
 
     fn enqueue(&self, source: &str, target: &str, prompt: &str) -> Result<i64> {
@@ -3053,9 +3166,14 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute(
-                "INSERT OR IGNORE INTO prompt_queue_recipient_seen
+                "INSERT INTO prompt_queue_recipient_seen
                      (prompt_id, recipient, seen_at, source)
-                 VALUES (?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(prompt_id, recipient) DO UPDATE SET
+                     seen_at = excluded.seen_at,
+                     source = excluded.source
+                 WHERE prompt_queue_recipient_seen.source = 'transport_delivered'
+                   AND excluded.source <> 'transport_delivered'",
                 params![
                     prompt_id,
                     recipient,
@@ -4578,7 +4696,8 @@ impl SqlitePromptQueueStore {
                          FROM prompt_queue q
                          LEFT JOIN prompt_queue_recipient_seen seen
                            ON seen.prompt_id = q.id AND seen.recipient = ?
-                         WHERE seen.prompt_id IS NULL
+                         WHERE 1 = 1
+                           {UNCLAIMED_RECIPIENT_RECEIPT_SQL}
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
@@ -4610,7 +4729,8 @@ impl SqlitePromptQueueStore {
                          FROM prompt_queue q
                          LEFT JOIN prompt_queue_recipient_seen seen
                            ON seen.prompt_id = q.id AND seen.recipient = ?
-                         WHERE seen.prompt_id IS NULL
+                         WHERE 1 = 1
+                           {UNCLAIMED_RECIPIENT_RECEIPT_SQL}
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
@@ -4635,9 +4755,13 @@ impl SqlitePromptQueueStore {
             if !prompts.is_empty() {
                 let seen_at = Utc::now().to_rfc3339();
                 let mut stmt = tx.prepare_cached(
-                    "INSERT OR IGNORE INTO prompt_queue_recipient_seen
+                    "INSERT INTO prompt_queue_recipient_seen
                          (prompt_id, recipient, seen_at, source)
-                     VALUES (?, ?, ?, ?)",
+                     VALUES (?, ?, ?, ?)
+                     ON CONFLICT(prompt_id, recipient) DO UPDATE SET
+                         seen_at = excluded.seen_at,
+                         source = excluded.source
+                     WHERE prompt_queue_recipient_seen.source = 'transport_delivered'",
                 )?;
                 for prompt in &prompts {
                     stmt.execute(params![prompt.id, recipient, seen_at, source.as_str()])?;
@@ -5535,9 +5659,10 @@ mod tests {
     /// instant — because "unread" is `seen.prompt_id IS NULL` and the transport
     /// that did the delivering wrote no receipt.
     ///
-    /// Delivery over ANY transport must be terminal for the unread view.
+    /// Transport delivery remains recoverable until the recipient claims it.
+    /// Once the recipient polls, its stronger InboxPoll receipt is terminal.
     #[test]
-    fn a_transport_delivered_row_is_not_re_served_by_the_recipients_own_poll() {
+    fn a_transport_delivered_row_is_pollable_until_the_recipients_own_poll_claims_it() {
         let (_temp, store) = create_test_store();
         let id = store
             .enqueue("supervisor", "zealous-fox-95", "Assignment: cas-5c50")
@@ -5551,14 +5676,23 @@ mod tests {
             .unwrap();
         store.mark_transport_delivered(id).unwrap();
 
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("zealous-fox-95", None, 20)
+                .unwrap()
+                .iter()
+                .map(|prompt| prompt.id)
+                .collect::<Vec<_>>(),
+            vec![id],
+            "a transport receipt is provisional so the recipient can recover \
+             a body whose harness wake was dropped"
+        );
         assert!(
             store
                 .poll_unseen_for_recipient("zealous-fox-95", None, 20)
                 .unwrap()
                 .is_empty(),
-            "a row this recipient was already shown over the daemon's own \
-             transport must not come back from its inbox_poll — that is the \
-             GH #176 redelivery burst"
+            "the recipient's InboxPoll claim must stop the old GH #176 redelivery burst"
         );
         assert_eq!(
             store
@@ -5586,12 +5720,22 @@ mod tests {
             .record_recipient_surfaced(id, "worker-a", SurfacingSource::TransportDelivered)
             .unwrap();
 
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("worker-a", None, 20)
+                .unwrap()
+                .iter()
+                .map(|prompt| prompt.id)
+                .collect::<Vec<_>>(),
+            vec![id],
+            "a transport receipt must not hide a broadcast from the worker's poll"
+        );
         assert!(
             store
                 .poll_unseen_for_recipient("worker-a", None, 20)
                 .unwrap()
                 .is_empty(),
-            "the receipted worker is done with this broadcast"
+            "the worker's own poll is the terminal claim for this broadcast"
         );
         assert_eq!(
             store
@@ -5636,9 +5780,35 @@ mod tests {
         assert_eq!(
             recipient_seen_at(&store, id, "worker-1"),
             Some(first),
-            "INSERT OR IGNORE: a re-observed delivery must leave the original \
+            "a repeated transport receipt must leave the original \
              receipt instant untouched"
         );
+    }
+
+    #[test]
+    fn deferred_inbox_handoff_and_wake_budget_survive_store_reopen() {
+        let (temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-1", "dispatch", "session")
+            .unwrap();
+        let first = store.record_wake_gate_decline(id, "worker busy").unwrap();
+        assert_eq!(first, 1);
+        store.record_deferred_inbox(id, 1234).unwrap();
+
+        drop(store);
+        let reopened = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        reopened.init().unwrap();
+        assert_eq!(
+            reopened.wake_gate_state(id).unwrap().0,
+            1,
+            "a daemon restart must not reset the per-message retry budget"
+        );
+        let (at, bytes) = reopened
+            .deferred_inbox_state(id)
+            .unwrap()
+            .expect("successful deferred inbox handoff must be durable");
+        assert!(at <= Utc::now());
+        assert_eq!(bytes, 1234);
     }
 
     /// Read back the persisted receipt instant for one (message, recipient).

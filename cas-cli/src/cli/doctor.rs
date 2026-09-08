@@ -251,6 +251,7 @@ impl CheckGroup {
             | "config repair"
             | "mcp config"
             | "mcp stdio upstreams"
+            | "mcp upstream reachability"
             | "sync target"
             | "models" =>
             {
@@ -546,9 +547,45 @@ fn host_known_repos_check() -> Check {
     if !db.is_file() { return Check::new("known repos", CheckStatus::Ok, "host registry is not initialized"); }
     match crate::worktree::discovery::list_tracked_repos() {
         Ok(repos) => {
-            let missing = repos.iter().filter(|repo| !repo.healthy).count();
-            if missing == 0 { Check::new("known repos", CheckStatus::Ok, format!("{} known repo(s); all roots exist", repos.len())) }
-            else { Check::new("known repos", CheckStatus::Warning, format!("{missing} missing root(s); run `cas doctor --fix` to prune them")) }
+            let missing = repos
+                .iter()
+                .filter(|repo| {
+                    matches!(
+                        crate::store::known_repos::classify_known_repo(&repo.path),
+                        crate::store::known_repos::KnownRepoState::MissingRoot
+                    )
+                })
+                .count();
+            let no_store = repos
+                .iter()
+                .filter(|repo| {
+                    matches!(
+                        crate::store::known_repos::classify_known_repo(&repo.path),
+                        crate::store::known_repos::KnownRepoState::MissingStore
+                    )
+                })
+                .count();
+            let mut findings = Vec::new();
+            if missing > 0 {
+                findings.push(format!(
+                    "{missing} missing root(s); run `cas doctor --fix` to prune them"
+                ));
+            }
+            if no_store > 0 {
+                findings.push(format!(
+                    "{} registered root(s) exist but have no Cassy store; run `cas init` in each root or `cas known-repos forget <path>`",
+                    no_store
+                ));
+            }
+            if findings.is_empty() {
+                Check::new(
+                    "known repos",
+                    CheckStatus::Ok,
+                    format!("{} known repo(s); all roots have Cassy stores", repos.len()),
+                )
+            } else {
+                Check::new("known repos", CheckStatus::Warning, findings.join("; "))
+            }
         }
         Err(error) => Check::new("known repos", CheckStatus::Warning, format!("cannot inspect host registry: {error}")),
     }
@@ -598,7 +635,32 @@ fn host_summary(checks: &[Check]) -> Check {
 fn host_autofix() -> Option<Check> {
     if !crate::store::known_repos::host_cas_dir().join("cas.db").is_file() { return None; }
     match crate::cli::known_repos::prune_missing(false) {
-        Ok(report) if report.removed > 0 => Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: known repos — pruned {} missing root(s)", report.removed))),
+        Ok(report) if report.removed > 0 => {
+            let retained = if report.no_store > 0 {
+                format!(
+                    "; retained {} live root(s) without a Cassy store — run `cas init` there or `cas known-repos forget <path>`",
+                    report.no_store
+                )
+            } else {
+                String::new()
+            };
+            Some(Check::new(
+                "auto-fix",
+                CheckStatus::Ok,
+                format!(
+                    "fixed: known repos — pruned {} missing root(s){retained}",
+                    report.removed
+                ),
+            ))
+        }
+        Ok(report) if report.no_store > 0 => Some(Check::new(
+            "auto-fix",
+            CheckStatus::Info,
+            format!(
+                "known repos: no safe automatic fix for {} live root(s) without a Cassy store — run `cas init` there or `cas known-repos forget <path>`",
+                report.no_store
+            ),
+        )),
         Ok(_) => None,
         Err(error) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("known-repos prune failed: {error}"))),
     }
@@ -1553,6 +1615,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     #[cfg(feature = "mcp-proxy")]
     checks.push(proxy_stdio_commands_check(&cas_root));
+    #[cfg(feature = "mcp-proxy")]
+    checks.push(proxy_upstream_reachability_check(&cas_root));
 
     recorder.mark("config and proxy", &checks);
     // Check 6: Sync target
@@ -3937,9 +4001,12 @@ fn is_missing_changelog_error(source: &str, error: &str) -> bool {
 fn format_history_source_error(source: &str, error: &str) -> String {
     if source.eq_ignore_ascii_case("github") {
         let lower = error.to_ascii_lowercase();
-        if lower.contains("issues.repo") || lower.contains("repo is not configured") {
+        if lower.contains("issues.repo")
+            || lower.contains("history.github_repo")
+            || lower.contains("repo is not configured")
+        {
             return format!(
-                "github: {}. Run `cas config set issues.repo <owner/repo>`",
+                "github: {}. Run `cas config set history.github_repo <owner/repo>` (or configure a GitHub origin)",
                 truncate(error, 100)
             );
         }
@@ -4202,8 +4269,30 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .map(|(entity_type, count)| format!("{entity_type}: {count}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let registration_conflicts = cloud_queue_registration_conflicts(&conn);
     let remediation = "Run `cas cloud queue --retry`, then `cas cloud push`, then `cas cloud purge-foreign --dry-run`; repeat the push until this count reaches 0.";
     let rejections = cloud_queue_rejections(&conn);
+
+    if !registration_conflicts.is_empty() {
+        let parked = registration_conflicts
+            .iter()
+            .map(|(_, count, _)| *count)
+            .sum::<usize>();
+        let detail = registration_conflicts
+            .iter()
+            .map(|(entity_type, count, _)| format!("{entity_type}: {count}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let remedy = "Resolve with `cas cloud project set <registered-canonical-id>` or a cloud-owner alias, then run `cas cloud sync`; parked rows are not transport retries.";
+        return Check {
+            name: "cloud sync queue".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "{} queued content change(s) block purge-foreign ({breakdown}); {parked} pending-with-registration-conflict row(s) are parked-with-reason: {detail}. {remedy}",
+                pending.len()
+            ),
+        };
+    }
 
     if pending.is_empty() && rejections.is_empty() {
         Check {
@@ -4240,6 +4329,46 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
             ),
         }
     }
+}
+
+/// Pending rows annotated before a sync could attempt them because the cloud
+/// rejected the project registration. They remain retryable (`retry_count = 0`)
+/// but need identity repair, not a queue retry.
+fn cloud_queue_registration_conflicts(
+    conn: &rusqlite::Connection,
+) -> Vec<(String, usize, String)> {
+    let has_columns: bool = conn
+        .query_row(
+            "SELECT COUNT(*) = 2 FROM pragma_table_info('sync_queue') WHERE name IN ('last_outcome', 'last_reason')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_columns {
+        return Vec::new();
+    }
+
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT entity_type, COUNT(*), COALESCE(MAX(last_error), '')
+         FROM sync_queue
+         WHERE retry_count < 5
+           AND last_outcome = 'parked'
+           AND last_reason = 'project_registration_conflict'
+         GROUP BY entity_type
+         ORDER BY entity_type",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)? as usize,
+            row.get::<_, String>(2)?,
+        ))
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
 }
 
 /// Terminal queue rows the cloud itself refused, grouped by its reason.
@@ -4364,6 +4493,98 @@ fn proxy_stdio_commands_check(cas_root: &Path) -> Check {
                 missing.join(", ")
             ),
         }
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn proxy_upstream_reachability_check(cas_root: &Path) -> Check {
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+    let proxy_path = cas_root.join("proxy.toml");
+    let config = match cmcp_core::config::Config::load_merged(
+        proxy_path.exists().then_some(proxy_path.as_path()),
+    ) {
+        Ok(config) => config,
+        Err(error) => {
+            return Check {
+                name: "MCP upstream reachability".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot probe configured upstreams: {error}"),
+            };
+        }
+    };
+    if config.servers.is_empty() {
+        return Check {
+            name: "MCP upstream reachability".to_string(),
+            status: CheckStatus::Ok,
+            message: "no configured upstreams to probe".to_string(),
+        };
+    }
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return Check {
+                name: "MCP upstream reachability".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("could not create bounded probe runtime: {error}"),
+            };
+        }
+    };
+    let snapshot = match runtime.block_on(cmcp_core::ProxyEngine::probe_configs(
+        config.servers,
+        PROBE_TIMEOUT,
+    )) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return Check {
+                name: "MCP upstream reachability".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "probe failed before checking each configured upstream once: {error}"
+                ),
+            };
+        }
+    };
+
+    let mut reachable = Vec::new();
+    let mut unavailable = Vec::new();
+    for server in snapshot.servers {
+        if server.state == cmcp_core::UpstreamState::Healthy {
+            reachable.push(server.name);
+        } else {
+            let detail = server
+                .last_error
+                .or(server.last_error_code)
+                .unwrap_or_else(|| "no diagnostic detail".to_string());
+            unavailable.push(format!("{} ({detail})", server.name));
+        }
+    }
+    reachable.sort();
+    unavailable.sort();
+    let status = if unavailable.is_empty() {
+        CheckStatus::Ok
+    } else {
+        CheckStatus::Warning
+    };
+    let mut message = format!(
+        "checked {} configured upstream(s) once; reachable: {}",
+        reachable.len() + unavailable.len(),
+        if reachable.is_empty() {
+            "(none)".to_string()
+        } else {
+            reachable.join(", ")
+        }
+    );
+    if !unavailable.is_empty() {
+        message.push_str(&format!("; unavailable: {}", unavailable.join(", ")));
+    }
+    Check {
+        name: "MCP upstream reachability".to_string(),
+        status,
+        message,
     }
 }
 
@@ -5838,6 +6059,60 @@ mod tests {
     }
 
     #[test]
+    fn doctor_queue_check_does_not_prescribe_retry_for_pending_registration_conflicts() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_outcome TEXT,
+                last_reason TEXT,
+                failed_client_version TEXT
+            );
+            INSERT INTO sync_queue
+                (id, entity_type, entity_id, operation, created_at, retry_count,
+                 last_error, last_outcome, last_reason)
+            VALUES
+                (1, 'task', 'task-a', 'upsert', '2026-09-01T00:00:00Z', 0,
+                 'project_registration_conflict: requested github.com/richards-llc/pulse-card conflicts with registered pulse-card; run cas cloud project set pulse-card or file an alias with the cloud owner',
+                 'parked', 'project_registration_conflict');
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            check.message.contains("pending-with-registration-conflict"),
+            "{}",
+            check.message
+        );
+        assert!(check.message.contains("parked-with-reason"), "{}", check.message);
+        assert!(
+            check
+                .message
+                .contains("cas cloud project set <registered-canonical-id>"),
+            "{}",
+            check.message
+        );
+        assert!(!check.message.contains("cas cloud queue --retry"), "{}", check.message);
+    }
+
+    #[test]
     fn doctor_queue_check_is_quiet_on_databases_without_the_verdict_columns() {
         use rusqlite::Connection;
 
@@ -6030,6 +6305,43 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn doctor_proxy_reachability_check_reports_real_missing_credential_detail() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|_| {
+            let temp = TempDir::new().unwrap();
+            let cas_root = temp.path().join(".cas");
+            fs::create_dir_all(&cas_root).unwrap();
+            let missing = format!("CAS_DOCTOR_PROXY_MISSING_{}", std::process::id());
+            let mut config = cmcp_core::config::Config::default();
+            config.add_server(
+                "neon".to_string(),
+                cmcp_core::config::ServerConfig::Http {
+                    url: "https://neon.example.invalid/mcp".to_string(),
+                    auth: Some(format!("env:{missing}")),
+                    headers: std::collections::HashMap::new(),
+                    oauth: false,
+                },
+            );
+            config.save_to(&cas_root.join("proxy.toml")).unwrap();
+
+            let check = proxy_upstream_reachability_check(&cas_root);
+            assert!(matches!(check.status, CheckStatus::Warning));
+            assert!(
+                check
+                    .message
+                    .contains("checked 1 configured upstream(s) once")
+            );
+            assert!(
+                check.message.contains(&format!(
+                    "neon (missing required environment variable {missing})"
+                )),
+                "{}",
+                check.message
+            );
+        });
+    }
+
     #[test]
     fn foreign_rows_check_warns_when_a_peer_db_could_not_be_read_cas_fc6fa() {
         use crate::cli::foreign_rows::{ForeignRowReport, UnreadablePeer};
@@ -6111,6 +6423,55 @@ mod tests {
             .filter(|c| c.name == name)
             .map(|c| c.message.clone())
             .collect()
+    }
+
+    #[test]
+    fn host_known_repos_distinguishes_a_live_root_without_a_cas_store() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let without_store = home.join("registered-without-cas");
+            std::fs::create_dir_all(&without_store).unwrap();
+            crate::store::known_repos::register_repo_strict(&without_store).unwrap();
+
+            let check = host_known_repos_check();
+            assert!(matches!(check.status, CheckStatus::Warning));
+            assert!(!check.message.contains("missing root"), "{}", check.message);
+            assert!(check.message.contains("have no Cassy store"), "{}", check.message);
+            assert!(check.message.contains("cas init"), "{}", check.message);
+            assert!(check.message.contains("cas known-repos forget"), "{}", check.message);
+
+            let fix = host_autofix().expect("doctor --fix should explain the manual remedy");
+            assert!(matches!(fix.status, CheckStatus::Info));
+            assert!(fix.message.contains("no safe automatic fix"), "{}", fix.message);
+            assert!(fix.message.contains("cas known-repos forget"), "{}", fix.message);
+        });
+    }
+
+    #[test]
+    fn host_known_repos_fix_prunes_a_gone_root_it_reports() {
+        use crate::store::KnownRepoStore as _;
+
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let gone = home.join("gone-repo");
+            crate::store::known_repos::register_repo_strict(&gone).unwrap();
+
+            let check = host_known_repos_check();
+            assert!(matches!(check.status, CheckStatus::Warning));
+            assert!(check.message.contains("missing root"), "{}", check.message);
+            assert!(check.message.contains("cas doctor --fix"), "{}", check.message);
+
+            let fix = host_autofix().expect("doctor --fix should prune the gone root");
+            assert!(matches!(fix.status, CheckStatus::Ok));
+            assert!(fix.message.contains("pruned 1 missing root"), "{}", fix.message);
+            assert_eq!(
+                crate::store::known_repos::open_host_known_repo_store()
+                    .unwrap()
+                    .count()
+                    .unwrap(),
+                0
+            );
+        });
     }
 
     #[test]
@@ -7380,6 +7741,16 @@ mod tests {
             check.message
         );
         assert!(check.message.contains("changelog"), "{}", check.message);
+    }
+
+    #[test]
+    fn history_repo_configuration_error_names_history_key_not_issue_intake() {
+        let rendered = format_history_source_error(
+            "github",
+            "history.github_repo is not configured; set it with `cas config set history.github_repo owner/name`",
+        );
+        assert!(rendered.contains("history.github_repo"), "{rendered}");
+        assert!(!rendered.contains("cas config set issues.repo"), "{rendered}");
     }
 
     /// An unreadable health signal reads as health. This arm is why the check

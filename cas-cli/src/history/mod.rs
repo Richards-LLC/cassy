@@ -196,6 +196,56 @@ pub fn repo_root_for(cas_root: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(root))
 }
 
+/// Resolve the GitHub `owner/repo` used by the code-history document index.
+///
+/// An explicit `[history] github_repo` override wins. Otherwise the checkout's
+/// GitHub `origin` is used, including the migration case where an older config
+/// set `[issues] repo` to that same origin for history. A different
+/// `issues.repo` remains untouched and is never used for history: it is the
+/// Cassy-system bug-intake destination.
+pub fn resolve_github_repo(config: &crate::config::Config, repo_root: &Path) -> Option<String> {
+    if let Some(repo) = config
+        .history
+        .as_ref()
+        .and_then(|history| history.github_repo.as_deref())
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+    {
+        return Some(repo.to_string());
+    }
+
+    let origin = github_repo_from_origin(repo_root);
+    if let Some(origin) = &origin
+        && config
+            .issues
+            .as_ref()
+            .and_then(|issues| issues.repo.as_deref())
+            .is_some_and(|repo| repo.trim().eq_ignore_ascii_case(origin))
+    {
+        // Legacy migration: the old shared key already pointed at origin, so
+        // preserve that effective target while the new key remains unset.
+        return Some(origin.clone());
+    }
+    origin
+}
+
+/// Read and validate a GitHub `owner/repo` from the checkout's `origin`.
+/// Non-GitHub origins are not valid GraphQL targets and therefore remain an
+/// honest `GitHub unavailable` boundary instead of being guessed into one.
+pub fn github_repo_from_origin(repo_root: &Path) -> Option<String> {
+    let raw = crate::cloud::git_origin_url(repo_root)?;
+    let normalized = crate::cloud::normalize_git_remote_url(&raw)?;
+    let (host, path) = normalized.split_once('/')?;
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+    let (owner, name) = path.split_once('/')?;
+    let candidate = format!("{owner}/{name}");
+    crate::gh_graphql::split_repo(&candidate)
+        .ok()
+        .map(|(owner, name)| format!("{owner}/{name}"))
+}
+
 /// Stable identity for a repository in the index tables.
 pub fn repository_id(repo_root: &Path) -> String {
     repo_root
@@ -650,7 +700,7 @@ pub fn run_changelog_pass(cas_root: &Path, repo_root: &Path) -> Result<Option<us
 pub fn run_docs_pass(
     cas_root: &Path,
     repo_root: &Path,
-    repo: Option<&str>,
+    history_repo: Option<&str>,
     force: bool,
     want_github: bool,
     want_changelog: bool,
@@ -658,11 +708,11 @@ pub fn run_docs_pass(
     let mut outcome = DocsOutcome::default();
 
     if want_github {
-        outcome.github = Some(match repo {
+        outcome.github = Some(match history_repo {
             Some(repo) => github::run_pass(cas_root, repo_root, repo, force)
                 .map_err(|e| e.to_string()),
-            // No `issues.repo`: report the boundary and propose nothing, the
-            // precedent set by the SessionStart detector (spec §8).
+            // No GitHub origin or explicit history repository: report the
+            // boundary and propose the new key, never the issue-intake key.
             None => {
                 let repository = repository_id(repo_root);
                 if let Ok(store) = SqliteHistoryStore::open(cas_root) {

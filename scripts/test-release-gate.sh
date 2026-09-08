@@ -132,6 +132,10 @@ printf 'ZIG=%s :: %s\n' "${ZIG:-unset}" "$*" \
   >>"${GATE_FIXTURE_ZIG_LOG:-/dev/null}"
 printf 'RUSTC_WRAPPER=%s CARGO_HOME=%s :: %s\n' "${RUSTC_WRAPPER:-unset}" "${CARGO_HOME:-unset}" "$*" \
   >>"${GATE_FIXTURE_ARCHIVE_ENV_LOG:-/dev/null}"
+printf 'CAS_FACTORY_SESSION=%s CAS_AGENT_ROLE=%s CAS_AGENT_NAME=%s CAS_SUPERVISOR_NAME=%s CAS_AGENT_ID=%s :: %s\n' \
+  "${CAS_FACTORY_SESSION:-unset}" "${CAS_AGENT_ROLE:-unset}" "${CAS_AGENT_NAME:-unset}" \
+  "${CAS_SUPERVISOR_NAME:-unset}" "${CAS_AGENT_ID:-unset}" "$*" \
+  >>"${GATE_FIXTURE_FACTORY_ENV_LOG:-/dev/null}"
 if [[ "$*" == 'check --workspace --tests' && "${GATE_FIXTURE_CHECK_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'nextest run --workspace'* && "${GATE_FIXTURE_NEXTEST_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == *'builtin_archive_portability_test'* && "${GATE_FIXTURE_FIXTURE_PATHS_FAIL:-}" == 1 ]]; then exit 1; fi
@@ -210,7 +214,8 @@ assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config \
         version-literals fixture-paths workspace-tests nextest doctests archive-mode snapshot-portability \
-        builtin-projections changelog-and-versions release-script procedure-guardrails working-tree hub-web-visual-qa; do
+        builtin-projections changelog-and-versions release-script procedure-guardrails working-tree \
+        hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
             return
@@ -260,6 +265,12 @@ if [[ "$1" == ci ]]; then
   : >"${GATE_FIXTURE_NPM_CI_MARKER:?}"
   exit 0
 fi
+if [[ "$1" == run && "${2:-}" == build ]]; then
+  mkdir -p dist
+  printf 'built: ' >dist/app.js
+  cat src/main.ts >>dist/app.js
+  exit 0
+fi
 if [[ "$1" == exec && "$*" == *'playwright install chromium'* ]]; then
   exit 0
 fi
@@ -293,6 +304,93 @@ if grep -qF 'PASS hub-web-visual-qa' <<<"$output" && \
     ok 'hub-web-visual-qa installs dependencies before invoking the runner'
 else
     bad "hub-web-visual-qa dependency install contract failed (output: $output; npm log: $(cat "$tmp/npm.log" 2>/dev/null || true))"
+fi
+
+# cas-83ff. Building Commander web assets must prove committed dist stays in
+# sync with src, and the later visual-QA row must reuse the same npm install.
+repo="$(new_fixture hub-web-dist-drift)"
+mkdir -p "$repo/hub-web/src" "$repo/hub-web/dist"
+printf '%s\n' '{"name":"hub-web-fixture","private":true,"scripts":{"build":"fixture-build"}}' \
+    >"$repo/hub-web/package.json"
+printf '%s\n' '{"name":"hub-web-fixture","lockfileVersion":3,"packages":{"":{"name":"hub-web-fixture"}}}' \
+    >"$repo/hub-web/package-lock.json"
+printf '%s\n' 'initial source' >"$repo/hub-web/src/main.ts"
+printf '%s\n' 'built: initial source' >"$repo/hub-web/dist/app.js"
+printf '%s\n' 'export {}' >"$repo/hub-web/scripts/visual-qa.mjs"
+cat >"$repo/scripts/npm-stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${GATE_FIXTURE_NPM_LOG:?}"
+if [[ "$1" == ci ]]; then
+  : >"${GATE_FIXTURE_NPM_CI_MARKER:?}"
+  exit 0
+fi
+if [[ "$1" == run && "${2:-}" == build ]]; then
+  printf 'built: ' >dist/app.js
+  cat src/main.ts >>dist/app.js
+  exit 0
+fi
+if [[ "$1" == exec && "$*" == *'playwright install chromium'* ]]; then
+  exit 0
+fi
+if [[ "$1" == exec && "$*" == *'node scripts/visual-qa.mjs'* ]]; then
+  [[ -f "${GATE_FIXTURE_NPM_CI_MARKER:?}" ]]
+  exit 0
+fi
+printf 'unexpected npm invocation: %s\n' "$*" >&2
+exit 1
+EOF
+chmod +x "$repo/scripts/npm-stub"
+git -C "$repo" add hub-web
+git -C "$repo" commit -qm 'seed hub web committed dist'
+printf '%s\n' 'changed source' >"$repo/hub-web/src/main.ts"
+dist_drift_npm_log="$tmp/dist-drift-npm.log"
+dist_drift_marker="$tmp/dist-drift-npm-ci.marker"
+dist_drift_runner_log="$tmp/dist-drift-runner.log"
+output="$({
+    cd "$repo" && \
+    env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH -u RELEASE_GATE_HUB_WEB_VISUAL_QA \
+      CARGO="$repo/scripts/cargo-stub" \
+      NPM="$repo/scripts/npm-stub" \
+      GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+      GATE_FIXTURE_NPM_LOG="$dist_drift_npm_log" \
+      GATE_FIXTURE_NPM_CI_MARKER="$dist_drift_marker" \
+      GATE_FIXTURE_NPM_RUNNER_LOG="$dist_drift_runner_log" \
+      "$repo/scripts/release-gate.sh" 9.99.7 --only hub-web-dist-drift,hub-web-visual-qa
+} 2>&1 || true)"
+assert_named_failure hub-web-dist-drift "$output"
+if ! grep -qF 'FAIL hub-web-visual-qa' <<<"$output" && \
+   [[ "$(grep -c '^ci ' "$dist_drift_npm_log")" -eq 1 ]]; then
+    ok 'hub-web-dist-drift fails stale dist and visual QA reuses npm ci'
+else
+    bad "hub-web-dist-drift did not isolate stale dist or repeated npm ci (output: $output; npm log: $(cat "$dist_drift_npm_log" 2>/dev/null || true))"
+fi
+
+(cd "$repo/hub-web" && \
+    GATE_FIXTURE_NPM_LOG="$dist_drift_npm_log" \
+    GATE_FIXTURE_NPM_CI_MARKER="$dist_drift_marker" \
+    "$repo/scripts/npm-stub" run build)
+git -C "$repo" add hub-web/dist
+git -C "$repo" commit -qm 'regenerate hub web committed dist'
+: >"$dist_drift_npm_log"
+output="$({
+    cd "$repo" && \
+    env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH -u RELEASE_GATE_HUB_WEB_VISUAL_QA \
+      CARGO="$repo/scripts/cargo-stub" \
+      NPM="$repo/scripts/npm-stub" \
+      GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+      GATE_FIXTURE_NPM_LOG="$dist_drift_npm_log" \
+      GATE_FIXTURE_NPM_CI_MARKER="$dist_drift_marker" \
+      GATE_FIXTURE_NPM_RUNNER_LOG="$dist_drift_runner_log" \
+      "$repo/scripts/release-gate.sh" 9.99.7 --only hub-web-dist-drift,hub-web-visual-qa || true
+})"
+if grep -qF 'PASS hub-web-dist-drift' <<<"$output" && \
+   grep -qF 'PASS hub-web-visual-qa' <<<"$output" && \
+   grep -qF 'RELEASE GATE PASSED' <<<"$output" && \
+   [[ "$(grep -c '^ci ' "$dist_drift_npm_log")" -eq 1 ]]; then
+    ok 'hub-web-dist-drift passes after dist regeneration'
+else
+    bad "hub-web-dist-drift did not pass with regenerated dist (output: $output; npm log: $(cat "$dist_drift_npm_log" 2>/dev/null || true))"
 fi
 
 # cas-1f6e. A src-side test module that reads the producer checkout at runtime
@@ -416,6 +514,43 @@ cmp "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md
 cmp "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
     "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"
 ok '--learn appends and mirrors a dated failure entry'
+
+# cas-6df6. Keep the release diagnosis in the executable nextest failure-log
+# category and prove --learn accepts the exact operator-reported cause.
+repo="$(new_fixture learn-nextest-factory-session)"
+nextest_cause='gate inherited the supervisor shell'"'"'s CAS_FACTORY_SESSION; a test agent registered under it routed lifecycle pushes to a supervisor absent from the fixture'
+learn_output="$(cd "$repo" && \
+    "$repo/scripts/release-gate.sh" --learn 'nextest inherited factory identity' "$nextest_cause" nextest 2>&1)"
+if grep -qF 'Learned release failure in all three mirrors' <<<"$learn_output" \
+    && grep -qF "$nextest_cause" "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" \
+    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"; then
+    ok '--learn records the nextest factory-session diagnosis in all mirrors'
+else
+    bad "--learn did not record the nextest factory-session diagnosis: $learn_output"
+fi
+
+# cas-77c1. Integration spawn fixtures must carry the build-guard override into
+# isolated children: otherwise a saturated host makes them read live
+# /proc/loadavg and refuse a request that is healthy under the test contract.
+repo="$(new_fixture learn-nextest-factory-build-guard)"
+nextest_symptom='nextest: spawn_workers integration tests refused by build guard under host load'
+nextest_cause='integration harness never set CAS_FACTORY_BUILD_GUARD=off; guard read live /proc/loadavg during full-suite run'
+learn_output="$(cd "$repo" && \
+    "$repo/scripts/release-gate.sh" --learn "$nextest_symptom" "$nextest_cause" nextest 2>&1)"
+if grep -qF 'Learned release failure in all three mirrors' <<<"$learn_output" \
+    && grep -qF "Symptom: $nextest_symptom Root cause: $nextest_cause" \
+        "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" \
+    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"; then
+    ok '--learn records the nextest factory build-guard diagnosis in all mirrors'
+else
+    bad "--learn did not record the nextest factory build-guard diagnosis: $learn_output"
+fi
 
 # cas-4ccc. A populated .cas/proxy.toml ABOVE the worktree is readable by any
 # test that resolves project config by walking up from its cwd. The gate must
@@ -604,6 +739,35 @@ if grep -qE '^RUSTC_WRAPPER=/nonexistent/sccache CARGO_HOME=.*/cargo-home :: nex
     ok 'archive-mode runs the extracted suite with a missing wrapper and empty CARGO_HOME'
 else
     bad "archive-mode did not reproduce the shard environment: $(cat "$archive_env_log") (output: $output)"
+fi
+
+# cas-6df6. A release gate launched inside a factory supervisor must not let
+# its shell identity become the registered session for integration fixtures.
+# Both the ordinary nextest row and both archive-mode cargo invocations must
+# receive a scrubbed factory identity, while the archive row keeps its existing
+# CAS_ROOT isolation.
+factory_env_log="$tmp/factory-environment.log"
+: >"$factory_env_log"
+output="$(cd "$repo" && \
+    CAS_FACTORY_SESSION=foreign-supervisor-session \
+    CAS_AGENT_ROLE=supervisor \
+    CAS_AGENT_NAME=foreign-supervisor \
+    CAS_SUPERVISOR_NAME=foreign-supervisor \
+    CAS_AGENT_ID=foreign-agent-id \
+    GATE_FIXTURE_FACTORY_ENV_LOG="$factory_env_log" \
+    GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
+    CARGO="$repo/scripts/cargo-stub" \
+    RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
+    "$repo/scripts/release-gate.sh" 9.99.7 --only nextest,archive-mode 2>&1 || true)"
+if grep -qF 'CAS_FACTORY_SESSION=unset CAS_AGENT_ROLE=unset CAS_AGENT_NAME=unset CAS_SUPERVISOR_NAME=unset CAS_AGENT_ID=unset :: nextest run --workspace' \
+    "$factory_env_log" \
+    && grep -qF 'CAS_FACTORY_SESSION=unset CAS_AGENT_ROLE=unset CAS_AGENT_NAME=unset CAS_SUPERVISOR_NAME=unset CAS_AGENT_ID=unset :: nextest archive --workspace' \
+    "$factory_env_log" \
+    && grep -qF 'CAS_FACTORY_SESSION=unset CAS_AGENT_ROLE=unset CAS_AGENT_NAME=unset CAS_SUPERVISOR_NAME=unset CAS_AGENT_ID=unset :: nextest run --archive-file' \
+    "$factory_env_log"; then
+    ok 'nextest and archive-mode scrub inherited factory identity'
+else
+    bad "nextest or archive-mode leaked factory identity: $(cat "$factory_env_log") (output: $output)"
 fi
 
 # cas-c0411. The `cas init` watchdog budget the gate hands its children is the

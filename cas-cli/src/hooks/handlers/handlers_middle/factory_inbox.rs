@@ -132,7 +132,12 @@ pub fn surface_factory_inbox(cas_root: Option<&Path>, input: &HookInput) -> Opti
     // under `warm-jaguar-96` keeps no receipt under `supervisor`, so the other
     // reader re-injects it on a later turn — and the in-turn dedupe above only
     // covers duplicates WITHIN one turn, never across them.
-    crate::harness_policy::mirror_receipts_across_aliases(&*queue, &rows, &aliases);
+    crate::harness_policy::mirror_receipts_across_aliases_with_source(
+        &*queue,
+        &rows,
+        &aliases,
+        cas_store::SurfacingSource::HookSurfaced,
+    );
     Some(render_surfaced(&rows))
 }
 

@@ -22,6 +22,40 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.max_concurrent_builders",
+        section: "factory",
+        name: "Maximum Concurrent Builders",
+        description: "Soft cap on workers with live Cargo processes. spawn_workers refuses when a request would exceed this cap or when one-minute load exceeds CPU count; pass force=true for an explicit override.",
+        value_type: ConfigType::Int,
+        default: "4",
+        constraint: Constraint::Range(1, 256),
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "build", "concurrency", "load", "workers"],
+        use_cases: &[
+            "Keep a shared 32-core host at four concurrent builders",
+            "Raise the cap only when the host has spare CPU capacity",
+        ],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.worker_build_jobs",
+        section: "factory",
+        name: "Worker Cargo Build Jobs",
+        description: "Per-worker CARGO_BUILD_JOBS cap. The default auto value is max(2, available CPUs / 4); factory.cargo_build_jobs remains accepted as a compatibility alias. Set a numeric value to override the computed cap.",
+        value_type: ConfigType::String,
+        default: "auto",
+        constraint: Constraint::NotEmpty,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "worker", "cargo", "build", "jobs", "throttle"],
+        use_cases: &[
+            "Keep each worker at a bounded Cargo parallelism",
+            "Set a numeric cap when the fleet size differs from the default four workers",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.ai_enrichment.enabled",
         section: "factory",
         name: "AI Enrichment",

@@ -50,15 +50,15 @@ env_vars = [
 ]
 
 # =============================================================================
-# playwright — stdio (npx). No auth required; profile path is hardcoded.
+# playwright — stdio (npx). No auth required; Playwright selects its
+# platform-native persistent profile under the worker's HOME when no explicit
+# user-data directory is supplied.
 # =============================================================================
 [mcp_servers.playwright]
 command = "npx"
 args = [
     "-y",
     "@playwright/mcp@0.0.70",
-    "--user-data-dir",
-    "/home/pippenz/.playwright-mcp-profile",
     "--browser",
     "chrome",
 ]
@@ -67,6 +67,7 @@ env_vars = [
     "HOME",
     "USER",
     "DISPLAY",
+    "PLAYWRIGHT_MCP_USER_DATA_DIR",
 ]
 
 # =============================================================================

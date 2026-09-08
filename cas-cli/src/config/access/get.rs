@@ -9,6 +9,7 @@ impl Config {
         let daemon = self.daemon.clone().unwrap_or_default();
         let staging = self.staging.clone().unwrap_or_default();
         let issues = self.issues.clone().unwrap_or_default();
+        let history = self.history.clone().unwrap_or_default();
         let issue_repos = issues.resolved_registry();
         let release = self.release.clone().unwrap_or_default();
         let notifications = self.notifications.clone().unwrap_or_default();
@@ -118,6 +119,8 @@ impl Config {
             "issues.components.cassy" => Some(issue_repos.cassy),
             "issues.components.mecha_cassy" => Some(issue_repos.mecha_cassy),
             "issues.components.cloud" => Some(issue_repos.cloud),
+            // History section
+            "history.github_repo" => Some(history.github_repo.unwrap_or_default()),
             // Release section
             "release.claude_account_allowlist" => Some(release.claude_account_allowlist.join(",")),
             // Notifications section

@@ -1180,6 +1180,96 @@ pub(super) fn lifecycle_redelivery_decision(
     }
 }
 
+/// GH #751: Claude's Agent-Teams inbox path must not redeliver a pending row
+/// on the daemon poll cadence. The budget is deliberately small because the
+/// fallback after three unsuccessful wake attempts is supervisor escalation,
+/// not an ever-growing Claude prompt.
+pub(super) const CLAUDE_REDELIVERY_MAX_ATTEMPTS: u32 = 3;
+pub(super) const CLAUDE_REDELIVERY_BASE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClaudeRedelivery {
+    Deliver,
+    Cooldown,
+    StopAcknowledged,
+    StopUndelivered,
+}
+
+fn claude_redelivery_delay(attempts: u32) -> std::time::Duration {
+    let exponent = attempts.saturating_sub(1).min(10);
+    let multiplier = 1_u64 << exponent;
+    std::time::Duration::from_secs(
+        CLAUDE_REDELIVERY_BASE_INTERVAL
+            .as_secs()
+            .saturating_mul(multiplier),
+    )
+}
+
+/// Decide whether a pending Claude inbox row may be re-offered.
+///
+/// Unlike [`lifecycle_redelivery_decision`], this consumes the durable
+/// `wake_gate_declines` and `wake_attempt_at` values. A daemon restart therefore
+/// cannot reset the budget and append the same supervisor dispatch again.
+pub(super) fn claude_redelivery_decision(
+    acked: bool,
+    attempts: u32,
+    last_attempt: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ClaudeRedelivery {
+    claude_redelivery_decision_after_turn(acked, attempts, last_attempt, now, false)
+}
+
+/// Decide whether a pending Claude inbox row may be re-offered after the
+/// recipient completed a turn.
+///
+/// A turn completion is the wake gate's missing edge: the previous decline
+/// correctly protected an in-flight turn, but waiting for the normal
+/// exponential interval after that turn has already ended leaves the message
+/// parked for minutes. The override still honours acknowledgement and the
+/// bounded attempt budget; it only bypasses cooldown for the one retry that a
+/// newly observed turn boundary authorizes.
+pub(super) fn claude_redelivery_decision_after_turn(
+    acked: bool,
+    attempts: u32,
+    last_attempt: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    turn_completed_since_attempt: bool,
+) -> ClaudeRedelivery {
+    if acked {
+        return ClaudeRedelivery::StopAcknowledged;
+    }
+    if attempts >= CLAUDE_REDELIVERY_MAX_ATTEMPTS {
+        return ClaudeRedelivery::StopUndelivered;
+    }
+    if turn_completed_since_attempt {
+        return ClaudeRedelivery::Deliver;
+    }
+    let Some(last_attempt) = last_attempt else {
+        return ClaudeRedelivery::Deliver;
+    };
+    let Ok(elapsed) = (now - last_attempt).to_std() else {
+        return ClaudeRedelivery::Cooldown;
+    };
+    if elapsed >= claude_redelivery_delay(attempts) {
+        ClaudeRedelivery::Deliver
+    } else {
+        ClaudeRedelivery::Cooldown
+    }
+}
+
+/// Whether a completed harness turn is newer than the wake attempt that
+/// declined to interrupt it. Kept pure so timestamp ordering stays explicit
+/// and testable at the queue boundary.
+pub(super) fn wake_retry_due_to_turn_end(
+    last_wake_attempt: Option<chrono::DateTime<chrono::Utc>>,
+    turn_completed_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    last_wake_attempt
+        .zip(turn_completed_at)
+        .is_some_and(|(attempt, completed)| completed > attempt)
+}
+
 /// cas-ceae (GH #124): which pending rows are governed by the cas-d732
 /// re-nudge cadence (one delivery per [`LIFECYCLE_RENUDGE_INTERVAL`], ack and
 /// consume terminal).
@@ -1447,6 +1537,16 @@ pub(super) fn deferred_inbox_outcome(
     }
 }
 
+/// A transcript reaction is a message-specific consumption signal. Keep the
+/// predicate separate from inbox-file and pane-byte heuristics so the GH #751
+/// path cannot accidentally consume on transport alone.
+pub(super) fn deferred_inbox_reaction_consumes(
+    written_earlier: bool,
+    reaction_observed: bool,
+) -> bool {
+    written_earlier && reaction_observed
+}
+
 /// cas-ef14 (GH #139): how long the daemon waits for a recipient's pane to show
 /// ANY output after its inbox copy was drained before concluding the harness
 /// ingested the message without surfacing it as a turn.
@@ -1477,6 +1577,9 @@ pub(crate) struct InboxDeferredWrite {
     pub(crate) bytes_at_write: u64,
     /// When the copy was written, for the observation window.
     pub(crate) written_at: std::time::Instant,
+    /// Wall-clock timestamp used to correlate the queued prompt with a
+    /// Claude transcript after a daemon restart.
+    pub(crate) delivered_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl FactoryDaemon {
@@ -2018,14 +2121,12 @@ impl FactoryDaemon {
     /// so the common path costs nothing.
     fn deferred_inbox_outcome_for(
         &self,
+        queue: &dyn cas_store::PromptQueueStore,
         row_id: i64,
         target: &str,
         from: &str,
         text: &str,
     ) -> DeferredInboxOutcome {
-        let Some(written) = self.inbox_deferred_writes.get(&row_id) else {
-            return DeferredInboxOutcome::Deliver;
-        };
         let Some(teams) = self.teams.as_ref() else {
             return DeferredInboxOutcome::Deliver;
         };
@@ -2040,6 +2141,39 @@ impl FactoryDaemon {
             != super::delivery::DeliveryChannel::TeamsInbox
         {
             return DeferredInboxOutcome::Deliver;
+        }
+        let written = if let Some(written) = self.inbox_deferred_writes.get(&row_id) {
+            written.clone()
+        } else {
+            // GH #751: reconstruct the daemon-local probe from the durable
+            // handoff marker. Without this branch a restarted daemon sees a
+            // drained row as a first delivery and appends another Claude
+            // inbox copy.
+            let Ok(Some((delivered_at, bytes_at_write))) = queue.deferred_inbox_state(row_id)
+            else {
+                return DeferredInboxOutcome::Deliver;
+            };
+            let elapsed = (chrono::Utc::now() - delivered_at)
+                .to_std()
+                .unwrap_or_default();
+            InboxDeferredWrite {
+                pane: pane_target.to_string(),
+                bytes_at_write,
+                written_at: std::time::Instant::now()
+                    .checked_sub(elapsed)
+                    .unwrap_or_else(std::time::Instant::now),
+                delivered_at,
+            }
+        };
+        // A Claude assistant record after the exact queued message is the
+        // harness reaction. It is stronger than inbox-file state or pane byte
+        // growth, and consumes the row even when the worker never calls
+        // message_ack (the GH #751 failure mode).
+        if deferred_inbox_reaction_consumes(
+            true,
+            self.claude_reaction_observed(pane_target, written.delivered_at, text),
+        ) {
+            return DeferredInboxOutcome::HarnessConsumed;
         }
         let inbox_target = if pane_target == self.app.supervisor_name() {
             "supervisor"
@@ -2068,6 +2202,69 @@ impl FactoryDaemon {
         )
     }
 
+    fn claude_reaction_observed(
+        &self,
+        pane_target: &str,
+        delivered_at: chrono::DateTime<chrono::Utc>,
+        prompt: &str,
+    ) -> bool {
+        let Ok(store) = open_agent_store(self.app.cas_dir()) else {
+            return false;
+        };
+        let Ok(agents) = store.list(None) else {
+            return false;
+        };
+        let Some(agent) = agents.into_iter().find(|agent| agent.name == pane_target) else {
+            return false;
+        };
+        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
+        if cli != cas_mux::SupervisorCli::Claude {
+            return false;
+        }
+        let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+            self.app.cas_dir(),
+            &agent,
+        ) else {
+            return false;
+        };
+        crate::mcp::tools::service::harness_observation::observations_after_delivery(
+            &path,
+            cli,
+            delivered_at,
+            prompt,
+        )
+        .reaction
+        .is_some()
+    }
+
+    /// Whether a recipient completed a harness turn after the last wake-gate
+    /// attempt for this row. A completed turn is the precise retry boundary:
+    /// it does not prove this message was consumed, but it proves the busy
+    /// turn that caused the decline is over.
+    fn recipient_turn_completion_after(
+        &self,
+        pane_target: &str,
+        after: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        let Ok(store) = open_agent_store(self.app.cas_dir()) else {
+            return None;
+        };
+        let Ok(agents) = store.list(None) else {
+            return None;
+        };
+        let Some(agent) = agents.into_iter().find(|agent| agent.name == pane_target) else {
+            return None;
+        };
+        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
+        let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+            self.app.cas_dir(),
+            &agent,
+        ) else {
+            return None;
+        };
+        crate::mcp::tools::service::harness_observation::turn_completion_after(&path, cli, after)
+    }
+
     /// cas-b8ce (GH #176): stamp the per-recipient surfacing receipt for a row
     /// this daemon's own transport put in front of `recipient`.
     ///
@@ -2080,24 +2277,106 @@ impl FactoryDaemon {
         prompt_id: i64,
         recipient: &str,
     ) {
-        if let Err(error) = queue.record_recipient_surfaced(
+        Self::record_surfacing_receipt(
+            queue,
             prompt_id,
             recipient,
             cas_store::SurfacingSource::TransportDelivered,
+        );
+    }
+
+    /// Record a strong receipt after the daemon observed the recipient take a
+    /// turn containing this row. Unlike the transport handoff receipt, this
+    /// must retire the row from the unread view (cas-1a54/cas-5255).
+    fn record_observed_wake_receipt(
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) {
+        Self::record_surfacing_receipt(
+            queue,
+            prompt_id,
+            recipient,
+            cas_store::SurfacingSource::ObservedWake,
+        );
+    }
+
+    fn record_surfacing_receipt(
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+        source: cas_store::SurfacingSource,
+    ) {
+        if let Err(error) = queue.record_recipient_surfaced(
+            prompt_id,
+            recipient,
+            source,
         ) {
             tracing::debug!(
                 target: "cas::coordination",
                 message_id = prompt_id,
                 %recipient,
                 %error,
-                "cas-b8ce: could not persist the transport surfacing receipt — \
+                "cas-b8ce: could not persist the surfacing receipt — \
                  the row may be re-served by the recipient's next inbox_poll"
             );
         }
     }
 
+    /// Tell the supervisor when a Claude inbox row exhausted its bounded
+    /// wake/redelivery budget. Keep the notice short: forwarding the original
+    /// dispatch is exactly how a prompt-overflow failure becomes another
+    /// prompt-overflow failure (GH #751).
+    fn notify_wake_starved_supervisor(
+        &self,
+        queue: &dyn cas_store::PromptQueueStore,
+        queued: &cas_store::QueuedPrompt,
+        pane_target: &str,
+        attempts: u32,
+    ) {
+        let summary: String = queued
+            .summary
+            .as_deref()
+            .unwrap_or("(no summary)")
+            .chars()
+            .take(240)
+            .collect();
+        let notice = format!(
+            "<system-notice>Claude worker wake failed: notification_id={}; target='{}'; attempts={}; summary='{}'. The bounded redelivery budget was exhausted without a transcript reaction. Reassign or recycle the worker; Cassy stopped retrying this dispatch to protect its context.</system-notice>",
+            queued.id, pane_target, attempts, summary
+        );
+        let summary_line = format!("Claude wake budget exhausted: {}", pane_target);
+        match queue.enqueue_with_summary(
+            "daemon",
+            self.app.supervisor_name(),
+            &notice,
+            Some(self.session_name.as_str()),
+            Some(&summary_line),
+        ) {
+            Ok(id) => {
+                super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
+                tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "wake_starved_escalated",
+                    message_id = queued.id,
+                    escalation_id = id,
+                    target_agent = %pane_target,
+                    attempts,
+                    "GH #751: exhausted Claude redelivery budget and escalated a bounded notice"
+                );
+            }
+            Err(error) => tracing::error!(
+                target: "cas::coordination",
+                message_id = queued.id,
+                target_agent = %pane_target,
+                %error,
+                "GH #751: failed to enqueue wake-budget escalation"
+            ),
+        }
+    }
+
     /// cas-1a54: terminalize an urgent row whose wake the pane corroborated —
-    /// receipt first, then the transport stamp.
+    /// strong observed-wake receipt first, then the transport stamp.
     ///
     /// This is the whole pairing the `ConsumeRow` arm of
     /// [`Self::resolve_urgent_wake_probes`] performs, extracted so a test can
@@ -2116,7 +2395,7 @@ impl FactoryDaemon {
         row_id: i64,
         recipient: &str,
     ) -> anyhow::Result<()> {
-        Self::record_transport_receipt(queue, row_id, recipient);
+        Self::record_observed_wake_receipt(queue, row_id, recipient);
         queue.mark_transport_delivered(row_id)?;
         Ok(())
     }
@@ -3890,7 +4169,40 @@ impl FactoryDaemon {
             // re-nudge cadence gate then actually grants a re-offer, so the
             // line count is O(retries) and not O(poll ticks).
             let mut announce_drain_unsurfaced = false;
+            let pane_target = if target == "supervisor" {
+                self.app.supervisor_name()
+            } else {
+                target
+            };
+            let claude_inbox_target = self.teams.is_some()
+                && self.app.harness_for(pane_target) == cas_mux::SupervisorCli::Claude
+                && super::delivery::choose_channel(
+                    self.app.harness_for(pane_target),
+                    true,
+                ) == super::delivery::DeliveryChannel::TeamsInbox;
+            let durable_deferred_inbox = claude_inbox_target
+                && queue
+                    .deferred_inbox_state(queued.id)
+                    .ok()
+                    .flatten()
+                    .is_some();
+            let deferred_inbox_recorded =
+                self.inbox_deferred_writes.contains_key(&queued.id) || durable_deferred_inbox;
+            // A wake decline protects the current turn, but must not make the
+            // pending row wait for the full re-nudge interval once that turn
+            // has ended. The timestamp is durable, so this also works after a
+            // daemon restart and remains bounded by each redelivery budget.
+            let retry_at_turn_end = queue
+                .wake_gate_state(queued.id)
+                .ok()
+                .and_then(|(_, last_attempt)| last_attempt)
+                .and_then(|attempt| {
+                    let completed_at = self.recipient_turn_completion_after(pane_target, attempt);
+                    wake_retry_due_to_turn_end(Some(attempt), completed_at).then_some(())
+                })
+                .is_some();
             match self.deferred_inbox_outcome_for(
+                queue.as_ref(),
                 queued.id,
                 target,
                 &inbox_source,
@@ -3901,11 +4213,9 @@ impl FactoryDaemon {
                     // cas-b8ce (GH #176): this arm is Cassy's strongest evidence
                     // that a NON-Cassy transport surfaced the content — the
                     // harness took our inbox copy AND the pane then produced
-                    // output. Write the per-recipient receipt so the row leaves
-                    // the recipient's unread set for good; stamping only
-                    // `transport_delivered` left it `seen.prompt_id IS NULL`,
-                    // and the recipient's next `inbox_poll` re-served it.
-                    Self::record_transport_receipt(&*queue, queued.id, &queued.target);
+                    // output. Record the strong observed-wake receipt so the
+                    // consumed row does not reappear in inbox_poll.
+                    Self::record_observed_wake_receipt(&*queue, queued.id, &queued.target);
                     if let Err(error) = queue.mark_transport_delivered(queued.id) {
                         tracing::error!(
                             prompt_id = queued.id,
@@ -3985,6 +4295,69 @@ impl FactoryDaemon {
                 DeferredInboxOutcome::Deliver => {}
             }
 
+            // GH #751: Claude inbox retries use the durable per-message wake
+            // budget and exponential spacing. The older lifecycle cadence is
+            // intentionally left in place for lifecycle relays and other
+            // harnesses, but must not govern this Claude failure path.
+            let claude_redelivery_applies = claude_inbox_target && deferred_inbox_recorded;
+            if claude_redelivery_applies {
+                let (attempts, last_attempt) =
+                    queue.wake_gate_state(queued.id).unwrap_or((0, None));
+                if retry_at_turn_end {
+                    tracing::debug!(
+                        target: "cas::coordination",
+                        stage = "turn_end_retry",
+                        message_id = queued.id,
+                        target_agent = %pane_target,
+                        "wake gate retry granted by the recipient's completed turn"
+                    );
+                }
+                match claude_redelivery_decision_after_turn(
+                    queued.acked_at.is_some(),
+                    attempts,
+                    last_attempt,
+                    chrono::Utc::now(),
+                    retry_at_turn_end,
+                ) {
+                    ClaudeRedelivery::Deliver => {}
+                    ClaudeRedelivery::Cooldown => {
+                        let _ = queue.record_pending_reason(
+                            queued.id,
+                            cas_store::PendingReason::GatedNotReady,
+                            Some(
+                                "Claude inbox redelivery cooldown — exponential spacing protects the worker context",
+                            ),
+                        );
+                        continue;
+                    }
+                    ClaudeRedelivery::StopAcknowledged => {
+                        let _ = queue.mark_suppressed(
+                            queued.id,
+                            Some("Claude inbox notification already acknowledged by the recipient"),
+                        );
+                        self.forget_row_delivery_state(queued.id);
+                        continue;
+                    }
+                    ClaudeRedelivery::StopUndelivered => {
+                        let detail = format!(
+                            "Claude inbox wake/redelivery budget exhausted after {attempts} attempts; escalated to supervisor"
+                        );
+                        let _ = queue.mark_undelivered_after_wake_declines(
+                            queued.id,
+                            Some(detail.as_str()),
+                        );
+                        self.notify_wake_starved_supervisor(
+                            queue.as_ref(),
+                            &queued,
+                            pane_target,
+                            attempts,
+                        );
+                        self.forget_row_delivery_state(queued.id);
+                        continue;
+                    }
+                }
+            }
+
             // cas-d732 (GH #119): a lifecycle row is deliberately not consumed
             // until it wakes the pane (cas-f02b), so on a 100ms poll it would
             // otherwise be re-written and re-nudged ten times a second — the
@@ -3998,19 +4371,22 @@ impl FactoryDaemon {
             // daemon has written to an inbox and left pending now carries the
             // same cadence contract: one delivery per nudge interval, ack and
             // consume terminal.
-            if row_needs_renudge_cadence(
-                Self::row_is_supervisor_wake(
-                    &wake_sender,
-                    self.app.supervisor_name(),
-                    &queued.source,
-                    &queued.prompt,
-                ),
-                self.inbox_deferred_writes.contains_key(&queued.id),
-                urgent_wake_is_unresolved(
-                    queued.urgent,
-                    self.lifecycle_redelivery_attempts.contains_key(&queued.id),
-                ),
-            ) {
+            if !claude_redelivery_applies
+                && !retry_at_turn_end
+                && row_needs_renudge_cadence(
+                    Self::row_is_supervisor_wake(
+                        &wake_sender,
+                        self.app.supervisor_name(),
+                        &queued.source,
+                        &queued.prompt,
+                    ),
+                    deferred_inbox_recorded,
+                    urgent_wake_is_unresolved(
+                        queued.urgent,
+                        self.lifecycle_redelivery_attempts.contains_key(&queued.id),
+                    ),
+                )
+            {
                 match lifecycle_redelivery_decision(
                     queued.acked_at.is_some(),
                     self.lifecycle_redelivery_attempts.get(&queued.id).copied(),
@@ -4673,6 +5049,14 @@ impl FactoryDaemon {
                                     queued.id,
                                     Some(detail.as_str()),
                                 );
+                                if claude_inbox_target {
+                                    self.notify_wake_starved_supervisor(
+                                        queue.as_ref(),
+                                        &queued,
+                                        &pane_target,
+                                        declines,
+                                    );
+                                }
                                 self.forget_row_delivery_state(queued.id);
                                 tracing::warn!(
                                     target: "cas::coordination",
@@ -5047,7 +5431,18 @@ impl FactoryDaemon {
                         pane: deferred_pane,
                         bytes_at_write,
                         written_at: std::time::Instant::now(),
+                        delivered_at: chrono::Utc::now(),
                     });
+                // GH #751: persist the successful write after the transport
+                // returned. A restarted daemon must recover this row as a
+                // pending handoff, not append a new Claude inbox copy.
+                if let Err(error) = queue.record_deferred_inbox(queued.id, bytes_at_write) {
+                    tracing::warn!(
+                        prompt_id = queued.id,
+                        %error,
+                        "failed to persist deferred Claude inbox handoff"
+                    );
+                }
                 self.lifecycle_redelivery_attempts
                     .entry(queued.id)
                     .or_insert_with(std::time::Instant::now);
@@ -5564,6 +5959,21 @@ impl FactoryDaemon {
                     // non-isolated spawns, so the roster could disagree with the
                     // live process about which directory the worker is in.
                     let bound_cwd = result.cwd.clone();
+                    if let Some(seed_receipt) =
+                        crate::ui::factory::app::render_and_ops::epic_workers::target_seed_receipt(
+                            &result,
+                        )
+                    {
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            request_id,
+                            Some(&pending_name),
+                            "provision",
+                            "seeded",
+                            &seed_receipt,
+                        );
+                    }
                     let task_id_for_finish = pending_task_id.clone();
                     match self.app.finish_worker_spawn(
                         result,
@@ -8072,7 +8482,92 @@ mod tests {
     // cas-d732 (GH #119): one transition, one delivery per nudge interval
     // -----------------------------------------------------------------------
 
-    use super::{LIFECYCLE_RENUDGE_INTERVAL, LifecycleRedelivery, lifecycle_redelivery_decision};
+    use super::{
+        CLAUDE_REDELIVERY_BASE_INTERVAL, CLAUDE_REDELIVERY_MAX_ATTEMPTS, ClaudeRedelivery,
+        LIFECYCLE_RENUDGE_INTERVAL, LifecycleRedelivery, claude_redelivery_decision,
+        claude_redelivery_decision_after_turn, lifecycle_redelivery_decision,
+        wake_retry_due_to_turn_end,
+    };
+
+    #[test]
+    fn gh_751_non_acking_claude_dispatch_has_bounded_exponential_redelivery() {
+        let start = chrono::DateTime::parse_from_rfc3339("2026-09-08T14:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let before_first_retry = start + chrono::Duration::seconds(29);
+        assert_eq!(
+            claude_redelivery_decision(false, 0, None, start),
+            ClaudeRedelivery::Deliver
+        );
+        assert_eq!(
+            claude_redelivery_decision(false, 1, Some(start), before_first_retry),
+            ClaudeRedelivery::Cooldown,
+            "the first retry waits for the base spacing"
+        );
+        let second = start + chrono::Duration::seconds(CLAUDE_REDELIVERY_BASE_INTERVAL.as_secs() as i64);
+        assert_eq!(
+            claude_redelivery_decision(false, 1, Some(start), second),
+            ClaudeRedelivery::Deliver
+        );
+        assert_eq!(
+            claude_redelivery_decision(false, 2, Some(second), second + chrono::Duration::seconds(59)),
+            ClaudeRedelivery::Cooldown,
+            "the second retry doubles the spacing"
+        );
+        let third = second + chrono::Duration::seconds(60);
+        assert_eq!(
+            claude_redelivery_decision(false, 2, Some(second), third),
+            ClaudeRedelivery::Deliver
+        );
+        assert_eq!(
+            claude_redelivery_decision(
+                false,
+                CLAUDE_REDELIVERY_MAX_ATTEMPTS,
+                Some(third),
+                third + chrono::Duration::days(1),
+            ),
+            ClaudeRedelivery::StopUndelivered,
+            "a non-acking Claude worker must reach a terminal supervisor escalation"
+        );
+        assert_eq!(
+            claude_redelivery_decision(true, 999, Some(third), third),
+            ClaudeRedelivery::StopAcknowledged,
+            "an explicit ack always wins over the retry budget"
+        );
+    }
+
+    #[test]
+    fn a_completed_turn_bypasses_redelivery_cooldown_but_not_terminal_guards() {
+        let start = chrono::DateTime::parse_from_rfc3339("2026-09-08T14:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let completed = start + chrono::Duration::seconds(1);
+        let now = start + chrono::Duration::seconds(2);
+
+        assert!(wake_retry_due_to_turn_end(Some(start), Some(completed)));
+        assert!(!wake_retry_due_to_turn_end(Some(completed), Some(start)));
+        assert_eq!(
+            claude_redelivery_decision_after_turn(false, 1, Some(start), now, true),
+            ClaudeRedelivery::Deliver,
+            "the recipient's completed turn grants the pending wake immediately"
+        );
+        assert_eq!(
+            claude_redelivery_decision_after_turn(
+                false,
+                CLAUDE_REDELIVERY_MAX_ATTEMPTS,
+                Some(start),
+                now,
+                true,
+            ),
+            ClaudeRedelivery::StopUndelivered,
+            "turn completion must not bypass the bounded retry budget"
+        );
+        assert_eq!(
+            claude_redelivery_decision_after_turn(true, 1, Some(start), now, true),
+            ClaudeRedelivery::StopAcknowledged,
+            "an explicit ack must still stop the row"
+        );
+    }
 
     /// The reported storm, simulated on the decision the daemon actually
     /// makes: a wake-eligible lifecycle row that never wakes the pane stays
@@ -8432,21 +8927,19 @@ mod tests {
         );
     }
 
-    /// cas-b8ce (GH #176): the daemon's terminal-delivery decision and the
-    /// recipient's unread view must agree.
+    /// cas-5255 (GH #719): transport delivery must leave an explicit poll
+    /// recovery path, and that poll must then claim the row.
     ///
-    /// The bug was that they could not: `mark_transport_delivered` writes only
-    /// `prompt_queue` columns, while `poll_unseen_for_recipient` answers from
-    /// `prompt_queue_recipient_seen`. A row could therefore be `delivered`
-    /// according to `message_status` and simultaneously unread according to the
-    /// recipient's own `inbox_poll`, which then handed it back — the observed
-    /// redelivery bursts.
+    /// A transport receipt is provisional because the daemon cannot prove that
+    /// the harness surfaced the body. `inbox_poll` is the stronger claim and
+    /// replaces that receipt atomically, preventing both silent loss and the
+    /// old redelivery burst.
     ///
     /// This pins the pairing at the daemon's own helper, so a future refactor
     /// that drops the receipt write from a success arm fails here rather than
     /// in production three releases later.
     #[test]
-    fn a_terminally_delivered_row_leaves_the_recipients_unread_view() {
+    fn a_transport_delivered_row_stays_pollable_until_the_recipient_claims_it() {
         use cas_store::PromptQueueStore;
         let temp = tempfile::TempDir::new().unwrap();
         let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
@@ -8471,23 +8964,32 @@ mod tests {
             store
                 .count_unseen_for_recipient("zealous-fox-95", None)
                 .unwrap(),
-            0,
-            "a row the daemon reports as delivered must not still be unread — \
-             that contradiction IS the GH #176 redelivery"
+            1,
+            "transport delivery is provisional until the recipient polls"
+        );
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("zealous-fox-95", None, 20)
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![id],
+            "the recipient's own inbox_poll must recover the delivered body"
         );
         assert!(
             store
                 .poll_unseen_for_recipient("zealous-fox-95", None, 20)
                 .unwrap()
                 .is_empty(),
-            "the recipient's own inbox_poll must not re-serve it"
+            "the InboxPoll claim must not re-serve the row"
         );
     }
 
     /// cas-f65d: a Commander semantic message and the equivalent MCP
     /// coordination message must differ only in authenticated sender metadata.
     /// Once the daemon's real delivery receipt helper runs, both rows must have
-    /// the same recipient-visible receipt and must be absent from inbox_poll.
+    /// the same provisional receipt and both remain recoverable by inbox_poll.
     #[test]
     fn commander_and_mcp_messages_have_queue_and_recipient_receipt_parity() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -8589,26 +9091,31 @@ mod tests {
             queue
                 .count_unseen_for_recipient("worker-1", Some("factory-1"))
                 .unwrap(),
-            0
+            2,
+            "transport receipts are provisional for both equivalent rows"
+        );
+        assert_eq!(
+            queue
+                .poll_unseen_for_recipient("worker-1", Some("factory-1"), 20)
+                .unwrap()
+                .len(),
+            2,
+            "inbox_poll must recover both delivered bodies"
         );
         assert!(
             queue
                 .poll_unseen_for_recipient("worker-1", Some("factory-1"), 20)
                 .unwrap()
                 .is_empty(),
-            "recipient-visible receipt parity means neither row is re-served"
+            "the poll claim must not re-serve either row"
         );
     }
 
     /// cas-1a54: the URGENT terminal arm was the one cas-b8ce missed.
     ///
-    /// `resolve_urgent_wake_probes` → `UrgentProbeAction::ConsumeRow` stamped
-    /// `mark_transport_delivered` and stopped there, so an interrupt the
-    /// recipient demonstrably took (the pane produced output after the inject)
-    /// stayed `seen.prompt_id IS NULL` and remained redelivery-eligible by
-    /// `unseen_for_recipient_predicate`. Live specimen: notification 8480 — a
-    /// supervisor urgent interrupt to zen-merlin-47, delivered and acted on,
-    /// still eligible on the read-only replay.
+    /// `resolve_urgent_wake_probes` → `UrgentProbeAction::ConsumeRow` records
+    /// the daemon transport handoff. The recipient's explicit poll remains the
+    /// authoritative claim that prevents a later inbox replay.
     ///
     /// Drives `consume_urgent_wake_row`, which IS what that arm calls, so
     /// deleting the receipt from the pairing fails here.
@@ -8777,8 +9284,21 @@ mod tests {
 
     use super::{
         DeferredInboxOutcome, INBOX_DRAIN_TURN_WINDOW, UrgentWakeOutcome, deferred_inbox_outcome,
-        row_needs_renudge_cadence,
+        deferred_inbox_reaction_consumes, row_needs_renudge_cadence,
     };
+
+    #[test]
+    fn claude_reaction_consumes_without_explicit_message_ack() {
+        assert!(deferred_inbox_reaction_consumes(true, true));
+        assert!(
+            !deferred_inbox_reaction_consumes(true, false),
+            "a drained inbox without a transcript reaction must remain pending"
+        );
+        assert!(
+            !deferred_inbox_reaction_consumes(false, true),
+            "a reaction cannot consume a row Cassy never deferred"
+        );
+    }
 
     /// Outcome of replaying one pending queue row across a window of daemon
     /// polls while the recipient's harness drains its inbox on its own cadence.

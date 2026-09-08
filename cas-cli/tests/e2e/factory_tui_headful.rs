@@ -205,6 +205,7 @@ fn factory_tui_headful_reuse_window() {
     ]);
 
     let config = PtyRunnerConfig::with_size(120, 40)
+        .env("CAS_FACTORY_BUILD_GUARD", "off")
         .env("CAS_ROOT", cas_root.to_string_lossy())
         .cwd(&cwd);
 

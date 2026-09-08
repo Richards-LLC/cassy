@@ -19,7 +19,7 @@ failure_log_codex_rel='cas-cli/src/builtins/codex/skills/cas-cut-release/referen
 failure_log_grok_rel='cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config
-    version-literals fixture-paths workspace-tests hub-web-visual-qa nextest doctests archive-mode
+    version-literals fixture-paths workspace-tests hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script
     procedure-guardrails working-tree
 )
@@ -438,6 +438,32 @@ check_fixture_paths() {
     check_src_runtime_manifest_dir_reads
 }
 
+install_hub_web_dependencies() {
+    local npm_bin="${NPM:-npm}"
+    if [[ -e "$tmp_dir/hub-web-npm-installed" ]]; then
+        return 0
+    fi
+    mkdir -p "$tmp_dir/npm-cache"
+    (cd hub-web && \
+        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
+        "$npm_bin" ci --no-audit --no-fund) || return $?
+    : >"$tmp_dir/hub-web-npm-installed"
+}
+
+check_hub_web_dist_drift() {
+    local npm_bin
+    if [[ ! -f hub-web/package.json ]]; then
+        printf 'hub-web-dist-drift: hub-web/package.json is not present; row not applicable to this release\n'
+        return 0
+    fi
+    npm_bin="${NPM:-npm}"
+    install_hub_web_dependencies || return $?
+    (cd hub-web && \
+        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
+        "$npm_bin" run build && \
+        git diff --exit-code -- dist)
+}
+
 check_hub_web_visual_qa() {
     local artifact_dir npm_bin
     if [[ -n "${RELEASE_GATE_HUB_WEB_VISUAL_QA:-}" ]]; then
@@ -459,10 +485,9 @@ check_hub_web_visual_qa() {
     }
     npm_bin="${NPM:-npm}"
     artifact_dir="$tmp_dir/hub-web-visual-qa"
-    mkdir -p "$artifact_dir" "$tmp_dir/npm-cache" "$tmp_dir/playwright"
+    mkdir -p "$artifact_dir" "$tmp_dir/playwright"
+    install_hub_web_dependencies && \
     (cd hub-web && \
-        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
-        "$npm_bin" ci --no-audit --no-fund && \
         NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
         PLAYWRIGHT_BROWSERS_PATH="$tmp_dir/playwright" \
         "$npm_bin" exec --yes --package=playwright -- playwright install chromium && \
@@ -480,7 +505,9 @@ check_workspace_tests() {
 # do too (cas-1f6e: a cas-mux snapshot test failed in the queue after a local
 # `-p cas` gate passed). The non-cas crates add roughly a minute to each row.
 check_nextest() {
-    "$cargo_bin" nextest run --workspace
+    env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
+        -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+        "$cargo_bin" nextest run --workspace
 }
 
 check_doctests() {
@@ -614,7 +641,9 @@ check_archive_mode() {
         return 1
     }
     archive_path="$(make_archive_path)"
-    if "$cargo_bin" nextest archive --workspace --archive-file "$archive"; then
+    if env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
+        -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+        "$cargo_bin" nextest archive --workspace --archive-file "$archive"; then
         :
     else
         status=$?
@@ -642,7 +671,9 @@ check_archive_mode() {
     # source-tree .snap files and are excluded rather than "fixed".
     if (
         cd "$archive_dir"
-        env -u CAS_ROOT -u COLUMNS HOME="${HOME:-$archive_dir}" TMPDIR="$archive_tmp" \
+        env -u CAS_ROOT -u COLUMNS -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE \
+            -u CAS_AGENT_NAME -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
+            HOME="${HOME:-$archive_dir}" TMPDIR="$archive_tmp" \
             CARGO_HOME="$archive_cargo_home" RUSTC_WRAPPER=/nonexistent/sccache \
             PATH="$archive_bin${archive_path:+:$archive_path}" \
             "$cargo_bin" nextest run --archive-file "$archive" \
@@ -841,17 +872,20 @@ run_check fixture-paths \
 run_check workspace-tests \
     "$cargo_bin check --workspace --tests" \
     check_workspace_tests
+run_check hub-web-dist-drift \
+    'npm ci --no-audit --no-fund && npm run build && git diff --exit-code -- dist' \
+    check_hub_web_dist_drift
 run_check hub-web-visual-qa \
     'npm exec --yes --package=playwright -- node scripts/visual-qa.mjs --artifact-dir <gate-scratch>/hub-web-visual-qa' \
     check_hub_web_visual_qa
 run_check nextest \
-    "$cargo_bin nextest run --workspace" \
+    "env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID $cargo_bin nextest run --workspace" \
     check_nextest
 run_check doctests \
     "$cargo_bin test -p cas --doc" \
     check_doctests
 run_check archive-mode \
-    "$cargo_bin nextest archive --workspace --archive-file <home-disk>/suite.tar.zst; archive run outside checkout with remap and rg removed" \
+    "env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID $cargo_bin nextest archive --workspace --archive-file <home-disk>/suite.tar.zst; archive run outside checkout with remap and rg removed" \
     check_archive_mode
 run_check snapshot-portability \
     'env -u COLUMNS TMPDIR=<deep path> cargo nextest run -p cas --test component_output_test' \

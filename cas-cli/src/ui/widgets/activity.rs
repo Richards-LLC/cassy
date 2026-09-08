@@ -325,7 +325,10 @@ fn event_category_style(event_type: &EventType, styles: &crate::ui::theme::Style
         | EventType::WorkerVerificationBlocked
         | EventType::VerificationStarted
         | EventType::VerificationAdded => styles.text_warning,
-        EventType::WorkerDied | EventType::TaskDeleted | EventType::AuditTrailGap => {
+        EventType::WorkerDied
+        | EventType::TaskDeleted
+        | EventType::WorkerPushBlocked
+        | EventType::AuditTrailGap => {
             styles.text_error
         }
         EventType::WorkerFileEdited | EventType::WorkerGitCommit => styles.text_accent,

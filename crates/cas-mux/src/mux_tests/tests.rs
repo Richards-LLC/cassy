@@ -46,7 +46,7 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
 }
 
 #[test]
-fn factory_pane_configs_propagates_machine_registration_credentials() {
+fn factory_pane_configs_propagates_configured_proxy_credentials() {
     let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let config_home = tempfile::tempdir().expect("temporary config home");
     let config_path = config_home.path().join("code-mode-mcp/config.toml");
@@ -93,8 +93,76 @@ auth = "env:UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE"
     );
     assert_eq!(
         env_value(worker_config, "UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE"),
-        None,
-        "only machine-registration credentials belong in worker panes"
+        Some("unrelated"),
+        "every configured upstream credential reference must reach the worker proxy"
+    );
+}
+
+#[test]
+fn factory_pane_configs_propagates_project_proxy_credentials() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let config_home = tempfile::tempdir().expect("temporary config home");
+    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    let project = tempfile::tempdir().expect("temporary project root");
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(
+        cas_root.join("proxy.toml"),
+        r#"
+[servers.neon]
+transport = "http"
+auth = "env:NEON_API_KEY_TEST_WORKER"
+"#,
+    )
+    .unwrap();
+    let _neon = RestoreEnv::set("NEON_API_KEY_TEST_WORKER", "neon-value");
+
+    let config = MuxConfig {
+        cwd: project.path().to_path_buf(),
+        cas_root: Some(cas_root),
+        workers: 1,
+        include_director: false,
+        ..MuxConfig::default()
+    };
+    let configs = Mux::factory_pane_configs(&config);
+    let (_, worker_config) = configs
+        .iter()
+        .find(|(name, _)| name == "worker-1")
+        .expect("worker config must be present");
+
+    assert_eq!(
+        env_value(worker_config, "NEON_API_KEY_TEST_WORKER"),
+        Some("neon-value")
+    );
+}
+
+#[test]
+fn factory_pane_configs_codex_worker_home_is_existing_host_home() {
+    let config = MuxConfig {
+        cwd: PathBuf::from("/tmp/test"),
+        workers: 1,
+        include_director: false,
+        supervisor_cli: SupervisorCli::Claude,
+        worker_cli: SupervisorCli::Codex,
+        ..MuxConfig::default()
+    };
+    let configs = Mux::factory_pane_configs(&config);
+    let (_, worker_config) = configs
+        .iter()
+        .find(|(name, _)| name == "worker-1")
+        .expect("worker config must be present");
+
+    let home = spawned_env(worker_config, "HOME").expect("Codex worker HOME must be set");
+    assert!(
+        std::path::Path::new(home).is_dir(),
+        "Codex worker HOME must exist on the host: {home}"
+    );
+    let profile = spawned_env(worker_config, "PLAYWRIGHT_MCP_USER_DATA_DIR")
+        .expect("Codex worker Playwright profile must be set");
+    assert_eq!(
+        std::path::Path::new(profile).parent(),
+        Some(std::path::Path::new(home)),
+        "Playwright profile must be rooted under worker HOME: {profile}"
     );
 }
 

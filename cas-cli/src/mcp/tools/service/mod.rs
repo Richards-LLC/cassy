@@ -15,6 +15,8 @@
 //! - mcp_search: Search tools across connected upstream MCP servers
 //! - mcp_execute: Execute tool calls across connected upstream MCP servers
 
+use std::borrow::Cow;
+
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::Content;
 use rmcp::model::{CallToolResult, ErrorCode};
@@ -1253,14 +1255,19 @@ impl CasService {
                     for img in result.images {
                         content.push(Content::image(img.data, img.mime_type));
                     }
-                    Ok(CallToolResult::success(content))
+                    if result.is_error {
+                        Ok(CallToolResult::error(content))
+                    } else {
+                        Ok(CallToolResult::success(content))
+                    }
                 }
                 Err(e) => {
                     crate::telemetry::track_mcp_tool("mcp_proxy", "execute", false);
-                    Err(Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!("MCP execute failed: {e}"),
-                    ))
+                    Err(McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::Owned(format!("MCP execute failed: {e}")),
+                        data: cmcp_core::upstream_mcp_error_data(&e),
+                    })
                 }
             }
         }

@@ -759,6 +759,97 @@ mod supervisor_claude_delivery {
         });
     }
 
+    /// GH #751 delivery-harness reproduction: Claude drains the inbox file
+    /// without calling `message_ack`, so a pending queue row must be retried
+    /// with bounded exponential spacing and never flood the next turn. The
+    /// transcript reaction is the message-specific consumption evidence.
+    #[test]
+    fn gh_751_non_acking_claude_harness_has_bounded_redelivery() {
+        let qdir = TempDir::new().unwrap();
+        let queue = open_queue(qdir.path());
+
+        with_team_session("gh751", true, |teams, inboxes, session| {
+            let id = queue
+                .enqueue_with_session("supervisor", "swift-fox", "single dispatch", session)
+                .unwrap();
+            teams
+                .write_to_inbox("swift-fox", "supervisor", "single dispatch", None, None)
+                .unwrap();
+            assert_eq!(read_inbox(inboxes, "swift-fox").len(), 1);
+
+            // Model Claude's teammate watcher moving the row into its own
+            // pending-message store. No explicit message_ack is produced.
+            std::fs::write(inboxes.join("swift-fox.json"), "[]").unwrap();
+            queue.record_wake_gate_decline(id, "worker busy").unwrap();
+            queue.record_deferred_inbox(id, 0).unwrap();
+
+            let start = chrono::DateTime::parse_from_rfc3339("2026-09-08T14:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+            let mut attempts = 1;
+            let mut last = Some(start);
+            let mut copies = 1;
+            for (offset, expected) in [
+                (29_i64, super::super::queue_and_events::ClaudeRedelivery::Cooldown),
+                (30, super::super::queue_and_events::ClaudeRedelivery::Deliver),
+                (89, super::super::queue_and_events::ClaudeRedelivery::Cooldown),
+                (90, super::super::queue_and_events::ClaudeRedelivery::Deliver),
+            ] {
+                let now = start + chrono::Duration::seconds(offset);
+                let decision = super::super::queue_and_events::claude_redelivery_decision(
+                    false,
+                    attempts,
+                    last,
+                    now,
+                );
+                assert_eq!(decision, expected, "offset={offset}s");
+                if decision == super::super::queue_and_events::ClaudeRedelivery::Deliver {
+                    teams
+                        .write_to_inbox(
+                            "swift-fox",
+                            "supervisor",
+                            "single dispatch",
+                            None,
+                            None,
+                        )
+                        .unwrap();
+                    copies += 1;
+                    std::fs::write(inboxes.join("swift-fox.json"), "[]").unwrap();
+                    attempts += 1;
+                    last = Some(now);
+                }
+            }
+            assert_eq!(copies, 3, "initial handoff plus two bounded retries");
+            assert_eq!(
+                super::super::queue_and_events::claude_redelivery_decision(
+                    false,
+                    attempts,
+                    last,
+                    start + chrono::Duration::days(1),
+                ),
+                super::super::queue_and_events::ClaudeRedelivery::StopUndelivered
+            );
+
+            let transcript = qdir.path().join("claude-transcript.jsonl");
+            std::fs::write(
+                &transcript,
+                "{\"timestamp\":\"2026-09-08T14:00:02Z\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"single dispatch\"}}\n{\"timestamp\":\"2026-09-08T14:00:03Z\",\"type\":\"assistant\",\"message\":{\"role\":\"assistant\"}}\n",
+            )
+            .unwrap();
+            let observations =
+                crate::mcp::tools::service::harness_observation::observations_after_delivery(
+                    &transcript,
+                    Claude,
+                    start,
+                    "single dispatch",
+                );
+            assert!(
+                observations.reaction.is_some(),
+                "the Claude transcript reaction is the consumption signal"
+            );
+        });
+    }
+
     /// Happy path: a normal supervisor→Claude message lands in the worker's inbox
     /// and its queue row is marked processed exactly once.
     #[test]

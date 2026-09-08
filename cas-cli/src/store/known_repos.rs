@@ -46,6 +46,33 @@ pub fn host_cas_dir() -> PathBuf {
     home.join(".cas")
 }
 
+/// The on-disk state of one path registered in the host known-repos registry.
+///
+/// A live directory without `.cas/` is not a missing root: it is a path that
+/// an operator can initialize or explicitly forget. Keeping this distinction
+/// in one predicate prevents doctor and `known-repos prune-missing` from
+/// disagreeing about what is safe to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KnownRepoState {
+    /// The registered root is a directory with a Cassy store directory.
+    Ready,
+    /// The registered root is gone (or is no longer a directory).
+    MissingRoot,
+    /// The registered root is still a directory, but has no `.cas/` store.
+    MissingStore,
+}
+
+/// Classify a registered root for host diagnostics and safe pruning.
+pub(crate) fn classify_known_repo(path: &Path) -> KnownRepoState {
+    if !path.is_dir() {
+        KnownRepoState::MissingRoot
+    } else if !path.join(".cas").is_dir() {
+        KnownRepoState::MissingStore
+    } else {
+        KnownRepoState::Ready
+    }
+}
+
 /// Install the known-repo registry and host-local binding schemas on
 /// `~/.cas/cas.db`, recording both migrations so the normal runner does not
 /// see them as pending on the next run.

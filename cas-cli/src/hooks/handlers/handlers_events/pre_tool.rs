@@ -169,7 +169,9 @@ pub fn handle_pre_tool_use(
                     ));
                 }
                 if looks_like_git_write_op(cmd) {
-                    if let Some(deny_msg) = check_worker_git_commit_scope(&input.cwd) {
+                    if let Some(deny_msg) =
+                        check_worker_git_commit_scope_for_command(&input.cwd, cmd)
+                    {
                         return Ok(HookOutput::with_pre_tool_permission("deny", &deny_msg));
                     }
                 }
@@ -1083,6 +1085,145 @@ pub(crate) fn get_branch_at_cwd(cwd: &str) -> Option<String> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct GitCommandTarget {
+    cwd: std::path::PathBuf,
+    git_dir: Option<std::path::PathBuf>,
+    work_tree: Option<std::path::PathBuf>,
+}
+
+impl GitCommandTarget {
+    fn from_cwd(cwd: &str) -> Self {
+        let cwd = if cwd.trim().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            std::path::PathBuf::from(cwd)
+        };
+        Self {
+            cwd,
+            git_dir: None,
+            work_tree: None,
+        }
+    }
+
+    fn path_for_scope(&self) -> &std::path::Path {
+        self.work_tree.as_deref().unwrap_or(&self.cwd)
+    }
+}
+
+fn resolve_git_option_path(base: &std::path::Path, value: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(value);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
+/// Extract every git write invocation's repository target from a shell command.
+/// Git's `-C`, `--git-dir`, and `--work-tree` options are parsed before the
+/// write subcommand so a linked worktree is checked instead of the hook's cwd.
+fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
+    let default_target = GitCommandTarget::from_cwd(cwd);
+    let mut targets = Vec::new();
+
+    for words in super::attribution::split_shell_statements(command) {
+        let Some(git_index) = words
+            .iter()
+            .position(|word| word == "git" || word.ends_with("/git"))
+        else {
+            continue;
+        };
+        let git_words = &words[git_index + 1..];
+        let Some(write_index) = git_words
+            .iter()
+            .position(|word| matches!(word.as_str(), "commit" | "merge" | "push"))
+        else {
+            continue;
+        };
+
+        let mut target = default_target.clone();
+        let mut index = 0;
+        while index < write_index {
+            let word = &git_words[index];
+            if word == "-C" {
+                if let Some(path) = git_words.get(index + 1) {
+                    target.cwd = resolve_git_option_path(&target.cwd, path);
+                    index += 2;
+                    continue;
+                }
+                break;
+            }
+            if let Some(path) = word.strip_prefix("-C").filter(|path| !path.is_empty()) {
+                target.cwd = resolve_git_option_path(&target.cwd, path);
+                index += 1;
+                continue;
+            }
+            if word == "--git-dir" {
+                if let Some(path) = git_words.get(index + 1) {
+                    target.git_dir = Some(resolve_git_option_path(&target.cwd, path));
+                    index += 2;
+                    continue;
+                }
+                break;
+            }
+            if let Some(path) = word.strip_prefix("--git-dir=") {
+                target.git_dir = Some(resolve_git_option_path(&target.cwd, path));
+                index += 1;
+                continue;
+            }
+            if word == "--work-tree" {
+                if let Some(path) = git_words.get(index + 1) {
+                    target.work_tree = Some(resolve_git_option_path(&target.cwd, path));
+                    index += 2;
+                    continue;
+                }
+                break;
+            }
+            if let Some(path) = word.strip_prefix("--work-tree=") {
+                target.work_tree = Some(resolve_git_option_path(&target.cwd, path));
+                index += 1;
+                continue;
+            }
+            index += 1;
+        }
+        targets.push(target);
+    }
+
+    if targets.is_empty() {
+        vec![default_target]
+    } else {
+        targets
+    }
+}
+
+fn get_branch_at_git_target(target: &GitCommandTarget) -> Option<String> {
+    let mut command = std::process::Command::new("git");
+    if let Some(git_dir) = &target.git_dir {
+        command.args(["--git-dir"]).arg(git_dir);
+    } else {
+        command.args(["-C"]).arg(&target.cwd);
+    }
+    if let Some(work_tree) = &target.work_tree {
+        command.args(["--work-tree"]).arg(work_tree);
+    }
+    let output = command
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+fn check_worker_git_commit_scope_for_command(cwd: &str, command: &str) -> Option<String> {
+    git_write_targets(cwd, command)
+        .into_iter()
+        .find_map(|target| check_worker_git_commit_scope_at_target(&target))
+}
+
 /// Check whether a factory worker's `git commit` / `git merge` / `git push`
 /// should be denied.
 ///
@@ -1101,6 +1242,11 @@ pub(crate) fn get_branch_at_cwd(cwd: &str) -> Option<String> {
 /// commit-msg/pre-commit hooks, not the Claude Code PreToolUse harness.
 /// Switching to a non-protected branch is the only way to unblock.
 pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
+    check_worker_git_commit_scope_at_target(&GitCommandTarget::from_cwd(cwd))
+}
+
+fn check_worker_git_commit_scope_at_target(target: &GitCommandTarget) -> Option<String> {
+    let cwd = target.path_for_scope().display().to_string();
     let clone_path = std::env::var("CAS_CLONE_PATH").ok();
     let is_isolated = clone_path
         .as_deref()
@@ -1111,7 +1257,7 @@ pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
     // Only applicable when CAS_CLONE_PATH is set.
     if is_isolated {
         let clone_path = clone_path.as_deref().unwrap();
-        let cwd_path = std::path::Path::new(cwd);
+        let cwd_path = std::path::Path::new(&cwd);
         let worktree_path = std::path::Path::new(clone_path);
 
         if !cwd_path.starts_with(worktree_path) {
@@ -1136,7 +1282,7 @@ pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
     let worker_name =
         std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "<worker-name>".to_string());
 
-    let branch = match get_branch_at_cwd(cwd) {
+    let branch = match get_branch_at_git_target(target) {
         None => {
             return Some(format!(
                 "🚫 WORKER COMMIT GUARD: HEAD is detached — cannot determine branch.\n\n\
@@ -1221,7 +1367,7 @@ pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
                 return Some(crate::factory_isolation::sibling_misbinding_message(
                     &registered_name,
                     &owner,
-                    cwd,
+                    &cwd,
                 ));
             }
             crate::factory_isolation::WorkerBinding::Other if !is_isolated => {
@@ -3463,6 +3609,155 @@ mod worker_commit_guard_tests {
     }
 
     // ── Integration: handle_pre_tool_use for Bash git commit ─────────────
+
+    fn add_linked_worktree(repo: &std::path::Path, worktree: &std::path::Path, branch: &str) {
+        let output = std::process::Command::new("git")
+            .args(["worktree", "add", "-b", branch])
+            .arg(worktree)
+            .current_dir(repo)
+            .output()
+            .expect("create linked worktree");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn hook_git_write_input(cwd: &str, command: &str) -> crate::hooks::handlers::HookInput {
+        let mut input = crate::hooks::handlers::HookInput::default();
+        input.hook_event_name = "PreToolUse".to_string();
+        input.tool_name = Some("Bash".to_string());
+        input.cwd = cwd.to_string();
+        input.tool_input = Some(serde_json::json!({"command": command}));
+        input
+    }
+
+    #[test]
+    fn pre_tool_allows_git_c_commit_in_linked_factory_worktree() {
+        let repo = make_git_repo();
+        let linked = tempfile::tempdir().expect("linked worktree path");
+        add_linked_worktree(repo.path(), linked.path(), "factory/linked-worker");
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let linked_path = linked.path().to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", None),
+            ("CAS_AGENT_NAME", Some("linked-worker")),
+        ]);
+
+        let input = hook_git_write_input(
+            &repo_path,
+            &format!("git -C '{linked_path}' commit -m work"),
+        );
+        let out = handle_pre_tool_use(&input, None).expect("handler ok");
+        let val = serde_json::to_value(&out).unwrap();
+        let decision = val
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("permissionDecision"))
+            .and_then(|v| v.as_str());
+        assert_ne!(
+            decision,
+            Some("deny"),
+            "linked worktree branch must be honored: {val}"
+        );
+    }
+
+    #[test]
+    fn pre_tool_allows_git_dir_and_work_tree_commit_in_linked_factory_worktree() {
+        let repo = make_git_repo();
+        let linked = tempfile::tempdir().expect("linked worktree path");
+        add_linked_worktree(repo.path(), linked.path(), "factory/explicit-target");
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let linked_path = linked.path().to_string_lossy().to_string();
+        let git_dir = std::process::Command::new("git")
+            .args(["-C", &linked_path, "rev-parse", "--git-dir"])
+            .output()
+            .expect("resolve linked worktree git dir");
+        assert!(git_dir.status.success());
+        let git_dir = String::from_utf8_lossy(&git_dir.stdout).trim().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", None),
+            ("CAS_AGENT_NAME", Some("explicit-target")),
+        ]);
+
+        let input = hook_git_write_input(
+            &repo_path,
+            &format!("git --git-dir '{git_dir}' --work-tree '{linked_path}' commit -m work"),
+        );
+        let out = handle_pre_tool_use(&input, None).expect("handler ok");
+        let val = serde_json::to_value(&out).unwrap();
+        let decision = val
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("permissionDecision"))
+            .and_then(|v| v.as_str());
+        assert_ne!(
+            decision,
+            Some("deny"),
+            "explicit linked worktree target must be honored: {val}"
+        );
+    }
+
+    #[test]
+    fn pre_tool_allows_commit_when_hook_cwd_is_linked_factory_worktree() {
+        let repo = make_git_repo();
+        let linked = tempfile::tempdir().expect("linked worktree path");
+        add_linked_worktree(repo.path(), linked.path(), "factory/cwd-worker");
+        let linked_path = linked.path().to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", None),
+            ("CAS_AGENT_NAME", Some("cwd-worker")),
+        ]);
+
+        let input = hook_git_write_input(&linked_path, "git commit -m work");
+        let out = handle_pre_tool_use(&input, None).expect("handler ok");
+        let val = serde_json::to_value(&out).unwrap();
+        let decision = val
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("permissionDecision"))
+            .and_then(|v| v.as_str());
+        assert_ne!(
+            decision,
+            Some("deny"),
+            "linked cwd branch must be honored: {val}"
+        );
+    }
+
+    #[test]
+    fn pre_tool_still_denies_shared_checkout_commit_on_staging() {
+        let repo = make_git_repo();
+        let output = std::process::Command::new("git")
+            .args(["switch", "-c", "staging"])
+            .current_dir(repo.path())
+            .output()
+            .expect("switch to staging");
+        assert!(output.status.success());
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", None),
+            ("CAS_AGENT_NAME", Some("shared-worker")),
+        ]);
+
+        let input = hook_git_write_input(&repo_path, "git commit -m work");
+        let out = handle_pre_tool_use(&input, None).expect("handler ok");
+        let val = serde_json::to_value(&out).unwrap();
+        let decision = val
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("permissionDecision"))
+            .and_then(|v| v.as_str());
+        assert_eq!(
+            decision,
+            Some("deny"),
+            "shared protected checkout must remain denied: {val}"
+        );
+    }
 
     #[test]
     fn pre_tool_denies_git_commit_on_protected_branch() {

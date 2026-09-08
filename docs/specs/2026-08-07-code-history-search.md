@@ -90,8 +90,8 @@ There is no `git2`/libgit2 dependency; everything is `std::process::Command::new
 ### 1.6 GitHub — one cache to extend, no tables
 
 - **No GitHub tables exist.** Grepping all 220 migrations for github/issue/pr yields only verification-token vocabulary (`m210`, `m215`).
-- Config key `issues.repo` already exists (`cas-cli/src/config/meta/seed/issues.rs:6`).
-- `cas-cli/src/hooks/handlers/issue_triage.rs:119` `fetch_issues()` already runs `gh api graphql` against `issues.repo`, caches to JSON in `cas_root` with a **5-minute TTL** (`:113`, `:159`), writes atomically via temp file (`:187`), and sanitizes titles against line injection (`:194`). This is the acquisition path to extend — §8.
+- Config key `issues.repo` remains the Cassy-system bug-intake destination; code history uses the separate `history.github_repo` key and defaults to the checkout's GitHub origin.
+- `cas-cli/src/hooks/handlers/issue_triage.rs:119` `fetch_issues()` still runs `gh api graphql` against `issues.repo` for the issue-triage banner, caches to JSON in `cas_root` with a **5-minute TTL** (`:113`, `:159`), writes atomically via temp file (`:187`), and sanitizes titles against line injection (`:194`). The history indexer shares the bounded GraphQL transport but resolves its repository independently.
 - Commit `1ecd9250` added a SessionStart detector that fires when `issues.repo` is unset (`session_hygiene.rs:~630`) and deliberately proposes no value (`:653`). Good precedent for honest degradation.
 
 ### 1.7 Doctor — extend, no registry to register with
@@ -473,10 +473,10 @@ Cost is therefore **negligible in steady state** and dominated entirely by the o
 
 ## 8. GitHub data acquisition (brief, spec section)
 
-- **Source:** extend `issue_triage.rs:119`'s `gh api graphql` call rather than adding a second GitHub client. `issues.repo` (`config/meta/seed/issues.rs:6`) is the single source of the owner/name.
+- **Source:** extend `issue_triage.rs:119`'s `gh api graphql` call rather than adding a second GitHub client. `history.github_repo` is the explicit history source; when unset, resolve the checkout's GitHub `origin` to `owner/name`.
 - **Cadence:** the daemon history tick fetches GitHub at most every **15 minutes** (a separate, longer interval than the 300 s git tick — GitHub data changes slower and is rate-limited by a third party). The existing 5-minute TTL cache (`issue_triage.rs:113`) is left alone for the SessionStart banner; the indexer reads the same cache when fresh and refetches when not.
 - **Incrementality:** GraphQL query filtered by `updated_at > last_indexed_at` from `history_index_state('github')`. Only changed issues/PRs are re-embedded (their `pending_embedding` reset to 1). Closed-and-unchanged issues cost nothing.
-- **Offline / unauthenticated behaviour:** if `gh` is absent, unauthenticated, or `issues.repo` is unset, the git half of the index runs normally and `history_index_state('github')` records `last_error`. The response contract (§6.5) surfaces it. **Never a silent partial index** — this is the same discipline the new SessionStart detector uses when `issues.repo` is unset (`session_hygiene.rs:653`: report, propose nothing, do not guess).
+- **Offline / unauthenticated behaviour:** if `gh` is absent, unauthenticated, or neither `history.github_repo` nor a GitHub `origin` is available, the git half of the index runs normally and `history_index_state('github')` records `last_error`. The response contract (§6.5) surfaces it. **Never a silent partial index** — the `issues.repo` key remains reserved for bug intake.
 - **Rate limits:** `gh api graphql` is subject to GitHub's 5,000 points/hour; a filtered incremental query at 15-minute cadence is ~96 queries/day. Non-issue.
 - **PR ↔ commit linkage:** GraphQL returns each PR's merge commit SHA and its commits; these populate `history_docs.refs_json` and give Q6 its "which PR shipped this commit" edge without heuristics.
 
@@ -531,7 +531,7 @@ The `INSUFFICIENT-POST-FIX-DATA` verdict is not a hedge; it is the direct encodi
 | Failure | Behaviour |
 |---|---|
 | No cloud login | Embedding channel absent; capability renormalization (`scorer.rs:258`) keeps lexical + structural live; `semantic_available: false` in every response |
-| `gh` missing / unauthenticated / `issues.repo` unset | Git half indexes normally; `history_index_state('github').last_error` set and surfaced |
+| `gh` missing / unauthenticated / `history.github_repo` and GitHub `origin` unset | Git half indexes normally; `history_index_state('github').last_error` set and surfaced |
 | Watermark not an ancestor of HEAD | Backfill re-run (§4.2 rule 3); never a silent gap |
 | Partial batch failure | Watermark not advanced; batch retried (§4.2 rule 2) |
 | `code_symbols` empty | `symbol_mapping = absent` recorded per commit; symbol-overlap boost contributes 0 rather than silently matching nothing |

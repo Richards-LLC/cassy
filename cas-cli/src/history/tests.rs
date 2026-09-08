@@ -13,6 +13,132 @@ struct Fixture {
     cas_root: PathBuf,
 }
 
+#[test]
+fn github_repo_resolution_prefers_explicit_history_key_over_issue_intake() {
+    let temp = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["remote", "add", "origin", "git@github.com:origin/project.git"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+
+    let config = crate::config::Config {
+        issues: Some(crate::config::IssuesConfig {
+            repo: Some("Richards-LLC/cassy".to_string()),
+            ..Default::default()
+        }),
+        history: Some(crate::config::HistoryConfig {
+            github_repo: Some("owner/history".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        crate::history::resolve_github_repo(&config, temp.path()).as_deref(),
+        Some("owner/history")
+    );
+}
+
+#[test]
+fn github_repo_resolution_uses_origin_when_issue_intake_is_elsewhere() {
+    let temp = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["remote", "add", "origin", "https://github.com/origin/project.git"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+
+    let config = crate::config::Config {
+        issues: Some(crate::config::IssuesConfig {
+            repo: Some("Richards-LLC/cassy".to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        crate::history::resolve_github_repo(&config, temp.path()).as_deref(),
+        Some("origin/project")
+    );
+}
+
+#[test]
+fn github_repo_resolution_migrates_an_old_origin_value_in_issue_intake() {
+    let temp = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["remote", "add", "origin", "git@github.com:origin/project.git"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+
+    let config = crate::config::Config {
+        issues: Some(crate::config::IssuesConfig {
+            repo: Some("ORIGIN/project".to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        crate::history::resolve_github_repo(&config, temp.path()).as_deref(),
+        Some("origin/project")
+    );
+}
+
+#[test]
+fn github_repo_resolution_rejects_a_non_github_origin() {
+    let temp = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["remote", "add", "origin", "https://gitlab.com/team/project.git"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+
+    assert_eq!(
+        crate::history::resolve_github_repo(&crate::config::Config::default(), temp.path()),
+        None
+    );
+}
+
+#[test]
+fn github_repo_resolution_reloads_an_override_without_process_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config::default();
+    config.history = Some(crate::config::HistoryConfig {
+        github_repo: Some("owner/first".to_string()),
+    });
+    assert_eq!(
+        crate::history::resolve_github_repo(&config, temp.path()).as_deref(),
+        Some("owner/first")
+    );
+
+    config.history.as_mut().unwrap().github_repo = Some("owner/second".to_string());
+    assert_eq!(
+        crate::history::resolve_github_repo(&config, temp.path()).as_deref(),
+        Some("owner/second")
+    );
+}
+
 fn run(repo: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)

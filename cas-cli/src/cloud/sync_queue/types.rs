@@ -176,6 +176,12 @@ pub struct QueuedSync {
     pub retry_count: i32,
     /// Last error message (if any)
     pub last_error: Option<String>,
+    /// Structured cloud outcome recorded for this row, when one exists.
+    pub last_outcome: Option<String>,
+    /// Structured cloud reason recorded for this row, when one exists.
+    pub last_reason: Option<String>,
+    /// Client version that recorded a terminal outcome, when one exists.
+    pub failed_client_version: Option<String>,
 }
 
 /// Queue statistics

@@ -7,6 +7,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.20.0] - 2026-09-08
+
+### Added
+- User-facing task labels now require a non-empty demo statement at creation
+  time. The configurable `qa.user_facing_labels` setting defaults to `ui`,
+  `hub`, `cli-ux`, `commander`, and `frontend`; epics, unlabeled tasks, and
+  deliberate supervisor overrides remain exempt, and worker briefs show the
+  statement that describes the observable outcome.
+- The built-in `cas-qa-craft` skill turns a demo statement into an exploration
+  matrix with evidence labels, a 30-minute time box, and a durable `LEDGER.md`
+  for honest results.
+- Task verification now applies the evidence-mode REJECT table before opening
+  captures, then records the capture judgment alongside each row and the close
+  reason.
+- The built-in `cas-release-report` skill now supplies a reusable renderer,
+  template, and PDF recipe, with the release workflow's step 13 requiring the
+  report artifacts before the release-notes rubric's authorized Slack post.
+- The v3.19.0 release report exemplar now demonstrates the Markdown, brief,
+  standalone HTML, PDF, and visual-QA evidence that release preparation carries
+  forward.
+
+### Changed
+- Release preparation now links the report source and both rendered report
+  formats from the announcement draft, preserving source fidelity and
+  continuous A4/Letter pagination evidence for review.
+
+### Fixed
+- An idle `cas serve` code watcher no longer spins a CPU core while it waits
+  for file changes.
+
 ## [3.19.0] - 2026-09-08
 
 ### Added
